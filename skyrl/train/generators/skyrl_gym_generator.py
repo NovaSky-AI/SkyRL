@@ -56,6 +56,12 @@ class TrajectoryOutput:
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
+    # Wall-clock time (seconds) this trajectory spent awaiting the inference engine, summed over
+    # turns. Optional: agent loops may leave this as None if they do not track timing.
+    llm_time: Optional[float] = None
+    # Wall-clock time (seconds) this trajectory spent in ``env.step()``, summed over turns.
+    # Optional: agent loops may leave this as None if they do not track timing.
+    env_time: Optional[float] = None
 
 
 @dataclass
@@ -66,6 +72,12 @@ class StepWiseOutput:
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
+    # Wall-clock time (seconds) this trajectory spent awaiting the inference engine, summed over
+    # turns. Optional: agent loops may leave this as None if they do not track timing.
+    llm_time: Optional[float] = None
+    # Wall-clock time (seconds) this trajectory spent in ``env.step()``, summed over turns.
+    # Optional: agent loops may leave this as None if they do not track timing.
+    env_time: Optional[float] = None
 
 
 @dataclass
@@ -321,6 +333,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs: Optional[List[float]]
         """
         agent_loop_start_time = time.monotonic()
+        # Wall-clock split of the trajectory: time awaiting the inference engine vs. time in
+        # ``env.step()``, accumulated across turns. The two need not sum to ``e2e_time`` — the
+        # remainder is tokenization, chat-template rendering and other in-loop bookkeeping.
+        llm_time_s = 0.0
+        env_time_s = 0.0
 
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
@@ -409,7 +426,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                     sampling_params=sampling_params,
                     cache_salt=cache_salt,
                 )
+                llm_call_start_time = time.monotonic()
                 engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
+                llm_time_s += time.monotonic() - llm_call_start_time
                 output = engine_output["responses"][0]
                 output_ids = engine_output["response_ids"][0]
                 stop_reason = engine_output["stop_reasons"][0]
@@ -443,7 +462,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                         added_eos = True
 
                 # 2. Environment step
+                env_step_start_time = time.monotonic()
                 env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+                env_time_s += time.monotonic() - env_step_start_time
                 new_obs = env_step_output["observations"]
                 step_reward: float = env_step_output["reward"]
                 agent_loop_state.done = env_step_output["done"]
@@ -606,6 +627,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 trajectory_id,
             )
             agent_loop_output.e2e_time = time.monotonic() - agent_loop_start_time
+            agent_loop_output.llm_time = llm_time_s
+            agent_loop_output.env_time = env_time_s
             return agent_loop_output
 
         finally:
@@ -874,6 +897,15 @@ class SkyRLGymGenerator(GeneratorInterface):
         if any(t is None for t in trajectory_generation_times_per_prompt):
             trajectory_generation_times_per_prompt = None
 
+        # Per-trajectory split of that end-to-end time into inference-engine wait vs. environment
+        # execution. Handled like ``e2e_time``: omitted entirely if any trajectory did not record it.
+        trajectory_llm_times_per_prompt = [getattr(output, "llm_time", None) for output in all_outputs]
+        if any(t is None for t in trajectory_llm_times_per_prompt):
+            trajectory_llm_times_per_prompt = None
+        trajectory_env_times_per_prompt = [getattr(output, "env_time", None) for output in all_outputs]
+        if any(t is None for t in trajectory_env_times_per_prompt):
+            trajectory_env_times_per_prompt = None
+
         if self.generator_cfg.step_wise_trajectories:
             responses = []
             rewards = []
@@ -953,6 +985,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             # NOTE: we only use trajectory completion times per prompt for
             # metrics, to avoid duplicate entries with step-wise training
             trajectory_completion_times=trajectory_generation_times_per_prompt,
+            trajectory_llm_times=trajectory_llm_times_per_prompt,
+            trajectory_env_times=trajectory_env_times_per_prompt,
         )
 
         if self.generator_cfg.zero_reward_on_non_stop:

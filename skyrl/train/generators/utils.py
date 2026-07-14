@@ -384,6 +384,8 @@ def get_rollout_metrics(
     env_classes: Optional[List[str]] = None,
     loss_masks: Optional[List[List[int]]] = None,
     trajectory_completion_times: Optional[List[float]] = None,
+    trajectory_llm_times: Optional[List[float]] = None,
+    trajectory_env_times: Optional[List[float]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -396,6 +398,10 @@ def get_rollout_metrics(
         loss_masks: Optional list of per-token loss masks; used to compute assistant-only token counts
         trajectory_completion_times: Optional per-trajectory end-to-end generation times (seconds);
             used to compute aggregate trajectory completion-time stats (mean / p90 / max)
+        trajectory_llm_times: Optional per-trajectory time (seconds) spent awaiting the inference
+            engine, summed over turns
+        trajectory_env_times: Optional per-trajectory time (seconds) spent in ``env.step()``, summed
+            over turns
 
     Returns:
         Dictionary of aggregated metrics
@@ -459,6 +465,36 @@ def get_rollout_metrics(
                 "generate/trajectory_completion_time_max": np.max(completion_times_arr).item(),
             }
         )
+
+    if trajectory_llm_times:
+        llm_times_arr = np.array(trajectory_llm_times, dtype=np.float64)
+        rollout_metrics.update(
+            {
+                "generate/trajectory_llm_time_mean": np.mean(llm_times_arr).item(),
+                "generate/trajectory_llm_time_p90": np.percentile(llm_times_arr, 90).item(),
+                "generate/trajectory_llm_time_max": np.max(llm_times_arr).item(),
+            }
+        )
+
+    if trajectory_env_times:
+        env_times_arr = np.array(trajectory_env_times, dtype=np.float64)
+        rollout_metrics.update(
+            {
+                "generate/trajectory_env_time_mean": np.mean(env_times_arr).item(),
+                "generate/trajectory_env_time_p90": np.percentile(env_times_arr, 90).item(),
+                "generate/trajectory_env_time_max": np.max(env_times_arr).item(),
+            }
+        )
+
+    if trajectory_llm_times and trajectory_env_times:
+        llm_times_arr = np.array(trajectory_llm_times, dtype=np.float64)
+        env_times_arr = np.array(trajectory_env_times, dtype=np.float64)
+        # Batch-level share of rollout time spent in the environment rather than awaiting the
+        # inference engine. Time-weighted (sum over sum), so long trajectories count proportionally
+        # instead of every trajectory contributing equally.
+        total_busy_time = np.sum(llm_times_arr) + np.sum(env_times_arr)
+        if total_busy_time > 0:
+            rollout_metrics["generate/frac_time_in_env"] = (np.sum(env_times_arr) / total_busy_time).item()
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)
