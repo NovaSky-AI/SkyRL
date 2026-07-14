@@ -129,19 +129,3 @@ python grpo_client.py \
   --max-val-examples 8 \
   --reprepare-data
 ```
-
-## Multi-Node Note
-
-Ray is installed in the image so cluster setup can be handled by normal Ray commands or a platform launcher.
-
-Head node:
-
-```bash
-ray start --head --port=6379
-```
-
-Worker nodes:
-
-```bash
-ray start --address="$HEAD_NODE_IP:6379"
-```
