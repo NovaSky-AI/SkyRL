@@ -83,6 +83,32 @@ def test_render_image_input_via_cpu_server(render_server):
     assert mm_kwargs["image_grid_thw"].shape[-1] == 3  # (t, h, w) per image
 
 
+def test_render_client_pools_within_loop_and_survives_loop_change(render_server):
+    """One RenderServerClient reused across asyncio.run calls (per-batch pattern).
+
+    Within a loop the pooled httpx client is reused; across loops (each
+    ``asyncio.run`` creates a fresh one) the client is rebuilt instead of
+    failing on the dead loop.
+    """
+    client = RenderServerClient(render_server.url)
+    renderer = VLLMRenderer(client, model_name=TINY_VLM)
+    model_input = types.ModelInput(chunks=[types.ImageChunk(data=base64.b64encode(_tiny_png()), format="png")])
+
+    async def render_twice_same_loop():
+        await renderer([model_input])
+        first = client._client
+        await renderer([model_input])
+        assert client._client is first, "pooled client must be reused within one event loop"
+        return first
+
+    first_client = asyncio.run(render_twice_same_loop())
+
+    # Second batch: new event loop -> client must be rebuilt, not reused.
+    rendered = asyncio.run(renderer([model_input]))[0]
+    assert rendered.multi_modal_placeholders is not None
+    assert client._client is not first_client, "client bound to a closed loop must be rebuilt"
+
+
 def test_render_text_only_makes_no_http_call(render_server):
     """Text-only inputs are rendered locally even when a render client is wired."""
 

@@ -22,6 +22,7 @@ Usage::
     server.shutdown()
 """
 
+import asyncio
 import logging
 import multiprocessing
 import os
@@ -34,7 +35,10 @@ from typing import Any, Dict, Optional
 import httpx
 
 from skyrl.backends.skyrl_train.inference_servers.common import find_and_reserve_port
-from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
+from skyrl.env_vars import (
+    SKYRL_HTTP_CONNECTION_LIMIT,
+    SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,17 +217,49 @@ class RenderServerClient:
     def __init__(self, url: str, timeout: float = 300.0):
         self._url = url
         self._timeout = timeout
+        self._client: Optional[httpx.AsyncClient] = None
+        self._client_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the pooled httpx client.
+
+        Mirrors ``RemoteInferenceClient._get_session``: the client (and its
+        connection pool) is reused across requests, but rebuilt when the
+        running event loop has changed — callers drive the renderer via
+        ``asyncio.run`` per batch, so a client bound to a previous (now
+        closed) loop is unusable. The stale client is dropped without
+        ``aclose()`` (its loop is gone); its transports are released on GC.
+        """
+        current_loop = asyncio.get_running_loop()
+        if self._client is not None and (self._client_loop is not current_loop or self._client.is_closed):
+            self._client = None
+        if self._client is None:
+            # keepalive_expiry must be shorter than the server's keep-alive
+            # timeout (uvicorn default: 5s). Otherwise the pool reuses
+            # connections the server has already closed, causing ECONNRESET
+            # under high concurrency.
+            self._client = httpx.AsyncClient(
+                limits=httpx.Limits(max_connections=SKYRL_HTTP_CONNECTION_LIMIT, keepalive_expiry=2),
+                timeout=self._timeout,
+            )
+            self._client_loop = current_loop
+        return self._client
 
     async def render_chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         body = dict(request_payload["json"])
         # Routing hints are meaningless for a single local server.
         body.pop("session_id", None)
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self._url}/v1/chat/completions/render",
-                json=body,
-                headers={"Content-Type": "application/json"},
-                timeout=self._timeout,
-            )
-            resp.raise_for_status()
-            return resp.json()
+        resp = await self._get_client().post(
+            f"{self._url}/v1/chat/completions/render",
+            json=body,
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def aclose(self) -> None:
+        """Close the pooled client (if one exists on the current loop)."""
+        if self._client is not None and self._client_loop is asyncio.get_running_loop():
+            await self._client.aclose()
+        self._client = None
+        self._client_loop = None
