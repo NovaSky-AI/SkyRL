@@ -32,6 +32,7 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
+
 def _empty_cuda_cache() -> None:
     """Release unused CUDA/ROCm cached blocks after full-weight sync."""
     if not torch.cuda.is_available():
