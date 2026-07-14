@@ -840,8 +840,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # Blackwell launchers explicitly select power-of-two scales.
     serialized_fp8 = cfg.generator.inference_engine.fp8_weight_sync_mode == SERIALIZED_BLOCKWISE_FP8
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
-    policy_transformer_kwargs = cfg.trainer.policy.megatron_config.transformer_config_kwargs
-    ref_transformer_kwargs = cfg.trainer.ref.megatron_config.transformer_config_kwargs
+    policy_megatron_config = getattr(cfg.trainer.policy, "megatron_config", None)
+    ref_megatron_config = getattr(cfg.trainer.ref, "megatron_config", None)
+    policy_transformer_kwargs = getattr(policy_megatron_config, "transformer_config_kwargs", None) or {}
+    ref_transformer_kwargs = getattr(ref_megatron_config, "transformer_config_kwargs", None) or {}
     policy_fp8_param = is_fp8_enabled(policy_transformer_kwargs.get("fp8_param"))
     ref_fp8_param = use_ref_model and is_fp8_enabled(ref_transformer_kwargs.get("fp8_param"))
     fp8_compute = is_fp8_enabled(policy_transformer_kwargs.get("fp8")) or (

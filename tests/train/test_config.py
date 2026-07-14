@@ -162,6 +162,22 @@ def test_runtime_env_forwards_te_block_scale_mode(monkeypatch):
     assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "1"
 
 
+def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
+    monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
+    monkeypatch.delenv("NVTE_FP8_BLOCK_AMAX_EPSILON", raising=False)
+    monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = example_dummy_config()
+    cfg.trainer.strategy = "fsdp"
+    cfg.trainer.policy.megatron_config = None
+    cfg.trainer.ref.megatron_config = None
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert "NVTE_FP8_BLOCK_SCALING_FP32_SCALES" not in env_vars
+    assert "VLLM_USE_DEEP_GEMM_E8M0" not in env_vars
+
+
 def test_serialized_fp8_runtime_defaults_to_fp32_scales(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
