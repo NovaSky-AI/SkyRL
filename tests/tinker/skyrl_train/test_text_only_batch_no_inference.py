@@ -84,3 +84,47 @@ def test_image_batch_uses_render_server_not_engines():
 
     with pytest.raises(_RenderServerUsed):
         skyrl_train_backend.SkyRLTrainBackend._to_training_batch(fake_self, prepared_batch, role="policy")
+
+
+def test_render_client_prefers_engine_client_when_initialized():
+    """Once engines are up (RL), rendering reuses the engine client instead of a CPU server."""
+    engine_client = object()
+    fake_self = SimpleNamespace(
+        _inference_engines_initialized=True,
+        _inference_engine_client=engine_client,
+        _render_server=None,
+        _cfg=None,
+    )
+    client = skyrl_train_backend.SkyRLTrainBackend._create_render_client(fake_self)
+    assert client is engine_client
+    assert fake_self._render_server is None
+
+
+def test_engine_init_invalidates_cpu_render_state():
+    """When engines come up, the CPU-render-backed renderer and server are dropped
+    so the next image batch rebuilds against the engine client."""
+
+    class _RenderServerStub:
+        def __init__(self):
+            self.shutdown_called = False
+
+        def shutdown(self):
+            self.shutdown_called = True
+
+    render_server = _RenderServerStub()
+    fake_self = SimpleNamespace(
+        _inference_engines_initialized=False,
+        _inference_engine_client=object(),
+        _create_new_inference_client=lambda: None,
+        _dispatch=SimpleNamespace(set_inference_engine_client=lambda client: None),
+        init_weight_sync_state=lambda: None,
+        _renderer=object(),
+        _render_server=render_server,
+    )
+
+    skyrl_train_backend.SkyRLTrainBackend._ensure_inference_engines(fake_self)
+
+    assert fake_self._inference_engines_initialized
+    assert fake_self._renderer is None
+    assert render_server.shutdown_called
+    assert fake_self._render_server is None
