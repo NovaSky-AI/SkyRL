@@ -1379,7 +1379,7 @@ def compute_advantages_and_returns(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
-    adv_estimator: AdvantageEstimator,
+    advantage_estimator: AdvantageEstimator,
     config: AlgorithmConfig,
     values: Optional[torch.Tensor] = None,
     grpo_norm_by_std: bool = True,
@@ -1387,7 +1387,7 @@ def compute_advantages_and_returns(
     lambd=1.0,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    estimator_func = AdvantageEstimatorRegistry.get(adv_estimator)
+    estimator_func = AdvantageEstimatorRegistry.get(advantage_estimator)
 
     return estimator_func(
         token_level_rewards=token_level_rewards,
