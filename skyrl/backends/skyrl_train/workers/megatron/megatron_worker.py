@@ -1346,7 +1346,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         adapter_state = {}
         for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
-            adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
+            key = f"base_model.model.{name}"
+            if self.cfg.policy.language_model_only:
+                if any(part in key for part in (".visual.", ".mtp.", ".multi_token")):
+                    continue
+                key = key.replace(
+                    "base_model.model.model.language_model.",
+                    "base_model.model.language_model.model.",
+                )
+            adapter_state[key] = tensor.clone().float()
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
