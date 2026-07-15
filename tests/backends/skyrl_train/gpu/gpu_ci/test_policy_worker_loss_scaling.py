@@ -12,13 +12,12 @@ from ray.util.placement_group import placement_group
 
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
-from skyrl.train.utils.utils import ResolvedPlacementGroup, validate_cfg
+from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
-    import_worker,
+    init_worker_with_type,
     make_dummy_training_batch,
 )
 
@@ -92,25 +91,11 @@ def _make_loss_batch(loss_fn: str, *, batch_size: int = 4, seq_len: int = 10, nu
     return batch
 
 
-def _init_policy_actor_group(cfg: SkyRLTrainConfig):
+def _create_policy_placement_group(cfg: SkyRLTrainConfig):
     num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
     raw_pg = placement_group([{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node}], strategy="PACK")
     get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
-    pg = ResolvedPlacementGroup(raw_pg)
-    worker_cls = import_worker(cfg.trainer.strategy, "policy")
-    actor_group = PPORayActorGroup(
-        cfg.trainer,
-        num_nodes=1,
-        num_gpus_per_node=num_gpus_per_node,
-        ray_actor_type=worker_cls,
-        pg=pg,
-        num_gpus_per_actor=1.0,
-        colocate_all=False,
-        sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
-        record_memory=cfg.trainer.policy.record_memory,
-    )
-    ray.get(actor_group.async_init_model(cfg.trainer.policy.model.path))
-    return actor_group, raw_pg
+    return raw_pg
 
 
 def _cleanup_policy_actor_group(actor_group, raw_pg):
@@ -135,7 +120,15 @@ def _run_policy_worker_calls(
     actor_group = None
     raw_pg = None
     try:
-        actor_group, raw_pg = _init_policy_actor_group(cfg)
+        raw_pg = _create_policy_placement_group(cfg)
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=raw_pg,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+            num_gpus_per_actor=1.0,
+        )
         dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
         outputs = {}
         for call in POLICY_CALLS:
