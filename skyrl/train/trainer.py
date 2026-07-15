@@ -1444,7 +1444,7 @@ class RayPPOTrainer:
         # Step 1: Z-score normalization (if enabled)
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
             num_actions = response_mask.sum()
-            mean = advantages.mean()
+            mean = masked_mean(advantages, response_mask)
             std = ((advantages - mean).pow(2) * response_mask).sum()
             rstd = (std / num_actions).clamp(min=1e-8).rsqrt()
             data["advantages"] = (advantages - mean) * rstd
