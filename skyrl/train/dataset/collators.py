@@ -291,11 +291,9 @@ class PackedDataCollator:
         # ------------------------------------------------------------------
         # 5. Loss normalization
         # ------------------------------------------------------------------
-        # The realized gradient is sum(loss * loss_mask) / (num_microbatches
-        # * dp_size). Each bin row is one micro-batch, so num_microbatches *
-        # dp_size = num_bins. So loss_mask *= num_bins / total_nonpad yields
-        # mean_over_nonpad.
-        scale = num_bins / max(total_nonpad, 1)
+        # We do a sum loss in the workers - we scale the loss mask by total non-padding tokens
+        # to get the true loss value
+        scale = 1 / max(total_nonpad, 1)
         loss_mask.mul_(scale)
 
         # ------------------------------------------------------------------
