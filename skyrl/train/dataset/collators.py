@@ -283,8 +283,7 @@ class PackedDataCollator:
                 # multiple, plus FP8's 16-token local-rank multiple when active.
                 row_offset += _round_up(s, align_size)
 
-        # The total_nonpad we just counted matches sum(loss_mask). Verify in
-        # debug logs only — too expensive on hot path for assert.
+        # The total_nonpad we just counted matches sum(loss_mask).
         if total_nonpad != int(loss_mask.sum().item()):
             total_nonpad = int(loss_mask.sum().item())
 
