@@ -25,6 +25,7 @@ from tests.backends.skyrl_train.gpu.utils import (
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MICRO_BATCH_SIZES = (1, 2)
 LOSS_FNS = ("cross_entropy", "dual_clip")
+POLICY_CALLS: tuple[Literal["forward", "forward_backward"], ...] = ("forward", "forward_backward")
 POLICY_WORKER_TYPES = [
     "fsdp",
     pytest.param("megatron", marks=pytest.mark.megatron),
@@ -118,32 +119,34 @@ def _cleanup_policy_actor_group(actor_group, raw_pg):
     ray.util.remove_placement_group(raw_pg)
 
 
-def _run_policy_worker(
+def _run_policy_worker_calls(
     policy_worker_type: str,
     loss_fn: str,
     batch_factory: Callable[[], TrainingInputBatch],
     *,
-    call: Literal["forward", "forward_backward"],
-    micro_train_batch_size_per_gpu: int = 1,
-    micro_forward_batch_size_per_gpu: int = 1,
-) -> WorkerOutput:
+    micro_batch_size: int,
+) -> dict[str, WorkerOutput]:
     cfg = _make_policy_cfg(
         policy_worker_type,
         loss_fn,
-        micro_train_batch_size_per_gpu=micro_train_batch_size_per_gpu,
-        micro_forward_batch_size_per_gpu=micro_forward_batch_size_per_gpu,
+        micro_train_batch_size_per_gpu=micro_batch_size,
+        micro_forward_batch_size_per_gpu=micro_batch_size,
     )
     actor_group = None
     raw_pg = None
     try:
         actor_group, raw_pg = _init_policy_actor_group(cfg)
         dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
-        batch = batch_factory()
-        if call == "forward_backward":
-            return dispatch.forward_backward("policy", batch, loss_fn=loss_fn)
-        if call == "forward":
-            return dispatch.forward("policy", batch, loss_fn=loss_fn)
-        raise ValueError(f"Unsupported call {call}")
+        outputs = {}
+        for call in POLICY_CALLS:
+            batch = batch_factory()
+            if call == "forward":
+                outputs[call] = dispatch.forward("policy", batch, loss_fn=loss_fn)
+            elif call == "forward_backward":
+                outputs[call] = dispatch.forward_backward("policy", batch, loss_fn=loss_fn)
+            else:
+                raise ValueError(f"Unsupported call {call}")
+        return outputs
     finally:
         if actor_group is not None and raw_pg is not None:
             _cleanup_policy_actor_group(actor_group, raw_pg)
@@ -179,81 +182,46 @@ def _assert_loss_output_shape(output: WorkerOutput, loss_fn: str, batch_size: in
 
 @pytest.mark.parametrize("policy_worker_type", POLICY_WORKER_TYPES, ids=["fsdp", "megatron"])
 @pytest.mark.parametrize("loss_fn", LOSS_FNS)
-def test_policy_forward_backward_loss_is_microbatch_size_invariant(ray_init_fixture, policy_worker_type, loss_fn):
-    losses_by_micro_batch = {}
+def test_policy_loss_is_microbatch_size_invariant(ray_init_fixture, policy_worker_type, loss_fn):
+    losses_by_call = {call: {} for call in POLICY_CALLS}
     for micro_batch_size in MICRO_BATCH_SIZES:
-        output = _run_policy_worker(
+        outputs_by_call = _run_policy_worker_calls(
             policy_worker_type,
             loss_fn,
             lambda: _make_loss_batch(loss_fn),
-            call="forward_backward",
-            micro_train_batch_size_per_gpu=micro_batch_size,
+            micro_batch_size=micro_batch_size,
         )
-        _assert_loss_output_shape(output, loss_fn)
-        losses_by_micro_batch[micro_batch_size] = _primary_loss(output, loss_fn)
+        for call, output in outputs_by_call.items():
+            _assert_loss_output_shape(output, loss_fn)
+            losses_by_call[call][micro_batch_size] = _primary_loss(output, loss_fn)
 
-    assert losses_by_micro_batch[1] == pytest.approx(
-        losses_by_micro_batch[2],
-        rel=MICROBATCH_INVARIANCE_REL_TOL,
-        abs=MICROBATCH_INVARIANCE_ABS_TOL,
-    )
+    for call in POLICY_CALLS:
+        assert losses_by_call[call][1] == pytest.approx(
+            losses_by_call[call][2],
+            rel=MICROBATCH_INVARIANCE_REL_TOL,
+            abs=MICROBATCH_INVARIANCE_ABS_TOL,
+        )
 
 
 @pytest.mark.megatron
-@pytest.mark.parametrize("micro_train_batch_size_per_gpu", MICRO_BATCH_SIZES)
-def test_policy_forward_backward_loss_fsdp_megatron_consistent(ray_init_fixture, micro_train_batch_size_per_gpu):
-    loss_fn = "cross_entropy"
-    losses_by_worker_type = {}
-    for policy_worker_type in ("fsdp", "megatron"):
-        output = _run_policy_worker(
-            policy_worker_type,
-            loss_fn,
-            lambda: _make_loss_batch(loss_fn),
-            call="forward_backward",
-            micro_train_batch_size_per_gpu=micro_train_batch_size_per_gpu,
-        )
-        _assert_loss_output_shape(output, loss_fn)
-        losses_by_worker_type[policy_worker_type] = _primary_loss(output, loss_fn)
-
-    assert losses_by_worker_type["fsdp"] == pytest.approx(losses_by_worker_type["megatron"], rel=2e-2, abs=2e-1)
-
-
-@pytest.mark.parametrize("policy_worker_type", POLICY_WORKER_TYPES, ids=["fsdp", "megatron"])
 @pytest.mark.parametrize("loss_fn", LOSS_FNS)
-def test_policy_forward_loss_is_microbatch_size_invariant(ray_init_fixture, policy_worker_type, loss_fn):
-    losses_by_micro_batch = {}
-    for micro_batch_size in MICRO_BATCH_SIZES:
-        output = _run_policy_worker(
-            policy_worker_type,
-            loss_fn,
-            lambda: _make_loss_batch(loss_fn),
-            call="forward",
-            micro_forward_batch_size_per_gpu=micro_batch_size,
-        )
-        _assert_loss_output_shape(output, loss_fn)
-        losses_by_micro_batch[micro_batch_size] = _primary_loss(output, loss_fn)
-
-    assert losses_by_micro_batch[1] == pytest.approx(
-        losses_by_micro_batch[2],
-        rel=MICROBATCH_INVARIANCE_REL_TOL,
-        abs=MICROBATCH_INVARIANCE_ABS_TOL,
-    )
-
-
-@pytest.mark.megatron
-@pytest.mark.parametrize("micro_forward_batch_size_per_gpu", MICRO_BATCH_SIZES)
-def test_policy_forward_loss_fsdp_megatron_consistent(ray_init_fixture, micro_forward_batch_size_per_gpu):
-    loss_fn = "cross_entropy"
-    losses_by_worker_type = {}
+@pytest.mark.parametrize("micro_batch_size", MICRO_BATCH_SIZES)
+def test_policy_loss_fsdp_megatron_consistent(ray_init_fixture, micro_batch_size, loss_fn):
+    losses_by_call = {call: {} for call in POLICY_CALLS}
     for policy_worker_type in ("fsdp", "megatron"):
-        output = _run_policy_worker(
+        outputs_by_call = _run_policy_worker_calls(
             policy_worker_type,
             loss_fn,
             lambda: _make_loss_batch(loss_fn),
-            call="forward",
-            micro_forward_batch_size_per_gpu=micro_forward_batch_size_per_gpu,
+            micro_batch_size=micro_batch_size,
         )
-        _assert_loss_output_shape(output, loss_fn)
-        losses_by_worker_type[policy_worker_type] = _primary_loss(output, loss_fn)
+        for call, output in outputs_by_call.items():
+            _assert_loss_output_shape(output, loss_fn)
+            losses_by_call[call][policy_worker_type] = _primary_loss(output, loss_fn)
 
-    assert losses_by_worker_type["fsdp"] == pytest.approx(losses_by_worker_type["megatron"], rel=2e-2, abs=2e-1)
+    for call in POLICY_CALLS:
+        assert losses_by_call[call]["fsdp"] == pytest.approx(
+            losses_by_call[call]["megatron"],
+            rel=2e-2,
+            abs=2e-1,
+        )
