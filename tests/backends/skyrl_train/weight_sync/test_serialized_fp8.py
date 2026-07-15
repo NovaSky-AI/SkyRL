@@ -4,7 +4,9 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
+    SKYRL_BATCHED_MOE_FP8_PREFIX,
     SerializedFp8Config,
+    batched_blockwise_cast_to_fp8,
     batched_moe_expert_spec,
     blockwise_cast_to_fp8,
     get_qwen35_fp8_ignored_layers,
@@ -186,7 +188,28 @@ def test_moe_shared_expert_quantized_router_and_gate_bf16():
     assert not is_quantizable_weight_shape("model.layers.3.mlp.shared_expert_gate.weight", (256, 1))
 
 
-def test_batched_moe_experts_unbatch_to_per_expert_fp8_with_pow2_scales():
+def test_batched_blockwise_cast_matches_independent_expert_casts():
+    torch.manual_seed(11)
+    weight = torch.randn(5, 257, 129, dtype=torch.bfloat16)
+
+    q_batched, scale_batched = batched_blockwise_cast_to_fp8(
+        weight,
+        [128, 128],
+        power_2_scale=True,
+        expert_batch_size=2,
+    )
+
+    for expert_id in range(weight.shape[0]):
+        q_expected, scale_expected = blockwise_cast_to_fp8(
+            weight[expert_id],
+            [128, 128],
+            power_2_scale=True,
+        )
+        assert torch.equal(q_batched[expert_id].view(torch.uint8), q_expected.view(torch.uint8))
+        assert torch.equal(scale_batched[expert_id], scale_expected)
+
+
+def test_batched_moe_experts_remain_fused_with_pow2_scales():
     num_experts, moe_inter, hidden = 3, 128, 256
     config = SerializedFp8Config(weight_block_size=(128, 128), power_2_scale=True)
     base = "model.language_model.layers.7.mlp.experts"
@@ -195,22 +218,33 @@ def test_batched_moe_experts_unbatch_to_per_expert_fp8_with_pow2_scales():
     gate_up = torch.randn(num_experts, 2 * moe_inter, hidden, dtype=torch.bfloat16)
     emitted = list(iter_serialized_fp8_tensors(f"{base}.gate_up_proj", gate_up, torch.bfloat16, config))
     by_name = dict(emitted)
-    # Names must match vLLM's per-expert parameter mapping.
-    for e in range(num_experts):
-        for proj in ("gate_proj", "up_proj"):
-            w = by_name[f"{base}.{e}.{proj}.weight"]
-            s = by_name[f"{base}.{e}.{proj}.weight_scale_inv"]
-            assert w.dtype == torch.float8_e4m3fn and tuple(w.shape) == (moe_inter, hidden)
-            assert s.dtype == torch.float32 and tuple(s.shape) == (1, 2)
-            log2 = torch.log2(s)
-            assert torch.allclose(log2, log2.round(), atol=0.0)
+    assert len(emitted) == 4
+    for projection_idx, proj in enumerate(("gate_proj", "up_proj")):
+        weight_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.{proj}.weight"
+        w = by_name[weight_name]
+        s = by_name[f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.{proj}.weight_scale_inv"]
+        assert w.dtype == torch.float8_e4m3fn and tuple(w.shape) == (num_experts, moe_inter, hidden)
+        assert s.dtype == torch.float32 and tuple(s.shape) == (num_experts, 1, 2)
+        log2 = torch.log2(s)
+        assert torch.allclose(log2, log2.round(), atol=0.0)
+        for expert_id in range(num_experts):
+            source = gate_up[expert_id, projection_idx * moe_inter : (projection_idx + 1) * moe_inter]
+            q_expected, scale_expected = blockwise_cast_to_fp8(
+                source,
+                config.weight_block_size,
+                config.power_2_scale,
+            )
+            assert torch.equal(w[expert_id].view(torch.uint8), q_expected.view(torch.uint8))
+            assert torch.equal(s[expert_id], scale_expected)
 
     down = torch.randn(num_experts, hidden, moe_inter, dtype=torch.bfloat16)
     emitted_d = dict(iter_serialized_fp8_tensors(f"{base}.down_proj", down, torch.bfloat16, config))
-    for e in range(num_experts):
-        w = emitted_d[f"{base}.{e}.down_proj.weight"]
-        assert w.dtype == torch.float8_e4m3fn and tuple(w.shape) == (hidden, moe_inter)
-        assert f"{base}.{e}.down_proj.weight_scale_inv" in emitted_d
+    down_weight_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.down_proj.weight"
+    assert set(emitted_d) == {
+        down_weight_name,
+        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.down_proj.weight_scale_inv",
+    }
+    assert emitted_d[down_weight_name].shape == down.shape
 
 
 def test_batched_moe_gate_up_rejects_odd_output_dimension():

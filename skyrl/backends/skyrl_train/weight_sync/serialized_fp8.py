@@ -11,6 +11,10 @@ from typing import Any, Iterator, Sequence
 import torch
 
 SERIALIZED_BLOCKWISE_FP8 = "serialized_blockwise"
+# Internal wire-format marker for Qwen3.5 MoE tensors that remain batched over
+# experts. The receiver strips this marker and routes the tensor directly to
+# vLLM's fused-MoE parameter loader instead of the ordinary HF-name loader.
+SKYRL_BATCHED_MOE_FP8_PREFIX = "__skyrl_batched_moe_fp8__:"
 
 
 def use_power_2_scales_default() -> bool:
@@ -58,8 +62,8 @@ _QWEN35_FP8_WEIGHT_SUFFIXES = (
     ".mlp.shared_expert.up_proj.weight",
     ".mlp.shared_expert.down_proj.weight",
 )
-# Megatron Bridge exports routed experts in batched tensors. Emit vLLM's
-# per-expert projection layout so its loader can assemble fused MoE parameters.
+# Megatron Bridge exports routed experts in batched tensors. Keep the expert
+# dimension intact on the wire so the receiver can use vLLM's fused MoE loader.
 _QWEN35_MOE_GATE_UP_SUFFIX = ".mlp.experts.gate_up_proj"
 _QWEN35_MOE_DOWN_SUFFIX = ".mlp.experts.down_proj"
 _QWEN35_UNQUANTIZED_LINEAR_SUFFIXES = (
@@ -245,6 +249,65 @@ def blockwise_cast_to_fp8(
     return q_weight, scale.to(torch.float32).contiguous()
 
 
+def batched_blockwise_cast_to_fp8(
+    weight: torch.Tensor,
+    block_size: Sequence[int],
+    power_2_scale: bool = False,
+    amax_epsilon: float = 0.0,
+    expert_batch_size: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a 3D ``[experts, rows, cols]`` tensor blockwise.
+
+    Quantizing several experts per operation avoids launching the full 2D
+    conversion pipeline once per expert, while bounded batches limit peak FP32
+    workspace.
+    """
+
+    if weight.ndim != 3:
+        raise ValueError(f"Batched blockwise FP8 expects a 3D tensor, got shape={tuple(weight.shape)}")
+    if not isfinite(amax_epsilon) or amax_epsilon < 0:
+        raise ValueError(f"amax_epsilon must be finite and non-negative, got {amax_epsilon}")
+    if isinstance(expert_batch_size, bool) or not isinstance(expert_batch_size, int) or expert_batch_size <= 0:
+        raise ValueError(f"expert_batch_size must be a positive integer, got {expert_batch_size!r}")
+
+    block_m, block_n = _normalize_block_size(block_size)
+    num_experts, rows, cols = weight.shape
+    padded_rows = ((rows + block_m - 1) // block_m) * block_m
+    padded_cols = ((cols + block_n - 1) // block_n) * block_n
+    row_blocks = padded_rows // block_m
+    col_blocks = padded_cols // block_n
+
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    q_weight = torch.empty(weight.shape, dtype=torch.float8_e4m3fn, device=weight.device)
+    scales = torch.empty(
+        (num_experts, row_blocks, col_blocks),
+        dtype=torch.float32,
+        device=weight.device,
+    )
+
+    for start in range(0, num_experts, expert_batch_size):
+        end = min(start + expert_batch_size, num_experts)
+        weight_fp32 = weight[start:end].detach().to(torch.float32).contiguous()
+        if padded_rows != rows or padded_cols != cols:
+            padded = weight_fp32.new_zeros((end - start, padded_rows, padded_cols))
+            padded[:, :rows, :cols].copy_(weight_fp32)
+        else:
+            padded = weight_fp32
+
+        blocks = padded.view(end - start, row_blocks, block_m, col_blocks, block_n)
+        blocks = blocks.permute(0, 1, 3, 2, 4)
+        scale = blocks.abs().amax(dim=(3, 4)).clamp(min=max(amax_epsilon, 1e-10)) / fp8_info.max
+        if power_2_scale:
+            scale = torch.pow(2.0, torch.ceil(torch.log2(scale)))
+        q_blocks = (blocks / scale[:, :, :, None, None]).clamp(min=fp8_info.min, max=fp8_info.max)
+        q_blocks = q_blocks.to(torch.float8_e4m3fn)
+        q_padded = q_blocks.permute(0, 1, 3, 2, 4).contiguous().view(end - start, padded_rows, padded_cols)
+        q_weight[start:end].copy_(q_padded[:, :rows, :cols])
+        scales[start:end].copy_(scale)
+
+    return q_weight, scales
+
+
 def batched_moe_expert_spec(name: str) -> tuple[str, tuple[str, ...], bool] | None:
     """Parse a Megatron Bridge batched Qwen3.5 MoE tensor name.
 
@@ -258,41 +321,42 @@ def batched_moe_expert_spec(name: str) -> tuple[str, tuple[str, ...], bool] | No
     return None
 
 
-def _per_expert_2d_slices(mat: torch.Tensor, is_gate_up: bool) -> list[torch.Tensor]:
-    """Split fused gate/up weights; return other expert weights unchanged."""
-    if is_gate_up:
-        if mat.shape[0] % 2 != 0:
-            raise ValueError("Batched MoE gate_up_proj output dimension must be even, " f"got shape={tuple(mat.shape)}")
-        half = mat.shape[0] // 2
-        return [mat[:half], mat[half:]]
-    return [mat]
-
-
 def iter_batched_moe_expert_fp8_tensors(
     name: str,
     tensor: torch.Tensor,
     config: SerializedFp8Config,
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Convert a batched expert tensor to per-expert FP8 weights and scales."""
+    """Convert a batched expert tensor without expanding expert names.
+
+    The old wire format emitted one weight and one scale tensor for every
+    expert/projection pair. Keeping the expert dimension intact reduces each
+    routed MoE layer from ``6 * num_experts`` tensors to six and lets vLLM use
+    its fused 3D loader.
+    """
     spec = batched_moe_expert_spec(name)
     if spec is None:
         raise ValueError(f"Not a batched MoE expert tensor: {name}")
     if tensor.ndim != 3:
         raise ValueError(f"Batched MoE expert tensor must be 3D, got shape={tuple(tensor.shape)}")
     experts_base, proj_names, is_gate_up = spec
-    num_experts = tensor.shape[0]
-    for expert_idx in range(num_experts):
-        mat = tensor[expert_idx]
-        for proj, sub in zip(proj_names, _per_expert_2d_slices(mat, is_gate_up)):
-            weight_name = f"{experts_base}.{expert_idx}.{proj}.weight"
-            q_weight, scale = blockwise_cast_to_fp8(
-                sub.contiguous(),
-                config.weight_block_size,
-                config.power_2_scale,
-                config.amax_epsilon,
-            )
-            yield weight_name, q_weight
-            yield scale_name_for_weight(weight_name), scale
+    if is_gate_up:
+        if tensor.shape[1] % 2 != 0:
+            raise ValueError(f"Batched MoE gate_up_proj output dimension must be even, got shape={tuple(tensor.shape)}")
+        half = tensor.shape[1] // 2
+        projection_tensors = (tensor[:, :half], tensor[:, half:])
+    else:
+        projection_tensors = (tensor,)
+
+    for proj, projection_tensor in zip(proj_names, projection_tensors):
+        q_weight, scale = batched_blockwise_cast_to_fp8(
+            projection_tensor,
+            config.weight_block_size,
+            config.power_2_scale,
+            config.amax_epsilon,
+        )
+        weight_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{experts_base}.{proj}.weight"
+        yield weight_name, q_weight
+        yield scale_name_for_weight(weight_name), scale
 
 
 def iter_serialized_fp8_tensors(
