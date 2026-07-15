@@ -902,12 +902,13 @@ class PolicyWorkerBase(Worker):
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
-            # Match the RL path: policy_loss is already a pre-scaled sum, so
-            # compensate for DP's gradient average by multiplying before
-            # backward and logging the uncorrected value.
+            # Policy loss masks are pre-scaled to achieve the correct reduction
+            # when summing across the entire minibatch (see `DefaultCollator`).
+            # FSDP averages loss value over DP ranks by default,
+            # so we multiply by dp_size to recover the correct sum reduction across workers.
             grad_sum_correction_factor = self.mesh_rank.dp_size
             loss = policy_loss * grad_sum_correction_factor
-            unscaled_loss = loss / grad_sum_correction_factor
+            unscaled_loss = policy_loss
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)

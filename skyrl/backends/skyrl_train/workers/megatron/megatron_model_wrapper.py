@@ -562,13 +562,18 @@ class MegatronModelWrapper:
 
             # SFT path: cross_entropy loss (negative log likelihood)
             if resolved_loss_name == "cross_entropy":
-                # Match the RL path: Megatron divides by num_microbatches and
-                # data parallel all-reduce averages gradients across dp_size.
-                # The SFT policy loss is already a pre-scaled sum, so multiply
-                # before backward and log the uncorrected value.
+                # Policy loss masks are pre-scaled to achieve the correct reduction
+                # when summing across the entire minibatch (see `DefaultCollator`).
+                # Megatron divides loss by num_microbatches
+                # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
+                # and the data parallel all-reduce averages gradients across dp_size.
+                # Megatron's schedule separately multiplies loss by the CP size for two-output loss funcs,
+                # so CP ranks are not included in this correction factor.
+                # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
+                # so we multiply by both factors to recover the correct sum reduction.
                 grad_sum_correction_factor = num_microbatches * dp_size
                 loss = policy_loss * grad_sum_correction_factor
-                unscaled_loss = loss / grad_sum_correction_factor
+                unscaled_loss = policy_loss
 
                 # Compute elementwise loss for Tinker API (per-token NLL)
                 with torch.no_grad():
