@@ -9,6 +9,10 @@ from megatron.core.distributed import finalize_model_grads
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 
+from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
+    call_model_with_fused_lm_head,
+    fused_lm_head_output_processor,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
@@ -80,35 +84,6 @@ def _build_packed_targets(
     packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
     targets[packed_indices[attention_mask]] = sequences[attention_mask]
     return targets.unsqueeze(0)
-
-
-def _fused_lm_head_output_processor(**kwargs):
-    """GPTModel ``output_processor`` hook for the fused LM-head log-prob path.
-
-    Skips the output-layer matmul (so the [S, B, vocab//TP] logits are never
-    built), returns the decoder hidden states in [b, s, h] layout (the same
-    layout the default logits path returns), and stashes the resolved
-    output-layer weight into the caller-provided ``context`` dict so the fused
-    log-prob / entropy can run downstream with it.
-    """
-    hidden_states = kwargs["hidden_states"]
-    output_layer = kwargs["output_layer"]
-    ctx = kwargs.get("context")
-    if ctx is not None:
-        output_weight = kwargs.get("output_weight")
-        ctx["lm_head_weight"] = output_weight if output_weight is not None else output_layer.weight
-    # With sequence parallelism the decoder hidden states are sharded along the
-    # sequence dim; the ColumnParallelLinear output layer all-gathers them before
-    # projecting (megatron tensor_parallel/layers.py). We skip that layer, so
-    # replicate the gather here. tensor_parallel_output_grad=True makes the
-    # backward reduce-scatter the hidden grad across TP ranks — exactly the sum
-    # of each rank's vocab-slice grad_hidden that the fused op produces.
-    if getattr(output_layer, "sequence_parallel", False):
-        from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
-
-        hidden_states = gather_from_sequence_parallel_region(hidden_states, tensor_parallel_output_grad=True)
-    # [s, b, h] -> [b, s, h], matching `logits.transpose(0, 1)` in the default path.
-    return hidden_states.transpose(0, 1).contiguous()
 
 
 class MegatronModelWrapper:
@@ -343,12 +318,13 @@ class MegatronModelWrapper:
                 # (e.g. PPO reference logprobs) at long context would still
                 # materialize the full [B, S, vocab//TP] logits and OOM.
                 _op_ctx: dict = {}
-                outputs = model(
+                outputs = call_model_with_fused_lm_head(
+                    model,
                     new_sequences,
                     new_position_ids,
                     to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
-                    output_processor=_fused_lm_head_output_processor,
+                    output_processor=fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
                     **vlm_inputs,
                 )
@@ -800,12 +776,13 @@ class MegatronModelWrapper:
                 # output_processor returns decoder hidden states (not logits) and
                 # stashes the LM-head weight; loss_func then fuses the projection.
                 _op_ctx: dict = {}
-                outputs = model(
+                outputs = call_model_with_fused_lm_head(
+                    model,
                     new_sequences,
                     new_position_ids,
                     to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
-                    output_processor=_fused_lm_head_output_processor,
+                    output_processor=fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
                     **vlm_inputs,
                 )
