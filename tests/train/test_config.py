@@ -154,16 +154,13 @@ def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value
         TrainerConfig(**{field_name: value})
 
 
-def test_sample_support_replay_requires_capture_and_megatron():
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
+def test_sample_support_replay_requires_capture(strategy):
     with pytest.raises(ValueError, match="enable_sample_support_replay requires"):
-        SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.enable_sample_support_replay=true"])
-
-    with pytest.raises(ValueError, match="requires trainer.strategy=megatron"):
         SkyRLTrainConfig.from_cli_overrides(
             [
+                f"trainer.strategy={strategy}",
                 "trainer.algorithm.enable_sample_support_replay=true",
-                "generator.inference_engine.enable_return_sample_support_set=true",
-                "generator.sampling_params.top_k=8",
             ]
         )
 
@@ -188,11 +185,12 @@ def test_sample_support_capture_rejects_unsupported_sampling_modifiers(override,
         )
 
 
-def test_sample_support_replay_accepts_top_k_top_p_and_min_p():
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
+def test_sample_support_replay_accepts_top_k_top_p_and_min_p(strategy):
     cfg = SkyRLTrainConfig.from_cli_overrides(
         [
-            "trainer.strategy=megatron",
             "trainer.algorithm.enable_sample_support_replay=true",
+            f"trainer.strategy={strategy}",
             "generator.inference_engine.enable_return_sample_support_set=true",
             "generator.sampling_params.top_k=8",
             "generator.sampling_params.top_p=0.9",
@@ -201,6 +199,29 @@ def test_sample_support_replay_accepts_top_k_top_p_and_min_p():
     )
 
     assert cfg.trainer.algorithm.enable_sample_support_replay
+
+
+def test_sample_support_replay_rejects_unimplemented_strategy():
+    with pytest.raises(ValueError, match="requires trainer.strategy=megatron or fsdp"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                "trainer.strategy=jax",
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=17",
+            ]
+        )
+
+
+def test_sample_support_capture_rejects_vlm():
+    with pytest.raises(ValueError, match="vision_language_generator"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+                "generator.vision_language_generator=true",
+            ]
+        )
 
 
 def test_cli_overrides_plus_prefix_rejected():
