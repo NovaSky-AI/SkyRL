@@ -529,6 +529,11 @@ class MegatronStrategy(DistributedStrategy):
         save_every_n_ranks: int = 1,
         **kwargs,
     ) -> None:
+        if distributed_save and io.is_cloud_path(output_dir):
+            raise ValueError(
+                f"distributed_save=True is incompatible with cloud paths (got {output_dir}). "
+                "Please use a shared filesystem path for distributed_save."
+            )
         # Create checkpoint directory if it doesn't exist.
         if self.is_rank_0():
             io.makedirs(output_dir, exist_ok=True)
