@@ -4,6 +4,7 @@
     "megatron",
     "ppo",
     "lora",
+    "amd",
     "llm_as_a_judge",
     "remote_server",
     "training_backends",

@@ -1,7 +1,7 @@
 FROM vllm/vllm-openai-rocm:v0.20.2
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG RAY_VERSION=2.51.1
+ARG RAY_VERSION=2.56.0
 ARG UV_VERSION=0.11.11
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]

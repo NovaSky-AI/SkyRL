@@ -28,20 +28,10 @@ import torch
 
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
+    _empty_cuda_cache_rocm,
 )
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
-
-
-def _empty_cuda_cache() -> None:
-    """Release unused CUDA/ROCm cached blocks after full-weight sync."""
-    if not torch.cuda.is_available():
-        return
-
-    device = torch.cuda.current_device()
-    torch.cuda.synchronize(device)
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize(device)
 
 
 class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
@@ -169,18 +159,4 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
             )
 
         torch.accelerator.synchronize()
-        _empty_cuda_cache()
-
-    def skyrl_finish_weight_update(self) -> None:
-        """
-        Finalize the current weight update.
-
-        For checkpoint-format weights, runs layerwise postprocessing
-        (quantization repacking, attention weight processing, etc.).
-        Must be called after all update_weights_* calls are done.
-
-        Keep the SkyRL-prefixed name to avoid colliding with vLLM Worker
-        methods such as finish_weight_update.
-        """
-        super().skyrl_finish_weight_update()
-        _empty_cuda_cache()
+        _empty_cuda_cache_rocm()
