@@ -39,7 +39,7 @@ from skyrl.train.generators.utils import (
 )
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
-from skyrl.train.utils.phase_metrics import TrainingPhaseGauge
+from skyrl.train.utils.phase_metrics import ScalarGauges, TrainingPhaseGauge
 from skyrl.train.utils.trainer_utils import (
     ResumeMode,
     build_dataloader,
@@ -463,6 +463,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
         self._phase_gauge = TrainingPhaseGauge()
+        # Rollout-buffer levels to Prometheus, so run-ahead pressure joins the phase gauge and node
+        # GPU metrics in one store (the per-step tracker logging below only reaches the experiment
+        # tracker). keep_rate exposes the zero-variance drop dynamics under sample_full_batch.
+        self._loop_gauges = ScalarGauges(
+            descriptions={
+                "skyrl_gen_buffer_qsize": "Completed generation groups buffered at step start.",
+                "skyrl_gen_buffer_maxsize": "Staleness-bounded generation-buffer capacity "
+                "(mini_batch_size * (max_staleness_steps + 1)).",
+                "skyrl_mini_batch_size": "Generation groups consumed per training step.",
+                "skyrl_gen_group_keep_rate": "Fraction of drained groups kept (not dropped as "
+                "zero-variance) while collecting the last mini-batch.",
+            }
+        )
 
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
@@ -516,6 +529,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         # starving for rollouts. Previously only visible in a tqdm postfix.
                         self.all_metrics["async/gen_buffer_qsize"] = generation_output_group_buffer.qsize()
                         self.all_metrics["async/gen_buffer_maxsize"] = generation_output_group_buffer.maxsize
+                        self._loop_gauges.set("skyrl_gen_buffer_qsize", generation_output_group_buffer.qsize())
+                        self._loop_gauges.set("skyrl_gen_buffer_maxsize", generation_output_group_buffer.maxsize)
+                        self._loop_gauges.set("skyrl_mini_batch_size", self.mini_batch_size)
 
                         # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups if
                         # sample_full_batch).
@@ -552,7 +568,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             break
 
                         if self.sample_full_batch:
-                            self.all_metrics["async/num_groups_dropped"] = len(cur_dropped_groups)
+                            num_kept = len(cur_generation_group_mini_batch)
+                            num_dropped = len(cur_dropped_groups)
+                            self.all_metrics["async/num_groups_dropped"] = num_dropped
+                            drained = num_kept + num_dropped
+                            if drained > 0:
+                                self._loop_gauges.set("skyrl_gen_group_keep_rate", num_kept / drained)
 
                         # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
                         with (
