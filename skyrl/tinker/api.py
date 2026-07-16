@@ -1259,6 +1259,10 @@ def parse_checkpoint_delete_path(
 
 
 def delete_checkpoint_file(checkpoint_path: Any) -> None:
+    # Only remove the checkpoint artifact itself; leave the enclosing directories in
+    # place. The run may still be active, and every save path recreates its directory
+    # on demand (parents=True / makedirs), so pruning them here is pointless churn that
+    # couples a per-checkpoint delete to run-wide directory state.
     if checkpoint_path.is_dir():
         if hasattr(checkpoint_path, "rmtree"):
             checkpoint_path.rmtree()
@@ -1269,12 +1273,6 @@ def delete_checkpoint_file(checkpoint_path: Any) -> None:
             checkpoint_path.unlink()
         except FileNotFoundError:
             return
-
-    with suppress(OSError):
-        checkpoint_path.parent.rmdir()
-    if checkpoint_path.parent.name == "sampler_weights":
-        with suppress(OSError):
-            checkpoint_path.parent.parent.rmdir()
 
 
 @app.get("/api/v1/training_runs")
@@ -1367,26 +1365,35 @@ async def delete_checkpoint(
 ) -> None:
     """Delete a saved checkpoint artifact and its database row."""
     checkpoint_id, resolved_checkpoint_type = parse_checkpoint_delete_path(checkpoint_path, checkpoint_type)
-    checkpoint_db = None
     if resolved_checkpoint_type is None:
-        resolved_checkpoint_type = types.CheckpointType.TRAINING
-        checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
-        if checkpoint_db is None:
-            resolved_checkpoint_type = types.CheckpointType.SAMPLER
-            checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
-    else:
-        checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
+        # The PK is (unique_id, checkpoint_id, checkpoint_type), so a training and a
+        # sampler checkpoint can share an id. Rather than guessing a type (which would
+        # make two identical DELETEs delete different rows), require the type to be
+        # explicit -- either via the "weights/"/"sampler_weights/" path prefix or the
+        # checkpoint_type query param. This matches upstream tinker, which rejects a
+        # bare id with a 400 and the same guidance.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid checkpoint identifier. Expected format 'weights/<name>' (training weights) "
+                "or 'sampler_weights/<name>' (sampler weights), where <name> is a single path segment."
+            ),
+        )
 
+    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
     if not checkpoint_db:
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
     if checkpoint_db.status == CheckpointStatus.PENDING:
         raise HTTPException(status_code=425, detail="Checkpoint is still being created")
 
+    # Commit the row deletion before unlinking the artifact. If the commit fails we
+    # leave an orphaned file (GC-able) rather than a row that lists a checkpoint whose
+    # archive is gone, which would make every subsequent download 500.
     path = checkpoint_file_path(request, unique_id, checkpoint_id, resolved_checkpoint_type)
-    await asyncio.to_thread(delete_checkpoint_file, path)
     await session.delete(checkpoint_db)
     await session.commit()
+    await asyncio.to_thread(delete_checkpoint_file, path)
 
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints")

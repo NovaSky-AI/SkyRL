@@ -302,29 +302,38 @@ def test_delete_checkpoint(tmp_path):
         def sampler_ckpt_file(checkpoint_id):
             return checkpoints_base / training_run_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
 
-        def listed_checkpoint_ids():
-            checkpoints = rest_client.list_checkpoints(training_run_id).result().checkpoints
-            return {ckpt.checkpoint_id for ckpt in checkpoints}
+        def listed_checkpoints():
+            return {ckpt.checkpoint_id: ckpt for ckpt in rest_client.list_checkpoints(training_run_id).result().checkpoints}
 
-        assert listed_checkpoint_ids() == {"ckpt0", "ckpt1", "ckpt2", "ckpt3", "sampler0"}
+        assert set(listed_checkpoints()) == {"ckpt0", "ckpt1", "ckpt2", "ckpt3", "sampler0"}
         for checkpoint_id in ["ckpt0", "ckpt1", "ckpt2", "ckpt3"]:
             assert training_ckpt_file(checkpoint_id).exists()
         assert sampler_ckpt_file("sampler0").exists()
 
-        # Delete two training checkpoints and the sampler checkpoint (the endpoint
-        # resolves the checkpoint type from the id when it isn't given explicitly).
-        rest_client.delete_checkpoint(training_run_id, "ckpt1").result()
-        rest_client.delete_checkpoint(training_run_id, "ckpt3").result()
-        rest_client.delete_checkpoint(training_run_id, "sampler0").result()
+        # Delete two training checkpoints and the sampler checkpoint. Delete via the
+        # type-qualified tinker path (the canonical tinker flow); the checkpoint type
+        # is carried by the path's "weights/"/"sampler_weights/" prefix.
+        checkpoints = listed_checkpoints()
+        for checkpoint_id in ["ckpt1", "ckpt3", "sampler0"]:
+            rest_client.delete_checkpoint_from_tinker_path(checkpoints[checkpoint_id].tinker_path).result()
 
         # Deleted checkpoints are gone from both the listing and disk.
-        assert listed_checkpoint_ids() == {"ckpt0", "ckpt2"}
+        assert set(listed_checkpoints()) == {"ckpt0", "ckpt2"}
         assert not training_ckpt_file("ckpt1").exists()
         assert not training_ckpt_file("ckpt3").exists()
         assert not sampler_ckpt_file("sampler0").exists()
         # Un-deleted checkpoints remain on disk.
         assert training_ckpt_file("ckpt0").exists()
         assert training_ckpt_file("ckpt2").exists()
+
+        # A bare (untyped) id is rejected with 400 -- the checkpoint type must be
+        # explicit, since a training and sampler checkpoint could share an id. This
+        # matches upstream tinker. The rejected delete must leave the checkpoint intact.
+        with pytest.raises(Exception) as exc_info:
+            rest_client.delete_checkpoint(training_run_id, "ckpt0").result()
+        assert getattr(exc_info.value, "status_code", None) == 400
+        assert set(listed_checkpoints()) == {"ckpt0", "ckpt2"}
+        assert training_ckpt_file("ckpt0").exists()
 
 
 @pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
