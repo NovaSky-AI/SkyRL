@@ -51,6 +51,7 @@ class InferenceEngineOutput(TypedDict):
     response_logprobs: Optional[List[List[float]]]
     prompt_logprobs: Optional[List[List[float]]]  # per-prompt-token logprobs under the current model
     rollout_expert_indices: Optional[List[RoutedExpertIndices]]
+    rollout_sample_support: Optional[List[List[List[int]]]]
 
 
 class InferenceEngineInterface(ABC):

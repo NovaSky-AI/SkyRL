@@ -104,3 +104,20 @@ def decode_packed_routed_experts(payload: dict[str, Any]) -> RoutedExpertIndices
     if compact.dtype != dtype:
         raise ValueError(f"packed routed_experts uses non-canonical dtype {dtype.name}; expected {compact.dtype.name}")
     return compact
+
+
+def clamp_sampled_logprobs(sampled: np.ndarray) -> Tuple[list[dict[str, float]], int]:
+    """Build ``logprobs.content`` from a flat array of sampled-token logprobs.
+
+    The array form of :func:`build_logprobs_content`, for vLLM's flat-logprobs
+    rows. A non-finite entry here reaches the client as JSON ``null`` (orjson
+    emits ``null`` rather than raising), which then fails tensor conversion in
+    preprocessing, so it has to be floored before serialization.
+
+    NaN needs the same treatment as ``-inf`` and is easier to miss: callers that
+    screen support columns with ``isneginf`` do not catch it.
+    """
+    finite = np.isfinite(sampled)
+    num_clamped = int((~finite).sum())
+    values = np.where(finite, sampled, CLAMPED_LOGPROB).tolist()
+    return [{"logprob": value} for value in values], num_clamped

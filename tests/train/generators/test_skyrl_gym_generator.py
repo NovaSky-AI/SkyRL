@@ -31,9 +31,14 @@ def test_turn_output_masks_uncaptured_suffix():
         new_obs=[],
         obs_ids=[20, 21],
         reward=1.0,
+        rollout_sample_support=np.array([[10, 100], [11, 101]], dtype=np.int32),
         added_eos=True,
     )
 
+    np.testing.assert_array_equal(
+        output.get_turn_rollout_sample_support(),
+        np.array([[10, 100], [11, 101], [-1, -1], [-1, -1], [-1, -1]], dtype=np.int32),
+    )
     assert output.get_turn_loss_mask() == [1, 1, 0, 0, 0]
 
 
@@ -412,7 +417,7 @@ async def test_agent_loop_single_turn(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_agent_loop_uses_incremental_routed_expert_trace(
+async def test_agent_loop_uses_incremental_replay_metadata_traces(
     mock_make,
     mock_tokenizer,
     mock_llm,
@@ -424,6 +429,8 @@ async def test_agent_loop_uses_incremental_routed_expert_trace(
     generator_cfg.max_turns = 2
     generator_cfg.use_conversation_multi_turn = True
     generator_cfg.inference_engine.enable_return_routed_experts = True
+    generator_cfg.inference_engine.enable_return_sample_support_set = True
+    generator_cfg.sampling_params.top_k = 2
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
@@ -432,19 +439,24 @@ async def test_agent_loop_uses_incremental_routed_expert_trace(
         for done in (False, True)
     ]
     prompt_starts = []
+    generation_index = 0
 
     def generate(input_batch, model=None):
+        nonlocal generation_index
         prompt_tokens = input_batch["prompt_token_ids"][0]
         prompt_start = input_batch["routed_experts_prompt_starts"][0]
         prompt_starts.append(prompt_start)
         output_ids = [10, 11]
         num_route_rows = len(prompt_tokens) - prompt_start + len(output_ids) - 1
         routes = np.arange(num_route_rows * 4, dtype=np.int32).reshape(num_route_rows, 2, 2) % 8
+        sample_support = [[10, 100 + generation_index], [11, 110 + generation_index]]
+        generation_index += 1
         return {
             "responses": ["mocked output"],
             "response_ids": [output_ids],
             "stop_reasons": ["stop"],
             "rollout_expert_indices": [routes],
+            "rollout_sample_support": [sample_support],
         }
 
     mock_llm.generate = AsyncMock(side_effect=generate)
@@ -456,7 +468,7 @@ async def test_agent_loop_uses_incremental_routed_expert_trace(
     )
     generator.base_conversation_token_ids = []
 
-    await generator.agent_loop(
+    output = await generator.agent_loop(
         [{"role": "user", "content": "Start"}],
         mock_env_cfg.env_class,
         {},
@@ -465,6 +477,9 @@ async def test_agent_loop_uses_incremental_routed_expert_trace(
     )
 
     assert prompt_starts == [0, 5]
+    assert output.rollout_sample_support[:2] == [[10, 100], [11, 110]]
+    assert output.rollout_sample_support[-2:] == [[10, 101], [11, 111]]
+    assert all(row == [-1, -1] for row in output.rollout_sample_support[2:-2])
 
 
 @pytest.mark.asyncio
