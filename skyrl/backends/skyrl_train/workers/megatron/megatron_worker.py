@@ -379,7 +379,7 @@ class MegatronWorker:
         bf16=True,
         flash_attn=False,
         lora_config=None,
-        enable_mtp=True,
+        enable_mtp=False,
         language_model_only=False,
         bridge_weights_path=None,
     ):
@@ -441,12 +441,7 @@ class MegatronWorker:
 
         provider = bridge.to_megatron_provider()
 
-        # Disable MTP heads for ordinary training -- the native in-forward MTP loss breaks
-        # packed-sequence backward under full recompute. EXCEPTION: decoupled MTP/draft training
-        # (trainer.mtp.enabled) keeps them built.
-        _mtp_cfg = getattr(self.cfg, "mtp", None)
-        _mtp_training = enable_mtp and _mtp_cfg is not None and getattr(_mtp_cfg, "enabled", False)
-        if not _mtp_training and getattr(provider, "mtp_num_layers", None):
+        if not enable_mtp and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
             provider.mtp_num_layers = None
 
@@ -903,6 +898,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             flash_attn=self.cfg.flash_attn,
             language_model_only=self.cfg.policy.language_model_only,
             bridge_weights_path=bridge_weights_path,
+            enable_mtp=self.cfg.mtp.enabled,
         )
 
         if self.enable_router_replay:
