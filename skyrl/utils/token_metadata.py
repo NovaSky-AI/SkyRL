@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
@@ -202,3 +203,51 @@ def scatter_packed_token_values_to_batch(
     )
     batch_values[output_mask] = values[packed_mask]
     return batch_values
+
+
+class TokenMetadataTrace:
+    """Accumulate arrays whose first dimension is aligned to tokens."""
+
+    def __init__(self) -> None:
+        self._chunks: list[np.ndarray] = []
+        self._schema: tuple[tuple[int, ...], np.dtype] | None = None
+        self._num_rows = 0
+        self._finalized = False
+
+    @property
+    def num_rows(self) -> int:
+        return self._num_rows
+
+    def append(self, rows: np.ndarray, *, expected_rows: int) -> None:
+        if self._finalized:
+            raise RuntimeError("token metadata trace is already finalized")
+        if isinstance(expected_rows, bool) or not isinstance(expected_rows, int) or expected_rows < 0:
+            raise ValueError(f"expected_rows must be a non-negative integer, got {expected_rows!r}")
+        if not isinstance(rows, np.ndarray):
+            raise TypeError("token metadata rows must be a NumPy array")
+        if rows.ndim < 1:
+            raise ValueError("token metadata must have a token-row dimension")
+        if rows.shape[0] != expected_rows:
+            raise ValueError(f"token metadata has {rows.shape[0]} rows, expected {expected_rows}")
+        if not rows.flags.c_contiguous:
+            raise ValueError("token metadata rows must be contiguous")
+
+        schema = (rows.shape[1:], rows.dtype)
+        if self._schema is None:
+            self._schema = schema
+        elif schema != self._schema:
+            raise ValueError(f"token metadata schema changed from {self._schema} to {schema}")
+
+        self._chunks.append(rows)
+        self._num_rows += expected_rows
+
+    def finalize(self, *, expected_rows: int) -> np.ndarray:
+        if self._finalized:
+            raise RuntimeError("token metadata trace is already finalized")
+        if self._num_rows != expected_rows:
+            raise ValueError(f"token metadata trace has {self._num_rows} rows, expected {expected_rows}")
+        if not self._chunks:
+            raise ValueError("token metadata trace has no chunks")
+
+        self._finalized = True
+        return self._chunks[0] if len(self._chunks) == 1 else np.concatenate(self._chunks, axis=0)

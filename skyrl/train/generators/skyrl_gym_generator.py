@@ -36,7 +36,7 @@ from skyrl.train.generators.utils import (
     get_generation_prompt_ids,
     get_rollout_metrics,
 )
-from skyrl.utils.routed_experts import RoutedExpertIndices
+from skyrl.utils.routed_experts import RoutedExpertIndices, RoutedExpertTrace
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
 
@@ -77,7 +77,7 @@ class AgentLoopState:
     rollout_logprobs: Optional[List[float]]
     response_end_idx: Optional[int]
     done: bool
-    rollout_expert_indices: Optional[RoutedExpertIndices] = None
+    routed_expert_trace: Optional[RoutedExpertTrace] = None
 
 
 @dataclass
@@ -87,13 +87,8 @@ class TurnOutput:
     output_logprobs: Optional[List[float]]
     new_obs: ConversationType
     obs_ids: List[int]
-    rollout_expert_indices: Optional[RoutedExpertIndices]
     reward: Optional[float]
     added_eos: bool = False
-
-    def get_turn_rollout_expert_indices(self) -> Optional[RoutedExpertIndices]:
-        """Return only routes that the inference model actually executed."""
-        return self.rollout_expert_indices
 
     def get_turn_loss_mask(self) -> List[int]:
         """
@@ -365,6 +360,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rollout_logprobs=[] if get_logprobs else None,
                 response_end_idx=None,
                 done=False,
+                routed_expert_trace=(
+                    RoutedExpertTrace() if self.generator_cfg.inference_engine.enable_return_routed_experts else None
+                ),
             )
 
             while not agent_loop_state.done:
@@ -387,11 +385,13 @@ class SkyRLGymGenerator(GeneratorInterface):
                     agent_loop_state.loss_mask = []
                     agent_loop_state.rollout_logprobs = None
 
+                routed_expert_trace = agent_loop_state.routed_expert_trace
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[agent_loop_state.input_ids],
                     session_ids=[session_id],
                     sampling_params=sampling_params,
                     cache_salt=cache_salt,
+                    routed_experts_prompt_starts=[routed_expert_trace.prompt_start] if routed_expert_trace else None,
                 )
                 engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
                 output = engine_output["responses"][0]
@@ -410,6 +410,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                         raise ValueError(
                             "Rollout expert indices bookkeeping is not supported with custom chat template"
                         )
+                if routed_expert_trace is not None:
+                    if rollout_expert_indices is None:
+                        raise ValueError("R3 generation did not return routed expert indices")
+                    routed_expert_trace.record_generation(
+                        prompt_token_count=len(agent_loop_state.input_ids),
+                        generated_token_count=len(output_ids),
+                        routed_experts=rollout_expert_indices,
+                    )
                 # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
                 # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
                 stop_strs = current_sampling_params.get("stop", None)
@@ -441,6 +449,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                     )
                     output = env_step_output["postprocessed_action"]
                     output_ids = self.tokenizer.encode(output, add_special_tokens=False)
+                    if routed_expert_trace is not None:
+                        raise ValueError("R3 bookkeeping is incompatible with postprocessed_action")
 
                 obs_ids = self.get_obs_ids_from_obs(new_obs, agent_loop_state.done)
 
@@ -453,7 +463,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                     reward=step_reward,
                     obs_ids=obs_ids,
                     added_eos=added_eos,
-                    rollout_expert_indices=rollout_expert_indices,
                 )
 
                 if is_step_wise:
@@ -473,7 +482,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                         rollout_logprobs=turn_response_logprobs,
                         stop_reason=stop_reason,
                         env_metrics=env.get_metrics() if agent_loop_state.done else {},
-                        rollout_expert_indices=turn_output.get_turn_rollout_expert_indices(),
                     )
                     agent_loop_output.step_outputs.append(per_step_output)
 
@@ -535,10 +543,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                     rollout_logprobs = agent_loop_state.rollout_logprobs[
                         : agent_loop_state.response_end_idx - initial_prompt_length + 1
                     ]
-                if agent_loop_state.rollout_expert_indices is not None:
-                    rollout_expert_indices_out = agent_loop_state.rollout_expert_indices[
-                        : agent_loop_state.response_end_idx + 1
-                    ]
                 # fix index for per_step_rewards
                 per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
                 assert len(loss_mask) == len(
@@ -554,6 +558,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                     if rollout_logprobs is not None:
                         rollout_logprobs.append(0.0)
                     appended_eos_token = True
+
+            if agent_loop_state.routed_expert_trace is not None and agent_loop_state.routed_expert_trace.prompt_start:
+                rollout_expert_indices_out = agent_loop_state.routed_expert_trace.finalize(
+                    token_count=len(prompt_ids) + len(response_ids),
+                    loss_mask=[0] * len(prompt_ids) + loss_mask,
+                )
 
             if self.generator_cfg.step_wise_trajectories:
                 for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):
@@ -1021,8 +1031,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         agent_loop_state.response_end_idx = None
         # `logprobs` are not computed because retokenizing breaks token-in-token-out
         agent_loop_state.rollout_logprobs = None
-        # indices are not meaningful when retokenizing
-        agent_loop_state.rollout_expert_indices = None
         return agent_loop_state
 
     def _update_agent_loop_state_with_multiturn_chat_template(
@@ -1074,17 +1082,12 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask_for_turn = turn_output.get_turn_loss_mask()
         rollout_logprobs_for_turn = turn_output.get_turn_rollout_logprobs()
 
-        # use the raw rollout expert indices without any appending of observation tokens
-        # this will be overwritten each turn, so we don't need to append observation tokens to it
-        rollout_expert_indices_for_turn = turn_output.rollout_expert_indices
-
         if self.generator_cfg.step_wise_trajectories:
             # cumulative input_ids is not tracked for step wise training
             agent_loop_state.response_end_idx = len(turn_output.output_ids) - 1
-            # no running loss_mask, `rollout_logprobs`, or `rollout_expert_indices` are tracked for step-wise training
+            # no running loss_mask or rollout logprobs are tracked for step-wise training
             agent_loop_state.loss_mask = None
             agent_loop_state.rollout_logprobs = None
-            agent_loop_state.rollout_expert_indices = None
         else:
             # Directly append turn output
             turn_ids = turn_output.output_ids + turn_output.obs_ids
@@ -1093,11 +1096,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             agent_loop_state.loss_mask += loss_mask_for_turn
             if agent_loop_state.rollout_logprobs is not None and rollout_logprobs_for_turn is not None:
                 agent_loop_state.rollout_logprobs += rollout_logprobs_for_turn
-            if rollout_expert_indices_for_turn is not None:
-                # overwrite the existing rollout inference indices, since the inference engine should
-                # return the expert indices for the entire sequence including each turn's input
-                # and the final response should not have an observation appended to it
-                agent_loop_state.rollout_expert_indices = rollout_expert_indices_for_turn
 
         return agent_loop_state
 
@@ -1168,13 +1166,4 @@ class SkyRLGymGenerator(GeneratorInterface):
         agent_loop_state.loss_mask += loss_mask_for_turn
         if agent_loop_state.rollout_logprobs is not None and rollout_logprobs_for_turn is not None:
             agent_loop_state.rollout_logprobs += rollout_logprobs_for_turn
-        if (
-            self.generator_cfg.inference_engine.enable_return_routed_experts
-            and turn_output.rollout_expert_indices is not None
-        ):
-            # overwrite the existing rollout inference indices, since the inference engine should
-            # return the expert indices for the entire sequence including each turn's input and observation tokens
-            # and the final response should not have an observation appended to it
-            agent_loop_state.rollout_expert_indices = turn_output.rollout_expert_indices
-
         return agent_loop_state

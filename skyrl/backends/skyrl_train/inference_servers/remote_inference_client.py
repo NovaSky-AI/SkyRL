@@ -241,13 +241,27 @@ class RemoteInferenceGenerator:
         session_id: Optional[Any],
         model: str,
         return_routed_experts: bool = False,
+        routed_experts_prompt_start: Optional[int] = None,
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
     ) -> RemoteGenerateResult:
         """Generate one raw-token completion, optionally returning R3 routes."""
+        if routed_experts_prompt_start is not None:
+            if not return_routed_experts:
+                raise ValueError("routed_experts_prompt_start requires return_routed_experts=True")
+            if (
+                isinstance(routed_experts_prompt_start, bool)
+                or not isinstance(routed_experts_prompt_start, int)
+                or not 0 <= routed_experts_prompt_start <= len(prompt_token_ids)
+            ):
+                raise ValueError("routed_experts_prompt_start must be an integer within the prompt")
+
         path = "/skyrl/v1/generate" if return_routed_experts else "/inference/v1/generate"
+        request_sampling_params = dict(sampling_params)
+        if routed_experts_prompt_start is not None:
+            request_sampling_params["routed_experts_prompt_start"] = routed_experts_prompt_start
         payload: Dict[str, Any] = {
-            "sampling_params": sampling_params,
+            "sampling_params": request_sampling_params,
             "model": model,
             "token_ids": prompt_token_ids,
         }
@@ -491,6 +505,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
         session_ids = input_batch.get("session_ids")
         mm_features = input_batch.get("mm_features")
         cache_salt = input_batch.get("cache_salt")
+        routed_experts_prompt_starts = input_batch.get("routed_experts_prompt_starts")
+        if routed_experts_prompt_starts is not None:
+            if not self.enable_return_routed_experts:
+                raise ValueError("routed_experts_prompt_starts requires enable_return_routed_experts=True")
+            if len(routed_experts_prompt_starts) != len(prompt_token_ids):
+                raise ValueError("routed_experts_prompt_starts must have one entry per prompt")
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -514,6 +534,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                     mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
+                    routed_experts_prompt_start=(
+                        routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
+                    ),
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -523,6 +546,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                     mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
+                    routed_experts_prompt_start=(
+                        routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
+                    ),
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -556,6 +582,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         model: str,
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
+        routed_experts_prompt_start: Optional[int] = None,
     ) -> Dict[str, Any]:
         result = await self._get_generator().generate(
             prompt_token_ids=prompt_token_ids,
@@ -563,6 +590,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             session_id=session_id,
             model=model,
             return_routed_experts=self.enable_return_routed_experts,
+            routed_experts_prompt_start=routed_experts_prompt_start,
             mm_features=mm_features,
             cache_salt=cache_salt,
         )
