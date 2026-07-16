@@ -702,6 +702,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "stop_reasons",
             "trajectory_ids",
             "rollout_expert_indices",
+            "rollout_sample_support",
             "is_last_step",
             "pixel_values",
             "image_grid_thw",
@@ -730,6 +731,11 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             assert len(response_ids) == len(generator_output["rollout_logprobs"][i]), (
                 f"Response ids and rollout logprobs must have the same length, "
                 f"for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
+            )
+        if generator_output.get("rollout_sample_support") is not None:
+            assert len(response_ids) == len(generator_output["rollout_sample_support"][i]), (
+                "Response ids and rollout sample support must have the same length, "
+                f"for sample {i} got {len(response_ids)} and {len(generator_output['rollout_sample_support'][i])}"
             )
 
     # loss masks should be non-zero for at least one element for trainer

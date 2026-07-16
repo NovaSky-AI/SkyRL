@@ -40,6 +40,21 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     # tests/backends/skyrl_train/mtp/test_build_vllm_cli_args_mtp.py
 
 
+@pytest.mark.vllm
+def test_sample_support_uses_processed_top_k_logprobs():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+        ]
+    )
+
+    args = build_vllm_cli_args(cfg)
+
+    assert args.max_logprobs == 8
+    assert args.logprobs_mode == "processed_logprobs"
+
+
 def test_resolve_policy_model_name_uses_served_model_name():
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = "base-model"
