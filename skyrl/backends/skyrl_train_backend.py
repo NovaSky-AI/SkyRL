@@ -15,7 +15,11 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
-from skyrl.backends.renderer import VLLMRenderer
+from skyrl.backends.renderer import (
+    RendererClientProtocol,
+    VLLMRenderer,
+    render_model_input,
+)
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
@@ -132,6 +136,9 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engine_client = None
         self._inference_engines_initialized = False
         self._renderer = None
+        # CPU-only render server for multi-modal preprocessing; started
+        # lazily on the first image-bearing training batch.
+        self._render_server = None
         # Captured at first LoRA create_model; subsequent create_models must
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
@@ -376,6 +383,36 @@ class SkyRLTrainBackend(AbstractBackend):
         if is_colocated:
             asyncio.run(client.sleep())
 
+    def _create_render_client(self) -> RendererClientProtocol:
+        """Return a client for vLLM's ``/v1/chat/completions/render``.
+
+        Two branches:
+
+        - Inference engines already initialized (e.g. VLM RL, where sampling
+          brought them up): reuse ``RemoteInferenceClient`` so render requests
+          fan out across all engine API servers rather than funneling through
+          a single driver-local process.
+        - Engines not initialized (e.g. VLM SFT): lazily start a CPU-only
+          render server. It loads just the tokenizer and HF processor (no
+          weights, no KV cache, no GPU), keeping the training path
+          (forward / forward_backward) free of inference-engine startup.
+        """
+        if self._inference_engines_initialized:
+            return self._inference_engine_client
+
+        from skyrl.backends.skyrl_train.inference_servers.render_server import (
+            CPURenderServer,
+            RenderServerClient,
+        )
+
+        if self._render_server is None:
+            self._render_server = CPURenderServer(
+                self._cfg.trainer.policy.model.path,
+                log_path=self._cfg.trainer.log_path,
+            )
+            self._render_server.start()
+        return RenderServerClient(self._render_server.url)
+
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
         if self._inference_engines_initialized:
@@ -386,6 +423,15 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.set_inference_engine_client(self._inference_engine_client)
         self.init_weight_sync_state()
         self._inference_engines_initialized = True
+
+        # The engines' API servers also expose the render endpoint, fanning
+        # render requests across all engines. Drop any CPU-render-backed
+        # renderer so the next image batch rebuilds against the engine client.
+        if self._renderer is not None:
+            self._renderer = None
+        if self._render_server is not None:
+            self._render_server.shutdown()
+            self._render_server = None
 
     def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
         # Tinker's public LoraConfig only exposes rank + alpha (plus
@@ -518,6 +564,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._inference_router:
             self._inference_router.shutdown()
             self._inference_router = None
+        if self._render_server is not None:
+            self._render_server.shutdown()
+            self._render_server = None
         ray.shutdown()
         self._model_ids_to_role = {}
         self._model_metadata = {}
@@ -539,10 +588,20 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
 
-        if self._renderer is None:
-            self._ensure_inference_engines()
-            self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
-        rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
+        # Only image chunks need vLLM's render endpoint. Text-only batches
+        # render locally, and image batches use a CPU-only render server, so
+        # the training path never pays for inference-engine startup.
+        has_image_chunks = any(
+            isinstance(chunk, (types.ImageChunk, types.ImageAssetPointerChunk))
+            for model_input in prepared_batch.all_model_inputs
+            for chunk in model_input.chunks
+        )
+        if has_image_chunks:
+            if self._renderer is None:
+                self._renderer = VLLMRenderer(self._create_render_client(), self._cfg.trainer.policy.model.path)
+            rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
+        else:
+            rendered_inputs = render_model_input(prepared_batch.all_model_inputs)
 
         all_input_ids = [r.prompt_ids for r in rendered_inputs]
 

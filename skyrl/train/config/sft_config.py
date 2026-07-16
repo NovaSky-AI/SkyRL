@@ -423,6 +423,9 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
 
     # Training params
     cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.micro_train_batch_size_per_gpu
+    # NOTE (sumanthrh): We use only one training batch size per GPU in SFT for training and evaluation
+    # to simplify user configuration
+    cfg.trainer.micro_forward_batch_size_per_gpu = sft_cfg.micro_train_batch_size_per_gpu
     cfg.trainer.remove_microbatch_padding = sft_cfg.remove_microbatch_padding
     # When sequence packing is on, each row in the dispatched batch is one bin
     # and one worker micro-batch, so the worker-side

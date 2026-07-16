@@ -983,7 +983,7 @@ class SFTTrainer:
         self.tracker = Tracking(
             project_name=self.cfg.trainer.project_name,
             experiment_name=self.cfg.trainer.run_name,
-            backends=self.cfg.trainer.logger,
+            backend=self.cfg.trainer.logger,
             config=self.sft_cfg,
             tags=self.cfg.trainer.tags,
         )
@@ -1630,7 +1630,6 @@ class SFTTrainer:
         """Build a dummy batch of random full-context sequences for benchmarking."""
         batch_size = self.sft_cfg.batch_size
         max_length = self.sft_cfg.max_length
-        micro_batch_size = self.sft_cfg.micro_train_batch_size_per_gpu
         vocab_size = self.tokenizer.vocab_size
 
         # num_actions is max_length - 1 because the autoregressive model
@@ -1641,12 +1640,9 @@ class SFTTrainer:
         sequences = torch.randint(0, vocab_size, (batch_size, max_length), dtype=torch.long)
         attention_mask = torch.ones(batch_size, max_length, dtype=torch.long)
         # All tokens are non-pad in the dummy batch, so total_nonpad = batch_size * num_actions.
-        # Scaling = batch_size / (micro_batch_size * total_nonpad)
-        #         = 1 / (micro_batch_size * num_actions)
+        # Scaling = 1 / total_nonpad.
         total_nonpad = batch_size * num_actions
-        loss_mask = torch.ones(batch_size, num_actions, dtype=torch.float) * (
-            batch_size / (micro_batch_size * total_nonpad)
-        )
+        loss_mask = torch.ones(batch_size, num_actions, dtype=torch.float) / total_nonpad
 
         batch = TrainingInputBatch(
             {

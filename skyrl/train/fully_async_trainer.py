@@ -18,7 +18,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Any, Iterable, List, Optional, Set, Tuple
 
 import torch
 from loguru import logger
@@ -65,12 +65,18 @@ class GeneratedOutputGroup:
         group_completion_time_s (Optional[float]): Wall-clock time (seconds) for the whole group to
             finish generation, i.e. the time for the slowest trajectory in the group to complete.
             None if generation timing was not captured.
+
+        prompts (Optional[List[Any]]): The generator input prompts (in OpenAI message format) for this
+            group, one per trajectory (parallel to ``generator_output["response_ids"]``). Retained so
+            the trajectory logger can render prompt + response, mirroring the synchronous trainer which
+            logs ``generator_input["prompts"]``. None if not captured.
     """
 
     generator_output: GeneratorOutput
     uid: str
     global_step_when_scheduled: int
     group_completion_time_s: Optional[float] = None
+    prompts: Optional[List[Any]] = None
 
 
 @dataclass
@@ -874,6 +880,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             uid=uids[0],
                             global_step_when_scheduled=global_step_at_start,
                             group_completion_time_s=group_completion_time_s,
+                            prompts=generator_input["prompts"],
                         )
                     )
                 except asyncio.QueueFull:
@@ -921,6 +928,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         dropped_groups = dropped_groups or []
         generator_outputs = []
+        # Prompts for the kept groups, kept parallel to the concatenated `generator_output` so the
+        # trajectory logger can render prompt + response (mirrors the sync trainer's use of
+        # `generator_input["prompts"]`).
+        prompts: List[Any] = []
         uids = []
         stalenesses = []
         staleness_violation_count = 0
@@ -933,6 +944,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
+            if cur_generated_output_group.prompts is not None:
+                prompts.extend(cur_generated_output_group.prompts)
 
             # Collect per-group / per-trajectory completion-time stats for this group.
             if cur_generated_output_group.group_completion_time_s is not None:
@@ -1064,6 +1077,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
         logger.info(f"Example generated: {vis}")
+
+        # Optionally upload up to `num_logger_train_samples` samples to tracker (mirrors the
+        # synchronous trainer's train trajectory logging).
+        if self.trajectory_logger is not None:
+            with Timer("log_train_results"):
+                self.trajectory_logger.log(
+                    tracker=self.tracker,
+                    num_samples=self.cfg.trainer.num_logger_train_samples,
+                    prompts=prompts,
+                    generator_output=generator_output,
+                    tokenizer=self.tokenizer,
+                    global_step=self.global_step,
+                    wandb_key="trajectories/train",
+                    include_idx=False,
+                )
 
         return self.convert_to_training_input(generator_output, uids)
 
