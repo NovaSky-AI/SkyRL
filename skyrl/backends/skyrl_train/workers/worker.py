@@ -854,6 +854,7 @@ class PolicyWorkerBase(Worker):
         loss_mask = experience.loss_mask
         action_mask = experience.action_mask
         rollout_action_logprobs = experience.rollout_logprobs
+        sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
         # Determine which loss function to use
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
@@ -888,6 +889,9 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.algorithm.use_entropy_loss,
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
+                sample_support_ids=experience.sample_support_ids if sample_support_replay else None,
+                loss_mask=loss_mask if sample_support_replay else None,
+                enable_sample_support_replay=sample_support_replay,
             )
             # loss function
             # TODO: recompute advantages
@@ -1118,6 +1122,7 @@ class PolicyWorkerBase(Worker):
         loss_mask = experience.loss_mask
         action_mask = experience.action_mask
         rollout_action_logprobs = experience.rollout_logprobs
+        sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
         current_loss_fn = PolicyLossRegistry.get(loss_fn)
 
@@ -1140,6 +1145,9 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=False,
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
+                sample_support_ids=experience.sample_support_ids if sample_support_replay else None,
+                loss_mask=loss_mask if sample_support_replay else None,
+                enable_sample_support_replay=sample_support_replay,
             )
             policy_loss, _ = current_loss_fn(
                 action_log_probs,
@@ -1196,6 +1204,7 @@ class PolicyWorkerBase(Worker):
         attention_mask = micro_batch["attention_mask"]
         pixel_values = micro_batch.get("pixel_values", None)
         image_grid_thw = micro_batch.get("image_grid_thw", None)
+        sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
@@ -1206,6 +1215,10 @@ class PolicyWorkerBase(Worker):
                 temperature=self.cfg.algorithm.temperature,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                # Policy ratios require recomputed logprobs to use the same support normalization.
+                sample_support_ids=micro_batch["sample_support_ids"] if sample_support_replay else None,
+                loss_mask=micro_batch["loss_mask"] if sample_support_replay else None,
+                enable_sample_support_replay=sample_support_replay,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
@@ -1499,14 +1512,19 @@ class RefWorkerBase(Worker):
         attention_mask = micro_batch["attention_mask"]
         pixel_values = micro_batch.get("pixel_values", None)
         image_grid_thw = micro_batch.get("image_grid_thw", None)
+        sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             log_probs = self.model(
                 sequences,
                 response_length,
                 attention_mask,
                 return_output=False,
+                temperature=self.cfg.algorithm.temperature if sample_support_replay else 1.0,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                sample_support_ids=micro_batch["sample_support_ids"] if sample_support_replay else None,
+                loss_mask=micro_batch["loss_mask"] if sample_support_replay else None,
+                enable_sample_support_replay=sample_support_replay,
             )
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch(

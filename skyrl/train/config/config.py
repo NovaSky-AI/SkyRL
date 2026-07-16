@@ -1206,8 +1206,8 @@ class SkyRLTrainConfig(BaseConfig):
                 "trainer.algorithm.enable_sample_support_replay requires "
                 "generator.inference_engine.enable_return_sample_support_set"
             )
-        if replay_sample_support and self.trainer.strategy != "megatron":
-            raise ValueError("sample-support replay requires trainer.strategy=megatron")
+        if replay_sample_support and self.trainer.strategy not in {"megatron", "fsdp"}:
+            raise ValueError("sample-support replay requires trainer.strategy=megatron or fsdp")
         if capture_sample_support:
             if sampling_params.temperature <= 0:
                 raise ValueError("sample-support capture requires generator.sampling_params.temperature > 0")

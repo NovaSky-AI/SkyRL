@@ -2,6 +2,7 @@
 
 import torch
 
+from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl.utils.token_metadata import (
     TokenMetadataLayout,
     align_token_metadata,
@@ -128,19 +129,28 @@ def synthetic_eos_logprobs(
     *,
     vocab_start_index: int,
     vocab_end_index: int,
-    tp_group: torch.distributed.ProcessGroup,
+    tp_group: torch.distributed.ProcessGroup | None,
     inference_only: bool,
     lm_head_weight: torch.Tensor | None = None,
     temperature: float = 1.0,
     chunk_size: int | None = None,
     fused_backend: str = "torch",
     metadata_layout: TokenMetadataLayout | None = None,
+    trajectory_ids: torch.Tensor | None = None,
+    num_trajectories: int | None = None,
 ) -> torch.Tensor:
     """Compute ordinary logprobs for EOS tokens appended after vLLM generation."""
     if synthetic_eos_mask.shape != sampled_ids.shape:
         raise ValueError("synthetic_eos_mask and sampled_ids must have matching shapes")
 
-    if metadata_layout is not None and metadata_layout.padded_sequence_lengths is not None:
+    if trajectory_ids is not None:
+        if trajectory_ids.shape != synthetic_eos_mask.shape:
+            raise ValueError("trajectory_ids and synthetic_eos_mask must have matching shapes")
+        if num_trajectories is None or num_trajectories <= 0:
+            raise ValueError("num_trajectories must be positive when trajectory_ids are provided")
+        flat_trajectory_ids = trajectory_ids.reshape(-1).to(torch.long)
+        capacity = num_trajectories
+    elif metadata_layout is not None and metadata_layout.padded_sequence_lengths is not None:
         if synthetic_eos_mask.shape[0] != 1:
             raise ValueError("Packed synthetic EOS metadata must have a singleton batch dimension")
         if metadata_layout.cu_seqlens_padded is None:
@@ -157,6 +167,12 @@ def synthetic_eos_logprobs(
             ).diff()
             // metadata_layout.context_parallel_size
         )
+        capacity = lengths.shape[0]
+        flat_trajectory_ids = torch.repeat_interleave(
+            torch.arange(capacity, device=lengths.device),
+            lengths,
+            output_size=synthetic_eos_mask.numel(),
+        )
     else:
         if synthetic_eos_mask.shape[0] == 0 or synthetic_eos_mask.shape[1] == 0:
             raise ValueError("Synthetic EOS fallback requires non-empty trajectory segments")
@@ -166,34 +182,44 @@ def synthetic_eos_logprobs(
             dtype=torch.long,
             device=synthetic_eos_mask.device,
         )
+        capacity = lengths.shape[0]
+        flat_trajectory_ids = torch.repeat_interleave(
+            torch.arange(capacity, device=lengths.device),
+            lengths,
+            output_size=synthetic_eos_mask.numel(),
+        )
 
     # Preprocessing permits at most one unsupported loss-bearing EOS per
     # trajectory. Select one fixed slot for every trajectory so TP collectives
     # never depend on the number of EOS fallbacks in this microbatch.
-    offsets = lengths.cumsum(dim=0) - lengths
-    trajectory_ids = torch.repeat_interleave(
-        torch.arange(lengths.shape[0], device=lengths.device),
-        lengths,
-        output_size=synthetic_eos_mask.numel(),
-    )
-    token_indices = torch.arange(synthetic_eos_mask.numel(), device=lengths.device)
+    token_indices = torch.arange(synthetic_eos_mask.numel(), device=synthetic_eos_mask.device)
     sentinel = synthetic_eos_mask.numel()
-    candidate_indices = torch.where(synthetic_eos_mask.reshape(-1), token_indices, sentinel)
-    selected_indices = torch.full_like(offsets, sentinel).scatter_reduce(
+    valid_trajectory = (flat_trajectory_ids >= 0) & (flat_trajectory_ids < capacity)
+    candidate_indices = torch.where(synthetic_eos_mask.reshape(-1) & valid_trajectory, token_indices, sentinel)
+    selected_indices = torch.full(
+        (capacity,),
+        sentinel,
+        dtype=torch.long,
+        device=synthetic_eos_mask.device,
+    ).scatter_reduce(
         0,
-        trajectory_ids,
+        flat_trajectory_ids.clamp(0, capacity - 1),
         candidate_indices,
         reduce="amin",
         include_self=True,
     )
     has_selection = selected_indices != sentinel
-    selected_indices = torch.where(has_selection, selected_indices, offsets)
+    selected_indices = torch.where(has_selection, selected_indices, 0)
 
     flat_source = logits_or_hidden.reshape(-1, logits_or_hidden.shape[-1])
     flat_targets = sampled_ids.reshape(-1)
     selected_source = flat_source.index_select(0, selected_indices)
     selected_targets = flat_targets.index_select(0, selected_indices)
-    if lm_head_weight is None:
+    source_is_full_vocab_logits = lm_head_weight is None and tp_group is None
+    source_is_tp_sharded_logits = lm_head_weight is None and tp_group is not None
+    if source_is_full_vocab_logits:
+        selected = logprobs_from_logits(selected_source, selected_targets, inplace_backward=False)
+    elif source_is_tp_sharded_logits:
         from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
             DistributedLogprob,
         )
@@ -233,6 +259,58 @@ def synthetic_eos_logprobs(
     return output.reshape(sampled_ids.shape)
 
 
+def aligned_sample_support_logprobs(
+    logits_or_hidden: torch.Tensor,
+    sampled_ids: torch.Tensor,
+    support_ids: torch.Tensor,
+    loss_mask: torch.Tensor,
+    *,
+    vocab_start_index: int,
+    vocab_end_index: int,
+    tp_group: torch.distributed.ProcessGroup | None,
+    inference_only: bool,
+    lm_head_weight: torch.Tensor | None = None,
+    temperature: float = 1.0,
+    chunk_size: int | None = None,
+    fused_backend: str = "torch",
+    metadata_layout: TokenMetadataLayout | None = None,
+    trajectory_ids: torch.Tensor | None = None,
+    num_trajectories: int | None = None,
+) -> torch.Tensor:
+    """Apply bounded replay and the explicit synthetic-EOS exception to aligned tokens."""
+    support_logprobs, valid_support = sample_support_logprobs(
+        logits_or_hidden,
+        sampled_ids,
+        support_ids,
+        vocab_start_index=vocab_start_index,
+        vocab_end_index=vocab_end_index,
+        tp_group=tp_group,
+        lm_head_weight=lm_head_weight,
+        temperature=temperature if lm_head_weight is not None else 1.0,
+        chunk_size=chunk_size,
+    )
+    # Preprocessing permits an empty loss-bearing row only for an EOS that SkyRL
+    # appended after generation. vLLM never supplied a support set for that token.
+    synthetic_eos_mask = loss_mask & ~valid_support
+    eos_logprobs = synthetic_eos_logprobs(
+        logits_or_hidden,
+        sampled_ids,
+        synthetic_eos_mask,
+        vocab_start_index=vocab_start_index,
+        vocab_end_index=vocab_end_index,
+        tp_group=tp_group,
+        inference_only=inference_only,
+        lm_head_weight=lm_head_weight,
+        temperature=temperature if lm_head_weight is not None else 1.0,
+        chunk_size=chunk_size,
+        fused_backend=fused_backend,
+        metadata_layout=metadata_layout,
+        trajectory_ids=trajectory_ids,
+        num_trajectories=num_trajectories,
+    )
+    return torch.where(synthetic_eos_mask, eos_logprobs, support_logprobs)
+
+
 def compute_sample_support_logprobs(
     logits_or_hidden: torch.Tensor,
     sequences: torch.Tensor,
@@ -270,33 +348,19 @@ def compute_sample_support_logprobs(
         aligned_support_ids = sample_support_ids[:, 1:]
         aligned_loss_mask = target_loss_mask[:, 1:]
 
-    support_logprobs, valid_support = sample_support_logprobs(
+    token_logprobs = aligned_sample_support_logprobs(
         logits_or_hidden if packed else logits_or_hidden[:, :-1],
         aligned_sampled_ids,
         aligned_support_ids,
-        vocab_start_index=vocab_start_index,
-        vocab_end_index=vocab_end_index,
-        tp_group=tp_group,
-        lm_head_weight=lm_head_weight,
-        temperature=temperature if lm_head_weight is not None else 1.0,
-        chunk_size=chunk_size,
-    )
-    # Preprocessing permits an empty loss-bearing row only for an EOS that SkyRL
-    # appended after generation. vLLM never supplied a support set for that token.
-    synthetic_eos_mask = aligned_loss_mask & ~valid_support
-    eos_logprobs = synthetic_eos_logprobs(
-        logits_or_hidden if packed else logits_or_hidden[:, :-1],
-        aligned_sampled_ids,
-        synthetic_eos_mask,
+        aligned_loss_mask,
         vocab_start_index=vocab_start_index,
         vocab_end_index=vocab_end_index,
         tp_group=tp_group,
         inference_only=inference_only,
         lm_head_weight=lm_head_weight,
-        temperature=temperature if lm_head_weight is not None else 1.0,
+        temperature=temperature,
         chunk_size=chunk_size,
         fused_backend=fused_backend,
         metadata_layout=metadata_layout if packed else None,
     )
-    token_logprobs = torch.where(synthetic_eos_mask, eos_logprobs, support_logprobs)
     return scatter_packed_token_values_to_batch(token_logprobs, metadata_layout, 0) if packed else token_logprobs
