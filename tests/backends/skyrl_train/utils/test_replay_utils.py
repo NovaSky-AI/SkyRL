@@ -68,7 +68,8 @@ def test_replay_has_no_dispatcher_specific_patch():
     assert "TokenDispatcher" not in inspect.getsource(replay_utils)
 
 
-def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, parallel_state):
+@pytest.mark.parametrize("route_dtype", [torch.uint8, torch.int16, torch.int32])
+def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, parallel_state, route_dtype):
     router_replay_module = types.ModuleType("megatron.core.transformer.moe.router_replay")
 
     class RouterReplay:
@@ -90,13 +91,33 @@ def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, paral
     router_replay_module.RouterReplay = RouterReplay
     router_replay_module.RouterReplayAction = RouterReplayAction
     monkeypatch.setitem(sys.modules, "megatron.core.transformer.moe.router_replay", router_replay_module)
-    monkeypatch.setattr(replay_utils, "_get_current_pp_stage_layer_range", lambda model_config: (0, 1))
+    monkeypatch.setattr(replay_utils, "_get_current_pp_stage_layer_range", lambda model_config: (1, 1))
     monkeypatch.setattr(
         replay_utils,
         "scatter_router_padding_mask_for_model",
         lambda mask, model, model_config: mask,
     )
-    routes = torch.tensor([[[[0, 1]], [[1, 2]], [[3, 4]], [[5, 6]]]], dtype=torch.int16)
+    apply_layout = replay_utils.align_token_metadata
+    routed_layer_counts = []
+
+    def record_routed_layer_count(metadata, layout, padding_value):
+        if metadata.ndim == 4:
+            routed_layer_counts.append(metadata.shape[2])
+        return apply_layout(metadata, layout, padding_value)
+
+    monkeypatch.setattr(replay_utils, "align_token_metadata", record_routed_layer_count)
+
+    routes = torch.tensor(
+        [
+            [
+                [[0, 1], [0, 1], [0, 1]],
+                [[10, 11], [1, 2], [20, 21]],
+                [[12, 13], [3, 4], [22, 23]],
+                [[14, 15], [5, 6], [24, 25]],
+            ]
+        ],
+        dtype=route_dtype,
+    )
     attention_mask = torch.tensor([[0, 1, 1, 1]])
     router_padding_mask = torch.tensor([[1, 0, 0, 1]], dtype=torch.bool)
     metadata_layout = build_token_metadata_layout(
@@ -116,8 +137,10 @@ def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, paral
     )
 
     assert RouterReplay.replay_data[0].tolist() == [[1, 2], [3, 4], [5, 6]]
+    assert RouterReplay.replay_data[0].dtype == torch.int32
     assert RouterReplay.action == RouterReplayAction.REPLAY_FORWARD
     assert model_kwargs["padding_mask"].tolist() == [[False, False, True]]
+    assert routed_layer_counts == [1]
 
 
 @pytest.mark.parametrize(

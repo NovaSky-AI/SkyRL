@@ -657,8 +657,6 @@ class MegatronWorker:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
             rollout_expert_indices = micro.get("rollout_expert_indices")
-            if rollout_expert_indices is not None:
-                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
             vlm_inputs = {}
             if micro.get("pixel_values") is not None:
@@ -1042,8 +1040,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
             rollout_expert_indices = experience.rollout_expert_indices
-            if rollout_expert_indices is not None:
-                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
             vlm_inputs = {}
             if experience.pixel_values is not None:
@@ -1171,8 +1167,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
             rollout_expert_indices = experience.rollout_expert_indices
-            if rollout_expert_indices is not None:
-                rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
             vlm_inputs = {}
             if experience.pixel_values is not None:

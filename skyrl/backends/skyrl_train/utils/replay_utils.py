@@ -3,7 +3,6 @@ Utility functions for MoE Router Replay.
 """
 
 from contextlib import contextmanager
-from typing import List
 
 import torch
 
@@ -67,14 +66,9 @@ def patch_topk_router_expert_bias_padding_mask():
     TopKRouter._expert_bias_padding_mask_patched = True
 
 
-def _split_replay_indices(rollout_expert_indices: torch.Tensor) -> List[torch.Tensor]:
-    if rollout_expert_indices is None:
-        return None
-    if rollout_expert_indices.dim() != 4:
-        raise ValueError(f"Expected 4D replay indices, got shape {rollout_expert_indices.shape}")
-    per_layer = rollout_expert_indices.permute(2, 0, 1, 3).contiguous()
-    # flatten [batch, seq, topk] to [batch * seq, topk] for each layer
-    return [per_layer[i].reshape(-1, per_layer.shape[-1]) for i in range(per_layer.shape[0])]
+def _split_replay_indices(rollout_expert_indices: torch.Tensor) -> list[torch.Tensor]:
+    per_layer = rollout_expert_indices.permute(2, 0, 1, 3).contiguous().to(torch.int32)
+    return list(per_layer.flatten(1, 2).unbind(0))
 
 
 def scatter_router_padding_mask_for_model(
@@ -117,6 +111,27 @@ def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
     offset = get_transformer_layer_offset(model_config, pp_rank=pp_rank)
     num_layers = get_num_layers_to_build(model_config, pp_rank=pp_rank)
     return offset, num_layers
+
+
+def _get_local_router_layer_indices(model_config, global_num_layers: int, instances: list) -> list[int]:
+    local_layer_offset, local_num_layers = _get_current_pp_stage_layer_range(model_config)
+    if local_num_layers == len(instances):
+        layer_indices = list(range(local_layer_offset, local_layer_offset + local_num_layers))
+    else:
+        layer_indices = []
+        for local_router_index, router_instance in enumerate(instances):
+            layer_number = getattr(router_instance, "layer_number", None)
+            if layer_number is not None:
+                layer_index = layer_number - 1
+            else:
+                layer_index = local_layer_offset + local_router_index + (local_num_layers - len(instances))
+            layer_indices.append(layer_index)
+
+    if any(layer_index < 0 or layer_index >= global_num_layers for layer_index in layer_indices):
+        raise ValueError(
+            f"Router replay layer indices {layer_indices} out of range for data with {global_num_layers} layers"
+        )
+    return layer_indices
 
 
 def setup_per_microbatch_replay_forward(
@@ -165,6 +180,8 @@ def setup_per_microbatch_replay_forward(
 
     if router_padding_mask is None:
         raise ValueError("router_padding_mask is required with rollout_expert_indices")
+    if rollout_expert_indices.dim() != 4:
+        raise ValueError(f"Expected 4D replay indices, got shape {rollout_expert_indices.shape}")
 
     if router_padding_mask.shape != attention_mask.shape:
         raise ValueError(
@@ -174,16 +191,25 @@ def setup_per_microbatch_replay_forward(
     if router_padding_mask.device != rollout_expert_indices.device:
         raise ValueError("rollout_expert_indices and router_padding_mask must be on the same device")
 
+    instances = RouterReplay.global_router_replay_instances
+    local_layer_indices = _get_local_router_layer_indices(
+        model_config,
+        rollout_expert_indices.shape[2],
+        instances,
+    )
+    layer_index = torch.tensor(local_layer_indices, dtype=torch.long, device=rollout_expert_indices.device)
+    local_rollout_expert_indices = rollout_expert_indices.index_select(2, layer_index)
+
     if (metadata_layout.padded_sequence_lengths is not None) != remove_microbatch_padding:
         raise ValueError("Shared token metadata layout does not match the model packing mode")
     aligned_router_padding_mask = align_token_metadata(router_padding_mask.to(torch.bool), metadata_layout, True)
     route_padding = torch.arange(
         rollout_expert_indices.shape[-1],
         dtype=rollout_expert_indices.dtype,
-        device=rollout_expert_indices.device,
+        device=local_rollout_expert_indices.device,
     )
     aligned_rollout_expert_indices = align_token_metadata(
-        rollout_expert_indices,
+        local_rollout_expert_indices,
         metadata_layout,
         route_padding,
     )
@@ -197,32 +223,7 @@ def setup_per_microbatch_replay_forward(
         aligned_rollout_expert_indices = aligned_rollout_expert_indices[
             :, tp_rank * chunk_size : (tp_rank + 1) * chunk_size, :, :
         ]
-    per_layer_data = _split_replay_indices(aligned_rollout_expert_indices)
-    global_num_layers_in_data = len(per_layer_data)
-    instances = RouterReplay.global_router_replay_instances
-    num_instances = len(instances)
-    local_layer_offset, local_num_layers = _get_current_pp_stage_layer_range(model_config)
-
-    if local_num_layers == num_instances:
-        local_per_layer_data = per_layer_data[local_layer_offset : local_layer_offset + local_num_layers]
-        RouterReplay.set_replay_data(local_per_layer_data)
-    else:
-        # Dense-layer mismatch: map each MoE router to its global layer index.
-        # Prefer the patched layer_number; fall back to offset-based mapping
-        # (assumes dense layers precede MoE layers).
-        for local_router_idx, router_instance in enumerate(instances):
-            layer_number = getattr(router_instance, "layer_number", None)
-            if layer_number is not None:
-                layer_idx = layer_number - 1  # layer_number is 1-based
-            else:
-                layer_idx = local_layer_offset + local_router_idx + (local_num_layers - num_instances)
-            if layer_idx < 0 or layer_idx >= global_num_layers_in_data:
-                raise ValueError(
-                    f"Router replay layer index {layer_idx} out of range "
-                    f"for data with {global_num_layers_in_data} layers "
-                    f"({num_instances} router instances)"
-                )
-            router_instance.set_target_indices(per_layer_data[layer_idx])
+    RouterReplay.set_replay_data(_split_replay_indices(aligned_rollout_expert_indices))
     RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
     model_router_padding_mask = scatter_router_padding_mask_for_model(
