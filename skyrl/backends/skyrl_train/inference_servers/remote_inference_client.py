@@ -76,6 +76,9 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
 from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
     decode_packed_routed_experts,
 )
+from skyrl.backends.skyrl_train.inference_servers.sample_support_set_wire import (
+    decode_sample_support_set,
+)
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
     SKYRL_HTTP_CONNECTION_LIMIT,
@@ -298,7 +301,9 @@ class RemoteInferenceGenerator:
                 raise ValueError("/skyrl/v1/generate must return packed routed_experts")
             routed_experts = decode_packed_routed_experts(packed_routed_experts)
 
-        sample_support = choice["rollout_sample_support"] if return_sample_support else None
+        sample_support = (
+            decode_sample_support_set(choice["rollout_sample_support"]).tolist() if return_sample_support else None
+        )
 
         return RemoteGenerateResult(
             raw_response=response,

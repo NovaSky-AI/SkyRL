@@ -41,6 +41,9 @@ from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorPr
 from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
     pack_routed_experts,
 )
+from skyrl.backends.skyrl_train.inference_servers.sample_support_set_wire import (
+    encode_sample_support_set,
+)
 from skyrl.env_vars import (
     SKYRL_HTTP_CONNECTION_LIMIT,
     SKYRL_VLLM_DP_PORT_OFFSET,
@@ -53,13 +56,13 @@ logger = logging.getLogger(__name__)
 def _sample_support_from_flat_logprobs(
     logprobs: FlatLogprobs,
     top_k: int,
-) -> tuple[list[dict[str, float]], list[list[int]]]:
+) -> tuple[list[dict[str, float]], np.ndarray]:
     """Extract sampled scores and post-filter support from vLLM's flat rows."""
     # vLLM emits [sampled token, top-1, ..., top-k] for every generated token.
     row_width = top_k + 1
-    token_ids = np.asarray(logprobs.token_ids, dtype=np.int64).reshape(-1, row_width)
+    token_ids = np.asarray(logprobs.token_ids, dtype=np.int32).reshape(-1, row_width)
     processed_logprobs = np.asarray(logprobs.logprobs).reshape(-1, row_width)
-    support_ids = np.where(np.isneginf(processed_logprobs[:, 1:]), -1, token_ids[:, 1:])
+    support_ids = np.where(np.isneginf(processed_logprobs[:, 1:]), np.int32(-1), token_ids[:, 1:])
     sampled_logprobs = [{"logprob": value} for value in processed_logprobs[:, 0].tolist()]
 
     # Repair rows whose sampled token is absent from the captured support.
@@ -94,7 +97,7 @@ def _sample_support_from_flat_logprobs(
             int(sampled[rows[0]]),
             int(rows[0]),
         )
-    return sampled_logprobs, support_ids.tolist()
+    return sampled_logprobs, support_ids
 
 
 class VLLMServerActor(ServerActorProtocol):
@@ -479,11 +482,12 @@ class VLLMServerActor(ServerActorProtocol):
             logprobs = None
             sample_support = None
             if capture_sample_support:
-                content, sample_support = _sample_support_from_flat_logprobs(
+                content, sample_support_ids = _sample_support_from_flat_logprobs(
                     resp.logprobs,
                     sampling_params_dict["top_k"],
                 )
                 logprobs = {"content": content}
+                sample_support = encode_sample_support_set(sample_support_ids)
             elif resp.logprobs is not None:
                 content = []
                 for tid, lp_dict in zip(token_ids_out, resp.logprobs):
