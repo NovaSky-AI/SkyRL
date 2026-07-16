@@ -435,6 +435,10 @@ class TestRemoteInferenceClientInit:
             data_parallel_size=1,
         )
 
+        # Materialize the generate client so the assertion below actually exercises
+        # __getstate__ dropping it, rather than passing because it was never created.
+        assert client._get_generate_client() is not None
+
         # Pickle and unpickle
         pickled = pickle.dumps(client)
         restored = pickle.loads(pickled)
@@ -443,7 +447,7 @@ class TestRemoteInferenceClientInit:
         assert restored.server_urls == client.server_urls
         assert restored.model_name == client.model_name
         # No sessions should survive unpickling
-        assert restored._sessions == {}
+        assert restored._generate_client is None
 
 
 class TestDataPlane:
@@ -512,7 +516,7 @@ class TestDataPlane:
                 ]
             }
 
-        monkeypatch.setattr(client, "_post", return_list_routes)
+        monkeypatch.setattr(client._get_generate_client(), "_post", return_list_routes)
         with pytest.raises(ValueError, match="must return packed"):
             await client._generate_single([1], {}, None, "model")
 
@@ -1035,7 +1039,8 @@ class TestContextManager:
             assert len(result) == 2
 
         # Session should be closed after exiting context
-        assert all(session.closed for session in client._sessions.values())
+        gen_client = client._generate_client
+        assert gen_client is None or all(session.closed for session in gen_client._sessions.values())
 
 
 class TestPerLoopSessions:
@@ -1057,6 +1062,8 @@ class TestPerLoopSessions:
 
         try:
             persistent = on_persistent(client._get_session())
+            # Sessions now live on the extracted generate client.
+            sessions = client._generate_client._sessions
 
             # A transient loop (asyncio.run) gets its own session and leaves the persistent one open.
             transient = asyncio.run(client._get_session())
@@ -1065,12 +1072,12 @@ class TestPerLoopSessions:
 
             # The persistent loop keeps reusing its session; the closed loop's entry is evicted.
             assert on_persistent(client._get_session()) is persistent
-            assert list(client._sessions) == [loop]
+            assert list(sessions) == [loop]
 
             # aclose() on the persistent loop closes only that loop's session.
             on_persistent(client.aclose())
             assert persistent.closed
-            assert client._sessions == {}
+            assert sessions == {}
         finally:
             loop.call_soon_threadsafe(loop.stop)
             thread.join(timeout=5)
