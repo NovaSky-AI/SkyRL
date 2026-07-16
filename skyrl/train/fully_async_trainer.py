@@ -463,9 +463,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
         self._phase_gauge = TrainingPhaseGauge()
-        # Rollout-buffer levels to Prometheus, so run-ahead pressure joins the phase gauge and node
-        # GPU metrics in one store (the per-step tracker logging below only reaches the experiment
-        # tracker). keep_rate exposes the zero-variance drop dynamics under sample_full_batch.
+        # Buffer depth to Prometheus, so it joins the phase gauge and node GPU metrics in one store
+        # (the per-step tracker logging below only reaches the experiment tracker). keep_rate exposes
+        # the zero-variance drop dynamics under sample_full_batch.
         self._loop_gauges = ScalarGauges(
             descriptions={
                 "skyrl_gen_buffer_qsize": "Completed generation groups buffered at step start.",
@@ -524,9 +524,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                     with Timer("step", self.all_timings):
-                        # Run-ahead depth of the rollout buffer at step start: high => generation is
-                        # ahead (buffer near the staleness-bounded maxsize); low => the trainer is
-                        # starving for rollouts. Previously only visible in a tqdm postfix.
+                        # Buffer depth at step start: how many completed rollout batches are queued
+                        # for the trainer. Near maxsize means generation is paused at the staleness
+                        # cap; near zero means the trainer is starving. Previously only shown live in
+                        # a tqdm postfix.
                         self.all_metrics["async/gen_buffer_qsize"] = generation_output_group_buffer.qsize()
                         self.all_metrics["async/gen_buffer_maxsize"] = generation_output_group_buffer.maxsize
                         self._loop_gauges.set("skyrl_gen_buffer_qsize", generation_output_group_buffer.qsize())
