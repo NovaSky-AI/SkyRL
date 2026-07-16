@@ -25,6 +25,9 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     RemoteGenerateClient,
     RemoteInferenceClient,
 )
+from skyrl.backends.skyrl_train.inference_servers.sample_support_set_wire import (
+    encode_sample_support_set,
+)
 from skyrl.backends.skyrl_train.inference_servers.setup import (
     build_new_inference_client,
 )
@@ -510,7 +513,7 @@ class TestDataPlane:
                         "token_ids": [7],
                         "finish_reason": "stop",
                         "logprobs": {"content": [{"logprob": -0.1}]},
-                        "rollout_sample_support": [[7, 8]],
+                        "rollout_sample_support": encode_sample_support_set(np.asarray([[7, 8]], dtype=np.int32)),
                     }
                 ]
             }
