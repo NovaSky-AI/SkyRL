@@ -363,7 +363,6 @@ class MegatronConfig(BaseConfig):
     moe_router_dtype: str = "fp32"
     """Pass through to Megatron-Bridge - can be set to 'fp64' for additional numerical stability."""
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
-    torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     hf_export_config: MegatronHFExportConfig = field(default_factory=MegatronHFExportConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
     optimizer_config_kwargs: Dict[str, Any] = field(
