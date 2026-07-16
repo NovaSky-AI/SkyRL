@@ -78,6 +78,7 @@ class Experience:
     # Per-row sub-sequence lengths for sequence packing (one 1-D int tensor per
     # packed row); ``None`` when packing is off.
     sub_seq_lengths: Optional[TensorList] = None
+    sample_support_ids: Optional[Integer[torch.Tensor, "batch seq_len topk"]] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
@@ -102,6 +103,8 @@ class Experience:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
         if self.rollout_expert_indices is not None:
             self.rollout_expert_indices = to(self.rollout_expert_indices, device)
+        if self.sample_support_ids is not None:
+            self.sample_support_ids = to(self.sample_support_ids, device)
         if self.router_padding_mask is not None:
             self.router_padding_mask = to(self.router_padding_mask, device)
         if self.pixel_values is not None:
@@ -133,6 +136,8 @@ class Experience:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
         if self.rollout_expert_indices is not None:
             self.rollout_expert_indices = self.rollout_expert_indices.pin_memory()
+        if self.sample_support_ids is not None:
+            self.sample_support_ids = self.sample_support_ids.pin_memory()
         if self.router_padding_mask is not None:
             self.router_padding_mask = self.router_padding_mask.pin_memory()
         return self

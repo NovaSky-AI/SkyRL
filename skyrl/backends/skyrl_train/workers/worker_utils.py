@@ -163,6 +163,7 @@ class BaseBatchIterator:
             num_actions=batch.metadata["response_length"],  # int
             rollout_logprobs=batch.get("rollout_logprobs"),
             rollout_expert_indices=batch.get("rollout_expert_indices"),
+            sample_support_ids=batch.get("sample_support_ids"),
             router_padding_mask=batch.get("router_padding_mask"),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
@@ -334,6 +335,14 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             )
         if self.data.get("router_padding_mask") is not None:
             data["router_padding_mask"] = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
+        if self.data.get("sample_support_ids") is not None:
+            ref_tensor = self.data["sample_support_ids"]
+            data["sample_support_ids"] = torch.full(
+                (batch_size, *ref_tensor.shape[1:]),
+                -1,
+                dtype=ref_tensor.dtype,
+                device=device,
+            )
         data.metadata = {}
         if self.data.metadata:
             data.metadata.update(self.data.metadata)

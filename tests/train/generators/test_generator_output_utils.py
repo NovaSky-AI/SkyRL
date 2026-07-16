@@ -29,6 +29,7 @@ def test_generator_output_concatenation():
         "rollout_metrics",
         "rollout_logprobs",
         "rollout_expert_indices",
+        "rollout_sample_support",
         # optional but present in the signature
         "trajectory_ids",
         "trajectory_generation_times",
@@ -169,6 +170,7 @@ class TestMergeStepwiseOutput:
             "rollout_logprobs": [[-0.5], [-0.3, -0.4]],
             "trajectory_ids": [tid, tid],
             "rollout_expert_indices": None,
+            "rollout_sample_support": [[[20, 21]], [[40, 42], [41, 43]]],
             "is_last_step": [False, True],
         }
 
@@ -182,6 +184,7 @@ class TestMergeStepwiseOutput:
         assert merged["loss_masks"] == [[1, 0, 1, 1]]
         # logprobs: A1=-0.5, O2=0.0, A2_tok1=-0.3, A2_tok2=-0.4
         assert merged["rollout_logprobs"] == [[-0.5, 0.0, -0.3, -0.4]]
+        assert merged["rollout_sample_support"] == [[[20, 21], [], [40, 42], [41, 43]]]
         # rewards: A1=1.0, O2=0.0, A2_tok1=0.0, A2_tok2=5.0
         assert merged["rewards"] == [[1.0, 0.0, 0.0, 5.0]]
         assert merged["stop_reasons"] == ["eos"]

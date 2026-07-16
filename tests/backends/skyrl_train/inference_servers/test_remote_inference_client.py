@@ -20,6 +20,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
     PauseMode,
     RemoteInferenceClient,
+    RemoteInferenceGenerator,
 )
 from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
     pack_routed_experts,
@@ -481,6 +482,37 @@ class TestDataPlane:
         assert result["rollout_expert_indices"][0].dtype == np.uint8
         assert np.array_equal(result["rollout_expert_indices"][0], np.arange(12).reshape(3, 2, 2))
         assert captured["routed_experts_prompt_start"] == 1
+
+    @pytest.mark.asyncio
+    async def test_external_generator_requests_sample_support(self, monkeypatch):
+        generator = RemoteInferenceGenerator(proxy_url="http://unused")
+        captured = {}
+
+        async def fake_post(url, json, headers):
+            captured.update(url=url, json=json, headers=headers)
+            return {
+                "choices": [
+                    {
+                        "token_ids": [7],
+                        "finish_reason": "stop",
+                        "logprobs": {"content": [{"logprob": -0.1}]},
+                        "rollout_sample_support": [[7, 8]],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(generator, "_post", fake_post)
+        result = await generator.generate(
+            prompt_token_ids=[1, 2],
+            sampling_params={},
+            session_id=None,
+            model="default",
+            return_sample_support=True,
+        )
+
+        assert captured["url"].endswith("/skyrl/v1/generate")
+        assert captured["json"]["return_sample_support"] is True
+        assert result.sample_support == [[7, 8]]
 
     @pytest.mark.asyncio
     async def test_generate_rejects_list_routed_experts(self, monkeypatch):

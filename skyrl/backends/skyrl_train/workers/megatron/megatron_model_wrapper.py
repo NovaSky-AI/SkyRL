@@ -47,12 +47,15 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
     setup_per_microbatch_replay_backward,
     setup_per_microbatch_replay_forward,
 )
+from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    compute_sample_support_logprobs,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
 )
 from skyrl.train.config import TrainerConfig
-from skyrl.utils.token_metadata import build_token_metadata_layout
+from skyrl.utils.token_metadata import TokenMetadataLayout, build_token_metadata_layout
 
 
 def _build_packed_targets(
@@ -244,7 +247,7 @@ class MegatronModelWrapper:
             self._assert_vlm_supported()
         forward_backward_func = get_forward_backward_func()
 
-        def collection_func(logits, data):
+        def collection_func(logits, *, data, metadata_layout: TokenMetadataLayout | None):
             sequences = data["sequences"]
             packed_seq_params = data.get("packed_seq_params")
             packed_targets = data.get("packed_targets")
@@ -265,7 +268,26 @@ class MegatronModelWrapper:
             if temperature != 1.0 and not fused_lm_head:
                 logits.div_(temperature)
 
-            if fused_lm_head and packed_seq_params is not None and packed_targets is not None:
+            shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
+            if self.cfg.algorithm.enable_sample_support_replay:
+                token_logprobs = compute_sample_support_logprobs(
+                    logits,
+                    sequences,
+                    data.get("loss_mask"),
+                    data.get("sample_support_ids"),
+                    data["num_actions"],
+                    packed=packed_seq_params is not None,
+                    metadata_layout=metadata_layout,
+                    vocab_start_index=tp_rank * shard_vocab_size,
+                    vocab_end_index=(tp_rank + 1) * shard_vocab_size,
+                    tp_group=tp_grp,
+                    lm_head_weight=lm_head_weight if fused_lm_head else None,
+                    temperature=temperature,
+                    inference_only=True,
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    fused_backend=self._fused_lm_head_backend,
+                )
+            elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
                     logits,  # decoder hidden states [1, T, H]
                     lm_head_weight,
@@ -332,6 +354,7 @@ class MegatronModelWrapper:
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             router_padding_mask = batch.pop("router_padding_mask", None)
+            sample_support_ids = batch.get("sample_support_ids")
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
@@ -339,6 +362,12 @@ class MegatronModelWrapper:
             sub_seq_lengths_field = batch.get("sub_seq_lengths")
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
             batch["sub_seq_lengths_list"] = sub_seq_lengths
+            if (
+                sample_support_ids is not None
+                and sub_seq_lengths is not None
+                and any(len(row_lengths) > 1 for row_lengths in sub_seq_lengths)
+            ):
+                raise ValueError("sample-support replay does not support controller-packed multi-subsequence rows")
 
             vlm_inputs = {}
             if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
@@ -375,7 +404,7 @@ class MegatronModelWrapper:
                     new_position_ids = None
 
             metadata_layout = None
-            if rollout_expert_indices is not None:
+            if rollout_expert_indices is not None or (sample_support_ids is not None and packed_seq_params is not None):
                 metadata_layout = build_token_metadata_layout(
                     attention_mask,
                     attention_mask.device,
@@ -433,7 +462,7 @@ class MegatronModelWrapper:
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
                 )
 
-            return outputs, partial(collection_func, data=batch)
+            return outputs, partial(collection_func, data=batch, metadata_layout=metadata_layout)
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
@@ -537,7 +566,7 @@ class MegatronModelWrapper:
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
 
-        def loss_func(logits, data):
+        def loss_func(logits, *, data, metadata_layout: TokenMetadataLayout | None):
             sequences = data["sequences"]
             packed_seq_params = data.get("packed_seq_params")
             packed_targets = data.get("packed_targets")
@@ -578,7 +607,26 @@ class MegatronModelWrapper:
             if temperature != 1.0 and not fused_lm_head:
                 logits.div_(temperature)
 
-            if fused_lm_head and packed_seq_params is not None and packed_targets is not None:
+            shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
+            if self.cfg.algorithm.enable_sample_support_replay:
+                token_logprobs = compute_sample_support_logprobs(
+                    logits,
+                    sequences,
+                    loss_mask,
+                    data.get("sample_support_ids"),
+                    num_actions,
+                    packed=packed_seq_params is not None,
+                    metadata_layout=metadata_layout,
+                    vocab_start_index=tp_rank * shard_vocab_size,
+                    vocab_end_index=(tp_rank + 1) * shard_vocab_size,
+                    tp_group=tp_grp,
+                    lm_head_weight=lm_head_weight if fused_lm_head else None,
+                    temperature=temperature,
+                    inference_only=forward_only,
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    fused_backend=self._fused_lm_head_backend,
+                )
+            elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
                     logits,  # decoder hidden states [1, T, H]
                     lm_head_weight,
@@ -917,6 +965,7 @@ class MegatronModelWrapper:
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             router_padding_mask = batch.pop("router_padding_mask", None)
+            sample_support_ids = batch.get("sample_support_ids")
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
@@ -932,6 +981,12 @@ class MegatronModelWrapper:
             sub_seq_lengths_field = batch.get("sub_seq_lengths")
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
             batch["sub_seq_lengths_list"] = sub_seq_lengths
+            if (
+                sample_support_ids is not None
+                and sub_seq_lengths is not None
+                and any(len(row_lengths) > 1 for row_lengths in sub_seq_lengths)
+            ):
+                raise ValueError("sample-support replay does not support controller-packed multi-subsequence rows")
 
             vlm_inputs = {}
             if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
@@ -981,7 +1036,7 @@ class MegatronModelWrapper:
             is_last_stage = mpu.is_pipeline_last_stage(ignore_virtual=True)
 
             metadata_layout = None
-            if rollout_expert_indices is not None:
+            if rollout_expert_indices is not None or (sample_support_ids is not None and packed_seq_params is not None):
                 metadata_layout = build_token_metadata_layout(
                     attention_mask,
                     attention_mask.device,
@@ -1092,7 +1147,7 @@ class MegatronModelWrapper:
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_backward()
 
-            return outputs, partial(loss_func, data=batch)
+            return outputs, partial(loss_func, data=batch, metadata_layout=metadata_layout)
 
         # batch should be a list of micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))

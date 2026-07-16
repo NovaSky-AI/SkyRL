@@ -266,6 +266,75 @@ def convert_prompts_responses_to_batch_tensors(
     )
 
 
+def build_dense_sample_support(
+    rollout_sample_support: Optional[List[List[List[int]]]],
+    response_ids: List[List[int]],
+    loss_masks: List[List[int]],
+    sequence_length: int,
+    top_k: int,
+    eos_token_id: int,
+) -> Optional[Integer[torch.Tensor, "batch seq_len topk"]]:
+    """Validate and left-pad per-token sampler support for replay."""
+    if rollout_sample_support is None:
+        return None
+    if len(rollout_sample_support) != len(response_ids):
+        raise ValueError("rollout_sample_support must have one entry per trajectory")
+    if len(loss_masks) != len(response_ids):
+        raise ValueError("loss_masks must have one entry per trajectory")
+
+    support = torch.full((len(response_ids), sequence_length, top_k), -1, dtype=torch.int32)
+    int32_max = int(np.iinfo(np.int32).max)
+    for sample_index, (sample_rows, sampled_tokens, sample_loss_mask) in enumerate(
+        zip(rollout_sample_support, response_ids, loss_masks, strict=True)
+    ):
+        if len(sample_rows) != len(sampled_tokens):
+            raise ValueError(
+                f"rollout_sample_support[{sample_index}] has {len(sample_rows)} rows for "
+                f"{len(sampled_tokens)} response tokens"
+            )
+        if len(sample_loss_mask) != len(sampled_tokens):
+            raise ValueError(
+                f"loss_masks[{sample_index}] has {len(sample_loss_mask)} entries for "
+                f"{len(sampled_tokens)} response tokens"
+            )
+
+        sample_support = torch.full((len(sample_rows), top_k), -1, dtype=torch.int64)
+        for token_index, row in enumerate(sample_rows):
+            if row:
+                if len(row) != top_k:
+                    raise ValueError("rollout_sample_support rows must match generator.sampling_params.top_k")
+                sample_support[token_index] = torch.as_tensor(row, dtype=torch.int64)
+
+        valid = sample_support >= 0
+        if torch.any((sample_support < -1) | (sample_support > int32_max)):
+            raise ValueError("rollout_sample_support vocab ids must fit non-negative int32")
+        if torch.any(valid & ((~valid).cumsum(dim=1) > 0)):
+            raise ValueError("rollout_sample_support padding must use trailing -1 values")
+
+        sampled = torch.as_tensor(sampled_tokens, dtype=torch.int64).unsqueeze(1)
+        loss_bearing = torch.as_tensor(sample_loss_mask, dtype=torch.bool)
+        has_support = valid.any(dim=1)
+        unsupported_loss = loss_bearing & ~has_support
+        if torch.count_nonzero(unsupported_loss) > 1:
+            raise ValueError(f"rollout_sample_support[{sample_index}] has more than one loss-bearing unsupported token")
+        unsupported_non_eos = unsupported_loss & (sampled.squeeze(1) != eos_token_id)
+        if torch.any(unsupported_non_eos):
+            token_index = int(torch.where(unsupported_non_eos)[0][0])
+            raise ValueError(
+                f"rollout_sample_support[{sample_index}][{token_index}] is empty for a loss-bearing non-EOS token"
+            )
+        missing = loss_bearing & has_support & ~torch.any(sample_support == sampled, dim=1)
+        if torch.any(missing):
+            missing_token = sampled_tokens[int(torch.where(missing)[0][0])]
+            raise ValueError(f"sampled token {missing_token} is missing from rollout_sample_support")
+
+        start = sequence_length - len(sampled_tokens)
+        if start < 0:
+            raise ValueError("response tokens exceed the sample-support sequence width")
+        support[sample_index, start:] = sample_support.to(torch.int32)
+    return support
+
+
 def compute_prompt_boundaries(uids: List[str]) -> List[Tuple[int, int]]:
     """Compute per-prompt ``(start, end)`` slices from a flat ``uids`` list.
 

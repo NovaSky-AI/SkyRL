@@ -479,6 +479,7 @@ class TrainingInput(TypedDict, total=False):
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_expert_indices: Optional[Integer[torch.Tensor, "batch_size seq_len layer_num topk"]]
     router_padding_mask: Optional[Bool[torch.Tensor, "batch_size seq_len"]]
+    sample_support_ids: Optional[Integer[torch.Tensor, "batch_size seq_len topk"]]
     pixel_values: Optional[TensorList]  # list of `batch_size` [num_patches_i, dim] tensors
     image_grid_thw: Optional[TensorList]  # list of `batch_size` [num_images_i, 3] tensors
 
@@ -538,6 +539,15 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
         elif key == "router_padding_mask":
             additional_dims = tensor.shape[1:]
             padding_tensor = torch.ones(pad_size, *additional_dims, dtype=torch.bool, device=tensor.device)
+            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+        elif key == "sample_support_ids":
+            additional_dims = tensor.shape[1:]
+            padding_tensor = torch.full(
+                (pad_size, *additional_dims),
+                -1,
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
             new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
         else:
             # Copy row 0 `pad_size` times. Loss masked so values don't affect the loss. Just need valid shape/dtype.

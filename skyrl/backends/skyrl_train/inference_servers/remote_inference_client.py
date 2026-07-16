@@ -176,6 +176,7 @@ class RemoteGenerateResult:
     response_logprobs: Optional[List[float]]
     stop_reason: str
     routed_experts: Optional[RoutedExpertIndices]
+    sample_support: Optional[List[List[int]]]
 
 
 @dataclass
@@ -242,10 +243,11 @@ class RemoteInferenceGenerator:
         model: str,
         return_routed_experts: bool = False,
         routed_experts_prompt_start: Optional[int] = None,
+        return_sample_support: bool = False,
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
     ) -> RemoteGenerateResult:
-        """Generate one raw-token completion, optionally returning R3 routes."""
+        """Generate one raw-token completion with optional replay metadata."""
         if routed_experts_prompt_start is not None:
             if not return_routed_experts:
                 raise ValueError("routed_experts_prompt_start requires return_routed_experts=True")
@@ -256,7 +258,8 @@ class RemoteInferenceGenerator:
             ):
                 raise ValueError("routed_experts_prompt_start must be an integer within the prompt")
 
-        path = "/skyrl/v1/generate" if return_routed_experts else "/inference/v1/generate"
+        use_skyrl_endpoint = return_routed_experts or return_sample_support
+        path = "/skyrl/v1/generate" if use_skyrl_endpoint else "/inference/v1/generate"
         request_sampling_params = dict(sampling_params)
         if routed_experts_prompt_start is not None:
             request_sampling_params["routed_experts_prompt_start"] = routed_experts_prompt_start
@@ -265,6 +268,8 @@ class RemoteInferenceGenerator:
             "model": model,
             "token_ids": prompt_token_ids,
         }
+        if return_sample_support:
+            payload["return_sample_support"] = True
         if mm_features:
             payload["features"] = mm_features
         # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
@@ -293,12 +298,15 @@ class RemoteInferenceGenerator:
                 raise ValueError("/skyrl/v1/generate must return packed routed_experts")
             routed_experts = decode_packed_routed_experts(packed_routed_experts)
 
+        sample_support = choice["rollout_sample_support"] if return_sample_support else None
+
         return RemoteGenerateResult(
             raw_response=response,
             response_ids=token_ids,
             response_logprobs=response_logprobs,
             stop_reason=choice["finish_reason"],
             routed_experts=routed_experts,
+            sample_support=sample_support,
         )
 
     async def aclose(self) -> None:
@@ -363,6 +371,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
     enable_return_routed_experts: bool = False
     """Whether to return routed expert indices (R3 / rollout router replay)."""
+
+    enable_return_sample_support_set: bool = False
+    """Whether to return sampled-token support sets for replay."""
 
     uses_lora_weight_sync: bool = False
     """True when the trainer syncs LoRA adapters (rather than full/merged weights). When True,
@@ -565,6 +576,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
         rollout_expert_indices = (
             [result["routed_experts"] for result in raw_results] if self.enable_return_routed_experts else None
         )
+        rollout_sample_support = (
+            [result["rollout_sample_support"] for result in raw_results]
+            if self.enable_return_sample_support_set
+            else None
+        )
 
         return InferenceEngineOutput(
             responses=responses,
@@ -572,6 +588,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             response_ids=[r["response_ids"] for r in raw_results],
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
             rollout_expert_indices=rollout_expert_indices,
+            rollout_sample_support=rollout_sample_support,
         )
 
     async def _generate_single(
@@ -591,6 +608,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             model=model,
             return_routed_experts=self.enable_return_routed_experts,
             routed_experts_prompt_start=routed_experts_prompt_start,
+            return_sample_support=self.enable_return_sample_support_set,
             mm_features=mm_features,
             cache_salt=cache_salt,
         )
@@ -599,6 +617,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "response_ids": result.response_ids,
             "response_logprobs": result.response_logprobs,
             "routed_experts": result.routed_experts,
+            "rollout_sample_support": result.sample_support,
         }
 
     async def _render_for_sample(

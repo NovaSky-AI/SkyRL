@@ -672,6 +672,10 @@ class MegatronWorker:
                     "num_actions": micro.metadata["response_length"],
                     "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
                     "router_padding_mask": micro.get("router_padding_mask") if self.enable_router_replay else None,
+                    "sample_support_ids": (
+                        micro.get("sample_support_ids") if self.cfg.algorithm.enable_sample_support_replay else None
+                    ),
+                    "loss_mask": micro.get("loss_mask"),
                     "sub_seq_lengths": micro.get("sub_seq_lengths"),
                     **vlm_inputs,
                 }
@@ -792,6 +796,13 @@ class MegatronWorker:
                 elif key == "rollout_expert_indices":
                     pad_tensor = make_replay_padding_indices(
                         (pad_count, *value.shape[1:]),
+                        dtype=value.dtype,
+                        device=device,
+                    )
+                elif key == "sample_support_ids":
+                    pad_tensor = torch.full(
+                        (pad_count, *value.shape[1:]),
+                        -1,
                         dtype=value.dtype,
                         device=device,
                     )
@@ -1061,6 +1072,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
+                    "sample_support_ids": (
+                        experience.sample_support_ids if self.cfg.algorithm.enable_sample_support_replay else None
+                    ),
                     "sub_seq_lengths": experience.sub_seq_lengths,
                     **vlm_inputs,
                 }
@@ -1188,6 +1202,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
+                    "sample_support_ids": (
+                        experience.sample_support_ids if self.cfg.algorithm.enable_sample_support_replay else None
+                    ),
                     # used with global sequence packing (None when token-based batching is active)
                     "sub_seq_lengths": experience.sub_seq_lengths,
                     "is_padding_batch": (
