@@ -183,6 +183,15 @@ megatron_config:
   lora_config:
     # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
     lora_type: "lora"
+  hf_export_config:
+    # Fan Megatron-to-HF safetensors export writes across ranks instead of writing the model from rank 0.
+    # NOTE: for multi-node training, it is preferable if the export path is a shared file system or 
+    # a common path in cloud storage, else the exported model weights 
+    # will be sharded across nodes in local filesystems.
+    distributed_save: false
+    # In distributed save, only ranks 0, N, 2N, ... write shards. For one writer per node,
+    # set this to the number of Megatron worker GPUs per node.
+    save_every_n_ranks: 1
   # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
   # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
   empty_cuda_cache: true
@@ -199,6 +208,8 @@ megatron_config:
 - `megatron_config.context_parallel_size`: Context parallel size for reducing activation memory across the sequence length dimension.
 - `megatron_config.expert_model_parallel_size`: The expert parallel size for sharding expert modules across multiple GPUs.
 - `megatron_config.expert_tensor_parallel_size`: The tensor parallel size for each expert module. If set to `null`, then the value will be resolved to `tensor_model_parallel_size` by Megatron. It is recommended to set this to `1` when enabling `expert_model_parallel_size > 1` for the best performance.
+- `megatron_config.hf_export_config.distributed_save`: Whether to parallelize Megatron-to-HuggingFace safetensors export writes across ranks. This only affects HF model exports from `hf_save_interval` or explicit `save_hf_model` calls.
+- `megatron_config.hf_export_config.save_every_n_ranks`: Rank stride for distributed HF export writers. When `distributed_save=true`, ranks `0`, `N`, `2N`, ... write shards, where `N` is `save_every_n_ranks`. Set this to the number of Megatron worker GPUs per node for one writer per node. Must be at least `1`; ignored when `distributed_save=false`.
 
 Some rules for configuring these parameters:
 
