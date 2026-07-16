@@ -1,11 +1,16 @@
 import logging
 from typing import List, Optional, Tuple
 
+import numpy as np
 import torch
 from jaxtyping import Bool, Float, Integer
 from transformers import AutoTokenizer
 
-from skyrl.utils.routed_experts import make_replay_padding_indices
+from skyrl.utils.routed_experts import (
+    ROUTED_EXPERT_DTYPES,
+    RoutedExpertIndices,
+    compact_routed_expert_indices,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +84,7 @@ def convert_prompts_responses_to_batch_tensors(
     rewards: List[List[float]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
-    rollout_expert_indices: Optional[List[List[List[List[int]]]]] = None,
+    rollout_expert_indices: Optional[List[RoutedExpertIndices]] = None,
     max_seq_len: Optional[int] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
@@ -205,39 +210,50 @@ def convert_prompts_responses_to_batch_tensors(
     rollout_expert_indices_tensor = None
     if rollout_expert_indices is not None:
         num_samples = len(prompts)
-        if len(rollout_expert_indices) != num_samples or any(not indices for indices in rollout_expert_indices):
+        if not isinstance(rollout_expert_indices, list):
+            raise TypeError("rollout_expert_indices must be a list of NumPy arrays")
+        if len(rollout_expert_indices) != num_samples:
             raise ValueError("rollout_expert_indices must contain routes for every trajectory")
 
-        num_layers = len(rollout_expert_indices[0][0])
-        topk = len(rollout_expert_indices[0][0][0]) if num_layers > 0 else 0
+        canonical_indices = []
+        for sample_index, sample_indices in enumerate(rollout_expert_indices):
+            if not isinstance(sample_indices, np.ndarray):
+                raise TypeError(
+                    f"rollout_expert_indices entries must be NumPy arrays, got {type(sample_indices).__name__} "
+                    f"at sample {sample_index}"
+                )
+            if sample_indices.dtype not in ROUTED_EXPERT_DTYPES:
+                raise TypeError(
+                    f"Unsupported routed expert dtype {sample_indices.dtype} at sample {sample_index}; "
+                    "expected uint8, int16, or int32"
+                )
+            canonical_indices.append(compact_routed_expert_indices(sample_indices))
+
+        first_shape = canonical_indices[0].shape
+        if len(first_shape) != 3 or first_shape[0] == 0:
+            raise ValueError("rollout_expert_indices must contain routes for every trajectory")
+        num_layers, topk = first_shape[1:]
         if topk < 1:
             raise ValueError("rollout_expert_indices must contain at least one expert per layer")
 
-        padded = make_replay_padding_indices(
-            (num_samples, max_total, num_layers, topk),
-            dtype=torch.int32,
-        )
-        for sample_index, sample_indices in enumerate(rollout_expert_indices):
-            sample_indices_tensor = torch.as_tensor(sample_indices, dtype=torch.int32)
-            if sample_indices_tensor.ndim != 3 or sample_indices_tensor.shape[1:] != (num_layers, topk):
+        batch_dtype = max((indices.dtype for indices in canonical_indices), key=lambda dtype: dtype.itemsize)
+        padded = np.empty((num_samples, max_total, num_layers, topk), dtype=batch_dtype)
+        padded[...] = np.arange(topk, dtype=batch_dtype)
+        for sample_index, sample_indices in enumerate(canonical_indices):
+            if sample_indices.ndim != 3 or sample_indices.shape[1:] != (num_layers, topk):
                 raise ValueError(
                     "rollout_expert_indices entries must share [layers, topk], "
-                    f"got shape {tuple(sample_indices_tensor.shape)} at sample {sample_index}"
+                    f"got shape {sample_indices.shape} at sample {sample_index}"
                 )
             left_pad = max_total - (prompt_token_lens[sample_index] + response_token_lens[sample_index])
             available = max_total - left_pad
-            if len(sample_indices) > available:
+            if sample_indices.shape[0] == 0 or sample_indices.shape[0] > available:
                 raise ValueError(
-                    f"Trajectory {sample_index} has {len(sample_indices)} route rows for {available} tokens"
+                    f"Trajectory {sample_index} has {sample_indices.shape[0]} route rows for {available} tokens"
                 )
-            padded[sample_index, left_pad : left_pad + len(sample_indices)] = sample_indices_tensor
-        rollout_expert_indices_tensor = padded
-
-        max_expert_id = int(rollout_expert_indices_tensor.max().item())
-        if max_expert_id < 2**8:
-            rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.uint8)
-        elif max_expert_id < 2**15:
-            rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.int16)
+            route_end = left_pad + sample_indices.shape[0]
+            padded[sample_index, left_pad:route_end] = sample_indices
+        rollout_expert_indices_tensor = torch.from_numpy(padded)
 
     return (
         sequences,

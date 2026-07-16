@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 import aiohttp
 import httpx
+import numpy as np
 import pytest
 import pytest_asyncio
 import uvicorn
@@ -19,6 +20,9 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
     PauseMode,
     RemoteInferenceClient,
+)
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
+    pack_routed_experts,
 )
 from skyrl.backends.skyrl_train.inference_servers.setup import (
     build_new_inference_client,
@@ -113,6 +117,9 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
                 for i in range(num_choices)
             ]
         }
+        if request.url.path == "/skyrl/v1/generate":
+            routes = np.arange(12).reshape(3, 2, 2)
+            response["choices"][0]["routed_experts"] = pack_routed_experts(routes)
 
         features = body.get("features")
         app.state.last_generate_features = features
@@ -449,6 +456,47 @@ class TestDataPlane:
         }
         result = await client.generate(input_batch)
         assert len(result["responses"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_decodes_packed_routed_experts(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
+            enable_return_routed_experts=True,
+        )
+        try:
+            result = await client.generate({"prompt_token_ids": [[1, 2, 3]]})
+        finally:
+            await client.teardown()
+
+        assert len(result["rollout_expert_indices"]) == 1
+        assert result["rollout_expert_indices"][0].dtype == np.uint8
+        assert np.array_equal(result["rollout_expert_indices"][0], np.arange(12).reshape(3, 2, 2))
+
+    @pytest.mark.asyncio
+    async def test_generate_rejects_list_routed_experts(self, monkeypatch):
+        client = RemoteInferenceClient(
+            proxy_url="http://unused",
+            server_urls=["http://unused"],
+            data_parallel_size=1,
+            enable_return_routed_experts=True,
+        )
+
+        async def return_list_routes(*args, **kwargs):
+            return {
+                "choices": [
+                    {
+                        "token_ids": [1],
+                        "finish_reason": "stop",
+                        "routed_experts": [[[0, 1]]],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(client, "_post", return_list_routes)
+        with pytest.raises(ValueError, match="must return packed"):
+            await client._generate_single([1], {}, None, "model")
 
     @pytest.mark.asyncio
     async def test_chat_completion(self, client):

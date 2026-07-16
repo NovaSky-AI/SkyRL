@@ -864,9 +864,7 @@ class RayPPOTrainer:
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
-        rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
-            "rollout_expert_indices", None
-        )
+        rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)

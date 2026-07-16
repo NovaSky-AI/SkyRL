@@ -5,6 +5,7 @@ uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_gener
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 from skyrl.train.config import ChatTemplateConfig, GeneratorConfig
@@ -23,7 +24,7 @@ MOCK_TOKENIZER_ENCODED_IDS = [1, 2, 3, 4]
 
 
 def test_turn_output_keeps_uncaptured_suffix_out_of_routes():
-    routes = [[[2, 3]], [[4, 5]]]
+    routes = np.asarray([[[2, 3]], [[4, 5]]], dtype=np.uint8)
     output = TurnOutput(
         output="answer",
         output_ids=[10, 11, 4],
