@@ -10,7 +10,7 @@ import pytest
 import pytest_asyncio
 import ray
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import SkyRLTrainConfig
@@ -41,7 +41,6 @@ def test_config() -> SkyRLTrainConfig:
 
     # vLLM generator with EP enabled
     cfg.generator.inference_engine.backend = "vllm"
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = NUM_GPUS // 2
     cfg.generator.inference_engine.tensor_parallel_size = 2
     cfg.generator.inference_engine.expert_parallel_size = 2

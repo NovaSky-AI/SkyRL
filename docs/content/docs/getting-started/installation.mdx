@@ -10,7 +10,7 @@ title: "Installation"
 
 We use [uv](https://docs.astral.sh/uv/) to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers.
 
-If you're running on an existing Ray cluster (see [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster) section), we suggest using Ray 2.51.1 and Python 3.12. However, we support Ray versions >= 2.44.0.
+If you're running on an existing Ray cluster (see [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster) section), we suggest using Ray 2.56.0 and Python 3.12. However, we support Ray versions >= 2.44.0.
 
 <Callout type="warn">
 We do not recommend using Ray 2.47.0 and 2.47.1 for SkyRL due to known issues in the uv+ray integration.
@@ -31,7 +31,7 @@ We provide docker images with the base dependencies for the FSDP and Megatron ba
 2. You can launch the container using the following command:
 
 ```bash
-docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8 /bin/bash
+docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl novaskyai/skyrl-train-ray-2.56.0-py3.12-cu12.8 /bin/bash
 ```
 
 3. Inside the launched container, setup the latest version of the project:
@@ -46,7 +46,7 @@ cd SkyRL
 2. You can launch the container using the following command:
 
 ```bash
-docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron /bin/bash
+docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl novaskyai/skyrl-train-ray-2.56.0-py3.12-cu12.8-megatron /bin/bash
 ```
 
 3. Inside the launched container, setup the latest version of the project:
@@ -61,9 +61,9 @@ That is it! After initializing the ray cluster as described below, you should no
 <Callout type="warn">
 The older docker image `novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8` is compatible with SkyRL only till commit https://github.com/NovaSky-AI/SkyRL/commit/0ee61a70a71344fbf15e0c6a603cdcc8b4d0cad5
 
-We recommend upgrading to the new docker image `novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8`.
+We recommend upgrading to the new docker image `novaskyai/skyrl-train-ray-2.56.0-py3.12-cu12.8`.
 
-If you wish to use SkyRL with ray != 2.51.1, see the guide for [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster).
+If you wish to use SkyRL with ray != 2.56.0, see the guide for [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster).
 </Callout>
 
 ## Install without Dockerfile
@@ -72,7 +72,7 @@ For installation without the Dockerfile, make sure you meet the pre-requisities:
 
 - CUDA 12.8
 - [uv](https://docs.astral.sh/uv/)
-- [ray](https://docs.ray.io/en/latest/) 2.51.1
+- [ray](https://docs.ray.io/en/latest/) 2.56.0
 
 ### System Dependencies
 
@@ -186,7 +186,7 @@ We recommend using Ray version 2.48.0 and above for the best experience. In this
 uv run ... --with ray==2.xx.yy -m skyrl.train.entrypoints.main_base ...
 ```
 
-### Ray < 2.51.1
+### Ray < 2.56.0
 
 SkyRL is compatible with any Ray version 2.44.0 and above (except 2.47.0 and 2.47.1 -- which we do not recommend due to an issue in the uv + Ray integration).
 Since we use a uv lockfile to pin dependencies, the best way to run SkyRL on a custom Ray version (say 2.46.0) would be to override the version at runtime with the `--with` flag.
@@ -196,7 +196,7 @@ For example, to run with Ray 2.46.0, you can do:
 uv run .... --with ray==2.46.0 -m skyrl.train.entrypoints.main_base ...
 ```
 
-For ray versions >= 2.44.0 but < 2.51.1, you additionally need to install vllm in the base pip environment, and then re-install ray to your desired version to ensure that the uv + Ray integration works as expected.
+For ray versions >= 2.44.0 but < 2.56.0, you additionally need to install vllm in the base pip environment, and then re-install ray to your desired version to ensure that the uv + Ray integration works as expected.
 We include these dependencies in the legacy Dockerfile: [Dockerfile.ray244](https://github.com/NovaSky-AI/SkyRL/blob/main/docker/Dockerfile.ray244), or you can install them manually:
 
 ```bash

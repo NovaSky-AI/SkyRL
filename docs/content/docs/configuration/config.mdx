@@ -118,7 +118,7 @@ run_name: "test_run"
 log_path: "/tmp/skyrl-logs"
 dump_data_batch: false
 dump_eval_results: true
-log_example_interval: 1
+print_example_interval: 1
 tags: null
 
 ```
@@ -129,7 +129,7 @@ tags: null
 - `log_path`: Path for infrastructure log files. Infrastructure logs (vLLM engine startup, model loading, worker initialization) are written to `{log_path}/infra-YYMMDD_HHMMSS.log`. For multi-node training, use a shared filesystem path to consolidate logs into a single file. See the [logging guide](../checkpointing-logging/logging) for details.
 - `dump_data_batch`: Whether to dump the data batch to a file. This is useful for debugging. When `true`, the data batch will be dumped to a file in the `export_path` directory. The training batch at global step `N` is saved to `self.cfg.trainer.export_path / "dumped_data" / global_step_N_training_input`
 - `dump_eval_results`: Whether to dump the evaluation results to a file. When `true`, the full evaluation results will be dumped to a file in the `export_path` directory. The evaluation results at global step `N` is saved to `self.cfg.trainer.export_path / "dumped_eval" / global_step_N_eval_results`
-- `log_example_interval`: Log an example prompt every N training steps, `0`/`-1` to disable.
+- `print_example_interval`: Pretty-print an example prompt/response/reward to stdout every N training steps, `0`/`-1` to disable.
 - `tags`: Optional list of tags to apply to the W&B run (e.g. `["sft", "experiment-1"]`). Has no effect on other backends.
 
 ## Training Backends
@@ -224,6 +224,23 @@ Some rules for configuring these parameters:
 `optimizer_config_kwargs.use_precision_aware_optimizer=true` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820. We recommend leaving this setting to `false`.
 </Callout>
 
+`optimizer_config_kwargs` accepts string values for Megatron `*_dtype` fields:
+
+```yaml
+optimizer_config_kwargs:
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: bf16
+  exp_avg_sq_dtype: fp8
+  main_params_dtype: fp32
+```
+
+Accepted names are case-insensitive: `fp32` (`float32`, `float`), `fp16` (`float16`, `half`), `bf16` (`bfloat16`), and `fp8` (`float8`, `uint8`). `fp8` maps to `torch.uint8`, matching TransformerEngine optimizer state storage.
+
+Field-specific checks:
+
+- `main_params_dtype` (master weights): `fp32`, `fp16`
+- `exp_avg_dtype` / `exp_avg_sq_dtype`: `fp32`, `fp16`, `bf16`, `fp8`
+
 ## Optimizer Configuration
 
 For both the critic and policy model, we provide a common optimizer configuration
@@ -284,6 +301,23 @@ policy:
   use_torch_compile: false  # Enable torch compile for the entropy calculation
   record_memory: false  # Dump memory snapshot for debugging
 
+  torch_profiler_config:    # torch.profiler for policy training
+    enable: false
+    ranks: [0]
+    save_path: null         # required when enable=true; absolute local path
+    skip_first: 10
+    wait: 0
+    warmup: 1
+    active: 1
+    repeat: 1                # 0 = repeat forever
+    activities: ["cpu", "cuda"]
+    record_shapes: true
+    profile_memory: false
+    with_stack: true
+    with_flops: false
+    with_modules: false
+    export_type: "chrome_trace"  # chrome_trace | stacks
+
   model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
 
 ```
@@ -293,6 +327,22 @@ policy:
 - `policy.sequence_parallel_size`: Sequence parallel size. We implement [Ulysses sequence parallelism](https://arxiv.org/abs/2309.14509)
 - `policy.use_torch_compile`: Whether to enable torch compile for entropy calculation
 - `policy.record_memory`: Whether to record memory usage. If `True`, this will use PyTorch's [memory snapshotting utility](https://docs.pytorch.org/docs/stable/torch_cuda_memory.html) to record memory usage and dump memory snapshots after each policy model training step.
+
+### Torch Profiler Configuration
+
+`policy.torch_profiler_config` profiles policy training steps for FSDP and Megatron in RL and SFT. It writes one Kineto/[HTA](https://github.com/facebookresearch/HolisticTraceAnalysis)-friendly `*.pt.trace.json` per active window and profiled rank.
+
+Scope: policy workers only. Active windows capture policy-worker operations between profiler steps: in RL, this includes policy log-prob forwards and policy training; in SFT, this includes training and may include eval forwards. Critic/ref workers, the controller, and generation/inference engines are not profiled.
+
+FSDP restriction: profiling is rejected when colocation is enabled without CPU offloading (`policy.fsdp_config.cpu_offload: false` with `placement.colocate_all` or `placement.colocate_policy_ref`).
+
+- `policy.torch_profiler_config.enable`: Enables profiling.
+- `policy.torch_profiler_config.ranks`: Global ranks to profile, for example `[0]`.
+- `policy.torch_profiler_config.save_path`: Required absolute local trace directory. Relative paths land under Ray's `/tmp/ray/.../working_dir_files`; cloud URIs are rejected.
+- `policy.torch_profiler_config.{skip_first,wait,warmup,active,repeat}`: Passed to [`torch.profiler.schedule`](https://docs.pytorch.org/docs/stable/profiler.html#torch.profiler.schedule).
+- `policy.torch_profiler_config.activities`: Subset of `["cpu", "cuda"]`.
+- `policy.torch_profiler_config.{record_shapes,profile_memory,with_stack,with_flops,with_modules}`: Passed to `torch.profiler.profile`.
+- `policy.torch_profiler_config.export_type`: `chrome_trace` for `*.pt.trace.json`; `stacks` for self-CUDA-time stacks (`with_stack: true` required).
 
 ### LoRA Configuration
 
@@ -651,7 +701,6 @@ generator:
     pipeline_parallel_size: 1
     expert_parallel_size: 1
     data_parallel_size: 1
-    async_engine: true
     enforce_eager: true
     enable_prefix_caching: true
     enable_chunked_prefill: true
@@ -659,11 +708,10 @@ generator:
     gpu_memory_utilization: 0.8
     max_num_seqs: 1024
     vllm_v1_disable_multiproc: true
-    remote_urls: []
     enable_return_routed_experts: false
     distributed_executor_backend: "ray"  # "mp", "ray"
     engine_init_kwargs: {}
-    override_existing_update_group: "auto" # "auto", "enable", "disable"
+    served_model_name: null
 
   # Custom chat template configuration if needed
   chat_template:
@@ -701,39 +749,32 @@ generator:
 
 ### Inference Engine Placement Configuration
 
-- `generator.inference_engine.run_engines_locally`: Whether to use local inference engines. If `true`, the inference engine will be initialized during the training run in the current Ray cluster. We use one Ray actor per inference replica and communication will happen via Ray object store.  If set to `false`, then the generator expects a list of remote urls and communication will happen over HTTP.
-- `generator.inference_engine.num_engines`: Number of inference engines to use. If `run_engines_locally` is `false`, then this number should match the number of remote urls.
-- `generator.inference_engine.remote_urls`: List of remote urls to use. Applicable only when `run_engines_locally` is `false`.
+- `generator.inference_engine.run_engines_locally`: Whether to launch inference servers during the training run in the current Ray cluster. If `false`, point SkyRL at an external HTTP/vLLM deployment with `external_proxy_url` and/or `external_server_urls`.
+- `generator.inference_engine.num_engines`: Number of inference engines to launch when `run_engines_locally=true`.
+- `generator.inference_engine.external_proxy_url`: Optional data-plane URL for an external router/proxy. Generation requests are sent here.
+- `generator.inference_engine.external_server_urls`: Optional list of external backend server URLs for control-plane fan-out (pause/resume, sleep/wake, and weight sync). If `external_proxy_url` is omitted, SkyRL starts an internal router over these servers.
 
 For more details on how different placement options work, please refer to the [placement guide](placement).
 
-### HTTP Endpoint Configuration
-
-- `generator.inference_engine.enable_http_endpoint`: When `true`, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using `.generate()` Python calls. When using HTTP endpoints, it is also important to propagate the temperature appropriately to the trainer configuration at `trainer.algorithm.temperature` if you are not utilizing `generator.sampling_params.temperature`.
-- `generator.inference_engine.http_endpoint_host`: Host for the inference HTTP endpoint.
-- `generator.inference_engine.http_endpoint_port`: Port for the inference HTTP endpoint.
-- `generator.inference_engine.served_model_name`: The model name to use for HTTP endpoint validation. If set, this name must be used in the `model` field of `/chat/completions` and `/completions` requests instead of the model path. This is useful when:
-  - The model path differs from the desired API model name (e.g., local paths vs API names)
-  - Using LiteLLM or other clients that expect a specific model name format
-
 ### Weight Transfer Configuration
 
-- `generator.inference_engine.weight_sync_backend`: Backend to use for weight synchronization. Currently, we support `nccl` and `gloo`.
+- `generator.inference_engine.weight_sync_backend`: Backend to use for weight synchronization. Use `nccl`; colocated `nccl` uses CUDA IPC internally.
 - `generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB`: When using `cuda_ipc` weight sync, send weights in batches of this size (in GB). Default: `1.0`.
-- `generator.inference_engine.override_existing_update_group`: Whether to override the existing update group for the inference engine. This is applicable only for remote inference engines. During training, the SkyRL-Train backend forms a custom process group ("update group") with the rank 0 training worker and all the inference engine ranks.  If `override_existing_update_group=enable`, then during initialization, a previous weight update group will be overriden in the inference engine. For example, if you have a remote server setup and you run training for the same model multiple times, it is helpful to override the previous update group. We recommend leaving this to `auto` - since it will automatically determine if the previous update group should be overridden based on `run_engines_locally`.
+- Remote inference servers automatically replace any stale weight update group during initialization. Locally launched inference servers do not.
 
 ### Inference Engine Configuration
 
 - `generator.inference_engine.backend`: Backend to use for the inference engine. We support `vllm`.
 - `generator.inference_engine.model_dtype`: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
-- `generator.inference_engine.async_engine`:  Whether to use an asynchronous/ offline inference engine. Applicable only when `backend="vllm"`.
 - `generator.inference_engine.tensor_parallel_size`: Tensor parallel size for the inference engine.
-- `generator.inference_engine.pipeline_parallel_size`: Pipeline parallel size for the inference engine. Currently, PP is only supported for vLLM backend with async_engine=true.
+- `generator.inference_engine.pipeline_parallel_size`: Pipeline parallel size for the inference engine. Currently, PP is only supported for the vLLM backend.
 - `generator.inference_engine.expert_parallel_size`: Expert parallel size for the inference engine. Currently, EP is only supported for vLLM backend and ep_size must equal dp_size * tp_size.
 - `generator.inference_engine.data_parallel_size`: Data parallel size for the inference engine. Currently, DP is only supported for vLLM backend.
+- `generator.inference_engine.engine_init_kwargs`: Pass-through kwargs for vLLM engine initialization. For Hugging Face config overrides such as RoPE scaling, use `generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters` and set the same trainer-side override with `trainer.policy.model_config_kwargs.rope_parameters` or `trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters`.
+- `generator.inference_engine.served_model_name`: The model name to use for HTTP endpoint validation. If set, this name must be used in the `model` field of `/chat/completions` and `/completions` requests instead of the model path.
 - `generator.inference_engine.gpu_memory_utilization`: GPU memory utilization for the inference engine. Applicable only for `run_engines_locally=true`.
 - `generator.inference_engine.vllm_v1_disable_multiproc`: If `true`, this will set `VLLM_ENABLE_V1_MULTIPROCESSING=0` in the environment, which makes the scheduling deterministic. This is useful for reproducibility.
-- `generator.inference_engine.enable_prefix_caching`: Whether to enable prefix caching for the inference engine. Applicable only when `backend="vllm"`. This can be left to the default `true` in most cases. Note that in the case of remote inference engines, you would need to match the setting used when you initialized the remote servers.
+- `generator.inference_engine.enable_prefix_caching`: Whether to enable prefix caching for the inference engine. Applicable only when `backend="vllm"`. This can be left to the default `true` in most cases. Note that in the case of remote inference servers, you would need to match the setting used when you initialized the remote servers.
 - `generator.inference_engine.enable_chunked_prefill`: Whether to enable chunked prefill for the inference engine. Applicable only when `backend="vllm"`. With vLLM, this can be left to the default `true` in most cases.
 - `generator.inference_engine.max_num_seqs`: Continous batching parameter for vLLM. Maximum number of sequences to pack into a batch.
 - `generator.inference_engine.max_num_batched_tokens`: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.

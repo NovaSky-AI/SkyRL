@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    _convert_moe_experts_lora_to_vllm,
     broadcast_object_across_pp_ranks,
     freeze_moe_router,
     get_model_config,
@@ -42,7 +43,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
-from skyrl.backends.skyrl_train.utils.profiler import Profiler
+from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
@@ -75,7 +76,7 @@ from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.base import (
+    from skyrl.backends.skyrl_train.inference_servers.base import (
         InferenceEngineInterface,
     )
     from skyrl.train.config.config import InferenceEngineConfig
@@ -324,6 +325,51 @@ class MegatronWeightExtractor(WeightExtractor):
 
 
 class MegatronWorker:
+    def _maybe_setup_fake_int4_qat(self):
+        """Wire up INT4-served training and return the BF16 bridge-weights path.
+
+        Reads the *policy's* ``model.fake_int4_qat`` (single source of truth for the
+        shared base model; the ref worker mirrors it). Two independent knobs:
+
+        - ``bf16_base_path``: when set, the trainer loads its BF16 master weights
+          from here instead of ``model.path``. Needed whenever ``model.path`` is a
+          compressed-tensors INT4 checkpoint (which Megatron-Bridge cannot load)
+          served by the inference engine. This redirect happens regardless of
+          ``enabled`` -- so an INT4-served *baseline* WITHOUT fake-quant (to show
+          the uncorrected train/infer mismatch) still loads.
+        - ``enabled``: additionally install the ``TEGroupedLinear`` fake-quant STE
+          so the trainer's MoE experts match the INT4 grid the sampler serves.
+
+        Returns ``bf16_base_path`` (or ``None`` for a plain BF16 ``model.path``).
+        """
+        fq = getattr(self.cfg.policy.model, "fake_int4_qat", None)
+        if fq is None:
+            return None
+
+        rank0 = getattr(self, "_rank", 0) == 0
+        if fq.enabled:
+            from skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat import (
+                install_fake_int4_qat,
+            )
+
+            install_fake_int4_qat(
+                group_size=fq.group_size,
+                scale_divisor=fq.scale_divisor,
+                q_min=fq.q_min,
+            )
+            if rank0:
+                logger.info(
+                    f"fake-INT4 QAT enabled (group_size={fq.group_size}, scale_divisor={fq.scale_divisor}); "
+                    f"trainer BF16 masters from {fq.bf16_base_path or 'model.path'}, "
+                    "MoE experts fake-quantized to INT4 in forward (STE backward)."
+                )
+        elif fq.bf16_base_path and rank0:
+            logger.info(
+                f"fake-INT4 QAT disabled; trainer loads BF16 masters from {fq.bf16_base_path} "
+                "while the inference engine serves INT4 model.path (uncorrected train/infer mismatch)."
+            )
+        return fq.bf16_base_path or None
+
     def init_configs(
         self,
         model_path,
@@ -334,12 +380,28 @@ class MegatronWorker:
         flash_attn=False,
         lora_config=None,
         language_model_only=False,
+        bridge_weights_path=None,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
+
+        ``bridge_weights_path`` (fake-INT4 QAT): when set, the Megatron-Bridge loads
+        its BF16 master weights from this path instead of ``model_path``. Used when
+        ``model_path`` is a compressed-tensors INT4 checkpoint (which the bridge
+        cannot load) served by the inference engine, while the trainer keeps BF16
+        masters and fake-quantizes them in the forward pass. Tokenizer + HF config
+        (the logical model identity) still come from ``model_path``.
         """
         tokenizer = get_tokenizer(model_path, trust_remote_code=True)
         hf_config_original = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+        if not language_model_only:
+            # VLM detection mirrors the FSDP path: a non-null ``vision_config`` on the
+            # HF config means a vision tower is present. Megatron's TransformerConfig
+            # has no such field, so this must be read off the HF config.
+            self.is_vlm = hasattr(hf_config_original, "vision_config") and hf_config_original.vision_config is not None
+        else:
+            self.is_vlm = False
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -359,7 +421,13 @@ class MegatronWorker:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
                 transformer_config_kwargs[key] = None
 
-        bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
+        bridge_source = bridge_weights_path or model_path
+        if bridge_weights_path:
+            logger.info(
+                f"fake-INT4 QAT: loading BF16 master weights from {bridge_source} "
+                f"(logical model / inference checkpoint: {model_path})"
+            )
+        bridge = AutoBridge.from_hf_pretrained(bridge_source, trust_remote_code=True)
 
         # For Qwen3.5, language_model_only routes to the native GPTModel + GDN
         # path (which supports sample packing) instead of the VL Qwen3VLModel
@@ -428,6 +496,10 @@ class MegatronWorker:
         self.provider = provider
         self.bridge = bridge
         self.megatron_config = megatron_config
+        # Logical model identity (what the inference engine serves). Differs from
+        # the bridge weights path only under fake-INT4 QAT (INT4 model.path, BF16
+        # bridge weights); used so saved LoRA adapters reference the INT4 base.
+        self._logical_model_path = model_path
 
         # strategy.hf_config is the on-disk source-of-truth used by
         # save_hf_configs and must NOT carry runtime overrides like
@@ -524,6 +596,8 @@ class MegatronWorker:
         """
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
+        self._drop_pixel_values_on_non_first_pp_stage(data)
+
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
         if use_token_batching:
@@ -552,6 +626,13 @@ class MegatronWorker:
             rollout_expert_indices = micro.get("rollout_expert_indices")
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+
+            vlm_inputs = {}
+            if micro.get("pixel_values") is not None:
+                vlm_inputs["pixel_values"] = micro.get("pixel_values")
+            if micro.get("image_grid_thw") is not None:
+                vlm_inputs["image_grid_thw"] = micro.get("image_grid_thw")
+
             micro_dicts.append(
                 {
                     "sequences": micro["sequences"],
@@ -560,6 +641,7 @@ class MegatronWorker:
                     "num_actions": micro.metadata["response_length"],
                     "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
                     "sub_seq_lengths": micro.get("sub_seq_lengths"),
+                    **vlm_inputs,
                 }
             )
 
@@ -700,6 +782,14 @@ class MegatronWorker:
         # The underlying offloadable module is `self.actor_module` instead of `self.model`.
         return self.actor_module
 
+    def _drop_pixel_values_on_non_first_pp_stage(self, data: TrainingInputBatch) -> None:
+        """
+        Drop ``pixel_values`` from the batch on every pipeline stage except the first.
+        Do this prior to moving to GPU to save memory
+        """
+        if mpu.get_pipeline_model_parallel_rank() != 0 and data.get("pixel_values") is not None:
+            data["pixel_values"] = None
+
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
@@ -708,7 +798,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
-        self.profiler: Profiler = None
+        # Worker base owns self.profiler; init_model may populate it.
         self._is_lora = self.cfg.policy.model.lora.rank > 0
         # Per-worker store of LoRA adapter snapshots. Allocated only for the
         # LoRA path; FFT runs single-tenant exactly as before.
@@ -766,6 +856,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Initialize the model, optimizer, and scheduler for the policy worker.
         """
+        # Fake-INT4 QAT: install the MoE expert fake-quant hook and (when the
+        # served checkpoint is INT4) redirect the trainer's BF16 master weights.
+        bridge_weights_path = self._maybe_setup_fake_int4_qat()
+
         # initialize the bridge and provider objects
         self.init_configs(
             model_path,
@@ -775,6 +869,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
             language_model_only=self.cfg.policy.language_model_only,
+            bridge_weights_path=bridge_weights_path,
         )
 
         if self.enable_router_replay:
@@ -810,9 +905,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
-        # create profiler
-        if self.cfg.policy.megatron_config.torch_profiler_config.enable:
-            self.profiler = Profiler(self.cfg.policy.megatron_config.torch_profiler_config)
+        # Created only on profiled ranks.
+        self.profiler = build_profiler_from_policy_cfg(self.cfg)
 
         # create optimizer (skipped for inference-only flows; Megatron's
         # DistributedOptimizer eagerly materializes fp32 master + AdamW state
@@ -839,6 +933,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             actor_module=self.actor_module,
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
+            is_vlm=self.is_vlm,
         )
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
@@ -879,6 +974,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         all_metrics = defaultdict(list)
         all_loss_fn_outputs: List[Dict[str, Any]] = []
 
+        self._drop_pixel_values_on_non_first_pp_stage(data)
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
@@ -892,6 +988,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             rollout_expert_indices = experience.rollout_expert_indices
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
+
+            vlm_inputs = {}
+            if experience.pixel_values is not None:
+                vlm_inputs["pixel_values"] = experience.pixel_values
+            if experience.image_grid_thw is not None:
+                vlm_inputs["image_grid_thw"] = experience.image_grid_thw
 
             micro_buffer.append(
                 {
@@ -907,6 +1009,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "action_mask": experience.action_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "sub_seq_lengths": experience.sub_seq_lengths,
+                    **vlm_inputs,
                 }
             )
 
@@ -942,12 +1045,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
-        sum_loss_metrics = resolved_loss_name != "cross_entropy"
-
-        status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        status = reduce_metrics(all_metrics, sum_loss_metrics=True)
         group = mpu.get_data_parallel_group(with_context_parallel=False)
-        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
+        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)
 
         clear_router_replay()
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
@@ -984,6 +1084,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         all_metrics = defaultdict(list)
 
+        self._drop_pixel_values_on_non_first_pp_stage(data)
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
@@ -1016,6 +1117,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices.to(torch.int32)
 
+            vlm_inputs = {}
+            if experience.pixel_values is not None:
+                vlm_inputs["pixel_values"] = experience.pixel_values
+            if experience.image_grid_thw is not None:
+                vlm_inputs["image_grid_thw"] = experience.image_grid_thw
+
             micro_buffer.append(
                 {
                     "sequences": experience.sequences,
@@ -1034,15 +1141,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "is_padding_batch": (
                         experience.metadata.get("is_padding_batch", False) if experience.metadata else False
                     ),
+                    **vlm_inputs,
                 }
             )
 
-        # Count microbatches that carry real (non-padding) samples. Token-based batching
-        # appends fully-padding microbatches (loss_mask all zero) so every DP rank runs the
-        # same number of forward passes; those contribute 0 to KL/entropy and to mean metrics
-        # but would otherwise inflate the denominators. `num_real_microbatches` lets the loss
-        # normalize KL/entropy over real microbatches only.
-        num_real_microbatches = sum(1 for m in micro_buffer if m["loss_mask"].sum().item() > 0)
+        # Count real (non-padding) microbatches. Token-based batching appends padding
+        # microbatches so every DP rank runs the same number of forward passes; they must
+        # not inflate the KL/entropy denominators. Use the iterator's padding count rather
+        # than loss_mask, since a real microbatch can be all-zero (e.g. DAPO overlong filtering).
+        num_padding_microbatches = (
+            getattr(microbatch_iterator, "num_padding_microbatches", 0) if microbatch_iterator is not None else 0
+        )
+        num_real_microbatches = len(micro_buffer) - num_padding_microbatches
         for m_batch in micro_buffer:
             m_batch["num_microbatches"] = len(micro_buffer)
             m_batch["num_real_microbatches"] = num_real_microbatches
@@ -1104,15 +1214,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # TODO: SFT path still averages metrics across microbatches and workers.
-        # This needs to be unified with the RL path which sums.
-        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
-        sum_loss_metrics = resolved_loss_name != "cross_entropy"
-
         # Reduce across microbatches and all-reduce metrics across DP ranks
         # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
-        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
-        status = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        # NOTE: Sum loss metrics because scaling is already applied before the worker reduction.
+        status = reduce_metrics(all_metrics, sum_loss_metrics=True)
         if self.optimizer is not None:
             status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
 
@@ -1122,10 +1227,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # identical on every rank; num_padding_microbatches reports the per-rank average).
         if use_token_batching:
             status["num_microbatches"] = float(len(micro_buffer))
-            status["num_padding_microbatches"] = float(len(micro_buffer) - num_real_microbatches)
+            status["num_padding_microbatches"] = float(num_padding_microbatches)
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
-        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=sum_loss_metrics)
+        status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)
 
         # Collect MoE aux metrics averaged across microbatches (all-reduced across ranks
         # inside get_moe_metrics) aggregating after per-microbatch scalar metrics.
@@ -1242,9 +1347,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
-            target_modules = infer_target_modules_from_adapter_weights(adapter_state.keys())
+            # Rewrite fused-MoE expert LoRA into vLLM's flat PEFT layout so
+            # merge_lora=False on-policy sync is accepted (otherwise
+            # load_lora_adapter rejects `experts.down_proj`). See
+            # _convert_moe_experts_lora_to_vllm for the layout details.
+            adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
+
+            target_modules = sorted(
+                set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"}
+            )
             base_model_name_or_path = str(
-                getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
+                getattr(self, "_logical_model_path", "")
+                or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
                 or getattr(self.bridge.hf_pretrained, "name_or_path", "")
             )
             adapter_config = build_adapter_config_dict(
@@ -1456,6 +1570,11 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         """
         Initialize the model for the ref worker.
         """
+        # Fake-INT4 QAT: the ref shares the policy's base model. Mirror the
+        # BF16-master redirect so it can load an INT4-served checkpoint, and the
+        # (global) fake-quant hook keeps the KL anchor in the same weight space.
+        bridge_weights_path = self._maybe_setup_fake_int4_qat()
+
         # initialize the bridge and provider objects
         self.init_configs(
             model_path,
@@ -1465,6 +1584,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
             language_model_only=self.cfg.ref.language_model_only,
+            bridge_weights_path=bridge_weights_path,
         )
 
         self.actor_module = self.make_megatron_module(
@@ -1485,7 +1605,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             print_model_size(self.actor_module[0])
 
         # create worker model
-        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
+        # Propagate is_vlm so ref forwards apply the same VLM image handling and
+        # parallelism guards as the policy worker.
+        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module, is_vlm=self.is_vlm)
 
         self._set_expandable_segments(True)
 

@@ -15,13 +15,12 @@ import torch
 from loguru import logger
 from ray.util.placement_group import (
     PlacementGroup,
-    PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
 )
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl.env_vars import (
-    _SKYRL_USE_NEW_INFERENCE,
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_PYTHONPATH_EXPORT,
@@ -271,6 +270,13 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "or negative to keep all checkpoints"
         )
 
+    cfg.trainer.policy.torch_profiler_config.validate(
+        strategy=cfg.trainer.strategy,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        colocate_policy_ref=cfg.trainer.placement.colocate_policy_ref,
+        fsdp_cpu_offload=cfg.trainer.policy.fsdp_config.cpu_offload,
+    )
+
     # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
     repopulate_all_registries()
     available_policy_losses = PolicyLossRegistry.list_available()
@@ -414,8 +420,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
         NotImplementedError: if feature is not supported
         ValueError: when cfg.generator.sampling_params.logprobs > 1
     """
-    ie_cfg = cfg.generator.inference_engine
-
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
@@ -425,11 +429,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "max_input_length should be set greater than or equal to trainer.max_prompt_length "
             "for multi-turn generation"
         )
-
-    if not ie_cfg.async_engine and ie_cfg.backend == "vllm":
-        assert (
-            cfg.generator.batched
-        ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
 
     # TODO(tgriggs): use a more modular config validation
     if cfg.trainer.logger == "wandb":
@@ -442,8 +441,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
                 f"`logprobs` if set should be 0 or 1 (both return only the chosen token's logprob), "
                 f"got {cfg.generator.sampling_params.logprobs}"
             )
-        if not _SKYRL_USE_NEW_INFERENCE and not ie_cfg.run_engines_locally:
-            raise NotImplementedError("Legacy remote inference mode doesn't support `sampling_params.logprobs`")
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
@@ -471,9 +468,6 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     Shared between the training path (via :func:`validate_generator_cfg`) and the
     inference-only serve entrypoint (``skyrl.train.entrypoints.serve``).
 
-    NOTE: this also resolves ``inference_engine.override_existing_update_group="auto"``
-    in place.
-
     Args:
         cfg (SkyRLTrainConfig): config to validate
 
@@ -488,23 +482,6 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             ie_cfg.num_prefill < ie_cfg.num_engines
         ), "num_prefill must be < num_engines (need at least one decode worker)"
         assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
-
-    if not _SKYRL_USE_NEW_INFERENCE and not ie_cfg.run_engines_locally:
-        assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
-
-    if ie_cfg.override_existing_update_group == "auto":
-        if ie_cfg.backend == "vllm" and not ie_cfg.run_engines_locally:
-            # remote engines can be launched separately so we `enable` by default
-            ie_cfg.override_existing_update_group = "enable"
-        else:
-            # for local engines, we disable
-            ie_cfg.override_existing_update_group = "disable"
-
-    if ie_cfg.enable_http_endpoint:
-        if not ie_cfg.async_engine:
-            raise ValueError(
-                "inference_engine.async_engine must be True when inference_engine.enable_http_endpoint==True."
-            )
 
     # Validate inference engine parallelism.
     ep_size = ie_cfg.expert_parallel_size
@@ -547,16 +524,15 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
 
 
 def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
-    """Validates config options for the new inference layer.
-
-    This validation only applies when _SKYRL_USE_NEW_INFERENCE=1.
+    """Validates config options for the inference layer.
 
     Config combinations:
-    - Colocated + external URLs → ERROR (requires driver-managed servers for PG sharing)
-    - Neither set → Build servers internally
-    - external_server_urls only → Create router over external servers
-    - external_proxy_url only → Use proxy for both data + control plane
-    - Both set → Fully external (proxy for data plane, servers for control plane)
+    - Colocated + external URLs -> ERROR (requires driver-managed servers for PG sharing)
+    - run_engines_locally=False + no external URLs -> ERROR
+    - Neither set + run_engines_locally=True -> Build servers internally
+    - external_server_urls only -> Create router over external servers
+    - external_proxy_url only -> Use proxy for both data + control plane
+    - Both set -> Fully external (proxy for data plane, servers for control plane)
 
     Args:
         cfg: The config to validate.
@@ -564,10 +540,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
     Raises:
         ValueError: If colocated mode is used with external URLs.
     """
-    if not _SKYRL_USE_NEW_INFERENCE:
-        # Only validate when using the new inference path
-        return
-
     is_colocated = cfg.trainer.placement.colocate_all
     has_external_proxy = cfg.generator.inference_engine.external_proxy_url is not None
     has_external_servers = cfg.generator.inference_engine.external_server_urls is not None
@@ -580,6 +552,12 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "between trainer and inference workers. Please either:\n"
             "  1. Set colocate_all=false to use external inference servers, or\n"
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
+        )
+
+    if not cfg.generator.inference_engine.run_engines_locally and not (has_external_proxy or has_external_servers):
+        raise ValueError(
+            "generator.inference_engine.run_engines_locally=false requires "
+            "external_proxy_url or external_server_urls."
         )
 
 
@@ -729,8 +707,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
 
-    env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1" if _SKYRL_USE_NEW_INFERENCE else "0"
-
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
@@ -747,6 +723,14 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
+
+    # Health-check timeout for the inference server actor. Forwarded so `VLLMServerActor.start`
+    # sees the override.
+    if health_timeout := os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"):
+        logger.info(
+            f"Exporting `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` to ray runtime env: {health_timeout}"
+        )
+        env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
 
     return env_vars
 

@@ -160,7 +160,7 @@ class Datum(BaseModel):
 
 class ForwardBackwardInput(BaseModel):
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic", "dppo"]
     loss_fn_config: dict[str, float] | None = None
 
 
@@ -334,6 +334,7 @@ SUPPORTED_LOSS_FNS = {
     "ppo",
     "cispo",
     "ppo_critic",
+    "dppo",
 }
 
 # Loss function type mappings used by the JAX backend dispatch path.

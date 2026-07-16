@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import math
 import os
 import tarfile
 import tempfile
@@ -11,15 +12,13 @@ import ray
 import torch
 from pydantic import BaseModel
 from ray.util.placement_group import placement_group
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
-from skyrl.backends.renderer import VLLMRenderer, render_model_input
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-    InferenceEngineClient,
-)
-from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
-    create_ray_wrapped_inference_engines,
+from skyrl.backends.renderer import (
+    RendererClientProtocol,
+    VLLMRenderer,
+    render_model_input,
 )
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
@@ -29,7 +28,13 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
+)
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.utils.utils import (
@@ -131,6 +136,9 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engine_client = None
         self._inference_engines_initialized = False
         self._renderer = None
+        # CPU-only render server for multi-modal preprocessing; started
+        # lazily on the first image-bearing training batch.
+        self._render_server = None
         # Captured at first LoRA create_model; subsequent create_models must
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
@@ -323,17 +331,6 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.init_weight_sync_state(self._inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
-    def _create_legacy_inference_client(self):
-        """Create legacy inference client using Ray-wrapped engines."""
-        logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} Ray-wrapped inference engines")
-        self._inference_engine_client = InferenceEngineClient(
-            create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
-            self._tokenizer,
-            self._cfg.trainer.policy.model.path,
-            self._cfg.trainer.policy.model.lora,
-            self._cfg.generator.inference_engine,
-        )
-
     def set_inference_state_publisher(self, publisher: Callable[[str | None], None]) -> None:
         """Wire a callback invoked when the inference proxy URL changes.
 
@@ -377,19 +374,64 @@ class SkyRLTrainBackend(AbstractBackend):
         # (only meaningful in non-colocated mode; the API gates on this).
         self._publish_inference_state(server_setup.proxy_url)
 
+        # In the new (HTTP) inference path the engines stay resident on the GPUs
+        # after init. Under colocate_all those GPUs are shared with training, so
+        # match the legacy behaviour and sleep the engines immediately; they are
+        # woken before sampling. sleep() is async with no running loop here, hence
+        # asyncio.run. Defaulting to level 2 (the client clamps to level 1 when
+        # LoRA weight sync is in use, since level 2 would discard the base model).
+        if is_colocated:
+            asyncio.run(client.sleep())
+
+    def _create_render_client(self) -> RendererClientProtocol:
+        """Return a client for vLLM's ``/v1/chat/completions/render``.
+
+        Two branches:
+
+        - Inference engines already initialized (e.g. VLM RL, where sampling
+          brought them up): reuse ``RemoteInferenceClient`` so render requests
+          fan out across all engine API servers rather than funneling through
+          a single driver-local process.
+        - Engines not initialized (e.g. VLM SFT): lazily start a CPU-only
+          render server. It loads just the tokenizer and HF processor (no
+          weights, no KV cache, no GPU), keeping the training path
+          (forward / forward_backward) free of inference-engine startup.
+        """
+        if self._inference_engines_initialized:
+            return self._inference_engine_client
+
+        from skyrl.backends.skyrl_train.inference_servers.render_server import (
+            CPURenderServer,
+            RenderServerClient,
+        )
+
+        if self._render_server is None:
+            self._render_server = CPURenderServer(
+                self._cfg.trainer.policy.model.path,
+                log_path=self._cfg.trainer.log_path,
+            )
+            self._render_server.start()
+        return RenderServerClient(self._render_server.url)
+
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
         if self._inference_engines_initialized:
             return
 
-        if _SKYRL_USE_NEW_INFERENCE:
-            self._create_new_inference_client()
-        else:
-            self._create_legacy_inference_client()
+        self._create_new_inference_client()
 
         self._dispatch.set_inference_engine_client(self._inference_engine_client)
         self.init_weight_sync_state()
         self._inference_engines_initialized = True
+
+        # The engines' API servers also expose the render endpoint, fanning
+        # render requests across all engines. Drop any CPU-render-backed
+        # renderer so the next image batch rebuilds against the engine client.
+        if self._renderer is not None:
+            self._renderer = None
+        if self._render_server is not None:
+            self._render_server.shutdown()
+            self._render_server = None
 
     def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
         # Tinker's public LoraConfig only exposes rank + alpha (plus
@@ -522,6 +564,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._inference_router:
             self._inference_router.shutdown()
             self._inference_router = None
+        if self._render_server is not None:
+            self._render_server.shutdown()
+            self._render_server = None
         ray.shutdown()
         self._model_ids_to_role = {}
         self._model_metadata = {}
@@ -543,10 +588,17 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
 
-        if _SKYRL_USE_NEW_INFERENCE:
+        # Only image chunks need vLLM's render endpoint. Text-only batches
+        # render locally, and image batches use a CPU-only render server, so
+        # the training path never pays for inference-engine startup.
+        has_image_chunks = any(
+            isinstance(chunk, (types.ImageChunk, types.ImageAssetPointerChunk))
+            for model_input in prepared_batch.all_model_inputs
+            for chunk in model_input.chunks
+        )
+        if has_image_chunks:
             if self._renderer is None:
-                self._ensure_inference_engines()
-                self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
+                self._renderer = VLLMRenderer(self._create_render_client(), self._cfg.trainer.policy.model.path)
             rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
         else:
             rendered_inputs = render_model_input(prepared_batch.all_model_inputs)
@@ -604,7 +656,16 @@ class SkyRLTrainBackend(AbstractBackend):
         has_values = any(len(v) > 0 for v in prepared_batch.all_values)
         has_returns = any(len(r) > 0 for r in prepared_batch.all_returns)
         if has_logprobs:
-            batch_dict["action_log_probs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
+            action_log_probs_tensor = torch.tensor(action_log_probs_list, dtype=torch.float32)
+            batch_dict["action_log_probs"] = action_log_probs_tensor
+            # Tinker datums carry the *sampling* (rollout-engine) logprobs.
+            # Mirror them into `rollout_logprobs` so the policy workers emit
+            # the train-vs-rollout logprob-gap metrics
+            # (`minibatch_rollout_logprobs_abs_diff_*`), surfaced by
+            # `_extract_metrics` below.  Loss behaviour only changes when
+            # `trainer.algorithm.off_policy_correction` is explicitly
+            # configured (rollout logprobs are its intended input).
+            batch_dict["rollout_logprobs"] = action_log_probs_tensor
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
         if role == "critic":
@@ -696,6 +757,31 @@ class SkyRLTrainBackend(AbstractBackend):
         if "critic_lr" in data:
             metrics["critic_lr:last"] = float(data["critic_lr"])
 
+        # Train-vs-rollout logprob gap, computed by the policy workers per
+        # micro-batch (masked |logp_train - logp_rollout| over action tokens)
+        # and reduced across micro-batches / DP ranks.  Reconstruct the std
+        # from the reduced first/second moments (std itself cannot be
+        # mean-reduced; same as finalize_minibatch_rollout_logprob_diff_std)
+        # and surface the family under skyrl-train's familiar
+        # `policy/rollout_train_logprobs_abs_diff_*` names.  The `:mean` /
+        # `:max` / `:min` suffixes drive the Tinker SDK's cross-chunk
+        # reduction when a request is split into multiple chunks.
+        if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY in data:
+            mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY])
+            metrics["policy/rollout_train_logprobs_abs_diff_mean:mean"] = mean
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY in data:
+                sq_mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY])
+                # max(0, ...) guards tiny negatives from float round-off.
+                metrics["policy/rollout_train_logprobs_abs_diff_std:mean"] = math.sqrt(max(0.0, sq_mean - mean**2))
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY in data:
+                metrics["policy/rollout_train_logprobs_abs_diff_max:max"] = float(
+                    data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY]
+                )
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY in data:
+                metrics["policy/rollout_train_logprobs_abs_diff_min:min"] = float(
+                    data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY]
+                )
+
         return metrics
 
     def _sleep_inference_engines(self):
@@ -705,11 +791,7 @@ class SkyRLTrainBackend(AbstractBackend):
             # TODO(team): remove once vllm fixes this
             # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
             sleep_level = 1 if lora_cfg and lora_cfg.rank > 0 else 2
-            if _SKYRL_USE_NEW_INFERENCE:
-                asyncio.run(self._inference_engine_client.sleep(level=sleep_level))
-            else:
-                # Legacy client has a preset sleep level passed during create_ray_wrapped_inference_engines_from_config
-                asyncio.run(self._inference_engine_client.sleep())
+            asyncio.run(self._inference_engine_client.sleep(level=sleep_level))
 
     def _validate_batch_role_and_loss(self, role: str, loss_fn: str):
         if role == "critic" and loss_fn not in {"ppo", "ppo_critic"}:
@@ -722,10 +804,22 @@ class SkyRLTrainBackend(AbstractBackend):
         role: str,
         loss_fn: str,
         loss_fn_config: dict[str, float] | None,
-    ) -> tuple[str, dict[str, float] | None]:
+    ) -> tuple[str, dict | None]:
         """Normalize public Tinker loss names/config into SkyRL-Train policy settings."""
         if role == "critic":
             return loss_fn, loss_fn_config
+
+        if loss_fn == "dppo":
+            # DPPO thresholds live in the nested `algorithm.dppo` sub-config, but
+            # Tinker's loss_fn_config is a flat float dict. Re-nest so the
+            # worker-side OmegaConf merge lands them on AlgorithmConfig.dppo.
+            normalized_config = dict(loss_fn_config or {})
+            dppo_overrides = {
+                key: normalized_config.pop(key) for key in ("delta_low", "delta_high") if key in normalized_config
+            }
+            if dppo_overrides:
+                normalized_config["dppo"] = dppo_overrides
+            return loss_fn, normalized_config or None
 
         if loss_fn != "ppo":
             return loss_fn, loss_fn_config
@@ -941,55 +1035,8 @@ class SkyRLTrainBackend(AbstractBackend):
             )
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
 
-        # 3. Dispatch to appropriate sampling path
-        if _SKYRL_USE_NEW_INFERENCE:
-            return self._sample_with_remote_client(prepared_batch)
-        return self._sample_with_legacy_client(prepared_batch)
-
-    def _sample_with_legacy_client(
-        self,
-        prepared_batch: types.PreparedSampleBatch,
-    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Sample using legacy InferenceEngineClient with Ray-wrapped engines."""
-        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
-
-        needs_prompt_logprobs = prepared_batch.needs_prompt_logprobs
-
-        async def sample_all():
-            tasks = []
-            for i in range(len(all_input_ids)):
-                prompt_token_ids = all_input_ids[i]
-                sampling_params = prepared_batch.all_sampling_params[i]
-
-                # Pass through common fields; only stop needs name translation
-                # (Tinker uses stop_strings/stop_tokens, vLLM uses stop/stop_token_ids)
-                params_dict = {
-                    "temperature": sampling_params.temperature,
-                    "max_tokens": sampling_params.max_tokens,
-                    "seed": sampling_params.seed,
-                    "top_k": sampling_params.top_k,
-                    "top_p": sampling_params.top_p,
-                    "logprobs": 0,
-                }
-                if sampling_params.stop_strings:
-                    params_dict["stop"] = sampling_params.stop_strings
-                if sampling_params.stop_tokens:
-                    params_dict["stop_token_ids"] = sampling_params.stop_tokens
-
-                tasks.append(
-                    self._inference_engine_client.sample(
-                        prompt_token_ids=prompt_token_ids,
-                        num_samples=1,  # Tinker batches multiple samples separately
-                        sampling_params=params_dict,
-                        prompt_logprobs=needs_prompt_logprobs,
-                    )
-                )
-
-            return await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Backend runs in engine subprocess with no event loop
-        sample_outputs = asyncio.run(sample_all())
-        return self._aggregate_sample_results(prepared_batch, sample_outputs)
+        # 3. Dispatch to the sampling path
+        return self._sample_with_remote_client(prepared_batch)
 
     def _sample_with_remote_client(
         self,
@@ -1039,20 +1086,13 @@ class SkyRLTrainBackend(AbstractBackend):
         prepared_batch: types.PreparedSampleBatch,
         sample_outputs: list,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Convert sample outputs to Tinker format. Handles both legacy and remote client outputs."""
+        """Convert sample outputs to Tinker format."""
         logger.info(f"Aggregating sample results for {len(sample_outputs)} samples")
 
         def _extract_sequences(output):
             """Yield (tokens, logprobs, stop_reason) from a single sample output."""
-            if _SKYRL_USE_NEW_INFERENCE:
-                for seq in output["sequences"]:
-                    yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
-            else:
-                yield (
-                    output["response_ids"][0],
-                    (output.get("response_logprobs") or [[]])[0],
-                    output["stop_reasons"][0],
-                )
+            for seq in output["sequences"]:
+                yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
 
         results = {}
         for request_id, model_id, start_idx, end_idx, prompt_logprobs_requested in prepared_batch.request_batch_slices:
@@ -1229,62 +1269,3 @@ class SkyRLTrainBackend(AbstractBackend):
                 info.size = len(marker)
                 tar.addfile(info, io.BytesIO(marker))
             logger.info(f"Synced weights for {model_id} (disk save skipped)")
-
-
-def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig, colocate_pg: ResolvedPlacementGroup | None, tokenizer: PreTrainedTokenizerBase
-):
-    engine_kwargs = {
-        "num_inference_engines": cfg.generator.inference_engine.num_engines,
-        "tensor_parallel_size": cfg.generator.inference_engine.tensor_parallel_size,
-        "pipeline_parallel_size": cfg.generator.inference_engine.pipeline_parallel_size,
-        "model_dtype": cfg.generator.inference_engine.model_dtype,
-        "pretrain": cfg.trainer.policy.model.path,
-        "seed": cfg.trainer.seed,
-        "vllm_v1_disable_multiproc": cfg.generator.inference_engine.vllm_v1_disable_multiproc,
-        "enable_prefix_caching": cfg.generator.inference_engine.enable_prefix_caching,
-        "enforce_eager": cfg.generator.inference_engine.enforce_eager,
-        "expert_parallel_size": cfg.generator.inference_engine.expert_parallel_size,
-        "data_parallel_size": cfg.generator.inference_engine.data_parallel_size,
-        "shared_pg": colocate_pg,
-        "gpu_memory_utilization": cfg.generator.inference_engine.gpu_memory_utilization,
-        "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
-        "async_engine": cfg.generator.inference_engine.async_engine,
-        "max_num_batched_tokens": cfg.generator.inference_engine.max_num_batched_tokens,
-        "max_num_seqs": cfg.generator.inference_engine.max_num_seqs,
-        "tokenizer": tokenizer,
-        "backend": cfg.generator.inference_engine.backend,
-        "engine_init_kwargs": cfg.generator.inference_engine.engine_init_kwargs,
-        "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
-        "distributed_executor_backend": cfg.generator.inference_engine.distributed_executor_backend,
-        "language_model_only": cfg.generator.inference_engine.language_model_only,
-        "use_expandable_segments": cfg.generator.inference_engine.use_expandable_segments,
-    }
-
-    # Conditionally add LoRA parameters if LoRA is enabled
-    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
-        lora_cfg = cfg.trainer.policy.model.lora
-        engine_kwargs["enable_lora"] = True
-        engine_kwargs["max_lora_rank"] = lora_cfg.rank
-        engine_kwargs["sleep_level"] = 1
-        engine_kwargs["max_loras"] = lora_cfg.max_loras
-        if lora_cfg.max_cpu_loras is not None:
-            engine_kwargs["max_cpu_loras"] = lora_cfg.max_cpu_loras
-        engine_kwargs["fully_sharded_loras"] = cfg.generator.inference_engine.fully_sharded_loras
-
-        if cfg.generator.inference_engine.enforce_eager and cfg.generator.inference_engine.backend == "vllm":
-            logger.warning(
-                "LoRA is enabled but generator.inference_engine.enforce_eager=true. "
-                "This combination causes significant performance degradation (2-3x slower generation). "
-                "Automatically setting enforce_eager=false for better performance. "
-            )
-            engine_kwargs["enforce_eager"] = False
-
-    if cfg.generator.rope_scaling is not None:
-        engine_kwargs["rope_scaling"] = cfg.generator.rope_scaling
-    if cfg.generator.rope_theta is not None:
-        engine_kwargs["rope_theta"] = cfg.generator.rope_theta
-    if cfg.generator.inference_engine.served_model_name is not None:
-        engine_kwargs["served_model_name"] = cfg.generator.inference_engine.served_model_name
-
-    return create_ray_wrapped_inference_engines(**engine_kwargs)
