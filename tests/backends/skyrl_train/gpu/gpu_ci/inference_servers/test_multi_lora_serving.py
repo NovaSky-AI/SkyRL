@@ -14,7 +14,7 @@ import pytest
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInput
 from skyrl.train.config import SkyRLLoraConfig, SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
@@ -41,7 +41,6 @@ def _multi_lora_test_config() -> SkyRLTrainConfig:
     cfg.trainer.strategy = "fsdp"
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.placement.policy_num_gpus_per_node = 1
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.run_engines_locally = True
     cfg.generator.inference_engine.tensor_parallel_size = 1
@@ -99,7 +98,6 @@ async def test_multi_lora_interleaved_generation(ray_init_fixture, qwen3_meowing
         cfg=cfg,
         model=MODEL_QWEN3,
         use_local=True,
-        async_engine=True,
         tp_size=1,
         colocate_all=False,
         sleep_level=1,
@@ -136,7 +134,6 @@ async def test_lora_inplace_reload_isolated(ray_init_fixture, qwen3_meowing_lora
         cfg=cfg,
         model=MODEL_QWEN3,
         use_local=True,
-        async_engine=True,
         tp_size=1,
         colocate_all=False,
         sleep_level=1,

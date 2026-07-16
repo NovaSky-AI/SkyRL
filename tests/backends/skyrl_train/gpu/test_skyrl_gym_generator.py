@@ -23,7 +23,6 @@ async def test_generator_multi_turn_text2sql():
     initialize_ray(SkyRLTrainConfig())
     try:
         await run_generator_end_to_end(
-            use_async_engine=True,
             batched=False,
             n_samples_per_prompt=5,
             num_inference_engines=2,

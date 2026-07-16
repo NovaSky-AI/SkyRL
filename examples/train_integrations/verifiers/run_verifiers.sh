@@ -31,7 +31,6 @@ uv run --isolated --with verifiers --extra fsdp -m examples.train_integrations.v
   trainer.max_prompt_length=8192 \
   generator.max_input_length=8192 \
   generator.sampling_params.max_generate_length=1024 \
-  generator.inference_engine.enable_http_endpoint=true \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   environment.env_class="$ENV_ID" \

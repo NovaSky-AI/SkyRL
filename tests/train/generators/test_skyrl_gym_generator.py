@@ -9,6 +9,7 @@ import pytest
 
 from skyrl.train.config import ChatTemplateConfig, GeneratorConfig
 from skyrl.train.generators.base import (
+    BatchMetadata,
     ConversationType,
     GeneratorInput,
     GeneratorOutput,
@@ -68,7 +69,7 @@ def mock_tokenizer():
 @pytest.fixture
 def mock_llm():
     """
-    This replaces InferenceEngineClient, where `.generate()` always returns MOCK_LLM_OUTPUT_IDS
+    Mock inference engine client whose `.generate()` always returns MOCK_LLM_OUTPUT_IDS
     for each prompt, with corresponding string output "mocked output".
     """
     mock = MagicMock()
@@ -242,6 +243,75 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
+@pytest.mark.parametrize(
+    "use_cache_salt,weight_version,policy_model_name,expected_salt",
+    [
+        (False, 3, None, None),  # disabled -> no salt
+        (True, 3, None, "3"),  # enabled, no model name -> bare version
+        (True, 5, "my-model", "my-model@5"),  # enabled with model name
+        (True, 0, "my-model", "my-model@0"),  # pre-first-sync version (0) still salts
+    ],
+)
+async def test_cache_salt_threaded_to_engine_input(
+    mock_make,
+    mock_tokenizer,
+    mock_llm,
+    mock_env,
+    generator_cfg,
+    mock_env_cfg,
+    use_cache_salt,
+    weight_version,
+    policy_model_name,
+    expected_salt,
+):
+    """The cache salt is derived from the engine weight version (not global_step) and threaded into
+    every engine request's ``cache_salt`` field."""
+    generator_cfg.batched = False
+    generator_cfg.use_cache_salt = use_cache_salt
+    generator_cfg.sampling_params.logprobs = None
+
+    mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    mock_tokenizer.eos_token_id = 4
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    captured = {}
+
+    def mock_generate(input_batch, model=None):
+        captured["cache_salt"] = input_batch.get("cache_salt")
+        return {
+            "responses": ["4"],
+            "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()],
+            "stop_reasons": ["stop"],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=mock_generate)
+    # The shared inference engine client exposes the live weight version.
+    mock_llm.weight_version = weight_version
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        policy_model_name=policy_model_name,
+    )
+    generator.base_conversation_token_ids = []
+
+    input_batch = {
+        "prompts": [[{"role": "user", "content": "What is 2 + 2?"}]],
+        "env_classes": [mock_env_cfg.env_class],
+        "env_extras": [{"answer": "4"}],
+        # global_step deliberately differs from weight_version to assert the salt ignores it.
+        "batch_metadata": BatchMetadata(global_step=7, training_phase="train"),
+    }
+    await generator.generate(input_batch, disable_tqdm=True)
+
+    assert captured["cache_salt"] == expected_salt
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
 @pytest.mark.parametrize("use_conversation_multi_turn", [True, False])
 @pytest.mark.parametrize("logprobs_setting", [None, 0])
 @pytest.mark.parametrize("mock_llm_output_ids", [[1, 10, 12, 4], [1, 10, 12]])
@@ -356,6 +426,39 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     assert generator_output["rewards"][0] == 1.0
     assert generator_output["stop_reasons"][0] == "stop"
     assert generator_output["loss_masks"][0] == [1] * len(MOCK_LLM_OUTPUT_IDS)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_batched_metrics_use_truncated_responses(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """Rollout metrics must describe the truncated responses that are trained, not the
+    raw engine output: with max_generate_length below the engine output, generate/
+    max_num_tokens must equal the truncated length, matching response_ids/loss_masks."""
+    generator_cfg.sampling_params.max_generate_length = 2  # < len(MOCK_LLM_OUTPUT_IDS) == 4
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    input_batch: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
+        "env_extras": [{"answer": "8"}],
+        "env_classes": ["gsm8k"],
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    assert generator_output["response_ids"][0] == MOCK_LLM_OUTPUT_IDS[:2]
+    assert generator_output["loss_masks"][0] == [1] * 2
+    assert generator_output["rollout_metrics"]["generate/max_num_tokens"] == 2
 
 
 @pytest.mark.asyncio

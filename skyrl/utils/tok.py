@@ -1,6 +1,11 @@
 """Tokenization related utilities"""
 
-from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from transformers import (
+    AutoConfig,
+    AutoProcessor,
+    AutoTokenizer,
+    PreTrainedTokenizerFast,
+)
 
 
 def get_tokenizer(model_name_or_path, **tokenizer_kwargs) -> AutoTokenizer:
@@ -21,3 +26,28 @@ def get_tokenizer(model_name_or_path, **tokenizer_kwargs) -> AutoTokenizer:
         tokenizer.pad_token_id = tokenizer.eos_token_id
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
+
+
+def check_is_vlm(model_config_or_path) -> bool:
+    """Returns True if the model config declares a non-null ``vision_config``.
+
+    Accepts either an already-loaded ``PretrainedConfig`` or a model name/path.
+    Passing the config avoids a redundant ``AutoConfig.from_pretrained`` round-trip
+    when the caller already holds it."""
+    if isinstance(model_config_or_path, str):
+        model_config = AutoConfig.from_pretrained(model_config_or_path, trust_remote_code=True)
+    else:
+        model_config = model_config_or_path
+    return hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
+
+
+def get_processor(model_name_or_path, **tokenizer_kwargs) -> AutoProcessor:
+    """Gets processor for the given base model with the given parameters
+
+    Sets the pad token ID to EOS token ID if `None`"""
+    tokenizer_kwargs.setdefault("trust_remote_code", True)
+    processor = AutoProcessor.from_pretrained(model_name_or_path, **tokenizer_kwargs)
+    if processor.tokenizer.pad_token_id is None:
+        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    return processor

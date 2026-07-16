@@ -157,7 +157,6 @@ async def weight_update_env(class_scoped_ray_init_fixture, request):
             num_inference_engines=num_prefill + num_decode,
             colocate_all=False,
             gpu_memory_utilization=0.5,
-            use_new_inference_servers=True,
             engine_init_kwargs={
                 "load_format": "dummy",
                 "kv_transfer_config": {
@@ -173,7 +172,6 @@ async def weight_update_env(class_scoped_ray_init_fixture, request):
             tp_size=2,
             colocate_all=False,
             gpu_memory_utilization=0.5,
-            use_new_inference_servers=True,
             engine_init_kwargs={"load_format": "dummy"},
         )
 
@@ -248,9 +246,6 @@ class TestWeightUpdateFlow:
                 master_port=master_port,
                 rank_offset=1,
                 world_size=world_size,
-                group_name=group_name,
-                backend="nccl",
-                model_dtype_str="bfloat16",
                 override_existing_receiver=True,
             )
 
@@ -401,7 +396,6 @@ async def ipc_weight_update_env(class_scoped_ray_init_fixture):
         tp_size=1,
         colocate_all=True,
         gpu_memory_utilization=0.5,
-        use_new_inference_servers=True,
         engine_init_kwargs={"load_format": "dummy"},
     )
 

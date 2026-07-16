@@ -26,6 +26,25 @@ bash examples/train/sft/run_sft_megatron.sh
 
 Trains `Qwen/Qwen3-0.6B` on 4 GPUs with Megatron (TP=2, PP=2). Key defaults: max length 512, batch size 4, 10 training steps.
 
+### VLM SFT (Megatron, multi-GPU)
+
+```bash
+# One-time: build a small messages-format dataset from HuggingFaceM4/the_cauldron
+uv run examples/train/sft/prepare_cauldron_vlm.py --output-dir $HOME/data/cauldron-vlm
+
+bash examples/train/sft/run_sft_megatron_vlm.sh
+```
+
+Fine-tunes the vision-language model `Qwen/Qwen3-VL-2B-Instruct` on 4 GPUs with the Megatron backend (pure DP=4 by default). Scale to larger models by overriding `megatron_config.tensor_model_parallel_size` / `pipeline_model_parallel_size`.
+
+VLM SFT mirrors the constraints of the FSDP VLM RL path (3D RoPE + image-token positions tie image tensors to specific sequence positions), so the following are required and enforced:
+
+- `remove_microbatch_padding=false` — no microbatch padding / sequence packing.
+- `megatron_config.sequence_parallel_size=1` and `megatron_config.context_parallel_size=1`.
+- `train_on_what=last_assistant_message` — VLM tokenization only supports last-assistant training.
+
+Mixed text+image batches are not supported: every sample in a VLM batch must carry image(s). The dataset must use the chat `messages` format with image content encoded as `{"type": "image", "image": <data-uri>}` (see `prepare_cauldron_vlm.py`).
+
 ### LoRA (FSDP, single GPU)
 
 ```bash
@@ -73,6 +92,11 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `batch_size` | `4` | Global batch size |
 | `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
 | `seed` | `42` | Random seed for data shuffling and reproducibility |
+| `sampler` | `random` | Training sampler: `random` (shuffle each epoch), `sequential` (in-order), or `custom` (load from `sampler_class_path`) |
+| `sampler_class_path` | `None` | Import path (`module.path.ClassName`) to a custom stateful sampler; required when `sampler=custom` |
+| `sampler_kwargs` | `{}` | Keyword args forwarded to the custom sampler constructor |
+| `dataloader_num_workers` | `0` | Worker processes for the training/eval `StatefulDataLoader` (0 = main process) |
+| `dataloader_persistent_workers` | `false` | Keep dataloader workers alive across epochs (only with `dataloader_num_workers > 0`) |
 | `remove_microbatch_padding` | `true` | Pack multiple sequences per batch (requires flash attention) |
 | `use_sequence_packing` | `false` | Enable controller-level bin-packing across the global mini-batch. Megatron-only. Requires `remove_microbatch_padding=true` and `max_length` set. |
 | `max_tokens_per_microbatch` | `null` | Token budget per worker micro-batch when `use_sequence_packing=true`; must be a positive multiple of `max_length` (gives `max_tokens_per_microbatch / max_length` bin rows per micro-batch). `null` = `max_length` (one bin row per micro-batch). |
@@ -120,6 +144,65 @@ bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
     max_tokens_per_microbatch=4096
 ```
 
+
+## Samplers and the stateful dataloader
+
+`SFTTrainer` feeds the training loop from a
+[`torchdata.stateful_dataloader.StatefulDataLoader`](https://pytorch.org/data/main/stateful_dataloader.html).
+The sampling position is written into each checkpoint (`data.pt`) so a
+`resume_from` run continues from the exact next example of the in-progress
+epoch.
+
+Three sampler strategies are built in:
+
+- `sampler=random` (default) — reshuffles every epoch using `seed`. The
+  in-progress epoch resumes bit-exactly; later epochs are re-shuffled into a
+  valid (but not byte-identical) order, matching the RL trainer's behavior.
+- `sampler=sequential` — iterates the dataset in order
+  ([`StatefulSequentialSampler`](../../../skyrl/train/dataset/samplers.py)).
+- `sampler=custom` — loads your own stateful sampler from `sampler_class_path`,
+  instantiated as `ClassName(tokenized, **sampler_kwargs)`. A custom sampler
+  only needs `__iter__`/`__len__` plus `state_dict`/`load_state_dict` to be
+  checkpointable. The import runs inside a Ray task, which does **not** inherit
+  the driver's `PYTHONPATH` -- use a dotted path importable from the repo root
+  (e.g. `examples.train.sft.curriculum_sampler.CurriculumLearningSampler`) and
+  launch from the repo root. No `__init__.py` is needed (namespace packages).
+
+### Curriculum learning example
+
+[`curriculum_sampler.py`](curriculum_sampler.py) is a reference custom sampler
+(`CurriculumLearningSampler`) that walks through difficulty-ordered subsets,
+progressively unlocking harder data. Order the dataset easy→hard and give the
+per-stage `lengths`. Set `num_samples=num_steps*batch_size` so the whole
+schedule is covered in a single pass (this keeps the curriculum state intact
+across epoch boundaries and makes resume bit-exact across the entire run).
+Pass the sampler config as overrides on the base SFT example script, run from
+the repo root so the dotted path resolves (`lengths` must sum to the dataset
+size — 100 for the script's `train[:100]` split — and `num_samples` should be
+`num_steps * batch_size` to cover the whole schedule):
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    sampler=custom \
+    sampler_class_path=examples.train.sft.curriculum_sampler.CurriculumLearningSampler \
+    'sampler_kwargs={lengths: [34, 33, 33], num_samples: 40, seed: 42}'
+```
+
+### Data mixing example
+
+[`data_mixing_sampler.py`](data_mixing_sampler.py) is a reference custom sampler
+(`DataMixingSampler`) that mixes a concatenation of sources with per-source
+`weights`, using torch's native `WeightedRandomSampler` for the weighted draw.
+Each source's weight is divided across its examples, so the source-level mixing
+proportion matches `weights` regardless of how many examples each source has.
+Order the dataset by source and give `lengths`/`weights` per source:
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    sampler=custom \
+    sampler_class_path=examples.train.sft.data_mixing_sampler.DataMixingSampler \
+    'sampler_kwargs={lengths: [80, 20], weights: [0.5, 0.5], num_samples: 40, seed: 42}'
+```
 
 ## Limitations
 

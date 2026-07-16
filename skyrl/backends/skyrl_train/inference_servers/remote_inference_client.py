@@ -2,8 +2,8 @@
 RemoteInferenceClient - Serializable HTTP client for inference.
 
 This is a lightweight, fully serializable HTTP client that wraps the inference
-server HTTP API. It replaces the old InferenceEngineInterface for HTTP-based
-inference servers.
+server HTTP API. It is the concrete ``InferenceEngineInterface`` implementation
+used for HTTP-based inference servers.
 
 Architecture:
 -------------
@@ -39,10 +39,9 @@ Usage:
         data_parallel_size=1,
     )
 
-Comparison with existing code:
-- Replaces: InferenceEngineClient + RemoteInferenceEngine (for remote-only usage)
-- Key difference: Talks directly to router via HTTP, no Ray actor wrapping
-- The router handles session-aware routing; this client handles control plane fan-out
+Design notes:
+- Talks directly to the router via HTTP, no Ray actor wrapping.
+- The router handles session-aware routing; this client handles control plane fan-out.
 """
 
 from __future__ import annotations
@@ -66,8 +65,9 @@ from typing import (
 
 import aiohttp
 
-from skyrl.backends.skyrl_train.inference_engines.base import (
+from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
@@ -163,9 +163,9 @@ class SampleResponse(TypedDict):
 
 
 @dataclass
-class RemoteInferenceClient:
+class RemoteInferenceClient(InferenceEngineInterface):
     """
-    Serializable HTTP client for inference. Replaces InferenceEngineInterface.
+    Serializable HTTP client for inference. The concrete InferenceEngineInterface.
 
     This class maintains two URL types:
     - proxy_url: Single URL for data plane operations (routed requests)
@@ -195,9 +195,10 @@ class RemoteInferenceClient:
     reports the full DP world size per server, so we divide by num_deployments."""
 
     model_name: str = "default"
-    """The base model identifier the inference server was started with.
+    """The model identifier accepted by the inference server for the base model.
 
-    Always the base model — never a LoRA adapter name. LoRA adapters are
+    This is usually the model path, but may be ``served_model_name`` when vLLM
+    is started with an alias. It is never a LoRA adapter name. LoRA adapters are
     addressed by the names callers register them under via
     ``load_lora_adapter(name, path)``, and per-call routing is done by
     passing that name as ``model`` on the data-plane methods.
@@ -224,6 +225,17 @@ class RemoteInferenceClient:
     _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
+    # Monotonic counter of weight syncs (see `increment_weight_version`); source of the prefix-cache salt.
+    _weight_version: int = field(default=0, repr=False)
+
+    @property
+    def weight_version(self) -> int:
+        """Number of weight syncs to the engines so far (0 before the first sync); the policy version."""
+        return self._weight_version
+
+    def increment_weight_version(self) -> None:
+        """Advance the weight version. Called once per completed weight sync to the engines."""
+        self._weight_version += 1
 
     def __post_init__(self):
         if self.data_parallel_size <= 0:
@@ -233,6 +245,10 @@ class RemoteInferenceClient:
             raise ValueError(
                 f"Expected number of servers to be divisible by data parallel size, got {self.server_urls} and {self.data_parallel_size}"
             )
+
+    def get_endpoint_url(self) -> str:
+        """Data-plane endpoint base URL (the router/proxy that load-balances requests)."""
+        return self.proxy_url
 
     # ---------------------------
     # Session Management
@@ -384,6 +400,7 @@ class RemoteInferenceClient:
 
         session_ids = input_batch.get("session_ids")
         mm_features = input_batch.get("mm_features")
+        cache_salt = input_batch.get("cache_salt")
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -408,6 +425,7 @@ class RemoteInferenceClient:
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                     mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                     model=model,
+                    cache_salt=cache_salt,
                 )
             async with gen_sem:
                 return await self._generate_single(
@@ -416,6 +434,7 @@ class RemoteInferenceClient:
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                     mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                     model=model,
+                    cache_salt=cache_salt,
                 )
 
         async def _throttled_detokenize(token_ids: List[int]) -> str:
@@ -445,6 +464,7 @@ class RemoteInferenceClient:
         session_id: Optional[Any],
         model: str,
         mm_features: Optional[MultiModalFeatures] = None,
+        cache_salt: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate completion for a single prompt.
@@ -469,6 +489,10 @@ class RemoteInferenceClient:
         }
         if mm_features:
             payload["features"] = mm_features
+        # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
+        # param.
+        if cache_salt is not None:
+            payload["cache_salt"] = cache_salt
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -994,11 +1018,11 @@ class RemoteInferenceClient:
         return await self._call_all_servers("/resume")
 
     async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
-        """Pause using keep mode - compatibility with InferenceEngineClient interface."""
+        """Pause using keep mode."""
         return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
 
     async def resume_generation(self) -> Dict[str, Any]:
-        """Resume after pause - compatibility with InferenceEngineClient interface."""
+        """Resume after pause."""
         return await self.resume()
 
     async def sleep(self, level: int = 2, tags: Optional[List[str]] = None) -> Dict[str, Any]:
