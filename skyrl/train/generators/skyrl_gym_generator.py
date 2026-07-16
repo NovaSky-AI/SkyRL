@@ -91,25 +91,8 @@ class TurnOutput:
     added_eos: bool = False
 
     def get_turn_rollout_expert_indices(self) -> Optional[List[List[List[int]]]]:
-        """
-        Get rollout inference indices for this turn's tokens (output tokens + observation tokens).
-
-        Returns indices for generated output tokens, with padding entries (all 0)
-        for any manually-added EOS token and observation tokens
-        Returns None if rollout_expert_indices is None.
-        """
-        if self.rollout_expert_indices is None:
-            return None
-        if not self.rollout_expert_indices:
-            return self.rollout_expert_indices
-        layer_num = len(self.rollout_expert_indices[0])
-        topk = len(self.rollout_expert_indices[0][0]) if layer_num > 0 else 0
-        pad_entry = [[0] * topk for _ in range(layer_num)]
-        indices = list(self.rollout_expert_indices)
-        if self.added_eos:
-            indices.append(pad_entry)
-        indices.extend(pad_entry for _ in range(len(self.obs_ids)))
-        return indices
+        """Return only routes that the inference model actually executed."""
+        return self.rollout_expert_indices
 
     def get_turn_loss_mask(self) -> List[int]:
         """
@@ -569,15 +552,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 assert response_ids is not None and loss_mask is not None
                 if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                     response_ids.append(self.tokenizer.eos_token_id)
-                    # TODO(Charlie): this should be 0? Otherwise logprobs will be extremely off. But if it is loss
-                    # masked with 0, why bother adding it?
                     loss_mask.append(1)
                     if rollout_logprobs is not None:
                         rollout_logprobs.append(0.0)
-                    if rollout_expert_indices_out is not None and rollout_expert_indices_out:
-                        layer_num = len(rollout_expert_indices_out[0])
-                        topk = len(rollout_expert_indices_out[0][0]) if layer_num > 0 else 0
-                        rollout_expert_indices_out.append([[0] * topk for _ in range(layer_num)])
                     appended_eos_token = True
 
             if self.generator_cfg.step_wise_trajectories:

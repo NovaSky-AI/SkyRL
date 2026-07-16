@@ -17,7 +17,10 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
-from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+from skyrl.train.dataset.preprocess import (
+    convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
+)
 from skyrl.train.generators.base import GeneratorInput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
@@ -201,6 +204,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
         )
 
         assert rii_tensor is not None
+        router_padding_mask = make_router_padding_mask(attention_mask, [len(sample) for sample in indices])
         num_actions = response_mask.shape[1]
         batch_size = sequences.shape[0]
         training_input = TrainingInputBatch(
@@ -216,6 +220,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
                     else torch.zeros((batch_size, num_actions), dtype=torch.float32)
                 ),
                 "rollout_expert_indices": rii_tensor,
+                "router_padding_mask": router_padding_mask,
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
@@ -333,10 +338,15 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
         MOONLIGHT_NUM_LAYERS = 27
         MOONLIGHT_TOPK = 6
         MOONLIGHT_NUM_EXPERTS = 64
-        rollout_expert_indices = torch.randint(
-            0, MOONLIGHT_NUM_EXPERTS, (batch_size, seq_len, MOONLIGHT_NUM_LAYERS, MOONLIGHT_TOPK), dtype=torch.int32
+        route_start = torch.randint(
+            0,
+            MOONLIGHT_NUM_EXPERTS,
+            (batch_size, seq_len, MOONLIGHT_NUM_LAYERS, 1),
+            dtype=torch.int32,
         )
-        rollout_expert_indices[attention_mask == 0] = 0
+        route_offsets = torch.arange(MOONLIGHT_TOPK, dtype=torch.int32)
+        rollout_expert_indices = (route_start + route_offsets) % MOONLIGHT_NUM_EXPERTS
+        rollout_expert_indices[attention_mask == 0] = route_offsets
 
         gen = torch.Generator().manual_seed(42)
         training_input = TrainingInputBatch(
@@ -348,6 +358,7 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
                 "loss_mask": loss_mask_t,
                 "rollout_logprobs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "rollout_expert_indices": rollout_expert_indices,
+                "router_padding_mask": ~attention_mask.bool(),
                 "action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "base_action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "advantages": torch.randn((batch_size, num_actions), generator=gen),

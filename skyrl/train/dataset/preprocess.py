@@ -2,10 +2,53 @@ import logging
 from typing import List, Optional, Tuple
 
 import torch
-from jaxtyping import Float, Integer
+from jaxtyping import Bool, Float, Integer
 from transformers import AutoTokenizer
 
+from skyrl.utils.routed_experts import make_replay_padding_indices
+
 logger = logging.getLogger(__name__)
+
+
+def make_router_padding_mask(
+    attention_mask: torch.Tensor,
+    captured_route_lengths: List[int],
+) -> Bool[torch.Tensor, "batch seq_len"]:
+    """Build Megatron's router-only padding mask for a ragged vLLM route prefix.
+
+    vLLM records routes only for tokens it evaluates. The final training sequence can be
+    longer because the last sampled token has no subsequent decode forward, and SkyRL may
+    append a synthetic EOS. In multi-turn generation, observations join the captured prefix
+    only when a later turn evaluates them. Captured route rows therefore align with a prefix
+    of each real, left-padded sequence; the remaining suffix needs dummy routes.
+
+    This cannot be derived from the loss mask. A loss-masked prompt or observation may still
+    condition later trained actions and must replay its captured route. ``True`` marks only
+    left padding and tokens without a captured route so Megatron excludes their dummy routes
+    from router accounting.
+    """
+    if attention_mask.ndim != 2:
+        raise ValueError(f"Expected 2D attention_mask, got shape {attention_mask.shape}")
+    if len(captured_route_lengths) != attention_mask.shape[0]:
+        raise ValueError(
+            f"Expected one captured route length per trajectory, got {len(captured_route_lengths)} "
+            f"for batch size {attention_mask.shape[0]}"
+        )
+
+    captured = torch.as_tensor(captured_route_lengths, dtype=torch.long, device=attention_mask.device)
+    sequence_lengths = attention_mask.sum(dim=1, dtype=torch.long)
+    if torch.any(captured < 0) or torch.any(captured > sequence_lengths):
+        raise ValueError(
+            f"Captured route lengths must be within trajectory lengths, got "
+            f"captured={captured.tolist()} and lengths={sequence_lengths.tolist()}"
+        )
+
+    sequence_starts = attention_mask.shape[1] - sequence_lengths
+    positions = torch.arange(attention_mask.shape[1], device=attention_mask.device).unsqueeze(0)
+    captured_positions = (positions >= sequence_starts.unsqueeze(1)) & (
+        positions < (sequence_starts + captured).unsqueeze(1)
+    )
+    return ~captured_positions
 
 
 def _verify_inputs(
@@ -160,24 +203,41 @@ def convert_prompts_responses_to_batch_tensors(
             logprobs_tensor[i, max_response - len(sample_logprobs) :] = lp
 
     rollout_expert_indices_tensor = None
-    if rollout_expert_indices:
-        first_non_empty = next((x for x in rollout_expert_indices if x), None)
-        if first_non_empty:
-            num_layers = len(first_non_empty[0])
-            topk = len(first_non_empty[0][0]) if num_layers > 0 else 0
-            padded = torch.zeros(len(rollout_expert_indices), max_total, num_layers, topk, dtype=torch.int32)
-            for i, sample_indices in enumerate(rollout_expert_indices):
-                if sample_indices:
-                    left_pad = max_total - (prompt_token_lens[i] + response_token_lens[i])
-                    n = min(len(sample_indices), max_total - left_pad)
-                    padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.int32)
-            rollout_expert_indices_tensor = padded
+    if rollout_expert_indices is not None:
+        num_samples = len(prompts)
+        if len(rollout_expert_indices) != num_samples or any(not indices for indices in rollout_expert_indices):
+            raise ValueError("rollout_expert_indices must contain routes for every trajectory")
 
-            # downcast to uint8 if possible, otherwise int16 to save memory
-            if rollout_expert_indices_tensor.max().item() < 2**8:
-                rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.uint8)
-            elif rollout_expert_indices_tensor.max().item() < 2**15:
-                rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.int16)
+        num_layers = len(rollout_expert_indices[0][0])
+        topk = len(rollout_expert_indices[0][0][0]) if num_layers > 0 else 0
+        if topk < 1:
+            raise ValueError("rollout_expert_indices must contain at least one expert per layer")
+
+        padded = make_replay_padding_indices(
+            (num_samples, max_total, num_layers, topk),
+            dtype=torch.int32,
+        )
+        for sample_index, sample_indices in enumerate(rollout_expert_indices):
+            sample_indices_tensor = torch.as_tensor(sample_indices, dtype=torch.int32)
+            if sample_indices_tensor.ndim != 3 or sample_indices_tensor.shape[1:] != (num_layers, topk):
+                raise ValueError(
+                    "rollout_expert_indices entries must share [layers, topk], "
+                    f"got shape {tuple(sample_indices_tensor.shape)} at sample {sample_index}"
+                )
+            left_pad = max_total - (prompt_token_lens[sample_index] + response_token_lens[sample_index])
+            available = max_total - left_pad
+            if len(sample_indices) > available:
+                raise ValueError(
+                    f"Trajectory {sample_index} has {len(sample_indices)} route rows for {available} tokens"
+                )
+            padded[sample_index, left_pad : left_pad + len(sample_indices)] = sample_indices_tensor
+        rollout_expert_indices_tensor = padded
+
+        max_expert_id = int(rollout_expert_indices_tensor.max().item())
+        if max_expert_id < 2**8:
+            rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.uint8)
+        elif max_expert_id < 2**15:
+            rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.int16)
 
     return (
         sequences,
