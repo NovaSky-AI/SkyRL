@@ -240,6 +240,20 @@ def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
     return flat
 
 
+def _concat_field(generator_outputs: List[GeneratorOutput], key: str) -> Optional[list]:
+    """Flatten an optional per-trajectory field, keyed off the first output (None if absent)."""
+    if generator_outputs[0].get(key) is None:
+        return None
+    return _flatten_field(generator_outputs, key)
+
+
+def _last_step_only(values: Optional[list], is_last_step: Optional[List[bool]]) -> Optional[list]:
+    """Keep only last-step entries when step-wise, so one trajectory contributes one value."""
+    if values is None or not is_last_step:
+        return values
+    return [v for v, last in zip(values, is_last_step) if last]
+
+
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step_wise: bool = False) -> GeneratorOutput:
     """
     Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
@@ -270,11 +284,9 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "rollout_logprobs": (
             _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
         ),
-        "trajectory_generation_times": (
-            _flatten_field(generator_outputs, "trajectory_generation_times")
-            if first.get("trajectory_generation_times") is not None
-            else None
-        ),
+        "trajectory_generation_times": _concat_field(generator_outputs, "trajectory_generation_times"),
+        "trajectory_llm_times": _concat_field(generator_outputs, "trajectory_llm_times"),
+        "trajectory_env_times": _concat_field(generator_outputs, "trajectory_env_times"),
     }
 
     # propagate additional keys with list values as-is
@@ -284,19 +296,21 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
     for key in additional_keys:
         result[key] = _flatten_field(generator_outputs, key)
 
-    # With step-wise training, only use the trajectory generation time from the last step
-    trajectory_generation_times = result.get("trajectory_generation_times")
-    if step_wise and trajectory_generation_times and result.get("is_last_step"):
-        trajectory_generation_times = [
-            t for t, is_last_step in zip(trajectory_generation_times, result.get("is_last_step")) if is_last_step
-        ]
+    # With step-wise training each trajectory spans multiple rows; keep only its last-step timing.
+    is_last_step = result.get("is_last_step") if step_wise else None
+    trajectory_generation_times = _last_step_only(result.get("trajectory_generation_times"), is_last_step)
+    trajectory_llm_times = _last_step_only(result.get("trajectory_llm_times"), is_last_step)
+    trajectory_env_times = _last_step_only(result.get("trajectory_env_times"), is_last_step)
 
-    # Re-aggregate rollout metrics
+    # Re-aggregate rollout metrics. The time splits must be recomputed here from the raw per-
+    # trajectory lists; the extra_keys fallback below cannot aggregate a p90 or a ratio correctly.
     rollout_metrics = get_rollout_metrics(
         result["response_ids"],
         result["rewards"],
         loss_masks=result.get("loss_masks"),
         trajectory_completion_times=trajectory_generation_times,
+        trajectory_llm_times=trajectory_llm_times,
+        trajectory_env_times=trajectory_env_times,
     )
 
     # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
@@ -466,8 +480,10 @@ def get_rollout_metrics(
             }
         )
 
-    if trajectory_llm_times:
-        llm_times_arr = np.array(trajectory_llm_times, dtype=np.float64)
+    llm_times_arr = np.array(trajectory_llm_times, dtype=np.float64) if trajectory_llm_times else None
+    env_times_arr = np.array(trajectory_env_times, dtype=np.float64) if trajectory_env_times else None
+
+    if llm_times_arr is not None:
         rollout_metrics.update(
             {
                 "generate/trajectory_llm_time_mean": np.mean(llm_times_arr).item(),
@@ -476,8 +492,7 @@ def get_rollout_metrics(
             }
         )
 
-    if trajectory_env_times:
-        env_times_arr = np.array(trajectory_env_times, dtype=np.float64)
+    if env_times_arr is not None:
         rollout_metrics.update(
             {
                 "generate/trajectory_env_time_mean": np.mean(env_times_arr).item(),
@@ -486,9 +501,7 @@ def get_rollout_metrics(
             }
         )
 
-    if trajectory_llm_times and trajectory_env_times:
-        llm_times_arr = np.array(trajectory_llm_times, dtype=np.float64)
-        env_times_arr = np.array(trajectory_env_times, dtype=np.float64)
+    if llm_times_arr is not None and env_times_arr is not None:
         # Batch-level share of rollout time spent in the environment rather than awaiting the
         # inference engine. Time-weighted (sum over sum), so long trajectories count proportionally
         # instead of every trajectory contributing equally.

@@ -1,14 +1,17 @@
 """Publishes the training loop's current macro-phase to Prometheus via ``ray.util.metrics``.
 
 Ray exports metrics recorded through ``ray.util.metrics`` to the same Prometheus that scrapes
-cluster-wide node metrics (GPU/CPU/disk). Emitting the training-loop phase there lets a query join
-"what was the loop doing" against "how busy were the GPUs" in a single store and time base, e.g.
+cluster-wide node metrics (GPU/CPU/disk), prefixing them with ``ray_``. Emitting the training-loop
+phase there puts "what was the loop doing" on the same store and time base as "how busy were the
+GPUs", so the two can be overlaid without correlating a separate experiment tracker by wall-clock.
+``ray_skyrl_training_phase{phase="eval"} == 1`` selects the eval windows, and node GPU utilization
+during a phase follows from a vector match against that selector, for example:
 
-    avg(ray_node_gpus_utilization) by (Phase)
+    avg(ray_node_gpus_utilization) and on() (ray_skyrl_training_phase{phase="eval"} == 1)
 
-without correlating a separate experiment tracker by wall-clock. This is deliberately a Prometheus
-gauge rather than a tracker/W&B scalar: Prometheus is the store that has cluster-wide GPU data and
-survives a cluster restart, so it is the one place a post-hoc utilization breakdown can be computed.
+This is deliberately a Prometheus gauge rather than a tracker/W&B scalar: Prometheus is the store
+that has cluster-wide GPU data and survives a cluster restart, so it is the one place a post-hoc
+utilization breakdown can be computed.
 """
 
 from contextlib import contextmanager

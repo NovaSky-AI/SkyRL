@@ -1768,6 +1768,8 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     import asyncio
     import time
 
+    import numpy as np
+
     from skyrl.train.generators import utils as generator_utils
     from skyrl.train.generators.base import TrajectoryID
 
@@ -1876,3 +1878,17 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     # The split accounts for real time inside the trajectory and never exceeds its end-to-end time.
     for llm_t, env_t, e2e_t in zip(llm_times, env_times, generator_output["trajectory_generation_times"]):
         assert llm_t + env_t <= e2e_t + 1e-6
+
+    # Regression: every logging path (async trainer, eval, step-wise) re-aggregates through
+    # concatenate_generator_outputs. The split must be recomputed there from the raw per-trajectory
+    # lists; when it was not, p90 and frac fell into a substring sum() fallback that inflated p90 by
+    # ~num_groups and summed the fractions past 1.0. Concatenating identical groups leaves the
+    # per-trajectory distribution unchanged, so the aggregates must match the single-group values.
+    concatenated = generator_utils.concatenate_generator_outputs([generator_output, generator_output])
+    concat_metrics = concatenated["rollout_metrics"]
+    # Concatenating two groups doubles the sample, so p90 is the percentile of the combined raw
+    # list, not the single-group p90. The sum() fallback instead added the two group p90s, exceeding
+    # the sample max, and summed the fractions past 1.0.
+    assert 0.5 < concat_metrics["generate/frac_time_in_env"] < 1.0
+    assert concat_metrics["generate/trajectory_llm_time_p90"] == pytest.approx(np.percentile(llm_times * 2, 90).item())
+    assert concat_metrics["generate/trajectory_env_time_p90"] == pytest.approx(np.percentile(env_times * 2, 90).item())
