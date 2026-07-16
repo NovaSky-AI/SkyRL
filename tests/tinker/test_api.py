@@ -303,7 +303,9 @@ def test_delete_checkpoint(tmp_path):
             return checkpoints_base / training_run_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
 
         def listed_checkpoints():
-            return {ckpt.checkpoint_id: ckpt for ckpt in rest_client.list_checkpoints(training_run_id).result().checkpoints}
+            return {
+                ckpt.checkpoint_id: ckpt for ckpt in rest_client.list_checkpoints(training_run_id).result().checkpoints
+            }
 
         assert set(listed_checkpoints()) == {"ckpt0", "ckpt1", "ckpt2", "ckpt3", "sampler0"}
         for checkpoint_id in ["ckpt0", "ckpt1", "ckpt2", "ckpt3"]:

@@ -1483,7 +1483,10 @@ async def root():
             "telemetry": ["/api/v1/telemetry"],
             "checkpoints": [
                 "/api/v1/training_runs/{unique_id}/checkpoints",
-                "DELETE /api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}",
+                # Delete requires an explicit checkpoint type via the path prefix (or the
+                # checkpoint_type query param); a bare checkpoint_id is rejected with 400.
+                "DELETE /api/v1/training_runs/{unique_id}/checkpoints/weights/{checkpoint_id}",
+                "DELETE /api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}",
             ],
             "download": [
                 "/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive",
