@@ -112,11 +112,6 @@ def _load_curriculum_cls():
     return _load_example_cls("curriculum_sampler.py", "CurriculumLearningSampler")
 
 
-def _load_data_mixing_cls():
-    """Import the example DataMixingSampler by file path."""
-    return _load_example_cls("data_mixing_sampler.py", "DataMixingSampler")
-
-
 def _make_trainer(**overrides) -> SFTTrainer:
     """Build a bare SFTTrainer (no setup/Ray/GPU) for dataloader-building tests.
 
@@ -549,9 +544,6 @@ class TestDataMixingSampler:
     def test_num_samples_defaults_to_dataset_length(self):
         sampler = DataMixingSampler(self.DATA, lengths=self.LENGTHS, weights=[0.5, 0.5])
         assert len(sampler) == 20
-
-    def test_example_file_reexports_core_class(self):
-        assert _load_data_mixing_cls() is DataMixingSampler
 
     def test_validates_lengths_sum(self):
         with pytest.raises(ValueError, match="must equal len"):

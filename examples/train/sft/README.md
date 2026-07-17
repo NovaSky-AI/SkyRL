@@ -164,9 +164,8 @@ Three sampler strategies are built in:
 - `sampler=random` (default) — reshuffles every epoch using `seed`. The
   in-progress epoch resumes bit-exactly; later epochs are re-shuffled into a
   valid (but not byte-identical) order, matching the RL trainer's behavior.
-  With multiple `train_datasets` this strategy switches to the core
-  [`DataMixingSampler`](../../../skyrl/train/dataset/samplers.py) (weighted
-  per-source mixing, fresh plan each epoch, bit-exact resume via RNG state).
+  With multiple `train_datasets` this strategy switches to weighted per-source
+  mixing (see [Multi-dataset training](#multi-dataset-training-and-evaluation)).
 - `sampler=sequential` — iterates the dataset in order
   ([`StatefulSequentialSampler`](../../../skyrl/train/dataset/samplers.py)).
 - `sampler=custom` — loads your own stateful sampler from `sampler_class_path`,
@@ -213,8 +212,9 @@ bash examples/train/sft/run_sft_megatron.sh \
 ```
 
 Each dataset is tokenized (and cached) independently, then concatenated. With
-multiple datasets and the default `sampler=random`, batches are drawn by the
-core [`DataMixingSampler`](../../../skyrl/train/dataset/samplers.py):
+multiple datasets and the default `sampler=random`, batches are drawn with
+weighted per-source sampling (see
+[`samplers.py`](../../../skyrl/train/dataset/samplers.py)):
 `train_dataset_weights` gives the approximate per-batch ratio of samples from
 each source, **independent of the dataset sizes** (a 1k-example dataset with
 weight 0.5 contributes half of every batch even when mixed with a 1M-example
@@ -258,12 +258,6 @@ bash examples/train/sft/run_sft_megatron.sh \
 
 (Here the curriculum sampler treats the concatenated datasets as its
 difficulty-ordered stages via the injected `lengths`.)
-
-[`data_mixing_sampler.py`](data_mixing_sampler.py) now simply re-exports the
-core `DataMixingSampler`, so existing `sampler_class_path` configs pointing at
-it keep working. Behavior change vs. the old example: the core sampler
-re-plans every epoch instead of replaying one fixed plan (old position-only
-checkpoints resume best-effort with a warning).
 
 ## Limitations
 
