@@ -1,4 +1,5 @@
-"""Publishes the training loop's current macro-phase to Prometheus via ``ray.util.metrics``.
+"""Publishes training-loop state to Prometheus via ``ray.util.metrics``: the current macro-phase
+(``TrainingPhaseGauge``) and scalar loop levels such as buffer depth (``ScalarGauges``).
 
 Ray exports metrics recorded through ``ray.util.metrics`` to the same Prometheus that scrapes
 cluster-wide node metrics (GPU/CPU/disk), prefixing them with ``ray_``. Emitting the training-loop
@@ -15,6 +16,7 @@ utilization breakdown can be computed.
 """
 
 from contextlib import contextmanager
+from typing import Dict, Optional
 
 from loguru import logger
 
@@ -78,3 +80,32 @@ class TrainingPhaseGauge:
             yield
         finally:
             self.set_phase(prev)
+
+
+class ScalarGauges:
+    """Best-effort scalar gauges published to Prometheus via ``ray.util.metrics``.
+
+    Lazily creates a gauge the first time a name is ``set`` (Ray exports it as ``ray_<name>``) and
+    updates its value on each call. Like ``TrainingPhaseGauge`` this no-ops when Ray metrics are
+    unavailable, so it is safe to construct and call without Ray (including in unit tests).
+    """
+
+    def __init__(self, descriptions: Optional[Dict[str, str]] = None) -> None:
+        self._descriptions = descriptions or {}
+        self._gauges: Dict[str, object] = {}
+        self._enabled = True
+
+    def set(self, name: str, value: float) -> None:
+        if not self._enabled:
+            return
+        try:
+            gauge = self._gauges.get(name)
+            if gauge is None:
+                from ray.util.metrics import Gauge
+
+                gauge = Gauge(name, description=self._descriptions.get(name, name))
+                self._gauges[name] = gauge
+            gauge.set(float(value))
+        except Exception as e:
+            logger.warning(f"ScalarGauges disabled ({e}); scalar training metrics will not be published.")
+            self._enabled = False
