@@ -204,14 +204,9 @@ def _validate_loss_mask(row: dict, row_idx: int, seq_len: int) -> list[int]:
     """Validate a row's full-sequence ``loss_mask`` and return it as ints."""
     loss_mask = row.get("loss_mask")
     if loss_mask is None:
-        hint = ""
-        if row.get("labels") is not None:
-            hint = " Found a 'labels' column: convert it offline (loss_mask[i] = 0 if labels[i] == -100 else 1)."
-        if row.get("num_actions") is not None:
-            hint = " Found a 'num_actions' column: store a full-sequence loss_mask instead; num_actions is inferred."
         raise ValueError(
             f"Row {row_idx}: missing required 'loss_mask' column (full-sequence 0/1 mask, "
-            f"same length as input_ids).{hint}"
+            f"same length as input_ids)."
         )
     loss_mask = [int(v) for v in loss_mask]
     if len(loss_mask) != seq_len:
