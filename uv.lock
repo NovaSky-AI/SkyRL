@@ -47,7 +47,7 @@ overrides = [
     { name = "flashinfer-cubin", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==0.6.12" },
     { name = "flashinfer-jit-cache", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==0.6.12", index = "https://flashinfer.ai/whl/cu128" },
     { name = "flashinfer-python", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==0.6.12" },
-    { name = "megatron-core", marker = "python_full_version >= '3.12' and sys_platform == 'linux'", git = "https://github.com/NVIDIA/Megatron-LM?rev=71e418ea7d7b3a6c9a53238c543c3e0b43e11026" },
+    { name = "megatron-core", marker = "python_full_version >= '3.12' and sys_platform == 'linux'", git = "https://github.com/NVIDIA/Megatron-LM?rev=0823c731ed7d793aef047b6a64f2dbbf32bf6e2c" },
     { name = "ml-dtypes", marker = "sys_platform == 'linux'", specifier = ">=0.5.0" },
     { name = "nixl-cu13", marker = "sys_platform == 'never'" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
@@ -3143,34 +3143,6 @@ wheels = [
 ]
 
 [[package]]
-name = "imageio"
-version = "2.37.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.12.*' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.13' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (python_full_version < '3.13' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (python_full_version < '3.13' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (python_full_version < '3.13' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (python_full_version < '3.13' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
-    { name = "pillow", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b1/84/93bcd1300216ea50811cee96873b84a1bebf8d0489ffaf7f2a3756bab866/imageio-2.37.3.tar.gz", hash = "sha256:bbb37efbfc4c400fcd534b367b91fcd66d5da639aaa138034431a1c5e0a41451", size = 389673, upload-time = "2026-03-09T11:31:12.573Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/49/fa/391e437a34e55095173dca5f24070d89cbc233ff85bf1c29c93248c6588d/imageio-2.37.3-py3-none-any.whl", hash = "sha256:46f5bb8522cd421c0f5ae104d8268f569d856b29eb1a13b92829d1970f32c9f0", size = 317646, upload-time = "2026-03-09T11:31:10.771Z" },
-]
-
-[[package]]
-name = "imageio-ffmpeg"
-version = "0.6.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/44/bd/c3343c721f2a1b0c9fc71c1aebf1966a3b7f08c2eea8ed5437a2865611d6/imageio_ffmpeg-0.6.0.tar.gz", hash = "sha256:e2556bed8e005564a9f925bb7afa4002d82770d6b08825078b7697ab88ba1755", size = 25210, upload-time = "2025-01-16T21:34:32.747Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/58/87ef68ac83f4c7690961bce288fd8e382bc5f1513860fc7f90a9c1c1c6bf/imageio_ffmpeg-0.6.0-py3-none-macosx_10_9_intel.macosx_10_9_x86_64.whl", hash = "sha256:9d2baaf867088508d4a3458e61eeb30e945c4ad8016025545f66c4b5aaef0a61", size = 24932969, upload-time = "2025-01-16T21:34:20.464Z" },
-    { url = "https://files.pythonhosted.org/packages/40/5c/f3d8a657d362cc93b81aab8feda487317da5b5d31c0e1fdfd5e986e55d17/imageio_ffmpeg-0.6.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b1ae3173414b5fc5f538a726c4e48ea97edc0d2cdc11f103afee655c463fa742", size = 21113891, upload-time = "2025-01-16T21:34:00.277Z" },
-    { url = "https://files.pythonhosted.org/packages/33/e7/1925bfbc563c39c1d2e82501d8372734a5c725e53ac3b31b4c2d081e895b/imageio_ffmpeg-0.6.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:1d47bebd83d2c5fc770720d211855f208af8a596c82d17730aa51e815cdee6dc", size = 25632706, upload-time = "2025-01-16T21:33:53.475Z" },
-    { url = "https://files.pythonhosted.org/packages/a0/2d/43c8522a2038e9d0e7dbdf3a61195ecc31ca576fb1527a528c877e87d973/imageio_ffmpeg-0.6.0-py3-none-manylinux2014_x86_64.whl", hash = "sha256:c7e46fcec401dd990405049d2e2f475e2b397779df2519b544b8aab515195282", size = 29498237, upload-time = "2025-01-16T21:34:13.726Z" },
-    { url = "https://files.pythonhosted.org/packages/a0/13/59da54728351883c3c1d9fca1710ab8eee82c7beba585df8f25ca925f08f/imageio_ffmpeg-0.6.0-py3-none-win32.whl", hash = "sha256:196faa79366b4a82f95c0f4053191d2013f4714a715780f0ad2a68ff37483cc2", size = 19652251, upload-time = "2025-01-16T21:34:06.812Z" },
-    { url = "https://files.pythonhosted.org/packages/2c/c6/fa760e12a2483469e2bf5058c5faff664acf66cadb4df2ad6205b016a73d/imageio_ffmpeg-0.6.0-py3-none-win_amd64.whl", hash = "sha256:02fa47c83703c37df6bfe4896aab339013f62bf02c5ebf2dce6da56af04ffc0a", size = 31246824, upload-time = "2025-01-16T21:34:28.6Z" },
-]
-
-[[package]]
 name = "importlib-metadata"
 version = "8.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4030,8 +4002,8 @@ wheels = [
 
 [[package]]
 name = "megatron-bridge"
-version = "0.6.0+91a15142"
-source = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge?rev=91a15142a4b4442a8d46ab539d1b923bd08570d0#91a15142a4b4442a8d46ab539d1b923bd08570d0" }
+version = "0.6.0+b7b4e11b"
+source = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge?rev=b7b4e11b054e73fa3cfc52e5df14cd6b4d50e02e#b7b4e11b054e73fa3cfc52e5df14cd6b4d50e02e" }
 dependencies = [
     { name = "accelerate", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
     { name = "comet-ml", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
@@ -4042,8 +4014,6 @@ dependencies = [
     { name = "flashinfer-cubin", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "flashinfer-python", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "hydra-core", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
-    { name = "imageio", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
-    { name = "imageio-ffmpeg", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
     { name = "megatron-core", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
     { name = "mistral-common", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
     { name = "mlflow", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
@@ -4066,8 +4036,8 @@ dependencies = [
 
 [[package]]
 name = "megatron-core"
-version = "0.19.0+71e418ea7"
-source = { git = "https://github.com/NVIDIA/Megatron-LM?rev=71e418ea7d7b3a6c9a53238c543c3e0b43e11026#71e418ea7d7b3a6c9a53238c543c3e0b43e11026" }
+version = "0.19.0+0823c731e"
+source = { git = "https://github.com/NVIDIA/Megatron-LM?rev=0823c731ed7d793aef047b6a64f2dbbf32bf6e2c#0823c731ed7d793aef047b6a64f2dbbf32bf6e2c" }
 dependencies = [
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.12.*' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (python_full_version != '3.12.*' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.13' and sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (python_full_version < '3.13' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (python_full_version < '3.13' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (python_full_version < '3.13' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (python_full_version < '3.13' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
@@ -8596,8 +8566,8 @@ requires-dist = [
     { name = "loguru", marker = "extra == 'skyrl-train'" },
     { name = "mamba-ssm", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl" },
     { name = "mamba-ssm", marker = "(python_full_version != '3.12.*' and sys_platform == 'linux' and extra == 'megatron') or (platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'megatron')", specifier = ">=2.3.0" },
-    { name = "megatron-bridge", marker = "python_full_version >= '3.12' and sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge?rev=91a15142a4b4442a8d46ab539d1b923bd08570d0" },
-    { name = "megatron-core", marker = "python_full_version >= '3.12' and sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/NVIDIA/Megatron-LM?rev=71e418ea7d7b3a6c9a53238c543c3e0b43e11026" },
+    { name = "megatron-bridge", marker = "python_full_version >= '3.12' and sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge?rev=b7b4e11b054e73fa3cfc52e5df14cd6b4d50e02e" },
+    { name = "megatron-core", marker = "python_full_version >= '3.12' and sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/NVIDIA/Megatron-LM?rev=0823c731ed7d793aef047b6a64f2dbbf32bf6e2c" },
     { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.12.0" },
     { name = "mkdocs", marker = "extra == 'dev'" },
     { name = "mkdocs-material", marker = "extra == 'dev'" },
@@ -8670,7 +8640,7 @@ provides-extras = ["gpu", "tpu", "tinker", "ray", "aws", "gcp", "azure", "jax", 
 
 [[package]]
 name = "skyrl-gym"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "skyrl-gym" }
 dependencies = [
     { name = "func-timeout" },

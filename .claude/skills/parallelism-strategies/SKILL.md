@@ -7,7 +7,7 @@ description: Operational guide for choosing and combining parallelism strategies
 
 > **Source.** Adapted from NVIDIA Megatron-Bridge docs:
 > `https://docs.nvidia.com/nemo/megatron-bridge/latest/skills/perf-techniques/parallelism-strategies/SKILL.html`
-> Re-fetch from upstream when bumping the `megatron-bridge` pin in `pyproject.toml`.
+> Refreshed from Megatron-Bridge `b7b4e11b`.
 >
 > **SkyRL adaptation.** Upstream uses `cfg.model.<field>`. In SkyRL these are surfaced through `MegatronConfig` (`skyrl/train/config.py`) and set on the CLI as e.g. `trainer.megatron.tensor_model_parallel_size=...` for SFT and `trainer.policy.megatron_config.` for RL. Field names are otherwise identical.
 >
@@ -124,7 +124,21 @@ DP size is always implicit:
 
 ```
 data_parallel_size = world_size / (TP * PP * CP)
+expert_data_parallel_size = world_size / (PP * EP * ETP)
 ```
+
+## Minimum GPU Count
+
+The dense `TP * CP` group and expert `EP * ETP` group share the GPUs in each pipeline
+stage. Only pipeline stages use separate GPU sets:
+
+```
+minimum_gpus = PP * max(TP * CP, EP * ETP)
+```
+
+Do not multiply all five sizes together. For example, PP=1, TP=2, CP=1, EP=8,
+ETP=1 needs 8 GPUs, not 16. Extra GPUs increase dense data parallelism and expert data
+parallelism.
 
 ## Memory Estimation
 
@@ -187,3 +201,5 @@ parallel_state.initialize_model_parallel(
 5. **EP is only for MoE models.** Setting `expert_model_parallel_size` on a dense model is a no-op or error.
 6. The model-size-to-parallelism table is a starting heuristic. Always profile the first iteration to check memory and communication.
 7. `CUDA_DEVICE_MAX_CONNECTIONS` and related env vars interact with overlap settings.
+8. For MoE models, minimum GPUs are `PP * max(TP * CP, EP * ETP)`, not the product of
+   every parallelism size.
