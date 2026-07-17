@@ -3,7 +3,10 @@ import gc
 import json
 import os
 import random
+import shutil
+import tempfile
 from collections import defaultdict
+from contextlib import contextmanager
 from typing import List, Optional, Union
 
 import numpy as np
@@ -572,7 +575,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 4: Save on rank 0 only
         if self.is_rank_0():
-            with io.local_work_dir(output_dir) as work_dir:
+            with self._atomic_local_export_dir(output_dir) as work_dir:
                 # Save the model in HuggingFace format using safetensors
                 model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
 
@@ -597,3 +600,31 @@ class FSDPStrategy(DistributedStrategy):
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 
         dist.barrier()
+
+    @contextmanager
+    def _atomic_local_export_dir(self, output_dir: str):
+        """Rank-0 HF export dir that appears at ``output_dir`` only once complete.
+
+        HF ``save_pretrained`` writes ``config.json`` before the safetensors
+        shards, so an in-place write lets a reader that polls for ``config.json``
+        (e.g. an eval watcher) pick up a half-written export. For local paths,
+        stage in a sibling temp dir and atomically swap it in. Cloud paths already
+        stage-then-upload via ``io.local_work_dir``.
+        """
+        if io.is_cloud_path(output_dir):
+            with io.local_work_dir(output_dir) as work_dir:
+                yield work_dir
+            return
+
+        parent = os.path.dirname(os.path.abspath(output_dir)) or "."
+        io.makedirs(parent, exist_ok=True)
+        staging_dir = tempfile.mkdtemp(prefix=".tmp-hf-export-", dir=parent)
+        try:
+            yield staging_dir
+            # os.replace can't overwrite a non-empty dir, so clear a prior export first.
+            shutil.rmtree(output_dir, ignore_errors=True)
+            os.replace(staging_dir, output_dir)
+            staging_dir = None
+        finally:
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
