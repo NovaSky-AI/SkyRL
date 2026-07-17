@@ -921,6 +921,8 @@ class TrainerConfig(BaseConfig):
     logger: str = "wandb"
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    enable_training_phase_gauge: bool = True
+    """Publish the fully async training loop's macro-phase to Prometheus via ray.util.metrics."""
     tags: Optional[List[str]] = None
     """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False

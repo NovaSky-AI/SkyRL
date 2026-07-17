@@ -4,85 +4,95 @@ uv run --isolated --extra dev --extra skyrl-train pytest tests/train/utils/test_
 
 from unittest.mock import MagicMock, patch
 
-from skyrl.train.utils.phase_metrics import PHASES, TrainingPhaseGauge
+from skyrl.train.utils.phase_metrics import PHASES, ScalarGauges, TrainingPhaseGauge
 
 
 def _make_gauge():
-    """Build a TrainingPhaseGauge backed by a mock ray Gauge; return (obj, mock_gauge)."""
+    """Build a TrainingPhaseGauge over a mock ray Gauge; return (obj, {phase: latest value})."""
+    values = {}
     mock_gauge = MagicMock()
+    mock_gauge.set.side_effect = lambda v, tags: values.__setitem__(tags["phase"], v)
     with patch("ray.util.metrics.Gauge", return_value=mock_gauge):
         obj = TrainingPhaseGauge()
-    return obj, mock_gauge
+    return obj, values
 
 
-def _active_phase(mock_gauge):
-    """Return the single phase set to 1.0 in the most recent full emit (len(PHASES) set calls)."""
-    last = mock_gauge.set.call_args_list[-len(PHASES) :]
-    active = [c.kwargs["tags"]["phase"] for c in last if c.args[0] == 1.0]
+def _active_phase(values):
+    # every phase series exists (seeded at construction) and exactly one is 1.0
+    assert set(values) == set(PHASES)
+    active = [p for p, v in values.items() if v == 1.0]
     assert len(active) == 1, f"expected exactly one active phase, got {active}"
-    # every phase must be written each emit (so stale phases are cleared to 0.0)
-    written = {c.kwargs["tags"]["phase"] for c in last}
-    assert written == set(PHASES)
     return active[0]
 
 
 def test_construction_defaults_to_generating():
-    _, g = _make_gauge()
-    assert _active_phase(g) == "generating"
+    _, values = _make_gauge()
+    assert _active_phase(values) == "generating"
 
 
 def test_set_phase_marks_exactly_one_active():
-    obj, g = _make_gauge()
-    obj.set_phase("training")
-    assert _active_phase(g) == "training"
+    obj, values = _make_gauge()
+    obj.set_phase("run_training")
+    assert _active_phase(values) == "run_training"
     obj.set_phase("eval")
-    assert _active_phase(g) == "eval"
+    assert _active_phase(values) == "eval"
 
 
 def test_phase_context_manager_restores_prior_phase():
-    obj, g = _make_gauge()
-    obj.set_phase("training")
-    with obj.phase("checkpoint"):
-        assert _active_phase(g) == "checkpoint"
+    obj, values = _make_gauge()
+    obj.set_phase("run_training")
+    with obj.phase("save_checkpoints"):
+        assert _active_phase(values) == "save_checkpoints"
     # restored to whatever was active before the block, not hard-coded to a default
-    assert _active_phase(g) == "training"
+    assert _active_phase(values) == "run_training"
+
+
+def test_unknown_phase_is_rejected():
+    obj, values = _make_gauge()
+    obj.set_phase("run_training")
+    obj.set_phase("bogus_phase")
+    assert _active_phase(values) == "run_training"
 
 
 def test_disabled_when_ray_metrics_unavailable():
-    # Gauge construction raising (e.g. Ray not initialized) must degrade to a silent no-op,
-    # never propagate, so training is never broken by observability.
+    # Gauge() raising must not propagate
     with patch("ray.util.metrics.Gauge", side_effect=RuntimeError("ray not initialized")):
         obj = TrainingPhaseGauge()
-    # all calls are safe no-ops
-    obj.set_phase("training")
+    obj.set_phase("run_training")
+    with obj.phase("eval"):
+        pass
+
+
+def test_disabled_by_flag_constructs_no_gauge():
+    with patch("ray.util.metrics.Gauge") as gauge_cls:
+        obj = TrainingPhaseGauge(enabled=False)
+    gauge_cls.assert_not_called()
+    obj.set_phase("run_training")
     with obj.phase("eval"):
         pass
 
 
 def test_scalar_gauges_create_once_and_update():
-    from skyrl.train.utils.phase_metrics import ScalarGauges
-
     created = {}
 
     def fake_gauge(name, description=None):
-        created[name] = MagicMock()
+        created[name] = MagicMock(description=description)
         return created[name]
 
     with patch("ray.util.metrics.Gauge", side_effect=fake_gauge):
         g = ScalarGauges()
-        g.set("skyrl_gen_buffer_qsize", 3)
+        g.set("skyrl_gen_buffer_qsize", 3, "queued groups")
         g.set("skyrl_gen_buffer_qsize", 5)
         g.set("skyrl_mini_batch_size", 8)
 
-    # A gauge is created once per name and reused, and values are coerced to float.
+    # A gauge is created once per name with its first description, and values are coerced to float.
     assert set(created) == {"skyrl_gen_buffer_qsize", "skyrl_mini_batch_size"}
+    assert created["skyrl_gen_buffer_qsize"].description == "queued groups"
     created["skyrl_gen_buffer_qsize"].set.assert_called_with(5.0)
     created["skyrl_mini_batch_size"].set.assert_called_with(8.0)
 
 
 def test_scalar_gauges_disabled_when_ray_metrics_unavailable():
-    from skyrl.train.utils.phase_metrics import ScalarGauges
-
     with patch("ray.util.metrics.Gauge", side_effect=RuntimeError("ray not initialized")):
         g = ScalarGauges()
         g.set("skyrl_gen_buffer_qsize", 1)  # must not raise

@@ -1,18 +1,10 @@
 """Publishes training-loop state to Prometheus via ``ray.util.metrics``: the current macro-phase
 (``TrainingPhaseGauge``) and scalar loop levels such as buffer depth (``ScalarGauges``).
 
-Ray exports metrics recorded through ``ray.util.metrics`` to the same Prometheus that scrapes
-cluster-wide node metrics (GPU/CPU/disk), prefixing them with ``ray_``. Emitting the training-loop
-phase there puts "what was the loop doing" on the same store and time base as "how busy were the
-GPUs", so the two can be overlaid without correlating a separate experiment tracker by wall-clock.
-``ray_skyrl_training_phase{phase="eval"} == 1`` selects the eval windows, and node GPU utilization
-during a phase follows from a vector match against that selector, for example:
+Ray exports these to the same Prometheus that scrapes node GPU metrics, under the ``ray_`` prefix,
+so loop phase joins GPU utilization on one wall-clock axis and survives a cluster restart, e.g.
 
     avg(ray_node_gpus_utilization) and on() (ray_skyrl_training_phase{phase="eval"} == 1)
-
-This is deliberately a Prometheus gauge rather than a tracker/W&B scalar: Prometheus is the store
-that has cluster-wide GPU data and survives a cluster restart, so it is the one place a post-hoc
-utilization breakdown can be computed.
 """
 
 from contextlib import contextmanager
@@ -20,30 +12,32 @@ from typing import Dict, Optional
 
 from loguru import logger
 
-# Macro-phases of one async training step, plus the default "generating" state between blocks (the
-# trainer is not blocking, so generation and staleness control proceed in the background).
+# Macro-phases of one async training step. Names match the paired Timer keys so the wandb timing/*
+# keys and the Prometheus phase label share one vocabulary. "generating" is the default between
+# blocks, when the trainer is not blocking and generation proceeds in the background.
 PHASES = (
     "generating",
-    "waiting_for_buffer",
-    "converting",
-    "training",
-    "weight_sync",
+    "wait_for_generation_buffer",
+    "convert_to_training_input",
+    "run_training",
+    "sync_weights",
     "eval",
-    "checkpoint",
+    "save_checkpoints",
 )
 
 
 class TrainingPhaseGauge:
-    """Sets a ``skyrl_training_phase`` gauge to 1.0 for the active phase and 0.0 for the rest.
+    """Sets ``skyrl_training_phase{phase=...}`` to 1.0 for the active phase and 0.0 for the rest.
 
-    Exactly one phase is 1.0 at any time, so ``ray_skyrl_training_phase{phase="eval"} == 1`` marks the
-    eval windows on the Prometheus timeline. Best-effort: if Ray metrics are unavailable the object
-    silently no-ops, so it is always safe to construct and call (including in unit tests without Ray).
+    Best-effort: silently no-ops when disabled or Ray metrics are unavailable, so it is always safe
+    to construct and call.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, enabled: bool = True) -> None:
         self._gauge = None
         self._current = "generating"
+        if not enabled:
+            return
         try:
             from ray.util.metrics import Gauge
 
@@ -52,24 +46,25 @@ class TrainingPhaseGauge:
                 description="1.0 for the active training-loop macro-phase, 0.0 otherwise.",
                 tag_keys=("phase",),
             )
-            self._emit("generating")
+            # Seed every series once so PromQL selectors never hit a missing series.
+            for phase in PHASES:
+                self._gauge.set(1.0 if phase == self._current else 0.0, tags={"phase": phase})
         except Exception as e:
             logger.warning(f"TrainingPhaseGauge disabled ({e}); the training-phase metric will not be published.")
             self._gauge = None
 
-    def _emit(self, active: str) -> None:
-        if self._gauge is None:
+    def set_phase(self, name: str) -> None:
+        if name not in PHASES:
+            logger.warning(f"TrainingPhaseGauge: unknown phase {name!r}; keeping {self._current!r}.")
+            return
+        prev, self._current = self._current, name
+        if self._gauge is None or prev == name:
             return
         try:
-            for phase in PHASES:
-                self._gauge.set(1.0 if phase == active else 0.0, tags={"phase": phase})
+            self._gauge.set(0.0, tags={"phase": prev})
+            self._gauge.set(1.0, tags={"phase": name})
         except Exception:
-            # Observability must never break training.
             pass
-
-    def set_phase(self, name: str) -> None:
-        self._current = name
-        self._emit(name)
 
     @contextmanager
     def phase(self, name: str):
@@ -85,17 +80,16 @@ class TrainingPhaseGauge:
 class ScalarGauges:
     """Best-effort scalar gauges published to Prometheus via ``ray.util.metrics``.
 
-    Lazily creates a gauge the first time a name is ``set`` (Ray exports it as ``ray_<name>``) and
-    updates its value on each call. Like ``TrainingPhaseGauge`` this no-ops when Ray metrics are
-    unavailable, so it is safe to construct and call without Ray (including in unit tests).
+    Lazily creates a gauge per name on first ``set`` (Ray exports it as ``ray_<name>``) and updates
+    it on each call. Like ``TrainingPhaseGauge`` this no-ops when Ray metrics are unavailable.
     """
 
-    def __init__(self, descriptions: Optional[Dict[str, str]] = None) -> None:
-        self._descriptions = descriptions or {}
+    def __init__(self) -> None:
         self._gauges: Dict[str, object] = {}
         self._enabled = True
 
-    def set(self, name: str, value: float) -> None:
+    def set(self, name: str, value: float, description: Optional[str] = None) -> None:
+        """Set gauge ``name``; ``description`` is used only when the gauge is first created."""
         if not self._enabled:
             return
         try:
@@ -103,7 +97,7 @@ class ScalarGauges:
             if gauge is None:
                 from ray.util.metrics import Gauge
 
-                gauge = Gauge(name, description=self._descriptions.get(name, name))
+                gauge = Gauge(name, description=description or name)
                 self._gauges[name] = gauge
             gauge.set(float(value))
         except Exception as e:
