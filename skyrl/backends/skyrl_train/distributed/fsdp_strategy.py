@@ -605,11 +605,9 @@ class FSDPStrategy(DistributedStrategy):
     def _atomic_local_export_dir(self, output_dir: str):
         """Rank-0 HF export dir that appears at ``output_dir`` only once complete.
 
-        HF ``save_pretrained`` writes ``config.json`` before the safetensors
-        shards, so an in-place write lets a reader that polls for ``config.json``
-        (e.g. an eval watcher) pick up a half-written export. For local paths,
-        stage in a sibling temp dir and atomically swap it in. Cloud paths already
-        stage-then-upload via ``io.local_work_dir``.
+         Atomic write to the local export path provides a consistent way to signal export
+         finish. Ex: An asynchronous watcher can watch for ``config.json`` file to populate
+         in the export directory. 
         """
         if io.is_cloud_path(output_dir):
             with io.local_work_dir(output_dir) as work_dir:
