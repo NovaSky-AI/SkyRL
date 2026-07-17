@@ -56,11 +56,9 @@ class TrajectoryOutput:
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
-    # Wall-clock time (seconds) this trajectory spent awaiting the inference engine, summed over
-    # turns. Optional: agent loops may leave this as None if they do not track timing.
+    # Wall-clock time (seconds) awaiting the inference engine, summed over turns. None if untracked.
     llm_time: Optional[float] = None
-    # Wall-clock time (seconds) this trajectory spent in ``env.step()``, summed over turns.
-    # Optional: agent loops may leave this as None if they do not track timing.
+    # Wall-clock time (seconds) in ``env.step()``, summed over turns. None if untracked.
     env_time: Optional[float] = None
 
 
@@ -72,11 +70,8 @@ class StepWiseOutput:
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
-    # Wall-clock time (seconds) this trajectory spent awaiting the inference engine, summed over
-    # turns. Optional: agent loops may leave this as None if they do not track timing.
+    # Same split as TrajectoryOutput.llm_time / env_time.
     llm_time: Optional[float] = None
-    # Wall-clock time (seconds) this trajectory spent in ``env.step()``, summed over turns.
-    # Optional: agent loops may leave this as None if they do not track timing.
     env_time: Optional[float] = None
 
 
@@ -150,6 +145,12 @@ class TurnOutput:
         if not self.output_logprobs:
             return None
         return self.output_logprobs + [0.0] * len(self.obs_ids)
+
+
+def _optional_times(outputs, attr: str) -> Optional[List[float]]:
+    """One value per trajectory, or None if any trajectory did not record ``attr``."""
+    values = [getattr(o, attr, None) for o in outputs]
+    return None if any(v is None for v in values) else values
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -333,9 +334,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs: Optional[List[float]]
         """
         agent_loop_start_time = time.monotonic()
-        # Wall-clock split of the trajectory: time awaiting the inference engine vs. time in
-        # ``env.step()``, accumulated across turns. The two need not sum to ``e2e_time``. The
-        # remainder is tokenization, chat-template rendering and other in-loop bookkeeping.
+        # Engine wait vs. env.step() time, accumulated across turns. The gap to e2e_time is
+        # tokenization, chat templating, and event-loop scheduling.
         llm_time_s = 0.0
         env_time_s = 0.0
 
@@ -891,20 +891,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             disable=disable_tqdm,
         )
         # Per-trajectory end-to-end generation times (one entry per prompt, preserving input order).
-        # ``e2e_time`` is optional for agent loops; if any trajectory did not record it, we omit the
-        # field entirely rather than emit a partially-populated list.
-        trajectory_generation_times_per_prompt = [getattr(output, "e2e_time", None) for output in all_outputs]
-        if any(t is None for t in trajectory_generation_times_per_prompt):
-            trajectory_generation_times_per_prompt = None
-
-        # Per-trajectory split of that end-to-end time into inference-engine wait vs. environment
-        # execution. Handled like ``e2e_time``: omitted entirely if any trajectory did not record it.
-        trajectory_llm_times_per_prompt = [getattr(output, "llm_time", None) for output in all_outputs]
-        if any(t is None for t in trajectory_llm_times_per_prompt):
-            trajectory_llm_times_per_prompt = None
-        trajectory_env_times_per_prompt = [getattr(output, "env_time", None) for output in all_outputs]
-        if any(t is None for t in trajectory_env_times_per_prompt):
-            trajectory_env_times_per_prompt = None
+        trajectory_generation_times_per_prompt = _optional_times(all_outputs, "e2e_time")
+        trajectory_llm_times_per_prompt = _optional_times(all_outputs, "llm_time")
+        trajectory_env_times_per_prompt = _optional_times(all_outputs, "env_time")
 
         if self.generator_cfg.step_wise_trajectories:
             responses = []

@@ -1752,19 +1752,20 @@ async def test_step_wise_trajectory_completion_time_metrics(mock_make, mock_toke
     )
     assert rollout_metrics["generate/trajectory_completion_time_max"] == pytest.approx(np.max(expected).item())
 
+    # The llm/env split is stored per step and replicated like the completion times above.
+    for key in ("trajectory_llm_times", "trajectory_env_times"):
+        split_times = generator_output[key]
+        assert split_times is not None
+        assert len(split_times) == num_steps
+        assert split_times[0] == split_times[1] and split_times[2] == split_times[3]
+
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
-    """The rollout time split attributes engine wait and ``env.step()`` time separately.
-
-    A trajectory's wall-clock time is split between awaiting the inference engine and executing
-    the environment. Only the total was previously recorded (``trajectory_completion_time_*``),
-    which cannot distinguish an engine-bound rollout from an environment-bound one.
-
-    Uses an environment that is deliberately slower than the engine, so a split that mixed the two
-    up (or attributed everything to one side) fails.
-    """
+    """Only the total rollout time was previously recorded, which cannot distinguish an engine-bound
+    rollout from an environment-bound one. Uses an env deliberately slower than the engine, so a
+    swapped or one-sided attribution fails."""
     import asyncio
     import time
 
@@ -1817,9 +1818,8 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
 
     mock_make.side_effect = lambda *args, **kwargs: SlowEnv()
 
-    # Run env steps on the executor (as in production, where ``max_env_workers`` defaults to 32).
-    # With inline execution a blocking ``env.step`` stalls the shared event loop, so a sibling
-    # trajectory's ``await generate()`` would absorb that stall and inflate its measured LLM time.
+    # Run env.step on the executor as in production; a blocking step inline would stall the event
+    # loop and inflate a sibling trajectory's measured LLM time.
     mock_env_cfg.max_env_workers = 4
 
     cfg = GeneratorConfig()
@@ -1879,16 +1879,10 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     for llm_t, env_t, e2e_t in zip(llm_times, env_times, generator_output["trajectory_generation_times"]):
         assert llm_t + env_t <= e2e_t + 1e-6
 
-    # Regression: every logging path (async trainer, eval, step-wise) re-aggregates through
-    # concatenate_generator_outputs. The split must be recomputed there from the raw per-trajectory
-    # lists; when it was not, p90 and frac fell into a substring sum() fallback that inflated p90 by
-    # ~num_groups and summed the fractions past 1.0. Concatenating identical groups leaves the
-    # per-trajectory distribution unchanged, so the aggregates must match the single-group values.
+    # Regression: concatenate_generator_outputs (every logging path) must recompute the split from
+    # the raw per-trajectory lists, not sum per-group p90/frac past the sample max and 1.0.
     concatenated = generator_utils.concatenate_generator_outputs([generator_output, generator_output])
     concat_metrics = concatenated["rollout_metrics"]
-    # Concatenating two groups doubles the sample, so p90 is the percentile of the combined raw
-    # list, not the single-group p90. The sum() fallback instead added the two group p90s, exceeding
-    # the sample max, and summed the fractions past 1.0.
     assert 0.5 < concat_metrics["generate/frac_time_in_env"] < 1.0
     assert concat_metrics["generate/trajectory_llm_time_p90"] == pytest.approx(np.percentile(llm_times * 2, 90).item())
     assert concat_metrics["generate/trajectory_env_time_p90"] == pytest.approx(np.percentile(env_times * 2, 90).item())

@@ -278,12 +278,8 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "response_ids": _flatten_field(generator_outputs, "response_ids"),
         "rewards": _flatten_field(generator_outputs, "rewards"),
         "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
-        "stop_reasons": (
-            _flatten_field(generator_outputs, "stop_reasons") if first.get("stop_reasons") is not None else None
-        ),
-        "rollout_logprobs": (
-            _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
-        ),
+        "stop_reasons": _concat_field(generator_outputs, "stop_reasons"),
+        "rollout_logprobs": _concat_field(generator_outputs, "rollout_logprobs"),
         "trajectory_generation_times": _concat_field(generator_outputs, "trajectory_generation_times"),
         "trajectory_llm_times": _concat_field(generator_outputs, "trajectory_llm_times"),
         "trajectory_env_times": _concat_field(generator_outputs, "trajectory_env_times"),
@@ -302,8 +298,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
     trajectory_llm_times = _last_step_only(result.get("trajectory_llm_times"), is_last_step)
     trajectory_env_times = _last_step_only(result.get("trajectory_env_times"), is_last_step)
 
-    # Re-aggregate rollout metrics. The time splits must be recomputed here from the raw per-
-    # trajectory lists; the extra_keys fallback below cannot aggregate a p90 or a ratio correctly.
+    # Re-aggregate rollout metrics; the extra_keys fallback below cannot aggregate a p90 or a ratio.
     rollout_metrics = get_rollout_metrics(
         result["response_ids"],
         result["rewards"],
@@ -391,6 +386,21 @@ def compute_turn_token_counts(loss_masks: List[List[int]]) -> List[int]:
     return turn_token_counts
 
 
+def _add_time_stats(rollout_metrics: Dict[str, Any], name: str, times: Optional[List[float]]) -> Optional[float]:
+    """Add mean/p90/max for a per-trajectory time list; returns its sum, or None if absent."""
+    if not times:
+        return None
+    arr = np.array(times, dtype=np.float64)
+    rollout_metrics.update(
+        {
+            f"generate/trajectory_{name}_time_mean": np.mean(arr).item(),
+            f"generate/trajectory_{name}_time_p90": np.percentile(arr, 90).item(),
+            f"generate/trajectory_{name}_time_max": np.max(arr).item(),
+        }
+    )
+    return np.sum(arr).item()
+
+
 def get_rollout_metrics(
     responses: List[List[int]],
     rewards: Union[List[float], List[List[float]]],
@@ -470,44 +480,14 @@ def get_rollout_metrics(
                 }
             )
 
-    if trajectory_completion_times:
-        completion_times_arr = np.array(trajectory_completion_times, dtype=np.float64)
-        rollout_metrics.update(
-            {
-                "generate/trajectory_completion_time_mean": np.mean(completion_times_arr).item(),
-                "generate/trajectory_completion_time_p90": np.percentile(completion_times_arr, 90).item(),
-                "generate/trajectory_completion_time_max": np.max(completion_times_arr).item(),
-            }
-        )
+    _add_time_stats(rollout_metrics, "completion", trajectory_completion_times)
+    llm_sum = _add_time_stats(rollout_metrics, "llm", trajectory_llm_times)
+    env_sum = _add_time_stats(rollout_metrics, "env", trajectory_env_times)
 
-    llm_times_arr = np.array(trajectory_llm_times, dtype=np.float64) if trajectory_llm_times else None
-    env_times_arr = np.array(trajectory_env_times, dtype=np.float64) if trajectory_env_times else None
-
-    if llm_times_arr is not None:
-        rollout_metrics.update(
-            {
-                "generate/trajectory_llm_time_mean": np.mean(llm_times_arr).item(),
-                "generate/trajectory_llm_time_p90": np.percentile(llm_times_arr, 90).item(),
-                "generate/trajectory_llm_time_max": np.max(llm_times_arr).item(),
-            }
-        )
-
-    if env_times_arr is not None:
-        rollout_metrics.update(
-            {
-                "generate/trajectory_env_time_mean": np.mean(env_times_arr).item(),
-                "generate/trajectory_env_time_p90": np.percentile(env_times_arr, 90).item(),
-                "generate/trajectory_env_time_max": np.max(env_times_arr).item(),
-            }
-        )
-
-    if llm_times_arr is not None and env_times_arr is not None:
-        # Batch-level share of rollout time spent in the environment rather than awaiting the
-        # inference engine. Time-weighted (sum over sum), so long trajectories count proportionally
-        # instead of every trajectory contributing equally.
-        total_busy_time = np.sum(llm_times_arr) + np.sum(env_times_arr)
-        if total_busy_time > 0:
-            rollout_metrics["generate/frac_time_in_env"] = (np.sum(env_times_arr) / total_busy_time).item()
+    if llm_sum is not None and env_sum is not None and llm_sum + env_sum > 0:
+        # Time-weighted (sum over sum), not a mean of per-trajectory ratios, so long trajectories
+        # count proportionally.
+        rollout_metrics["generate/frac_time_in_env"] = env_sum / (llm_sum + env_sum)
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)

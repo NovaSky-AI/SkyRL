@@ -32,6 +32,8 @@ def test_generator_output_concatenation():
         # optional but present in the signature
         "trajectory_ids",
         "trajectory_generation_times",
+        "trajectory_llm_times",
+        "trajectory_env_times",
         "is_last_step",
         "env_metrics",
         "pixel_values",
