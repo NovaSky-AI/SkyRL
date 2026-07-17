@@ -153,7 +153,7 @@ def _load_arrow_files(files: list[str]) -> Dataset:
     return parts[0] if len(parts) == 1 else concatenate_datasets(parts)
 
 
-def _load_hf_dataset(local_path: str) -> Dataset:
+def _load_as_hf_dataset(local_path: str) -> Dataset:
     """Load a :class:`datasets.Dataset` from a local file or directory."""
     if os.path.isdir(local_path):
         # A ``Dataset.save_to_disk`` directory is identified by its state.json.
@@ -322,7 +322,7 @@ def load_pretokenized_dataset(
         for the SFT collators.
     """
     with _materialize_local(path, cache_dir, force_redownload) as local_path:
-        dataset = _load_hf_dataset(local_path)
+        dataset = _load_as_hf_dataset(local_path)
         logger.info(f"Loaded pretokenized dataset from '{path}': {len(dataset)} rows, columns={dataset.column_names}")
 
         normalized: list[dict] = []
