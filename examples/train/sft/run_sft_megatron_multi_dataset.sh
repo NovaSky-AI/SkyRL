@@ -8,8 +8,6 @@ set -x
 # slices of both datasets separately. Eval metrics are logged per dataset under
 # eval/{name}/loss (names from eval_dataset_names).
 #
-# Note the quoting: OmegaConf list overrides must be a single shell argument.
-#
 # Usage:
 #   bash examples/train/sft/run_sft_megatron_multi_dataset.sh [extra overrides...]
 #
@@ -20,12 +18,12 @@ uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
     strategy=megatron \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \
-    "train_datasets=['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
-    "train_dataset_splits=['train[:800]','train[:200]']" \
-    "train_dataset_weights=[0.8,0.2]" \
-    "eval_datasets=['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
-    "eval_dataset_splits=['train[-100:]','train[200:300]']" \
-    "eval_dataset_names=[tulu3,alpaca]" \
+    train_datasets="['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
+    train_dataset_splits="['train[:800]','train[:200]']" \
+    train_dataset_weights="[0.8,0.2]" \
+    eval_datasets="['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
+    eval_dataset_splits="['train[-100:]','train[200:300]']" \
+    eval_dataset_names="[tulu3,alpaca]" \
     eval_interval=5 \
     messages_key=messages \
     max_length=512 \

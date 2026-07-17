@@ -34,7 +34,7 @@ LOG_FILE="${LOG_FILE:-/tmp/${RUN_NAME}.log}"
 #   * batch_size=8, micro_train_batch_size_per_gpu=2 are sized for L4_ci (4 GPUs).
 bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
   num_steps=$NUM_STEPS \
-  "train_dataset_splits=['train[:2000]']" \
+  train_dataset_splits="['train[:2000]']" \
   batch_size=8 \
   micro_train_batch_size_per_gpu=2 \
   max_length=1024 \

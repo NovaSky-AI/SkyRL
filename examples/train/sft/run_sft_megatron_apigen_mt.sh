@@ -18,10 +18,10 @@ uv run --isolated --extra megatron --python 3.12 \
     python -m skyrl.train.main_sft \
     strategy=megatron \
     model.path=Qwen/Qwen2.5-1.5B-Instruct \
-    "train_datasets=['$DATA_DIR']" \
-    "train_dataset_splits=['train[:4000]']" \
-    "eval_datasets=['$DATA_DIR']" \
-    "eval_dataset_splits=['train[4000:]']" \
+    train_datasets="['$DATA_DIR']" \
+    train_dataset_splits="['train[:4000]']" \
+    eval_datasets="['$DATA_DIR']" \
+    eval_dataset_splits="['train[4000:]']" \
     messages_key=messages \
     tools_key=tools \
     system_key=system \

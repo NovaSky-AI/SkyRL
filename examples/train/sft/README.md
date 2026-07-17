@@ -199,16 +199,15 @@ bash examples/train/sft/run_sft_megatron.sh \
 ## Multi-dataset training and evaluation
 
 Training on a weighted mixture of datasets is built in: pass lists to
-`train_datasets`/`train_dataset_splits` (note the quoting -- OmegaConf list
-overrides must be a single shell argument):
+`train_datasets`/`train_dataset_splits`:
 
 ```bash
 bash examples/train/sft/run_sft_megatron_multi_dataset.sh
 # or directly:
 bash examples/train/sft/run_sft_megatron.sh \
-    "train_datasets=['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
-    "train_dataset_splits=['train[:50000]','train[:10000]']" \
-    "train_dataset_weights=[0.8,0.2]"
+    train_datasets="['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
+    train_dataset_splits="['train[:50000]','train[:10000]']" \
+    train_dataset_weights="[0.8,0.2]"
 ```
 
 Each dataset is tokenized (and cached) independently, then concatenated. With
@@ -228,9 +227,9 @@ Evaluation similarly accepts multiple datasets, each evaluated separately with
 its loss logged under `eval/{name}/loss`:
 
 ```bash
-    "eval_datasets=['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
-    "eval_dataset_splits=['train[-500:]','train[200:700]']" \
-    "eval_dataset_names=[tulu3,alpaca]"
+    eval_datasets="['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
+    eval_dataset_splits="['train[-500:]','train[200:700]']" \
+    eval_dataset_names="[tulu3,alpaca]"
 ```
 
 `eval_dataset_names` is optional (defaults to the dataset name with `/`
@@ -249,8 +248,8 @@ kwarg. Explicit `train_dataset_weights` are rejected outside `sampler=random`
 
 ```bash
 bash examples/train/sft/run_sft_megatron.sh \
-    "train_datasets=['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
-    "train_dataset_splits=['train[:80]','train[:20]']" \
+    train_datasets="['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
+    train_dataset_splits="['train[:80]','train[:20]']" \
     sampler=custom \
     sampler_class_path=examples.train.sft.curriculum_sampler.CurriculumLearningSampler \
     'sampler_kwargs={num_samples: 40, seed: 42}'

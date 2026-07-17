@@ -33,8 +33,8 @@ uv run --isolated --extra megatron \
     python -m skyrl.train.main_sft \
     strategy=megatron \
     model.path=Qwen/Qwen3-VL-2B-Instruct \
-    "train_datasets=['$DATA_DIR']" \
-    "train_dataset_splits=['train']" \
+    train_datasets="['$DATA_DIR']" \
+    train_dataset_splits="['train']" \
     messages_key=messages \
     max_length=4096 \
     num_steps=30 \

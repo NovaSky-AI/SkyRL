@@ -21,8 +21,8 @@ uv run --isolated --extra fsdp \
     model.lora.rank=32 \
     model.lora.alpha=16 \
     model.lora.target_modules=all-linear \
-    "train_datasets=['yahma/alpaca-cleaned']" \
-    "train_dataset_splits=['train[:100]']" \
+    train_datasets="['yahma/alpaca-cleaned']" \
+    train_dataset_splits="['train[:100]']" \
     messages_key=messages \
     max_length=512 \
     num_steps=10 \
