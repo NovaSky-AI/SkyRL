@@ -496,17 +496,16 @@ def get_rollout_metrics(
         # count proportionally.
         rollout_metrics["generate/frac_time_in_env"] = env_sum / (llm_sum + env_sum)
 
-    # Everything in e2e not attributed to the engine, the env, or env setup: tokenization, chat
-    # templating, output assembly, and event-loop scheduling. Closes the trajectory-time stack.
-    if trajectory_completion_times and trajectory_llm_times and trajectory_env_times:
-        setup_times = trajectory_env_setup_times or [0.0] * len(trajectory_completion_times)
-        overhead = [
-            e2e - llm - env - setup
-            for e2e, llm, env, setup in zip(
-                trajectory_completion_times, trajectory_llm_times, trajectory_env_times, setup_times
-            )
-        ]
-        _add_time_stats(rollout_metrics, "overhead", overhead)
+    # Remainder of e2e not attributed to the engine, env steps, or env setup. Tokenization, chat
+    # templating, output assembly, env teardown, and event-loop scheduling.
+    if trajectory_completion_times and trajectory_llm_times and trajectory_env_times and trajectory_env_setup_times:
+        overhead = (
+            np.array(trajectory_completion_times, dtype=np.float64)
+            - np.array(trajectory_llm_times, dtype=np.float64)
+            - np.array(trajectory_env_times, dtype=np.float64)
+            - np.array(trajectory_env_setup_times, dtype=np.float64)
+        )
+        _add_time_stats(rollout_metrics, "overhead", overhead.tolist())
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)

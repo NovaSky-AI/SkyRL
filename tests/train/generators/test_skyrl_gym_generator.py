@@ -1862,6 +1862,7 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     assert llm_times is not None and env_times is not None and setup_times is not None
     assert len(llm_times) == num_trajectories
     assert len(env_times) == num_trajectories
+    assert len(setup_times) == num_trajectories
     assert all(t >= setup_sleep_s for t in setup_times)
 
     # Each side is at least its per-turn sleep summed over turns, and neither swallows the other.
@@ -1894,3 +1895,7 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     assert 0.5 < concat_metrics["generate/frac_time_in_env"] < 1.0
     assert concat_metrics["generate/trajectory_llm_time_p90"] == pytest.approx(np.percentile(llm_times * 2, 90).item())
     assert concat_metrics["generate/trajectory_env_time_p90"] == pytest.approx(np.percentile(env_times * 2, 90).item())
+    assert concat_metrics["generate/trajectory_env_setup_time_p90"] == pytest.approx(
+        np.percentile(setup_times * 2, 90).item()
+    )
+    assert concat_metrics["generate/trajectory_overhead_time_mean"] >= 0.0
