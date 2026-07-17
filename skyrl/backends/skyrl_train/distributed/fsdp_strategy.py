@@ -619,12 +619,19 @@ class FSDPStrategy(DistributedStrategy):
         parent = os.path.dirname(os.path.abspath(output_dir)) or "."
         io.makedirs(parent, exist_ok=True)
         staging_dir = tempfile.mkdtemp(prefix=".tmp-hf-export-", dir=parent)
+        old_dir = None
         try:
             yield staging_dir
-            # os.replace can't overwrite a non-empty dir, so clear a prior export first.
-            shutil.rmtree(output_dir, ignore_errors=True)
+            # Swap via renames only (each atomic on the same filesystem) so a reader
+            # never sees output_dir mid-delete: move any prior export aside, move the
+            # new one in, then rmtree the old one afterwards.
+            if os.path.lexists(output_dir):
+                old_dir = tempfile.mktemp(prefix=".old-hf-export-", dir=parent)
+                os.replace(output_dir, old_dir)
             os.replace(staging_dir, output_dir)
             staging_dir = None
         finally:
             if staging_dir is not None:
                 shutil.rmtree(staging_dir, ignore_errors=True)
+            if old_dir is not None:
+                shutil.rmtree(old_dir, ignore_errors=True)
