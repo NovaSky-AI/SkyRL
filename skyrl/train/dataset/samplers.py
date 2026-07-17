@@ -200,11 +200,11 @@ class DataMixingSampler(torch.utils.data.Sampler[int]):
         if "generator_state" in state:
             self._generator.set_state(state["generator_state"])
         else:
-            # Checkpoint from the old example sampler (position-only): keep the
-            # freshly-seeded generator and resume the cursor best-effort.
+            # Position-only state (no generator state): keep the freshly-seeded
+            # generator and resume the cursor best-effort.
             logger.warning(
-                "DataMixingSampler: checkpoint has no generator_state (old format); "
-                "resuming position only -- the restored plan may differ from the original run."
+                "DataMixingSampler: checkpoint has no generator_state; "
+                "resuming position only -- the restored plan may differ from the run that saved it."
             )
         self._plan = None
         self._plan_gen_state = None

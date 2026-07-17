@@ -16,10 +16,9 @@ and the multi-dataset RFC (#1875) test plan:
   - DataMixingSampler draws a fresh plan every epoch and resumes exactly
     (mid-epoch and across epoch boundaries) via its RNG state
 
-The custom-sampler path is exercised with small test-local samplers (curriculum
-learning remains a user-supplied example under
-``examples/train/sft/curriculum_sampler.py``, loaded by file path here to keep
-it covered).
+The custom-sampler path is exercised with small test-local samplers. The
+``CurriculumLearningSampler`` example under
+``examples/train/sft/curriculum_sampler.py`` is loaded by file path.
 
 Run::
 
@@ -632,8 +631,9 @@ class TestDataMixingSampler:
         resumed.load_state_dict(state)
         assert list(resumed) == epoch2
 
-    def test_old_format_position_only_state_loads(self):
-        # Checkpoints from the old example sampler carry only the position.
+    def test_position_only_state_loads(self):
+        # A position-only state (no generator_state key) loads with a warning
+        # and resumes the cursor against the freshly-seeded generator.
         sampler = self._make()
         sampler.load_state_dict({"position": 5})
         assert sampler.position == 5
