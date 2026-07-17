@@ -8,6 +8,34 @@ By default, the example uses the [Alpaca-Cleaned](https://huggingface.co/dataset
 
 You can switch to a different dataset by overriding `dataset_name` and `dataset_split` on the command line.
 
+### Pretokenized datasets (local or S3/GCS)
+
+If your data pipeline tokenizes offline, point the trainer directly at the pretokenized store and skip
+`apply_chat_template` entirely:
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    pretokenized_dataset_path=s3://my-bucket/datasets/tokenized-train \
+    eval_pretokenized_dataset_path=s3://my-bucket/datasets/tokenized-eval  # optional
+```
+
+`pretokenized_dataset_path` accepts a local path, `s3://`, `gs://`, or `gcs://` URI pointing at a file or
+directory in any of these formats (auto-detected): Parquet, JSON-lines, raw Arrow IPC files, or a HuggingFace
+`Dataset.save_to_disk` directory. Cloud paths are downloaded once and cached under `cache_dir` (set
+`disable_cache=true` to download to a temporary directory instead, or `force_recache=true` to re-download).
+
+Each row must contain `input_ids` (unpadded token ids) plus one of the following loss-target schemas:
+
+- `num_actions` — loss on the trailing `num_actions` tokens, optionally with a 0/1 `loss_mask` of that length
+  (SkyRL's native tokenized format);
+- a full-sequence `loss_mask` (same length as `input_ids`);
+- HF-style `labels` (same length as `input_ids`, `-100` = ignored).
+
+Rows are normalized to the trainer's internal format; `max_length` truncation still applies (rows whose loss
+window is fully truncated are dropped). When `pretokenized_dataset_path` is set, `dataset_name`/`dataset_split`
+are ignored (same for the eval pair). See
+[`skyrl/train/dataset/pretokenized.py`](../../../skyrl/train/dataset/pretokenized.py) for details.
+
 ## Quickstart
 
 ### FSDP (single GPU)
@@ -87,6 +115,8 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `model.path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path |
 | `dataset_name` | `yahma/alpaca-cleaned` | HuggingFace dataset name |
 | `dataset_split` | `train[:100]` | Dataset split/slice |
+| `pretokenized_dataset_path` | `None` | Local path or `s3://`/`gs://` URI to a pretokenized dataset (Parquet/JSONL/Arrow/`save_to_disk`); skips tokenization and overrides `dataset_name` |
+| `eval_pretokenized_dataset_path` | `None` | Same as above, for the eval dataset |
 | `max_length` | `None` | Maximum sequence length |
 | `num_steps` | `None` | Number of training steps |
 | `batch_size` | `4` | Global batch size |

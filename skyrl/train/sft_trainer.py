@@ -1216,12 +1216,32 @@ class SFTTrainer:
 
             shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
 
+    def _load_pretokenized(self, path: str) -> list:
+        """Load a pretokenized dataset from a local path or object store (S3/GCS).
+
+        Skips online tokenization entirely: rows already carry ``input_ids``
+        and a loss target and are only normalized/truncated. Cloud downloads
+        are cached under ``cache_dir`` (unless caching is disabled).
+        """
+        from skyrl.train.dataset.pretokenized import load_pretokenized_dataset
+
+        return load_pretokenized_dataset(
+            path,
+            max_length=self.sft_cfg.max_length,
+            cache_dir=None if self.sft_cfg.disable_cache else self.sft_cfg.cache_dir,
+            force_redownload=self.sft_cfg.force_recache,
+        )
+
     def load_dataset(self) -> list:
-        """Load and tokenize the training dataset."""
+        """Load the training dataset (pretokenized store or tokenize-on-load)."""
+        if self.sft_cfg.pretokenized_dataset_path:
+            return self._load_pretokenized(self.sft_cfg.pretokenized_dataset_path)
         return self._load_and_tokenize(self.sft_cfg.dataset_name, self.sft_cfg.dataset_split)
 
     def load_eval_dataset(self) -> Optional[list]:
         """Load and tokenize the eval dataset, or return ``None`` if not configured."""
+        if self.sft_cfg.eval_pretokenized_dataset_path:
+            return self._load_pretokenized(self.sft_cfg.eval_pretokenized_dataset_path)
         if not self.sft_cfg.eval_dataset_name:
             return None
         return self._load_and_tokenize(self.sft_cfg.eval_dataset_name, self.sft_cfg.eval_dataset_split)

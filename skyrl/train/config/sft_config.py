@@ -149,6 +149,13 @@ class SFTConfig(BaseConfig):
     strategy: str = "megatron"  # "megatron" or "fsdp"
     dataset_name: str = "yahma/alpaca-cleaned"
     dataset_split: str = "train[:100]"
+    pretokenized_dataset_path: Optional[str] = None
+    """Path to a *pretokenized* training dataset: a local path, ``s3://``,
+    ``gs://``, or ``gcs://`` URI holding parquet/JSONL/arrow files or a HF
+    ``Dataset.save_to_disk`` directory. Rows must carry ``input_ids`` plus a
+    loss target (``num_actions``, ``loss_mask``, or HF-style ``labels``); see
+    ``skyrl.train.dataset.pretokenized``. When set, online tokenization is
+    skipped and ``dataset_name`` / ``dataset_split`` are ignored."""
     messages_key: str = "messages"  # column name for chat-format datasets
     tools_key: str = "tools"
     """Column name holding per-row tool/function schemas for tool-calling datasets
@@ -164,6 +171,10 @@ class SFTConfig(BaseConfig):
     When ``None`` (default), eval is disabled."""
     eval_dataset_split: str = "validation"
     """Split of the eval dataset to load (e.g. ``"validation"``, ``"test[:500]"``)."""
+    eval_pretokenized_dataset_path: Optional[str] = None
+    """Path to a *pretokenized* eval dataset (same formats and schema as
+    ``pretokenized_dataset_path``). When set, ``eval_dataset_name`` /
+    ``eval_dataset_split`` are ignored."""
     eval_interval: int = 0
     """Run eval every N training steps. Eval also runs once at the end of training
     when an eval dataset is configured. ``0`` disables periodic eval."""
@@ -335,10 +346,13 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     # Eval config
     if cfg.eval_interval < 0:
         raise ValueError(f"eval_interval must be >= 0, got {cfg.eval_interval}")
-    if cfg.eval_interval > 0 and not cfg.eval_dataset_name:
-        raise ValueError("eval_interval > 0 requires eval_dataset_name to be set")
-    if cfg.eval_before_train and cfg.eval_dataset_name is None:
-        raise ValueError("eval_before_train=True requires eval_dataset_name to be set")
+    has_eval_dataset = bool(cfg.eval_dataset_name) or bool(cfg.eval_pretokenized_dataset_path)
+    if cfg.eval_interval > 0 and not has_eval_dataset:
+        raise ValueError("eval_interval > 0 requires eval_dataset_name or eval_pretokenized_dataset_path to be set")
+    if cfg.eval_before_train and not has_eval_dataset:
+        raise ValueError(
+            "eval_before_train=True requires eval_dataset_name or eval_pretokenized_dataset_path to be set"
+        )
 
     #  checks for megatron
     if cfg.strategy == "megatron":
