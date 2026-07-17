@@ -296,3 +296,47 @@ def test_find_single_requests_barrier_is_per_model(scheduling_engine):
         assert list(singles.keys()) == ["2", "5"]
         assert singles["2"][0] == "model_a"
         assert singles["5"][0] == "model_b"
+
+
+def test_process_batch_requests_per_model_completes_incrementally(scheduling_engine):
+    """per_model=True must complete each model's futures before processing the next model's group."""
+    from types import SimpleNamespace
+
+    from sqlmodel import select
+
+    engine = scheduling_engine
+    engine.backend = SimpleNamespace(has_model=lambda model_id: True)
+
+    with Session(engine.db_engine) as session:
+        for model_id in ["model_a", "model_a", "model_b"]:
+            session.add(
+                FutureDB(
+                    request_type=types.RequestType.FORWARD_BACKWARD,
+                    model_id=model_id,
+                    request_data={},
+                    status=RequestStatus.PENDING,
+                )
+            )
+        session.commit()
+        futures = session.exec(select(FutureDB).order_by(FutureDB.request_id)).all()
+        adam = types.AdamParams(learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0)
+        requests = {str(f.request_id): (f.model_id, types.OptimStepInput(adam_params=adam)) for f in futures}
+
+    processed_models = []
+
+    def processor(group):
+        (model_id,) = {mid for mid, _ in group.values()}
+        if model_id == "model_b":
+            with Session(engine.db_engine) as session:
+                statuses = [
+                    f.status for f in session.exec(select(FutureDB).where(FutureDB.model_id == "model_a")).all()
+                ]
+                assert statuses == [RequestStatus.COMPLETED] * 2
+        processed_models.append(model_id)
+        return {request_id: types.OptimStepOutput(metrics={}) for request_id in group}
+
+    engine.process_batch_requests(requests, processor, "forward_backward", per_model=True)
+
+    assert processed_models == ["model_a", "model_b"]
+    with Session(engine.db_engine) as session:
+        assert all(f.status == RequestStatus.COMPLETED for f in session.exec(select(FutureDB)).all())
