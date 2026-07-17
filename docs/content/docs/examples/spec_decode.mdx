@@ -6,6 +6,10 @@ title: "Faster Rollouts with MTP Speculative Decoding"
 MTP training requires the `megatron` backend and the `vllm` inference engine.
 </Callout>
 
+<Callout type="info">
+MTP traininng is currently experimental. We are actively working on benchmarking MTP in fully async, multi-turn RL scenarios as well as providing guidelines on when it is most useful.
+</Callout>
+
 In this example we train a model's native **Multi-Token Prediction (MTP)** head with a decoupled draft loss, and reuse that head for **vLLM speculative decoding** to speed up rollout. Because the draft loss is autograd-decoupled, it trains only the MTP head and never perturbs the policy, leaving the RL dynamics unchanged.
 
 Source code: `examples/train/spec_decode/`.
@@ -145,6 +149,7 @@ Reward and policy loss track the baseline, differing only by the run-to-run nois
 The MTP head adds ~7% to the train phase (57.3 → 61.3 s/step), easily paid for by the 2x rollout speedup.
 
 ![Training tokens per second per GPU](/images/examples/specdecode_tokens_per_sec_per_gpu.png)
+
 
 ## What's Next
 
