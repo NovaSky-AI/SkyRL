@@ -2,7 +2,8 @@
 
 Some data pipelines tokenize offline (e.g. on a Spark/Ray data cluster) and
 publish the result to an object store. This module lets the SFT trainer ingest
-such a store directly -- skipping ``apply_chat_template`` entirely -- from:
+such a store directly -- skipping online tokenization (``tokenize_chat_example``
+and ``tokenize_sft_example`` in ``skyrl.train.sft_trainer``) entirely -- from:
 
 - a local file or directory,
 - an S3 path (``s3://bucket/prefix``),
@@ -19,20 +20,21 @@ Supported on-disk formats (auto-detected):
 - JSON-lines file(s) (``.jsonl`` / ``.json``),
 - raw Arrow IPC file(s) (``.arrow``).
 
-Each row must contain ``input_ids`` (list[int]) plus one of the following ways
-of describing which tokens to compute loss on:
+Row schema (all rows must be stored unpadded; SkyRL pads at collation time):
 
-1. ``num_actions`` (int): loss on the trailing ``num_actions`` tokens, with an
-   optional ``loss_mask`` of length ``num_actions`` (0/1 within that window).
-   This is SkyRL's native tokenized format (what the tokenization cache holds).
-2. ``loss_mask`` of length ``len(input_ids)``: a full-sequence 0/1 mask. The
-   action window starts at the first nonzero entry.
-3. ``labels`` of length ``len(input_ids)``: HF convention, ``-100`` marks
-   tokens excluded from the loss.
+- ``input_ids`` (list[int]): token ids for the full sequence.
+- ``loss_mask`` (list[int], same length as ``input_ids``): 1 for tokens to
+  compute loss on, 0 otherwise. Works for instruction-following data (1s on
+  the response) and multi-turn conversational data (1s on every assistant
+  turn, 0s in between).
+- VLM data additionally carries ``pixel_values`` and ``image_grid_thw``
+  (Qwen-style image tensors, stored as nested lists).
 
-Rows are normalized to the trainer's internal representation
-(``input_ids`` / ``attention_mask`` / ``num_actions`` / ``loss_mask``) and rows
-whose loss window is empty (e.g. after ``max_length`` truncation) are dropped.
+``num_actions`` (the trailing action-window length SkyRL's workers consume) is
+inferred from the first nonzero ``loss_mask`` entry -- do not store it. Rows
+are normalized to the trainer's internal representation (``input_ids`` /
+``attention_mask`` / ``num_actions`` / window ``loss_mask``) and rows whose
+loss window is empty (e.g. after ``max_length`` truncation) are dropped.
 """
 
 import hashlib
@@ -47,16 +49,19 @@ from loguru import logger
 
 from skyrl.backends.skyrl_train.utils.io import io
 
-# Keys consumed by normalization; all other columns are passed through
-# untouched (e.g. VLM tensors like ``pixel_values`` / ``image_grid_thw``).
-_NORMALIZED_KEYS = frozenset({"input_ids", "attention_mask", "num_actions", "loss_mask", "labels"})
+# Keys consumed (and re-emitted in normalized form) by ``_normalize_row``.
+# ``num_actions`` and ``labels`` are consumed-but-dropped: ``num_actions`` is
+# always re-inferred from ``loss_mask``, and HF-style ``labels`` are not a
+# supported loss target (convert to a 0/1 ``loss_mask`` offline). All other
+# columns pass through untouched (e.g. ``pixel_values`` / ``image_grid_thw``).
+_CONSUMED_KEYS = frozenset({"input_ids", "attention_mask", "loss_mask", "num_actions", "labels"})
+
+_VLM_KEYS = ("pixel_values", "image_grid_thw")
 
 _PARQUET_EXTS = (".parquet",)
 _JSON_EXTS = (".jsonl", ".json")
 _ARROW_EXTS = (".arrow",)
 _DATA_EXTS = _PARQUET_EXTS + _JSON_EXTS + _ARROW_EXTS
-
-_LABEL_IGNORE_INDEX = -100
 
 
 # ---------------------------------------------------------------------------
@@ -195,60 +200,39 @@ def _load_as_hf_dataset(local_path: str) -> Dataset:
 # ---------------------------------------------------------------------------
 
 
-def _derive_loss_window(row: dict, row_idx: int, seq_len: int) -> tuple[int, list[int]]:
-    """Derive ``(num_actions, loss_mask)`` (trailing-window form) from a row.
-
-    See the module docstring for the accepted schemas.
-    """
-    num_actions = row.get("num_actions")
+def _validate_loss_mask(row: dict, row_idx: int, seq_len: int) -> list[int]:
+    """Validate a row's full-sequence ``loss_mask`` and return it as ints."""
     loss_mask = row.get("loss_mask")
-    labels = row.get("labels")
-
-    if num_actions is not None:
-        num_actions = int(num_actions)
-        if not 0 < num_actions <= seq_len:
-            raise ValueError(f"Row {row_idx}: num_actions ({num_actions}) must be in (0, len(input_ids)={seq_len}].")
-        if loss_mask is None:
-            return num_actions, [1] * num_actions
-        loss_mask = [int(v) for v in loss_mask]
-        if len(loss_mask) == num_actions:
-            return num_actions, loss_mask
-        if len(loss_mask) == seq_len:
-            return num_actions, loss_mask[seq_len - num_actions :]
+    if loss_mask is None:
+        hint = ""
+        if row.get("labels") is not None:
+            hint = " Found a 'labels' column: convert it offline (loss_mask[i] = 0 if labels[i] == -100 else 1)."
+        if row.get("num_actions") is not None:
+            hint = " Found a 'num_actions' column: store a full-sequence loss_mask instead; num_actions is inferred."
         raise ValueError(
-            f"Row {row_idx}: loss_mask length ({len(loss_mask)}) must equal num_actions "
-            f"({num_actions}) or len(input_ids) ({seq_len})."
+            f"Row {row_idx}: missing required 'loss_mask' column (full-sequence 0/1 mask, "
+            f"same length as input_ids).{hint}"
         )
-
-    if loss_mask is None and labels is not None:
-        if len(labels) != seq_len:
-            raise ValueError(f"Row {row_idx}: labels length ({len(labels)}) must equal len(input_ids) ({seq_len}).")
-        loss_mask = [0 if lab == _LABEL_IGNORE_INDEX else 1 for lab in labels]
-
-    if loss_mask is not None:
-        loss_mask = [int(v) for v in loss_mask]
-        if len(loss_mask) != seq_len:
-            raise ValueError(
-                f"Row {row_idx}: without num_actions, loss_mask length ({len(loss_mask)}) must equal "
-                f"len(input_ids) ({seq_len})."
-            )
-        first = next((i for i, v in enumerate(loss_mask) if v != 0), None)
-        if first is None:
-            # No trainable tokens; caller drops the row.
-            return 0, []
-        return seq_len - first, loss_mask[first:]
-
-    raise ValueError(
-        f"Row {row_idx}: no loss target found. Each row needs 'num_actions', a 'loss_mask' "
-        f"(full-sequence or action-window), or 'labels' (-100 = ignored) alongside 'input_ids'."
-    )
+    loss_mask = [int(v) for v in loss_mask]
+    if len(loss_mask) != seq_len:
+        raise ValueError(
+            f"Row {row_idx}: loss_mask length ({len(loss_mask)}) must equal len(input_ids) "
+            f"({seq_len}). Window-form masks are not supported; store the full-sequence mask."
+        )
+    if any(v not in (0, 1) for v in loss_mask):
+        raise ValueError(f"Row {row_idx}: loss_mask must contain only 0s and 1s.")
+    return loss_mask
 
 
 def _normalize_row(row: dict, row_idx: int, max_length: Optional[int]) -> Optional[dict]:
     """Normalize one pretokenized row to the trainer's internal representation.
 
-    Returns ``None`` when the row should be dropped (empty loss window, or
-    fully truncated by ``max_length``).
+    Infers ``num_actions`` from the first nonzero ``loss_mask`` entry: the
+    action window spans from there to the end of the sequence, with the mask's
+    interior 0s (e.g. user turns between assistant turns) preserved inside it.
+
+    Returns ``None`` when the row should be dropped (empty loss window, fully
+    truncated by ``max_length``, or a VLM row exceeding ``max_length``).
     """
     input_ids = row.get("input_ids")
     if input_ids is None:
@@ -265,21 +249,37 @@ def _normalize_row(row: dict, row_idx: int, max_length: Optional[int]) -> Option
             "unpadded (padding is applied at collation time)."
         )
 
-    num_actions, loss_mask = _derive_loss_window(row, row_idx, seq_len)
-    if num_actions <= 0:
+    loss_mask = _validate_loss_mask(row, row_idx, seq_len)
+    first = next((i for i, v in enumerate(loss_mask) if v != 0), None)
+    if first is None:
+        # No trainable tokens; drop the row.
         return None
+    num_actions = seq_len - first
+    loss_mask = loss_mask[first:]
 
-    # Truncate to max_length, mirroring the online tokenization path: the
-    # prompt prefix is kept and the (trailing) action window shrinks.
-    if max_length is not None and seq_len > max_length:
-        prompt_len = seq_len - num_actions
+    # VLM rows: require both image keys, and mirror the online VLM path by
+    # dropping (never truncating) rows over max_length -- truncation would cut
+    # image placeholder tokens and break image/text alignment.
+    has_images = any(row.get(k) is not None for k in _VLM_KEYS)
+    if has_images:
+        if any(row.get(k) is None for k in _VLM_KEYS):
+            raise ValueError(f"Row {row_idx}: VLM rows must carry both {_VLM_KEYS}, found only one.")
+        if max_length is not None and seq_len > max_length:
+            return None
+    elif max_length is not None and seq_len > max_length:
+        # Truncate to max_length, mirroring the online tokenization path: the
+        # prompt prefix is kept and the (trailing) action window shrinks.
+        prompt_len = first
         input_ids = input_ids[:max_length]
         num_actions = max(max_length - prompt_len, 0)
         loss_mask = loss_mask[:num_actions]
         if num_actions <= 0 or sum(loss_mask) == 0:
             return None
 
-    normalized = {k: v for k, v in row.items() if k not in _NORMALIZED_KEYS}
+    # Pass through extra columns (e.g. VLM tensors). None-valued columns are
+    # dropped: mixed text+VLM stores materialize missing columns as None, and a
+    # None 'pixel_values' key would break the collator's homogeneity check.
+    normalized = {k: v for k, v in row.items() if k not in _CONSUMED_KEYS and v is not None}
     normalized.update(
         {
             "input_ids": input_ids,
@@ -296,7 +296,7 @@ def _normalize_row(row: dict, row_idx: int, max_length: Optional[int]) -> Option
 # ---------------------------------------------------------------------------
 
 
-def load_pretokenized_dataset(
+def load_from_pretokenized(
     path: str,
     max_length: Optional[int] = None,
     cache_dir: Optional[str] = None,
@@ -304,13 +304,18 @@ def load_pretokenized_dataset(
 ) -> list[dict[str, Any]]:
     """Load a pretokenized SFT dataset from a local path or object store.
 
+    The pretokenized counterpart of ``SFTTrainer._load_and_tokenize``: returns
+    the same ``list[dict]`` representation the trainer's dataloaders and
+    collators consume.
+
     Args:
         path: Local path, ``s3://``, ``gs://``, or ``gcs://`` URI pointing to a
             file or directory in one of the supported formats (see module
             docstring).
-        max_length: Optional sequence-length cap. Longer rows are truncated
-            (keeping the prompt prefix); rows left with no loss tokens are
-            dropped, matching the online tokenization path.
+        max_length: Optional sequence-length cap. Longer text rows are
+            truncated (keeping the prompt prefix) and dropped if no loss tokens
+            survive; longer VLM rows are always dropped, matching the online
+            tokenization path.
         cache_dir: Base directory for caching cloud downloads. ``None``
             downloads to a temporary directory instead (no reuse across runs).
         force_redownload: Re-download a cloud path even if a cached copy
@@ -318,8 +323,8 @@ def load_pretokenized_dataset(
 
     Returns:
         List of normalized examples (``input_ids`` / ``attention_mask`` /
-        ``num_actions`` / ``loss_mask``, plus any pass-through columns) ready
-        for the SFT collators.
+        ``num_actions`` / window ``loss_mask``, plus pass-through columns like
+        ``pixel_values`` / ``image_grid_thw``) ready for the SFT collators.
     """
     with _materialize_local(path, cache_dir, force_redownload) as local_path:
         dataset = _load_as_hf_dataset(local_path)
@@ -336,8 +341,8 @@ def load_pretokenized_dataset(
 
     if num_dropped:
         logger.warning(
-            f"Dropped {num_dropped}/{len(dataset)} pretokenized rows with an empty loss window "
-            f"(no trainable tokens, possibly after max_length={max_length} truncation)."
+            f"Dropped {num_dropped}/{len(dataset)} pretokenized rows: empty loss window, "
+            f"no loss tokens surviving max_length={max_length} truncation, or VLM rows over max_length."
         )
     if not normalized:
         raise ValueError(f"Pretokenized dataset at '{path}' produced 0 usable examples.")

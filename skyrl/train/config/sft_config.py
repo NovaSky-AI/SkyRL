@@ -152,8 +152,9 @@ class SFTConfig(BaseConfig):
     pretokenized_dataset_path: Optional[str] = None
     """Path to a *pretokenized* training dataset: a local path, ``s3://``,
     ``gs://``, or ``gcs://`` URI holding parquet/JSONL/arrow files or a HF
-    ``Dataset.save_to_disk`` directory. Rows must carry ``input_ids`` plus a
-    loss target (``num_actions``, ``loss_mask``, or HF-style ``labels``); see
+    ``Dataset.save_to_disk`` directory. Rows must carry unpadded ``input_ids``
+    and a full-sequence 0/1 ``loss_mask`` (``num_actions`` is inferred); VLM
+    rows additionally carry ``pixel_values`` / ``image_grid_thw``. See
     ``skyrl.train.dataset.pretokenized``. When set, online tokenization is
     skipped and ``dataset_name`` / ``dataset_split`` are ignored."""
     messages_key: str = "messages"  # column name for chat-format datasets

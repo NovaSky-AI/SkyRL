@@ -10,8 +10,8 @@ You can switch to a different dataset by overriding `dataset_name` and `dataset_
 
 ### Pretokenized datasets (local or S3/GCS)
 
-If your data pipeline tokenizes offline, point the trainer directly at the pretokenized store and skip
-`apply_chat_template` entirely:
+If your data pipeline tokenizes offline, point the trainer directly at the pretokenized store to skip
+online tokenization (`tokenize_chat_example` / `tokenize_sft_example`) entirely:
 
 ```bash
 bash examples/train/sft/run_sft_megatron.sh \
@@ -24,15 +24,18 @@ directory in any of these formats (auto-detected): Parquet, JSON-lines, raw Arro
 `Dataset.save_to_disk` directory. Cloud paths are downloaded once and cached under `cache_dir` (set
 `disable_cache=true` to download to a temporary directory instead, or `force_recache=true` to re-download).
 
-Each row must contain `input_ids` (unpadded token ids) plus one of the following loss-target schemas:
+Each row must contain:
 
-- `num_actions` — loss on the trailing `num_actions` tokens, optionally with a 0/1 `loss_mask` of that length
-  (SkyRL's native tokenized format);
-- a full-sequence `loss_mask` (same length as `input_ids`);
-- HF-style `labels` (same length as `input_ids`, `-100` = ignored).
+- `input_ids` — unpadded token ids for the full sequence (SkyRL pads at collation time);
+- `loss_mask` — full-sequence 0/1 mask, same length as `input_ids`: 1 on tokens to compute loss on. This covers
+  instruction-following data (1s on the response) and multi-turn conversational data (1s on every assistant
+  turn, 0s in between);
+- for VLM data: `pixel_values` and `image_grid_thw` (Qwen-style image tensors, stored as nested lists).
 
+`num_actions` is inferred from the first nonzero `loss_mask` entry — don't store it. HF-style `labels`
+(`-100` = ignored) are not accepted; convert offline via `loss_mask[i] = 0 if labels[i] == -100 else 1`.
 Rows are normalized to the trainer's internal format; `max_length` truncation still applies (rows whose loss
-window is fully truncated are dropped). When `pretokenized_dataset_path` is set, `dataset_name`/`dataset_split`
+window is fully truncated are dropped, and over-length VLM rows are always dropped rather than truncated). When `pretokenized_dataset_path` is set, `dataset_name`/`dataset_split`
 are ignored (same for the eval pair). See
 [`skyrl/train/dataset/pretokenized.py`](../../../skyrl/train/dataset/pretokenized.py) for details.
 
