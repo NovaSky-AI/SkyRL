@@ -456,6 +456,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("sync_weights_to_inference_engines"):
             await self.dispatch.save_weights_for_sampler()
 
+        # Per-step GPU utilization to the tracker. The base loop starts, flushes, and stops the
+        # monitor itself. The async loop overrides train() and must wire it here.
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
+
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
@@ -593,6 +598,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 await asyncio.to_thread(self.save_models)
 
                     timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
+                    if self._ray_gpu_monitor is not None:
+                        timing_payload.update(self._ray_gpu_monitor.flush())
                     if self._vllm_metrics_scraper is not None:
                         timing_payload.update(await self._vllm_metrics_scraper.sample())
                     self.tracker.log(timing_payload, step=self.global_step, commit=True)
@@ -657,6 +664,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # End of an epoch.
         finally:
             self._profiler_stop()
+            if self._ray_gpu_monitor is not None:
+                self._ray_gpu_monitor.stop()
 
         pbar.close()
 
