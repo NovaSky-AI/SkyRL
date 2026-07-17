@@ -529,6 +529,21 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         ), "num_prefill must be < num_engines (need at least one decode worker)"
         assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
 
+    # Role-specific engine kwargs for PD disaggregation.
+    if ie_cfg.prefill_init_kwargs or ie_cfg.decode_init_kwargs:
+        if not ie_cfg.enable_pd:
+            raise ValueError(
+                "generator.inference_engine.prefill_init_kwargs / decode_init_kwargs "
+                "are only valid with enable_pd=true."
+            )
+        if ie_cfg.engine_init_kwargs:
+            raise ValueError(
+                "generator.inference_engine.engine_init_kwargs cannot be combined with "
+                "prefill_init_kwargs / decode_init_kwargs. Move all engine overrides "
+                "(including shared ones like kv_transfer_config) into the role-specific "
+                "prefill_init_kwargs and decode_init_kwargs."
+            )
+
     # Validate inference engine parallelism.
     ep_size = ie_cfg.expert_parallel_size
     dp_size = ie_cfg.data_parallel_size
