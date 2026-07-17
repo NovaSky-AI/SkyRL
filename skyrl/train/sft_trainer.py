@@ -807,10 +807,6 @@ class SFTTrainer:
         callbacks: Optional[list[TrainingCallback]] = None,
     ):
         self.sft_cfg = cfg
-        # Translate deprecated single-dataset fields into the list-based ones.
-        # Also runs inside validate_sft_cfg (idempotent); calling it here covers
-        # trainers constructed with a pre-built ``skyrl_cfg``, which skip
-        # ``build_skyrl_config_for_sft``.
         _normalize_dataset_cfg(cfg)
         # Accept a pre-built bridge config to avoid redundant rebuilds.
         # When not provided (e.g. standalone usage), build it here.

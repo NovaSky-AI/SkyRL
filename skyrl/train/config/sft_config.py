@@ -320,10 +320,6 @@ def _normalize_dataset_cfg(cfg: SFTConfig) -> None:
     """Translate the deprecated single-dataset fields into the list-based fields
     and validate the dataset configuration.
 
-    Idempotent, so it is safe to call from both ``validate_sft_cfg`` and
-    ``SFTTrainer.__init__`` (the latter covers trainers constructed with a
-    pre-built ``skyrl_cfg``, which bypass ``build_skyrl_config_for_sft``).
-
     Post-conditions:
 
     - ``train_datasets``/``train_dataset_splits`` are equal-length non-empty lists;

@@ -1,21 +1,5 @@
 """CPU tests for the SFT stateful dataloader and samplers.
 
-Covers the stateful-dataloader RFC test plan:
-  - default random dataloader order is deterministic for identical seeds
-  - random dataloader order differs across different seeds
-  - sequential sampler yields examples in order
-  - sequential sampler state_dict/load_state_dict resumes at the next sample
-  - custom sampler state is included in the dataloader checkpoint
-  - data-mixing / curriculum samplers resume correctly
-
-and the multi-dataset RFC (#1875) test plan:
-  - user-specified train_dataset_weights: per-batch source representation
-    tracks the weights
-  - default weights: equal mixing across datasets
-  - mixing ratios are independent of the individual dataset sizes
-  - DataMixingSampler draws a fresh plan every epoch and resumes exactly
-    (mid-epoch and across epoch boundaries) via its RNG state
-
 The custom-sampler path is exercised with small test-local samplers. The
 ``CurriculumLearningSampler`` example under
 ``examples/train/sft/curriculum_sampler.py`` is loaded by file path.
