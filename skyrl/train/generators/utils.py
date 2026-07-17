@@ -283,6 +283,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "trajectory_generation_times": _concat_field(generator_outputs, "trajectory_generation_times"),
         "trajectory_llm_times": _concat_field(generator_outputs, "trajectory_llm_times"),
         "trajectory_env_times": _concat_field(generator_outputs, "trajectory_env_times"),
+        "trajectory_env_setup_times": _concat_field(generator_outputs, "trajectory_env_setup_times"),
     }
 
     # propagate additional keys with list values as-is
@@ -297,6 +298,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
     trajectory_generation_times = _last_step_only(result.get("trajectory_generation_times"), is_last_step)
     trajectory_llm_times = _last_step_only(result.get("trajectory_llm_times"), is_last_step)
     trajectory_env_times = _last_step_only(result.get("trajectory_env_times"), is_last_step)
+    trajectory_env_setup_times = _last_step_only(result.get("trajectory_env_setup_times"), is_last_step)
 
     # Re-aggregate rollout metrics; the extra_keys fallback below cannot aggregate a p90 or a ratio.
     rollout_metrics = get_rollout_metrics(
@@ -306,6 +308,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         trajectory_completion_times=trajectory_generation_times,
         trajectory_llm_times=trajectory_llm_times,
         trajectory_env_times=trajectory_env_times,
+        trajectory_env_setup_times=trajectory_env_setup_times,
     )
 
     # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
@@ -410,6 +413,7 @@ def get_rollout_metrics(
     trajectory_completion_times: Optional[List[float]] = None,
     trajectory_llm_times: Optional[List[float]] = None,
     trajectory_env_times: Optional[List[float]] = None,
+    trajectory_env_setup_times: Optional[List[float]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -426,6 +430,8 @@ def get_rollout_metrics(
             engine, summed over turns
         trajectory_env_times: Optional per-trajectory time (seconds) spent in ``env.step()``, summed
             over turns
+        trajectory_env_setup_times: Optional per-trajectory time (seconds) spent constructing and
+            initializing the env
 
     Returns:
         Dictionary of aggregated metrics
@@ -483,11 +489,24 @@ def get_rollout_metrics(
     _add_time_stats(rollout_metrics, "completion", trajectory_completion_times)
     llm_sum = _add_time_stats(rollout_metrics, "llm", trajectory_llm_times)
     env_sum = _add_time_stats(rollout_metrics, "env", trajectory_env_times)
+    _add_time_stats(rollout_metrics, "env_setup", trajectory_env_setup_times)
 
     if llm_sum is not None and env_sum is not None and llm_sum + env_sum > 0:
         # Time-weighted (sum over sum), not a mean of per-trajectory ratios, so long trajectories
         # count proportionally.
         rollout_metrics["generate/frac_time_in_env"] = env_sum / (llm_sum + env_sum)
+
+    # Everything in e2e not attributed to the engine, the env, or env setup: tokenization, chat
+    # templating, output assembly, and event-loop scheduling. Closes the trajectory-time stack.
+    if trajectory_completion_times and trajectory_llm_times and trajectory_env_times:
+        setup_times = trajectory_env_setup_times or [0.0] * len(trajectory_completion_times)
+        overhead = [
+            e2e - llm - env - setup
+            for e2e, llm, env, setup in zip(
+                trajectory_completion_times, trajectory_llm_times, trajectory_env_times, setup_times
+            )
+        ]
+        _add_time_stats(rollout_metrics, "overhead", overhead)
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)

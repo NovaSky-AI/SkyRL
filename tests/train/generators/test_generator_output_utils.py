@@ -34,6 +34,7 @@ def test_generator_output_concatenation():
         "trajectory_generation_times",
         "trajectory_llm_times",
         "trajectory_env_times",
+        "trajectory_env_setup_times",
         "is_last_step",
         "env_metrics",
         "pixel_values",
