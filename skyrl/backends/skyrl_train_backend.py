@@ -37,6 +37,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from skyrl.train.dataset.preprocess import pad_rollout_expert_indices
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
@@ -194,6 +195,7 @@ class SkyRLTrainBackend(AbstractBackend):
             "all_advantages",
             "all_values",
             "all_returns",
+            "all_routing_matrices",
             "all_model_ids",
             "all_loss_fns",
             "all_loss_fn_configs",
@@ -668,6 +670,23 @@ class SkyRLTrainBackend(AbstractBackend):
             batch_dict["rollout_logprobs"] = action_log_probs_tensor
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
+
+        # MoE router replay: routing indices cover exactly the forwarded tokens
+        # (model_input = pre-shifted prompt + response[:-1]), so the final
+        # sequence position is left zero by the padding helper. Alignment is
+        # sequence-start against attention_mask, matching the classic path.
+        routing_matrices = prepared_batch.all_routing_matrices
+        if any(rm is not None for rm in routing_matrices):
+            if not all(rm is not None for rm in routing_matrices):
+                raise ValueError(
+                    "forward_backward batch mixes datums with and without routing_matrix; "
+                    "router replay is all-or-nothing per batch"
+                )
+            batch_dict["rollout_expert_indices"] = pad_rollout_expert_indices(
+                [rm.to_numpy() for rm in routing_matrices],
+                row_lengths=[len(seq) for seq in full_sequences],
+                max_total=max_seq_len,
+            )
         if role == "critic":
             if has_values != has_returns:
                 raise ValueError("Critic batches must provide both values and returns, or neither")
@@ -1049,8 +1068,16 @@ class SkyRLTrainBackend(AbstractBackend):
         # save_sampler_checkpoint via load_lora_adapter). Single-tenant /
         # FFT path falls back to resolve_policy_model_name(cfg).
         fallback_model_name = resolve_policy_model_name(self._cfg)
+        # Adapters exist on vLLM only when the sync takes the in-place LoRA path.
+        # With megatron merge_lora (the default), LoRA weights are merged and
+        # broadcast under the base model name -- routing by adapter name would
+        # 404. Mirror the gate the dispatch uses in broadcast_to_inference_engines.
+        serves_lora_adapters = self._base_lora_signature is not None and not (
+            self._cfg.trainer.strategy == "megatron"
+            and self._cfg.trainer.policy.megatron_config.lora_config.merge_lora
+        )
         per_request_models = [
-            mid if (self._base_lora_signature is not None and mid in self._model_ids_to_role) else fallback_model_name
+            mid if (serves_lora_adapters and mid in self._model_ids_to_role) else fallback_model_name
             for mid in prepared_batch.all_model_ids
         ]
 
@@ -1090,9 +1117,9 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Aggregating sample results for {len(sample_outputs)} samples")
 
         def _extract_sequences(output):
-            """Yield (tokens, logprobs, stop_reason) from a single sample output."""
+            """Yield (tokens, logprobs, stop_reason, routing_matrix) from a single sample output."""
             for seq in output["sequences"]:
-                yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
+                yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason"), seq.get("routing_matrix")
 
         results = {}
         for request_id, model_id, start_idx, end_idx, prompt_logprobs_requested in prepared_batch.request_batch_slices:
@@ -1115,7 +1142,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     logger.error(error_msg)
                     break
 
-                for tokens, logprobs_raw, stop_reason_raw in _extract_sequences(output):
+                for tokens, logprobs_raw, stop_reason_raw, routing_matrix in _extract_sequences(output):
                     # Map vLLM stop reason to Tinker format
                     stop_reason = "stop" if stop_reason_raw in ("stop", "stop_token") else "length"
                     logprobs = logprobs_raw or []
@@ -1130,6 +1157,7 @@ class SkyRLTrainBackend(AbstractBackend):
                             tokens=tokens,
                             logprobs=logprobs,
                             stop_reason=stop_reason,
+                            routing_matrix=routing_matrix,
                         )
                     )
 
