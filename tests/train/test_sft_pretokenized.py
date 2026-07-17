@@ -175,19 +175,21 @@ def test_missing_loss_mask_raises(tmp_path):
         load_from_pretokenized(path)
 
 
-def test_labels_column_rejected_with_hint(tmp_path):
+def test_labels_column_rejected(tmp_path):
     path = str(tmp_path / "data.parquet")
+    # HF-style labels are not a supported loss target; loss_mask is required.
     Dataset.from_list([{"input_ids": [1, 2, 3], "labels": [-100, 2, 3]}]).to_parquet(path)
 
-    with pytest.raises(ValueError, match="convert it offline"):
+    with pytest.raises(ValueError, match="missing required 'loss_mask'"):
         load_from_pretokenized(path)
 
 
-def test_num_actions_column_rejected_with_hint(tmp_path):
+def test_num_actions_column_rejected(tmp_path):
     path = str(tmp_path / "data.parquet")
+    # num_actions alone is not a loss target; the full-sequence loss_mask is required.
     Dataset.from_list([{"input_ids": [1, 2, 3], "num_actions": 2}]).to_parquet(path)
 
-    with pytest.raises(ValueError, match="num_actions is inferred"):
+    with pytest.raises(ValueError, match="missing required 'loss_mask'"):
         load_from_pretokenized(path)
 
 
@@ -406,8 +408,8 @@ def test_trainer_load_dataset_routes_to_pretokenized(tmp_path):
     Dataset.from_list(_rows()[:1]).to_parquet(eval_path)
 
     cfg = SFTConfig(
-        pretokenized_dataset_path=train_path,
-        eval_pretokenized_dataset_path=eval_path,
+        pretokenized_dataset_paths=[train_path],
+        eval_pretokenized_dataset_paths=[eval_path],
         enable_ray_gpu_monitor=False,
         disable_cache=True,
     )
@@ -415,10 +417,103 @@ def test_trainer_load_dataset_routes_to_pretokenized(tmp_path):
     trainer = SFTTrainer(cfg)
 
     # No tokenizer / workers needed: the pretokenized path never tokenizes.
-    tokenized = trainer.load_dataset()
+    tokenized, dataset_lengths = trainer.load_dataset()
     assert len(tokenized) == 2
-    eval_tokenized = trainer.load_eval_dataset()
+    assert dataset_lengths == [2]
+    eval_sets = trainer.load_eval_datasets()
+    assert len(eval_sets) == 1
+    eval_name, eval_tokenized = eval_sets[0]
+    assert eval_name == "eval.parquet"
     assert len(eval_tokenized) == 1
+
+
+def test_trainer_concatenates_multiple_pretokenized_stores(tmp_path):
+    path_a = str(tmp_path / "store_a.parquet")
+    path_b = str(tmp_path / "store_b.parquet")
+    Dataset.from_list(_rows()).to_parquet(path_a)
+    Dataset.from_list(_rows()[:1]).to_parquet(path_b)
+
+    cfg = SFTConfig(
+        pretokenized_dataset_paths=[path_a, path_b],
+        enable_ray_gpu_monitor=False,
+        disable_cache=True,
+    )
+    validate_sft_cfg(cfg)
+    # Equal mixing weights are defaulted for the random sampler.
+    assert cfg.train_dataset_weights == [0.5, 0.5]
+
+    trainer = SFTTrainer(cfg)
+    tokenized, dataset_lengths = trainer.load_dataset()
+    assert len(tokenized) == 3
+    assert dataset_lengths == [2, 1]
+
+    # Multiple sources -> DataMixingSampler configured from the store lengths.
+    sampler = trainer.build_train_sampler(tokenized, dataset_lengths)
+    assert sampler is not None
+    assert len(list(iter(sampler))) > 0
+
+
+def test_multiple_pretokenized_eval_stores_named_by_basename(tmp_path):
+    path_a = str(tmp_path / "eval_a.parquet")
+    path_b = str(tmp_path / "eval_b.parquet")
+    Dataset.from_list(_rows()).to_parquet(path_a)
+    Dataset.from_list(_rows()[:1]).to_parquet(path_b)
+
+    cfg = SFTConfig(
+        pretokenized_dataset_paths=[path_a],
+        eval_pretokenized_dataset_paths=[path_a, path_b],
+        enable_ray_gpu_monitor=False,
+        disable_cache=True,
+    )
+    validate_sft_cfg(cfg)
+    assert cfg.eval_dataset_names == ["eval_a.parquet", "eval_b.parquet"]
+
+    trainer = SFTTrainer(cfg)
+    eval_sets = trainer.load_eval_datasets()
+    assert [(name, len(rows)) for name, rows in eval_sets] == [("eval_a.parquet", 2), ("eval_b.parquet", 1)]
+
+
+def test_validate_cfg_rejects_pretokenized_with_train_datasets():
+    cfg = SFTConfig(
+        pretokenized_dataset_paths=["/data/train"],
+        train_datasets=["yahma/alpaca-cleaned"],
+        train_dataset_splits=["train[:100]"],
+    )
+    with pytest.raises(ValueError, match="only one of pretokenized_dataset_paths"):
+        validate_sft_cfg(cfg)
+
+
+def test_validate_cfg_rejects_colliding_default_eval_names():
+    cfg = SFTConfig(
+        pretokenized_dataset_paths=["/data/train"],
+        eval_pretokenized_dataset_paths=["/data/a/eval", "/data/b/eval"],
+    )
+    with pytest.raises(ValueError, match="collide"):
+        validate_sft_cfg(cfg)
+
+    # Explicit names disambiguate.
+    cfg = SFTConfig(
+        pretokenized_dataset_paths=["/data/train"],
+        eval_pretokenized_dataset_paths=["/data/a/eval", "/data/b/eval"],
+        eval_dataset_names=["eval_a", "eval_b"],
+    )
+    validate_sft_cfg(cfg)
+
+
+def test_validate_cfg_weights_validated_against_pretokenized_paths():
+    cfg = SFTConfig(
+        pretokenized_dataset_paths=["/data/a", "/data/b"],
+        train_dataset_weights=[0.9],
+    )
+    with pytest.raises(ValueError, match="one weight per entry of pretokenized_dataset_paths"):
+        validate_sft_cfg(cfg)
+
+    cfg = SFTConfig(
+        pretokenized_dataset_paths=["/data/a", "/data/b"],
+        train_dataset_weights=[0.9, 0.1],
+    )
+    validate_sft_cfg(cfg)
+    assert cfg.train_dataset_weights == [0.9, 0.1]
 
 
 def test_pretokenized_rows_collate(tmp_path):
@@ -434,8 +529,8 @@ def test_pretokenized_rows_collate(tmp_path):
 
 def test_validate_cfg_accepts_pretokenized_eval_only():
     cfg = SFTConfig(
-        pretokenized_dataset_path="/data/train",
-        eval_pretokenized_dataset_path="/data/eval",
+        pretokenized_dataset_paths=["/data/train"],
+        eval_pretokenized_dataset_paths=["/data/eval"],
         eval_interval=10,
     )
     validate_sft_cfg(cfg)
