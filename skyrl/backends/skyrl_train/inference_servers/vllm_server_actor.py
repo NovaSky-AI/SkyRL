@@ -61,6 +61,39 @@ def _sample_support_from_flat_logprobs(
     processed_logprobs = np.asarray(logprobs.logprobs).reshape(-1, row_width)
     support_ids = np.where(np.isneginf(processed_logprobs[:, 1:]), -1, token_ids[:, 1:])
     sampled_logprobs = [{"logprob": value} for value in processed_logprobs[:, 0].tolist()]
+
+    # Repair rows whose sampled token is absent from the captured support.
+    #
+    # The support row is columns 1: (the top_k neighbors); column 0 is the token
+    # vLLM actually sampled. vLLM's approximate Triton top-k/top-p pivot (in
+    # processed_logprobs mode) can leave slightly more than top_k survivors, so the
+    # sampled token can rank just beyond top_k and be absent from cols 1:. When that
+    # happens the downstream sample-support invariant
+    # (assert_sampled_tokens_in_sample_support_sets / build_sample_support_replay)
+    # hard-crashes the whole run. To preserve it we overwrite the row's WEAKEST valid
+    # member (vLLM returns top-k descending, so the trailing valid slot is weakest)
+    # with the sampled id. Overwriting keeps width == top_k, inserts the sampled id
+    # exactly once (so the trainer's renorm denominator is not double-counted), and
+    # leaves any trailing -1 padding intact (the weakest valid col precedes the pad).
+    sampled = token_ids[:, 0]
+    valid = support_ids >= 0
+    present = np.any(support_ids == sampled[:, None], axis=1)
+    # Only repair rows that already have >=1 valid member (matches the downstream
+    # has_support condition); a fully -1 row is left untouched.
+    missing = (~present) & valid.any(axis=1)
+    if np.any(missing):
+        rows = np.flatnonzero(missing)
+        weakest_col = valid.sum(axis=1) - 1  # last valid (weakest) column per row
+        support_ids[rows, weakest_col[rows]] = sampled[rows]
+        logger.warning(
+            "sample-support repair: %d token(s) had the sampled id absent from top-%d "
+            "support; overwrote the weakest member to preserve the invariant (vLLM "
+            "approx top-k/top-p pivot artifact); example: sampled token %d at row %d",
+            rows.size,
+            top_k,
+            int(sampled[rows[0]]),
+            int(rows[0]),
+        )
     return sampled_logprobs, support_ids.tolist()
 
 
