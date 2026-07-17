@@ -543,6 +543,17 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 "(including shared ones like kv_transfer_config) into the role-specific "
                 "prefill_init_kwargs and decode_init_kwargs."
             )
+        # Completeness: role-specific kwargs replace engine_init_kwargs entirely, so each
+        # role must carry its own kv_transfer_config. Fail fast here rather than at
+        # serve-setup time in get_pd_cli_args (which raises per-role once the engine starts).
+        for role in ("prefill", "decode"):
+            role_kwargs = getattr(ie_cfg, f"{role}_init_kwargs")
+            if "kv_transfer_config" not in role_kwargs:
+                raise ValueError(
+                    f"generator.inference_engine.{role}_init_kwargs must set kv_transfer_config when "
+                    "using role-specific PD kwargs. Both prefill_init_kwargs and decode_init_kwargs must "
+                    "be fully specified (each with its own kv_transfer_config)."
+                )
 
     # Validate inference engine parallelism.
     ep_size = ie_cfg.expert_parallel_size

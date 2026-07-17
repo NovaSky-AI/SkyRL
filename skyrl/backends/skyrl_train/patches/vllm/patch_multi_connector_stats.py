@@ -6,8 +6,7 @@ class. Some connectors (e.g. ``MooncakeConnector``) produce ``KVConnectorStats``
 but expose no prom-metrics class, so with a ``MultiConnector`` stack like
 MooncakeConnector + MooncakeStoreConnector the assert fires inside
 ``AsyncLLM.output_handler`` on the first stats flush — killing the output
-handler and hanging every in-flight request (hit in exp 14 of
-exp_logs/p_d_wide_ep_testing).
+handler and hanging every in-flight request.
 
 Patch: skip children without registered prom metrics (their stats still appear
 in the periodic "KV Transfer metrics" log lines; only the Prometheus export is
