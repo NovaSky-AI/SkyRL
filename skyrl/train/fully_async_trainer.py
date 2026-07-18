@@ -39,7 +39,7 @@ from skyrl.train.generators.utils import (
 )
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
-from skyrl.train.utils.phase_metrics import ScalarGauges, TrainingPhaseGauge
+from skyrl.train.utils.scalar_gauges import ScalarGauges
 from skyrl.train.utils.trainer_utils import (
     ResumeMode,
     build_dataloader,
@@ -336,9 +336,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self.sample_full_batch = cfg.trainer.fully_async.sample_full_batch
 
-        # Publishes the loop macro-phase to Prometheus; see phase_metrics.py.
-        self._phase_gauge = TrainingPhaseGauge()
-        # Buffer depth to Prometheus, joining the phase gauge and node GPU metrics in one store.
+        # Buffer depth to Prometheus, joining node GPU metrics in one store.
         self._loop_gauges = ScalarGauges()
         self._loop_gauges.set(
             "skyrl_mini_batch_size", self.mini_batch_size, "Generation groups consumed per training step."
@@ -467,7 +465,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
-            with Timer("eval", self.all_timings), self._phase_gauge.phase("eval"):
+            with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
                 self.tracker.log(eval_metrics, step=self.global_step, commit=True)
 
@@ -527,14 +525,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                         # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups if
                         # sample_full_batch).
-                        with self._phase_gauge.phase("wait_for_generation_buffer"):
-                            (
-                                cur_generation_group_mini_batch,
-                                cur_dropped_groups,
-                                epoch_exhausted,
-                            ) = await self._collect_generation_mini_batch(
-                                generation_output_group_buffer, all_generators_done
-                            )
+                        (
+                            cur_generation_group_mini_batch,
+                            cur_dropped_groups,
+                            epoch_exhausted,
+                        ) = await self._collect_generation_mini_batch(
+                            generation_output_group_buffer, all_generators_done
+                        )
 
                         if epoch_exhausted:
                             # Exhausted mid mini-batch: discard the partial batch (marked consumed so it
@@ -573,10 +570,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             )
 
                         # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
-                        with (
-                            Timer("convert_to_training_input", self.all_timings),
-                            self._phase_gauge.phase("convert_to_training_input"),
-                        ):
+                        with Timer("convert_to_training_input", self.all_timings):
                             training_input = await asyncio.to_thread(
                                 self.convert_generation_group_mini_batch_to_training_input,
                                 cur_generation_group_mini_batch,
@@ -584,14 +578,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             )
 
                         # 3. Run training and update consumed UIDs.
-                        with Timer("run_training", self.all_timings), self._phase_gauge.phase("run_training"):
+                        with Timer("run_training", self.all_timings):
                             status = await self._run_training(training_input)
                             await self.async_train_dataloader.mark_consumed_uids(
                                 [g.uid for g in cur_generation_group_mini_batch]
                             )
 
                         # 4. After training: pause generation, sync weights, resume.
-                        with Timer("sync_weights", self.all_timings), self._phase_gauge.phase("sync_weights"):
+                        with Timer("sync_weights", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
 
                     # A training step completed: count it for this epoch's bookkeeping.
@@ -613,7 +607,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self.global_step % self.cfg.trainer.eval_interval == 0
                         or self.global_step == self.total_training_steps
                     ):
-                        with Timer("eval", self.all_timings), self._phase_gauge.phase("eval"):
+                        with Timer("eval", self.all_timings):
                             eval_metrics = await self.eval()
                             self.all_metrics.update(eval_metrics)
 
@@ -621,10 +615,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
                     if self.cfg.trainer.ckpt_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                            with (
-                                Timer("save_checkpoints", self.all_timings),
-                                self._phase_gauge.phase("save_checkpoints"),
-                            ):
+                            with Timer("save_checkpoints", self.all_timings):
                                 await asyncio.to_thread(self.save_checkpoints)
                     if self.cfg.trainer.hf_save_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
@@ -706,7 +697,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # safety net: always save final checkpoint at end of training.
         if self.cfg.trainer.ckpt_interval > 0:
-            with Timer("save_checkpoints", self.all_timings), self._phase_gauge.phase("save_checkpoints"):
+            with Timer("save_checkpoints", self.all_timings):
                 await asyncio.to_thread(self.save_checkpoints)
                 logger.info("Saved final checkpoint.")
         if self.cfg.trainer.hf_save_interval > 0:
