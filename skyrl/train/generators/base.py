@@ -47,7 +47,8 @@ class GeneratorOutput(TypedDict):
     # async trainer to compute per-group / intra-group completion-time metrics.
     trajectory_generation_times: Optional[List[float]]
     # Engine and env time splits of ``trajectory_generation_times``, one list entry per trajectory,
-    # e.g. {"llm": [...], "env": [...]}. None if any trajectory did not record them.
+    # e.g. {"llm": [...], "env": [...]}. This whole field is None if any trajectory did not record
+    # its split; the per-key lists are never partially populated.
     trajectory_time_splits: Optional[Dict[str, List[float]]]
     rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training

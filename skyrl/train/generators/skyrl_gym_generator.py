@@ -56,9 +56,6 @@ class TrajectoryOutput:
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
-    # Wall-clock split of ``e2e_time`` by component (seconds), summed over turns: "llm" is time in
-    # the inference-engine call, "env" is time in ``env.step()``. The remainder of ``e2e_time`` is
-    # tokenization, chat templating, and event-loop scheduling. None if untracked.
     time_splits: Optional[Dict[str, float]] = None
 
 
@@ -70,7 +67,6 @@ class StepWiseOutput:
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
-    # Same as TrajectoryOutput.time_splits.
     time_splits: Optional[Dict[str, float]] = None
 
 
