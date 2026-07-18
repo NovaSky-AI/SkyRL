@@ -247,6 +247,14 @@ def _concat_field(generator_outputs: List[GeneratorOutput], key: str) -> Optiona
     return _flatten_field(generator_outputs, key)
 
 
+def _concat_time_splits(generator_outputs: List[GeneratorOutput]) -> Optional[Dict[str, List[float]]]:
+    """Concatenate the per-trajectory time-split lists across outputs, per component."""
+    first = generator_outputs[0].get("trajectory_time_splits")
+    if first is None:
+        return None
+    return {name: [t for go in generator_outputs for t in go["trajectory_time_splits"][name]] for name in first}
+
+
 def _last_step_only(values: Optional[list], is_last_step: Optional[List[bool]]) -> Optional[list]:
     """Keep only last-step entries when step-wise, so one trajectory contributes one value."""
     if values is None or not is_last_step:
@@ -281,8 +289,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "stop_reasons": _concat_field(generator_outputs, "stop_reasons"),
         "rollout_logprobs": _concat_field(generator_outputs, "rollout_logprobs"),
         "trajectory_generation_times": _concat_field(generator_outputs, "trajectory_generation_times"),
-        "trajectory_llm_times": _concat_field(generator_outputs, "trajectory_llm_times"),
-        "trajectory_env_times": _concat_field(generator_outputs, "trajectory_env_times"),
+        "trajectory_time_splits": _concat_time_splits(generator_outputs),
     }
 
     # propagate additional keys with list values as-is
@@ -295,8 +302,9 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
     # With step-wise training each trajectory spans multiple rows; keep only its last-step timing.
     is_last_step = result.get("is_last_step") if step_wise else None
     trajectory_generation_times = _last_step_only(result.get("trajectory_generation_times"), is_last_step)
-    trajectory_llm_times = _last_step_only(result.get("trajectory_llm_times"), is_last_step)
-    trajectory_env_times = _last_step_only(result.get("trajectory_env_times"), is_last_step)
+    trajectory_time_splits = result.get("trajectory_time_splits")
+    if trajectory_time_splits is not None and is_last_step:
+        trajectory_time_splits = {k: _last_step_only(v, is_last_step) for k, v in trajectory_time_splits.items()}
 
     # Re-aggregate rollout metrics; the extra_keys fallback below cannot aggregate a p90 or a ratio.
     rollout_metrics = get_rollout_metrics(
@@ -304,8 +312,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         result["rewards"],
         loss_masks=result.get("loss_masks"),
         trajectory_completion_times=trajectory_generation_times,
-        trajectory_llm_times=trajectory_llm_times,
-        trajectory_env_times=trajectory_env_times,
+        trajectory_time_splits=trajectory_time_splits,
     )
 
     # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
@@ -408,8 +415,7 @@ def get_rollout_metrics(
     env_classes: Optional[List[str]] = None,
     loss_masks: Optional[List[List[int]]] = None,
     trajectory_completion_times: Optional[List[float]] = None,
-    trajectory_llm_times: Optional[List[float]] = None,
-    trajectory_env_times: Optional[List[float]] = None,
+    trajectory_time_splits: Optional[Dict[str, List[float]]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -422,10 +428,8 @@ def get_rollout_metrics(
         loss_masks: Optional list of per-token loss masks; used to compute assistant-only token counts
         trajectory_completion_times: Optional per-trajectory end-to-end generation times (seconds);
             used to compute aggregate trajectory completion-time stats (mean / p90 / max)
-        trajectory_llm_times: Optional per-trajectory time (seconds) spent awaiting the inference
-            engine, summed over turns
-        trajectory_env_times: Optional per-trajectory time (seconds) spent in ``env.step()``, summed
-            over turns
+        trajectory_time_splits: Optional per-component split of the completion times, e.g.
+            {"llm": [...], "env": [...]}, one entry per trajectory
 
     Returns:
         Dictionary of aggregated metrics
@@ -481,8 +485,10 @@ def get_rollout_metrics(
             )
 
     _add_time_stats(rollout_metrics, "completion", trajectory_completion_times)
-    llm_sum = _add_time_stats(rollout_metrics, "llm", trajectory_llm_times)
-    env_sum = _add_time_stats(rollout_metrics, "env", trajectory_env_times)
+    split_sums = {
+        name: _add_time_stats(rollout_metrics, name, times) for name, times in (trajectory_time_splits or {}).items()
+    }
+    llm_sum, env_sum = split_sums.get("llm"), split_sums.get("env")
 
     if llm_sum is not None and env_sum is not None and llm_sum + env_sum > 0:
         # Time-weighted (sum over sum), not a mean of per-trajectory ratios, so long trajectories

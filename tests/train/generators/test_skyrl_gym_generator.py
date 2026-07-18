@@ -1752,10 +1752,10 @@ async def test_step_wise_trajectory_completion_time_metrics(mock_make, mock_toke
     )
     assert rollout_metrics["generate/trajectory_completion_time_max"] == pytest.approx(np.max(expected).item())
 
-    # The llm/env split is stored per step and replicated like the completion times above.
-    for key in ("trajectory_llm_times", "trajectory_env_times"):
-        split_times = generator_output[key]
-        assert split_times is not None
+    # The time splits are stored per step and replicated like the completion times above.
+    time_splits = generator_output["trajectory_time_splits"]
+    assert time_splits is not None and set(time_splits) == {"llm", "env"}
+    for split_times in time_splits.values():
         assert len(split_times) == num_steps
         assert split_times[0] == split_times[1] and split_times[2] == split_times[3]
 
@@ -1854,9 +1854,9 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     with patch("skyrl.train.generators.skyrl_gym_generator.get_rollout_metrics", spy):
         generator_output: GeneratorOutput = await generator.generate(input_batch)
 
-    llm_times = spy.call_args.kwargs["trajectory_llm_times"]
-    env_times = spy.call_args.kwargs["trajectory_env_times"]
-    assert llm_times is not None and env_times is not None
+    time_splits = spy.call_args.kwargs["trajectory_time_splits"]
+    assert time_splits is not None and set(time_splits) == {"llm", "env"}
+    llm_times, env_times = time_splits["llm"], time_splits["env"]
     assert len(llm_times) == num_trajectories
     assert len(env_times) == num_trajectories
 
