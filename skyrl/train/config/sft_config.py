@@ -389,14 +389,17 @@ def _normalize_dataset_cfg(cfg: SFTConfig) -> None:
 
     # ---- Train datasets ----
     if cfg.pretokenized_dataset_paths is not None:
-        conflicting = cfg.train_datasets is not None or cfg.dataset_name is not None or cfg.dataset_split is not None
+        conflicting = (
+            cfg.train_datasets is not None
+            or cfg.train_dataset_splits is not None
+            or cfg.dataset_name is not None
+            or cfg.dataset_split is not None
+        )
         if conflicting:
             raise ValueError(
-                "Specify only one of pretokenized_dataset_paths and train_datasets "
+                "Specify only one of pretokenized_dataset_paths and train_datasets/train_dataset_splits "
                 "(or the deprecated dataset_name/dataset_split), not both."
             )
-        if cfg.train_dataset_splits is not None:
-            raise ValueError("train_dataset_splits does not apply to pretokenized_dataset_paths (no split syntax).")
         if len(cfg.pretokenized_dataset_paths) == 0:
             raise ValueError("pretokenized_dataset_paths must be a non-empty list when set.")
         _normalize_mixing_weights(cfg, len(cfg.pretokenized_dataset_paths), "pretokenized_dataset_paths")
