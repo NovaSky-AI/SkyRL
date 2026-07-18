@@ -487,9 +487,6 @@ def get_rollout_metrics(
     for name, times in (trajectory_time_splits or {}).items():
         _add_time_stats(rollout_metrics, name, times)
 
-    # Overhead is e2e minus every recorded split component: env construction and teardown,
-    # tokenization, chat templating, and event-loop scheduling. It closes the stack, so
-    # unattributed time is visible instead of silent.
     if trajectory_completion_times and trajectory_time_splits:
         overhead = np.array(trajectory_completion_times, dtype=np.float64)
         for times in trajectory_time_splits.values():

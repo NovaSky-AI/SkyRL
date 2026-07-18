@@ -1763,15 +1763,11 @@ async def test_step_wise_trajectory_completion_time_metrics(mock_make, mock_toke
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
-    """Only the total rollout time was previously recorded, which cannot distinguish an engine-bound
-    rollout from an environment-bound one. Uses an env deliberately slower than the engine, so a
-    swapped or one-sided attribution fails."""
+    """agent_loop attributes engine sleep to "llm" and env sleep to "env", not swapped or merged.
+    Metric math over the splits is covered by exact-value tests in test_generator_output_utils.py."""
     import asyncio
     import time
 
-    import numpy as np
-
-    from skyrl.train.generators import utils as generator_utils
     from skyrl.train.generators.base import TrajectoryID
 
     llm_sleep_s = 0.02
@@ -1850,41 +1846,17 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
         "trajectory_ids": [TrajectoryID(instance_id=f"uid{i}", repetition_id=0) for i in range(num_trajectories)],
     }
 
-    spy = MagicMock(side_effect=generator_utils.get_rollout_metrics)
-    with patch("skyrl.train.generators.skyrl_gym_generator.get_rollout_metrics", spy):
-        generator_output: GeneratorOutput = await generator.generate(input_batch)
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
 
-    time_splits = spy.call_args.kwargs["trajectory_time_splits"]
+    time_splits = generator_output["trajectory_time_splits"]
     assert time_splits is not None and set(time_splits) == {"llm", "env"}
     llm_times, env_times = time_splits["llm"], time_splits["env"]
     assert len(llm_times) == num_trajectories
     assert len(env_times) == num_trajectories
 
-    # Each side is at least its per-turn sleep summed over turns, and neither swallows the other.
-    for llm_t, env_t in zip(llm_times, env_times):
+    for llm_t, env_t, e2e_t in zip(llm_times, env_times, generator_output["trajectory_generation_times"]):
         assert llm_t >= llm_sleep_s * num_turns
         assert env_t >= env_sleep_s * num_turns
         # The environment is ~3x slower than the engine here, so a swapped attribution would flip this.
         assert env_t > llm_t
-
-    metrics = generator_output["rollout_metrics"]
-    assert metrics["generate/trajectory_llm_time_mean"] >= llm_sleep_s * num_turns
-    assert metrics["generate/trajectory_env_time_mean"] >= env_sleep_s * num_turns
-    assert metrics["generate/trajectory_overhead_time_mean"] >= 0.0
-
-    # The splits never exceed the trajectory's end-to-end time; overhead is the exact remainder.
-    overhead_times = []
-    for llm_t, env_t, e2e_t in zip(llm_times, env_times, generator_output["trajectory_generation_times"]):
         assert llm_t + env_t <= e2e_t + 1e-6
-        overhead_times.append(e2e_t - llm_t - env_t)
-    assert metrics["generate/trajectory_overhead_time_mean"] == pytest.approx(np.mean(overhead_times).item())
-
-    # Regression: concatenate_generator_outputs (every logging path) must recompute the split from
-    # the raw per-trajectory lists, not sum per-group aggregates past the sample max.
-    concatenated = generator_utils.concatenate_generator_outputs([generator_output, generator_output])
-    concat_metrics = concatenated["rollout_metrics"]
-    assert concat_metrics["generate/trajectory_llm_time_p90"] == pytest.approx(np.percentile(llm_times * 2, 90).item())
-    assert concat_metrics["generate/trajectory_env_time_p90"] == pytest.approx(np.percentile(env_times * 2, 90).item())
-    assert concat_metrics["generate/trajectory_overhead_time_p90"] == pytest.approx(
-        np.percentile(overhead_times * 2, 90).item()
-    )
