@@ -138,7 +138,7 @@ def test_time_splits_concatenation():
 
 
 def test_time_splits_concatenation_partial_is_none():
-    """A batch that recorded no splits drops the whole aggregate to None rather than crashing."""
+    """A batch that recorded no splits drops the whole time-split aggregate to None."""
 
     def make_output(times, splits) -> GeneratorOutput:
         return {
@@ -154,7 +154,7 @@ def test_time_splits_concatenation_partial_is_none():
 
     recorded = make_output([10.0, 20.0], {"llm": [4.0, 8.0], "env": [5.0, 10.0]})
     missing = make_output([30.0, 40.0], None)
-    # Order must not matter: keying off the first output would crash when the missing batch is second.
+    # Both orders: the None batch must not depend on being first or last.
     for outputs in ([recorded, missing], [missing, recorded]):
         concatenated = concatenate_generator_outputs(outputs)
         assert concatenated["trajectory_time_splits"] is None
