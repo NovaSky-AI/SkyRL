@@ -137,6 +137,31 @@ def test_time_splits_concatenation():
     assert concat_metrics["generate/trajectory_overhead_time_mean"] == pytest.approx(2.5)
 
 
+def test_time_splits_concatenation_partial_is_none():
+    """A batch that recorded no splits drops the whole aggregate to None rather than crashing."""
+
+    def make_output(times, splits) -> GeneratorOutput:
+        return {
+            "prompt_token_ids": [[1]] * len(times),
+            "response_ids": [[1, 2]] * len(times),
+            "rewards": [1.0] * len(times),
+            "loss_masks": [[1, 1]] * len(times),
+            "stop_reasons": ["stop"] * len(times),
+            "rollout_logprobs": None,
+            "trajectory_generation_times": times,
+            "trajectory_time_splits": splits,
+        }
+
+    recorded = make_output([10.0, 20.0], {"llm": [4.0, 8.0], "env": [5.0, 10.0]})
+    missing = make_output([30.0, 40.0], None)
+    # Order must not matter: keying off the first output would crash when the missing batch is second.
+    for outputs in ([recorded, missing], [missing, recorded]):
+        concatenated = concatenate_generator_outputs(outputs)
+        assert concatenated["trajectory_time_splits"] is None
+        # generation_times has its own None-ness, so it still concatenates fully.
+        assert sorted(concatenated["trajectory_generation_times"]) == [10.0, 20.0, 30.0, 40.0]
+
+
 def test_get_metrics_from_generator_output():
     # Per trajectory rewards, where rewards are List[float]
     generator_output: GeneratorOutput = {

@@ -240,25 +240,28 @@ def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
     return flat
 
 
-def _concat_field(generator_outputs: List[GeneratorOutput], key: str) -> Optional[list]:
-    """Flatten an optional per-trajectory field, keyed off the first output (None if absent)."""
-    if generator_outputs[0].get(key) is None:
+def _concat_optional_field(
+    generator_outputs: List[GeneratorOutput], key: str
+) -> Optional[Union[list, Dict[str, list]]]:
+    """Concatenate an optional per-trajectory field across outputs. None if any output lacks it.
+    Handles a flat list or a dict-of-lists, concatenating each component."""
+    values = [go.get(key) for go in generator_outputs]
+    if any(v is None for v in values):
         return None
+    if isinstance(values[0], dict):
+        return {name: [t for v in values for t in v[name]] for name in values[0]}
     return _flatten_field(generator_outputs, key)
 
 
-def _concat_time_splits(generator_outputs: List[GeneratorOutput]) -> Optional[Dict[str, List[float]]]:
-    """Concatenate the per-trajectory time-split lists across outputs, per component."""
-    first = generator_outputs[0].get("trajectory_time_splits")
-    if first is None:
-        return None
-    return {name: [t for go in generator_outputs for t in go["trajectory_time_splits"][name]] for name in first}
-
-
-def _last_step_only(values: Optional[list], is_last_step: Optional[List[bool]]) -> Optional[list]:
-    """Keep only last-step entries when step-wise, so one trajectory contributes one value."""
+def _last_step_only(
+    values: Optional[Union[list, Dict[str, list]]], is_last_step: Optional[List[bool]]
+) -> Optional[Union[list, Dict[str, list]]]:
+    """Keep only last-step entries when step-wise, so one trajectory contributes one value.
+    Handles a flat list or a dict-of-lists. No-op when not step-wise."""
     if values is None or not is_last_step:
         return values
+    if isinstance(values, dict):
+        return {name: _last_step_only(v, is_last_step) for name, v in values.items()}
     return [v for v, last in zip(values, is_last_step) if last]
 
 
@@ -286,10 +289,10 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "response_ids": _flatten_field(generator_outputs, "response_ids"),
         "rewards": _flatten_field(generator_outputs, "rewards"),
         "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
-        "stop_reasons": _concat_field(generator_outputs, "stop_reasons"),
-        "rollout_logprobs": _concat_field(generator_outputs, "rollout_logprobs"),
-        "trajectory_generation_times": _concat_field(generator_outputs, "trajectory_generation_times"),
-        "trajectory_time_splits": _concat_time_splits(generator_outputs),
+        "stop_reasons": _concat_optional_field(generator_outputs, "stop_reasons"),
+        "rollout_logprobs": _concat_optional_field(generator_outputs, "rollout_logprobs"),
+        "trajectory_generation_times": _concat_optional_field(generator_outputs, "trajectory_generation_times"),
+        "trajectory_time_splits": _concat_optional_field(generator_outputs, "trajectory_time_splits"),
     }
 
     # propagate additional keys with list values as-is
@@ -302,9 +305,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
     # With step-wise training each trajectory spans multiple rows; keep only its last-step timing.
     is_last_step = result.get("is_last_step") if step_wise else None
     trajectory_generation_times = _last_step_only(result.get("trajectory_generation_times"), is_last_step)
-    trajectory_time_splits = result.get("trajectory_time_splits")
-    if trajectory_time_splits is not None and is_last_step:
-        trajectory_time_splits = {k: _last_step_only(v, is_last_step) for k, v in trajectory_time_splits.items()}
+    trajectory_time_splits = _last_step_only(result.get("trajectory_time_splits"), is_last_step)
 
     # Re-aggregate rollout metrics; the extra_keys fallback below cannot aggregate a p90 or a ratio.
     rollout_metrics = get_rollout_metrics(
