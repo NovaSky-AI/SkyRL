@@ -540,7 +540,7 @@ class KLCovConfig(BaseConfig):
 @dataclass
 class CISPOConfig(BaseConfig):
 
-    cispo_eps_clip_low: float = 1
+    cispo_eps_clip_low: float = 1.0
     """Offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping).
     
     The lower bound used is ``1-cispo_eps_clip_low``. The default lower bound is 0 following the ScaleRL recipe: https://arxiv.org/abs/2510.13786
