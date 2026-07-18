@@ -745,16 +745,65 @@ def compute_policy_loss_cispo(
     update. This means the model can still learn from samples whose importance sampling
     ratio is clipped in CISPO, as opposed to PPO where these samples have zero
     gradient and are essentially ignored.
+
+    The behavior policy the IS ratio is anchored on is selected by ``config.cispo.cispo_anchor``:
+
+    * ``"old"`` (default, original CISPO): ``ratio = pi_theta / pi_old``, where ``pi_old`` is the
+      recomputed log-probs of the current policy at experience-prep. Under a single gradient step
+      this ratio is ~1, so the clamp only bites across multiple gradient passes over a frozen batch.
+    * ``"rollout"``: ``ratio = pi_theta / pi_rollout``, anchored on the sampler/behavior policy. This
+      makes the clamped objective engage under fully-async training, where the sampler lags the
+      trainer by up to ``max_staleness_steps`` so the ratio genuinely differs from 1 even at a single
+      gradient pass. Here the rollout-anchored ratio *is* the off-policy correction, so stacking TIS
+      (``off_policy_correction.tis_ratio_type``) would double-count it and is rejected.
+
+    The ``"rollout"`` anchor is the clamped (CISPO) counterpart of the hard-zero ``rollout_is`` loss:
+    both anchor on ``pi_rollout``, but CISPO caps out-of-range tokens rather than zeroing them, so
+    every token keeps a (bounded) gradient.
+
+    Logs ``clip_ratio`` (cap-hit fraction) plus ``cispo/ratio_{mean,clamped_mean,max,min}`` so the
+    actual gradient multiplier ``r = pi_theta / pi_behavior`` is observable, not just how often the
+    cap fires (which is near-zero with a wide ``eps_clip_high``).
     """
-    ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+    anchor = config.cispo.cispo_anchor
+    if anchor == "rollout":
+        assert rollout_logprobs is not None, "rollout_logprobs are required for cispo with cispo_anchor='rollout'"
+        if config.off_policy_correction.tis_ratio_type is not None:
+            raise ValueError(
+                "cispo_anchor='rollout' is already rollout-anchored and performs the off-policy "
+                f"correction; TIS (tis_ratio_type={config.off_policy_correction.tis_ratio_type!r}) "
+                "would double-count it. Set off_policy_correction.tis_ratio_type=None."
+            )
+        behavior_log_probs = rollout_logprobs
+    else:
+        behavior_log_probs = old_log_probs
+
+    ratio = safe_exp_delta(log_probs - behavior_log_probs, clip=20.0, out_dtype=log_probs.dtype)
     clamped_ratio = torch.clamp(ratio, 1 - config.cispo.cispo_eps_clip_low, 1 + config.cispo.cispo_eps_clip_high)
     loss = -advantages * clamped_ratio.detach() * log_probs
 
     is_clipped = (ratio < 1 - config.cispo.cispo_eps_clip_low) | (ratio > 1 + config.cispo.cispo_eps_clip_high)
     clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
 
+    # IS-ratio diagnostics. clip_ratio above is only the cap-HIT fraction; these expose the actual
+    # gradient multiplier r = pi_theta / pi_behavior. Under cispo_anchor="rollout", r drifts from 1
+    # via the vLLM-vs-train numerical gap + async staleness even at a single gradient pass, so mean(r)
+    # and the raw-vs-clamped gap quantify how much the off-policy correction (and the cap) actually
+    # move the gradient -- not just how often the cap fires. The `* loss_mask` zeros masked tokens for
+    # max/min; masked_mean excludes them for the means.
+    cispo_ratio_mean = masked_mean(ratio, loss_mask).mean().detach().item()
+    cispo_ratio_clamped_mean = masked_mean(clamped_ratio, loss_mask).mean().detach().item()
+    cispo_ratio_max = (ratio * loss_mask).max().detach().item() if loss_mask is not None else ratio.max().item()
+    cispo_ratio_min = (ratio * loss_mask).min().detach().item() if loss_mask is not None else ratio.min().item()
+
     # apply off policy correction
-    loss_metrics = {"clip_ratio": clip_ratio}
+    loss_metrics = {
+        "clip_ratio": clip_ratio,
+        "cispo/ratio_mean": cispo_ratio_mean,
+        "cispo/ratio_clamped_mean": cispo_ratio_clamped_mean,
+        "cispo/ratio_max": cispo_ratio_max,
+        "cispo/ratio_min": cispo_ratio_min,
+    }
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )

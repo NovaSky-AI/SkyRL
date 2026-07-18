@@ -136,6 +136,107 @@ def test_policy_loss_cispo():
     assert actual_loss.item() == pytest.approx(-2.9930, abs=1e-4)
 
 
+def test_policy_loss_cispo_rollout_anchor():
+    """CISPO with cispo_anchor='rollout' anchors the IS ratio on the rollout log-probs."""
+
+    device = "cpu"
+
+    advantages = torch.tensor([[1.0, -1.0, -4.0]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]], device=device)
+    log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)
+    # Distinct rollout log-probs so the rollout-anchored ratio differs from the old-anchored one.
+    rollout_logprobs = torch.tensor([[-1.30685, -1.5, -1.0]], device=device)
+
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_eps_clip_low=0.2, cispo_eps_clip_high=0.2, cispo_anchor="rollout"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    loss_fn = PolicyLossRegistry.get("cispo")
+
+    # ratio is anchored on rollout_logprobs (NOT old_log_probs)
+    ratio = torch.exp(log_probs - rollout_logprobs)
+    expected_loss = (-ratio.clamp(1 - 0.2, 1 + 0.2) * advantages * log_probs).sum()
+
+    actual_loss, metrics = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        rollout_logprobs=rollout_logprobs,
+    )
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-3, atol=1e-8)
+
+    # IS-ratio diagnostics are logged and reflect the rollout-anchored ratio
+    for k in ("clip_ratio", "cispo/ratio_mean", "cispo/ratio_clamped_mean", "cispo/ratio_max", "cispo/ratio_min"):
+        assert k in metrics, f"missing metric {k}"
+    assert metrics["cispo/ratio_mean"] == pytest.approx(ratio.mean().item(), rel=1e-3)
+    expected_clamped = ratio.clamp(1 - 0.2, 1 + 0.2)
+    assert metrics["cispo/ratio_clamped_mean"] == pytest.approx(expected_clamped.mean().item(), rel=1e-3)
+    assert metrics["cispo/ratio_max"] == pytest.approx(ratio.max().item(), rel=1e-3)
+
+    # rollout anchor genuinely differs from the default old anchor on the same inputs
+    old_config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_eps_clip_low=0.2, cispo_eps_clip_high=0.2, cispo_anchor="old"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    old_loss, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=old_config,
+        rollout_logprobs=rollout_logprobs,
+    )
+    assert not torch.allclose(actual_loss, old_loss)
+
+
+def test_policy_loss_cispo_rollout_anchor_requires_rollout_logprobs():
+    """cispo_anchor='rollout' must be given rollout_logprobs."""
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_anchor="rollout"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    loss_fn = PolicyLossRegistry.get("cispo")
+    with pytest.raises(AssertionError):
+        loss_fn(
+            log_probs=torch.tensor([[-1.0]]),
+            old_log_probs=torch.tensor([[-1.0]]),
+            advantages=torch.tensor([[1.0]]),
+            config=config,
+            rollout_logprobs=None,
+        )
+
+
+def test_policy_loss_cispo_rollout_anchor_rejects_tis():
+    """cispo_anchor='rollout' refuses to stack TIS (would double-count the off-policy gap)."""
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_anchor="rollout"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=OffPolicyCorrectionConfig(tis_ratio_type="token"),
+    )
+    loss_fn = PolicyLossRegistry.get("cispo")
+    with pytest.raises(ValueError, match="double-count"):
+        loss_fn(
+            log_probs=torch.tensor([[-1.0]]),
+            old_log_probs=torch.tensor([[-1.0]]),
+            advantages=torch.tensor([[1.0]]),
+            config=config,
+            rollout_logprobs=torch.tensor([[-1.2]]),
+        )
+
+
+def test_cispo_anchor_validation():
+    """CISPOConfig rejects an invalid anchor."""
+    with pytest.raises(ValueError, match="cispo_anchor"):
+        CISPOConfig(cispo_anchor="bogus")
+
+
 def test_gspo_importance_sampling_levels():
     """Tests GSPO policy loss function with sequence-level importance sampling.
 
