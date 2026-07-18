@@ -1,0 +1,96 @@
+---
+title: "Mixing Multiple Datasets"
+---
+
+`SFTTrainer` can train on a **weighted mixture of several datasets** and
+evaluate on multiple held-out datasets separately -- no manual preprocessing or
+concatenation required. This page covers the list-based dataset config and how
+mixing weights behave.
+
+<Callout type="info">
+The singular `dataset_name` / `dataset_split` (and `eval_dataset_name` /
+`eval_dataset_split`) fields are **deprecated**. They still work but emit a
+`DeprecationWarning` and are translated to the list form internally. Use
+`train_datasets` / `train_dataset_splits` instead.
+</Callout>
+
+## Weighted multi-source training
+
+Pass parallel lists to `train_datasets` and `train_dataset_splits`, plus an
+optional `train_dataset_weights`:
+
+```bash
+bash examples/train/sft/run_sft_megatron_multi_dataset.sh
+# or directly on top of any SFT script:
+bash examples/train/sft/run_sft_megatron.sh \
+    train_datasets="['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
+    train_dataset_splits="['train[:50000]','train[:10000]']" \
+    train_dataset_weights="[0.8,0.2]"
+```
+
+Each dataset is tokenized (and cached) independently, then concatenated. With
+multiple datasets and the default `sampler=random`, the trainer switches to
+weighted per-source sampling via
+[`DataMixingSampler`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/dataset/samplers.py).
+
+### How weights work
+
+`train_dataset_weights` is the approximate **per-batch ratio of samples drawn
+from each source, independent of the dataset sizes**. A 1k-example dataset with
+weight `0.5` contributes half of every batch even when mixed with a 1M-example
+one. Weights need not sum to 1 (relative scale is what matters) and default to
+equal mixing (`1/N` each).
+
+The sampler draws a fresh weighted plan every epoch and stores its RNG state in
+the checkpoint, so `resume_from` reproduces the exact sample stream: a mid-epoch
+resume replays the in-flight plan, and all subsequent epochs match an
+uninterrupted run.
+
+<Callout type="warn">
+`train_dataset_weights` is only valid with `sampler=random`. With
+`sampler=custom`, pass your mixing ratios through `sampler_kwargs` instead (see
+[Using Custom Samplers](./custom_sampler#custom-samplers-over-multiple-datasets)).
+</Callout>
+
+### Constraints
+
+All training datasets must share the same `messages_key` / `tools_key` /
+`system_key` columns and the same modality (all-text or all-image).
+
+## Multi-dataset evaluation
+
+Evaluation accepts multiple datasets too. Each is evaluated separately and its
+loss is logged under `eval/{name}/loss`:
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    eval_datasets="['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
+    eval_dataset_splits="['train[-500:]','train[200:700]']" \
+    eval_dataset_names="[tulu3,alpaca]" \
+    eval_interval=5
+```
+
+- `eval_dataset_names` is optional and only affects metric names. It defaults to
+  each dataset name with `/` replaced by `_`, and must be unique (set it
+  explicitly to disambiguate the same dataset used with two different splits).
+- `eval_interval` runs eval every N steps; eval also runs once at the end of
+  training. `eval_before_train=true` logs a baseline pass at step 0.
+
+<Callout type="warn">
+Eval metrics are **always nested per dataset**. The former `eval/eval_loss` key
+is now `eval/{name}/loss`, even with a single eval dataset.
+</Callout>
+
+## Config reference
+
+| Parameter | Description |
+|-----------|-------------|
+| `train_datasets` | List of dataset names/paths to train on |
+| `train_dataset_splits` | Split/slice per training dataset (same length as `train_datasets`) |
+| `train_dataset_weights` | Per-source per-batch sampling ratios, independent of dataset size (`sampler=random` only). Defaults to equal mixing |
+| `eval_datasets` | List of eval dataset names (`None` disables eval) |
+| `eval_dataset_splits` | Split per eval dataset (same length as `eval_datasets`) |
+| `eval_dataset_names` | Optional shorthand names for logging (`eval/{name}/loss`); must be unique |
+| `eval_interval` | Run eval every N training steps (`0` disables periodic eval) |
+| `eval_before_train` | Run a baseline eval pass before training (logged at step 0) |
+| `messages_key` / `tools_key` / `system_key` | Column names shared across all datasets |
