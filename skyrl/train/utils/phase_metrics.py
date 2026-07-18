@@ -27,15 +27,13 @@ PHASES = (
 class TrainingPhaseGauge:
     """Sets ``skyrl_training_phase{phase=...}`` to 1.0 for the active phase and 0.0 for the rest.
 
-    Best-effort: silently no-ops when disabled or Ray metrics are unavailable, so it is always safe
-    to construct and call.
+    Best-effort: silently no-ops when Ray metrics are unavailable, so it is always safe to
+    construct and call.
     """
 
-    def __init__(self, enabled: bool = True) -> None:
+    def __init__(self) -> None:
         self._gauge = None
         self._current = "generating"
-        if not enabled:
-            return
         try:
             from ray.util.metrics import Gauge
 
