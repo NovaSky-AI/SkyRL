@@ -1870,19 +1870,21 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     metrics = generator_output["rollout_metrics"]
     assert metrics["generate/trajectory_llm_time_mean"] >= llm_sleep_s * num_turns
     assert metrics["generate/trajectory_env_time_mean"] >= env_sleep_s * num_turns
+    assert metrics["generate/trajectory_overhead_time_mean"] >= 0.0
 
-    # env_sleep / (env_sleep + llm_sleep) = 0.75; allow generous headroom for scheduling overhead
-    # attributed to the engine wait, but it must clearly indicate an environment-bound rollout.
-    assert 0.5 < metrics["generate/frac_time_in_env"] < 1.0
-
-    # The split accounts for real time inside the trajectory and never exceeds its end-to-end time.
+    # The splits never exceed the trajectory's end-to-end time; overhead is the exact remainder.
+    overhead_times = []
     for llm_t, env_t, e2e_t in zip(llm_times, env_times, generator_output["trajectory_generation_times"]):
         assert llm_t + env_t <= e2e_t + 1e-6
+        overhead_times.append(e2e_t - llm_t - env_t)
+    assert metrics["generate/trajectory_overhead_time_mean"] == pytest.approx(np.mean(overhead_times).item())
 
     # Regression: concatenate_generator_outputs (every logging path) must recompute the split from
-    # the raw per-trajectory lists, not sum per-group p90/frac past the sample max and 1.0.
+    # the raw per-trajectory lists, not sum per-group aggregates past the sample max.
     concatenated = generator_utils.concatenate_generator_outputs([generator_output, generator_output])
     concat_metrics = concatenated["rollout_metrics"]
-    assert 0.5 < concat_metrics["generate/frac_time_in_env"] < 1.0
     assert concat_metrics["generate/trajectory_llm_time_p90"] == pytest.approx(np.percentile(llm_times * 2, 90).item())
     assert concat_metrics["generate/trajectory_env_time_p90"] == pytest.approx(np.percentile(env_times * 2, 90).item())
+    assert concat_metrics["generate/trajectory_overhead_time_p90"] == pytest.approx(
+        np.percentile(overhead_times * 2, 90).item()
+    )

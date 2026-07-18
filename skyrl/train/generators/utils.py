@@ -393,10 +393,10 @@ def compute_turn_token_counts(loss_masks: List[List[int]]) -> List[int]:
     return turn_token_counts
 
 
-def _add_time_stats(rollout_metrics: Dict[str, Any], name: str, times: Optional[List[float]]) -> Optional[float]:
-    """Add mean/p90/max for a per-trajectory time list; returns its sum, or None if absent."""
+def _add_time_stats(rollout_metrics: Dict[str, Any], name: str, times: Optional[List[float]]) -> None:
+    """Add mean/p90/max stats for a per-trajectory time list under generate/trajectory_<name>_time_*."""
     if not times:
-        return None
+        return
     arr = np.array(times, dtype=np.float64)
     rollout_metrics.update(
         {
@@ -405,7 +405,6 @@ def _add_time_stats(rollout_metrics: Dict[str, Any], name: str, times: Optional[
             f"generate/trajectory_{name}_time_max": np.max(arr).item(),
         }
     )
-    return np.sum(arr).item()
 
 
 def get_rollout_metrics(
@@ -485,15 +484,17 @@ def get_rollout_metrics(
             )
 
     _add_time_stats(rollout_metrics, "completion", trajectory_completion_times)
-    split_sums = {
-        name: _add_time_stats(rollout_metrics, name, times) for name, times in (trajectory_time_splits or {}).items()
-    }
-    llm_sum, env_sum = split_sums.get("llm"), split_sums.get("env")
+    for name, times in (trajectory_time_splits or {}).items():
+        _add_time_stats(rollout_metrics, name, times)
 
-    if llm_sum is not None and env_sum is not None and llm_sum + env_sum > 0:
-        # Time-weighted (sum over sum), not a mean of per-trajectory ratios, so long trajectories
-        # count proportionally.
-        rollout_metrics["generate/frac_time_in_env"] = env_sum / (llm_sum + env_sum)
+    # Overhead is e2e minus every recorded split component: env construction and teardown,
+    # tokenization, chat templating, and event-loop scheduling. It closes the stack, so
+    # unattributed time is visible instead of silent.
+    if trajectory_completion_times and trajectory_time_splits:
+        overhead = np.array(trajectory_completion_times, dtype=np.float64)
+        for times in trajectory_time_splits.values():
+            overhead = overhead - np.array(times, dtype=np.float64)
+        _add_time_stats(rollout_metrics, "overhead", overhead.tolist())
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)
