@@ -336,7 +336,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self.sample_full_batch = cfg.trainer.fully_async.sample_full_batch
 
-        # Buffer depth to Prometheus, joining node GPU metrics in one store.
         self._loop_gauges = ScalarGauges()
         self._loop_gauges.set(
             "skyrl_mini_batch_size", self.mini_batch_size, "Generation groups consumed per training step."
@@ -510,8 +509,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                     with Timer("step", self.all_timings):
-                        # Buffer depth at step start. Near maxsize means generation is paused at the
-                        # staleness cap. Near zero means the trainer is starving.
                         qsize = generation_output_group_buffer.qsize()
                         maxsize = generation_output_group_buffer.maxsize
                         self.all_metrics["async/gen_buffer_qsize"] = qsize
@@ -557,8 +554,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             break
 
                         if self.sample_full_batch:
-                            # The collect loop returns exactly mini_batch_size kept groups here; the
-                            # epoch-exhausted partial case breaks out above.
+                            # The collect loop returns exactly mini_batch_size kept groups here.
                             num_dropped = len(cur_dropped_groups)
                             keep_rate = self.mini_batch_size / (self.mini_batch_size + num_dropped)
                             self.all_metrics["async/num_groups_dropped"] = num_dropped

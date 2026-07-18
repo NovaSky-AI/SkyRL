@@ -20,7 +20,6 @@ def test_create_once_and_update():
         g.set("skyrl_gen_buffer_qsize", 5)
         g.set("skyrl_mini_batch_size", 8)
 
-    # A gauge is created once per name with its first description, and values are coerced to float.
     assert set(created) == {"skyrl_gen_buffer_qsize", "skyrl_mini_batch_size"}
     assert created["skyrl_gen_buffer_qsize"].description == "queued groups"
     created["skyrl_gen_buffer_qsize"].set.assert_called_with(5.0)
