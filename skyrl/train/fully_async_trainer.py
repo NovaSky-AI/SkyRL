@@ -337,7 +337,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.sample_full_batch = cfg.trainer.fully_async.sample_full_batch
 
         # Publishes the loop macro-phase to Prometheus; see phase_metrics.py.
-        self._phase_gauge = TrainingPhaseGauge(enabled=cfg.trainer.enable_training_phase_gauge)
+        self._phase_gauge = TrainingPhaseGauge()
         # Buffer depth to Prometheus, joining the phase gauge and node GPU metrics in one store.
         self._loop_gauges = ScalarGauges()
         self._loop_gauges.set(

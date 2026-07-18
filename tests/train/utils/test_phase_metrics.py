@@ -63,15 +63,6 @@ def test_disabled_when_ray_metrics_unavailable():
         pass
 
 
-def test_disabled_by_flag_constructs_no_gauge():
-    with patch("ray.util.metrics.Gauge") as gauge_cls:
-        obj = TrainingPhaseGauge(enabled=False)
-    gauge_cls.assert_not_called()
-    obj.set_phase("run_training")
-    with obj.phase("eval"):
-        pass
-
-
 def test_scalar_gauges_create_once_and_update():
     created = {}
 
