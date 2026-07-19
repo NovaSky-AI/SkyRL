@@ -155,15 +155,42 @@ class VLLMServerActor(ServerActorProtocol):
         self._cli_args.host = "0.0.0.0"
         self._cli_args.port = self._port
 
-        # PD disaggregation: setup NIXL side channel for KV transfer
+        # PD disaggregation: setup the KV-transfer side channel for the P2P
+        # connector (NIXL side channel or Mooncake bootstrap server).
         self._nixl_port_reservation = None
         self._nixl_side_channel_base = None
         if enable_pd:
-            # use nixl_side_channel_base + server_idx as convention for the start port for this server
-            self._nixl_side_channel_base, self._nixl_port_reservation = find_and_reserve_port(
-                nixl_side_channel_base + server_idx
+            from skyrl.backends.skyrl_train.inference_servers.utils import (
+                get_pd_p2p_connector_name,
             )
-            self._setup_nixl_side_channel(self._nixl_side_channel_base)
+            from skyrl.backends.skyrl_train.patches.vllm.patch_multi_connector_stats import (
+                apply_multi_connector_stats_patch,
+            )
+
+            # MultiConnector stacks (e.g. Mooncake P2P + store) crash the
+            # AsyncLLM output handler when a child has stats but no prom
+            # metrics; patch before the engine is built in this process.
+            apply_multi_connector_stats_patch()
+
+            kv_config = getattr(self._cli_args, "kv_transfer_config", None) or {}
+            p2p_connector = get_pd_p2p_connector_name(kv_config) if kv_config else "NixlConnector"
+
+            if p2p_connector == "MooncakeConnector":
+                # Each external-LB instance launches its own bootstrap HTTP
+                # server bound at exactly VLLM_MOONCAKE_BOOTSTRAP_PORT
+                # (get_mooncake_bootstrap_addr — no rank offset), so the port
+                # must be unique per server on a node: group base + server_idx.
+                # The router is given the same port per prefill server
+                # (computed in create_inference_servers).
+                mooncake_bootstrap_port = nixl_side_channel_base + server_idx
+                os.environ["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(mooncake_bootstrap_port)
+                logger.info(f"Server {server_idx}: Mooncake PD bootstrap port {mooncake_bootstrap_port}")
+            else:
+                # use nixl_side_channel_base + server_idx as convention for the start port for this server
+                self._nixl_side_channel_base, self._nixl_port_reservation = find_and_reserve_port(
+                    nixl_side_channel_base + server_idx
+                )
+                self._setup_nixl_side_channel(self._nixl_side_channel_base)
 
         # Each engine needs to know its dp_rank and dp_size so DP process groups are formed
         if dp_size > 0:

@@ -716,6 +716,8 @@ generator:
     enable_return_routed_experts: false
     distributed_executor_backend: "ray"  # "mp", "ray"
     engine_init_kwargs: {}
+    prefill_init_kwargs: {}
+    decode_init_kwargs: {}
     served_model_name: null
 
   # Custom chat template configuration if needed
@@ -788,6 +790,8 @@ For more details on how different placement options work, please refer to the [p
 - `generator.inference_engine.enable_return_routed_experts`: Whether to return per-layer expert routing indices to use for rollout router replay (R3) if training an MoE model. Used together with `trainer.policy.megatron_config.moe_enable_routing_replay` to enable R3.
 - `generator.inference_engine.distributed_executor_backend`: The distributed executor backend to use for the vLLM engine. Options are either `mp` or `ray`.
 - `generator.inference_engine.engine_init_kwargs`: Inference engine arguments passed directly to the vLLM engine. If duplicate kwargs are passed or kwargs clash with existing inference engine arguments (e.g., `tensor_parallel_size`), an error is raised.
+- `generator.inference_engine.prefill_init_kwargs`: Pass-through kwargs for the vLLM engine, applied only to prefill engines when `enable_pd=true` (e.g. a different `all2all_backend` for prefill vs decode). Mutually exclusive with `engine_init_kwargs`: when using role-specific overrides, provide all engine kwargs (including shared ones like `kv_transfer_config`) via `prefill_init_kwargs` / `decode_init_kwargs`. When used, both `prefill_init_kwargs` and `decode_init_kwargs` must be set and each must carry its own `kv_transfer_config`.
+- `generator.inference_engine.decode_init_kwargs`: Pass-through kwargs for the vLLM engine, applied only to decode engines when `enable_pd=true`. Mutually exclusive with `engine_init_kwargs` (see `prefill_init_kwargs`).
 
 ### Generation Parameters
 

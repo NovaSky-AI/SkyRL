@@ -529,6 +529,32 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         ), "num_prefill must be < num_engines (need at least one decode worker)"
         assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
 
+    # Role-specific engine kwargs for PD disaggregation.
+    if ie_cfg.prefill_init_kwargs or ie_cfg.decode_init_kwargs:
+        if not ie_cfg.enable_pd:
+            raise ValueError(
+                "generator.inference_engine.prefill_init_kwargs / decode_init_kwargs "
+                "are only valid with enable_pd=true."
+            )
+        if ie_cfg.engine_init_kwargs:
+            raise ValueError(
+                "generator.inference_engine.engine_init_kwargs cannot be combined with "
+                "prefill_init_kwargs / decode_init_kwargs. Move all engine overrides "
+                "(including shared ones like kv_transfer_config) into the role-specific "
+                "prefill_init_kwargs and decode_init_kwargs."
+            )
+        # Completeness: role-specific kwargs replace engine_init_kwargs entirely, so each
+        # role must carry its own kv_transfer_config. Fail fast here rather than at
+        # serve-setup time in get_pd_cli_args (which raises per-role once the engine starts).
+        for role in ("prefill", "decode"):
+            role_kwargs = getattr(ie_cfg, f"{role}_init_kwargs")
+            if "kv_transfer_config" not in role_kwargs:
+                raise ValueError(
+                    f"generator.inference_engine.{role}_init_kwargs must set kv_transfer_config when "
+                    "using role-specific PD kwargs. Both prefill_init_kwargs and decode_init_kwargs must "
+                    "be fully specified (each with its own kv_transfer_config)."
+                )
+
     # Validate inference engine parallelism.
     ep_size = ie_cfg.expert_parallel_size
     dp_size = ie_cfg.data_parallel_size

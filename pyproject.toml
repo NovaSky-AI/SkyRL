@@ -167,6 +167,12 @@ miniswe = [
 harbor = [
     "harbor[daytona,modal]; python_version >= '3.12'",
 ]
+# Mooncake distributed KV for vLLM: the store connector (MooncakeStoreConnector,
+# KV-cache offloading) and P2P PD transfer (MooncakeConnector). Provides the python
+# bindings and the `mooncake_master` binary. Off-the-shelf PyPI wheel; Linux-only.
+mooncake = [
+    "mooncake-transfer-engine; sys_platform == 'linux'",
+]
 
 dev = [
     "mkdocs",

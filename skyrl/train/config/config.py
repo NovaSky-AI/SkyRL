@@ -801,6 +801,14 @@ class InferenceEngineConfig(BaseConfig):
     """Number of prefill engines when ``enable_pd=True``. Decode engines = ``num_engines - num_prefill``
 
     NOTE: SkyRL counts data parallel workers separately, so the total number of prefill workers will be ``data_parallel_size * num_prefill``."""
+    prefill_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """Pass-through kwargs for the vLLM engine, applied only to prefill engines when
+    ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs``: provide role-specific
+    kwargs (including shared ones like ``kv_transfer_config``) via ``prefill_init_kwargs`` /
+    ``decode_init_kwargs`` instead."""
+    decode_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """Pass-through kwargs for the vLLM engine, applied only to decode engines when
+    ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs`` (see ``prefill_init_kwargs``)."""
     router_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs applied to ``RouterArgs`` for the vllm-router.
     Names must match ``vllm_router.RouterArgs`` fields (e.g. ``policy``, ``request_timeout_secs``)."""

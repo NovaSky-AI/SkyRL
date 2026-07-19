@@ -4419,6 +4419,23 @@ wheels = [
 ]
 
 [[package]]
+name = "mooncake-transfer-engine"
+version = "0.3.11.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
+    { name = "requests", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/16/93d9023f414e55481ce5d0d258d3d8f6375f722fcc08ea942d335ae6eaae/mooncake_transfer_engine-0.3.11.post1-cp311-cp311-manylinux_2_35_x86_64.whl", hash = "sha256:d838e6a245a54b38fbe5b117d46595d997f11281031c53da31245886628afa89", size = 42657804, upload-time = "2026-05-24T12:08:36.379Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/ec/b8828bc564222efaea0232e08d2df812854e4c8c8f3a4eb590f6ef233683/mooncake_transfer_engine-0.3.11.post1-cp311-cp311-manylinux_2_39_aarch64.whl", hash = "sha256:ca49d114eec0fe959285f27e9d5df3d91f7c726700d6081df9dfd8cf8d5aef4f", size = 18090732, upload-time = "2026-05-24T16:18:58.651Z" },
+    { url = "https://files.pythonhosted.org/packages/82/6c/92d517ba157a02b2612b06a00c7e3f366d1050e41cc50e1bdefa382a7dc0/mooncake_transfer_engine-0.3.11.post1-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:5ea50146d0d65f0274a406db49a570d187ad04760e054a49627bf84158038ac0", size = 42661963, upload-time = "2026-05-24T12:08:40.453Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/a4/a187adcd485ff27bdbdb5c2b4d9cf210427bc74bcaacfc8226409db17535/mooncake_transfer_engine-0.3.11.post1-cp312-cp312-manylinux_2_39_aarch64.whl", hash = "sha256:1ccad9f44cf1a67f4e0494bd02f505503139ab606ecbe76cd6050d7a069247d5", size = 18089789, upload-time = "2026-05-24T16:19:01.828Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/79/f5fc8738bd5da6a2c2c8371601309ceed50d1c63a199b52823f79b6ef2d9/mooncake_transfer_engine-0.3.11.post1-cp313-cp313-manylinux_2_35_x86_64.whl", hash = "sha256:f61208f25c0a6e33f15ec9fbfcec32a35d0017a69b7624e497fefb3aef1689a8", size = 42661366, upload-time = "2026-05-24T12:08:43.83Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/2b/f294e8c7da16de24b6a75b2c0b58bbb7ab321cee343ea2847379b6ea9976/mooncake_transfer_engine-0.3.11.post1-cp313-cp313-manylinux_2_39_aarch64.whl", hash = "sha256:c78cb21f009fd906741181bd5120dc651cfc0c6efc423a0c73d46af8b8a587f1", size = 18090305, upload-time = "2026-05-24T16:19:04.544Z" },
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -8498,6 +8515,9 @@ miniswe = [
     { name = "vllm-router", version = "0.1.14.post1", source = { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-5-skyrl-miniswe') or (platform_machine != 'x86_64' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-gpu' and extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu')" },
     { name = "wandb" },
 ]
+mooncake = [
+    { name = "mooncake-transfer-engine", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
+]
 ray = [
     { name = "ray", extra = ["default"] },
 ]
@@ -8602,6 +8622,7 @@ requires-dist = [
     { name = "mkdocs", marker = "extra == 'dev'" },
     { name = "mkdocs-material", marker = "extra == 'dev'" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'dev'", specifier = ">=0.24.0" },
+    { name = "mooncake-transfer-engine", marker = "sys_platform == 'linux' and extra == 'mooncake'" },
     { name = "ninja", marker = "extra == 'skyrl-train'" },
     { name = "nixl", marker = "sys_platform == 'linux' and extra == 'fsdp'" },
     { name = "nixl", marker = "sys_platform == 'linux' and extra == 'megatron'" },
@@ -8666,11 +8687,11 @@ requires-dist = [
     { name = "vllm-router", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'skyrl-train'", url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl" },
     { name = "wandb", marker = "extra == 'skyrl-train'" },
 ]
-provides-extras = ["gpu", "tpu", "tinker", "ray", "aws", "gcp", "azure", "jax", "skyrl-train", "fsdp", "megatron", "miniswe", "harbor", "dev"]
+provides-extras = ["gpu", "tpu", "tinker", "ray", "aws", "gcp", "azure", "jax", "skyrl-train", "fsdp", "megatron", "miniswe", "harbor", "mooncake", "dev"]
 
 [[package]]
 name = "skyrl-gym"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "skyrl-gym" }
 dependencies = [
     { name = "func-timeout" },
