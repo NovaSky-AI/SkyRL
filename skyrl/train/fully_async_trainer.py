@@ -748,6 +748,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         kept_groups: List[GeneratedOutputGroup] = []
         dropped_groups: List[GeneratedOutputGroup] = []
         epoch_exhausted = False
+        # Buffer occupancy when this step starts waiting.
+        self.all_metrics["async/gen_buffer_qsize_at_wait_start"] = generation_output_group_buffer.qsize()
         with Timer("wait_for_generation_buffer", self.all_timings):
             buffer_pbar = tqdm(total=self.mini_batch_size, initial=0, desc="Generation Buffer Progress", position=1)
             while len(kept_groups) < self.mini_batch_size:
