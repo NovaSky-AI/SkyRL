@@ -567,6 +567,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # 5. Set logs for this training step.
                     logger.info(status)
                     self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+                    pbar.update(1)
 
                     # 6. Eval. At interval and at the last step.
                     # NOTE(Charlie): eval does not overlap with training, but overlaps with generation.
@@ -581,7 +582,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # Log metrics for this step after evaluation
                     self.tracker.log(self.all_metrics, step=self.global_step, commit=False)
                     self.all_metrics = {}
-                    pbar.update(1)
 
                     # 7. Checkpointing. At interval and at the last step of each epoch.
                     is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
