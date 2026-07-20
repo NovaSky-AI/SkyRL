@@ -6,7 +6,9 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron import token_metadata
-from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import TokenMetadataTrace
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    TokenMetadataTrace,
+)
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertTrace
 
 
