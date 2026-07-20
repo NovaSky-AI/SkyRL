@@ -17,36 +17,20 @@ import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from enum import Enum
 from pathlib import Path
-from typing import (
-    Callable,
-    Dict,
-    Iterable,
-    Iterator,
-    Optional,
-    Sequence,
-    Tuple,
-    TypeVar,
-)
+from typing import Iterable, Iterator, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file
+from safetensors.torch import save, save_file
 
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 from skyrl.backends.skyrl_train.weight_sync.delta_payload import (
-    bytes_tensor_to_tensor,
     bytes_to_uint8_tensor,
     compress_bytes,
     decompress_bytes,
-    tensor_to_bytes_tensor,
     uint8_tensor_to_bytes,
-)
-from skyrl.backends.skyrl_train.weight_sync.memory_debug import (
-    log_memory,
-    trim_process_memory,
 )
 from skyrl.backends.skyrl_train.weight_sync.weight_extractor import ExtractorShardInfo
 
@@ -55,11 +39,14 @@ logger = logging.getLogger(__name__)
 
 _MANIFEST_NAME = "manifest.json"
 _STATE_DIR_NAME = ".skyrl_weight_sync"
-_DEFAULT_WRITER_QUEUE_SIZE = 2
 _DEFAULT_CHECKSUM_ALGORITHM = "xxh3-128"
 _DEFAULT_PINNED_STAGING_BYTE_CAP = 32 * 1024**3
-_T = TypeVar("_T")
-_U = TypeVar("_U")
+SUPPORTED_CHECKPOINT_LOAD_FORMATS = frozenset(
+    {
+        "vllm_fastsafetensors",
+        "vllm_multi_thread_safetensors",
+    }
+)
 
 
 @dataclass
@@ -110,11 +97,7 @@ class DeltaManifest:
 
 
 def _version_name(version: int) -> str:
-    return f"v{version:08d}"
-
-
-def _version_dir(root: Path, version: int) -> Path:
-    return root / "versions" / _version_name(version)
+    return f"delta-{version:08d}"
 
 
 def _weights_dir(root: Path) -> Path:
@@ -125,12 +108,16 @@ def _deltas_dir(root: Path) -> Path:
     return root / "deltas"
 
 
-def _staging_dir(root: Path, version: int) -> Path:
-    return root / "versions" / f"{_version_name(version)}.staging"
-
-
 def _is_gs_uri(uri: str) -> bool:
     return uri.startswith("gs://")
+
+
+def _is_s3_uri(uri: str) -> bool:
+    return uri.startswith("s3://")
+
+
+def _is_cloud_uri(uri: str) -> bool:
+    return _is_gs_uri(uri) or _is_s3_uri(uri)
 
 
 def _join_uri(base: str, child: str) -> str:
@@ -141,70 +128,93 @@ def _safe_path_name(value: str) -> str:
     return "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in value)[:160]
 
 
-def _ordered_prefetch(
-    items: Iterable[_T],
-    fn: Callable[[_T], _U],
-    prefetch_depth: int,
-) -> Iterator[_U]:
-    """Apply ``fn`` in order while preparing a bounded number of items ahead."""
-    if prefetch_depth <= 0:
-        for item in items:
-            yield fn(item)
+def _uri_basename(uri: str) -> str:
+    return uri.rstrip("/").rsplit("/", 1)[-1] or "object"
+
+
+def _cloud_cp_command(src: str, dst: str) -> list[str]:
+    if _is_gs_uri(src) or _is_gs_uri(dst):
+        executable = "gcloud"
+        if shutil.which(executable) is None:
+            raise RuntimeError("GCS delta transfer requires the gcloud CLI to be installed on this node")
+        return [executable, "storage", "cp", src, dst]
+    if _is_s3_uri(src) or _is_s3_uri(dst):
+        executable = "s5cmd"
+        if shutil.which(executable) is None:
+            raise RuntimeError("S3 delta transfer requires the s5cmd CLI to be installed on this node")
+        return [executable, "cp", src, dst]
+    raise ValueError(f"Unsupported cloud transfer: {src!r} -> {dst!r}")
+
+
+def _run_cloud_cp(src: str, dst: str) -> None:
+    cmd = _cloud_cp_command(src, dst)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Cloud delta transfer failed: " f"{' '.join(cmd)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+
+
+def _default_publish_staging_dir(sync_dir: str) -> Path:
+    return Path(tempfile.gettempdir()) / "skyrl_delta_publish_staging" / _safe_path_name(sync_dir)
+
+
+def _atomic_write_bytes_local(data: bytes, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    with tmp_path.open("wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, dst)
+    try:
+        dir_fd = os.open(dst.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
+def _write_bytes_to_uri(data: bytes, uri: str, staging_dir: Optional[Path] = None) -> None:
+    if _is_cloud_uri(uri):
+        staging_root = staging_dir or _default_publish_staging_dir(uri)
+        staging_root.mkdir(parents=True, exist_ok=True)
+        name = _uri_basename(uri)
+        tmp_path = staging_root / f".{name}.{os.getpid()}.tmp"
+        try:
+            with tmp_path.open("wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            _run_cloud_cp(str(tmp_path), uri)
+        finally:
+            tmp_path.unlink(missing_ok=True)
         return
 
-    item_iter = iter(items)
-    pending: deque[Future[_U]] = deque()
+    _atomic_write_bytes_local(data, Path(uri))
 
-    def submit_next(executor: ThreadPoolExecutor) -> bool:
+
+def _write_tensors_to_uri(tensors: dict[str, torch.Tensor], uri: str, staging_dir: Optional[Path] = None) -> None:
+    if _is_cloud_uri(uri):
+        staging_root = staging_dir or _default_publish_staging_dir(uri)
+        staging_root.mkdir(parents=True, exist_ok=True)
+        name = _uri_basename(uri)
+        tmp_path = staging_root / f".{name}.{os.getpid()}.tmp"
+        local_path = staging_root / name
         try:
-            item = next(item_iter)
-        except StopIteration:
-            return False
-        pending.append(executor.submit(fn, item))
-        return True
+            save_file(tensors, str(tmp_path))
+            os.replace(tmp_path, local_path)
+            _run_cloud_cp(str(local_path), uri)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+            local_path.unlink(missing_ok=True)
+        return
 
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="skyrl-delta-prefetch") as executor:
-        for _ in range(prefetch_depth + 1):
-            if not submit_next(executor):
-                break
-        while pending:
-            future = pending.popleft()
-            submit_next(executor)
-            yield future.result()
-
-
-def _run_gcloud(args: Sequence[str]) -> None:
-    cmd = ["gcloud", "storage", *args]
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(
-            "gcloud storage command failed: "
-            f"{' '.join(cmd)}\nstdout:\n{exc.stdout or ''}\nstderr:\n{exc.stderr or ''}"
-        ) from exc
-
-
-def _copy_to_uri(local_path: Path, uri: str) -> None:
-    if _is_gs_uri(uri):
-        _run_gcloud(["cp", str(local_path), uri])
-    else:
-        dst = Path(uri)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
-        if tmp_path.exists():
-            tmp_path.unlink()
-        shutil.copy2(local_path, tmp_path)
-        with tmp_path.open("rb") as f:
-            os.fsync(f.fileno())
-        os.replace(tmp_path, dst)
-        try:
-            dir_fd = os.open(dst.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
+    _write_bytes_to_uri(save(tensors), uri)
 
 
 def _copy_from_uri(uri: str, local_path: Path) -> None:
@@ -212,32 +222,14 @@ def _copy_from_uri(uri: str, local_path: Path) -> None:
     tmp_path = local_path.with_name(f".{local_path.name}.{os.getpid()}.tmp")
     if tmp_path.exists():
         tmp_path.unlink()
-    if _is_gs_uri(uri):
-        _run_gcloud(["cp", uri, str(tmp_path)])
+    if _is_cloud_uri(uri):
+        _run_cloud_cp(uri, str(tmp_path))
     else:
         shutil.copy2(Path(uri), tmp_path)
     os.replace(tmp_path, local_path)
 
 
-def publish_delta_directory(local_dir: Path, uri: str) -> None:
-    """Publish payload files first and manifest last."""
-    manifest_path = local_dir / _MANIFEST_NAME
-    for path in sorted(local_dir.iterdir()):
-        if path.name == _MANIFEST_NAME:
-            continue
-        _copy_to_uri(path, _join_uri(uri, path.name))
-    _copy_to_uri(manifest_path, _join_uri(uri, _MANIFEST_NAME))
-
-
-def publish_delta_payload_files(local_dir: Path, uri: str) -> None:
-    """Publish only payload files for a source-rank submanifest."""
-    for path in sorted(local_dir.iterdir()):
-        if path.name == _MANIFEST_NAME:
-            continue
-        _copy_to_uri(path, _join_uri(uri, path.name))
-
-
-def fetch_delta_directory(uri: str, cache_dir: Path) -> Tuple[DeltaManifest, Path]:
+def fetch_delta_directory(uri: str, cache_dir: Path, gcs_download_workers: int = 4) -> Tuple[DeltaManifest, Path]:
     """Fetch a published delta directory into a local cache and return its manifest."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     lock = FileLock(cache_dir / ".fetch.lock")
@@ -248,10 +240,23 @@ def fetch_delta_directory(uri: str, cache_dir: Path) -> Tuple[DeltaManifest, Pat
         with manifest_path.open("r", encoding="utf-8") as f:
             manifest = DeltaManifest.from_json(json.load(f))
 
+        missing_payload_files = []
         for payload_file in manifest.payload_files:
             dst = cache_dir / payload_file
             if not dst.exists():
-                _copy_from_uri(_join_uri(uri, payload_file), dst)
+                missing_payload_files.append(payload_file)
+        if _is_gs_uri(uri) and len(missing_payload_files) > 1 and gcs_download_workers > 1:
+            workers = min(len(missing_payload_files), max(1, gcs_download_workers))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="skyrl-delta-gcs-fetch") as executor:
+                futures = [
+                    executor.submit(_copy_from_uri, _join_uri(uri, payload_file), cache_dir / payload_file)
+                    for payload_file in missing_payload_files
+                ]
+                for future in futures:
+                    future.result()
+        else:
+            for payload_file in missing_payload_files:
+                _copy_from_uri(_join_uri(uri, payload_file), cache_dir / payload_file)
     return manifest, cache_dir
 
 
@@ -305,28 +310,17 @@ def _read_safetensors_header(path: Path) -> tuple[int, dict]:
     return 8 + header_len, header
 
 
-class SafetensorsPatcher:
-    """Patch tensor bytes in safetensors files without loading whole shards."""
+def _checkpoint_safetensors_files(checkpoint_dir: Path) -> list[str]:
+    index_files = sorted(checkpoint_dir.glob("*.safetensors.index.json"))
+    if index_files:
+        with index_files[0].open("r", encoding="utf-8") as f:
+            weight_map = json.load(f)["weight_map"]
+        return [str(checkpoint_dir / name) for name in sorted(set(weight_map.values()))]
 
-    def __init__(self, checkpoint_dir: Path) -> None:
-        self.checkpoint_dir = checkpoint_dir
-        self._headers: Dict[Path, tuple[int, dict]] = {}
-
-    def write_tensor(self, rel_file: str, name: str, tensor: torch.Tensor) -> None:
-        path = self.checkpoint_dir / rel_file
-        if path not in self._headers:
-            self._headers[path] = _read_safetensors_header(path)
-        data_start, header = self._headers[path]
-        if name not in header:
-            raise KeyError(f"Tensor {name!r} not found in {path}")
-        offsets = header[name]["data_offsets"]
-        expected_nbytes = int(offsets[1]) - int(offsets[0])
-        data = uint8_tensor_to_bytes(tensor_to_bytes_tensor(tensor))
-        if len(data) != expected_nbytes:
-            raise ValueError(f"Tensor {name!r} has {len(data)} bytes, but {path} expects {expected_nbytes} bytes")
-        with path.open("r+b") as f:
-            f.seek(data_start + int(offsets[0]))
-            f.write(data)
+    files = sorted(checkpoint_dir.glob("*.safetensors"))
+    if not files:
+        raise ValueError(f"No safetensors weights found under {checkpoint_dir}")
+    return [str(path) for path in files]
 
 
 class CheckpointIndex:
@@ -390,247 +384,6 @@ def _copy_file_reflink(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def _link_or_copy(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    src = src.resolve()
-    try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
-
-
-def mirror_checkpoint_tree(base_dir: Path, target_dir: Path, copied_rel_files: set[str]) -> None:
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    target_dir.mkdir(parents=True, exist_ok=False)
-    for src in base_dir.rglob("*"):
-        rel = src.relative_to(base_dir)
-        dst = target_dir / rel
-        if src.is_dir():
-            dst.mkdir(parents=True, exist_ok=True)
-        elif rel.as_posix() in copied_rel_files:
-            _copy_file_reflink(src, dst)
-        else:
-            _link_or_copy(src, dst)
-
-
-def ensure_base_version(local_checkpoint_dir: Path, base_model_path: str) -> None:
-    state_dir = local_checkpoint_dir / _STATE_DIR_NAME
-    base_dir = _version_dir(local_checkpoint_dir, 0)
-    if base_dir.exists():
-        return
-    with FileLock(state_dir / "init.lock"):
-        if base_dir.exists():
-            return
-        resolved_base = resolve_checkpoint_path(base_model_path)
-        mirror_checkpoint_tree(resolved_base, base_dir, copied_rel_files=set())
-
-
-class CheckpointVersionWriter:
-    def __init__(
-        self,
-        root: Path,
-        base_version: int,
-        target_version: int,
-        changed_names: Optional[set[str]] = None,
-        copied_rel_files: Optional[set[str]] = None,
-    ) -> None:
-        self.root = root
-        self.base_version = base_version
-        self.target_version = target_version
-        self.base_dir = _version_dir(root, base_version)
-        self.final_dir = _version_dir(root, target_version)
-        self.staging_dir = _staging_dir(root, target_version)
-        base_index = CheckpointIndex(self.base_dir)
-        if copied_rel_files is None:
-            copied_rel_files = {base_index.relative_file_for(name) for name in changed_names or set()}
-        mirror_checkpoint_tree(self.base_dir, self.staging_dir, copied_rel_files=copied_rel_files)
-        self.index = CheckpointIndex(self.staging_dir)
-        self.patcher = SafetensorsPatcher(self.staging_dir)
-
-    def write_tensor(self, name: str, tensor: torch.Tensor) -> None:
-        resolved_name = self.index.resolve_tensor_name(name)
-        self.patcher.write_tensor(self.index.relative_file_for(resolved_name), resolved_name, tensor)
-
-    def commit(self) -> None:
-        if self.final_dir.exists():
-            shutil.rmtree(self.staging_dir, ignore_errors=True)
-            return
-        os.rename(self.staging_dir, self.final_dir)
-
-    def abort(self) -> None:
-        shutil.rmtree(self.staging_dir, ignore_errors=True)
-
-
-def stage_checkpoint_tree_deferred(base_dir: Path, target_dir: Path, deferred_rel_files: set[str]) -> None:
-    """Create a staging checkpoint while leaving deferred files absent.
-
-    Deferred files are safetensors shards that will be copied/reflinked lazily
-    by the writer thread before the first tensor in that shard is patched.
-    """
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    target_dir.mkdir(parents=True, exist_ok=False)
-    for src in base_dir.rglob("*"):
-        rel = src.relative_to(base_dir)
-        rel_posix = rel.as_posix()
-        dst = target_dir / rel
-        if src.is_dir():
-            dst.mkdir(parents=True, exist_ok=True)
-        elif rel_posix in deferred_rel_files:
-            continue
-        else:
-            _link_or_copy(src, dst)
-
-
-class LazyCheckpointVersionWriter:
-    """Persist changed tensors into a staged checkpoint lazily by shard."""
-
-    def __init__(
-        self,
-        root: Path,
-        base_version: int,
-        target_version: int,
-        changed_names: set[str],
-    ) -> None:
-        self.root = root
-        self.base_version = base_version
-        self.target_version = target_version
-        self.base_dir = _version_dir(root, base_version)
-        self.final_dir = _version_dir(root, target_version)
-        self.staging_dir = _staging_dir(root, target_version)
-        self.index = CheckpointIndex(self.base_dir)
-        self.deferred_rel_files = {self.index.relative_file_for(name) for name in changed_names}
-        self._prepared_rel_files: set[str] = set()
-        stage_checkpoint_tree_deferred(self.base_dir, self.staging_dir, self.deferred_rel_files)
-        self.patcher = SafetensorsPatcher(self.staging_dir)
-
-    def _prepare_rel_file(self, rel_file: str) -> None:
-        if rel_file in self._prepared_rel_files:
-            return
-        src = self.base_dir / rel_file
-        dst = self.staging_dir / rel_file
-        if not dst.exists():
-            _copy_file_reflink(src, dst)
-        self._prepared_rel_files.add(rel_file)
-
-    def write_tensor(self, name: str, tensor: torch.Tensor) -> None:
-        resolved_name = self.index.resolve_tensor_name(name)
-        rel_file = self.index.relative_file_for(resolved_name)
-        self._prepare_rel_file(rel_file)
-        self.patcher.write_tensor(rel_file, resolved_name, tensor)
-
-    def commit(self) -> None:
-        if self.final_dir.exists():
-            shutil.rmtree(self.staging_dir, ignore_errors=True)
-            return
-        missing = sorted(rel_file for rel_file in self.deferred_rel_files if not (self.staging_dir / rel_file).exists())
-        if missing:
-            raise RuntimeError(f"Missing staged checkpoint shard(s): {missing[:5]}")
-        os.rename(self.staging_dir, self.final_dir)
-
-    def abort(self) -> None:
-        shutil.rmtree(self.staging_dir, ignore_errors=True)
-
-
-class AsyncCheckpointWriter:
-    """Bounded CPU writer queue for checkpoint persistence side effects."""
-
-    _STOP = object()
-
-    def __init__(self, writer: LazyCheckpointVersionWriter, max_queue_size: int) -> None:
-        self.writer = writer
-        self._queue: queue.Queue[object] = queue.Queue(maxsize=max_queue_size)
-        self._failure: BaseException | None = None
-        self._failure_lock = threading.Lock()
-        self._abort = threading.Event()
-        self.write_s = 0.0
-        self._thread = threading.Thread(target=self._run, name="skyrl-delta-checkpoint-writer", daemon=True)
-        self._thread.start()
-
-    def _set_failure(self, exc: BaseException) -> None:
-        with self._failure_lock:
-            if self._failure is None:
-                self._failure = exc
-
-    def _raise_if_failed(self) -> None:
-        with self._failure_lock:
-            failure = self._failure
-        if failure is not None:
-            raise RuntimeError("Async checkpoint writer failed") from failure
-
-    def enqueue(self, name: str, tensor: torch.Tensor) -> None:
-        self._raise_if_failed()
-        cpu_tensor = tensor.detach().to("cpu", copy=True).contiguous()
-        item = (name, cpu_tensor)
-        while True:
-            self._raise_if_failed()
-            try:
-                self._queue.put(item, timeout=0.1)
-                break
-            except queue.Full:
-                continue
-        self._raise_if_failed()
-
-    def close_and_wait(self) -> None:
-        if self._thread.is_alive():
-            while True:
-                try:
-                    self._queue.put(self._STOP, timeout=0.1)
-                    break
-                except queue.Full:
-                    self._raise_if_failed()
-                    continue
-        self._thread.join()
-        self._raise_if_failed()
-
-    def commit(self) -> None:
-        self.writer.commit()
-
-    def abort(self) -> None:
-        self._abort.set()
-        if self._thread.is_alive():
-            try:
-                self._queue.put_nowait(self._STOP)
-            except queue.Full:
-                pass
-            self._thread.join()
-        self.writer.abort()
-
-    def _run(self) -> None:
-        try:
-            while True:
-                item = self._queue.get()
-                if item is self._STOP or self._abort.is_set():
-                    return
-                name, tensor = item
-                t0 = time.perf_counter()
-                self.writer.write_tensor(name, tensor)
-                self.write_s += time.perf_counter() - t0
-                del tensor
-        except BaseException as exc:
-            self._set_failure(exc)
-
-
-def apply_xor_patch(
-    base_tensor: torch.Tensor,
-    compressed_patch: torch.Tensor,
-    expected_checksum: str,
-    expected_num_bytes: Optional[int] = None,
-    checksum_algorithm: str = _DEFAULT_CHECKSUM_ALGORITHM,
-) -> torch.Tensor:
-    compressed = uint8_tensor_to_bytes(compressed_patch)
-    patch_bytes = decompress_bytes(compressed, expected_num_bytes)
-    base_bytes = tensor_to_bytes_tensor(base_tensor)
-    patch = bytes_to_uint8_tensor(patch_bytes)
-    if patch.numel() != base_bytes.numel():
-        raise ValueError(f"Patch has {patch.numel()} bytes, expected {base_bytes.numel()}")
-    updated = torch.bitwise_xor(base_bytes, patch)
-    if _checksum(uint8_tensor_to_bytes(updated), checksum_algorithm) != expected_checksum:
-        raise ValueError("Post-apply tensor checksum mismatch")
-    return bytes_tensor_to_tensor(updated, base_tensor.dtype, list(base_tensor.shape)).clone()
-
-
 class PayloadReader:
     def __init__(self, payload_dir: Path) -> None:
         self.payload_dir = payload_dir
@@ -648,71 +401,6 @@ class PayloadReader:
         for handle in self._files.values():
             handle.__exit__(None, None, None)
         self._files.clear()
-
-
-class PlanType(str, Enum):
-    Apply = "apply"
-    ApplyAndPersist = "apply_and_persist"
-
-
-@dataclass
-class DeltaReceivePlan:
-    plan_type: PlanType
-    manifest: DeltaManifest
-    base_dir: Path
-    payload_dir: Path
-    direct_dir: Optional[Path] = None
-    writer: Optional[AsyncCheckpointWriter] = None
-    lock: Optional[FileLock] = None
-    stats: dict[str, float] = field(default_factory=dict)
-
-    @property
-    def persist(self) -> bool:
-        return self.plan_type == PlanType.ApplyAndPersist
-
-
-class DeltaCheckpointIterator:
-    def __init__(self, plan: DeltaReceivePlan) -> None:
-        self.plan = plan
-        self._reader: PayloadReader | None = None
-
-    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
-        if self.plan.direct_dir is not None:
-            yield from CheckpointIndex(self.plan.direct_dir).iter_tensors()
-            return
-
-        self._reader = PayloadReader(self.plan.payload_dir)
-        index = CheckpointIndex(self.plan.base_dir)
-        records_by_resolved_name = {}
-        for record in self.plan.manifest.tensors:
-            try:
-                records_by_resolved_name[index.resolve_tensor_name(record.name)] = record
-            except KeyError:
-                logger.warning(
-                    "Skipping delta tensor %s because it is not present in checkpoint %s",
-                    record.name,
-                    self.plan.base_dir,
-                )
-        try:
-            for name, base_tensor in index.iter_tensors():
-                record = records_by_resolved_name.get(name)
-                if record is None:
-                    yield name, base_tensor
-                    continue
-
-                patch = self._reader.get(record)
-                updated = apply_xor_patch(
-                    base_tensor,
-                    patch,
-                    record.checksum,
-                    record.uncompressed_num_bytes,
-                    record.checksum_algorithm,
-                )
-                if plan_writer := self.plan.writer:
-                    plan_writer.enqueue(name, updated)
-                yield name, updated
-        finally:
-            self._reader.close()
 
 
 def _copy_checkpoint_tree_for_mutation(src_dir: Path, dst_dir: Path) -> None:
@@ -844,7 +532,7 @@ def _tensor_locations(checkpoint_dir: Path) -> dict[str, TensorLocation]:
 class LocalCheckpointStore:
     """Mutable host-local checkpoint used by fetch-before-pause delta sync."""
 
-    def __init__(self, base_model_path: str, local_checkpoint_dir: str) -> None:
+    def __init__(self, base_model_path: str, local_checkpoint_dir: str, gcs_download_workers: int = 4) -> None:
         self.base_model_path = base_model_path
         self.root = Path(local_checkpoint_dir)
         self.weights_dir = _weights_dir(self.root)
@@ -852,6 +540,7 @@ class LocalCheckpointStore:
         self.state_dir = self.root / _STATE_DIR_NAME
         self.state_path = self.state_dir / "state.json"
         self.lock_path = self.state_dir / "writer.lock"
+        self.gcs_download_workers = max(1, int(gcs_download_workers))
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.deltas_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_initialized()
@@ -940,7 +629,11 @@ class LocalCheckpointStore:
                     )
                     cache_dir = self.deltas_dir / _safe_path_name(delta_uri)
                     t_fetch = time.perf_counter()
-                    manifest, payload_dir = fetch_delta_directory(delta_uri, cache_dir)
+                    manifest, payload_dir = fetch_delta_directory(
+                        delta_uri,
+                        cache_dir,
+                        gcs_download_workers=self.gcs_download_workers,
+                    )
                     stats["fetch_s"] += time.perf_counter() - t_fetch
                     if manifest.version != version:
                         raise ValueError(
@@ -1066,280 +759,40 @@ class LocalCheckpointStore:
             )
         self._current_checkpoint_dir()
 
-    def iter_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
-        yield from CheckpointIndex(self._current_checkpoint_dir()).iter_tensors()
-
-
-class LocalCheckpointDeltaManager:
-    def __init__(
+    def iter_tensors(
         self,
-        base_model_path: str,
-        local_checkpoint_dir: str,
-        max_files_to_keep: int = 5,
-        prefetch_depth: int = 0,
-        version_wait_timeout_s: float = 7200.0,
-    ) -> None:
-        self.base_model_path = base_model_path
-        self.root = Path(local_checkpoint_dir)
-        self.max_files_to_keep = max_files_to_keep
-        self.prefetch_depth = prefetch_depth
-        self.version_wait_timeout_s = version_wait_timeout_s
-        ensure_base_version(self.root, base_model_path)
-        (self.root / _STATE_DIR_NAME / "artifacts").mkdir(parents=True, exist_ok=True)
-
-    def _completed_versions(self) -> list[int]:
-        versions_dir = self.root / "versions"
-        if not versions_dir.exists():
-            return []
-        versions = []
-        for path in versions_dir.iterdir():
-            if path.is_dir() and path.name.startswith("v") and not path.name.endswith(".staging"):
-                try:
-                    versions.append(int(path.name[1:]))
-                except ValueError:
-                    pass
-        return sorted(versions)
-
-    def _cleanup_old_versions(self, base_version: int, target_version: int) -> None:
-        versions = self._completed_versions()
-        protected = {0, base_version, target_version}
-        excess = max(0, len(versions) - self.max_files_to_keep)
-        for candidate in [v for v in versions if v not in protected][:excess]:
-            shutil.rmtree(_version_dir(self.root, candidate), ignore_errors=True)
-
-    def _wait_for_version(self, version: int, timeout_s: Optional[float] = None) -> Path:
-        target_dir = _version_dir(self.root, version)
-        wait_timeout_s = self.version_wait_timeout_s if timeout_s is None else timeout_s
-        deadline = time.perf_counter() + wait_timeout_s
-        while time.perf_counter() < deadline:
-            if target_dir.exists():
-                return target_dir
-            time.sleep(0.1)
-        raise TimeoutError(f"Timed out waiting for checkpoint version {version} at {target_dir}")
-
-    def _apply_delta_to_writer(
-        self,
-        manifest: DeltaManifest,
-        base_dir: Path,
-        payload_dir: Path,
-        writer: CheckpointVersionWriter,
-    ) -> None:
-        index = CheckpointIndex(base_dir)
-        reader = PayloadReader(payload_dir)
-
-        def build_updated_tensor(record: DeltaTensorRecord) -> tuple[str, torch.Tensor]:
-            base_tensor = index.load_tensor(record.name)
-            patch = reader.get(record)
-            updated = apply_xor_patch(
-                base_tensor,
-                patch,
-                record.checksum,
-                record.uncompressed_num_bytes,
-                record.checksum_algorithm,
-            )
-            del base_tensor, patch
-            return record.name, updated
-
-        try:
-            for name, updated in _ordered_prefetch(manifest.tensors, build_updated_tensor, self.prefetch_depth):
-                writer.write_tensor(name, updated)
-                del updated
-        finally:
-            reader.close()
-
-    def prepare(self, uri: str, expected_version: Optional[int] = None) -> DeltaReceivePlan:
-        cache_dir = self.root / _STATE_DIR_NAME / "artifacts" / _safe_path_name(uri)
-        t_fetch = time.perf_counter()
-        manifest, payload_dir = fetch_delta_directory(uri, cache_dir)
-        fetch_s = time.perf_counter() - t_fetch
-        if expected_version is not None and manifest.version != expected_version:
-            raise ValueError(f"Manifest version {manifest.version} does not match update version {expected_version}")
-        if manifest.base_version != manifest.version - 1:
-            raise ValueError(
-                f"Unsupported delta version relationship: version={manifest.version}, "
-                f"base_version={manifest.base_version}"
-            )
-        base_dir = _version_dir(self.root, manifest.base_version)
-        target_dir = _version_dir(self.root, manifest.version)
-        staging_dir = _staging_dir(self.root, manifest.version)
-        if not base_dir.exists():
-            raise FileNotFoundError(f"Base checkpoint version {manifest.base_version} missing at {base_dir}")
-
-        lock = FileLock(self.root / _STATE_DIR_NAME / "writer.lock")
-        if staging_dir.exists():
-            if lock.acquire(blocking=False):
-                lock.release()
-                raise RuntimeError(f"Found stale staging checkpoint from failed sync: {staging_dir}")
-            return DeltaReceivePlan(
-                plan_type=PlanType.Apply,
-                manifest=manifest,
-                base_dir=base_dir,
-                payload_dir=payload_dir,
-                stats={"fetch_s": fetch_s, "materialize_s": 0.0, "wait_s": 0.0, "commit_s": 0.0},
+        load_format: str = "vllm_fastsafetensors",
+        multi_thread_safetensors_max_workers: int = 8,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        checkpoint_dir = self._current_checkpoint_dir()
+        files = _checkpoint_safetensors_files(checkpoint_dir)
+        if load_format == "vllm_multi_thread_safetensors":
+            from vllm.model_executor.model_loader.weight_utils import (
+                multi_thread_safetensors_weights_iterator,
             )
 
-        if lock.acquire(blocking=False):
-            writer: AsyncCheckpointWriter | None = None
-            try:
-                if target_dir.exists():
-                    lock.release()
-                    return DeltaReceivePlan(
-                        plan_type=PlanType.Apply,
-                        manifest=manifest,
-                        base_dir=base_dir,
-                        payload_dir=payload_dir,
-                        stats={"fetch_s": fetch_s, "materialize_s": 0.0, "wait_s": 0.0, "commit_s": 0.0},
-                    )
-                else:
-                    self._cleanup_old_versions(manifest.base_version, manifest.version)
-                    writer = AsyncCheckpointWriter(
-                        LazyCheckpointVersionWriter(
-                            self.root,
-                            base_version=manifest.base_version,
-                            target_version=manifest.version,
-                            changed_names={record.name for record in manifest.tensors},
-                        ),
-                        max_queue_size=max(_DEFAULT_WRITER_QUEUE_SIZE, self.prefetch_depth),
-                    )
-                return DeltaReceivePlan(
-                    plan_type=PlanType.ApplyAndPersist,
-                    manifest=manifest,
-                    base_dir=base_dir,
-                    payload_dir=payload_dir,
-                    writer=writer,
-                    lock=lock,
-                    stats={
-                        "fetch_s": fetch_s,
-                        "materialize_s": 0.0,
-                        "wait_s": 0.0,
-                        "commit_s": 0.0,
-                    },
-                )
-            except Exception:
-                if writer is not None:
-                    writer.abort()
-                lock.release()
-                raise
-
-        return DeltaReceivePlan(
-            plan_type=PlanType.Apply,
-            manifest=manifest,
-            base_dir=base_dir,
-            payload_dir=payload_dir,
-            stats={"fetch_s": fetch_s, "materialize_s": 0.0, "wait_s": 0.0, "commit_s": 0.0},
-        )
-
-    def prepare_materialize_then_reload(
-        self,
-        uri: str,
-        expected_version: Optional[int] = None,
-    ) -> DeltaReceivePlan:
-        cache_dir = self.root / _STATE_DIR_NAME / "artifacts" / _safe_path_name(uri)
-        t_fetch = time.perf_counter()
-        manifest, payload_dir = fetch_delta_directory(uri, cache_dir)
-        fetch_s = time.perf_counter() - t_fetch
-        if expected_version is not None and manifest.version != expected_version:
-            raise ValueError(f"Manifest version {manifest.version} does not match update version {expected_version}")
-        if manifest.base_version != manifest.version - 1:
-            raise ValueError(
-                f"Unsupported delta version relationship: version={manifest.version}, "
-                f"base_version={manifest.base_version}"
+            yield from multi_thread_safetensors_weights_iterator(
+                files,
+                use_tqdm_on_load=False,
+                max_workers=multi_thread_safetensors_max_workers,
             )
-
-        base_dir = _version_dir(self.root, manifest.base_version)
-        target_dir = _version_dir(self.root, manifest.version)
-        staging_dir = _staging_dir(self.root, manifest.version)
-        if not base_dir.exists():
-            raise FileNotFoundError(f"Base checkpoint version {manifest.base_version} missing at {base_dir}")
-
-        stats = {"fetch_s": fetch_s, "materialize_s": 0.0, "wait_s": 0.0, "commit_s": 0.0}
-        lock = FileLock(self.root / _STATE_DIR_NAME / "writer.lock")
-        if target_dir.exists():
-            return DeltaReceivePlan(
-                plan_type=PlanType.Apply,
-                manifest=manifest,
-                base_dir=base_dir,
-                payload_dir=payload_dir,
-                direct_dir=target_dir,
-                stats=stats,
-            )
-
-        if lock.acquire(blocking=False):
-            writer: CheckpointVersionWriter | None = None
-            try:
-                if target_dir.exists():
-                    return DeltaReceivePlan(
-                        plan_type=PlanType.Apply,
-                        manifest=manifest,
-                        base_dir=base_dir,
-                        payload_dir=payload_dir,
-                        direct_dir=target_dir,
-                        stats=stats,
-                    )
-                if staging_dir.exists():
-                    raise RuntimeError(f"Found stale staging checkpoint from failed sync: {staging_dir}")
-
-                self._cleanup_old_versions(manifest.base_version, manifest.version)
-                writer = CheckpointVersionWriter(
-                    self.root,
-                    base_version=manifest.base_version,
-                    target_version=manifest.version,
-                    changed_names={record.name for record in manifest.tensors},
-                )
-                t_materialize = time.perf_counter()
-                self._apply_delta_to_writer(manifest, base_dir, payload_dir, writer)
-                stats["materialize_s"] = time.perf_counter() - t_materialize
-                t_commit = time.perf_counter()
-                writer.commit()
-                stats["commit_s"] = time.perf_counter() - t_commit
-            except Exception:
-                if writer is not None:
-                    writer.abort()
-                raise
-            finally:
-                lock.release()
-        else:
-            t_wait = time.perf_counter()
-            target_dir = self._wait_for_version(manifest.version)
-            stats["wait_s"] = time.perf_counter() - t_wait
-
-        return DeltaReceivePlan(
-            plan_type=PlanType.Apply,
-            manifest=manifest,
-            base_dir=base_dir,
-            payload_dir=payload_dir,
-            direct_dir=target_dir,
-            stats=stats,
-        )
-
-    def iterator(self, plan: DeltaReceivePlan) -> DeltaCheckpointIterator:
-        return DeltaCheckpointIterator(plan)
-
-    def complete(self, plan: DeltaReceivePlan) -> None:
-        if plan.writer is None:
             return
-        try:
-            t_wait = time.perf_counter()
-            plan.writer.close_and_wait()
-            plan.stats["wait_s"] = time.perf_counter() - t_wait
-            plan.stats["materialize_s"] = plan.writer.write_s
-            t_commit = time.perf_counter()
-            plan.writer.commit()
-            plan.stats["commit_s"] = time.perf_counter() - t_commit
-        except Exception:
-            plan.writer.abort()
-            raise
-        finally:
-            if plan.lock is not None:
-                plan.lock.release()
-                plan.lock = None
 
-    def abort(self, plan: DeltaReceivePlan) -> None:
-        if plan.writer is not None:
-            plan.writer.abort()
-        if plan.lock is not None:
-            plan.lock.release()
-            plan.lock = None
+        if load_format == "vllm_fastsafetensors":
+            # NOTE (sumanthrh): The fastsafetensors iterator can lead to large temporary memory usage
+            # during weight loading due to out of order loading + layerwise reloading interaction
+            # For more details, see: https://github.com/vllm-project/vllm/issues/48644
+            from vllm.model_executor.model_loader.weight_utils import (
+                fastsafetensors_weights_iterator,
+            )
+
+            yield from fastsafetensors_weights_iterator(files, use_tqdm_on_load=False)
+            return
+
+        raise ValueError(
+            "Unknown checkpoint_load_format "
+            f"{load_format!r}; expected one of {sorted(SUPPORTED_CHECKPOINT_LOAD_FORMATS)}"
+        )
 
 
 @dataclass
@@ -1427,15 +880,21 @@ class DeltaCheckpointPublisher:
         self,
         base_model_path: str,
         sync_dir: str,
-        local_checkpoint_dir: str,
+        publish_staging_dir: Optional[str] = None,
         max_file_size_in_gb: float = 1.0,
-        max_files_to_keep: int = 5,
+        publish_num_workers: Optional[int] = None,
     ) -> None:
         self.base_model_path = base_model_path
         self.sync_dir = sync_dir
-        self.root = Path(local_checkpoint_dir)
+        if publish_staging_dir is not None and _is_cloud_uri(publish_staging_dir):
+            raise ValueError("publish_staging_dir must be a local filesystem path")
+        self.publish_staging_dir = (
+            Path(publish_staging_dir) if publish_staging_dir else _default_publish_staging_dir(sync_dir)
+        )
+        if publish_num_workers is not None and publish_num_workers < 1:
+            raise ValueError(f"publish_num_workers must be >= 1, got {publish_num_workers}")
+        self.publish_num_workers = publish_num_workers
         self.max_file_size_bytes = int(max_file_size_in_gb * 1024**3)
-        self.max_files_to_keep = max_files_to_keep
         self.checksum_algorithm = _DEFAULT_CHECKSUM_ALGORITHM
         self.version = 0
         self.snapshot: dict[str, np.ndarray] = {}
@@ -1500,24 +959,6 @@ class DeltaCheckpointPublisher:
         return self.snapshot[name]
 
     @staticmethod
-    def _stage_tensor_to_cpu_bytes(
-        tensor: torch.Tensor,
-        target_dtype: torch.dtype,
-        target_shape: list[int],
-    ) -> tuple[np.ndarray, str, list[int]]:
-        current = tensor.detach()
-        if list(current.shape) != target_shape:
-            raise ValueError(f"Shape mismatch: current={list(current.shape)}, base={target_shape}")
-        if current.dtype != target_dtype:
-            current = current.to(dtype=target_dtype)
-        current = current.cpu().contiguous()
-        current_bytes = current.view(torch.uint8).reshape(-1).numpy().copy()
-        dtype_name = _torch_dtype_name(current.dtype)
-        shape = list(current.shape)
-        del current
-        return current_bytes, dtype_name, shape
-
-    @staticmethod
     def _stage_tensor_for_publish(
         tensor: torch.Tensor,
         target_dtype: torch.dtype,
@@ -1557,51 +998,38 @@ class DeltaCheckpointPublisher:
         staging_pool: Optional[_PinnedStagingPool],
         checksum_algorithm: str,
     ):
+        t_total = time.perf_counter()
         timings: dict[str, float] = {}
         if staged.pinned:
             assert isinstance(staged.data, torch.Tensor)
-            t = time.perf_counter()
             try:
                 current = np.empty(staged.nbytes, dtype=np.uint8)
                 np.copyto(current, staged.data[: staged.nbytes].numpy())
             finally:
                 if staging_pool is not None:
                     staging_pool.release(staged.data)
-            timings["pinned_to_numpy_s"] = time.perf_counter() - t
         else:
             assert isinstance(staged.data, np.ndarray)
             current = staged.data
-            timings["pinned_to_numpy_s"] = 0.0
 
         if current.nbytes != base.nbytes:
             raise ValueError(f"Byte-size mismatch for {name}: current={current.nbytes}, base={base.nbytes}")
 
-        t = time.perf_counter()
         checksum = _checksum(memoryview(current), checksum_algorithm)
-        timings["checksum_s"] = time.perf_counter() - t
 
-        t = time.perf_counter()
         np.bitwise_xor(current, base, out=current)
-        timings["xor_s"] = time.perf_counter() - t
 
-        t = time.perf_counter()
         changed_bytes = int(np.count_nonzero(current))
-        timings["changed_scan_s"] = time.perf_counter() - t
 
         compressed = None
         if changed_bytes:
-            t = time.perf_counter()
             compressed = compress_bytes(memoryview(current), level=1)
-            timings["compress_s"] = time.perf_counter() - t
-        else:
-            timings["compress_s"] = 0.0
 
         # ``current`` is the XOR patch at this point. Apply it to the existing
         # snapshot in-place so repeated publishes do not replace every
         # full-model CPU snapshot allocation.
-        t = time.perf_counter()
         np.bitwise_xor(base, current, out=base)
-        timings["xor_restore_s"] = time.perf_counter() - t
+        timings["delta_compute_s"] = time.perf_counter() - t_total
 
         return _TensorPublishResult(
             name=name,
@@ -1618,17 +1046,8 @@ class DeltaCheckpointPublisher:
     @staticmethod
     def _empty_stats() -> dict[str, float]:
         return {
-            "extract_or_gather_s": 0.0,
-            "stage_to_cpu_s": 0.0,
-            "snapshot_read_s": 0.0,
-            "pinned_to_numpy_s": 0.0,
-            "xor_s": 0.0,
-            "changed_scan_s": 0.0,
-            "compress_s": 0.0,
-            "checksum_s": 0.0,
-            "xor_restore_s": 0.0,
-            "snapshot_update_s": 0.0,
-            "payload_write_s": 0.0,
+            "cpu_stage_s": 0.0,
+            "delta_compute_s": 0.0,
             "upload_s": 0.0,
             "publish_s": 0.0,
             "processed_tensors": 0.0,
@@ -1640,19 +1059,9 @@ class DeltaCheckpointPublisher:
             "source_rank": 0.0,
         }
 
-    @staticmethod
-    def _num_publish_workers() -> int:
+    def _num_publish_workers(self) -> int:
         default = min(8, os.cpu_count() or 1)
-        raw = os.environ.get("SKYRL_DELTA_PUBLISH_NUM_WORKERS")
-        if raw is None:
-            return default
-        try:
-            value = int(raw)
-        except ValueError as exc:
-            raise ValueError(f"SKYRL_DELTA_PUBLISH_NUM_WORKERS must be an integer, got {raw!r}") from exc
-        if value < 1:
-            raise ValueError(f"SKYRL_DELTA_PUBLISH_NUM_WORKERS must be >= 1, got {value}")
-        return min(value, default)
+        return self.publish_num_workers or default
 
     def _publish_executor_for(self, num_workers: int) -> ThreadPoolExecutor:
         if self._publish_executor is None:
@@ -1669,11 +1078,6 @@ class DeltaCheckpointPublisher:
                 num_workers,
             )
         return self._publish_executor
-
-    @staticmethod
-    def _trim_publish_workers(executor: ThreadPoolExecutor, num_workers: int) -> int:
-        futures = [executor.submit(trim_process_memory) for _ in range(num_workers)]
-        return sum(1 for future in futures if future.result())
 
     def _staging_pool_for(self, max_tensor_bytes: int, num_workers: int) -> _PinnedStagingPool:
         signature = (max_tensor_bytes, num_workers)
@@ -1701,40 +1105,25 @@ class DeltaCheckpointPublisher:
         skipped_names: set[str] = set()
         t_publish = time.perf_counter()
         stats["source_rank"] = 1.0 if extractor_shard_info.is_source_rank else 0.0
-        try:
-            memory_log_interval = int(os.environ.get("SKYRL_DELTA_MEMORY_LOG_INTERVAL_TENSORS", "5000"))
-        except ValueError:
-            memory_log_interval = 5000
-        memory_log_interval = max(0, memory_log_interval)
-
-        def snapshot_bytes_total() -> int:
-            return sum(int(value.nbytes) for value in self.snapshot.values())
 
         def current_payload_file() -> str:
-            return f"payload-rank{rank:06d}-file{payload_file_idx:06d}.safetensors"
+            return f"delta-rank{rank:05d}-file{payload_file_idx:06d}.safetensors"
 
-        def flush_payload_file(local_publish_dir: Path) -> None:
+        def flush_payload_file() -> None:
             nonlocal payload_tensors, payload_file_idx, payload_file_bytes
             if not payload_tensors:
                 return
             t = time.perf_counter()
             file_name = current_payload_file()
-            save_file(payload_tensors, str(local_publish_dir / file_name))
-            stats["payload_write_s"] += time.perf_counter() - t
+            staging_dir = self.publish_staging_dir / _version_name(target_version) / f"rank{rank:06d}"
+            _write_tensors_to_uri(payload_tensors, _join_uri(publish_uri, file_name), staging_dir=staging_dir)
+            stats["upload_s"] += time.perf_counter() - t
             payload_files.append(file_name)
             payload_tensors = {}
             payload_file_idx += 1
             payload_file_bytes = 0
-            log_memory(
-                logger,
-                "delta_publisher_after_payload_flush",
-                rank=rank,
-                target_version=target_version,
-                payload_files=len(payload_files),
-                snapshot_bytes=snapshot_bytes_total(),
-            )
 
-        def consume_result(result: _TensorPublishResult, local_publish_dir: Path) -> None:
+        def consume_result(result: _TensorPublishResult) -> None:
             nonlocal payload_file_bytes
             for key, value in result.timings.items():
                 stats[key] = stats.get(key, 0.0) + value
@@ -1743,7 +1132,7 @@ class DeltaCheckpointPublisher:
             if result.compressed is None:
                 return
             if payload_tensors and payload_file_bytes + len(result.compressed) > self.max_file_size_bytes:
-                flush_payload_file(local_publish_dir)
+                flush_payload_file()
             key = result.name
             payload_tensors[key] = bytes_to_uint8_tensor(result.compressed)
             payload_file_bytes += len(result.compressed)
@@ -1762,183 +1151,82 @@ class DeltaCheckpointPublisher:
             stats["uncompressed_bytes"] += record.uncompressed_num_bytes
             stats["compressed_bytes"] += record.compressed_num_bytes
             stats["records"] += 1
-            if memory_log_interval and int(stats["processed_tensors"]) % memory_log_interval == 0:
-                log_memory(
-                    logger,
-                    "delta_publisher_progress",
-                    rank=rank,
-                    target_version=target_version,
-                    processed_tensors=int(stats["processed_tensors"]),
-                    records=len(records),
-                    payload_file_bytes=payload_file_bytes,
-                    pending=len(pending),
-                    snapshot_tensors=len(self.snapshot),
-                    snapshot_bytes=snapshot_bytes_total(),
-                    uncompressed_bytes=int(stats["uncompressed_bytes"]),
-                    compressed_bytes=int(stats["compressed_bytes"]),
-                )
 
-        def drain_one(local_publish_dir: Path) -> None:
+        def drain_one() -> None:
             result = pending.popleft().result()
-            consume_result(result, local_publish_dir)
+            consume_result(result)
 
         try:
-            with tempfile.TemporaryDirectory(prefix=f"skyrl-delta-publish-rank{rank}-") as tmpdir:
-                local_publish_dir = Path(tmpdir)
-                num_workers = self._num_publish_workers()
-                max_inflight = max(1, num_workers)
-                staging_pool: Optional[_PinnedStagingPool] = None
-                log_memory(
-                    logger,
-                    "delta_publisher_start",
-                    rank=rank,
-                    target_version=target_version,
-                    is_source_rank=extractor_shard_info.is_source_rank,
-                    existing_snapshot_tensors=len(self.snapshot),
-                    existing_snapshot_bytes=snapshot_bytes_total(),
-                    num_workers=num_workers,
-                    max_inflight=max_inflight,
-                )
-                if extractor_shard_info.is_source_rank:
-                    locations = self._ensure_base_locations()
-                    max_tensor_bytes = max((loc.nbytes for loc in locations.values()), default=0)
-                    staging_pool = self._staging_pool_for(max_tensor_bytes, num_workers)
-                    log_memory(
-                        logger,
-                        "delta_publisher_after_staging_pool",
-                        rank=rank,
-                        target_version=target_version,
-                        max_tensor_bytes=max_tensor_bytes,
-                        staging_pool_enabled=bool(staging_pool and staging_pool.enabled),
-                        staging_pool_buffer_nbytes=(staging_pool.buffer_nbytes if staging_pool else 0),
-                        staging_pool_total_nbytes=(staging_pool.total_nbytes if staging_pool else 0),
-                    )
-                executor = self._publish_executor_for(num_workers) if extractor_shard_info.is_source_rank else None
-                chunk_iter = iter(chunks)
-                chunk_index = 0
-                while True:
-                    t = time.perf_counter()
+            num_workers = self._num_publish_workers()
+            max_inflight = max(1, num_workers)
+            staging_pool: Optional[_PinnedStagingPool] = None
+            if extractor_shard_info.is_source_rank:
+                locations = self._ensure_base_locations()
+                max_tensor_bytes = max((loc.nbytes for loc in locations.values()), default=0)
+                staging_pool = self._staging_pool_for(max_tensor_bytes, num_workers)
+            executor = self._publish_executor_for(num_workers) if extractor_shard_info.is_source_rank else None
+            chunk_iter = iter(chunks)
+            while True:
+                try:
+                    chunk = next(chunk_iter)
+                except StopIteration:
+                    break
+                if not extractor_shard_info.is_source_rank:
+                    continue
+                for name, tensor in zip(chunk.names, chunk.tensors):
                     try:
-                        chunk = next(chunk_iter)
-                    except StopIteration:
-                        stats["extract_or_gather_s"] += time.perf_counter() - t
-                        break
-                    stats["extract_or_gather_s"] += time.perf_counter() - t
-                    if not extractor_shard_info.is_source_rank:
-                        chunk_index += 1
+                        loc = self._base_location(name)
+                        base = self._snapshot_bytes(name)
+                    except KeyError:
+                        skipped_names.add(name)
+                        stats["skipped_tensors"] += 1
                         continue
-                    for name, tensor in zip(chunk.names, chunk.tensors):
-                        t = time.perf_counter()
-                        try:
-                            loc = self._base_location(name)
-                            base = self._snapshot_bytes(name)
-                        except KeyError:
-                            skipped_names.add(name)
-                            stats["skipped_tensors"] += 1
-                            continue
-                        stats["snapshot_read_s"] += time.perf_counter() - t
 
-                        t = time.perf_counter()
-                        staged, dtype_name, shape = self._stage_tensor_for_publish(
-                            tensor,
-                            target_dtype=_safetensors_dtype_to_torch(loc.dtype),
-                            target_shape=loc.shape,
-                            staging_pool=staging_pool,
-                        )
-                        stats["stage_to_cpu_s"] += time.perf_counter() - t
-                        if executor is None:
-                            raise RuntimeError("Delta checkpoint source rank is missing a publish executor")
-                        pending.append(
-                            executor.submit(
-                                self._process_tensor_delta,
-                                name,
-                                staged,
-                                base,
-                                dtype_name,
-                                shape,
-                                staging_pool,
-                                self.checksum_algorithm,
-                            )
-                        )
-                        if len(pending) >= max_inflight:
-                            drain_one(local_publish_dir)
-                    chunk_index += 1
-                while pending:
-                    drain_one(local_publish_dir)
-                trimmed_workers = self._trim_publish_workers(executor, num_workers) if executor is not None else 0
-                trimmed = trim_process_memory()
-                log_memory(
-                    logger,
-                    "delta_publisher_after_drain",
-                    rank=rank,
-                    target_version=target_version,
-                    records=len(records),
-                    payload_file_bytes=payload_file_bytes,
-                    snapshot_tensors=len(self.snapshot),
-                    snapshot_bytes=snapshot_bytes_total(),
-                    memory_trimmed=trimmed,
-                    publish_worker_trims=trimmed_workers,
-                )
-                flush_payload_file(local_publish_dir)
-                trimmed = trim_process_memory()
-
-                if skipped_names:
-                    logger.warning(
-                        "delta checkpoint publisher rank=%s skipped %s tensor(s) absent from base checkpoint: %s",
-                        rank,
-                        len(skipped_names),
-                        sorted(skipped_names)[:10],
-                    )
-
-                if payload_files:
                     t = time.perf_counter()
-                    log_memory(
-                        logger,
-                        "delta_publisher_before_payload_upload",
-                        rank=rank,
-                        target_version=target_version,
-                        payload_files=len(payload_files),
-                        snapshot_bytes=snapshot_bytes_total(),
-                        memory_trimmed=trimmed,
+                    staged, dtype_name, shape = self._stage_tensor_for_publish(
+                        tensor,
+                        target_dtype=_safetensors_dtype_to_torch(loc.dtype),
+                        target_shape=loc.shape,
+                        staging_pool=staging_pool,
                     )
-                    publish_delta_payload_files(local_publish_dir, publish_uri)
-                    stats["upload_s"] = time.perf_counter() - t
-                    trimmed = trim_process_memory()
-                    log_memory(
-                        logger,
-                        "delta_publisher_after_payload_upload",
-                        rank=rank,
-                        target_version=target_version,
-                        payload_files=len(payload_files),
-                        snapshot_bytes=snapshot_bytes_total(),
-                        memory_trimmed=trimmed,
+                    stats["cpu_stage_s"] += time.perf_counter() - t
+                    if executor is None:
+                        raise RuntimeError("Delta checkpoint source rank is missing a publish executor")
+                    pending.append(
+                        executor.submit(
+                            self._process_tensor_delta,
+                            name,
+                            staged,
+                            base,
+                            dtype_name,
+                            shape,
+                            staging_pool,
+                            self.checksum_algorithm,
+                        )
                     )
+                    if len(pending) >= max_inflight:
+                        drain_one()
+            while pending:
+                drain_one()
+            flush_payload_file()
+
+            if skipped_names:
+                logger.warning(
+                    "delta checkpoint publisher rank=%s skipped %s tensor(s) absent from base checkpoint: %s",
+                    rank,
+                    len(skipped_names),
+                    sorted(skipped_names)[:10],
+                )
         except Exception:
             raise
 
         self.version = target_version
         stats["publish_s"] = time.perf_counter() - t_publish
-        trimmed = trim_process_memory()
-        log_memory(
-            logger,
-            "delta_publisher_done",
-            rank=rank,
-            target_version=target_version,
-            records=len(records),
-            payload_files=len(payload_files),
-            snapshot_tensors=len(self.snapshot),
-            snapshot_bytes=snapshot_bytes_total(),
-            compressed_bytes=int(stats["compressed_bytes"]),
-            uncompressed_bytes=int(stats["uncompressed_bytes"]),
-            memory_trimmed=trimmed,
-        )
         ratio = stats["compressed_bytes"] / stats["uncompressed_bytes"] if stats["uncompressed_bytes"] else 0.0
         logger.info(
             "delta checkpoint publish local: rank=%s version=%s base_version=%s tensors=%s payload_files=%s "
             "uncompressed_bytes=%s compressed_bytes=%s compression_ratio=%.6f publish_s=%.3f "
-            "extract_or_gather_s=%.3f stage_to_cpu_s=%.3f snapshot_read_s=%.3f pinned_to_numpy_s=%.3f "
-            "xor_s=%.3f scan_s=%.3f compress_s=%.3f checksum_s=%.3f xor_restore_s=%.3f "
-            "payload_write_s=%.3f upload_s=%.3f",
+            "cpu_stage_s=%.3f delta_compute_s=%.3f upload_s=%.3f",
             rank,
             target_version,
             base_version,
@@ -1948,16 +1236,8 @@ class DeltaCheckpointPublisher:
             int(stats["compressed_bytes"]),
             ratio,
             stats["publish_s"],
-            stats["extract_or_gather_s"],
-            stats["stage_to_cpu_s"],
-            stats["snapshot_read_s"],
-            stats["pinned_to_numpy_s"],
-            stats["xor_s"],
-            stats["changed_scan_s"],
-            stats["compress_s"],
-            stats["checksum_s"],
-            stats["xor_restore_s"],
-            stats["payload_write_s"],
+            stats["cpu_stage_s"],
+            stats["delta_compute_s"],
             stats["upload_s"],
         )
         return DeltaPublishResult(
@@ -1998,13 +1278,14 @@ class DeltaCheckpointPublisher:
             total_compressed_num_bytes=sum(record.compressed_num_bytes for record in records),
             payload_files=payload_files,
         )
-        with tempfile.TemporaryDirectory(prefix="skyrl-delta-manifest-") as tmpdir:
-            local_publish_dir = Path(tmpdir)
-            with (local_publish_dir / _MANIFEST_NAME).open("w", encoding="utf-8") as f:
-                json.dump(manifest.to_json(), f)
-            t = time.perf_counter()
-            publish_delta_directory(local_publish_dir, publish_uri)
-            manifest_upload_s = time.perf_counter() - t
+        t = time.perf_counter()
+        manifest_staging_dir = self.publish_staging_dir / _version_name(target_version) / "manifest"
+        _write_bytes_to_uri(
+            json.dumps(manifest.to_json()).encode("utf-8"),
+            _join_uri(publish_uri, _MANIFEST_NAME),
+            staging_dir=manifest_staging_dir,
+        )
+        manifest_upload_s = time.perf_counter() - t
 
         ratio = (
             manifest.total_compressed_num_bytes / manifest.total_uncompressed_num_bytes
@@ -2012,21 +1293,11 @@ class DeltaCheckpointPublisher:
             else 0.0
         )
         max_publish_s = max((result.stats.get("publish_s", 0.0) for result in results), default=0.0)
-        sum_cpu_s = sum(
-            result.stats.get("pinned_to_numpy_s", 0.0)
-            + result.stats.get("xor_s", 0.0)
-            + result.stats.get("changed_scan_s", 0.0)
-            + result.stats.get("compress_s", 0.0)
-            + result.stats.get("checksum_s", 0.0)
-            + result.stats.get("xor_restore_s", 0.0)
-            for result in results
-        )
+        total_upload_s = aggregate.get("upload_s", 0.0) + manifest_upload_s
         logger.info(
             "delta checkpoint publish finalized: version=%s base_version=%s source_ranks=%s tensors=%s "
             "payload_files=%s uncompressed_bytes=%s compressed_bytes=%s compression_ratio=%.6f "
-            "max_per_rank_publish_s=%.3f sum_per_rank_cpu_s=%.3f manifest_upload_s=%.3f "
-            "extract_or_gather_s=%.3f stage_to_cpu_s=%.3f snapshot_read_s=%.3f pinned_to_numpy_s=%.3f "
-            "xor_s=%.3f scan_s=%.3f compress_s=%.3f checksum_s=%.3f xor_restore_s=%.3f",
+            "publish_s=%.3f cpu_stage_s=%.3f delta_compute_s=%.3f upload_s=%.3f",
             target_version,
             base_version,
             len([result for result in results if result.stats.get("source_rank", 0.0) > 0.0]),
@@ -2036,17 +1307,9 @@ class DeltaCheckpointPublisher:
             manifest.total_compressed_num_bytes,
             ratio,
             max_publish_s,
-            sum_cpu_s,
-            manifest_upload_s,
-            aggregate.get("extract_or_gather_s", 0.0),
-            aggregate.get("stage_to_cpu_s", 0.0),
-            aggregate.get("snapshot_read_s", 0.0),
-            aggregate.get("pinned_to_numpy_s", 0.0),
-            aggregate.get("xor_s", 0.0),
-            aggregate.get("changed_scan_s", 0.0),
-            aggregate.get("compress_s", 0.0),
-            aggregate.get("checksum_s", 0.0),
-            aggregate.get("xor_restore_s", 0.0),
+            aggregate.get("cpu_stage_s", 0.0),
+            aggregate.get("delta_compute_s", 0.0),
+            total_upload_s,
         )
         return {
             "target_version": target_version,

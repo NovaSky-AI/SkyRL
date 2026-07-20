@@ -350,6 +350,55 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model.model -> AutoModelForCausalLM
         self.model.model.config.pad_token_id = pad_token_id
 
+    def benchmark_apply_sparse_weight_delta(
+        self,
+        sparsity: float = 0.04,
+        delta: float = 1.0e-3,
+        phase: int = 0,
+    ) -> dict[str, float | int]:
+        """Apply a deterministic sparse in-place perturbation for sync benchmarks."""
+        if not 0.0 < sparsity <= 1.0:
+            raise ValueError(f"sparsity must be in (0, 1], got {sparsity}")
+        if self.model is None:
+            raise RuntimeError("model is not initialized")
+
+        stride = max(1, round(1.0 / sparsity))
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        start_offset = (rank + phase) % stride
+        total_elements = 0
+        updated_elements = 0
+        tensors = 0
+
+        with torch.no_grad():
+            for param in self.model.model.parameters():
+                if not param.is_floating_point():
+                    continue
+                flat = param.data.view(-1)
+                total_elements += flat.numel()
+                if flat.numel() <= start_offset:
+                    continue
+                view = flat[start_offset::stride]
+                if view.numel() == 0:
+                    continue
+                view.add_(delta)
+                updated_elements += view.numel()
+                tensors += 1
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+        return {
+            "rank": rank,
+            "phase": phase,
+            "stride": stride,
+            "tensors": tensors,
+            "total_elements": total_elements,
+            "updated_elements": updated_elements,
+            "actual_sparsity": (updated_elements / total_elements) if total_elements else 0.0,
+        }
+
     def forward(
         self,
         data: TrainingInputBatch,

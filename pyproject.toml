@@ -51,6 +51,7 @@ ray = [
 
 aws = [
     "cloudpathlib[s3]",
+    "s5cmd>=0.3.3; sys_platform == 'linux'",
 ]
 
 gcp = [
@@ -93,6 +94,8 @@ skyrl-train = [
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "polars",
     "s3fs",
+    "s5cmd>=0.3.3; sys_platform == 'linux'",
+    "gcsfs",
     "fastapi",
     "uvicorn",
     "vllm-router; sys_platform == 'linux'",

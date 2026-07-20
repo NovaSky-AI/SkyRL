@@ -25,9 +25,9 @@ except Exception:
 class DeltaTransferInitInfo:
     base_model_path: str
     local_checkpoint_dir: str
-    max_files_to_keep: int = 5
-    prefetch_depth: int = 0
-    version_wait_timeout_s: float = 7200.0
+    gcs_download_workers: int = 4
+    checkpoint_load_format: str = "vllm_fastsafetensors"
+    multi_thread_safetensors_max_workers: int = 8
 
 
 @dataclass
@@ -36,8 +36,10 @@ class DeltaTransferUpdateInfo:
     sync_dir: str | None = None
     uri: str | None = None
     version: int | None = None
+    # vLLM 0.23's native /update_weights path checks this attribute before it
+    # dispatches into the custom transfer engine. Delta checkpoint sync always
+    # reloads dense prepared checkpoint tensors.
     update_kind: str = "dense"
-    receive_update_kind: str | None = None
 
     @property
     def resolved_target_version(self) -> int:
@@ -73,6 +75,9 @@ class DeltaWeightTransferEngine:
         self.parallel_config = parallel_config
         self.model = model
         self._store: LocalCheckpointStore | None = None
+        self._checkpoint_load_format = "vllm_fastsafetensors"
+        self._multi_thread_safetensors_max_workers = 8
+        self._gcs_download_workers = 4
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> DeltaTransferInitInfo:
         try:
@@ -91,11 +96,18 @@ class DeltaWeightTransferEngine:
         self._store = LocalCheckpointStore(
             base_model_path=init_info.base_model_path,
             local_checkpoint_dir=init_info.local_checkpoint_dir,
+            gcs_download_workers=init_info.gcs_download_workers,
         )
+        self._checkpoint_load_format = init_info.checkpoint_load_format
+        self._multi_thread_safetensors_max_workers = init_info.multi_thread_safetensors_max_workers
+        self._gcs_download_workers = init_info.gcs_download_workers
         logger.info(
-            "Initialized delta weight transfer engine: base_model_path=%s local_checkpoint_dir=%s",
+            "Initialized delta weight transfer engine: base_model_path=%s local_checkpoint_dir=%s "
+            "checkpoint_load_format=%s gcs_download_workers=%s",
             init_info.base_model_path,
             init_info.local_checkpoint_dir,
+            self._checkpoint_load_format,
+            self._gcs_download_workers,
         )
 
     def fetch_weights(self, target_version: int, sync_dir: str | None = None, uri: str | None = None) -> dict[str, Any]:
@@ -129,13 +141,20 @@ class DeltaWeightTransferEngine:
         prepare_s = time.perf_counter() - t0
         load_s = 0.0
         t1 = time.perf_counter()
-        load_weights(self._store.iter_tensors())
+        load_weights(
+            self._store.iter_tensors(
+                load_format=self._checkpoint_load_format,
+                multi_thread_safetensors_max_workers=self._multi_thread_safetensors_max_workers,
+            )
+        )
         load_s = time.perf_counter() - t1
         total_s = time.perf_counter() - t0
         message = (
-            "delta checkpoint receive reload-only: target_version=%s prepare_s=%.3f load_s=%.3f total_s=%.3f"
+            "delta checkpoint receive reload-only: target_version=%s checkpoint_load_format=%s "
+            "prepare_s=%.3f load_s=%.3f total_s=%.3f"
         ) % (
             target_version,
+            self._checkpoint_load_format,
             prepare_s,
             load_s,
             total_s,

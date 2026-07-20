@@ -389,6 +389,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
 
+        # delta weight sync is not yet supported
+        # TODO (sumanthrh): Delta weight sync should be naturally supported for `merge_lora=true`, we should
+        # test and enable this in a follow-up. `merge_lora=false` needs bookkeeping of per-LoRA safetensors
+        # on the inference side.
+        assert cfg.generator.weight_sync_backend != "delta", "Delta weight sync is not yet support for LoRA"
+
     # Validate placement
     if cfg.trainer.placement.colocate_all:
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -727,10 +733,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
 
-    for var_name in ["SKYRL_DELTA_MEMORY_LOG", "SKYRL_DELTA_MEMORY_LOG_INTERVAL_TENSORS"]:
-        if value := os.environ.get(var_name):
-            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
-            env_vars[var_name] = value
+    if worker_nccl_timeout := os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S"):
+        logger.info(f"Exporting `SKYRL_WORKER_NCCL_TIMEOUT_IN_S` to ray runtime env: {worker_nccl_timeout}")
+        env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = worker_nccl_timeout
 
     # Health-check timeout for the inference server actor. Forwarded so `VLLMServerActor.start`
     # sees the override.

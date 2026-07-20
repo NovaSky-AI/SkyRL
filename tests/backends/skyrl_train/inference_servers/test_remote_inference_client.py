@@ -36,6 +36,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app.state.last_render_model = None
     # Per-server LoRA registry: lora_name -> lora_path
     app.state.lora_registry = {}
+    app.state.fetch_weights_requests = []
     # Session ids received via /finish_session, in arrival order.
     app.state.finished_sessions = []
 
@@ -250,6 +251,12 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/update_weights")
     async def update_weights(request: Request):
         return {"status": "ok", "server_id": server_id}
+
+    @app.post("/fetch_weights")
+    async def fetch_weights(request: Request):
+        body = await request.json()
+        app.state.fetch_weights_requests.append(body)
+        return {"status": "ok", "server_id": server_id, "body": body}
 
     @app.post("/skyrl/v1/load_lora_adapter")
     async def load_lora_adapter(request: Request):
@@ -612,6 +619,22 @@ class TestWeightSync:
         }
         result = await client.update_named_weights(update_info)
         assert len(result) == 2
+
+    @pytest.mark.asyncio
+    async def test_fetch_weights(self, client):
+        """Test fetch_weights uses the first-class /fetch_weights endpoint."""
+        result = await client.fetch_weights(
+            target_version=3,
+            sync_dir="gs://bucket/prefix",
+            uri="gs://bucket/prefix/delta-00000003",
+        )
+        assert len(result) == 2
+        for response in result.values():
+            assert response["body"]["body"] == {
+                "target_version": 3,
+                "sync_dir": "gs://bucket/prefix",
+                "uri": "gs://bucket/prefix/delta-00000003",
+            }
 
 
 class TestServerInfo:

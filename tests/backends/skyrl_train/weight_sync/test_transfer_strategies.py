@@ -107,9 +107,10 @@ class TestCreateInitInfo:
         ie_cfg = self._make_ie_cfg(weight_sync_backend="delta", run_engines_locally=False)
         ie_cfg.delta_weight_sync.sync_dir = "gs://bucket/prefix"
         ie_cfg.delta_weight_sync.local_checkpoint_dir = "/tmp/receiver"
-        ie_cfg.delta_weight_sync.publisher_local_checkpoint_dir = "/tmp/publisher"
         ie_cfg.delta_weight_sync.max_file_size_in_gb = 2
-        ie_cfg.delta_weight_sync.max_files_to_keep = 5
+        ie_cfg.delta_weight_sync.publish_num_workers = 3
+        ie_cfg.delta_weight_sync.checkpoint_load_format = "vllm_multi_thread_safetensors"
+        ie_cfg.delta_weight_sync.multi_thread_safetensors_max_workers = 4
 
         init_info = DeltaTransferStrategy.create_init_info(
             ie_cfg,
@@ -120,10 +121,10 @@ class TestCreateInitInfo:
         assert init_info.sync_dir == "gs://bucket/prefix"
         assert init_info.base_model_path == "Qwen/Qwen2.5-1.5B-Instruct"
         assert init_info.local_checkpoint_dir == "/tmp/receiver"
-        assert init_info.publisher_local_checkpoint_dir == "/tmp/publisher"
+        assert init_info.checkpoint_load_format == "vllm_multi_thread_safetensors"
+        assert init_info.multi_thread_safetensors_max_workers == 4
         assert init_info.max_file_size_in_gb == 2
-        assert init_info.max_files_to_keep == 5
-        assert init_info.version_wait_timeout_s == ie_cfg.delta_weight_sync.version_wait_timeout_s
+        assert init_info.publish_num_workers == 3
         assert init_info.override_existing_receiver is True
 
     def test_delta_create_init_info_requires_sync_dir(self):

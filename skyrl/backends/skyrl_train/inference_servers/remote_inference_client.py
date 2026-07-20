@@ -1126,13 +1126,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             kwargs["sync_dir"] = sync_dir
         if uri is not None:
             kwargs["uri"] = uri
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {
-                "method": "fetch_weights",
-                "kwargs": kwargs,
-            },
-        )
+        return await self._call_all_servers("/fetch_weights", kwargs)
 
     # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
     # these three methods from /collective_rpc to the native vLLM endpoints

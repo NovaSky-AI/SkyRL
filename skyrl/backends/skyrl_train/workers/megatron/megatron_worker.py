@@ -50,7 +50,6 @@ from skyrl.backends.skyrl_train.weight_sync import (
     WeightChunk,
     WeightExtractor,
 )
-from skyrl.backends.skyrl_train.weight_sync.memory_debug import log_memory
 from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     AdapterStore,
     LoraSignature,
@@ -1364,8 +1363,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         inference_engine_cfg: "InferenceEngineConfig",
         model_id: Optional[str] = None,
     ):
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        log_memory(logger, "megatron_broadcast_start", rank=rank)
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
@@ -1384,7 +1381,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache(reset_running_requests=True)
 
         torch.cuda.empty_cache()
-        log_memory(logger, "megatron_broadcast_after_empty_cache", rank=rank)
 
         if self._is_lora and not self.cfg.policy.megatron_config.lora_config.merge_lora:
             # AdapterStore.swap_to has already made `model_id` the live adapter
@@ -1399,28 +1395,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # CUDA-IPC path calls cudaIpcGetMemHandle, which is incompatible with the
             # VMM addresses expandable segments uses.
             with self._expandable_segments_disabled_for_sync():
-                log_memory(logger, "megatron_broadcast_before_weight_metadata", rank=rank)
                 weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
-                log_memory(logger, "megatron_broadcast_before_send_chunks", rank=rank)
                 await self._weight_transfer_sender.send_chunks(
                     self.weight_extractor.extract_weights(generator_dtype),
                     weight_metadata=weight_metadata,
                     extractor_shard_info=self.weight_extractor.get_shard_info(),
                 )
-                log_memory(logger, "megatron_broadcast_after_send_chunks", rank=rank)
 
         if cache_reset_task is not None:
             await cache_reset_task
         torch.cuda.empty_cache()
-        log_memory(logger, "megatron_broadcast_before_barrier", rank=rank)
         torch.distributed.barrier()
-        log_memory(logger, "megatron_broadcast_after_barrier", rank=rank)
         sender_client = getattr(self._weight_transfer_sender, "_inference_client", None)
         if inference_engine_client is not sender_client:
             close_client = getattr(inference_engine_client, "aclose", None)
             if close_client is not None:
                 await close_client()
-        log_memory(logger, "megatron_broadcast_done", rank=rank)
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method
@@ -1466,7 +1456,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         stride = max(1, round(1.0 / sparsity))
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        log_memory(logger, "megatron_sparse_delta_start", rank=rank, sparsity=sparsity, phase=phase)
         start_offset = (rank + phase) % stride
         total_elements = 0
         updated_elements = 0
@@ -1502,7 +1491,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             "updated_elements": updated_elements,
             "actual_sparsity": (updated_elements / total_elements) if total_elements else 0.0,
         }
-        log_memory(logger, "megatron_sparse_delta_done", **result)
         return result
 
     def register_pristine_adapter(self) -> None:

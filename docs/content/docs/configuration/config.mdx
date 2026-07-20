@@ -730,8 +730,13 @@ For more details on how different placement options work, please refer to the [p
 
 ### Weight Transfer Configuration
 
-- `generator.inference_engine.weight_sync_backend`: Backend to use for weight synchronization. Use `nccl`; colocated `nccl` uses CUDA IPC internally.
+- `generator.inference_engine.weight_sync_backend`: Backend to use for weight synchronization. Use `nccl`; colocated `nccl` uses CUDA IPC internally. Use `delta` for checkpoint-delta sync through shared storage in non-colocated vLLM runs.
 - `generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB`: When using `cuda_ipc` weight sync, send weights in batches of this size (in GB). Default: `1.0`.
+- `generator.inference_engine.delta_weight_sync.sync_dir`: Shared local/NFS directory or `gs://` URI where the trainer publishes versioned delta artifacts. Required when `weight_sync_backend=delta`.
+- `generator.inference_engine.delta_weight_sync.local_checkpoint_dir`: Receiver-side cache for the mutable checkpoint prepared before vLLM reload. Defaults to `/tmp/skyrl_delta_checkpoints/<model>`.
+- `generator.inference_engine.delta_weight_sync.max_file_size_in_gb`: Maximum compressed payload file size before starting a new safetensors payload file. Default: `1.0`.
+- `generator.inference_engine.delta_weight_sync.publish_num_workers`: Number of trainer-side worker threads used to compute and compress delta payloads. Defaults to `min(8, os.cpu_count())`.
+- `gs://` delta sync requires the `gcloud` CLI on trainer and inference workers. `s3://` delta sync requires the `s5cmd` CLI.
 - Remote inference servers automatically replace any stale weight update group during initialization. Locally launched inference servers do not.
 
 ### Inference Engine Configuration

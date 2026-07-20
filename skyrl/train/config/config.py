@@ -659,30 +659,33 @@ class DeltaWeightSyncConfig(BaseConfig):
 
     sync_dir: Optional[str] = None
     """Shared directory/URI where the trainer publishes per-version delta payloads.
-    Supports local paths and ``gs://`` URIs."""
+    Supports local paths, ``gs://`` URIs, and ``s3://`` URIs."""
 
     local_checkpoint_dir: Optional[str] = None
     """Receiver-side directory used to cache patched checkpoint versions.
     If unset, a path under ``/tmp/skyrl_delta_checkpoints`` is used."""
 
-    publisher_local_checkpoint_dir: Optional[str] = None
-    """Trainer-side directory used to persist the previous checkpoint version
-    for bounded-memory XOR diff construction. If unset, a path under
-    ``/tmp/skyrl_delta_publisher`` is used."""
+    publish_staging_dir: Optional[str] = None
+    """Trainer-side local directory used to stage cloud payload files before upload.
+    If unset, a path under ``/tmp/skyrl_delta_publish_staging`` is used."""
 
     max_file_size_in_gb: float = 1.0
     """Maximum compressed payload file size before starting a new safetensors file."""
 
-    max_files_to_keep: int = 5
-    """Maximum number of completed local checkpoint versions to retain."""
+    gcs_download_workers: int = 4
+    """Maximum number of payload files to download concurrently for ``gs://`` sync dirs."""
 
-    prefetch_depth: int = 0
-    """Number of compressed payload entries to prefetch on the receiver. ``0``
-    keeps the iterator synchronous."""
+    publish_num_workers: Optional[int] = None
+    """Number of trainer-side worker threads used to compute and compress delta payloads.
+    If unset, the publisher uses ``min(8, os.cpu_count())``."""
 
-    version_wait_timeout_s: float = 7200.0
-    """Maximum seconds non-writer receiver workers wait for a checkpoint
-    version to be committed by the writer worker."""
+    checkpoint_load_format: str = "vllm_fastsafetensors"
+    """Receiver reload iterator for the prepared local checkpoint.
+    ``"vllm_fastsafetensors"`` is the default CUDA/GDS-oriented path.
+    ``"vllm_multi_thread_safetensors"`` is the CPU safetensors fallback."""
+
+    multi_thread_safetensors_max_workers: int = 8
+    """Number of worker threads for ``vllm_multi_thread_safetensors``."""
 
 
 @dataclass

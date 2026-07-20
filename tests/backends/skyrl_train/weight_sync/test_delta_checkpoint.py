@@ -1,5 +1,7 @@
 import json
+import subprocess
 
+import numpy as np
 import pytest
 import torch
 from safetensors import safe_open
@@ -8,10 +10,20 @@ from safetensors.torch import save_file
 from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
+    _MANIFEST_NAME,
+    CheckpointIndex,
     DeltaCheckpointPublisher,
     DeltaPublishResult,
     LocalCheckpointStore,
+    _copy_from_uri,
+    _deltas_dir,
+    _safe_path_name,
     _weights_dir,
+    _write_bytes_to_uri,
+)
+from skyrl.backends.skyrl_train.weight_sync.delta_payload import (
+    decompress_bytes,
+    uint8_tensor_to_bytes,
 )
 from skyrl.backends.skyrl_train.weight_sync.delta_strategy import (
     DeltaInitInfo,
@@ -71,6 +83,10 @@ def _read_state(receiver_dir):
         return json.load(f)
 
 
+def _store_tensors(store):
+    return dict(CheckpointIndex(store._current_checkpoint_dir()).iter_tensors())
+
+
 def test_delta_checkpoint_publish_fetch_and_reload_roundtrip(tmp_path):
     base_tensors = {
         "model.layers.0.self_attn.q_proj.weight": torch.arange(16, dtype=torch.bfloat16).view(4, 4),
@@ -89,7 +105,6 @@ def test_delta_checkpoint_publish_fetch_and_reload_roundtrip(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
-        local_checkpoint_dir=str(tmp_path / "publisher"),
     )
     update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
 
@@ -98,12 +113,76 @@ def test_delta_checkpoint_publish_fetch_and_reload_roundtrip(tmp_path):
     assert stats["apply_s"] >= 0.0
     store.validate_ready(1)
 
-    received = dict(store.iter_tensors())
+    received = _store_tensors(store)
     assert set(received) == {changed_name, unchanged_name}
     assert torch.equal(received[changed_name], updated_tensors[changed_name])
     assert torch.equal(received[unchanged_name], base_tensors[unchanged_name])
     assert torch.equal(_load_tensor(_weights_dir(receiver_dir), changed_name), updated_tensors[changed_name])
     assert _read_state(receiver_dir)["version"] == 1
+
+
+def test_delta_checkpoint_payload_stores_xor_patch(tmp_path):
+    base_tensors = {"a.weight": torch.arange(16, dtype=torch.bfloat16).view(4, 4)}
+    updated = base_tensors["a.weight"].clone()
+    updated[1, 2] = updated[1, 2] + torch.tensor(3, dtype=torch.bfloat16)
+    updated[3, 0] = updated[3, 0] + torch.tensor(5, dtype=torch.bfloat16)
+    base_dir = tmp_path / "base"
+    sync_dir = tmp_path / "sync"
+    _write_checkpoint(base_dir, base_tensors)
+
+    publisher = DeltaCheckpointPublisher(
+        base_model_path=str(base_dir),
+        sync_dir=str(sync_dir),
+        publish_num_workers=1,
+    )
+    publisher.publish([_chunk_from_tensors({"a.weight": updated})])
+
+    with (sync_dir / "delta-00000001" / _MANIFEST_NAME).open(encoding="utf-8") as f:
+        manifest = json.load(f)
+    record = manifest["tensors"][0]
+    with safe_open(sync_dir / "delta-00000001" / record["payload_file"], framework="pt", device="cpu") as f:
+        compressed = f.get_tensor(record["payload_key"])
+
+    patch = np.frombuffer(
+        decompress_bytes(uint8_tensor_to_bytes(compressed), expected_size=record["uncompressed_num_bytes"]),
+        dtype=np.uint8,
+    )
+    base_bytes = base_tensors["a.weight"].contiguous().view(torch.uint8).numpy().reshape(-1)
+    updated_bytes = updated.contiguous().view(torch.uint8).numpy().reshape(-1)
+
+    assert np.count_nonzero(patch) > 0
+    assert np.array_equal(np.bitwise_xor(base_bytes, patch), updated_bytes)
+
+
+def test_delta_checkpoint_vllm_multi_thread_safetensors_iterator_roundtrip(tmp_path):
+    pytest.importorskip("vllm")
+
+    base_tensors = {
+        "model.layers.0.self_attn.q_proj.weight": torch.arange(16, dtype=torch.bfloat16).view(4, 4),
+        "model.layers.0.mlp.down_proj.weight": torch.arange(8, dtype=torch.bfloat16).view(2, 4),
+    }
+    updated_tensors = {
+        "model.layers.0.self_attn.q_proj.weight": base_tensors["model.layers.0.self_attn.q_proj.weight"]
+        + torch.tensor(1, dtype=torch.bfloat16),
+        "model.layers.0.mlp.down_proj.weight": base_tensors["model.layers.0.mlp.down_proj.weight"],
+    }
+    base_dir = tmp_path / "base"
+    receiver_dir = tmp_path / "receiver"
+    _write_checkpoint(base_dir, base_tensors)
+
+    publisher = DeltaCheckpointPublisher(
+        base_model_path=str(base_dir),
+        sync_dir=str(tmp_path / "sync"),
+    )
+    update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+
+    store = LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
+    store.fetch(target_version=update_info["target_version"], sync_dir=update_info["sync_dir"])
+
+    received = dict(store.iter_tensors(load_format="vllm_multi_thread_safetensors"))
+    assert set(received) == set(updated_tensors)
+    for name, expected in updated_tensors.items():
+        assert torch.equal(received[name], expected)
 
 
 def test_delta_checkpoint_publisher_converts_to_base_checkpoint_dtype(tmp_path):
@@ -117,10 +196,9 @@ def test_delta_checkpoint_publisher_converts_to_base_checkpoint_dtype(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
-        local_checkpoint_dir=str(tmp_path / "publisher"),
     )
     update_info = publisher.publish([_chunk_from_tensors(runtime_updated)])
-    with open(tmp_path / "sync" / "v00000001" / "manifest.json", encoding="utf-8") as f:
+    with open(tmp_path / "sync" / "delta-00000001" / "manifest.json", encoding="utf-8") as f:
         manifest = json.load(f)
     assert manifest["tensors"][0]["dtype"] == "float32"
     assert manifest["tensors"][0]["payload_key"] == "a.weight"
@@ -130,7 +208,7 @@ def test_delta_checkpoint_publisher_converts_to_base_checkpoint_dtype(tmp_path):
     store = LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
     assert not _weights_dir(receiver_dir).exists()
     store.fetch(target_version=1, sync_dir=update_info["sync_dir"])
-    received = dict(store.iter_tensors())["a.weight"]
+    received = _store_tensors(store)["a.weight"]
     assert received.dtype == torch.float32
     assert torch.equal(received, expected_checkpoint_tensor)
 
@@ -149,7 +227,6 @@ def test_delta_checkpoint_non_source_rank_drains_without_publishing(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(sync_dir),
-        local_checkpoint_dir=str(tmp_path / "publisher"),
     )
 
     result = publisher.publish(chunks, _non_source_info())
@@ -158,7 +235,7 @@ def test_delta_checkpoint_non_source_rank_drains_without_publishing(tmp_path):
     assert result.payload_files == []
     assert publisher.snapshot == {}
     assert publisher.version == 1
-    assert not (sync_dir / "v00000001").exists()
+    assert not (sync_dir / "delta-00000001").exists()
 
 
 def test_delta_checkpoint_replays_multiple_versions_for_late_join(tmp_path):
@@ -172,7 +249,6 @@ def test_delta_checkpoint_replays_multiple_versions_for_late_join(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
-        local_checkpoint_dir=str(tmp_path / "publisher"),
     )
     publisher.publish([_chunk_from_tensors(v1_tensors)])
     first_snapshot = publisher.snapshot["a.weight"]
@@ -189,7 +265,10 @@ def test_delta_checkpoint_replays_multiple_versions_for_late_join(tmp_path):
     store = LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
     store.fetch(target_version=2, sync_dir=update_info["sync_dir"])
     store.validate_ready(2)
-    assert torch.equal(dict(store.iter_tensors())["a.weight"], v2_tensors["a.weight"])
+    assert torch.equal(
+        _store_tensors(store)["a.weight"],
+        v2_tensors["a.weight"],
+    )
 
 
 def test_delta_checkpoint_splits_payload_files_by_size(tmp_path):
@@ -207,12 +286,11 @@ def test_delta_checkpoint_splits_payload_files_by_size(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
-        local_checkpoint_dir=str(tmp_path / "publisher"),
         max_file_size_in_gb=1e-9,
     )
     update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
 
-    with open(tmp_path / "sync" / "v00000001" / "manifest.json", encoding="utf-8") as f:
+    with open(tmp_path / "sync" / "delta-00000001" / "manifest.json", encoding="utf-8") as f:
         manifest = json.load(f)
     assert update_info["target_version"] == 1
     assert len(manifest["payload_files"]) == 2
@@ -229,7 +307,6 @@ def test_delta_checkpoint_skips_missing_lm_head_when_checkpoint_ties_embeddings(
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
-        local_checkpoint_dir=str(tmp_path / "publisher"),
     )
     update_info = publisher.publish(
         [
@@ -241,16 +318,92 @@ def test_delta_checkpoint_skips_missing_lm_head_when_checkpoint_ties_embeddings(
             )
         ]
     )
-    with open(tmp_path / "sync" / "v00000001" / "manifest.json", encoding="utf-8") as f:
+    with open(tmp_path / "sync" / "delta-00000001" / "manifest.json", encoding="utf-8") as f:
         manifest = json.load(f)
     assert [record["name"] for record in manifest["tensors"]] == ["model.embed_tokens.weight"]
 
     store = LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
     store.fetch(target_version=1, uri=update_info["uri"])
 
-    received = dict(store.iter_tensors())
+    received = _store_tensors(store)
     assert set(received) == {"model.embed_tokens.weight"}
     assert torch.equal(received["model.embed_tokens.weight"], updated_embed)
+
+
+def test_local_checkpoint_store_fetch_is_single_writer_with_concurrent_ray_actors(tmp_path):
+    ray = pytest.importorskip("ray")
+
+    base_tensors = {"a.weight": torch.arange(16, dtype=torch.bfloat16).view(4, 4)}
+    updated_tensors = {"a.weight": base_tensors["a.weight"] + torch.tensor(1, dtype=torch.bfloat16)}
+    base_dir = tmp_path / "base"
+    receiver_dir = tmp_path / "receiver"
+    sync_dir = tmp_path / "sync"
+    counter_path = tmp_path / "fetch_count.json"
+    _write_checkpoint(base_dir, base_tensors)
+    counter_path.write_text(json.dumps({"count": 0}), encoding="utf-8")
+
+    publisher = DeltaCheckpointPublisher(base_model_path=str(base_dir), sync_dir=str(sync_dir))
+    update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+
+    class FetchActor:
+        def fetch(self, base_model_path, local_checkpoint_dir, target_version, uri, counter_file):
+            import json
+            import time
+            from pathlib import Path
+
+            import skyrl.backends.skyrl_train.weight_sync.delta_checkpoint as delta_checkpoint
+
+            original = delta_checkpoint.fetch_delta_directory
+            counter = Path(counter_file)
+
+            def counted_fetch(delta_uri, cache_dir, gcs_download_workers=4):
+                with delta_checkpoint.FileLock(Path(f"{counter_file}.lock")):
+                    data = json.loads(counter.read_text(encoding="utf-8"))
+                    data["count"] += 1
+                    counter.write_text(json.dumps(data), encoding="utf-8")
+                time.sleep(0.2)
+                return original(delta_uri, cache_dir, gcs_download_workers=gcs_download_workers)
+
+            delta_checkpoint.fetch_delta_directory = counted_fetch
+            store = delta_checkpoint.LocalCheckpointStore(
+                base_model_path=base_model_path,
+                local_checkpoint_dir=local_checkpoint_dir,
+            )
+            stats = store.fetch(target_version=target_version, uri=uri)
+            with (Path(local_checkpoint_dir) / ".skyrl_weight_sync" / "state.json").open("r", encoding="utf-8") as f:
+                state = json.load(f)
+            return {"stats": stats, "state": state}
+
+    started_ray = False
+    if not ray.is_initialized():
+        ray.init(num_cpus=2, include_dashboard=False, ignore_reinit_error=True)
+        started_ray = True
+    try:
+        actor_cls = ray.remote(num_cpus=1)(FetchActor)
+        actors = [actor_cls.remote(), actor_cls.remote()]
+        results = ray.get(
+            [
+                actor.fetch.remote(
+                    str(base_dir),
+                    str(receiver_dir),
+                    update_info["target_version"],
+                    update_info["uri"],
+                    str(counter_path),
+                )
+                for actor in actors
+            ]
+        )
+    finally:
+        if started_ray:
+            ray.shutdown()
+
+    assert json.loads(counter_path.read_text(encoding="utf-8"))["count"] == 1
+    assert all(result["state"]["version"] == 1 for result in results)
+    assert (_deltas_dir(receiver_dir) / _safe_path_name(update_info["uri"])).exists()
+    received = _store_tensors(
+        LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
+    )
+    assert torch.equal(received["a.weight"], updated_tensors["a.weight"])
 
 
 def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
@@ -262,7 +415,6 @@ def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
-        local_checkpoint_dir=str(tmp_path / "publisher"),
     )
     update_info = publisher.publish([_chunk_from_tensors({"a.weight": base_tensors["a.weight"].clone()})])
 
@@ -270,7 +422,7 @@ def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
     assert update_info["target_version"] == 1
     assert publisher.version == 1
 
-    with open(tmp_path / "sync" / "v00000001" / "manifest.json", encoding="utf-8") as f:
+    with open(tmp_path / "sync" / "delta-00000001" / "manifest.json", encoding="utf-8") as f:
         manifest = json.load(f)
     assert manifest["tensors"] == []
     assert manifest["payload_files"] == []
@@ -280,7 +432,108 @@ def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
     store.fetch(target_version=1, uri=update_info["uri"])
     assert _read_state(receiver_dir)["version"] == 1
     assert not _weights_dir(receiver_dir).exists()
-    assert torch.equal(dict(store.iter_tensors())["a.weight"], base_tensors["a.weight"])
+    assert torch.equal(
+        _store_tensors(store)["a.weight"],
+        base_tensors["a.weight"],
+    )
+
+
+def test_delta_checkpoint_gcs_byte_io_uses_cli_staging(monkeypatch, tmp_path):
+    objects = {}
+    commands = []
+
+    def fake_which(name):
+        return f"/usr/bin/{name}" if name == "gcloud" else None
+
+    def fake_run(cmd, stdout=None, stderr=None, text=None):
+        commands.append(cmd)
+        assert cmd[:3] == ["gcloud", "storage", "cp"]
+        src, dst = cmd[3], cmd[4]
+        if dst.startswith("gs://"):
+            objects[dst] = open(src, "rb").read()
+        elif src.startswith("gs://"):
+            with open(dst, "wb") as f:
+                f.write(objects[src])
+        else:
+            raise AssertionError(f"unexpected command {cmd}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr(
+        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.subprocess.run",
+        fake_run,
+    )
+
+    uri = "gs://bucket/sync/delta-00000001/payload.safetensors"
+    _write_bytes_to_uri(b"payload-bytes", uri, staging_dir=tmp_path / "stage")
+    assert objects[uri] == b"payload-bytes"
+
+    local_path = tmp_path / "payload.safetensors"
+    _copy_from_uri(uri, local_path)
+    assert local_path.read_bytes() == b"payload-bytes"
+    assert len(commands) == 2
+    assert commands[0][:3] == ["gcloud", "storage", "cp"]
+    assert commands[1][:3] == ["gcloud", "storage", "cp"]
+
+
+def test_delta_checkpoint_gcs_cli_publish_fetch_roundtrip(monkeypatch, tmp_path):
+    objects = {}
+
+    def fake_which(name):
+        return f"/usr/bin/{name}" if name == "gcloud" else None
+
+    def fake_run(cmd, stdout=None, stderr=None, text=None):
+        if cmd and cmd[0] == "cp":
+            with open(cmd[-2], "rb") as src, open(cmd[-1], "wb") as dst:
+                dst.write(src.read())
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        assert cmd[:3] == ["gcloud", "storage", "cp"]
+        src, dst = cmd[3], cmd[4]
+        if dst.startswith("gs://"):
+            objects[dst] = open(src, "rb").read()
+        elif src.startswith("gs://"):
+            with open(dst, "wb") as f:
+                f.write(objects[src])
+        else:
+            raise AssertionError(f"unexpected command {cmd}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr(
+        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.subprocess.run",
+        fake_run,
+    )
+
+    base_tensors = {"a.weight": torch.zeros(8, dtype=torch.bfloat16)}
+    updated_tensors = {"a.weight": torch.arange(8, dtype=torch.bfloat16)}
+    base_dir = tmp_path / "base"
+    receiver_dir = tmp_path / "receiver"
+    staging_dir = tmp_path / "publish-stage"
+    _write_checkpoint(base_dir, base_tensors)
+
+    publisher = DeltaCheckpointPublisher(
+        base_model_path=str(base_dir),
+        sync_dir="gs://bucket/sync",
+        publish_staging_dir=str(staging_dir),
+    )
+    update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+
+    assert update_info["uri"] == "gs://bucket/sync/delta-00000001"
+    assert "gs://bucket/sync/delta-00000001/manifest.json" in objects
+    assert any(key.endswith(".safetensors") for key in objects)
+    assert not list(staging_dir.rglob("*.tmp"))
+    assert not list(staging_dir.rglob("*.safetensors"))
+
+    store = LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
+    store.fetch(target_version=1, uri=update_info["uri"])
+    received = _store_tensors(store)
+    assert torch.equal(received["a.weight"], updated_tensors["a.weight"])
 
 
 def test_delta_checkpoint_checksum_failure_marks_write_in_progress(tmp_path):
@@ -293,10 +546,9 @@ def test_delta_checkpoint_checksum_failure_marks_write_in_progress(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
-        local_checkpoint_dir=str(tmp_path / "publisher"),
     )
     update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
-    manifest_path = tmp_path / "sync" / "v00000001" / "manifest.json"
+    manifest_path = tmp_path / "sync" / "delta-00000001" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["tensors"][0]["checksum"] = "0" * 32
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -311,12 +563,14 @@ def test_delta_checkpoint_checksum_failure_marks_write_in_progress(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(shutil_sync),
-        local_checkpoint_dir=str(tmp_path / "publisher_valid"),
     )
     valid_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
     store.fetch(target_version=1, uri=valid_info["uri"])
     assert _read_state(receiver_dir)["write_in_progress"] is False
-    assert torch.equal(dict(store.iter_tensors())["a.weight"], updated_tensors["a.weight"])
+    assert torch.equal(
+        _store_tensors(store)["a.weight"],
+        updated_tensors["a.weight"],
+    )
 
 
 @pytest.mark.asyncio
@@ -350,7 +604,6 @@ async def test_delta_sender_seed_sync_skips_chunk_iteration(tmp_path):
             base_model_path=str(tmp_path / "base"),
             sync_dir=str(tmp_path / "sync"),
             local_checkpoint_dir=str(tmp_path / "receiver"),
-            publisher_local_checkpoint_dir=str(tmp_path / "publisher"),
         ),
         FakeInferenceClient(),
     )
