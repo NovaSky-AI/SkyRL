@@ -32,9 +32,6 @@ from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 from skyrl.train.utils.scalar_gauges import ScalarGauges
 
 _PROMETHEUS_NAME_RE = re.compile(r"[^a-zA-Z0-9_]")
-# Step and epoch are published directly by the trainer at step start. This mirror runs at step
-# commit, so mirroring them here would add a duplicate series lagging a full step behind.
-_MIRROR_SKIP = frozenset({"trainer/global_step", "trainer/epoch"})
 
 
 # TODO(tgriggs): Test all backends.
@@ -90,12 +87,20 @@ class Tracking:
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
-        # Also mirror numeric values to Prometheus, one gauge per key. bool is a numbers.Real
-        # subtype, so exclude it; the step number is a value, never a label.
+        # Mirror numeric values to Prometheus, one gauge per key; bool subtypes numbers.Real so exclude it.
         for key, value in data.items():
-            if key in _MIRROR_SKIP or isinstance(value, bool) or not isinstance(value, numbers.Real):
+            if isinstance(value, bool) or not isinstance(value, numbers.Real):
                 continue
             self._prometheus.set(f"skyrl_{_PROMETHEUS_NAME_RE.sub('_', key)}", value)
+
+    def log_gauge(self, name: str, value: float, description: Optional[str] = None) -> None:
+        """Set a Prometheus gauge directly, on the same registry the metric mirror publishes to.
+
+        The trainer uses this for step-timed gauges (e.g. step-start values), whose timing the
+        commit-time mirror cannot reproduce. Sharing the registry means a dedicated gauge and its
+        mirrored twin (same name) are one series, not two.
+        """
+        self._prometheus.set(name, value, description)
 
     def finish(self):
         if self.backend == "console":

@@ -80,7 +80,6 @@ from skyrl.train.utils.callbacks import (
     TrainingControl,
 )
 from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
-from skyrl.train.utils.scalar_gauges import ScalarGauges
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -142,8 +141,6 @@ class RayPPOTrainer:
 
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
-        self._loop_gauges = ScalarGauges()
-
         # trajectory logger is installed after construction if needed
         self.trajectory_logger: TrajectoryLogger = None
 
@@ -168,6 +165,19 @@ class RayPPOTrainer:
         self._num_training_gpus = (
             cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
         )
+
+    def _mark_step_start(self, epoch: int, start_time: float) -> None:
+        """Publish the step/epoch join gauges at step start, so a mid-step scrape reads the
+        in-progress step. The gauge names match the mirror's output for the trainer/* metrics, so
+        the start-timed value here and the commit-time mirror are one series. Callers pass the
+        step's own start time."""
+        self.tracker.log_gauge("skyrl_trainer_global_step", self.global_step, "Step the loop is working on.")
+        self.tracker.log_gauge("skyrl_trainer_epoch", epoch, "Current epoch, zero-indexed.")
+        self.tracker.log_gauge("skyrl_step_start_unixtime", start_time, "Wall-clock start of the current step.")
+
+    def _mark_step_end(self) -> None:
+        """Publish the step-end timestamp. Must run before global_step increments."""
+        self.tracker.log_gauge("skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step.")
 
     def add_callback(self, callback: TrainingCallback) -> None:
         """Register a callback. Events fired after this call reach the new callback."""
@@ -334,13 +344,9 @@ class RayPPOTrainer:
                     if not step_started:
                         self._fire("on_step_start")
                         step_started = True
-                        # Set at step start so a mid-step scrape attributes wall-clock series to
-                        # the in-progress step.
-                        self._loop_gauges.set("skyrl_current_step", self.global_step, "Step the loop is working on.")
-                        self._loop_gauges.set("skyrl_epoch", epoch, "Current epoch, zero-indexed.")
-                        self._loop_gauges.set(
-                            "skyrl_step_start_unixtime", time.time(), "Wall-clock start of the current step."
-                        )
+                        # time.time() rather than a step Timer: dynamic sampling re-enters
+                        # Timer("step") several times per logical step, so there is no single one.
+                        self._mark_step_start(epoch, time.time())
                         # Open the train-rollout metrics window once per logical
                         # step; paused so only the generation spans count toward the
                         # throughput denominator (dynamic sampling may generate more
@@ -545,10 +551,7 @@ class RayPPOTrainer:
                     self._fire("on_log", logs=log_payload)
 
                     self.tracker.log(log_payload, step=self.global_step, commit=True)
-                    # Must be set before global_step increments below.
-                    self._loop_gauges.set(
-                        "skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step."
-                    )
+                    self._mark_step_end()
                     self.all_metrics = {}
                     self.all_timings = {}
 
