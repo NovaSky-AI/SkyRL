@@ -8670,7 +8670,7 @@ provides-extras = ["gpu", "tpu", "tinker", "ray", "aws", "gcp", "azure", "jax", 
 
 [[package]]
 name = "skyrl-gym"
-version = "0.4.0"
+version = "0.3.0"
 source = { editable = "skyrl-gym" }
 dependencies = [
     { name = "func-timeout" },
