@@ -128,6 +128,55 @@ def test_cli_overrides_empty_args():
     assert cfg.trainer.seed == 42
 
 
+def test_sample_support_replay_requires_capture_and_megatron():
+    with pytest.raises(ValueError, match="enable_sample_support_replay requires"):
+        SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.enable_sample_support_replay=true"])
+
+    with pytest.raises(ValueError, match="requires trainer.strategy=megatron"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("generator.sampling_params.temperature=0", "temperature > 0"),
+        ("generator.sampling_params.top_k=1", "top_k > 1"),
+        ("generator.sampling_params.repetition_penalty=1.1", "repetition_penalty=1.0"),
+        ("generator.sampling_params.additional_kwargs.foo=bar", "additional_kwargs"),
+    ],
+)
+def test_sample_support_capture_rejects_unsupported_sampling_modifiers(override, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+                override,
+            ]
+        )
+
+
+def test_sample_support_replay_accepts_top_k_top_p_and_min_p():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.algorithm.enable_sample_support_replay=true",
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            "generator.sampling_params.top_p=0.9",
+            "generator.sampling_params.min_p=0.05",
+        ]
+    )
+
+    assert cfg.trainer.algorithm.enable_sample_support_replay
+
+
 def test_cli_overrides_plus_prefix_rejected():
     with pytest.raises(ValueError, match="The '\\+' prefix"):
         SkyRLTrainConfig.from_cli_overrides(["+new_field=value"])

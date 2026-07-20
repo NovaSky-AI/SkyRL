@@ -199,6 +199,20 @@ class TestTokenBasedBatchIterator:
         # Padding rows must not contribute to the loss.
         assert padding["loss_mask"].sum().item() == 0
 
+    def test_padding_microbatch_uses_unique_dummy_routes(self):
+        batch = self._make_batch([4, 4], num_actions=2)
+        batch["rollout_expert_indices"] = torch.full((2, 4, 2, 3), 7, dtype=torch.int16)
+        batch["router_padding_mask"] = torch.zeros((2, 4), dtype=torch.bool)
+        batch["sample_support_ids"] = torch.full((2, 4, 8), 7, dtype=torch.int32)
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)
+
+        padding = iterator._create_padding_microbatch()
+
+        expected = torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(padding["rollout_expert_indices"])
+        assert torch.equal(padding["rollout_expert_indices"], expected)
+        assert torch.all(padding["router_padding_mask"])
+        assert torch.all(padding["sample_support_ids"] == -1)
+
     def test_multimodal_tensorlist_microbatching(self):
         """Token-based microbatching must gather TensorList fields (multi-modal pixel_values /
         image_grid_thw) via the same index gather used for regular tensors."""
