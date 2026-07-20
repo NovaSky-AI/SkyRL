@@ -516,6 +516,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                     with Timer("step", self.all_timings):
+                        # The step-to-wall-clock join key: any Prometheus series can be attributed
+                        # to a training step by the window where these gauges held its number.
+                        self._loop_gauges.set("skyrl_current_step", self.global_step, "Step the loop is working on.")
+                        self._loop_gauges.set("skyrl_epoch", epoch, "Current epoch, zero-indexed.")
+                        self._loop_gauges.set(
+                            "skyrl_step_start_unixtime", time.time(), "Wall-clock start of the current step."
+                        )
                         self._loop_gauges.set(
                             "skyrl_gen_buffer_qsize",
                             generation_output_group_buffer.qsize(),
@@ -628,6 +635,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if self._vllm_metrics_scraper is not None:
                         timing_payload.update(await self._vllm_metrics_scraper.sample())
                     self.tracker.log(timing_payload, step=self.global_step, commit=True)
+                    self._loop_gauges.set(
+                        "skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step."
+                    )
                     self.all_timings = {}
                     self.global_step += 1
 
