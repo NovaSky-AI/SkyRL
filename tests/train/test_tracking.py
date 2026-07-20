@@ -51,7 +51,11 @@ def test_log_mirrors_numeric_metrics_to_prometheus():
 
     with patch("ray.util.metrics.Gauge", side_effect=fake_gauge):
         t = Tracking(project_name="proj", experiment_name="exp", backend="console")
-        t.log({"timing/run_training": 1.5, "generate/n": 2, "note": "text", "flag": True}, step=3)
+        # trainer/global_step is skipped: it is published directly with step-start timing.
+        t.log(
+            {"timing/run_training": 1.5, "generate/n": 2, "note": "text", "flag": True, "trainer/global_step": 7},
+            step=3,
+        )
         t.log({"timing/run_training": 2.5}, step=4)
 
     assert set(created) == {"skyrl_timing_run_training", "skyrl_generate_n"}
