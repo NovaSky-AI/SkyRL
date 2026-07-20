@@ -7,7 +7,9 @@ from typing import Any, Dict, Generic, List, Optional, TypedDict, TypeVar
 
 import numpy as np
 import torch
-from jaxtyping import Float, Integer
+from jaxtyping import Bool, Float, Integer
+
+from skyrl.utils.routed_experts import make_replay_padding_indices
 
 DictType = TypeVar("DictType")
 
@@ -476,6 +478,8 @@ class TrainingInput(TypedDict, total=False):
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_expert_indices: Optional[Integer[torch.Tensor, "batch_size seq_len layer_num topk"]]
+    router_padding_mask: Optional[Bool[torch.Tensor, "batch_size seq_len"]]
+    sample_support_ids: Optional[Integer[torch.Tensor, "batch_size seq_len topk"]]
     pixel_values: Optional[TensorList]  # list of `batch_size` [num_patches_i, dim] tensors
     image_grid_thw: Optional[TensorList]  # list of `batch_size` [num_images_i, 3] tensors
 
@@ -523,6 +527,27 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
             # Ensures that padding tensors don't count towards the loss
             additional_dims = tensor.shape[1:]
             padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+        elif key == "rollout_expert_indices":
+            additional_dims = tensor.shape[1:]
+            padding_tensor = make_replay_padding_indices(
+                (pad_size, *additional_dims),
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+        elif key == "router_padding_mask":
+            additional_dims = tensor.shape[1:]
+            padding_tensor = torch.ones(pad_size, *additional_dims, dtype=torch.bool, device=tensor.device)
+            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+        elif key == "sample_support_ids":
+            additional_dims = tensor.shape[1:]
+            padding_tensor = torch.full(
+                (pad_size, *additional_dims),
+                -1,
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
             new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
         else:
             # Copy row 0 `pad_size` times. Loss masked so values don't affect the loss. Just need valid shape/dtype.

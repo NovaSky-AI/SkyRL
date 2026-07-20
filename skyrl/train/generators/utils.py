@@ -745,19 +745,22 @@ def _is_prefix(maybe_prefix: List[int], candidate: List[int]) -> bool:
     return maybe_prefix == candidate[: len(maybe_prefix)]
 
 
-def _slice_generator_output(generator_output: GeneratorOutput, indices: List[int]) -> GeneratorOutput:
+def slice_generator_output(
+    generator_output: GeneratorOutput, indices: List[int], *, preserve_metrics: bool = True
+) -> GeneratorOutput:
     """Slice a GeneratorOutput to keep only the entries at the given indices.
 
-    All sliced entries must share the same TrajectoryID — this helper is used by
-    prefix-aware merging which operates on one trajectory at a time.
+    Generator-specific per-trajectory fields are sliced without naming them here.
+    Prefix-aware merging passes entries that all share one ``TrajectoryID``;
+    dynamic sampling may intentionally select entries from different trajectories.
     """
     assert len(indices) > 0, "indices must be non-empty"
     # Every key except `rollout_metrics` is either a per-entry list to slice, or None.
     sliced: GeneratorOutput = {}
     for key, value in generator_output.items():
         if key == "rollout_metrics":
-            # Skip since metrics are already recorded before calling `merge_stepwise_output()`.
-            continue
+            if preserve_metrics:
+                sliced[key] = value
         elif value is None:
             sliced[key] = None
         else:
@@ -784,6 +787,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     is_token_level_rewards = isinstance(gen_out["rewards"][0], list)
     has_logprobs = gen_out.get("rollout_logprobs") is not None
     has_stop_reasons = gen_out.get("stop_reasons") is not None
+    has_sample_support = gen_out.get("rollout_sample_support") is not None
 
     # Per-field output accumulators.
     # Fields that we take from all the entries in the merge group
@@ -791,6 +795,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     out_response_ids: List[List[int]] = []
     out_loss_masks: List[List[int]] = []
     out_logprobs: Optional[List[List[float]]] = [] if has_logprobs else None
+    out_sample_support: Optional[List[List[List[int]]]] = [] if has_sample_support else None
     # If per-token rewards, we keep appending. If per-turn rewards, we only take from the last turn.
     out_rewards: list = []
 
@@ -804,16 +809,21 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     acc_response: List[int] = list(gen_out["response_ids"][0])
     acc_loss_mask: List[int] = list(gen_out["loss_masks"][0])
     acc_logprobs: Optional[List[float]] = list(gen_out["rollout_logprobs"][0]) if has_logprobs else None
+    acc_sample_support: Optional[List[List[int]]] = (
+        [list(row) for row in gen_out["rollout_sample_support"][0]] if has_sample_support else None
+    )
     acc_rewards_tokens: Optional[List[float]] = list(gen_out["rewards"][0]) if is_token_level_rewards else None
     last = 0
 
     def flush():
-        nonlocal acc_prompt, acc_response, acc_loss_mask, acc_logprobs, acc_rewards_tokens, last
+        nonlocal acc_prompt, acc_response, acc_loss_mask, acc_logprobs, acc_sample_support, acc_rewards_tokens, last
         out_prompt_ids.append(acc_prompt)
         out_response_ids.append(acc_response)
         out_loss_masks.append(acc_loss_mask)
         if has_logprobs:
             out_logprobs.append(acc_logprobs)
+        if has_sample_support:
+            out_sample_support.append(acc_sample_support)
         out_rewards.append(acc_rewards_tokens if is_token_level_rewards else gen_out["rewards"][last])
         if has_stop_reasons:
             out_stop_reasons.append(gen_out["stop_reasons"][last])
@@ -831,6 +841,9 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
             acc_response = list(gen_out["response_ids"][i])
             acc_loss_mask = list(gen_out["loss_masks"][i])
             acc_logprobs = list(gen_out["rollout_logprobs"][i]) if has_logprobs else None
+            acc_sample_support = (
+                [list(row) for row in gen_out["rollout_sample_support"][i]] if has_sample_support else None
+            )
             acc_rewards_tokens = list(gen_out["rewards"][i]) if is_token_level_rewards else None
             last = i
             continue
@@ -845,6 +858,8 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         acc_loss_mask.extend([0] * len(obs_delta))
         if acc_logprobs is not None:
             acc_logprobs.extend([0.0] * len(obs_delta))
+        if acc_sample_support is not None:
+            acc_sample_support.extend([] for _ in obs_delta)
         if acc_rewards_tokens is not None:
             acc_rewards_tokens.extend([0.0] * len(obs_delta))
 
@@ -853,6 +868,8 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         acc_loss_mask.extend(gen_out["loss_masks"][i])
         if acc_logprobs is not None:
             acc_logprobs.extend(gen_out["rollout_logprobs"][i])
+        if acc_sample_support is not None:
+            acc_sample_support.extend(gen_out["rollout_sample_support"][i])
         if acc_rewards_tokens is not None:
             acc_rewards_tokens.extend(gen_out["rewards"][i])
 
@@ -867,6 +884,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         "loss_masks": out_loss_masks,
         "stop_reasons": out_stop_reasons,
         "rollout_logprobs": out_logprobs,
+        "rollout_sample_support": out_sample_support,
         "trajectory_ids": out_trajectory_ids,
         "rollout_expert_indices": None,
         "is_last_step": out_is_last_step,
@@ -913,7 +931,9 @@ def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
     start = 0
     for i in range(num_samples):
         if is_last_step[i]:
-            trajectory_slices.append(_slice_generator_output(generator_output, list(range(start, i + 1))))
+            trajectory_slices.append(
+                slice_generator_output(generator_output, list(range(start, i + 1)), preserve_metrics=False)
+            )
             start = i + 1
 
     merged_slices = [_merge_single_trajectory(s) for s in trajectory_slices]

@@ -64,6 +64,7 @@ from typing import (
 )
 
 import aiohttp
+import orjson
 
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
@@ -72,10 +73,17 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
 )
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
+    decode_packed_routed_experts,
+)
+from skyrl.backends.skyrl_train.inference_servers.sample_support_set_wire import (
+    decode_sample_support_set,
+)
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
     SKYRL_HTTP_CONNECTION_LIMIT,
 )
+from skyrl.utils.routed_experts import RoutedExpertIndices
 
 _DATA_PLANE_RETRIES = 30
 
@@ -162,6 +170,165 @@ class SampleResponse(TypedDict):
     topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]]
 
 
+@dataclass(frozen=True)
+class RemoteGenerateResult:
+    """Raw token generation result returned by ``RemoteInferenceGenerator``."""
+
+    raw_response: Dict[str, Any]
+    response_ids: List[int]
+    response_logprobs: Optional[List[float]]
+    stop_reason: str
+    routed_experts: Optional[RoutedExpertIndices]
+    sample_support: Optional[List[List[int]]]
+
+
+@dataclass
+class RemoteInferenceGenerator:
+    """Reusable HTTP client for one raw-token generation request."""
+
+    proxy_url: str
+    _session: Optional[aiohttp.ClientSession] = field(default=None, init=False, repr=False)
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        current_loop = asyncio.get_running_loop()
+        if self._session is not None and not self._session.closed and self._session.loop != current_loop:
+            self._session = None
+        if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(
+                limit=SKYRL_HTTP_CONNECTION_LIMIT,
+                keepalive_timeout=2,
+            )
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=None),
+            )
+        return self._session
+
+    async def _post(self, url: str, json: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
+        """POST JSON with retry on transient connection and response-decoding failures."""
+        session = await self._get_session()
+        last_exc: Optional[Exception] = None
+        for attempt in range(_DATA_PLANE_RETRIES):
+            try:
+                async with session.post(url, json=json, headers=headers) as resp:
+                    try:
+                        body = orjson.loads(await resp.read())
+                    except orjson.JSONDecodeError as exc:
+                        if 400 <= resp.status < 500:
+                            text = await resp.text()
+                            raise aiohttp.ClientResponseError(
+                                resp.request_info,
+                                resp.history,
+                                status=resp.status,
+                                message=text or resp.reason,
+                                headers=resp.headers,
+                            ) from exc
+                        last_exc = exc
+                        logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {exc}")
+                        await asyncio.sleep(1)
+                        continue
+                    raise_for_status(resp, body)
+                    return body
+            except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as exc:
+                last_exc = exc
+                logger.debug(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {exc}")
+                await asyncio.sleep(1)
+        if last_exc is None:
+            raise RuntimeError(f"POST failed without an exception for {url=}")
+        raise last_exc
+
+    async def generate(
+        self,
+        *,
+        prompt_token_ids: List[int],
+        sampling_params: Dict[str, Any],
+        session_id: Optional[Any],
+        model: str,
+        return_routed_experts: bool = False,
+        routed_experts_prompt_start: Optional[int] = None,
+        return_sample_support: bool = False,
+        mm_features: Optional[MultiModalFeatures] = None,
+        cache_salt: Optional[str] = None,
+    ) -> RemoteGenerateResult:
+        """Generate one raw-token completion with optional replay metadata."""
+        if routed_experts_prompt_start is not None:
+            if not return_routed_experts:
+                raise ValueError("routed_experts_prompt_start requires return_routed_experts=True")
+            if (
+                isinstance(routed_experts_prompt_start, bool)
+                or not isinstance(routed_experts_prompt_start, int)
+                or not 0 <= routed_experts_prompt_start <= len(prompt_token_ids)
+            ):
+                raise ValueError("routed_experts_prompt_start must be an integer within the prompt")
+
+        use_skyrl_endpoint = return_routed_experts or return_sample_support
+        path = "/skyrl/v1/generate" if use_skyrl_endpoint else "/inference/v1/generate"
+        request_sampling_params = dict(sampling_params)
+        if routed_experts_prompt_start is not None:
+            request_sampling_params["routed_experts_prompt_start"] = routed_experts_prompt_start
+        payload: Dict[str, Any] = {
+            "sampling_params": request_sampling_params,
+            "model": model,
+            "token_ids": prompt_token_ids,
+        }
+        if return_sample_support:
+            payload["return_sample_support"] = True
+        if mm_features:
+            payload["features"] = mm_features
+        # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
+        # param.
+        if cache_salt is not None:
+            payload["cache_salt"] = cache_salt
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
+
+        response = await self._post(f"{self.proxy_url}{path}", json=payload, headers=headers)
+        choice = response["choices"][0]
+        token_ids = choice["token_ids"]
+        logprobs = choice.get("logprobs")
+        response_logprobs = None
+        if logprobs is not None:
+            logprobs_content = logprobs.get("content", [])
+            if logprobs_content:
+                response_logprobs = [logprob_info["logprob"] for logprob_info in logprobs_content]
+
+        routed_experts = None
+        if return_routed_experts:
+            packed_routed_experts = choice.get("routed_experts")
+            if not isinstance(packed_routed_experts, dict):
+                raise ValueError("/skyrl/v1/generate must return packed routed_experts")
+            routed_experts = decode_packed_routed_experts(packed_routed_experts)
+
+        sample_support = (
+            decode_sample_support_set(choice["rollout_sample_support"]).tolist() if return_sample_support else None
+        )
+
+        return RemoteGenerateResult(
+            raw_response=response,
+            response_ids=token_ids,
+            response_logprobs=response_logprobs,
+            stop_reason=choice["finish_reason"],
+            routed_experts=routed_experts,
+            sample_support=sample_support,
+        )
+
+    async def aclose(self) -> None:
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+    def __getstate__(self) -> Dict[str, Any]:
+        state = self.__dict__.copy()
+        state["_session"] = None
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._session = None
+
+
 @dataclass
 class RemoteInferenceClient(InferenceEngineInterface):
     """
@@ -210,6 +377,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
     enable_return_routed_experts: bool = False
     """Whether to return routed expert indices (R3 / rollout router replay)."""
 
+    enable_return_sample_support_set: bool = False
+    """Whether to return sampled-token support sets for replay."""
+
     uses_lora_weight_sync: bool = False
     """True when the trainer syncs LoRA adapters (rather than full/merged weights). When True,
     `sleep()` is forced to level=1: level=2 discards the base model from VRAM with no CPU backup,
@@ -220,7 +390,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
 
     # Private fields excluded from repr for cleaner output
-    _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
+    _generator: Optional[RemoteInferenceGenerator] = field(default=None, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
     _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
@@ -277,66 +447,16 @@ class RemoteInferenceClient(InferenceEngineInterface):
             self._sem_loop = current_loop
         return self._gen_sem, self._detok_sem
 
+    def _get_generator(self) -> RemoteInferenceGenerator:
+        if self._generator is None:
+            self._generator = RemoteInferenceGenerator(proxy_url=self.proxy_url)
+        return self._generator
+
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create the aiohttp session."""
-        # Re-use the existing session object if it is not closed.
-        # Note that we also create a new session object if the event loop has changed, since
-        # aiohttp.ClientSession is tied to the event loop.
-        current_loop = asyncio.get_running_loop()
-        if self._session is not None and not self._session.closed and self._session.loop != current_loop:
-            # Event loop changed - the old session is unusable (bound to a dead loop).
-            self._session = None
-        if self._session is None or self._session.closed:
-            # keepalive_timeout must be shorter than the server's timeout_keep_alive
-            # (uvicorn default: 5s). Otherwise aiohttp reuses connections the server
-            # has already closed, causing ECONNRESET under high concurrency.
-            connector = aiohttp.TCPConnector(
-                limit=SKYRL_HTTP_CONNECTION_LIMIT,
-                keepalive_timeout=2,
-            )
-            self._session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
-        return self._session
+        return await self._get_generator()._get_session()
 
     async def _post(self, url: str, json: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
-        """POST with retry + backoff on transient connection errors.
-
-        Between generate bursts the pool's keep-alive connections go stale
-        (server closes them after ``timeout_keep_alive``).  An immediate
-        retry would grab another stale connection from the same pool, so we
-        sleep briefly to let the connector detect and purge dead sockets
-        before the next attempt.
-        """
-        session = await self._get_session()
-        last_exc: Optional[Exception] = None
-        for attempt in range(_DATA_PLANE_RETRIES):
-            try:
-                async with session.post(url, json=json, headers=headers) as resp:
-                    try:
-                        body = await resp.json(content_type=None)
-                    except Exception as e:
-                        if 400 <= resp.status < 500:
-                            # Non-JSON client error (e.g. plain text 422 from vllm-router).
-                            # Raise immediately — client errors won't succeed on retry.
-                            text = await resp.text()
-                            raise aiohttp.ClientResponseError(
-                                resp.request_info,
-                                resp.history,
-                                status=resp.status,
-                                message=text or resp.reason,
-                                headers=resp.headers,
-                            )
-                        last_exc = e
-                        logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
-                        await asyncio.sleep(1)
-                        continue
-                    raise_for_status(resp, body)
-                    return body
-            except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
-                last_exc = e
-                logger.debug(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
-                await asyncio.sleep(1)
-                continue
-        raise last_exc  # type: ignore[misc]
+        return await self._get_generator()._post(url, json=json, headers=headers)
 
     # ---------------------------
     # Data Plane
@@ -401,6 +521,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
         session_ids = input_batch.get("session_ids")
         mm_features = input_batch.get("mm_features")
         cache_salt = input_batch.get("cache_salt")
+        routed_experts_prompt_starts = input_batch.get("routed_experts_prompt_starts")
+        if routed_experts_prompt_starts is not None:
+            if not self.enable_return_routed_experts:
+                raise ValueError("routed_experts_prompt_starts requires enable_return_routed_experts=True")
+            if len(routed_experts_prompt_starts) != len(prompt_token_ids):
+                raise ValueError("routed_experts_prompt_starts must have one entry per prompt")
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -424,6 +550,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                     mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
+                    routed_experts_prompt_start=(
+                        routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
+                    ),
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -433,6 +562,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                     mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
+                    routed_experts_prompt_start=(
+                        routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
+                    ),
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -446,15 +578,22 @@ class RemoteInferenceClient(InferenceEngineInterface):
         raw_results = await asyncio.gather(*[_throttled_generate(idx) for idx in range(batch_size)])
         responses = await asyncio.gather(*[_throttled_detokenize(r["response_ids"]) for r in raw_results])
 
-        rollout_expert_indices = [r.get("routed_experts") for r in raw_results]
-        has_routed_experts = any(x is not None for x in rollout_expert_indices)
+        rollout_expert_indices = (
+            [result["routed_experts"] for result in raw_results] if self.enable_return_routed_experts else None
+        )
+        rollout_sample_support = (
+            [result["rollout_sample_support"] for result in raw_results]
+            if self.enable_return_sample_support_set
+            else None
+        )
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=[r["stop_reason"] for r in raw_results],
             response_ids=[r["response_ids"] for r in raw_results],
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
-            rollout_expert_indices=rollout_expert_indices if has_routed_experts else None,
+            rollout_expert_indices=rollout_expert_indices,
+            rollout_sample_support=rollout_sample_support,
         )
 
     async def _generate_single(
@@ -465,59 +604,25 @@ class RemoteInferenceClient(InferenceEngineInterface):
         model: str,
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
+        routed_experts_prompt_start: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """
-        Generate completion for a single prompt.
-
-        With keep-mode pause, in-flight requests are frozen by the vLLM
-        scheduler and resume where they left off after /resume. No retry
-        logic is needed.
-
-        Returns:
-            Dict with keys: stop_reason, response_ids, response_logprobs
-        """
-        url = (
-            f"{self.proxy_url}/skyrl/v1/generate"
-            if self.enable_return_routed_experts
-            else f"{self.proxy_url}/inference/v1/generate"
+        result = await self._get_generator().generate(
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            session_id=session_id,
+            model=model,
+            return_routed_experts=self.enable_return_routed_experts,
+            routed_experts_prompt_start=routed_experts_prompt_start,
+            return_sample_support=self.enable_return_sample_support_set,
+            mm_features=mm_features,
+            cache_salt=cache_salt,
         )
-
-        payload: dict[str, Any] = {
-            "sampling_params": sampling_params,
-            "model": model,
-            "token_ids": prompt_token_ids,
-        }
-        if mm_features:
-            payload["features"] = mm_features
-        # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
-        # param.
-        if cache_salt is not None:
-            payload["cache_salt"] = cache_salt
-
-        headers = {"Content-Type": "application/json"}
-        if session_id:
-            headers["X-Session-ID"] = str(session_id)
-
-        response = await self._post(url, json=payload, headers=headers)
-
-        choice = response["choices"][0]
-        token_ids = choice["token_ids"]
-        stop_reason = choice["finish_reason"]
-
-        response_logprobs: Optional[List[float]] = None
-        logprobs = choice.get("logprobs")
-        if logprobs is not None:
-            logprobs_content = logprobs.get("content", [])
-            if logprobs_content:
-                response_logprobs = [logprob_info["logprob"] for logprob_info in logprobs_content]
-
-        routed_experts = choice.get("routed_experts")
-
         return {
-            "stop_reason": stop_reason,
-            "response_ids": token_ids,
-            "response_logprobs": response_logprobs,
-            "routed_experts": routed_experts,
+            "stop_reason": result.stop_reason,
+            "response_ids": result.response_ids,
+            "response_logprobs": result.response_logprobs,
+            "routed_experts": result.routed_experts,
+            "rollout_sample_support": result.sample_support,
         }
 
     async def _render_for_sample(
@@ -1367,9 +1472,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
     async def teardown(self) -> None:
         """Close HTTP session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
+        if self._generator is not None:
+            await self._generator.aclose()
 
     async def __aenter__(self) -> "RemoteInferenceClient":
         """Async context manager entry."""
@@ -1386,7 +1490,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
     def __getstate__(self) -> dict:
         """Exclude non-serializable fields from pickle."""
         state = self.__dict__.copy()
-        state["_session"] = None
         state["_gen_sem"] = None
         state["_detok_sem"] = None
         state["_sem_loop"] = None
@@ -1395,19 +1498,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
     def __setstate__(self, state: dict) -> None:
         """Restore state after unpickling."""
         self.__dict__.update(state)
-        self._session = None
         self._gen_sem = None
         self._detok_sem = None
         self._sem_loop = None
 
-    async def aclose(self):
-        if self._session is not None:
-            try:
-                await self._session.close()
-            except Exception as e:
-                logger.warning(f"Encountered exception {e} while closing client session")
-                pass
-            self._session = None
+    async def aclose(self) -> None:
+        await self.teardown()
 
 
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:

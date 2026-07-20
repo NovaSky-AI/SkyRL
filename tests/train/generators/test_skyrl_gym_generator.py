@@ -5,6 +5,7 @@ uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_gener
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 from skyrl.train.config import ChatTemplateConfig, GeneratorConfig
@@ -14,12 +15,31 @@ from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
 )
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator, TurnOutput
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
 # Mock constants, where 4 is the eos token id
 MOCK_LLM_OUTPUT_IDS = [1, 10, 12, 4]
 MOCK_TOKENIZER_ENCODED_IDS = [1, 2, 3, 4]
+
+
+def test_turn_output_masks_uncaptured_suffix():
+    output = TurnOutput(
+        output="answer",
+        output_ids=[10, 11, 4],
+        output_logprobs=None,
+        new_obs=[],
+        obs_ids=[20, 21],
+        reward=1.0,
+        rollout_sample_support=np.array([[10, 100], [11, 101]], dtype=np.int32),
+        added_eos=True,
+    )
+
+    np.testing.assert_array_equal(
+        output.get_turn_rollout_sample_support(),
+        np.array([[10, 100], [11, 101], [-1, -1], [-1, -1], [-1, -1]], dtype=np.int32),
+    )
+    assert output.get_turn_loss_mask() == [1, 1, 0, 0, 0]
 
 
 # TODO (erictang000): clean up the mocking for tests in this file
@@ -376,7 +396,7 @@ async def test_agent_loop_single_turn(
             # No EOS: just add it
             expected_response_ids = mock_llm_output_ids + [mock_tokenizer.eos_token_id]
 
-        expected_loss_mask = [1] * (len(expected_response_ids))
+        expected_loss_mask = [1] * len(expected_response_ids)
 
     if logprobs_setting is not None:
         assert output.rollout_logprobs is not None
@@ -393,6 +413,73 @@ async def test_agent_loop_single_turn(
     else:
         assert output.reward == 1.0
     assert output.stop_reason == "stop"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_agent_loop_uses_incremental_replay_metadata_traces(
+    mock_make,
+    mock_tokenizer,
+    mock_llm,
+    mock_env,
+    generator_cfg,
+    mock_env_cfg,
+):
+    generator_cfg.batched = False
+    generator_cfg.max_turns = 2
+    generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.inference_engine.enable_return_routed_experts = True
+    generator_cfg.inference_engine.enable_return_sample_support_set = True
+    generator_cfg.sampling_params.top_k = 2
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    mock_env.step.side_effect = [
+        BaseTextEnvStepOutput(observations=[{"role": "user", "content": "next"}], reward=1.0, done=done, metadata={})
+        for done in (False, True)
+    ]
+    prompt_starts = []
+    generation_index = 0
+
+    def generate(input_batch, model=None):
+        nonlocal generation_index
+        prompt_tokens = input_batch["prompt_token_ids"][0]
+        prompt_start = input_batch["routed_experts_prompt_starts"][0]
+        prompt_starts.append(prompt_start)
+        output_ids = [10, 11]
+        num_route_rows = len(prompt_tokens) - prompt_start + len(output_ids) - 1
+        routes = np.arange(num_route_rows * 4, dtype=np.int32).reshape(num_route_rows, 2, 2) % 8
+        sample_support = [[10, 100 + generation_index], [11, 110 + generation_index]]
+        generation_index += 1
+        return {
+            "responses": ["mocked output"],
+            "response_ids": [output_ids],
+            "stop_reasons": ["stop"],
+            "rollout_expert_indices": [routes],
+            "rollout_sample_support": [sample_support],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=generate)
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    output = await generator.agent_loop(
+        [{"role": "user", "content": "Start"}],
+        mock_env_cfg.env_class,
+        {},
+        max_tokens=32,
+        max_input_length=64,
+    )
+
+    assert prompt_starts == [0, 5]
+    assert output.rollout_sample_support[:2] == [[10, 100], [11, 110]]
+    assert output.rollout_sample_support[-2:] == [[10, 101], [11, 111]]
+    assert all(row == [-1, -1] for row in output.rollout_sample_support[2:-2])
 
 
 @pytest.mark.asyncio

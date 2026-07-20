@@ -293,6 +293,7 @@ def build_new_inference_client(
         server_urls=server_setup.server_urls,
         model_name=ie_cfg.served_model_name or cfg.trainer.policy.model.path,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
+        enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,

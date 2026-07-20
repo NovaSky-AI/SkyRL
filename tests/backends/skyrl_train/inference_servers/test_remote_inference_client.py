@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 import aiohttp
 import httpx
+import numpy as np
 import pytest
 import pytest_asyncio
 import uvicorn
@@ -19,6 +20,13 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
     PauseMode,
     RemoteInferenceClient,
+    RemoteInferenceGenerator,
+)
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
+    pack_routed_experts,
+)
+from skyrl.backends.skyrl_train.inference_servers.sample_support_set_wire import (
+    encode_sample_support_set,
 )
 from skyrl.backends.skyrl_train.inference_servers.setup import (
     build_new_inference_client,
@@ -31,6 +39,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app = FastAPI()
     app.state.last_generate_features = None
     app.state.last_generate_model = None
+    app.state.last_generate_sampling_params = None
     app.state.last_chat_model = None
     app.state.last_completion_model = None
     app.state.last_render_model = None
@@ -55,6 +64,10 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.get("/test/last_generate_features")
     async def get_last_generate_features():
         return {"features": app.state.last_generate_features}
+
+    @app.get("/test/last_generate_sampling_params")
+    async def get_last_generate_sampling_params():
+        return app.state.last_generate_sampling_params
 
     @app.get("/test/last_models")
     async def get_last_models():
@@ -92,6 +105,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def generate(request: Request):
         body = await request.json()  # Consume body
         sp = body.get("sampling_params", {})
+        app.state.last_generate_sampling_params = sp
         input_token_ids = body.get("token_ids", [])
         app.state.last_generate_model = body.get("model")
         n = sp.get("n", 1)
@@ -113,6 +127,9 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
                 for i in range(num_choices)
             ]
         }
+        if request.url.path == "/skyrl/v1/generate":
+            routes = np.arange(12).reshape(3, 2, 2)
+            response["choices"][0]["routed_experts"] = pack_routed_experts(routes)
 
         features = body.get("features")
         app.state.last_generate_features = features
@@ -417,8 +434,7 @@ class TestRemoteInferenceClientInit:
         assert restored.proxy_url == client.proxy_url
         assert restored.server_urls == client.server_urls
         assert restored.model_name == client.model_name
-        # Session should be None after unpickling
-        assert restored._session is None
+        assert restored._generator is None
 
 
 class TestDataPlane:
@@ -449,6 +465,81 @@ class TestDataPlane:
         }
         result = await client.generate(input_batch)
         assert len(result["responses"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_decodes_packed_routed_experts(self, mock_servers):
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
+            enable_return_routed_experts=True,
+        )
+        try:
+            result = await client.generate({"prompt_token_ids": [[1, 2, 3]], "routed_experts_prompt_starts": [1]})
+            async with httpx.AsyncClient() as http:
+                captured = (await http.get(f"{mock_servers['proxy_url']}/test/last_generate_sampling_params")).json()
+        finally:
+            await client.teardown()
+
+        assert len(result["rollout_expert_indices"]) == 1
+        assert result["rollout_expert_indices"][0].dtype == np.uint8
+        assert np.array_equal(result["rollout_expert_indices"][0], np.arange(12).reshape(3, 2, 2))
+        assert captured["routed_experts_prompt_start"] == 1
+
+    @pytest.mark.asyncio
+    async def test_external_generator_requests_sample_support(self, monkeypatch):
+        generator = RemoteInferenceGenerator(proxy_url="http://unused")
+        captured = {}
+
+        async def fake_post(url, json, headers):
+            captured.update(url=url, json=json, headers=headers)
+            return {
+                "choices": [
+                    {
+                        "token_ids": [7],
+                        "finish_reason": "stop",
+                        "logprobs": {"content": [{"logprob": -0.1}]},
+                        "rollout_sample_support": encode_sample_support_set(np.asarray([[7, 8]], dtype=np.int32)),
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(generator, "_post", fake_post)
+        result = await generator.generate(
+            prompt_token_ids=[1, 2],
+            sampling_params={},
+            session_id=None,
+            model="default",
+            return_sample_support=True,
+        )
+
+        assert captured["url"].endswith("/skyrl/v1/generate")
+        assert captured["json"]["return_sample_support"] is True
+        assert result.sample_support == [[7, 8]]
+
+    @pytest.mark.asyncio
+    async def test_generate_rejects_list_routed_experts(self, monkeypatch):
+        client = RemoteInferenceClient(
+            proxy_url="http://unused",
+            server_urls=["http://unused"],
+            data_parallel_size=1,
+            enable_return_routed_experts=True,
+        )
+
+        async def return_list_routes(*args, **kwargs):
+            return {
+                "choices": [
+                    {
+                        "token_ids": [1],
+                        "finish_reason": "stop",
+                        "routed_experts": [[[0, 1]]],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(client._get_generator(), "_post", return_list_routes)
+        with pytest.raises(ValueError, match="must return packed"):
+            await client._generate_single([1], {}, None, "model")
 
     @pytest.mark.asyncio
     async def test_chat_completion(self, client):
@@ -928,8 +1019,7 @@ class TestContextManager:
             result = await client.resume()
             assert len(result) == 2
 
-        # Session should be closed after exiting context
-        assert client._session is None or client._session.closed
+        assert client._generator is None or client._generator._session is None
 
 
 async def _get_lora_registries(server_urls: List[str]) -> List[Dict[str, str]]:
