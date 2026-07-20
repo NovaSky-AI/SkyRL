@@ -84,6 +84,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     args: Namespace = parser.parse_args(args=[])
 
     ie_cfg = cfg.generator.inference_engine
+    sample_support_top_k = cfg.generator.sampling_params.top_k
     overrides = dict(
         model=cfg.trainer.policy.model.path,
         tensor_parallel_size=ie_cfg.tensor_parallel_size,
@@ -118,6 +119,9 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         # Overridable via generator.inference_engine.engine_init_kwargs.trust_remote_code below.
         trust_remote_code=True,
     )
+    if ie_cfg.enable_return_sample_support_set:
+        overrides["max_logprobs"] = sample_support_top_k
+        overrides["logprobs_mode"] = "processed_logprobs"
     for key, value in overrides.items():
         setattr(args, key, value)
 

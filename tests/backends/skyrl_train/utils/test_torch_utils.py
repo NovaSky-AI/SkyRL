@@ -6,6 +6,7 @@ import torch
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_cross_entropy_from_log_probs,
     chunked_entropy_from_logits,
+    logprobs_from_logits,
 )
 
 
@@ -33,6 +34,27 @@ def test_chunked_cross_entropy_from_logprobs():
 
     assert torch.allclose(result_BS[0, 2], torch.tensor(expected_uniform_entropy), atol=1e-4)
     assert torch.allclose(result_BS[1, 0], torch.tensor(expected_uniform_entropy), atol=1e-4)
+
+
+def test_logprobs_from_logits_uses_torch_path_for_cpu(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("flash-attn cross entropy requires CUDA tensors")
+
+    monkeypatch.setattr(
+        "skyrl.backends.skyrl_train.utils.torch_utils.FLASH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE",
+        True,
+    )
+    monkeypatch.setattr(
+        "skyrl.backends.skyrl_train.utils.torch_utils.logprobs_from_logits_flash_attn",
+        fail_if_called,
+    )
+    logits = torch.tensor([[[1.0, 2.0, 3.0]]])
+    labels = torch.tensor([[2]])
+
+    actual = logprobs_from_logits(logits, labels)
+
+    expected = torch.log_softmax(logits, dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    torch.testing.assert_close(actual, expected)
 
 
 def test_chunked_entropy_from_logits():

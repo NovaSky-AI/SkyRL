@@ -27,6 +27,9 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    aligned_sample_support_logprobs,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
@@ -250,9 +253,26 @@ class HFModelWrapper(nn.Module):
         pixel_values: Optional[TensorList] = None,
         image_grid_thw: Optional[TensorList] = None,
         mm_token_type_ids: Optional[torch.Tensor] = None,
+        sample_support_ids: Optional[torch.Tensor] = None,
+        loss_mask: Optional[torch.Tensor] = None,
+        enable_sample_support_replay: bool = False,
     ) -> torch.Tensor:
         """Returns action log probs"""
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
+        if enable_sample_support_replay and sample_support_ids is None:
+            raise ValueError("sample-support replay is enabled but the microbatch has no recorded support")
+        if enable_sample_support_replay and loss_mask is None:
+            raise ValueError("sample-support replay is enabled but the microbatch has no loss mask")
+        support_ids_fwd = sample_support_ids if enable_sample_support_replay else None
+        target_loss_mask_fwd = None
+        support_trajectory_ids_fwd = None
+        if enable_sample_support_replay:
+            # The loss mask is response-only. Place it in the full token layout so it
+            # follows support IDs through the same unpadding, target shift, and SP slice.
+            target_loss_mask_fwd = torch.zeros_like(sequences, dtype=torch.bool)
+            target_loss_mask_fwd[:, sequences.shape[1] - loss_mask.shape[1] :] = loss_mask.to(torch.bool)
+            support_trajectory_ids_fwd = torch.arange(sequences.shape[0], device=sequences.device).unsqueeze(1)
+            support_trajectory_ids_fwd = support_trajectory_ids_fwd.expand_as(sequences)
         if self.is_vlm:
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
             # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
@@ -286,9 +306,24 @@ class HFModelWrapper(nn.Module):
                 position_ids_fwd, _, _, _, _ = unpad_input(position_ids.unsqueeze(-1), attention_mask)
                 # (nnz, 1) -> (1, nnz)
                 position_ids_fwd = position_ids_fwd.transpose(0, 1)
+                if support_ids_fwd is not None:
+                    support_ids_fwd = support_ids_fwd.flatten(0, 1).index_select(0, nnz_indices).unsqueeze(0)
+                    target_loss_mask_fwd = target_loss_mask_fwd.flatten().index_select(0, nnz_indices).unsqueeze(0)
+                    support_trajectory_ids_fwd = (
+                        support_trajectory_ids_fwd.flatten().index_select(0, nnz_indices).unsqueeze(0)
+                    )
                 attention_mask_fwd = None  # no attention mask with FA 2
 
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
+        support_ids_rolled = torch.roll(support_ids_fwd, shifts=-1, dims=1) if support_ids_fwd is not None else None
+        target_loss_mask_rolled = (
+            torch.roll(target_loss_mask_fwd, shifts=-1, dims=1) if target_loss_mask_fwd is not None else None
+        )
+        support_trajectory_ids_rolled = (
+            torch.roll(support_trajectory_ids_fwd, shifts=-1, dims=1)
+            if support_trajectory_ids_fwd is not None
+            else None
+        )
         if self.sequence_parallel_size > 1:
             # NOTE: don't pass any attn mask with sample packing
             attention_mask_fwd = None if self.remove_microbatch_padding else attention_mask_fwd
@@ -301,6 +336,27 @@ class HFModelWrapper(nn.Module):
             sequences_rolled, _, _, _ = ulysses_pad_and_slice_inputs(
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
+            if support_ids_rolled is not None:
+                support_ids_rolled, _, _, _ = ulysses_pad_and_slice_inputs(
+                    support_ids_rolled,
+                    None,
+                    None,
+                    self.sequence_parallel_size,
+                    input_padding_value=-1,
+                )
+                target_loss_mask_rolled, _, _, _ = ulysses_pad_and_slice_inputs(
+                    target_loss_mask_rolled,
+                    None,
+                    None,
+                    self.sequence_parallel_size,
+                )
+                support_trajectory_ids_rolled, _, _, _ = ulysses_pad_and_slice_inputs(
+                    support_trajectory_ids_rolled,
+                    None,
+                    None,
+                    self.sequence_parallel_size,
+                    input_padding_value=-1,
+                )
 
         if self.is_vlm:
             # NOTE: transformers v5 introduced `mm_token_type_ids` to distinguish text
@@ -333,12 +389,27 @@ class HFModelWrapper(nn.Module):
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
 
-        # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
-        log_probs = logprobs_from_logits(
-            logits_BSV,
-            sequences_rolled,
-            inplace_backward=True,
-        )
+        if enable_sample_support_replay:
+            assert (
+                support_ids_rolled is not None
+                and target_loss_mask_rolled is not None
+                and support_trajectory_ids_rolled is not None
+            )
+            log_probs = aligned_sample_support_logprobs(
+                logits_BSV,
+                sequences_rolled,
+                support_ids_rolled,
+                target_loss_mask_rolled,
+                vocab_start_index=0,
+                vocab_end_index=logits_BSV.shape[-1],
+                tp_group=None,
+                inference_only=not torch.is_grad_enabled(),
+                trajectory_ids=support_trajectory_ids_rolled,
+                num_trajectories=sequences.shape[0],
+            )
+        else:
+            # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
+            log_probs = logprobs_from_logits(logits_BSV, sequences_rolled, inplace_backward=True)
 
         # gather output if sp > 1
         if self.sequence_parallel_size > 1:

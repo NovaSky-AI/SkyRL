@@ -551,6 +551,8 @@ EXPECTED_TRAINING_INPUT_FIELDS = {
     "rewards",
     "rollout_logprobs",
     "rollout_expert_indices",
+    "router_padding_mask",
+    "sample_support_ids",
     "pixel_values",
     "image_grid_thw",
 }
@@ -576,6 +578,8 @@ def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> Training
         "rewards": torch.randn(batch_size, seq_len),
         "rollout_logprobs": torch.randn(batch_size, seq_len),
         "rollout_expert_indices": torch.randint(0, 8, (batch_size, seq_len, 2, 3), dtype=torch.long),
+        "router_padding_mask": torch.zeros((batch_size, seq_len), dtype=torch.bool),
+        "sample_support_ids": torch.randint(0, 100, (batch_size, seq_len, 4), dtype=torch.int32),
         "pixel_values": TensorList([torch.randn(i + 1, 3) for i in range(batch_size)]),  # batch_size * (i + 1) * 3
         "image_grid_thw": TensorList([torch.tensor([[1, 2, 3]]) for _ in range(batch_size)]),  # batch_size * 1 * 3
     }
@@ -636,7 +640,22 @@ def test_pad_batch_all_fields():
 
     # Regular tensor fields (not loss_mask, not TensorList): original rows untouched,
     # padding rows are copies of row 0.
-    regular_tensor_keys = EXPECTED_TRAINING_INPUT_FIELDS - {"loss_mask", "pixel_values", "image_grid_thw"}
+    assert torch.equal(padded["router_padding_mask"][:batch_size], batch["router_padding_mask"])
+    assert torch.all(padded["router_padding_mask"][batch_size:])
+    assert torch.equal(padded["rollout_expert_indices"][:batch_size], batch["rollout_expert_indices"])
+    expected_routes = torch.tensor([0, 1, 2]).expand_as(padded["rollout_expert_indices"][batch_size:])
+    assert torch.equal(padded["rollout_expert_indices"][batch_size:], expected_routes)
+    assert torch.equal(padded["sample_support_ids"][:batch_size], batch["sample_support_ids"])
+    assert torch.all(padded["sample_support_ids"][batch_size:] == -1)
+
+    regular_tensor_keys = EXPECTED_TRAINING_INPUT_FIELDS - {
+        "loss_mask",
+        "rollout_expert_indices",
+        "router_padding_mask",
+        "sample_support_ids",
+        "pixel_values",
+        "image_grid_thw",
+    }
     for key in regular_tensor_keys:
         assert torch.equal(padded[key][:batch_size], batch[key]), f"Original rows changed for {key!r}"
         for i in range(batch_size, batch_size + pad_size):

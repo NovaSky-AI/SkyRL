@@ -52,9 +52,11 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
+    build_dense_sample_support,
     compute_prompt_boundaries,
     compute_prompt_mini_batch_boundaries,
     convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
 )
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
 from skyrl.train.generators.base import (
@@ -863,9 +865,8 @@ class RayPPOTrainer:
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
-        rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
-            "rollout_expert_indices", None
-        )
+        rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
+        rollout_sample_support = generator_output.get("rollout_sample_support", None)
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
@@ -898,6 +899,20 @@ class RayPPOTrainer:
             rollout_expert_indices,
             max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
         )
+        router_padding_mask = None
+        if rollout_expert_indices is not None:
+            router_padding_mask = make_router_padding_mask(
+                attention_masks_tensor,
+                [len(indices) for indices in rollout_expert_indices],
+            )
+        sample_support_ids = build_dense_sample_support(
+            rollout_sample_support,
+            response_ids,
+            loss_masks,
+            sequences_tensor.shape[1],
+            self.cfg.generator.sampling_params.top_k,
+            self.tokenizer.eos_token_id,
+        )
 
         # sanity check for off_policy_correction
         off_policy_correction = self.cfg.trainer.algorithm.off_policy_correction
@@ -919,6 +934,8 @@ class RayPPOTrainer:
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
+                "router_padding_mask": router_padding_mask,
+                "sample_support_ids": sample_support_ids,
                 "pixel_values": pixel_values,
                 "image_grid_thw": image_grid_thw,
             },
@@ -1300,6 +1317,10 @@ class RayPPOTrainer:
         fwd_keys = ["sequences", "attention_mask"]
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")
+        if training_input.get("router_padding_mask") is not None:
+            fwd_keys.append("router_padding_mask")
+        if training_input.get("sample_support_ids") is not None:
+            fwd_keys.extend(["sample_support_ids", "loss_mask"])
         if training_input.get("pixel_values") is not None:
             fwd_keys.append("pixel_values")
         if training_input.get("image_grid_thw") is not None:

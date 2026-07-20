@@ -645,6 +645,8 @@ class AlgorithmConfig(BaseConfig):
     use_tis: bool = False
     """Deprecated: use ``off_policy_correction`` instead."""
     off_policy_correction: OffPolicyCorrectionConfig = field(default_factory=OffPolicyCorrectionConfig)
+    enable_sample_support_replay: bool = False
+    """Renormalize policy logprobs over the sampler's recorded support."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     value_clip: float = 0.2
     dynamic_sampling: DynamicSamplingConfig = field(default_factory=DynamicSamplingConfig)
@@ -760,6 +762,8 @@ class InferenceEngineConfig(BaseConfig):
     enable_prefix_caching: bool = True
     enable_chunked_prefill: bool = True
     enable_return_routed_experts: bool = False
+    enable_return_sample_support_set: bool = False
+    """Return the bounded post-filter sampler support for each generated token."""
     max_num_batched_tokens: int = 8192
     enforce_eager: bool = False
     """Disable CUDA graphs for stability. Set to ``False`` for higher performance,
@@ -1193,6 +1197,28 @@ class SkyRLTrainConfig(BaseConfig):
         # so workers can access it without needing the generator config
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
+        capture_sample_support = self.generator.inference_engine.enable_return_sample_support_set
+        replay_sample_support = self.trainer.algorithm.enable_sample_support_replay
+        sampling_params = self.generator.sampling_params
+        if replay_sample_support and not capture_sample_support:
+            raise ValueError(
+                "trainer.algorithm.enable_sample_support_replay requires "
+                "generator.inference_engine.enable_return_sample_support_set"
+            )
+        if replay_sample_support and self.trainer.strategy not in {"megatron", "fsdp"}:
+            raise ValueError("sample-support replay requires trainer.strategy=megatron or fsdp")
+        if capture_sample_support:
+            if sampling_params.temperature <= 0:
+                raise ValueError("sample-support capture requires generator.sampling_params.temperature > 0")
+            if sampling_params.top_k <= 1:
+                raise ValueError("sample-support capture requires generator.sampling_params.top_k > 1")
+            if sampling_params.repetition_penalty != 1.0:
+                raise ValueError("sample-support capture requires repetition_penalty=1.0")
+            if sampling_params.additional_kwargs:
+                raise ValueError("sample-support capture does not support sampling_params.additional_kwargs")
+            if self.generator.vision_language_generator:
+                raise ValueError("sample-support capture does not support vision_language_generator")
 
         if self.data.dataloader.num_workers is None:
             self.data.dataloader.num_workers = 8
