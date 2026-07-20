@@ -336,9 +336,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self.sample_full_batch = cfg.trainer.fully_async.sample_full_batch
 
+        self._gen_buffer_maxsize = self.mini_batch_size * (self.max_staleness_steps + 1)
         self._loop_gauges = ScalarGauges()
         self._loop_gauges.set(
             "skyrl_mini_batch_size", self.mini_batch_size, "Generation groups consumed per training step."
+        )
+        self._loop_gauges.set(
+            "skyrl_gen_buffer_maxsize", self._gen_buffer_maxsize, "Staleness-bounded generation-buffer capacity."
         )
 
         assert (
@@ -480,9 +484,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
 
                 # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
-                generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
-                    maxsize=self.mini_batch_size * (self.max_staleness_steps + 1)
-                )
+                generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](maxsize=self._gen_buffer_maxsize)
 
                 # Maintain self.num_parallel_generation_workers concurrent group-generation workers
                 generator_tasks = [
@@ -509,15 +511,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                     with Timer("step", self.all_timings):
-                        qsize = generation_output_group_buffer.qsize()
-                        maxsize = generation_output_group_buffer.maxsize
-                        self.all_metrics["async/gen_buffer_qsize"] = qsize
-                        self.all_metrics["async/gen_buffer_maxsize"] = maxsize
                         self._loop_gauges.set(
-                            "skyrl_gen_buffer_qsize", qsize, "Completed generation groups buffered at step start."
-                        )
-                        self._loop_gauges.set(
-                            "skyrl_gen_buffer_maxsize", maxsize, "Staleness-bounded generation-buffer capacity."
+                            "skyrl_gen_buffer_qsize",
+                            generation_output_group_buffer.qsize(),
+                            "Completed generation groups buffered at step start.",
                         )
 
                         # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups if
