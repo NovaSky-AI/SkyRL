@@ -42,7 +42,7 @@ def test_wandb_init_tags_default_none():
 
 
 def test_log_mirrors_numeric_metrics_to_prometheus():
-    """Every numeric metric is mirrored as a skyrl_-prefixed gauge; non-numerics and bools are not."""
+    """Numeric metrics are mirrored to skyrl_-prefixed gauges. Strings and bools are skipped."""
     created = {}
 
     def fake_gauge(name, description=None):

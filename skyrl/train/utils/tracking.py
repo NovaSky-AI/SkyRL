@@ -87,8 +87,8 @@ class Tracking:
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
-        # Mirror numerics to Prometheus, where they join cluster metrics on the wall-clock axis and
-        # survive a cluster restart. Step stays a value (skyrl_current_step), never a label.
+        # Also mirror numeric values to Prometheus, one gauge per key. Step stays a value, never a
+        # label, so cardinality is bounded by the metric namespace.
         for key, value in data.items():
             if isinstance(value, numbers.Real) and not isinstance(value, bool):
                 self._prometheus.set(f"skyrl_{_PROMETHEUS_NAME_RE.sub('_', key)}", value)
