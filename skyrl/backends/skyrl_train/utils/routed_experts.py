@@ -3,7 +3,9 @@ from typing import TypeAlias
 
 import numpy as np
 
-from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import TokenMetadataTrace
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    TokenMetadataTrace,
+)
 
 RoutedExpertIndices: TypeAlias = np.ndarray
 ROUTED_EXPERT_DTYPES = frozenset({np.dtype(np.uint8), np.dtype(np.int16), np.dtype(np.int32)})
