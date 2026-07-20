@@ -12,6 +12,7 @@
     "geometry3k",
     "visgym",
     "quantized_rollouts",
+    "spec_decode",
     "mini_swe_agent",
     "openenv"
   ]
