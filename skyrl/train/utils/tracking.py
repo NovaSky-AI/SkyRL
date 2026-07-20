@@ -16,7 +16,9 @@
 # limitations under the License.
 
 import dataclasses
+import numbers
 import pprint
+import re
 import traceback
 from enum import Enum
 from functools import partial
@@ -27,6 +29,9 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
+from skyrl.train.utils.scalar_gauges import ScalarGauges
+
+_PROMETHEUS_NAME_RE = re.compile(r"[^a-zA-Z0-9_]")
 
 
 # TODO(tgriggs): Test all backends.
@@ -75,12 +80,18 @@ class Tracking:
             self.logger = ConsoleLogger()
 
         self._exception_logged = False
+        self._prometheus = ScalarGauges()
 
     def log(self, data, step, commit=False):
         if self.backend == "wandb":
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
+        # Mirror numerics to Prometheus, where they join cluster metrics on the wall-clock axis and
+        # survive a cluster restart. Step stays a value (skyrl_current_step), never a label.
+        for key, value in data.items():
+            if isinstance(value, numbers.Real) and not isinstance(value, bool):
+                self._prometheus.set(f"skyrl_{_PROMETHEUS_NAME_RE.sub('_', key)}", value)
 
     def finish(self):
         if self.backend == "console":
