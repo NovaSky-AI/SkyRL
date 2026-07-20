@@ -87,18 +87,18 @@ class Tracking:
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
-        # Mirror numeric values to Prometheus, one gauge per key; bool subtypes numbers.Real so exclude it.
+        # Publish numeric values to Prometheus, one gauge per key; bool subtypes numbers.Real so exclude it.
         for key, value in data.items():
             if isinstance(value, bool) or not isinstance(value, numbers.Real):
                 continue
             self._prometheus.set(f"skyrl_{_PROMETHEUS_NAME_RE.sub('_', key)}", value)
 
     def log_gauge(self, name: str, value: float, description: Optional[str] = None) -> None:
-        """Set a Prometheus gauge directly, on the same registry the metric mirror publishes to.
+        """Set a Prometheus gauge directly, on the same gauges ``log`` publishes metrics to.
 
         The trainer uses this for step-timed gauges (e.g. step-start values), whose timing the
-        commit-time mirror cannot reproduce. Sharing the registry means a dedicated gauge and its
-        mirrored twin (same name) are one series, not two.
+        commit-time metric publish cannot reproduce. Sharing the gauges means a dedicated gauge and
+        the metric published under the same name are one series, not two.
         """
         self._prometheus.set(name, value, description)
 

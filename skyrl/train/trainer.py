@@ -168,9 +168,9 @@ class RayPPOTrainer:
 
     def _mark_step_start(self, epoch: int, start_time: float) -> None:
         """Publish the step/epoch join gauges at step start, so a mid-step scrape reads the
-        in-progress step. The gauge names match the mirror's output for the trainer/* metrics, so
-        the start-timed value here and the commit-time mirror are one series. Callers pass the
-        step's own start time."""
+        in-progress step. The gauge names match what ``Tracking.log`` publishes for the trainer/*
+        metrics, so the start-timed value here and the commit-time publish are one series. Callers
+        pass the step's own start time."""
         self.tracker.log_gauge("skyrl_trainer_global_step", self.global_step, "Step the loop is working on.")
         self.tracker.log_gauge("skyrl_trainer_epoch", epoch, "Current epoch, zero-indexed.")
         self.tracker.log_gauge("skyrl_step_start_unixtime", start_time, "Wall-clock start of the current step.")

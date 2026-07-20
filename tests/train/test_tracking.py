@@ -41,8 +41,8 @@ def test_wandb_init_tags_default_none():
         assert wandb_mock.init.call_args.kwargs["tags"] is None
 
 
-def test_log_mirrors_numeric_metrics_to_prometheus():
-    """Numeric metrics are mirrored to skyrl_-prefixed gauges. Strings and bools are skipped."""
+def test_log_publishes_numeric_metrics_to_prometheus():
+    """Numeric metrics are published to skyrl_-prefixed gauges. Strings and bools are skipped."""
     created = {}
 
     def fake_gauge(name, description=None):
@@ -57,8 +57,8 @@ def test_log_mirrors_numeric_metrics_to_prometheus():
     created["skyrl_timing_run_training"].set.assert_called_with(1.5)
 
 
-def test_log_gauge_shares_registry_with_mirror():
-    """A gauge set via log_gauge and the same-named mirrored metric are one gauge object."""
+def test_log_gauge_and_metric_share_one_gauge():
+    """A gauge set via log_gauge and the same-named published metric are one gauge object."""
     created = {}
 
     def fake_gauge(name, description=None):
@@ -68,7 +68,7 @@ def test_log_gauge_shares_registry_with_mirror():
     with patch("ray.util.metrics.Gauge", side_effect=fake_gauge):
         t = Tracking(project_name="proj", experiment_name="exp", backend="console")
         t.log_gauge("skyrl_trainer_global_step", 5, "step")  # step-start edge
-        t.log({"trainer/global_step": 5}, step=5)  # mirror at commit, same name
+        t.log({"trainer/global_step": 5}, step=5)  # published at commit, same name
 
     assert list(created) == ["skyrl_trainer_global_step"]
     created["skyrl_trainer_global_step"].set.assert_called_with(5.0)
