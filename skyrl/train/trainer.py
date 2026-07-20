@@ -1,6 +1,7 @@
 import math
 import os
 import shutil
+import time
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -79,6 +80,7 @@ from skyrl.train.utils.callbacks import (
     TrainingControl,
 )
 from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
+from skyrl.train.utils.scalar_gauges import ScalarGauges
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -139,6 +141,8 @@ class RayPPOTrainer:
         )
 
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
+
+        self._loop_gauges = ScalarGauges()
 
         # trajectory logger is installed after construction if needed
         self.trajectory_logger: TrajectoryLogger = None
@@ -330,6 +334,13 @@ class RayPPOTrainer:
                     if not step_started:
                         self._fire("on_step_start")
                         step_started = True
+                        # Set at step start so a mid-step scrape attributes wall-clock series to
+                        # the in-progress step.
+                        self._loop_gauges.set("skyrl_current_step", self.global_step, "Step the loop is working on.")
+                        self._loop_gauges.set("skyrl_epoch", epoch, "Current epoch, zero-indexed.")
+                        self._loop_gauges.set(
+                            "skyrl_step_start_unixtime", time.time(), "Wall-clock start of the current step."
+                        )
                         # Open the train-rollout metrics window once per logical
                         # step; paused so only the generation spans count toward the
                         # throughput denominator (dynamic sampling may generate more
@@ -534,6 +545,10 @@ class RayPPOTrainer:
                     self._fire("on_log", logs=log_payload)
 
                     self.tracker.log(log_payload, step=self.global_step, commit=True)
+                    # Must be set before global_step increments below.
+                    self._loop_gauges.set(
+                        "skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step."
+                    )
                     self.all_metrics = {}
                     self.all_timings = {}
 

@@ -39,7 +39,6 @@ from skyrl.train.generators.utils import (
 )
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
-from skyrl.train.utils.scalar_gauges import ScalarGauges
 from skyrl.train.utils.trainer_utils import (
     ResumeMode,
     build_dataloader,
@@ -337,13 +336,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.sample_full_batch = cfg.trainer.fully_async.sample_full_batch
 
         self._gen_buffer_maxsize = self.mini_batch_size * (self.max_staleness_steps + 1)
-        self._loop_gauges = ScalarGauges()
-        self._loop_gauges.set(
-            "skyrl_mini_batch_size", self.mini_batch_size, "Generation groups consumed per training step."
-        )
-        self._loop_gauges.set(
-            "skyrl_gen_buffer_maxsize", self._gen_buffer_maxsize, "Staleness-bounded generation-buffer capacity."
-        )
 
         assert (
             # otherwise wasted throughput
@@ -359,6 +351,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Initialize base trainer
         super().__init__(*args, **kwargs)
+
+        self._loop_gauges.set(
+            "skyrl_mini_batch_size", self.mini_batch_size, "Generation groups consumed per training step."
+        )
+        self._loop_gauges.set(
+            "skyrl_gen_buffer_maxsize", self._gen_buffer_maxsize, "Staleness-bounded generation-buffer capacity."
+        )
 
         # Callbacks aren't wired into FullyAsyncRayPPOTrainer.train() yet — fail
         # fast
@@ -515,7 +514,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # already reflects this epoch's trained steps. The range below is just an upper bound.
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
-                    with Timer("step", self.all_timings):
+                    with Timer("step", self.all_timings) as step_timer:
+                        # Set at step start so a mid-step scrape attributes wall-clock series to
+                        # the in-progress step.
+                        self._loop_gauges.set("skyrl_current_step", self.global_step, "Step the loop is working on.")
+                        self._loop_gauges.set("skyrl_epoch", epoch, "Current epoch, zero-indexed.")
+                        self._loop_gauges.set(
+                            "skyrl_step_start_unixtime", step_timer.start_time, "Wall-clock start of the current step."
+                        )
                         self._loop_gauges.set(
                             "skyrl_gen_buffer_qsize",
                             generation_output_group_buffer.qsize(),
@@ -628,6 +634,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if self._vllm_metrics_scraper is not None:
                         timing_payload.update(await self._vllm_metrics_scraper.sample())
                     self.tracker.log(timing_payload, step=self.global_step, commit=True)
+                    # Must be set before global_step increments below.
+                    self._loop_gauges.set(
+                        "skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step."
+                    )
                     self.all_timings = {}
                     self.global_step += 1
 
