@@ -52,6 +52,7 @@ from skyrl.train.config.sft_config import (
     _normalize_dataset_cfg,
     build_skyrl_config_for_sft,
 )
+from skyrl.train.dataset.pretokenized import load_from_pretokenized
 from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
@@ -1233,8 +1234,6 @@ class SFTTrainer:
         ``list[dict]`` return shape): rows already carry ``input_ids`` and a
         full-sequence ``loss_mask`` and are only validated/truncated.
         """
-        from skyrl.train.dataset.pretokenized import load_from_pretokenized
-
         return load_from_pretokenized(path, max_length=self.sft_cfg.max_length)
 
     def load_dataset(self) -> tuple[list, list[int]]:
