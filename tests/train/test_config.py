@@ -531,6 +531,76 @@ def test_fake_int4_qat_requires_unmerged_lora_sync():
         )
 
 
+def test_expert_mxfp8_defaults():
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
+    mxfp8 = cfg.trainer.policy.model.expert_mxfp8
+    assert mxfp8.enabled is False
+    assert mxfp8.training is True
+    assert mxfp8.rollout is True
+
+
+def test_expert_mxfp8_cli_overrides():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.model.expert_mxfp8.enabled=true",
+            "trainer.policy.model.expert_mxfp8.rollout=false",
+        ]
+    )
+    assert cfg.trainer.policy.model.expert_mxfp8.enabled is True
+    assert cfg.trainer.policy.model.expert_mxfp8.rollout is False
+
+
+def test_expert_mxfp8_requires_megatron():
+    with pytest.raises(ValueError, match="strategy=megatron"):
+        SkyRLTrainConfig.from_cli_overrides(["trainer.policy.model.expert_mxfp8.enabled=true"])
+
+
+def test_expert_mxfp8_rejects_unmerged_lora_rollout():
+    with pytest.raises(ValueError, match="unmerged LoRA"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.lora.rank=32",
+                "trainer.policy.megatron_config.lora_config.merge_lora=false",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+            ]
+        )
+
+
+def test_expert_mxfp8_conflicts_with_fake_int4():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.lora.rank=32",
+                "trainer.policy.megatron_config.lora_config.merge_lora=false",
+                "trainer.policy.model.fake_int4_qat.enabled=true",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+                "trainer.policy.model.expert_mxfp8.rollout=false",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "override,match",
+    [
+        ("moe_grouped_gemm=false", "moe_grouped_gemm=true"),
+        ("moe_router_dtype=bf16", "moe_router_dtype=fp32"),
+        ("fp8_dot_product_attention=true", "transformer_config_kwargs"),
+    ],
+)
+def test_expert_mxfp8_rejects_transformer_overrides(override, match):
+    with pytest.raises(ValueError, match=match):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+                f"trainer.policy.megatron_config.transformer_config_kwargs.{override}",
+            ]
+        )
+
+
 class TestTrainerUseSamplePackingAlias:
     """`trainer.use_sample_packing` is a deprecated alias for `trainer.remove_microbatch_padding`
     on the RL entrypoint config (mirrors the ``fsdp2``->``fsdp`` alias)."""
