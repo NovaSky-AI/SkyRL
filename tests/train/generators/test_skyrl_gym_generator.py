@@ -1876,13 +1876,13 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     assert metrics["generate/trajectory_llm_time_mean"] >= llm_sleep_s * num_turns
     assert metrics["generate/trajectory_env_time_mean"] >= env_sleep_s * num_turns
     assert metrics["generate/trajectory_env_setup_time_mean"] >= setup_sleep_s
-    assert metrics["generate/trajectory_overhead_time_mean"] >= 0.0
+    assert metrics["generate/trajectory_other_time_mean"] >= 0.0
 
     # env_sleep / (env_sleep + llm_sleep) = 0.75; allow generous headroom for scheduling overhead
     # attributed to the engine wait, but it must clearly indicate an environment-bound rollout.
     assert 0.5 < metrics["generate/frac_time_in_env"] < 1.0
 
-    # The bands never exceed the trajectory's end-to-end time; overhead is the exact remainder.
+    # The bands never exceed the trajectory's end-to-end time; "other" is the exact remainder.
     for llm_t, env_t, setup_t, e2e_t in zip(
         llm_times, env_times, setup_times, generator_output["trajectory_generation_times"]
     ):
@@ -1898,4 +1898,4 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     assert concat_metrics["generate/trajectory_env_setup_time_p90"] == pytest.approx(
         np.percentile(setup_times * 2, 90).item()
     )
-    assert concat_metrics["generate/trajectory_overhead_time_mean"] >= 0.0
+    assert concat_metrics["generate/trajectory_other_time_mean"] >= 0.0

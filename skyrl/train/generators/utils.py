@@ -499,13 +499,13 @@ def get_rollout_metrics(
     # Remainder of e2e not attributed to the engine, env steps, or env setup. Tokenization, chat
     # templating, output assembly, env teardown, and event-loop scheduling.
     if trajectory_completion_times and trajectory_llm_times and trajectory_env_times and trajectory_env_setup_times:
-        overhead = (
+        other = (
             np.array(trajectory_completion_times, dtype=np.float64)
             - np.array(trajectory_llm_times, dtype=np.float64)
             - np.array(trajectory_env_times, dtype=np.float64)
             - np.array(trajectory_env_setup_times, dtype=np.float64)
         )
-        _add_time_stats(rollout_metrics, "overhead", overhead.tolist())
+        _add_time_stats(rollout_metrics, "other", other.tolist())
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)
