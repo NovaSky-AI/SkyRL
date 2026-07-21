@@ -57,7 +57,7 @@ class TrajectoryOutput:
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
     # Wall-clock seconds spent in each phase. "llm" is time in inference-engine calls, "env" is
-    # time in env.step. The whole field is None if the agent loop did not record a split.
+    # time in env.step. Field is None if any loop did not record a split.
     time_splits: Optional[Dict[str, float]] = None
 
 
@@ -70,7 +70,7 @@ class StepWiseOutput:
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
     # Wall-clock seconds spent in each phase. "llm" is time in inference-engine calls, "env" is
-    # time in env.step. The whole field is None if the agent loop did not record a split.
+    # time in env.step. Field is None if any loop did not record a split.
     time_splits: Optional[Dict[str, float]] = None
 
 
