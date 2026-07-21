@@ -110,6 +110,33 @@ def test_load_directory_of_parquet_shards(tmp_path):
     assert len(rows) == 4
 
 
+def test_load_directory_of_jsonl_shards(tmp_path):
+    data_dir = tmp_path / "shards"
+    data_dir.mkdir()
+    Dataset.from_list(_rows()).to_json(str(data_dir / "shard-00000.jsonl"))
+    Dataset.from_list(_rows()).to_json(str(data_dir / "shard-00001.jsonl"))
+
+    rows = load_from_pretokenized(str(data_dir))
+    assert len(rows) == 4
+    _assert_normalized(rows)
+
+
+def test_load_directory_of_arrow_shards(tmp_path):
+    saved = tmp_path / "hf_dataset"
+    Dataset.from_list(_rows()).save_to_disk(str(saved))
+    arrow_files = [f for f in os.listdir(saved) if f.endswith(".arrow")]
+    assert arrow_files
+
+    data_dir = tmp_path / "shards"
+    data_dir.mkdir()
+    shutil.copy(saved / arrow_files[0], data_dir / "shard-00000.arrow")
+    shutil.copy(saved / arrow_files[0], data_dir / "shard-00001.arrow")
+
+    rows = load_from_pretokenized(str(data_dir))
+    assert len(rows) == 4
+    _assert_normalized(rows)
+
+
 def test_mixed_formats_in_directory_raises(tmp_path):
     data_dir = tmp_path / "mixed"
     data_dir.mkdir()
