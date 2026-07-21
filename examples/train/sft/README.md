@@ -8,21 +8,19 @@ By default, the example uses the [Alpaca-Cleaned](https://huggingface.co/dataset
 
 You can switch to a different dataset by overriding `train_datasets` and `train_dataset_splits` on the command line, or train on a weighted mixture of several datasets (see [Multi-dataset training](#multi-dataset-training-and-evaluation)). The singular `dataset_name`/`dataset_split` (and `eval_dataset_name`/`eval_dataset_split`) fields are deprecated: they still work but emit a `DeprecationWarning` and are translated to the list form internally.
 
-### Pretokenized datasets (local or S3/GCS)
+### Pretokenized datasets
 
 If your data pipeline tokenizes offline, point the trainer directly at the pretokenized store to skip
 online tokenization (`tokenize_chat_example` / `tokenize_sft_example`) entirely:
 
 ```bash
 bash examples/train/sft/run_sft_megatron.sh \
-    "pretokenized_dataset_paths=['s3://my-bucket/datasets/tokenized-train']" \
-    "eval_pretokenized_dataset_paths=['s3://my-bucket/datasets/tokenized-eval']"  # optional
+    "pretokenized_dataset_paths=['$HOME/data/tokenized-train']" \
+    "eval_pretokenized_dataset_paths=['$HOME/data/tokenized-eval']"  # optional
 ```
 
-Each entry of `pretokenized_dataset_paths` accepts a local path, `s3://`, `gs://`, or `gcs://` URI pointing at
-a file or directory in any of these formats (auto-detected): Parquet, JSON-lines, raw Arrow IPC files, or a
-HuggingFace `Dataset.save_to_disk` directory. Cloud paths are downloaded once and cached under `cache_dir` (set
-`disable_cache=true` to download to a temporary directory instead, or `force_recache=true` to re-download).
+Each entry of `pretokenized_dataset_paths` is a local path to a file or directory in any of these formats
+(auto-detected): Parquet, JSON-lines, raw Arrow IPC files, or a HuggingFace `Dataset.save_to_disk` directory.
 Like `train_datasets`, multiple stores are concatenated and mixed per `train_dataset_weights`; multiple eval
 stores are evaluated separately under `eval/{name}/`, with names from `eval_dataset_names` (defaulting to each
 path's basename).
@@ -123,7 +121,7 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `train_datasets` | `[yahma/alpaca-cleaned]` | List of HuggingFace dataset names to train on; multiple entries are mixed per `train_dataset_weights` |
 | `train_dataset_splits` | `[train[:100]]` | Split/slice per training dataset (same length as `train_datasets`) |
 | `train_dataset_weights` | equal (`1/N`) | Per-dataset sampling ratios within a batch, independent of dataset sizes; `sampler=random` only |
-| `pretokenized_dataset_paths` | `None` | List of local paths or `s3://`/`gs://` URIs to pretokenized datasets (Parquet/JSONL/Arrow/`save_to_disk`); skips tokenization, mixed per `train_dataset_weights`; exclusive with `train_datasets` |
+| `pretokenized_dataset_paths` | `None` | List of local paths to pretokenized datasets (Parquet/JSONL/Arrow/`save_to_disk`); skips tokenization, mixed per `train_dataset_weights`; exclusive with `train_datasets` |
 | `eval_datasets` | `None` | List of eval dataset names; `None` disables eval. Metrics logged under `eval/{name}/` |
 | `eval_dataset_splits` | `None` | Split per eval dataset (same length as `eval_datasets`) |
 | `eval_dataset_names` | dataset names | Shorthand names used only for logging (`eval/{name}/loss`); must be unique |

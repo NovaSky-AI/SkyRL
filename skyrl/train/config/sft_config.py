@@ -165,9 +165,9 @@ class SFTConfig(BaseConfig):
     dataset, independent of dataset sizes. Only supported with ``sampler="random"`` (custom
     samplers receive ratios via ``sampler_kwargs``). Defaults to equal mixing (``1/N`` each)."""
     pretokenized_dataset_paths: Optional[List[str]] = None
-    """Paths to *pretokenized* training datasets: local paths, ``s3://``,
-    ``gs://``, or ``gcs://`` URIs each holding parquet/JSONL/arrow files or a
-    HF ``Dataset.save_to_disk`` directory. Rows must carry unpadded
+    """Local paths to *pretokenized* training datasets, each a file or
+    directory holding parquet/JSONL/arrow files or a HF
+    ``Dataset.save_to_disk`` directory. Rows must carry unpadded
     ``input_ids`` and a full-sequence 0/1 ``loss_mask`` (``num_actions`` is
     inferred); VLM rows additionally carry ``pixel_values`` /
     ``image_grid_thw``. See ``skyrl.train.dataset.pretokenized``. When set,

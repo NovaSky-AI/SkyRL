@@ -1227,21 +1227,15 @@ class SFTTrainer:
             shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
 
     def _load_from_pretokenized(self, path: str) -> list:
-        """Load a pretokenized dataset from a local path or object store (S3/GCS).
+        """Load a pretokenized dataset from a local file or directory.
 
         The pretokenized counterpart of :meth:`_load_and_tokenize` (same
         ``list[dict]`` return shape): rows already carry ``input_ids`` and a
-        full-sequence ``loss_mask`` and are only validated/truncated. Cloud
-        downloads are cached under ``cache_dir`` (unless caching is disabled).
+        full-sequence ``loss_mask`` and are only validated/truncated.
         """
         from skyrl.train.dataset.pretokenized import load_from_pretokenized
 
-        return load_from_pretokenized(
-            path,
-            max_length=self.sft_cfg.max_length,
-            cache_dir=None if self.sft_cfg.disable_cache else self.sft_cfg.cache_dir,
-            force_redownload=self.sft_cfg.force_recache,
-        )
+        return load_from_pretokenized(path, max_length=self.sft_cfg.max_length)
 
     def load_dataset(self) -> tuple[list, list[int]]:
         """Load the training dataset(s): pretokenized stores or tokenize-on-load.

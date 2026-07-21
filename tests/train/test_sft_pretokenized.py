@@ -1,5 +1,5 @@
 """
-CPU tests for pretokenized SFT dataset ingestion (local + object store paths).
+CPU tests for pretokenized SFT dataset ingestion.
 
 uv run --extra dev pytest tests/train/test_sft_pretokenized.py -v
 """
@@ -12,7 +12,6 @@ import pytest
 import torch
 from datasets import Dataset
 
-from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.train.config.sft_config import SFTConfig, validate_sft_cfg
 from skyrl.train.dataset.pretokenized import load_from_pretokenized
 from skyrl.train.sft_trainer import SFTTrainer, collate_sft_batch
@@ -332,68 +331,6 @@ def test_mixed_text_and_vlm_store_drops_null_image_columns(tmp_path):
     assert len(rows) == 3
     text_rows = [r for r in rows if "pixel_values" not in r]
     assert len(text_rows) == 1
-
-
-# ---------------------------------------------------------------------------
-# Cloud (S3) paths
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def fake_s3(tmp_path, monkeypatch):
-    """Route the io module's cloud calls at a local directory acting as S3."""
-    remote_dir = tmp_path / "remote"
-    remote_dir.mkdir()
-    Dataset.from_list(_rows()).to_parquet(str(remote_dir / "data.parquet"))
-    calls = {"downloads": 0}
-
-    def fake_isdir(path):
-        assert path.startswith("s3://")
-        return True
-
-    def fake_download_directory(path, local_path):
-        assert path.startswith("s3://")
-        calls["downloads"] += 1
-        shutil.copytree(remote_dir, local_path, dirs_exist_ok=True)
-
-    monkeypatch.setattr(io, "isdir", fake_isdir)
-    monkeypatch.setattr(io, "download_directory", fake_download_directory)
-    return calls
-
-
-def test_s3_path_download(tmp_path, fake_s3):
-    rows = load_from_pretokenized("s3://bucket/prefix/data", cache_dir=None)
-    assert len(rows) == 2
-    assert fake_s3["downloads"] == 1
-    _assert_normalized(rows)
-
-
-def test_s3_download_cached_across_calls(tmp_path, fake_s3):
-    cache_dir = str(tmp_path / "cache")
-    rows = load_from_pretokenized("s3://bucket/prefix/data", cache_dir=cache_dir)
-    assert len(rows) == 2
-    assert fake_s3["downloads"] == 1
-
-    # Second load reuses the cached download.
-    rows = load_from_pretokenized("s3://bucket/prefix/data", cache_dir=cache_dir)
-    assert len(rows) == 2
-    assert fake_s3["downloads"] == 1
-
-    # force_redownload bypasses the cache.
-    rows = load_from_pretokenized("s3://bucket/prefix/data", cache_dir=cache_dir, force_redownload=True)
-    assert len(rows) == 2
-    assert fake_s3["downloads"] == 2
-
-
-def test_s3_single_file_download(tmp_path, monkeypatch):
-    remote_file = tmp_path / "data.parquet"
-    Dataset.from_list(_rows()).to_parquet(str(remote_file))
-
-    monkeypatch.setattr(io, "isdir", lambda path: False)
-    monkeypatch.setattr(io, "download_file", lambda path, local: shutil.copy(remote_file, local))
-
-    rows = load_from_pretokenized("s3://bucket/data.parquet", cache_dir=None)
-    assert len(rows) == 2
 
 
 # ---------------------------------------------------------------------------

@@ -1,17 +1,9 @@
-"""Loading of pretokenized SFT datasets from local or cloud storage.
+"""Loading of pretokenized SFT datasets.
 
-Some data pipelines tokenize offline (e.g. on a Spark/Ray data cluster) and
-publish the result to an object store. This module lets the SFT trainer ingest
-such a store directly -- skipping online tokenization (``tokenize_chat_example``
-and ``tokenize_sft_example`` in ``skyrl.train.sft_trainer``) entirely -- from:
-
-- a local file or directory,
-- an S3 path (``s3://bucket/prefix``),
-- a GCS path (``gs://`` or ``gcs://``).
-
-Cloud paths are materialized locally through
-:mod:`skyrl.backends.skyrl_train.utils.io` (fsspec-backed, with the project's
-S3 retry/credential-refresh handling) before loading.
+Some data pipelines tokenize offline (e.g. on a Spark/Ray data cluster). This
+module lets the SFT trainer ingest such a dataset directly from a local file
+or directory -- skipping online tokenization (``tokenize_chat_example`` and
+``tokenize_sft_example`` in ``skyrl.train.sft_trainer``) entirely.
 
 Supported on-disk formats (auto-detected):
 
@@ -37,17 +29,11 @@ are normalized to the trainer's internal representation (``input_ids`` /
 loss window is empty (e.g. after ``max_length`` truncation) are dropped.
 """
 
-import hashlib
 import os
-import shutil
-import tempfile
-from contextlib import contextmanager
-from typing import Any, Iterator, Optional
+from typing import Any, Optional
 
 from datasets import Dataset, concatenate_datasets, load_dataset
 from loguru import logger
-
-from skyrl.backends.skyrl_train.utils.io import io
 
 # Keys consumed (and re-emitted in normalized form) by ``_normalize_row``.
 # ``num_actions`` and ``labels`` are consumed-but-dropped: ``num_actions`` is
@@ -62,74 +48,6 @@ _PARQUET_EXTS = (".parquet",)
 _JSON_EXTS = (".jsonl", ".json")
 _ARROW_EXTS = (".arrow",)
 _DATA_EXTS = _PARQUET_EXTS + _JSON_EXTS + _ARROW_EXTS
-
-
-# ---------------------------------------------------------------------------
-# Cloud path materialization
-# ---------------------------------------------------------------------------
-
-
-def _cache_dir_for_path(cache_dir: str, path: str) -> str:
-    """Local cache directory for a downloaded cloud dataset path."""
-    key = hashlib.sha256(path.encode()).hexdigest()[:16]
-    return os.path.join(cache_dir, "pretokenized", key)
-
-
-def _download_to(path: str, target_dir: str) -> None:
-    """Download a cloud file or directory into ``target_dir``.
-
-    A cloud directory's contents land directly in ``target_dir``; a single
-    cloud file lands at ``target_dir/<basename>``. The download goes to a
-    sibling ``<target_dir>.tmp`` first and is atomically renamed so concurrent
-    readers (e.g. multi-node runs sharing an NFS cache) never see a partial
-    download.
-    """
-    temp_dir = target_dir + ".tmp"
-    if os.path.isdir(temp_dir):
-        shutil.rmtree(temp_dir)
-    os.makedirs(temp_dir, exist_ok=True)
-
-    if io.isdir(path):
-        io.download_directory(path, temp_dir)
-    else:
-        io.download_file(path, os.path.join(temp_dir, os.path.basename(path.rstrip("/"))))
-
-    if os.path.isdir(target_dir):
-        shutil.rmtree(target_dir)
-    os.makedirs(os.path.dirname(target_dir), exist_ok=True)
-    os.rename(temp_dir, target_dir)
-
-
-@contextmanager
-def _materialize_local(path: str, cache_dir: Optional[str], force_redownload: bool) -> Iterator[str]:
-    """Yield a local path holding the dataset at ``path``.
-
-    Local paths are yielded as-is. Cloud paths are downloaded either into a
-    persistent cache directory (keyed by the remote path, reused across runs)
-    or -- when ``cache_dir`` is ``None`` -- into a temporary directory that is
-    removed once the rows have been materialized in memory.
-    """
-    if not io.is_cloud_path(path):
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Pretokenized dataset path does not exist: {path}")
-        yield path
-        return
-
-    if cache_dir is not None:
-        local_dir = _cache_dir_for_path(cache_dir, path)
-        if os.path.isdir(local_dir) and not force_redownload:
-            logger.info(f"Using cached download of '{path}' at {local_dir}")
-        else:
-            logger.info(f"Downloading pretokenized dataset '{path}' to {local_dir} ...")
-            _download_to(path, local_dir)
-        yield local_dir
-        return
-
-    with tempfile.TemporaryDirectory(prefix="skyrl_pretokenized_") as temp_dir:
-        local_dir = os.path.join(temp_dir, "data")
-        logger.info(f"Downloading pretokenized dataset '{path}' to temporary directory ...")
-        _download_to(path, local_dir)
-        yield local_dir
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +178,10 @@ def _normalize_row(row: dict, row_idx: int, max_length: Optional[int]) -> Option
         if any(row.get(k) is None for k in _VLM_KEYS):
             raise ValueError(f"Row {row_idx}: VLM rows must carry both {_VLM_KEYS}, found only one.")
         if max_length is not None and seq_len > max_length:
+            logger.warning(
+                f"Dropping VLM sample longer than max_length={max_length}, "
+                f"consider increasing max_length if you see this warning too much"
+            )
             return None
     elif max_length is not None and seq_len > max_length:
         # Truncate to max_length, mirroring the online tokenization path: the
@@ -294,45 +216,40 @@ def _normalize_row(row: dict, row_idx: int, max_length: Optional[int]) -> Option
 def load_from_pretokenized(
     path: str,
     max_length: Optional[int] = None,
-    cache_dir: Optional[str] = None,
-    force_redownload: bool = False,
 ) -> list[dict[str, Any]]:
-    """Load a pretokenized SFT dataset from a local path or object store.
+    """Load a pretokenized SFT dataset from a local file or directory.
 
     The pretokenized counterpart of ``SFTTrainer._load_and_tokenize``: returns
     the same ``list[dict]`` representation the trainer's dataloaders and
     collators consume.
 
     Args:
-        path: Local path, ``s3://``, ``gs://``, or ``gcs://`` URI pointing to a
-            file or directory in one of the supported formats (see module
-            docstring).
+        path: Local path to a file or directory in one of the supported
+            formats (see module docstring).
         max_length: Optional sequence-length cap. Longer text rows are
             truncated (keeping the prompt prefix) and dropped if no loss tokens
-            survive; longer VLM rows are always dropped, matching the online
-            tokenization path.
-        cache_dir: Base directory for caching cloud downloads. ``None``
-            downloads to a temporary directory instead (no reuse across runs).
-        force_redownload: Re-download a cloud path even if a cached copy
-            exists.
+            survive; longer VLM rows are always dropped with a warning,
+            matching the online tokenization path.
 
     Returns:
         List of normalized examples (``input_ids`` / ``attention_mask`` /
         ``num_actions`` / window ``loss_mask``, plus pass-through columns like
         ``pixel_values`` / ``image_grid_thw``) ready for the SFT collators.
     """
-    with _materialize_local(path, cache_dir, force_redownload) as local_path:
-        dataset = _load_as_hf_dataset(local_path)
-        logger.info(f"Loaded pretokenized dataset from '{path}': {len(dataset)} rows, columns={dataset.column_names}")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Pretokenized dataset path does not exist: {path}")
 
-        normalized: list[dict] = []
-        num_dropped = 0
-        for row_idx, row in enumerate(dataset):
-            example = _normalize_row(row, row_idx, max_length)
-            if example is None:
-                num_dropped += 1
-            else:
-                normalized.append(example)
+    dataset = _load_as_hf_dataset(path)
+    logger.info(f"Loaded pretokenized dataset from '{path}': {len(dataset)} rows, columns={dataset.column_names}")
+
+    normalized: list[dict] = []
+    num_dropped = 0
+    for row_idx, row in enumerate(dataset):
+        example = _normalize_row(row, row_idx, max_length)
+        if example is None:
+            num_dropped += 1
+        else:
+            normalized.append(example)
 
     if num_dropped:
         logger.warning(
