@@ -83,7 +83,9 @@ def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig])
 
 
 def get_sampling_params_for_backend(backend: str, sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
-    if backend == "vllm":
+    if backend in ("vllm", "fireworks"):
+        # FireworksInferenceClient consumes this normalized OpenAI/vLLM-shaped
+        # dictionary and maps the supported subset to tinker.SamplingParams.
         return get_vllm_sampling_params(sampling_params)
     else:
         raise ValueError(f"Unsupported generation backend: {backend}")

@@ -258,6 +258,123 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
         }
 
 
+def _validate_fireworks_cfg(cfg: SkyRLTrainConfig) -> None:
+    """Validate the initial policy-only Fireworks GRPO capability set."""
+
+    trainer = cfg.trainer
+    fireworks = trainer.fireworks
+    inference = cfg.generator.inference_engine
+    algorithm = trainer.algorithm
+
+    if trainer.strategy != "fireworks" or inference.backend != "fireworks":
+        raise ValueError(
+            "Fireworks must be selected for both trainer.strategy and "
+            "generator.inference_engine.backend"
+        )
+    if fireworks.infrastructure not in ("serverless", "dedicated"):
+        raise ValueError("trainer.fireworks.infrastructure must be 'serverless' or 'dedicated'")
+    if not fireworks.base_model:
+        raise ValueError("trainer.fireworks.base_model is required")
+    if fireworks.max_seq_len is None or fireworks.max_seq_len <= 0:
+        raise ValueError("trainer.fireworks.max_seq_len must be a positive integer")
+    if not trainer.policy.model.path:
+        raise ValueError("trainer.policy.model.path must name the tokenizer matching the Fireworks base model")
+    if trainer.policy.model.lora.rank < 0:
+        raise ValueError("trainer.policy.model.lora.rank must be >= 0")
+    if fireworks.infrastructure == "serverless" and trainer.policy.model.lora.rank == 0:
+        raise ValueError(
+            "Fireworks serverless training is LoRA-only; set trainer.policy.model.lora.rank > 0"
+        )
+
+    if fireworks.infrastructure == "dedicated":
+        if not fireworks.training_shape_id:
+            raise ValueError("Dedicated Fireworks training requires trainer.fireworks.training_shape_id")
+        if not fireworks.trainer_job_id:
+            raise ValueError("Dedicated Fireworks training requires trainer.fireworks.trainer_job_id for safe audit")
+        if not fireworks.deployment_id:
+            raise ValueError("Dedicated Fireworks training requires trainer.fireworks.deployment_id for safe audit")
+        if fireworks.trainer_replica_count <= 0:
+            raise ValueError("Dedicated Fireworks training requires trainer_replica_count > 0")
+        if fireworks.replica_count <= 0:
+            raise ValueError("Dedicated Fireworks training requires replica_count > 0")
+        if not fireworks.cleanup_on_exit:
+            raise ValueError("The initial dedicated Fireworks backend requires cleanup_on_exit=true")
+        if fireworks.cleanup_deployment_on_close not in ("delete", "scale_to_zero"):
+            raise ValueError("cleanup_deployment_on_close must be 'delete' or 'scale_to_zero'")
+
+    if algorithm.advantage_estimator != "grpo":
+        raise ValueError("The initial Fireworks backend is GRPO-only")
+    if algorithm.policy_loss_type != "rollout_is":
+        raise ValueError(
+            "The initial Fireworks GRPO backend requires trainer.algorithm.policy_loss_type='rollout_is'"
+        )
+    if algorithm.use_kl_loss or algorithm.use_kl_in_reward:
+        raise ValueError("The initial Fireworks GRPO backend requires KL loss and KL reward penalty to be disabled")
+    if trainer.critic.model.path:
+        raise ValueError("The Fireworks GRPO backend is policy-only; trainer.critic.model.path must be null")
+    if trainer.update_epochs_per_batch != 1:
+        raise ValueError("The initial Fireworks GRPO backend requires trainer.update_epochs_per_batch=1")
+
+    correction = algorithm.off_policy_correction
+    if correction.tis_ratio_type is not None or correction.sequence_mask_metric is not None:
+        raise NotImplementedError(
+            "SkyRL off_policy_correction is not yet translated to Fireworks; use rollout_is without an extra mask"
+        )
+
+    if trainer.placement.colocate_all or trainer.placement.colocate_policy_ref:
+        raise ValueError("Hosted Fireworks training cannot be colocated with local SkyRL models")
+    if inference.run_engines_locally:
+        raise ValueError("Fireworks inference is hosted; set generator.inference_engine.run_engines_locally=false")
+    if cfg.generator.max_turns != 1:
+        raise NotImplementedError("The initial Fireworks backend supports single-turn SkyRL rollouts only")
+    if cfg.generator.vision_language_generator:
+        raise NotImplementedError("The initial Fireworks backend supports text-only rollouts")
+
+    if trainer.resume_mode not in (None, "none", "latest", "from_path"):
+        raise ValueError(
+            "trainer.resume_mode must be null/'none', 'latest', or 'from_path'"
+        )
+    if trainer.resume_mode == "from_path" and not trainer.resume_path:
+        raise ValueError(
+            "trainer.resume_path is required when trainer.resume_mode='from_path'"
+        )
+    if trainer.hf_save_interval > 0:
+        raise NotImplementedError(
+            "HuggingFace export is not wired to Fireworks yet; set trainer.hf_save_interval=-1"
+        )
+    if trainer.policy.torch_profiler_config.enable:
+        raise ValueError("Local torch profiling is unavailable with hosted Fireworks training")
+    if trainer.enable_ray_gpu_monitor:
+        raise ValueError("Set trainer.enable_ray_gpu_monitor=false for hosted Fireworks training")
+    if inference.enable_ray_prometheus_stats:
+        raise ValueError("Set generator.inference_engine.enable_ray_prometheus_stats=false for Fireworks")
+
+    optimizer = trainer.policy.optimizer_config
+    if optimizer.num_warmup_steps != 0 or optimizer.scheduler != "constant_with_warmup":
+        raise NotImplementedError(
+            "The initial Fireworks backend supports a constant learning rate only "
+            "(scheduler='constant_with_warmup', num_warmup_steps=0)"
+        )
+
+    for name, sampling in (
+        ("sampling_params", cfg.generator.sampling_params),
+        ("eval_sampling_params", cfg.generator.eval_sampling_params),
+    ):
+        if sampling is None:
+            raise ValueError(f"generator.{name} must be configured for Fireworks")
+        if sampling.repetition_penalty != 1.0:
+            raise NotImplementedError(f"generator.{name}.repetition_penalty is not supported by Fireworks sampling")
+        if sampling.min_p != 0.0:
+            raise NotImplementedError(f"generator.{name}.min_p is not supported by Fireworks sampling")
+
+    max_model_input = trainer.max_prompt_length + cfg.generator.sampling_params.max_generate_length - 1
+    if max_model_input > fireworks.max_seq_len:
+        raise ValueError(
+            "Configured prompt plus generation length exceeds trainer.fireworks.max_seq_len: "
+            f"{max_model_input} > {fireworks.max_seq_len}"
+        )
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -272,6 +389,9 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.max_training_steps is not None:
         if cfg.trainer.max_training_steps <= 0:
             raise ValueError(f"max_training_steps must be > 0, got {cfg.trainer.max_training_steps}")
+
+    if cfg.trainer.strategy == "fireworks" or cfg.generator.inference_engine.backend == "fireworks":
+        _validate_fireworks_cfg(cfg)
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
@@ -428,7 +548,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
                 "`trainer.algorithm.off_policy_correction` doesn't support clip_cov or kl_cov policy loss types"
             )
 
-    if cfg.trainer.policy.model.lora.rank > 0:
+    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "fireworks":
         # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
 
@@ -521,6 +641,16 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         ValueError / NotImplementedError / AssertionError: on invalid combinations.
     """
     ie_cfg = cfg.generator.inference_engine
+
+    # Fireworks owns the inference topology. Local vLLM placement, parallelism,
+    # and external-router validation do not apply to the hosted client.
+    if ie_cfg.backend == "fireworks":
+        if cfg.trainer.strategy != "fireworks":
+            raise ValueError(
+                "generator.inference_engine.backend='fireworks' currently requires "
+                "trainer.strategy='fireworks'"
+            )
+        return
 
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
@@ -742,6 +872,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if os.environ.get("WANDB_API_KEY"):
         logger.info("Exporting wandb api key to ray runtime env")
         env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
+
+    if cfg.trainer.strategy == "fireworks" and os.environ.get("FIREWORKS_API_KEY"):
+        logger.info("Exporting Fireworks API key to the Ray entrypoint")
+        env_vars["FIREWORKS_API_KEY"] = os.environ["FIREWORKS_API_KEY"]
 
     if os.environ.get("MLFLOW_TRACKING_URI"):
         logger.info("Exporting mlflow tracking uri to ray runtime env")

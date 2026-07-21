@@ -98,6 +98,12 @@ def run_on_each_node(node_ids: List[str], fn: Callable, *args, **kwargs):
         **kwargs: Keyword arguments to pass to the function
     """
     node_ids = list(set(node_ids))
+    # Hosted backends have no SkyRL Ray workers. Avoid constructing a remote
+    # function (which implicitly auto-connects Ray) when there is nowhere to
+    # schedule it; the driver-local invocation is handled separately by the
+    # caller.
+    if not node_ids:
+        return []
     task = ray.remote(num_cpus=0.25)(fn)
     refs = []
 

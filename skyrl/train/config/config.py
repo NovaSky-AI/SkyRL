@@ -903,6 +903,50 @@ class MTPConfig(BaseConfig):
 
 
 @dataclass
+class FireworksConfig(BaseConfig):
+    """Fireworks Training API settings.
+
+    The API credential is intentionally absent: it is read from
+    ``FIREWORKS_API_KEY`` at runtime so it cannot leak through config logging or
+    checkpoint metadata.
+    """
+
+    infrastructure: str = "serverless"
+    """Fireworks ``"serverless"`` shared pool or SDK-managed ``"dedicated"`` resources."""
+    base_url: str = "https://api.fireworks.ai"
+    base_model: Optional[str] = None
+    """Fireworks resource name, for example ``accounts/fireworks/models/qwen3p6-27b``."""
+    max_seq_len: Optional[int] = None
+    """Maximum submitted model-input length. Required for both hosted modes."""
+    request_timeout_s: int = 3600
+    sampling_timeout_s: int = 600
+    trainer_timeout_s: int = 900
+    deployment_timeout_s: int = 900
+    hotload_timeout_s: int = 600
+    adam_eps: float = 1e-8
+    snapshot_prefix: str = "skyrl"
+    """Prefix for unique in-session sampler snapshot names. It must not contain secrets."""
+    training_shape_id: Optional[str] = None
+    """Dedicated-only training shape resource name."""
+    trainer_job_id: Optional[str] = None
+    """Dedicated-only stable trainer ID, used for audit and failure cleanup."""
+    trainer_replica_count: int = 1
+    """Number of data-parallel HSDP trainer replicas for dedicated training.
+
+    The training shape owns each replica's topology. Increasing this value
+    replicates that shape; it does not change the shape's model-parallel or
+    pipeline-parallel topology.
+    """
+    deployment_id: Optional[str] = None
+    """Dedicated-only stable rollout deployment ID."""
+    replica_count: int = 1
+    """Number of dedicated rollout replicas managed by Fireworks."""
+    cleanup_on_exit: bool = True
+    cleanup_deployment_on_close: str = "delete"
+    """``"delete"`` or ``"scale_to_zero"`` for SDK-created dedicated deployments."""
+
+
+@dataclass
 class TrainerConfig(BaseConfig):
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     use_expandable_segments: bool = True
@@ -918,6 +962,7 @@ class TrainerConfig(BaseConfig):
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
     mtp: MTPConfig = field(default_factory=MTPConfig)
     fully_async: FullyAsyncConfig = field(default_factory=FullyAsyncConfig)
+    fireworks: FireworksConfig = field(default_factory=FireworksConfig)
     gradient_checkpointing: bool = True
     gradient_checkpointing_use_reentrant: bool = False
     seed: int = 42

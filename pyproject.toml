@@ -43,8 +43,15 @@ tinker = [
     "psycopg2-binary",
 ]
 
+fireworks = [
+    "skyrl[skyrl-train]",
+    "fireworks-ai[training]>=1.2.0a87,<2; python_version < '3.14'",
+    "tinker>=0.3.0",
+]
+
 ray = [
-    "ray[default]==2.56.0",
+    # Match the managed Ray cluster image used by the Harbor Apex run.
+    "ray[default]==2.51.1",
 ]
 
 aws = [
@@ -79,7 +86,7 @@ skyrl-train = [
     "accelerate",
     "torchdata",
     "omegaconf",
-    "ray==2.56.0",
+    "ray==2.51.1",
     "peft==0.18.1",
     "debugpy==1.8.0",
     "hf_transfer",
@@ -166,6 +173,9 @@ miniswe = [
 ]
 harbor = [
     "harbor[daytona,modal]; python_version >= '3.12'",
+    # Harbor's token-in/token-out Archipelago path imports vLLM's client-side
+    # tool/reasoning parsers even when model inference is hosted by Fireworks.
+    "vllm==0.23.0; sys_platform == 'linux'",
 ]
 
 dev = [
@@ -312,7 +322,10 @@ torchvision = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
-harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
+# Absolute because Ray stages this project in a temporary working directory;
+# a ../harbor-private relative source would then resolve inside Ray's staging
+# tree instead of to the editable checkout on this pinned single node.
+harbor = { path = "/home/ray/default/harbor-private", editable = true }
 megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "91a15142a4b4442a8d46ab539d1b923bd08570d0", marker = "sys_platform == 'linux'"}
 # megatron-core main branch: https://github.com/NVIDIA/Megatron-LM/tree/main latest as of 6/8/26
 megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "71e418ea7d7b3a6c9a53238c543c3e0b43e11026", marker = "sys_platform == 'linux'"}
@@ -381,4 +394,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["skyrl", "skyrl_gym"]
-

@@ -14,6 +14,9 @@ from loguru import logger
 from ray.util.placement_group import placement_group
 
 from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
+    get_sampling_params_for_backend,
+)
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
@@ -64,6 +67,7 @@ class BasePPOExp:
         self._prefill_server_groups = None
         self._decode_server_groups = None
         self._inference_router = None
+        self._fireworks_runtime = None
 
     @staticmethod
     def get_cfg_as_str(cfg: SkyRLTrainConfig) -> str:
@@ -82,9 +86,9 @@ class BasePPOExp:
             num_workers=8,
         )
         # make sure the dataset is large enough to train on
-        assert (
-            len(prompts_dataset) >= self.cfg.trainer.train_batch_size
-        ), f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
+            f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        )
         return prompts_dataset
 
     def get_eval_dataset(self):
@@ -103,7 +107,9 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> Optional[ResolvedPlacementGroup]:
+    def get_colocate_pg(
+        self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S
+    ) -> Optional[ResolvedPlacementGroup]:
         """Initializes a placement group for colocated training.
 
         Creates a single placement group with per-GPU bundles for all inference
@@ -119,7 +125,11 @@ class BasePPOExp:
             return None
 
         ie_cfg = self.cfg.generator.inference_engine
-        per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+        per_engine_gpu_count = (
+            ie_cfg.tensor_parallel_size
+            * ie_cfg.pipeline_parallel_size
+            * ie_cfg.data_parallel_size
+        )
         total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
 
         pg = placement_group(
@@ -243,7 +253,9 @@ class BasePPOExp:
         if is_colocated:
             # Callers must invoke get_inference_client() from a sync context (no running event loop).
             asyncio.run(client.sleep())
-            logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
+            logger.info(
+                "HTTP Inference: Colocated mode - slept inference engines after startup"
+            )
 
         return client
 
@@ -271,16 +283,78 @@ class BasePPOExp:
                 PolicyWorker,
                 RefWorker,
             )
+        elif self.cfg.trainer.strategy == "fireworks":
+            PolicyWorker = CriticWorker = RefWorker = None
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
 
-        # NOTE (sumanthrh): Instantiate tracker before trainer init.
+        if self.cfg.trainer.strategy == "fireworks":
+            from skyrl.backends.fireworks.inference import FireworksInferenceClient
+            from skyrl.backends.fireworks.runtime import FireworksRuntime
+            from skyrl.backends.fireworks.training_backend import (
+                FireworksPolicyDispatch,
+            )
+
+            base_model = self.cfg.trainer.fireworks.base_model
+            if not base_model:
+                raise ValueError("trainer.fireworks.base_model is required")
+            runtime = FireworksRuntime.connect(
+                config=self.cfg.trainer.fireworks,
+                tokenizer=self.tokenizer,
+                tokenizer_model=self.cfg.trainer.policy.model.path,
+                lora_rank=self.cfg.trainer.policy.model.lora.rank,
+                learning_rate=self.cfg.trainer.policy.optimizer_config.lr,
+            )
+            self._fireworks_runtime = runtime
+            logger.info(
+                "Connected Fireworks {} runtime (trainer_job_id={}, deployment_id={})",
+                self.cfg.trainer.fireworks.infrastructure,
+                runtime.trainer_job_id,
+                runtime.deployment_id,
+            )
+            try:
+                # Opening the hosted runtime is the Fireworks entitlement and
+                # model-availability preflight. Do it before starting an
+                # external tracker run so a rejected provider session does not
+                # leave behind an empty W&B run.
+                tracker = self.get_tracker()
+                inference_engine_client = FireworksInferenceClient(
+                    runtime=runtime,
+                    model_name=base_model,
+                    default_sampling_params=get_sampling_params_for_backend(
+                        "fireworks", self.cfg.generator.sampling_params
+                    ),
+                )
+                generator = self.get_generator(
+                    self.cfg, self.tokenizer, inference_engine_client
+                )
+                trainer = self.get_trainer(
+                    cfg=self.cfg,
+                    tracker=tracker,
+                    tokenizer=self.tokenizer,
+                    train_dataset=self.train_dataset,
+                    eval_dataset=self.eval_dataset,
+                    inference_engine_client=inference_engine_client,
+                    generator=generator,
+                    colocate_pg=None,
+                )
+                trainer.trajectory_logger = self.get_trajectory_logger()
+                trainer.dispatch = FireworksPolicyDispatch(self.cfg, runtime)
+                self.trainer = trainer
+                return trainer
+            except Exception:
+                asyncio.run(runtime.close())
+                self._fireworks_runtime = None
+                raise
+
+        # NOTE (sumanthrh): Instantiate tracker before local trainer init.
         # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()
-
         inference_engine_client = self.get_inference_client()
 
-        generator: GeneratorInterface = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
+        generator: GeneratorInterface = self.get_generator(
+            self.cfg, self.tokenizer, inference_engine_client
+        )
 
         trainer = self.get_trainer(
             cfg=self.cfg,
@@ -317,8 +391,20 @@ class BasePPOExp:
         self.trainer = None
         try:
             trainer = self._setup_trainer()
+
+            async def _train_and_close_remote_runtime():
+                try:
+                    await trainer.train()
+                finally:
+                    # Fireworks owns asyncio synchronization primitives used by
+                    # sampling and publication. Close it on the same loop that
+                    # ran training rather than constructing a second loop.
+                    if self._fireworks_runtime is not None:
+                        await trainer.inference_engine_client.teardown()
+                        self._fireworks_runtime = None
+
             # Start the training loop
-            asyncio.run(trainer.train())
+            asyncio.run(_train_and_close_remote_runtime())
         except Exception as e:
             # OOMs raised inside actor init (e.g. FSDPPolicyWorkerBase.init_model)
             # surface here as RayTaskError. Without this they only land in Ray
@@ -333,6 +419,9 @@ class BasePPOExp:
             else:
                 logger.error(f"Setup failed before tracker was initialized:\n{e}")
             raise
+        finally:
+            if self._fireworks_runtime is not None:
+                asyncio.run(self._fireworks_runtime.close())
 
 
 @ray.remote(num_cpus=1)
