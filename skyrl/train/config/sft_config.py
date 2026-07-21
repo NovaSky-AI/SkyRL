@@ -356,8 +356,14 @@ def _normalize_mixing_weights(cfg: SFTConfig, num_sources: int, sources_field: s
         cfg.train_dataset_weights = [1.0 / num_sources] * num_sources
 
 
-def _default_pretokenized_names(paths: List[str]) -> List[str]:
-    """Default eval metric names for pretokenized stores: the path basenames."""
+def _default_pretokenized_eval_names(paths: List[str]) -> List[str]:
+    """Default eval metric names for pretokenized eval stores: the path basenames.
+
+    Only eval stores need names: each one is evaluated separately and its
+    metrics are namespaced under ``eval/{name}/``. Training stores don't --
+    they are concatenated into a single dataset (mixed per
+    ``train_dataset_weights``), so there is no per-store metric to label.
+    """
     names = [os.path.basename(path.rstrip("/")) for path in paths]
     if any(not name for name in names) or len(set(names)) != len(names):
         raise ValueError(
@@ -449,7 +455,7 @@ def _normalize_dataset_cfg(cfg: SFTConfig) -> None:
         if len(cfg.eval_pretokenized_dataset_paths) == 0:
             raise ValueError("eval_pretokenized_dataset_paths must be a non-empty list when set.")
         if cfg.eval_dataset_names is None:
-            cfg.eval_dataset_names = _default_pretokenized_names(cfg.eval_pretokenized_dataset_paths)
+            cfg.eval_dataset_names = _default_pretokenized_eval_names(cfg.eval_pretokenized_dataset_paths)
         else:
             if len(cfg.eval_dataset_names) != len(cfg.eval_pretokenized_dataset_paths):
                 raise ValueError(
