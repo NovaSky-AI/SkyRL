@@ -137,6 +137,21 @@ def test_load_directory_of_arrow_shards(tmp_path):
     _assert_normalized(rows)
 
 
+def test_hidden_files_and_dirs_skipped(tmp_path):
+    data_dir = tmp_path / "shards"
+    data_dir.mkdir()
+    Dataset.from_list(_rows()).to_parquet(str(data_dir / "shard-00000.parquet"))
+    # Stale Jupyter checkpoint copy (would silently duplicate rows) and a
+    # macOS AppleDouble sidecar (not valid parquet, would crash the load).
+    checkpoints = data_dir / ".ipynb_checkpoints"
+    checkpoints.mkdir()
+    Dataset.from_list(_rows()).to_parquet(str(checkpoints / "shard-00000.parquet"))
+    (data_dir / "._shard-00000.parquet").write_bytes(b"\x00\x05\x16\x07not parquet")
+
+    rows = load_from_pretokenized(str(data_dir))
+    assert len(rows) == 2
+
+
 def test_mixed_formats_in_directory_raises(tmp_path):
     data_dir = tmp_path / "mixed"
     data_dir.mkdir()

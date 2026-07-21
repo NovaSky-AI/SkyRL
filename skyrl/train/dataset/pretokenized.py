@@ -59,10 +59,18 @@ _warned_attention_mask_dropped = False
 
 
 def _collect_data_files(root: str) -> dict[str, list[str]]:
-    """Recursively collect data files under ``root``, grouped by format."""
+    """Recursively collect data files under ``root``, grouped by format.
+
+    Hidden files and directories (dotfiles) are skipped: `.ipynb_checkpoints/`
+    holds stale copies that would silently duplicate rows, and macOS `._*`
+    AppleDouble sidecars are not valid data files.
+    """
     groups: dict[str, list[str]] = {"parquet": [], "json": [], "arrow": []}
-    for dirpath, _, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for name in sorted(filenames):
+            if name.startswith("."):
+                continue
             full = os.path.join(dirpath, name)
             lower = name.lower()
             if lower.endswith(_PARQUET_EXTS):
