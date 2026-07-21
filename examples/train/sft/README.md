@@ -39,7 +39,6 @@ Each row must contain:
 {"input_ids": [5091, 374, 8949, 220, 748], "loss_mask": [0, 1, 1, 0, 1]}
 ```
 
-`num_actions` is inferred from the first nonzero `loss_mask` entry — don't store it.
 Rows are normalized to the trainer's internal format; `max_length` truncation still applies (rows whose loss
 window is fully truncated are dropped, and over-length VLM rows are always dropped rather than truncated).
 `pretokenized_dataset_paths` cannot be combined with `train_datasets` (nor `eval_pretokenized_dataset_paths`
