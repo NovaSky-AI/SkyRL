@@ -568,8 +568,6 @@ class PPORayActorGroup:
         self.colocate_all = colocate_all
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
-        self._pg = pg
-        self._num_gpus_per_actor = num_gpus_per_actor
         self._last_dp_size: Optional[int] = None
         self._initiate_actors(pg, num_gpus_per_actor)
 
