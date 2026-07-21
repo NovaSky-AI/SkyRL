@@ -1397,15 +1397,12 @@ class SFTTrainer:
         if sampler_type == "random":
             if not multi_dataset:
                 return None
-            weights = self.sft_cfg.train_dataset_weights
-            if weights is None:
-                # Config normalization fills this on the standard path; default
-                # to equal mixing for directly-constructed trainers.
-                weights = [1.0 / len(dataset_lengths)] * len(dataset_lengths)
+            # Config normalization (validate_sft_cfg) fills equal weights for
+            # the random sampler on every construction path.
             return DataMixingSampler(
                 tokenized,
                 lengths=dataset_lengths,
-                weights=weights,
+                weights=self.sft_cfg.train_dataset_weights,
                 seed=self.sft_cfg.seed,
             )
         if sampler_type == "sequential":
