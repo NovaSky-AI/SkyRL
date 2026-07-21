@@ -396,9 +396,9 @@ def _add_time_stats(rollout_metrics: Dict[str, Any], name: str, times: Optional[
     arr = np.array(times, dtype=np.float64)
     rollout_metrics.update(
         {
-            f"generate/trajectory_{name}_time_mean": np.mean(arr).item(),
-            f"generate/trajectory_{name}_time_p90": np.percentile(arr, 90).item(),
-            f"generate/trajectory_{name}_time_max": np.max(arr).item(),
+            f"generate/trajectory_time_{name}_mean": np.mean(arr).item(),
+            f"generate/trajectory_time_{name}_p90": np.percentile(arr, 90).item(),
+            f"generate/trajectory_time_{name}_max": np.max(arr).item(),
         }
     )
     return np.sum(arr).item()

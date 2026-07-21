@@ -1740,17 +1740,17 @@ async def test_step_wise_trajectory_completion_time_metrics(mock_make, mock_toke
     # Aggregate stats are present and computed over the per-prompt times.
     rollout_metrics = generator_output["rollout_metrics"]
     for key in (
-        "generate/trajectory_completion_time_mean",
-        "generate/trajectory_completion_time_p90",
-        "generate/trajectory_completion_time_max",
+        "generate/trajectory_time_completion_mean",
+        "generate/trajectory_time_completion_p90",
+        "generate/trajectory_time_completion_max",
     ):
         assert key in rollout_metrics, f"missing metric {key}"
     expected = np.array(metrics_times, dtype=np.float64)
-    assert rollout_metrics["generate/trajectory_completion_time_mean"] == pytest.approx(np.mean(expected).item())
-    assert rollout_metrics["generate/trajectory_completion_time_p90"] == pytest.approx(
+    assert rollout_metrics["generate/trajectory_time_completion_mean"] == pytest.approx(np.mean(expected).item())
+    assert rollout_metrics["generate/trajectory_time_completion_p90"] == pytest.approx(
         np.percentile(expected, 90).item()
     )
-    assert rollout_metrics["generate/trajectory_completion_time_max"] == pytest.approx(np.max(expected).item())
+    assert rollout_metrics["generate/trajectory_time_completion_max"] == pytest.approx(np.max(expected).item())
 
     # The llm/env/setup split is stored per step and replicated like the completion times above.
     for key in ("trajectory_llm_times", "trajectory_env_times", "trajectory_env_setup_times"):
@@ -1873,10 +1873,10 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
         assert env_t > llm_t
 
     metrics = generator_output["rollout_metrics"]
-    assert metrics["generate/trajectory_llm_time_mean"] >= llm_sleep_s * num_turns
-    assert metrics["generate/trajectory_env_time_mean"] >= env_sleep_s * num_turns
-    assert metrics["generate/trajectory_env_setup_time_mean"] >= setup_sleep_s
-    assert metrics["generate/trajectory_other_time_mean"] >= 0.0
+    assert metrics["generate/trajectory_time_llm_mean"] >= llm_sleep_s * num_turns
+    assert metrics["generate/trajectory_time_env_mean"] >= env_sleep_s * num_turns
+    assert metrics["generate/trajectory_time_env_setup_mean"] >= setup_sleep_s
+    assert metrics["generate/trajectory_time_other_mean"] >= 0.0
 
     # env_sleep / (env_sleep + llm_sleep) = 0.75; allow generous headroom for scheduling overhead
     # attributed to the engine wait, but it must clearly indicate an environment-bound rollout.
@@ -1893,9 +1893,9 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
     concatenated = generator_utils.concatenate_generator_outputs([generator_output, generator_output])
     concat_metrics = concatenated["rollout_metrics"]
     assert 0.5 < concat_metrics["generate/frac_time_in_env"] < 1.0
-    assert concat_metrics["generate/trajectory_llm_time_p90"] == pytest.approx(np.percentile(llm_times * 2, 90).item())
-    assert concat_metrics["generate/trajectory_env_time_p90"] == pytest.approx(np.percentile(env_times * 2, 90).item())
-    assert concat_metrics["generate/trajectory_env_setup_time_p90"] == pytest.approx(
+    assert concat_metrics["generate/trajectory_time_llm_p90"] == pytest.approx(np.percentile(llm_times * 2, 90).item())
+    assert concat_metrics["generate/trajectory_time_env_p90"] == pytest.approx(np.percentile(env_times * 2, 90).item())
+    assert concat_metrics["generate/trajectory_time_env_setup_p90"] == pytest.approx(
         np.percentile(setup_times * 2, 90).item()
     )
-    assert concat_metrics["generate/trajectory_other_time_mean"] >= 0.0
+    assert concat_metrics["generate/trajectory_time_other_mean"] >= 0.0
