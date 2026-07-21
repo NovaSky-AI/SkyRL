@@ -1740,17 +1740,17 @@ async def test_step_wise_trajectory_completion_time_metrics(mock_make, mock_toke
     # Aggregate stats are present and computed over the per-prompt times.
     rollout_metrics = generator_output["rollout_metrics"]
     for key in (
-        "generate/trajectory_completion_time_mean",
-        "generate/trajectory_completion_time_p90",
-        "generate/trajectory_completion_time_max",
+        "generate/trajectory_time_completion_mean",
+        "generate/trajectory_time_completion_p90",
+        "generate/trajectory_time_completion_max",
     ):
         assert key in rollout_metrics, f"missing metric {key}"
     expected = np.array(metrics_times, dtype=np.float64)
-    assert rollout_metrics["generate/trajectory_completion_time_mean"] == pytest.approx(np.mean(expected).item())
-    assert rollout_metrics["generate/trajectory_completion_time_p90"] == pytest.approx(
+    assert rollout_metrics["generate/trajectory_time_completion_mean"] == pytest.approx(np.mean(expected).item())
+    assert rollout_metrics["generate/trajectory_time_completion_p90"] == pytest.approx(
         np.percentile(expected, 90).item()
     )
-    assert rollout_metrics["generate/trajectory_completion_time_max"] == pytest.approx(np.max(expected).item())
+    assert rollout_metrics["generate/trajectory_time_completion_max"] == pytest.approx(np.max(expected).item())
 
     # The time splits are stored per step and replicated like the completion times above.
     time_splits = generator_output["trajectory_time_splits"]
