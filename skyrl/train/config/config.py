@@ -904,20 +904,18 @@ class MTPConfig(BaseConfig):
 
 @dataclass
 class FireworksConfig(BaseConfig):
-    """Fireworks Training API settings.
+    """Dedicated Fireworks Training API settings.
 
     The API credential is intentionally absent: it is read from
     ``FIREWORKS_API_KEY`` at runtime so it cannot leak through config logging or
     checkpoint metadata.
     """
 
-    infrastructure: str = "serverless"
-    """Fireworks ``"serverless"`` shared pool or SDK-managed ``"dedicated"`` resources."""
     base_url: str = "https://api.fireworks.ai"
     base_model: Optional[str] = None
     """Fireworks resource name, for example ``accounts/fireworks/models/qwen3p6-27b``."""
     max_seq_len: Optional[int] = None
-    """Maximum submitted model-input length. Required for both hosted modes."""
+    """Maximum submitted model-input length."""
     request_timeout_s: int = 3600
     sampling_timeout_s: int = 600
     trainer_timeout_s: int = 900
@@ -927,9 +925,9 @@ class FireworksConfig(BaseConfig):
     snapshot_prefix: str = "skyrl"
     """Prefix for unique in-session sampler snapshot names. It must not contain secrets."""
     training_shape_id: Optional[str] = None
-    """Dedicated-only training shape resource name."""
+    """Training shape resource name."""
     trainer_job_id: Optional[str] = None
-    """Dedicated-only stable trainer ID, used for audit and failure cleanup."""
+    """Stable trainer ID, used for audit and failure cleanup."""
     trainer_replica_count: int = 1
     """Number of data-parallel HSDP trainer replicas for dedicated training.
 
@@ -938,12 +936,12 @@ class FireworksConfig(BaseConfig):
     pipeline-parallel topology.
     """
     deployment_id: Optional[str] = None
-    """Dedicated-only stable rollout deployment ID."""
+    """Stable rollout deployment ID."""
     replica_count: int = 1
-    """Number of dedicated rollout replicas managed by Fireworks."""
+    """Number of rollout replicas managed by Fireworks."""
     cleanup_on_exit: bool = True
     cleanup_deployment_on_close: str = "delete"
-    """``"delete"`` or ``"scale_to_zero"`` for SDK-created dedicated deployments."""
+    """``"delete"`` or ``"scale_to_zero"`` for the SDK-created deployment."""
 
 
 @dataclass

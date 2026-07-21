@@ -44,13 +44,13 @@ class _Sampler:
         self.prompts = []
         self.closed = False
 
-    def sample(self, *, prompt, num_samples, sampling_params):
+    async def sample_async(self, *, prompt, num_samples, sampling_params):
         assert num_samples == 1
         self.prompts.append(prompt)
         sequence = SimpleNamespace(
             tokens=[7, 8], logprobs=[-0.7, -0.8], stop_reason="stop"
         )
-        return _Future(SimpleNamespace(sequences=[sequence]))
+        return SimpleNamespace(sequences=[sequence])
 
     def close(self):
         self.closed = True
@@ -70,6 +70,9 @@ class _Service:
 
     def create_sampling_client(self, **kwargs):
         return self.sampler
+
+    def hotload_sampler_snapshot(self, path):
+        return None
 
     def close(self):
         return None
@@ -91,7 +94,6 @@ async def test_generate_returns_exact_tokens_and_logprobs() -> None:
     await runtime.publish_sampler_weights()
     client = FireworksInferenceClient(
         runtime=runtime,
-        model_name="accounts/fireworks/models/test",
         default_sampling_params={
             "max_tokens": 8,
             "temperature": 1.0,
@@ -125,14 +127,12 @@ def test_client_exposes_native_openai_endpoint() -> None:
         service=_Service(),
         training_client=_TrainingClient(),
         tokenizer=_Tokenizer(),
-        config=FireworksConfig(infrastructure="dedicated"),
+        config=FireworksConfig(),
     )
-    client = FireworksInferenceClient(
-        runtime=runtime, model_name="test", default_sampling_params={}
-    )
+    client = FireworksInferenceClient(runtime=runtime, default_sampling_params={})
 
-    assert client.openai_api_base == "https://api.fireworks.ai/inference/v1"
-    assert client.inference_model == "accounts/test/deployments/rollout"
+    assert client.get_endpoint_url() == "https://api.fireworks.ai/inference/v1"
+    assert client.model_name == "accounts/test/deployments/rollout"
 
 
 @pytest.mark.asyncio
@@ -144,7 +144,7 @@ async def test_generate_requires_published_sampler() -> None:
         config=FireworksConfig(),
     )
     client = FireworksInferenceClient(
-        runtime=runtime, model_name="test", default_sampling_params={"max_tokens": 8}
+        runtime=runtime, default_sampling_params={"max_tokens": 8}
     )
 
     with pytest.raises(RuntimeError, match="have not been published"):
@@ -172,7 +172,7 @@ async def test_pause_generation_blocks_new_admissions() -> None:
     )
     await runtime.publish_sampler_weights()
     client = FireworksInferenceClient(
-        runtime=runtime, model_name="test", default_sampling_params={"max_tokens": 8}
+        runtime=runtime, default_sampling_params={"max_tokens": 8}
     )
     await client.pause_generation()
 

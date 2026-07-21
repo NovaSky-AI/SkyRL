@@ -126,7 +126,6 @@ timeout --signal=INT --kill-after=2m "${MAX_PAID_RUNTIME_MINUTES}m" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="[]" \
   trainer.strategy=fireworks \
-  trainer.fireworks.infrastructure=dedicated \
   trainer.fireworks.base_model="$FIREWORKS_BASE_MODEL" \
   trainer.fireworks.max_seq_len="$FIREWORKS_MAX_SEQ_LEN" \
   trainer.fireworks.training_shape_id="$FIREWORKS_TRAINING_SHAPE" \

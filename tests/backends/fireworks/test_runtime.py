@@ -19,9 +19,12 @@ class _Future:
 
 
 class _Sampler:
-    def __init__(self, path: str):
-        self.path = path
+    def __init__(self):
         self.closed = False
+
+    async def sample_async(self, *, prompt, num_samples, sampling_params):
+        assert num_samples == 1
+        return (prompt, sampling_params)
 
     def close(self):
         self.closed = True
@@ -30,13 +33,17 @@ class _Sampler:
 class _Service:
     def __init__(self):
         self.samplers = []
+        self.hotloads = []
         self.closed = False
 
-    def create_sampling_client(self, *, model_path, tokenizer):
+    def create_sampling_client(self, *, tokenizer):
         assert tokenizer == "tokenizer"
-        sampler = _Sampler(model_path)
+        sampler = _Sampler()
         self.samplers.append(sampler)
         return sampler
+
+    def hotload_sampler_snapshot(self, path):
+        self.hotloads.append(path)
 
     def close(self):
         self.closed = True
@@ -51,7 +58,21 @@ class _TrainingClient:
         return _Future(SimpleNamespace(path=f"snapshot://{name}"))
 
 
-def test_connect_dedicated_uses_managed_resources(monkeypatch) -> None:
+def _runtime(
+    *,
+    service=None,
+    training_client=None,
+    config=None,
+) -> FireworksRuntime:
+    return FireworksRuntime(
+        service=service or _Service(),
+        training_client=training_client or _TrainingClient(),
+        tokenizer="tokenizer",
+        config=config or FireworksConfig(),
+    )
+
+
+def test_connect_uses_managed_dedicated_resources(monkeypatch) -> None:
     from fireworks.training.sdk import FiretitanServiceClient
 
     captured = {}
@@ -75,7 +96,6 @@ def test_connect_dedicated_uses_managed_resources(monkeypatch) -> None:
         FiretitanServiceClient, "from_firetitan_config", staticmethod(_factory)
     )
     config = FireworksConfig(
-        infrastructure="dedicated",
         base_model="accounts/fireworks/models/qwen3-4b",
         max_seq_len=32768,
         training_shape_id="accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora",
@@ -85,7 +105,7 @@ def test_connect_dedicated_uses_managed_resources(monkeypatch) -> None:
         trainer_replica_count=2,
     )
 
-    runtime = FireworksRuntime.connect_dedicated(
+    runtime = FireworksRuntime.connect(
         config=config,
         tokenizer="tokenizer",
         tokenizer_model="Qwen/Qwen3-4B",
@@ -108,22 +128,15 @@ def test_connect_dedicated_uses_managed_resources(monkeypatch) -> None:
     assert service.closed is True
 
 
-def test_dedicated_runtime_exposes_native_inference_endpoint() -> None:
+def test_runtime_exposes_native_inference_endpoint() -> None:
     service = _Service()
     service._managed_handle = SimpleNamespace(
         deployment=SimpleNamespace(
             inference_model="accounts/test/deployments/skyrl-rollout"
         ),
-        deployment_manager=SimpleNamespace(
-            inference_url="https://api.fireworks.ai/"
-        ),
+        deployment_manager=SimpleNamespace(inference_url="https://api.fireworks.ai/"),
     )
-    runtime = FireworksRuntime(
-        service=service,
-        training_client=_TrainingClient(),
-        tokenizer="tokenizer",
-        config=FireworksConfig(infrastructure="dedicated"),
-    )
+    runtime = _runtime(service=service)
 
     endpoint = runtime.inference_endpoint
 
@@ -132,33 +145,25 @@ def test_dedicated_runtime_exposes_native_inference_endpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_uses_rcu_and_retires_sampler_after_active_call() -> None:
+async def test_publish_reuses_one_stable_sampler() -> None:
     service = _Service()
     training = _TrainingClient()
-    runtime = FireworksRuntime(
-        service=service,
-        training_client=training,
-        tokenizer="tokenizer",
-        config=FireworksConfig(snapshot_prefix="test run"),
-    )
+    runtime = _runtime(service=service, training_client=training)
 
     first = await runtime.publish_sampler_weights()
-    lease = runtime.acquire_sampler()
     second = await runtime.publish_sampler_weights()
 
     assert first.version == 0
     assert second.version == 1
-    assert runtime.weight_version == 1
     assert first.snapshot_path != second.snapshot_path
-    assert training.names[0].startswith("test-run-v00000000-")
+    assert service.hotloads == [first.snapshot_path, second.snapshot_path]
+    assert len(service.samplers) == 1
     assert service.samplers[0].closed is False
-
-    runtime.release_sampler(lease)
-    assert service.samplers[0].closed is True
-    assert service.samplers[1].closed is False
+    assert runtime.weight_version == second.version
+    assert runtime.snapshot_path == second.snapshot_path
 
     await runtime.close()
-    assert service.samplers[1].closed is True
+    assert service.samplers[0].closed is True
     assert service.closed is True
 
     # Teardown is intentionally idempotent.
@@ -166,87 +171,29 @@ async def test_publish_uses_rcu_and_retires_sampler_after_active_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_async_sample_keeps_lease_across_publish() -> None:
+async def test_active_sample_spans_hotload_on_same_client() -> None:
     started = asyncio.Event()
     finish = asyncio.Event()
 
-    class AsyncSampler(_Sampler):
+    class BlockingSampler(_Sampler):
         async def sample_async(self, *, prompt, num_samples, sampling_params):
-            assert prompt == "prompt"
-            assert num_samples == 1
-            assert sampling_params == "params"
             started.set()
             await finish.wait()
             return "result"
 
-    class AsyncService(_Service):
-        def create_sampling_client(self, *, model_path, tokenizer):
+    class BlockingService(_Service):
+        def create_sampling_client(self, *, tokenizer):
             assert tokenizer == "tokenizer"
-            sampler = AsyncSampler(model_path)
+            sampler = BlockingSampler()
             self.samplers.append(sampler)
             return sampler
 
-    service = AsyncService()
-    runtime = FireworksRuntime(
+    service = BlockingService()
+    runtime = _runtime(
         service=service,
-        training_client=_TrainingClient(),
-        tokenizer="tokenizer",
         config=FireworksConfig(sampling_timeout_s=1),
     )
     first = await runtime.publish_sampler_weights()
-
-    sample_task = asyncio.create_task(
-        runtime.sample_async(prompt="prompt", sampling_params="params")
-    )
-    await asyncio.wait_for(started.wait(), timeout=1)
-    second = await runtime.publish_sampler_weights()
-
-    assert second.version == first.version + 1
-    assert service.samplers[0].closed is False
-
-    finish.set()
-    result, identity = await sample_task
-    assert result == "result"
-    assert identity == first
-    assert service.samplers[0].closed is True
-    assert service.samplers[1].closed is False
-
-    await runtime.close()
-
-
-@pytest.mark.asyncio
-async def test_dedicated_hotload_reuses_one_client_during_active_sample() -> None:
-    started = asyncio.Event()
-    finish = asyncio.Event()
-
-    class AsyncSampler(_Sampler):
-        async def sample_async(self, *, prompt, num_samples, sampling_params):
-            started.set()
-            await finish.wait()
-            return "result"
-
-    class DedicatedService(_Service):
-        def __init__(self):
-            super().__init__()
-            self.hotloads = []
-
-        def hotload_sampler_snapshot(self, model_path):
-            self.hotloads.append(model_path)
-
-        def create_sampling_client(self, *, tokenizer):
-            assert tokenizer == "tokenizer"
-            sampler = AsyncSampler("stable-deployment")
-            self.samplers.append(sampler)
-            return sampler
-
-    service = DedicatedService()
-    runtime = FireworksRuntime(
-        service=service,
-        training_client=_TrainingClient(),
-        tokenizer="tokenizer",
-        config=FireworksConfig(infrastructure="dedicated", sampling_timeout_s=1),
-    )
-    first = await runtime.publish_sampler_weights()
     sample_task = asyncio.create_task(
         runtime.sample_async(prompt="prompt", sampling_params="params")
     )
@@ -254,7 +201,6 @@ async def test_dedicated_hotload_reuses_one_client_during_active_sample() -> Non
 
     second = await runtime.publish_sampler_weights()
 
-    assert service.hotloads == [first.snapshot_path, second.snapshot_path]
     assert len(service.samplers) == 1
     assert service.samplers[0].closed is False
     assert runtime.weight_version == second.version
@@ -263,23 +209,34 @@ async def test_dedicated_hotload_reuses_one_client_during_active_sample() -> Non
     result, admission_identity = await sample_task
     assert result == "result"
     assert admission_identity == first
-
-    await runtime.close()
-    assert service.samplers[0].closed is True
-    assert service.closed is True
-
-    # Teardown is intentionally idempotent.
     await runtime.close()
 
 
-def test_snapshot_name_leaves_room_for_dedicated_provider_suffix() -> None:
-    runtime = FireworksRuntime(
-        service=_Service(),
-        training_client=_TrainingClient(),
-        tokenizer="tokenizer",
-        config=FireworksConfig(
-            snapshot_prefix="skyrl-smoke-" + "very-long-prefix-" * 8
-        ),
+@pytest.mark.asyncio
+async def test_failed_hotload_preserves_published_identity_and_client() -> None:
+    class FailingService(_Service):
+        def hotload_sampler_snapshot(self, path):
+            if self.hotloads:
+                raise RuntimeError("hotload failed")
+            super().hotload_sampler_snapshot(path)
+
+    service = FailingService()
+    runtime = _runtime(service=service)
+    first = await runtime.publish_sampler_weights()
+
+    with pytest.raises(RuntimeError, match="hotload failed"):
+        await runtime.publish_sampler_weights()
+
+    assert runtime.weight_version == first.version
+    assert runtime.snapshot_path == first.snapshot_path
+    assert len(service.samplers) == 1
+    assert service.samplers[0].closed is False
+    await runtime.close()
+
+
+def test_snapshot_name_leaves_room_for_provider_suffix() -> None:
+    runtime = _runtime(
+        config=FireworksConfig(snapshot_prefix="skyrl-smoke-" + "long-prefix-" * 8)
     )
 
     name = runtime._snapshot_name(42)
@@ -293,11 +250,8 @@ def test_snapshot_name_leaves_room_for_dedicated_provider_suffix() -> None:
 
 
 def test_snapshot_name_is_a_lowercase_dns_label() -> None:
-    runtime = FireworksRuntime(
-        service=_Service(),
-        training_client=_TrainingClient(),
-        tokenizer="tokenizer",
-        config=FireworksConfig(snapshot_prefix="My Run_with.dots / and spaces"),
+    runtime = _runtime(
+        config=FireworksConfig(snapshot_prefix="My Run_with.dots / and spaces")
     )
 
     name = runtime._snapshot_name(0)
@@ -306,44 +260,32 @@ def test_snapshot_name_is_a_lowercase_dns_label() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_keeps_current_sampler_when_new_sampler_creation_fails() -> None:
-    class FailingService(_Service):
-        def create_sampling_client(self, *, model_path, tokenizer):
-            if self.samplers:
-                raise RuntimeError("sampler unavailable")
-            return super().create_sampling_client(
-                model_path=model_path, tokenizer=tokenizer
-            )
+async def test_close_waits_for_active_sample() -> None:
+    started = asyncio.Event()
+    finish = asyncio.Event()
 
-    service = FailingService()
-    runtime = FireworksRuntime(
+    class BlockingSampler(_Sampler):
+        async def sample_async(self, *, prompt, num_samples, sampling_params):
+            started.set()
+            await finish.wait()
+            return "result"
+
+    class BlockingService(_Service):
+        def create_sampling_client(self, *, tokenizer):
+            sampler = BlockingSampler()
+            self.samplers.append(sampler)
+            return sampler
+
+    service = BlockingService()
+    runtime = _runtime(
         service=service,
-        training_client=_TrainingClient(),
-        tokenizer="tokenizer",
-        config=FireworksConfig(),
-    )
-    first = await runtime.publish_sampler_weights()
-
-    with pytest.raises(RuntimeError, match="sampler unavailable"):
-        await runtime.publish_sampler_weights()
-
-    assert runtime.weight_version == first.version
-    assert runtime.snapshot_path == first.snapshot_path
-    assert service.samplers[0].closed is False
-    await runtime.close()
-
-
-@pytest.mark.asyncio
-async def test_close_waits_for_active_sampler_lease() -> None:
-    service = _Service()
-    runtime = FireworksRuntime(
-        service=service,
-        training_client=_TrainingClient(),
-        tokenizer="tokenizer",
         config=FireworksConfig(sampling_timeout_s=1),
     )
     await runtime.publish_sampler_weights()
-    lease = runtime.acquire_sampler()
+    sample_task = asyncio.create_task(
+        runtime.sample_async(prompt="prompt", sampling_params="params")
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
 
     close_task = asyncio.create_task(runtime.close())
     await asyncio.sleep(0.01)
@@ -351,7 +293,10 @@ async def test_close_waits_for_active_sampler_lease() -> None:
     assert close_task.done() is False
     assert service.samplers[0].closed is False
 
-    runtime.release_sampler(lease)
+    finish.set()
+    result, identity = await sample_task
+    assert result == "result"
+    assert identity.version == 0
     await close_task
     assert service.samplers[0].closed is True
     assert service.closed is True

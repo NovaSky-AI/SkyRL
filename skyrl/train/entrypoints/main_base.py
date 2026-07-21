@@ -307,8 +307,7 @@ class BasePPOExp:
             )
             self._fireworks_runtime = runtime
             logger.info(
-                "Connected Fireworks {} runtime (trainer_job_id={}, deployment_id={})",
-                self.cfg.trainer.fireworks.infrastructure,
+                "Connected dedicated Fireworks runtime (trainer_job_id={}, deployment_id={})",
                 runtime.trainer_job_id,
                 runtime.deployment_id,
             )
@@ -320,7 +319,6 @@ class BasePPOExp:
                 tracker = self.get_tracker()
                 inference_engine_client = FireworksInferenceClient(
                     runtime=runtime,
-                    model_name=base_model,
                     default_sampling_params=get_sampling_params_for_backend(
                         "fireworks", self.cfg.generator.sampling_params
                     ),

@@ -15,6 +15,9 @@ def test_fireworks_provider_preflight_runs_before_tracker(
     cfg = SkyRLTrainConfig()
     cfg.trainer.strategy = "fireworks"
     cfg.trainer.fireworks.base_model = "accounts/fireworks/models/test"
+    cfg.trainer.fireworks.training_shape_id = "accounts/fireworks/trainingShapes/test"
+    cfg.trainer.fireworks.trainer_job_id = "skyrl-smoke-test-trainer"
+    cfg.trainer.fireworks.deployment_id = "skyrl-smoke-test-rollout"
     cfg.trainer.policy.model.lora.rank = 8
     cfg.trainer.export_path = str(tmp_path / "exports")
     cfg.trainer.ckpt_path = str(tmp_path / "checkpoints")
@@ -32,14 +35,12 @@ def test_fireworks_provider_preflight_runs_before_tracker(
         raise AssertionError("tracker must not start before provider preflight")
 
     def _reject_provider(**_kwargs):
-        raise RuntimeError("serverless training beta is not enabled")
+        raise RuntimeError("dedicated trainer provisioning failed")
 
     monkeypatch.setattr(exp, "get_tracker", _start_tracker)
-    monkeypatch.setattr(
-        FireworksRuntime, "connect_serverless", staticmethod(_reject_provider)
-    )
+    monkeypatch.setattr(FireworksRuntime, "connect", staticmethod(_reject_provider))
 
-    with pytest.raises(RuntimeError, match="serverless training beta"):
+    with pytest.raises(RuntimeError, match="dedicated trainer provisioning"):
         exp._setup_trainer()
 
     assert not tracker_started

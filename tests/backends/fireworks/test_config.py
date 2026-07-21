@@ -9,6 +9,9 @@ def _valid_fireworks_cfg() -> SkyRLTrainConfig:
     cfg.trainer.strategy = "fireworks"
     cfg.trainer.fireworks.base_model = "accounts/fireworks/models/test"
     cfg.trainer.fireworks.max_seq_len = 4096
+    cfg.trainer.fireworks.training_shape_id = "accounts/fireworks/trainingShapes/test"
+    cfg.trainer.fireworks.trainer_job_id = "skyrl-smoke-test-trainer"
+    cfg.trainer.fireworks.deployment_id = "skyrl-smoke-test-rollout"
     cfg.trainer.policy.model.path = "Test/Tokenizer"
     cfg.trainer.policy.model.lora.rank = 8
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
@@ -51,24 +54,15 @@ def test_validate_fireworks_fully_async_grpo_config() -> None:
 
 def test_validate_dedicated_fireworks_grpo_config() -> None:
     cfg = _valid_fireworks_cfg()
-    cfg.trainer.fireworks.infrastructure = "dedicated"
-    cfg.trainer.fireworks.training_shape_id = (
-        "accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora"
-    )
-    cfg.trainer.fireworks.trainer_job_id = "skyrl-smoke-test-trainer"
-    cfg.trainer.fireworks.deployment_id = "skyrl-smoke-test-rollout"
 
     validate_cfg(cfg)
 
 
 def test_validate_dedicated_full_parameter_fireworks_grpo_config() -> None:
     cfg = _valid_fireworks_cfg()
-    cfg.trainer.fireworks.infrastructure = "dedicated"
     cfg.trainer.fireworks.training_shape_id = (
         "accounts/fireworks/trainingShapes/qwen3-4b-minimum"
     )
-    cfg.trainer.fireworks.trainer_job_id = "skyrl-smoke-test-trainer"
-    cfg.trainer.fireworks.deployment_id = "skyrl-smoke-test-rollout"
     cfg.trainer.fireworks.replica_count = 4
     cfg.trainer.policy.model.lora.rank = 0
 
@@ -92,22 +86,8 @@ def test_validate_fireworks_resume_from_path_requires_path() -> None:
         validate_cfg(cfg)
 
 
-def test_validate_serverless_rejects_full_parameter_training() -> None:
-    cfg = _valid_fireworks_cfg()
-    cfg.trainer.policy.model.lora.rank = 0
-
-    with pytest.raises(ValueError, match="serverless training is LoRA-only"):
-        validate_cfg(cfg)
-
-
 def test_validate_dedicated_requires_positive_replica_count() -> None:
     cfg = _valid_fireworks_cfg()
-    cfg.trainer.fireworks.infrastructure = "dedicated"
-    cfg.trainer.fireworks.training_shape_id = (
-        "accounts/fireworks/trainingShapes/qwen3-4b-minimum"
-    )
-    cfg.trainer.fireworks.trainer_job_id = "skyrl-smoke-test-trainer"
-    cfg.trainer.fireworks.deployment_id = "skyrl-smoke-test-rollout"
     cfg.trainer.fireworks.replica_count = 0
 
     with pytest.raises(ValueError, match="replica_count > 0"):
@@ -116,12 +96,6 @@ def test_validate_dedicated_requires_positive_replica_count() -> None:
 
 def test_validate_dedicated_requires_positive_trainer_replica_count() -> None:
     cfg = _valid_fireworks_cfg()
-    cfg.trainer.fireworks.infrastructure = "dedicated"
-    cfg.trainer.fireworks.training_shape_id = (
-        "accounts/fireworks/trainingShapes/qwen3-4b-minimum"
-    )
-    cfg.trainer.fireworks.trainer_job_id = "skyrl-smoke-test-trainer"
-    cfg.trainer.fireworks.deployment_id = "skyrl-smoke-test-rollout"
     cfg.trainer.fireworks.trainer_replica_count = 0
 
     with pytest.raises(ValueError, match="trainer_replica_count > 0"):
@@ -130,7 +104,7 @@ def test_validate_dedicated_requires_positive_trainer_replica_count() -> None:
 
 def test_validate_dedicated_requires_auditable_resource_ids() -> None:
     cfg = _valid_fireworks_cfg()
-    cfg.trainer.fireworks.infrastructure = "dedicated"
+    cfg.trainer.fireworks.training_shape_id = None
 
     with pytest.raises(ValueError, match="training_shape_id"):
         validate_cfg(cfg)

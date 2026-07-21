@@ -271,8 +271,6 @@ def _validate_fireworks_cfg(cfg: SkyRLTrainConfig) -> None:
             "Fireworks must be selected for both trainer.strategy and "
             "generator.inference_engine.backend"
         )
-    if fireworks.infrastructure not in ("serverless", "dedicated"):
-        raise ValueError("trainer.fireworks.infrastructure must be 'serverless' or 'dedicated'")
     if not fireworks.base_model:
         raise ValueError("trainer.fireworks.base_model is required")
     if fireworks.max_seq_len is None or fireworks.max_seq_len <= 0:
@@ -281,26 +279,20 @@ def _validate_fireworks_cfg(cfg: SkyRLTrainConfig) -> None:
         raise ValueError("trainer.policy.model.path must name the tokenizer matching the Fireworks base model")
     if trainer.policy.model.lora.rank < 0:
         raise ValueError("trainer.policy.model.lora.rank must be >= 0")
-    if fireworks.infrastructure == "serverless" and trainer.policy.model.lora.rank == 0:
-        raise ValueError(
-            "Fireworks serverless training is LoRA-only; set trainer.policy.model.lora.rank > 0"
-        )
-
-    if fireworks.infrastructure == "dedicated":
-        if not fireworks.training_shape_id:
-            raise ValueError("Dedicated Fireworks training requires trainer.fireworks.training_shape_id")
-        if not fireworks.trainer_job_id:
-            raise ValueError("Dedicated Fireworks training requires trainer.fireworks.trainer_job_id for safe audit")
-        if not fireworks.deployment_id:
-            raise ValueError("Dedicated Fireworks training requires trainer.fireworks.deployment_id for safe audit")
-        if fireworks.trainer_replica_count <= 0:
-            raise ValueError("Dedicated Fireworks training requires trainer_replica_count > 0")
-        if fireworks.replica_count <= 0:
-            raise ValueError("Dedicated Fireworks training requires replica_count > 0")
-        if not fireworks.cleanup_on_exit:
-            raise ValueError("The initial dedicated Fireworks backend requires cleanup_on_exit=true")
-        if fireworks.cleanup_deployment_on_close not in ("delete", "scale_to_zero"):
-            raise ValueError("cleanup_deployment_on_close must be 'delete' or 'scale_to_zero'")
+    if not fireworks.training_shape_id:
+        raise ValueError("Dedicated Fireworks training requires trainer.fireworks.training_shape_id")
+    if not fireworks.trainer_job_id:
+        raise ValueError("Dedicated Fireworks training requires trainer.fireworks.trainer_job_id for safe audit")
+    if not fireworks.deployment_id:
+        raise ValueError("Dedicated Fireworks training requires trainer.fireworks.deployment_id for safe audit")
+    if fireworks.trainer_replica_count <= 0:
+        raise ValueError("Dedicated Fireworks training requires trainer_replica_count > 0")
+    if fireworks.replica_count <= 0:
+        raise ValueError("Dedicated Fireworks training requires replica_count > 0")
+    if not fireworks.cleanup_on_exit:
+        raise ValueError("The dedicated Fireworks backend requires cleanup_on_exit=true")
+    if fireworks.cleanup_deployment_on_close not in ("delete", "scale_to_zero"):
+        raise ValueError("cleanup_deployment_on_close must be 'delete' or 'scale_to_zero'")
 
     if algorithm.advantage_estimator != "grpo":
         raise ValueError("The initial Fireworks backend is GRPO-only")

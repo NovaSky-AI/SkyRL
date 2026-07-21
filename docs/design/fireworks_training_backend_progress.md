@@ -1,6 +1,6 @@
 # SkyRL Fireworks training backend: progress and validation
 
-Last updated: 2026-07-21 07:00 UTC
+Last updated: 2026-07-21 22:43 UTC
 
 This is the working record of the Fireworks Training API integration in SkyRL:
 what was implemented, why the boundaries look the way they do, what was tested
@@ -9,10 +9,10 @@ live, and what remains incomplete. The longer design rationale is in
 
 ## Current status
 
-The backend now runs policy-only GRPO through Fireworks serverless or dedicated
-training APIs and uses Fireworks-hosted rollout sampling. Dedicated access is
-enabled on this account; serverless training reached the service but returned
-HTTP 403, so the live work moved to dedicated B200 shapes.
+The backend now deliberately supports only the Fireworks dedicated Training
+API and dedicated hosted rollout deployments. An early serverless entitlement
+probe returned HTTP 403; its partially implemented path has since been removed
+to keep the validated backend small and unambiguous.
 
 The following paths are implemented:
 
@@ -75,9 +75,8 @@ sequence masking are not yet translated and are rejected at config validation.
 
 ### Full fine-tuning and LoRA
 
-`trainer.policy.model.lora.rank=0` means full-parameter training on dedicated
-Fireworks. A positive rank selects LoRA. Serverless is currently restricted to
-LoRA in this integration. All Qwen3-4B learning-curve runs described below used
+`trainer.policy.model.lora.rank=0` means full-parameter training. A positive
+rank selects LoRA. All Qwen3-4B learning-curve runs described below used
 full-parameter training unless explicitly labeled LoRA.
 
 ### Dedicated ASYNC weight transition
@@ -93,14 +92,11 @@ the swap and resumes on the same stream with its live KV state. New requests
 queue during the transition. SkyRL does not need to abort or recreate active
 requests, and it does not need multiple clients to keep old requests alive.
 
-The runtime's sampler lease is only a lifetime guard:
-
-- it counts active calls so final teardown cannot close the SDK sampler under
-  a live stream;
-- in serverless mode it also lets an old snapshot-qualified client drain after
-  an RCU pointer swap; and
-- in dedicated mode it does **not** pin a request to one policy or perform the
-  pause/resume—the Fireworks deployment performs the in-flight transition.
+The runtime has no sampler lease or client-generation abstraction. It keeps one
+sampler plus an integer active-call count, used only so final teardown cannot
+close the client under a live stream. It does **not** pin a request to one
+policy or perform pause/resume; the Fireworks deployment performs the in-flight
+transition.
 
 The SDK helper currently relies on Fireworks' documented ASYNC default; SkyRL
 does not yet explicitly set or verify the deployment transition field.
@@ -149,8 +145,8 @@ and the paid two-replica demonstration wrapper is
 
 The main additions are:
 
-- `skyrl/backends/fireworks/runtime.py`: service, trainer, snapshots, stable
-  dedicated sampler, serverless RCU leases, and teardown;
+- `skyrl/backends/fireworks/runtime.py`: dedicated service, trainer, snapshots,
+  one stable sampler, active-call teardown draining, and exact cleanup;
 - `skyrl/backends/fireworks/inference.py`: exact token-in/token-out sampling,
   and pause/resume admission;
 - `skyrl/backends/fireworks/grpo.py`: SkyRL batch to Fireworks datum conversion;
@@ -162,13 +158,32 @@ The main additions are:
 Secrets remain environment variables. `FIREWORKS_API_KEY` and `WANDB_API_KEY`
 are propagated without being serialized into SkyRL config.
 
+### Dedicated-only simplification (2026-07-21)
+
+The unvalidated serverless surface was removed: `FireworksConfig` no longer has
+an `infrastructure` switch, `FireworksRuntime.connect()` always provisions the
+managed trainer/deployment pair, the serverless launch script was deleted, and
+all dedicated launchers no longer pass a redundant mode flag. Snapshot
+publication now hot-loads one stable deployment and creates exactly one SDK
+sampler client. `_SamplerLease`, retired-client lists, RCU swapping, and the
+blocking sampling fallback were deleted; the pinned dedicated SDK must expose
+native `sample_async()`.
+
+The inference adapter also uses SkyRL's existing generic interface:
+`get_endpoint_url()` returns the Fireworks OpenAI base URL and `model_name`
+returns the deployment-qualified model. The Apex generator consumes these
+methods directly, so the Fireworks-specific `openai_api_base` and
+`inference_model` properties were removed. Focused validation after this
+refactor passed 33 Fireworks runtime, inference, config, entrypoint, and policy
+dispatch tests.
+
 ## Validation completed
 
 ### Unit and contract tests
 
 The Fireworks tests cover config capability gates, credential redaction, datum
-shape/alignment, runtime publication and cleanup, stable dedicated clients,
-serverless RCU retirement, native async sampling, trainer replica
+shape/alignment, runtime publication and cleanup, one stable dedicated client,
+native async sampling, an active request spanning a hot-load, trainer replica
 pass-through, and entrypoint selection.
 
 ### Live runs
@@ -392,6 +407,19 @@ and all local driver processes were healthy. At the first ten-minute boundary
 allocation. The new log contained no `generation_config`, trajectory-attempt,
 Modal-permission, or traceback errors. Monitoring is scheduled every 10 minutes
 until the first successful optimizer step, then hourly.
+
+The run passed the stability gate at 09:08 UTC when optimizer step 1 completed
+and sampler version 1 was published. At the 22:41 UTC hourly audit it remained
+healthy: the two-replica trainer was `JOB_STATE_RUNNING` with provider status
+`OK`, the 12-replica deployment was `READY`, and all driver processes were
+alive. It had completed 50 optimizer steps (51 published sampler versions
+including version 0), retained checkpoints through global step 45, and was 35
+of 99 tasks into the global-step-50 evaluation. Harbor had written 20,167
+completed trial results. There were 21 transient first-attempt failures—initial
+deployment-warmup 404s, occasional HTTP 502s, and Modal filesystem errors—but
+zero second-attempt failures; every one recovered through the existing retry.
+The active log contains no `generation_config` or Modal-permission regression.
+Monitoring is now on the requested hourly cadence.
 
 ## Known gaps
 

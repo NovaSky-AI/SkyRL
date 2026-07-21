@@ -126,9 +126,7 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
 
     assert len(training_client.saved_states) == 1
     assert training_client.saved_states[0].startswith("skyrl-step-7-")
-    manifest = json.loads(
-        (ckpt_dir / "fireworks_checkpoint.json").read_text()
-    )
+    manifest = json.loads((ckpt_dir / "fireworks_checkpoint.json").read_text())
     assert manifest["source_trainer_job_id"] == "source-trainer"
     assert manifest["includes_optimizer_state"] is True
 
@@ -147,13 +145,13 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
     ]
 
 
-def test_policy_dispatch_serverless_load_uses_provider_path(tmp_path) -> None:
+def test_policy_dispatch_load_falls_back_to_manifest_provider_path(tmp_path) -> None:
     training_client = _TrainingClient()
     runtime = SimpleNamespace(training_client=training_client, trainer_job_id=None)
     dispatch = FireworksPolicyDispatch(_cfg(), runtime)
     ckpt_dir = tmp_path / "global_step_2" / "policy"
     ckpt_dir.mkdir(parents=True)
-    provider_path = "tinker://serverless-run/weights/step-2"
+    provider_path = "tinker://prior-run/weights/step-2"
     (ckpt_dir / "fireworks_checkpoint.json").write_text(
         json.dumps(
             {

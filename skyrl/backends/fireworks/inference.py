@@ -21,11 +21,9 @@ class FireworksInferenceClient(InferenceEngineInterface):
         self,
         *,
         runtime: FireworksRuntime,
-        model_name: str,
         default_sampling_params: dict[str, Any],
     ):
         self.runtime = runtime
-        self._model_name = model_name
         self._default_sampling_params = dict(default_sampling_params)
         self._admission = threading.Event()
         self._admission.set()
@@ -36,23 +34,11 @@ class FireworksInferenceClient(InferenceEngineInterface):
 
     @property
     def model_name(self) -> str:
-        return self._model_name
+        return self.runtime.inference_endpoint.model
 
     @property
     def weight_version(self) -> int:
         return self.runtime.weight_version
-
-    @property
-    def openai_api_base(self) -> str:
-        """OpenAI-compatible API base of the managed rollout deployment."""
-
-        return self.runtime.inference_endpoint.api_base
-
-    @property
-    def inference_model(self) -> str:
-        """Deployment-qualified model name accepted by the native endpoint."""
-
-        return self.runtime.inference_endpoint.model
 
     @staticmethod
     def _tinker_sampling_params(values: dict[str, Any]):
@@ -161,9 +147,7 @@ class FireworksInferenceClient(InferenceEngineInterface):
         )
 
     def get_endpoint_url(self) -> str:
-        raise NotImplementedError(
-            "Fireworks hosted sampling currently exposes only token-in/token-out generation"
-        )
+        return self.runtime.inference_endpoint.api_base
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         del request_payload

@@ -1,16 +1,18 @@
 # Fireworks Training API backend for SkyRL
 
-Status: synchronous serverless/dedicated MVP and fully-async scheduler wiring implemented; dedicated ten-step GRPO live-validated  
-Initial scope: text-only, policy-only GRPO; LoRA or dedicated full-parameter training  
-Target order: serverless GSM8K sync -> dedicated GSM8K sync -> dedicated GSM8K fully async
+Status: dedicated synchronous and fully-async GRPO implemented and live-validated
 
-Serverless remains account-gated: on July 20, 2026, its one-step GSM8K smoke
-reached the API but received HTTP 403 before a training session or paid model
-operation was created. Dedicated access is enabled on this account. On July
-21, 2026, the bounded Qwen3-4B dedicated run provisioned a trainer and linked
-rollout deployment, completed one GRPO forward/backward plus optimizer step,
-hotloaded both the initial and updated sampler snapshots, and deleted both
-resources. See [Live dedicated validation](#live-dedicated-validation).
+Initial scope: text-only, policy-only GRPO; LoRA or full-parameter training
+
+Supported infrastructure: SDK-managed dedicated trainer plus linked deployment
+
+An early serverless probe received HTTP 403 before creating a session. That
+unvalidated implementation was subsequently removed in favor of a
+dedicated-only backend. On July 21, 2026, the bounded Qwen3-4B dedicated run
+provisioned a trainer and linked rollout deployment, completed one GRPO
+forward/backward plus optimizer step, hotloaded both the initial and updated
+sampler snapshots, and deleted both resources. See
+[Live dedicated validation](#live-dedicated-validation).
 
 ## Decision summary
 
@@ -86,7 +88,7 @@ TrainingBackend       InferenceEngineInterface
 FireworksTrainingBackend  FireworksInferenceClient
            \             /
              FireworksRuntime
-       service + trainer + sampler(s)
+        service + trainer + sampler
 ```
 
 This separation also permits a later mixed mode: local SkyRL training with a
@@ -107,16 +109,14 @@ trainer.algorithm.use_kl_in_reward = false
 trainer.critic.model.path = null
 trainer.update_epochs_per_batch = 1
 trainer.placement.colocate_all = false
-trainer.fireworks.infrastructure = serverless | dedicated
 trainer.policy.model.lora.rank >= 0
 trainer.resume_mode = null
 ```
 
-Dedicated mode additionally requires stable `trainer_job_id`, `deployment_id`,
-and `training_shape_id` values, one or more rollout replicas, and explicit
-cleanup-on-exit. A zero LoRA rank selects full-parameter training. Serverless
-requires neither resource ID and remains LoRA-only, so its rank must be
-positive.
+The backend requires stable `trainer_job_id`, `deployment_id`, and
+`training_shape_id` values, one or more trainer and rollout replicas, and
+explicit cleanup-on-exit. A zero LoRA rank selects full-parameter training; a
+positive rank selects LoRA.
 
 The reason for `update_epochs_per_batch=1` is that the rollout logprobs are the
 behavior-policy anchor. Multiple optimizer passes over the same samples are a
@@ -174,44 +174,6 @@ The converter must:
 Unit tests should cover unequal prompt/response lengths, a pad token that also
 appears in real text, masked multi-turn spans, a zero-variance group, and a
 round-trip shape comparison against SkyRL's existing Tinker conversion path.
-
-## Serverless lifecycle
-
-Serverless is a good first integration because Fireworks supplies a shared
-trainer and sampler pool. It is LoRA-only, currently private preview, and model
-availability is account-specific. The documentation's current example uses
-`accounts/fireworks/models/qwen3p6-27b`; it does not publish a stable global
-"smallest supported model" list.
-
-Therefore the SkyRL config should require both values rather than silently
-guessing them:
-
-```text
-trainer.fireworks.base_model
-trainer.policy.model.path
-```
-
-For a cheap GSM8K smoke test, prefer
-`accounts/fireworks/models/qwen3-1p7b` **only if it is enabled for serverless
-training on the account**. Otherwise use the model Fireworks has enabled and
-reported for the account. Do not fall back to a larger model without showing
-the resolved model and run shape to the operator.
-
-The runtime sequence is:
-
-1. create `FiretitanServiceClient` at
-   `https://api.fireworks.ai/training/v1/serverless`;
-2. call `create_lora_training_client(base_model, rank)`;
-3. before the first rollout, save an initial sampler snapshot;
-4. create a sampling client bound to that exact snapshot;
-5. after every optimizer step, save a uniquely named snapshot and atomically
-   install a new sampling client; and
-6. close retired samplers after their in-flight reference count reaches zero,
-   then close the service during trainer teardown.
-
-Serverless `sleep()` and `wake_up()` are no-ops. They are memory-management
-operations for colocated local GPUs and must not be overloaded to mean hosted
-resource creation or deletion.
 
 ## Live dedicated validation
 
@@ -325,13 +287,11 @@ deployment, and was independently audited with the trainer in
 
 ## Fully async semantics
 
-Fully async is possible on both Fireworks modes, but the weight-boundary
-semantics differ.
+Fully async uses the dedicated deployment's weight-transition semantics.
 
 | Backend | In-flight call at weight publication | New call after publication | Meaning of `pause_generation` |
 | --- | --- | --- | --- |
 | Local vLLM | Frozen, then resumed after local weight update | Uses new weights | Real scheduler pause |
-| Fireworks serverless | Provider-managed; verify the hosted deployment transition behavior for the account | Acquires the newly installed sampler client | Local admission gate plus provider-managed transition |
 | Fireworks dedicated, ASYNC hot-load | Pauses at the swap and resumes on the same HTTP stream with the new weights and existing active KV | Queues during the swap, then uses new weights | Provider-managed by hot-load |
 | Fireworks dedicated, SYNC hot-load | Finishes on old weights before the swap | May receive HTTP 425 and retry | Drain semantics |
 
@@ -348,33 +308,16 @@ claim to have explicitly changed the provider setting. The earlier live GSM8K
 test validated sequential hotloads; the fully-async run is the first live test
 with generation and hot-loads overlapping.
 
-For serverless, use a read-copy-update sampler pointer:
-
-```text
-generate(): acquire current sampler/version -> sample -> release
-publish():  save snapshot -> build new sampler -> atomic pointer swap
-retire():   close old sampler when its active count becomes zero
-```
-
-This overlaps rollout and training safely, but it does not splice new weights
-into an active generation. SkyRL's existing fully-async staleness gate remains
-the admission bound: a rollout group records the SkyRL training step at
-submission, while the generator's cache salt reads the sampler version. New
-groups stop being admitted when the configured head budget is full.
-As in the Fireworks cookbook, this is a submission/accounting guarantee, not a
-proof that every slow completion finishes within the bound.
-
 For dedicated ASYNC hot-load, Fireworks already performs the behavior SkyRL
 wants from `pause_generation`: active streams pause for the actual weight swap
 and resume without client-side abort/retry. SkyRL should not issue a separate
 pause request. Aborting an agent turn is the wrong default because retrying can
 duplicate tool effects and loses the active HTTP/KV state. SkyRL's local
-dedicated runtime retains one stable sampling client across every hot-load; it
-does not need one client or lease generation per checkpoint. The lease merely
-prevents final teardown from closing that shared client with a live stream. It
-neither pins a stream to one weight version nor performs the provider's
-pause/resume operation. Serverless still uses an RCU lease because its sampling
-route is snapshot-qualified and the SDK returns a new client per snapshot.
+dedicated runtime retains one stable sampling client across every hot-load.
+There is no lease or client generation per checkpoint. A simple active-call
+counter prevents final teardown from closing that shared client with a live
+stream; it neither pins a stream to one weight version nor performs the
+provider's pause/resume operation.
 
 Dedicated streaming responses can report `model@snapshot_identity` per chunk.
 The adapter should record the observed snapshot identity for every generated
@@ -384,9 +327,9 @@ rather than being mislabeled as a single policy version.
 ## Inference adapter
 
 The current `FireworksInferenceClient` implements SkyRL's token-in/token-out
-contract over the sampling client returned by either hosted runtime. In
-dedicated mode, the SDK prepares the linked deployment by hotloading the saved
-snapshot before returning that client. The adapter:
+contract over the dedicated deployment's stable sampling client. The SDK
+prepares the linked deployment by hotloading the saved snapshot before
+returning that client. The adapter:
 
 - uses the SDK's native async streaming coroutine rather than occupying one
   Python executor thread for every active rollout request;
@@ -434,7 +377,6 @@ Add a provider-specific config rather than reusing local placement fields:
 ```python
 @dataclass
 class FireworksConfig(BaseConfig):
-    infrastructure: Literal["serverless", "dedicated"] = "serverless"
     base_url: str = "https://api.fireworks.ai"
     base_model: str | None = None
     max_seq_len: int | None = None
@@ -480,14 +422,10 @@ SkyRL needs to store two different kinds of state:
   state, sampler version, and W&B metadata.
 
 A local checkpoint manifest should contain the provider checkpoint reference,
-base model, tokenizer, infrastructure mode, and sampler snapshot identity. It
-must never contain credentials.
-
-Serverless cross-run resume is not currently supported, so Phase 1 requires
-`resume_mode=null`. Same-run snapshots are still used for sampling. Dedicated
-support should use Fireworks DCP for weights+optimizer and SkyRL's local
-manifest for orchestration state; restore is complete only after both sides
-have loaded.
+base model, tokenizer, source trainer ID, and sampler snapshot identity. It
+must never contain credentials. Fireworks DCP stores weights and optimizer
+state while SkyRL's local manifest stores orchestration state; restore is
+complete only after both sides have loaded.
 
 ## Implementation plan
 
@@ -500,57 +438,57 @@ have loaded.
 - Add config capability validation and secret-redaction tests.
 - Add a fake Fireworks service/training/sampler test double. No network calls.
 
-### Milestone 1: synchronous serverless GSM8K (implementation complete; paid smoke entitlement-blocked)
+### Milestone 1: synchronous dedicated GSM8K (complete)
 
 - Implement `FireworksRuntime`, `FireworksTrainingBackend`, and
   `FireworksInferenceClient`.
-- Wire policy-only GRPO with `rollout_is`, KL disabled, LoRA, and one update
-  per batch.
-- Add `examples/train/gsm8k/run_gsm8k_fireworks_serverless.sh` with a one-step
-  smoke-test mode.
+- Wire policy-only GRPO with `rollout_is`, KL disabled, LoRA or full parameter,
+  and one update per batch.
+- Add a dedicated GSM8K wrapper with explicit auditable trainer/deployment IDs
+  and exact cleanup.
 - Compare datum contents and GRPO advantages against native SkyRL on a fixed
   synthetic rollout before making a paid call.
 
-### Milestone 2: fully async serverless GSM8K (scheduler/runtime wiring complete; paid smoke pending)
+### Milestone 2: fully async dedicated GSM8K (complete)
 
-- Add the reference-counted sampler pointer and version metadata.
+- Reuse one stable dedicated sampler and track only active calls for teardown.
 - Reuse SkyRL's `FullyAsyncRayPPOTrainer` admission/staleness manager.
 - Select that scheduler in the direct Fireworks entrypoint when
   `trainer.fully_async.enabled=true`; despite its legacy class name, the
   configured algorithm remains policy-only GRPO.
-- Test delayed old-sampler completions, pointer swaps, cleanup, and restart
-  failure behavior with fakes.
+- Test an active completion spanning a hot-load, cleanup, and failure behavior
+  with fakes.
 - Run `max_staleness_steps=0`, then 1, then a small bounded value.
 
-### Milestone 3: dedicated Fireworks (synchronous MVP and cleanup live-validated)
+### Milestone 3: checkpoint/resume and scaling (complete)
 
 - SDK-managed trainer/deployment provisioning, LoRA snapshot hot-load, stable
   resource IDs, timeouts, delete/scale-to-zero selection, and exact-ID fallback
   cleanup are implemented.
 - The one-step Qwen3-4B GSM8K acceptance run and both snapshot publications
   passed; see the live-validation record above.
-- DCP resume, an explicit provider-resource manifest for intentional reattach,
-  streamed snapshot identities, and a long request crossing a hot-load remain.
+- DCP save/resume and independent trainer/rollout replica scaling are
+  live-validated. Streamed per-token snapshot identities remain.
 - ASYNC versus SYNC is a provider deployment-template setting; resolve it with
   Fireworks rather than defaulting it in SkyRL configuration.
 
-### Milestone 4: Harbor/TITO
+### Milestone 4: Harbor/TITO (active validation)
 
-- Deferred after the CodeContests experiment showed that the current Qwen
-  reasoning/chat history was not prefix-mergeable.
-- The experimental local proxy and Harbor-specific Fireworks code were removed.
-- If revisited, start from Fireworks' native HTTP endpoint and validate exact
-  per-turn token IDs before adding a new SkyRL integration.
+- Harbor calls the dedicated deployment's native `/completions` endpoint with
+  token-in/token-out state; there is no local OpenAI proxy.
+- Fireworks session-affinity headers keep tool turns on one rollout replica.
+- The Apex integration uses `get_endpoint_url()` and the interface's
+  deployment-qualified `model_name` rather than Fireworks-specific accessors.
+- The 9B Apex run is being monitored through its first optimizer step.
 
 ## Acceptance gates
 
-Before the first paid serverless run:
+For every paid dedicated run:
 
 - all unit tests use fakes and pass locally;
-- the resolved account-enabled base model, tokenizer, LoRA rank, max sequence
-  length, number of prompt groups, completions per prompt, token caps, and
-  estimated paid operations are printed for explicit confirmation;
-- the run is capped at one optimizer step with minimal sampling tokens;
+- the resolved base model, tokenizer, training shape, trainer/rollout replica
+  counts, sequence length, and auditable resource IDs are printed before
+  provisioning;
 - W&B uses a new run name and no secret fields; and
 - every opened sampler/service has a tested `finally` cleanup path.
 
@@ -566,7 +504,6 @@ Before Harbor:
 ## References
 
 - [Fireworks Training API introduction](https://docs.fireworks.ai/fine-tuning/training-api/introduction)
-- [Serverless training](https://docs.fireworks.ai/fine-tuning/training-api/serverless)
 - [Dedicated training](https://docs.fireworks.ai/fine-tuning/training-api/dedicated)
 - [Training and sampling](https://docs.fireworks.ai/fine-tuning/training-api/training-and-sampling)
 - [Loss functions](https://docs.fireworks.ai/fine-tuning/training-api/loss-functions)
@@ -575,7 +512,6 @@ Before Harbor:
 - [Inference and policy versions for RL rollouts](https://docs.fireworks.ai/guides/rollout-inference)
 - [Checkpoint-swap behavior](https://docs.fireworks.ai/fine-tuning/rl-rollout-debugging)
 - [Dedicated GPU pricing](https://fireworks.ai/pricing)
-- `other_frameworks/fw_cookbook/training/examples/serverless_rl/countdown_rl.py`
 - `other_frameworks/fw_cookbook/training/recipes/async_rl_loop.py`
 - `other_frameworks/rllm/rllm/trainer/fireworks/fireworks_backend.py`
 - `other_frameworks/rllm/rllm/trainer/fireworks/fireworks_trainer.py`
