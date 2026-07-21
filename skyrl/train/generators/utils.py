@@ -489,10 +489,11 @@ def get_rollout_metrics(
         _add_time_stats(rollout_metrics, name, times)
 
     if trajectory_completion_times and trajectory_time_splits:
-        overhead = np.array(trajectory_completion_times, dtype=np.float64)
+        # Completion time not attributed to a named split, e.g. tokenization and chat templating.
+        other = np.array(trajectory_completion_times, dtype=np.float64)
         for times in trajectory_time_splits.values():
-            overhead = overhead - np.array(times, dtype=np.float64)
-        _add_time_stats(rollout_metrics, "overhead", overhead.tolist())
+            other = other - np.array(times, dtype=np.float64)
+        _add_time_stats(rollout_metrics, "other", other.tolist())
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)

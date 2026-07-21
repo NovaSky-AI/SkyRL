@@ -106,9 +106,9 @@ def test_time_split_rollout_metrics():
     assert metrics["generate/trajectory_llm_time_p90"] == pytest.approx(np.percentile([4.0, 8.0, 12.0, 16.0], 90))
     assert metrics["generate/trajectory_llm_time_max"] == 16.0
     assert metrics["generate/trajectory_env_time_mean"] == 12.5
-    # Overhead is the exact per-trajectory remainder, here [1.0, 2.0, 3.0, 4.0].
-    assert metrics["generate/trajectory_overhead_time_mean"] == pytest.approx(2.5)
-    assert metrics["generate/trajectory_overhead_time_max"] == pytest.approx(4.0)
+    # "other" is the exact per-trajectory remainder, here [1.0, 2.0, 3.0, 4.0].
+    assert metrics["generate/trajectory_other_time_mean"] == pytest.approx(2.5)
+    assert metrics["generate/trajectory_other_time_max"] == pytest.approx(4.0)
 
 
 def test_time_splits_concatenation():
@@ -134,7 +134,7 @@ def test_time_splits_concatenation():
     assert concat_metrics["generate/trajectory_llm_time_p90"] == pytest.approx(
         np.percentile([4.0, 8.0, 12.0, 16.0], 90)
     )
-    assert concat_metrics["generate/trajectory_overhead_time_mean"] == pytest.approx(2.5)
+    assert concat_metrics["generate/trajectory_other_time_mean"] == pytest.approx(2.5)
 
 
 def test_time_splits_concatenation_partial_is_none():

@@ -56,6 +56,8 @@ class TrajectoryOutput:
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
+    # Wall-clock seconds keyed by phase, e.g. {"llm": <inference-engine calls>, "env": <env.step>}.
+    # None if the agent loop did not record a split.
     time_splits: Optional[Dict[str, float]] = None
 
 
@@ -67,6 +69,8 @@ class StepWiseOutput:
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
+    # Wall-clock seconds keyed by phase, e.g. {"llm": <inference-engine calls>, "env": <env.step>}.
+    # None if the agent loop did not record a split.
     time_splits: Optional[Dict[str, float]] = None
 
 
