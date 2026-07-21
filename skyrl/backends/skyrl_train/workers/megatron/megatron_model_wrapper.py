@@ -180,7 +180,6 @@ class MegatronModelWrapper:
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
         is_vlm: bool = False,
-        cpu_resident_microbatches: bool = False,
     ):
         self.cfg = config
         self.actor_module = actor_module
@@ -188,7 +187,6 @@ class MegatronModelWrapper:
         self.policy_loss_fn = policy_loss_fn
         self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
         self.is_vlm = is_vlm
-        self.cpu_resident_microbatches = cpu_resident_microbatches
         # Fuse the LM-head projection into the chunked log-prob/entropy via the
         # GPTModel output_processor hook (avoids materializing the full
         # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
@@ -345,8 +343,9 @@ class MegatronModelWrapper:
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
-            if self.cpu_resident_microbatches:
-                batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
+            # Microbatches are held on CPU and transferred just before their forward
+            # step to cap resident input memory (no-op if already on device).
+            batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
@@ -919,8 +918,9 @@ class MegatronModelWrapper:
             # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
             # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
             batch = next(batch_iter)
-            if self.cpu_resident_microbatches:
-                batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
+            # Microbatches are held on CPU and transferred just before their forward
+            # step to cap resident input memory (no-op if already on device).
+            batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))

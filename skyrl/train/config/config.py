@@ -372,8 +372,6 @@ class MegatronConfig(BaseConfig):
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
     empty_cuda_cache: Optional[bool] = True
-    cpu_resident_microbatches: bool = False
-    """Keep policy batches on CPU and transfer each microbatch before its forward step."""
     model_config_kwargs: dict = field(default_factory=dict)
     dist_ckpt_optim_fully_reshardable: bool = False
     freeze_moe_router: bool = False

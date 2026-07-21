@@ -129,11 +129,6 @@ def test_cli_overrides_empty_args():
     assert cfg.trainer.seed == 42
 
 
-def test_cli_overrides_cpu_resident_megatron_microbatches():
-    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.policy.megatron_config.cpu_resident_microbatches=true"])
-    assert cfg.trainer.policy.megatron_config.cpu_resident_microbatches is True
-
-
 @pytest.mark.parametrize(
     ("field_name", "value"),
     [

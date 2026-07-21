@@ -650,8 +650,6 @@ class MegatronWorker:
             micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
 
         for micro in micro_batches:
-            if not self.model.cpu_resident_microbatches:
-                micro.to(torch.cuda.current_device())
             attention_mask = micro["attention_mask"]
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
@@ -978,7 +976,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
             is_vlm=self.is_vlm,
-            cpu_resident_microbatches=self.cfg.policy.megatron_config.cpu_resident_microbatches,
         )
 
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
@@ -1020,8 +1017,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         all_loss_fn_outputs: List[Dict[str, Any]] = []
 
         self._drop_pixel_values_on_non_first_pp_stage(data)
-        if not self.cfg.policy.megatron_config.cpu_resident_microbatches:
-            data.to(torch.cuda.current_device())
 
         # Build micro-batch dicts expected by forward_backward_mini_batch
         micro_buffer = []
@@ -1130,8 +1125,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         all_metrics = defaultdict(list)
 
         self._drop_pixel_values_on_non_first_pp_stage(data)
-        if not self.cfg.policy.megatron_config.cpu_resident_microbatches:
-            data.to(torch.cuda.current_device())
 
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
