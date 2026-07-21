@@ -21,6 +21,7 @@
 # limitations under the License.
 
 import gc
+import re
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -169,6 +170,7 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
 
 def _convert_moe_experts_lora_to_vllm(
     adapter_state: Dict[str, "torch.Tensor"],
+    num_moe_experts: Optional[int] = None,
 ) -> Dict[str, "torch.Tensor"]:
     """Rewrite fused-MoE expert LoRA tensors into the layout vLLM expects.
 
@@ -179,12 +181,24 @@ def _convert_moe_experts_lora_to_vllm(
     the flat PEFT layout keyed ``...experts.base_layer`` (w13) / ``...experts``
     (w2), with ``lora_A=(rank*E, in)`` and ``lora_B=(out, rank*E)``. This is the
     exact inverse of vLLM's per-expert reshape. Non-expert tensors pass through.
+
+    Shared-outer grouped-expert LoRA (``experts_shared_outer_loras=True``) exports
+    the shared side (gate_up lora_A / down lora_B) as a ``(1, ...)`` tensor under
+    an expert-agnostic name. vLLM has no shared-expert LoRA contract, so the
+    shared side is expanded to all ``num_moe_experts`` experts (mathematically
+    identical since every expert applies the same matrix): for packed-HF models
+    it joins the flat-layout rewrite above; for per-expert-HF models (keys like
+    ``...experts.<idx>.gate_proj``) it is replicated into per-expert indexed keys.
     """
+    uses_indexed_expert_keys = any(re.search(r"\.mlp\.experts\.\d+\.", key) for key in adapter_state)
+
     converted: Dict[str, "torch.Tensor"] = {}
     for key, tensor in adapter_state.items():
         is_gate_up = ".mlp.experts.gate_up_proj." in key
         is_down = ".mlp.experts.down_proj." in key
-        if (is_gate_up or is_down) and tensor.ndim == 3:
+        if (is_gate_up or is_down) and tensor.ndim == 3 and not uses_indexed_expert_keys:
+            if num_moe_experts is not None and tensor.shape[0] == 1 and num_moe_experts > 1:
+                tensor = tensor.expand(num_moe_experts, -1, -1)
             if key.endswith(".lora_A.weight"):
                 # (E, rank, in) -> (rank*E [expert-major], in)
                 tensor = tensor.reshape(-1, tensor.shape[-1]).contiguous()
@@ -195,8 +209,60 @@ def _convert_moe_experts_lora_to_vllm(
                 key = key.replace(".mlp.experts.gate_up_proj.", ".mlp.experts.base_layer.")
             else:
                 key = key.replace(".mlp.experts.down_proj.", ".mlp.experts.")
+            converted[key] = tensor
+            continue
+
+        shared_match = (
+            re.search(r"\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.(lora_[AB])\.weight$", key)
+            if uses_indexed_expert_keys
+            else None
+        )
+        if shared_match is not None and tensor.ndim == 3 and tensor.shape[0] == 1 and num_moe_experts is not None:
+            # Per-expert-HF model: replicate the shared side into the indexed
+            # per-expert keys vLLM's PEFT loader parses.
+            insert_pos = key.rindex(".mlp.experts.") + len(".mlp.experts.")
+            for expert_idx in range(num_moe_experts):
+                converted[f"{key[:insert_pos]}{expert_idx}.{key[insert_pos:]}"] = tensor[0].clone()
+            continue
+
         converted[key] = tensor
     return converted
+
+
+def patch_packed_per_expert_sharded_state_dict():
+    """Fix Megatron-Bridge's ``PackedPerExpertLinear.sharded_state_dict``.
+
+    The pinned bridge rev builds the packed per-expert LoRA weight's sharded
+    tensor without the required ``pg_collection`` kwarg, so dist-checkpoint
+    saving with ``experts_shared_outer_loras=True`` raises ``TypeError``. This
+    supplies the same MPU-backed collection the other grouped-expert adapters
+    resolve via ``_get_pg_collection``.
+    """
+    try:
+        from megatron.bridge.peft import utils as bridge_peft_utils
+        from megatron.core.process_groups_config import ProcessGroupCollection
+    except ImportError:
+        return
+
+    cls = getattr(bridge_peft_utils, "PackedPerExpertLinear", None)
+    if cls is None or getattr(cls, "_skyrl_sharded_state_dict_patched", False):
+        return
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        key = f"{prefix}weight"
+        pg_collection = ProcessGroupCollection.use_mpu_process_groups(required_pgs=["ep", "expt_tp", "expt_dp"])
+        return {
+            key: bridge_peft_utils._make_grouped_expert_sharded_tensor(
+                self.weight.data,
+                key,
+                tp_axis=None,
+                sharded_offsets=sharded_offsets,
+                pg_collection=pg_collection,
+            )
+        }
+
+    cls.sharded_state_dict = sharded_state_dict
+    cls._skyrl_sharded_state_dict_patched = True
 
 
 @torch.no_grad()
