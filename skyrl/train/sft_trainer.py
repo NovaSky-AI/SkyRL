@@ -1227,25 +1227,17 @@ class SFTTrainer:
 
             shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
 
-    def _load_from_pretokenized(self, path: str) -> list:
-        """Load a pretokenized dataset from a local file or directory.
-
-        The pretokenized counterpart of :meth:`_load_and_tokenize` (same
-        ``list[dict]`` return shape): rows already carry ``input_ids`` and a
-        full-sequence ``loss_mask`` and are only validated/truncated.
-        """
-        return load_from_pretokenized(path, max_length=self.sft_cfg.max_length)
-
     def load_dataset(self) -> tuple[list, list[int]]:
         """Load the training dataset(s): pretokenized stores or tokenize-on-load.
 
         When ``pretokenized_dataset_paths`` is set, each store is loaded through
-        :meth:`_load_from_pretokenized` and concatenated in config order (no
-        online tokenization). Otherwise each ``(name, split)`` pair from
-        ``train_datasets``/``train_dataset_splits`` is tokenized independently
-        through :meth:`_load_and_tokenize` (preserving per-dataset cache keys),
-        then concatenated in config order. Either way, multiple sources are
-        mixed per ``train_dataset_weights``.
+        :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized` (same
+        ``list[dict]`` shape as :meth:`_load_and_tokenize`, no online
+        tokenization) and concatenated in config order. Otherwise each
+        ``(name, split)`` pair from ``train_datasets``/``train_dataset_splits``
+        is tokenized independently through :meth:`_load_and_tokenize`
+        (preserving per-dataset cache keys), then concatenated in config order.
+        Either way, multiple sources are mixed per ``train_dataset_weights``.
 
         Returns:
             ``(tokenized, dataset_lengths)`` where ``dataset_lengths`` holds the
@@ -1257,7 +1249,7 @@ class SFTTrainer:
         if self.sft_cfg.pretokenized_dataset_paths:
             for path in self.sft_cfg.pretokenized_dataset_paths:
                 # The loader raises on 0 usable rows, so no empty-source check.
-                source = self._load_from_pretokenized(path)
+                source = load_from_pretokenized(path, max_length=self.sft_cfg.max_length)
                 tokenized.extend(source)
                 dataset_lengths.append(len(source))
             if len(dataset_lengths) > 1:
@@ -1283,9 +1275,10 @@ class SFTTrainer:
         """Load and tokenize the eval dataset(s), or return ``None`` if not configured.
 
         When ``eval_pretokenized_dataset_paths`` is set, each store is loaded
-        through :meth:`_load_from_pretokenized` and named by the corresponding
-        entry of ``eval_dataset_names`` (filled from the path basenames by
-        config normalization when not set explicitly).
+        through :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized`
+        and named by the corresponding entry of ``eval_dataset_names`` (filled
+        from the path basenames by config normalization when not set
+        explicitly).
 
         Returns:
             One ``(name, tokenized)`` pair per eval source, where ``name``
@@ -1293,7 +1286,7 @@ class SFTTrainer:
         """
         if self.sft_cfg.eval_pretokenized_dataset_paths:
             return [
-                (name, self._load_from_pretokenized(path))
+                (name, load_from_pretokenized(path, max_length=self.sft_cfg.max_length))
                 for name, path in zip(self.sft_cfg.eval_dataset_names, self.sft_cfg.eval_pretokenized_dataset_paths)
             ]
         if not self.sft_cfg.eval_datasets:
