@@ -165,6 +165,12 @@ def _normalize_row(row: dict, row_idx: int, max_length: Optional[int]) -> Option
             "unpadded (padding is applied at collation time)."
         )
 
+    # TODO (sft): support consuming the full-sequence loss_mask in the workers
+    # directly instead of converting to the trailing action-window form
+    # (num_actions + window mask). The window representation is an RL legacy
+    # (prompt + trailing response); for SFT a position-aligned full-sequence
+    # mask is the more natural interface and would make this inference,
+    # the window slicing, and the collator's window padding unnecessary.
     loss_mask = _validate_loss_mask(row, row_idx, seq_len)
     first = next((i for i, v in enumerate(loss_mask) if v != 0), None)
     if first is None:
