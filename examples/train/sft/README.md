@@ -28,13 +28,18 @@ path's basename).
 Each row must contain:
 
 - `input_ids` — unpadded token ids for the full sequence (SkyRL pads at collation time);
-- `loss_mask` — full-sequence 0/1 mask, same length as `input_ids`: 1 on tokens to compute loss on. This covers
-  instruction-following data (1s on the response) and multi-turn conversational data (1s on every assistant
-  turn, 0s in between);
+- `loss_mask` — full-sequence 0/1 mask, same length as `input_ids`: 1 on tokens to compute loss on;
 - for VLM data: `pixel_values` and `image_grid_thw` (Qwen-style image tensors, stored as nested lists).
 
-`num_actions` is inferred from the first nonzero `loss_mask` entry — don't store it. HF-style `labels`
-(`-100` = ignored) are not accepted; convert offline via `loss_mask[i] = 0 if labels[i] == -100 else 1`.
+```python
+# Instruction-following: 3 prompt tokens, loss on the 2 response tokens.
+{"input_ids": [5091, 374, 220, 8949, 13], "loss_mask": [0, 0, 0, 1, 1]}
+
+# Multi-turn: loss on every assistant turn; 0s on the user turn between them.
+{"input_ids": [5091, 374, 8949, 220, 748], "loss_mask": [0, 1, 1, 0, 1]}
+```
+
+`num_actions` is inferred from the first nonzero `loss_mask` entry — don't store it.
 Rows are normalized to the trainer's internal format; `max_length` truncation still applies (rows whose loss
 window is fully truncated are dropped, and over-length VLM rows are always dropped rather than truncated).
 `pretokenized_dataset_paths` cannot be combined with `train_datasets` (nor `eval_pretokenized_dataset_paths`
