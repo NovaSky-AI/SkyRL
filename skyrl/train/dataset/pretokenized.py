@@ -49,6 +49,9 @@ _JSON_EXTS = (".jsonl", ".json")
 _ARROW_EXTS = (".arrow",)
 _DATA_EXTS = _PARQUET_EXTS + _JSON_EXTS + _ARROW_EXTS
 
+# Warn once per SFT run (process) when stores carry an attention_mask column
+_warned_attention_mask_dropped = False
+
 
 # ---------------------------------------------------------------------------
 # Format detection / loading
@@ -241,6 +244,14 @@ def load_from_pretokenized(
 
     dataset = _load_as_hf_dataset(path)
     logger.info(f"Loaded pretokenized dataset from '{path}': {len(dataset)} rows, columns={dataset.column_names}")
+
+    global _warned_attention_mask_dropped
+    if "attention_mask" in dataset.column_names and not _warned_attention_mask_dropped:
+        _warned_attention_mask_dropped = True
+        logger.warning(
+            "Pretokenized dataset carries an 'attention_mask' column; its values are dropped and "
+            "regenerated as all-ones (rows must be stored unpadded; padding is applied at collation time)."
+        )
 
     normalized: list[dict] = []
     num_dropped = 0
