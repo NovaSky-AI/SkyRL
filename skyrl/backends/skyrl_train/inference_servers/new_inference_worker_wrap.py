@@ -188,21 +188,23 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
     # requests with their KV restored to the same virtual addresses -- no abort,
     # no prefill recompute. Mirrors GPUWorker.sleep/wake_up; re-verify on vLLM bumps.
 
-    def skyrl_sleep_preserve_kv(self) -> None:
-        """Offload the KV cache to CPU, discard the weights, and free all GPU memory.
+    def skyrl_sleep_for_weight_sync(self, offload_kv: bool = True) -> None:
+        """Free GPU memory for weight sync by sleeping the allocator.
 
         Weights are discarded rather than backed up since the broadcast overwrites
-        every parameter on wake. Model buffers live in the weights pool but are not
-        sent by the broadcast (e.g. non-persistent rotary ``inv_freq``), so save them
-        here and restore on wake -- as GPUWorker.sleep(level=2) does.
+        every parameter on wake. ``offload_kv`` controls whether the KV cache is
+        offloaded to CPU (preserved for frozen in-flight requests) or discarded. Model
+        buffers live in the weights pool but are not sent by the broadcast (e.g.
+        non-persistent rotary ``inv_freq``), so save them here and restore on wake --
+        as GPUWorker.sleep(level=2) does.
         """
         from vllm.device_allocator import get_mem_allocator_instance
 
         model = self.model_runner.model
         self._skyrl_saved_buffers = {name: buf.cpu().clone() for name, buf in model.named_buffers()}
-        get_mem_allocator_instance().sleep(offload_tags=("kv_cache",))
+        get_mem_allocator_instance().sleep(offload_tags=("kv_cache",) if offload_kv else ())
 
-    def skyrl_wake_preserved(self, tags: list) -> None:
+    def skyrl_wake_for_weight_sync(self, tags: list) -> None:
         """Wake the given allocator tags, restoring CPU-backed contents.
 
         Call ``["weights"]`` before the broadcast and ``["kv_cache"]`` after. Does

@@ -340,39 +340,29 @@ def test_offload_kv_for_weight_sync_rejects_colocated():
 def test_offload_kv_for_weight_sync_rejects_lora():
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = False
-    cfg.trainer.fully_async.enabled = True
     cfg.generator.inference_engine.offload_kv_for_weight_sync = True
     cfg.trainer.policy.model.lora.rank = 8
     with pytest.raises(AssertionError, match="does not support LoRA"):
         validate_inference_engine_cfg(cfg)
 
 
-def test_offload_kv_for_weight_sync_requires_fully_async():
+def test_offload_kv_for_weight_sync_sync_trainer_ok():
+    # Non-fully-async (synchronous trainer) is supported: plain sleep, no in-flight.
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = False
-    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
     cfg.trainer.fully_async.enabled = False
-    with pytest.raises(AssertionError, match="only helps the fully-async trainer"):
-        validate_inference_engine_cfg(cfg)
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    validate_inference_engine_cfg(cfg)
 
 
-def test_offload_kv_for_weight_sync_rejects_clear_kv_cache():
+@pytest.mark.parametrize("clear_kv_cache", [False, True])
+def test_offload_kv_for_weight_sync_async_ok(clear_kv_cache):
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = False
     cfg.generator.inference_engine.offload_kv_for_weight_sync = True
     cfg.trainer.fully_async.enabled = True
-    cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = True
-    with pytest.raises(AssertionError, match="incompatible with"):
-        validate_inference_engine_cfg(cfg)
-
-
-def test_offload_kv_for_weight_sync_async_ok():
-    cfg = SkyRLTrainConfig()
-    cfg.trainer.placement.colocate_all = False
-    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
-    cfg.trainer.fully_async.enabled = True
-    cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = False
-    # Should not raise.
+    cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = clear_kv_cache
+    # Both clear_kv_cache settings are supported now.
     validate_inference_engine_cfg(cfg)
 
 

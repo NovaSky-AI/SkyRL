@@ -1062,28 +1062,30 @@ class RemoteInferenceClient(InferenceEngineInterface):
         params = {"tags": tags} if tags else {}
         return await self._call_all_servers("/wake_up", params=params)
 
-    async def sleep_preserving_inflight(self) -> Dict[str, Any]:
+    async def sleep_for_weight_sync(self, offload_kv: bool = True) -> Dict[str, Any]:
         """Free GPU memory for weight sync while keeping in-flight requests frozen.
 
-        Offloads the KV cache to CPU via ``/collective_rpc`` without touching the
-        scheduler (unlike :meth:`sleep`, which preempts running requests and clears
-        the prefix cache). Pair with :meth:`wake_up_preserved`; the caller must
-        KEEP-pause before and ``resume`` after.
+        Sleeps the allocator via ``/collective_rpc`` without touching the scheduler
+        (unlike :meth:`sleep`, which preempts running requests and clears the prefix
+        cache). ``offload_kv`` offloads the KV cache to CPU so frozen requests resume
+        from it; set False to discard it (e.g. when the sync will reset it anyway).
+        Pair with :meth:`wake_for_weight_sync`; the caller must KEEP-pause before and
+        ``resume`` after.
         """
         return await self._call_all_servers(
             "/collective_rpc",
-            {"method": "skyrl_sleep_preserve_kv"},
+            {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": offload_kv}},
         )
 
-    async def wake_up_preserved(self, tags: List[str]) -> Dict[str, Any]:
-        """Restore allocator pools by tag (see :meth:`sleep_preserving_inflight`).
+    async def wake_for_weight_sync(self, tags: List[str]) -> Dict[str, Any]:
+        """Restore allocator pools by tag (see :meth:`sleep_for_weight_sync`).
 
         Wake ``["weights"]`` before the broadcast and ``["kv_cache"]`` after. Does
         not resume generation -- call :meth:`resume_generation` once KV is back.
         """
         return await self._call_all_servers(
             "/collective_rpc",
-            {"method": "skyrl_wake_preserved", "kwargs": {"tags": tags}},
+            {"method": "skyrl_wake_for_weight_sync", "kwargs": {"tags": tags}},
         )
 
     async def reset_prefix_cache(

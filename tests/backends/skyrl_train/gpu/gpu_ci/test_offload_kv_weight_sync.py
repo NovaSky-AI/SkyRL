@@ -96,8 +96,8 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
     While a long sample is mid-generation we run a real training step and
     ``save_weights_for_sampler()`` (which takes the ``offload_kv_for_weight_sync``
     branch). The in-flight request must finish with a non-abort stop reason and a
-    non-empty token stream, and the offload path (``sleep_preserving_inflight`` +
-    ``wake_up_preserved(["kv_cache"])``) must actually have been exercised.
+    non-empty token stream, and the offload path (``sleep_for_weight_sync`` +
+    ``wake_for_weight_sync(["kv_cache"])``) must actually have been exercised.
     """
     # ignore_eos isn't in the default Tinker->vLLM forwarding map; widen it.
     monkeypatch.setitem(_ric._TINKER_SAMPLE_TO_VLLM_PARAM_MAP, "ignore_eos", "ignore_eos")
@@ -134,8 +134,8 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
         # Spy on the offload primitives to prove the path actually ran.
         sleep_calls: List[tuple] = []
         wake_tags: List[list] = []
-        orig_sleep = client.sleep_preserving_inflight
-        orig_wake = client.wake_up_preserved
+        orig_sleep = client.sleep_for_weight_sync
+        orig_wake = client.wake_for_weight_sync
 
         async def spy_sleep(*args, **kwargs):
             sleep_calls.append((args, kwargs))
@@ -145,8 +145,8 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
             wake_tags.append(kwargs.get("tags", args[0] if args else None))
             return await orig_wake(*args, **kwargs)
 
-        monkeypatch.setattr(client, "sleep_preserving_inflight", spy_sleep)
-        monkeypatch.setattr(client, "wake_up_preserved", spy_wake)
+        monkeypatch.setattr(client, "sleep_for_weight_sync", spy_sleep)
+        monkeypatch.setattr(client, "wake_for_weight_sync", spy_wake)
 
         # Launch a long in-flight sample and let it start emitting tokens.
         task = asyncio.create_task(_sample_via(client, _sample_payload(prompt_token_ids, MODEL, max_tokens=1024)))
@@ -173,7 +173,7 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
         assert len(seq["tokens"]) > 0, "in-flight sample produced no tokens after the sync"
 
         # Confirm the KV-offloading path was actually exercised.
-        assert sleep_calls, "sleep_preserving_inflight was never called — offload_kv path not taken"
+        assert sleep_calls, "sleep_for_weight_sync was never called — offload_kv path not taken"
         assert any(tags and "weights" in tags for tags in wake_tags), "weights were never woken for the broadcast"
         assert any(tags and "kv_cache" in tags for tags in wake_tags), "KV cache was never restored"
 

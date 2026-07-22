@@ -769,12 +769,13 @@ class InferenceEngineConfig(BaseConfig):
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
     offload_kv_for_weight_sync: bool = False
-    """Non-colocated fully-async only. Offload the KV cache to CPU during weight sync so
-    ``gpu_memory_utilization`` can be pushed higher without OOMing on the weight-transfer
-    buffers. In-flight requests are frozen (KEEP pause) and resume from the restored KV
-    cache with no abort or prefill recompute, at the cost of a GPU<->CPU copy of the KV
-    pool each sync. Requires non-colocated, non-LoRA, the fully-async trainer, and
-    ``trainer.fully_async.clear_kv_cache_on_weight_sync=False``."""
+    """Non-colocated only. Sleep the engine (freeing the KV cache from GPU) during weight
+    sync so ``gpu_memory_utilization`` can be pushed higher without OOMing on the weight-
+    transfer buffers. On the fully-async trainer, in-flight requests are frozen (KEEP
+    pause) and, unless ``trainer.fully_async.clear_kv_cache_on_weight_sync`` is set, their
+    KV cache is offloaded to CPU and restored so they resume with no abort or prefill
+    recompute (at the cost of a GPU<->CPU copy of the KV pool each sync). Requires
+    non-colocated and non-LoRA weight sync."""
     use_expandable_segments: bool = False
     """Set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` on the inference-engine
     processes to reduce fragmentation. Independent of the trainer-side
