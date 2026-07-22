@@ -768,22 +768,16 @@ class InferenceEngineConfig(BaseConfig):
     enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
-    sleep_engines_during_weight_sync: bool = False
-    """Non-colocated only. Put the inference engines to sleep (free the KV cache + weights
-    from GPU) around weight sync, then wake weights, broadcast, and wake the KV cache -- the
-    same three-phase pattern colocated mode already uses. Frees KV-cache memory during the
-    sync so ``gpu_memory_utilization`` can be pushed higher without OOMing on the weight-
-    transfer scratch buffers. Requires non-colocated placement and non-LoRA weight sync.
-    By default (``preserve_inflight_requests_during_weight_sync=False``) the sleep discards
-    the KV cache and aborts in-flight requests, which is correct for the synchronous trainer
-    where generation is already complete at sync time."""
-    preserve_inflight_requests_during_weight_sync: bool = False
-    """Requires ``sleep_engines_during_weight_sync=True`` and the fully-async trainer.
-    Instead of aborting in-flight requests and discarding the KV cache, freeze in-flight
-    requests (vLLM KEEP pause) and offload the KV cache to CPU across the sync, then restore
-    it on wake so the frozen requests resume seamlessly (no abort, no prefill recompute).
-    This trades a GPU<->CPU copy of the whole KV pool each sync for zero lost generation
-    work. Incompatible with ``trainer.fully_async.clear_kv_cache_on_weight_sync=True``."""
+    offload_kv_for_weight_sync: bool = False
+    """Non-colocated fully-async only. Offload the KV cache to CPU around weight sync to
+    free GPU memory during the sync, so ``gpu_memory_utilization`` can be pushed higher
+    without OOMing on the weight-transfer scratch buffers. In-flight requests are frozen
+    (vLLM KEEP pause, KV blocks intact), the KV cache is offloaded to CPU while the weights
+    are re-synced into the freed space, then the KV cache is restored on wake so the frozen
+    requests resume seamlessly (no abort, no prefill recompute). Trades a GPU<->CPU copy of
+    the whole KV pool each sync for zero lost generation work. Requires non-colocated
+    placement, non-LoRA weight sync, the fully-async trainer, and
+    ``trainer.fully_async.clear_kv_cache_on_weight_sync=False``."""
     use_expandable_segments: bool = False
     """Set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` on the inference-engine
     processes to reduce fragmentation. Independent of the trainer-side

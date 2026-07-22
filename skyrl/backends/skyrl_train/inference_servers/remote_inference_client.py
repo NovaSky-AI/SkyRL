@@ -1071,7 +1071,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         requests held under a KEEP pause stay frozen with their KV blocks intact.
         Pair with :meth:`wake_up_preserved`; the caller must KEEP-pause before
         and ``resume`` after. Used by the non-colocated
-        ``preserve_inflight_requests_during_weight_sync`` weight-sync path.
+        ``offload_kv_for_weight_sync`` weight-sync path.
         """
         return await self._call_all_servers(
             "/collective_rpc",

@@ -329,65 +329,47 @@ def test_run_engines_locally_false_requires_external_endpoint():
         validate_inference_engine_cfg(cfg)
 
 
-def test_sleep_during_weight_sync_rejects_colocated():
+def test_offload_kv_for_weight_sync_rejects_colocated():
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = True
-    cfg.generator.inference_engine.sleep_engines_during_weight_sync = True
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
     with pytest.raises(AssertionError, match="non-colocated weight sync only"):
         validate_inference_engine_cfg(cfg)
 
 
-def test_sleep_during_weight_sync_rejects_lora():
+def test_offload_kv_for_weight_sync_rejects_lora():
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = False
-    cfg.generator.inference_engine.sleep_engines_during_weight_sync = True
+    cfg.trainer.fully_async.enabled = True
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
     cfg.trainer.policy.model.lora.rank = 8
     with pytest.raises(AssertionError, match="does not support LoRA"):
         validate_inference_engine_cfg(cfg)
 
 
-def test_sleep_during_weight_sync_non_colocated_ok():
+def test_offload_kv_for_weight_sync_requires_fully_async():
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = False
-    cfg.generator.inference_engine.sleep_engines_during_weight_sync = True
-    # Should not raise.
-    validate_inference_engine_cfg(cfg)
-
-
-def test_preserve_inflight_requires_sleep_flag():
-    cfg = SkyRLTrainConfig()
-    cfg.trainer.placement.colocate_all = False
-    cfg.generator.inference_engine.preserve_inflight_requests_during_weight_sync = True
-    with pytest.raises(AssertionError, match="requires sleep_engines_during_weight_sync"):
-        validate_inference_engine_cfg(cfg)
-
-
-def test_preserve_inflight_requires_fully_async():
-    cfg = SkyRLTrainConfig()
-    cfg.trainer.placement.colocate_all = False
-    cfg.generator.inference_engine.sleep_engines_during_weight_sync = True
-    cfg.generator.inference_engine.preserve_inflight_requests_during_weight_sync = True
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
     cfg.trainer.fully_async.enabled = False
     with pytest.raises(AssertionError, match="only helps the fully-async trainer"):
         validate_inference_engine_cfg(cfg)
 
 
-def test_preserve_inflight_rejects_clear_kv_cache():
+def test_offload_kv_for_weight_sync_rejects_clear_kv_cache():
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = False
-    cfg.generator.inference_engine.sleep_engines_during_weight_sync = True
-    cfg.generator.inference_engine.preserve_inflight_requests_during_weight_sync = True
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
     cfg.trainer.fully_async.enabled = True
     cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = True
     with pytest.raises(AssertionError, match="incompatible with"):
         validate_inference_engine_cfg(cfg)
 
 
-def test_preserve_inflight_async_ok():
+def test_offload_kv_for_weight_sync_async_ok():
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = False
-    cfg.generator.inference_engine.sleep_engines_during_weight_sync = True
-    cfg.generator.inference_engine.preserve_inflight_requests_during_weight_sync = True
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
     cfg.trainer.fully_async.enabled = True
     cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = False
     # Should not raise.
