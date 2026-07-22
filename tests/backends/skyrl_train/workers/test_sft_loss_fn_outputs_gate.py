@@ -172,9 +172,7 @@ class TestForwardBackwardMicroGate:
         """The gate is independent of loss_fn_config; overrides still merge."""
         # A real override key confirms legitimate config merge still runs while
         # the explicit gate suppresses per-token outputs.
-        status = _run_forward_backward_micro(
-            return_per_token_outputs=False, loss_fn_config={"eps_clip_low": 0.1}
-        )
+        status = _run_forward_backward_micro(return_per_token_outputs=False, loss_fn_config={"eps_clip_low": 0.1})
         assert status["loss_fn_outputs"] == [{} for _ in range(BATCH_SIZE)]
 
 
