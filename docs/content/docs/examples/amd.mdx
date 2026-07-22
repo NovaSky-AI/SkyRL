@@ -10,8 +10,8 @@ This example shows how to run SkyRL's Tinker-compatible API on AMD GPUs. It
 uses the AMD Docker image in `docker/Dockerfile.amd` and the client scripts in
 `examples/train/amd`.
 
-The Docker image builds from `vllm/vllm-openai-rocm:v0.20.2`, installs Ray and
-SkyRL's non-GPU runtime dependencies, and relies on the base image for ROCm
+The Docker image builds from `vllm/vllm-openai-rocm:v0.23.0`, installs Ray and
+SkyRL's non-GPU runtime dependencies, and relies on the parent image for ROCm
 builds of PyTorch, vLLM, and flash-attn.
 
 ## Build The Image
@@ -138,4 +138,3 @@ python grpo_client.py \
   --max-val-examples 8 \
   --reprepare-data
 ```
-

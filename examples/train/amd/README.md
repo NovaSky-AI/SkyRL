@@ -4,10 +4,10 @@ This example is a starting point for running SkyRL's Tinker-compatible API on AM
 
 The runtime path is intentionally split from the image path:
 
-- `docker/Dockerfile.amd` builds a SkyRL AMD image from `vllm/vllm-openai-rocm:v0.20.2`.
+- `docker/Dockerfile.amd` builds a SkyRL AMD image from `vllm/vllm-openai-rocm:v0.23.0`.
 - This directory contains commands to run inside that image.
 
-The Docker image bakes in Ray and the non-GPU SkyRL dependencies. It relies on the base vLLM ROCm image for ROCm builds of PyTorch, vLLM, and flash-attn.
+The Docker image bakes in Ray and the non-GPU SkyRL dependencies. It relies on the parent vLLM ROCm image for ROCm builds of PyTorch, vLLM, and flash-attn.
 
 ## Build
 
