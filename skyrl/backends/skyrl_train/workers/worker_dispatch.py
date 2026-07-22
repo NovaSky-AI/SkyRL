@@ -110,16 +110,16 @@ class WorkerDispatch:
         """Get LCM of all models' dp_size."""
         import math
 
-        dp_size = self._actor_groups["policy"].actor_infos[0].rank.dp_size
+        dp_size = self._actor_groups["policy"].get_dp_size()
         if "critic" in self._actor_groups:
-            dp_size = math.lcm(dp_size, self._actor_groups["critic"].actor_infos[0].rank.dp_size)
+            dp_size = math.lcm(dp_size, self._actor_groups["critic"].get_dp_size())
         if "ref" in self._actor_groups:
-            dp_size = math.lcm(dp_size, self._actor_groups["ref"].actor_infos[0].rank.dp_size)
+            dp_size = math.lcm(dp_size, self._actor_groups["ref"].get_dp_size())
         return dp_size
 
     def dp_size(self, model: str) -> int:
         """Return the data-parallel size for ``model`` (e.g. "policy")."""
-        return self._actor_groups[model].actor_infos[0].rank.dp_size
+        return self._actor_groups[model].get_dp_size()
 
     def _should_manage_offload(self, model: str) -> bool:
         """Check if we need to manage offload for this model."""
@@ -137,6 +137,11 @@ class WorkerDispatch:
             return [m for m in ["policy", "ref"] if m in self._actor_groups]
         return [model]
 
+    def _offload_inactive_model(self, model: str) -> None:
+        """Offload an inactive colocated model to CPU."""
+        self._actor_groups[model].offload_to_cpu()
+        self._gpu_state[model] = GPUState()
+
     def _ensure_on_gpu(self, model: str, need_optimizer: bool = True, need_model: bool = True) -> None:
         """Ensure model is on GPU, offloading others in same colocation group if needed."""
         if not self._should_manage_offload(model):
@@ -147,26 +152,27 @@ class WorkerDispatch:
 
         group = self._get_colocation_group(model)
 
-        # Offload others in the same colocation group
+        # Offload others in the same colocation group.
         for other in group:
             if other != model and other in self._actor_groups:
                 state = self._gpu_state[other]
                 if state.model_on_gpu or state.optimizer_on_gpu:
-                    self._actor_groups[other].offload_to_cpu()
-                    self._gpu_state[other] = GPUState()
+                    self._offload_inactive_model(other)
 
-        # Backload requested model
+        # Reload only missing state; model weights may remain resident while the
+        # optimizer is offloaded.
         state = self._gpu_state[model]
-        needs_backload = (need_model and not state.model_on_gpu) or (need_optimizer and not state.optimizer_on_gpu)
+        backload_model = need_model and not state.model_on_gpu
+        backload_optimizer = need_optimizer and not state.optimizer_on_gpu
 
-        if needs_backload:
+        if backload_model or backload_optimizer:
             self._actor_groups[model].backload_to_gpu(
-                backload_optimizer=need_optimizer,
-                backload_model=need_model,
+                backload_optimizer=backload_optimizer,
+                backload_model=backload_model,
             )
-            if need_model:
+            if backload_model:
                 self._gpu_state[model].model_on_gpu = True
-            if need_optimizer:
+            if backload_optimizer:
                 self._gpu_state[model].optimizer_on_gpu = True
 
     def _offload(self, model: str, offload_optimizer: bool = True, offload_model: bool = True) -> None:
@@ -516,8 +522,7 @@ class WorkerDispatch:
                 if other != model and other in self._actor_groups:
                     state = self._gpu_state[other]
                     if state.model_on_gpu or state.optimizer_on_gpu:
-                        self._actor_groups[other].offload_to_cpu()
-                        self._gpu_state[other] = GPUState()
+                        self._offload_inactive_model(other)
 
         kwargs = {"model_path": model_path}
         if num_training_steps is not None:
@@ -646,3 +651,7 @@ class WorkerDispatch:
                     self._finish_weight_sync()
                 finally:
                     await self._inference_engine_client.resume_generation()
+
+        # Advance the policy version so prefix-cache salting isolates blocks from the previous weights
+        # (see `GeneratorConfig.use_cache_salt`).
+        self._inference_engine_client.increment_weight_version()

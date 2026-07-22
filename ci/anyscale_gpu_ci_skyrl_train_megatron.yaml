@@ -5,5 +5,7 @@ cloud: sky-anyscale-aws-us-east-1
 ray_version: "2.56.0"
 compute_config: l4_ci
 working_dir: .
+env_vars:
+  HF_TOKEN: $HF_TOKEN
 max_retries: 0
 

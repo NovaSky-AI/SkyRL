@@ -6,6 +6,7 @@ ray_version: "2.56.0"
 compute_config: l4_ci
 env_vars:
   RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
+  HF_TOKEN: $HF_TOKEN
 working_dir: .
 max_retries: 0
 

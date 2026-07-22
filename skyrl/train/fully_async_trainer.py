@@ -18,7 +18,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Any, Iterable, List, Optional, Set, Tuple
 
 import torch
 from loguru import logger
@@ -65,12 +65,18 @@ class GeneratedOutputGroup:
         group_completion_time_s (Optional[float]): Wall-clock time (seconds) for the whole group to
             finish generation, i.e. the time for the slowest trajectory in the group to complete.
             None if generation timing was not captured.
+
+        prompts (Optional[List[Any]]): The generator input prompts (in OpenAI message format) for this
+            group, one per trajectory (parallel to ``generator_output["response_ids"]``). Retained so
+            the trajectory logger can render prompt + response, mirroring the synchronous trainer which
+            logs ``generator_input["prompts"]``. None if not captured.
     """
 
     generator_output: GeneratorOutput
     uid: str
     global_step_when_scheduled: int
     group_completion_time_s: Optional[float] = None
+    prompts: Optional[List[Any]] = None
 
 
 @dataclass
@@ -450,6 +456,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("sync_weights_to_inference_engines"):
             await self.dispatch.save_weights_for_sampler()
 
+        # Per-step GPU utilization to the tracker. The base loop starts, flushes, and stops the
+        # monitor itself. The async loop overrides train() and must wire it here.
+        if self._ray_gpu_monitor is not None:
+            self._ray_gpu_monitor.start()
+
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
@@ -561,8 +572,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # 5. Set logs for this training step.
                     logger.info(status)
                     self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                    self.tracker.log(self.all_metrics, step=self.global_step, commit=False)
-                    self.all_metrics = {}
                     pbar.update(1)
 
                     # 6. Eval. At interval and at the last step.
@@ -574,6 +583,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         with Timer("eval", self.all_timings):
                             eval_metrics = await self.eval()
                             self.all_metrics.update(eval_metrics)
+
+                    # Log metrics for this step after evaluation
+                    self.tracker.log(self.all_metrics, step=self.global_step, commit=False)
+                    self.all_metrics = {}
 
                     # 7. Checkpointing. At interval and at the last step of each epoch.
                     is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
@@ -587,6 +600,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 await asyncio.to_thread(self.save_models)
 
                     timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
+                    if self._ray_gpu_monitor is not None:
+                        timing_payload.update(self._ray_gpu_monitor.flush())
                     if self._vllm_metrics_scraper is not None:
                         timing_payload.update(await self._vllm_metrics_scraper.sample())
                     self.tracker.log(timing_payload, step=self.global_step, commit=True)
@@ -651,6 +666,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # End of an epoch.
         finally:
             self._profiler_stop()
+            if self._ray_gpu_monitor is not None:
+                self._ray_gpu_monitor.stop()
 
         pbar.close()
 
@@ -742,6 +759,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         kept_groups: List[GeneratedOutputGroup] = []
         dropped_groups: List[GeneratedOutputGroup] = []
         epoch_exhausted = False
+        # Buffer occupancy when this step starts waiting.
+        self.all_metrics["async/gen_buffer_qsize_at_wait_start"] = generation_output_group_buffer.qsize()
         with Timer("wait_for_generation_buffer", self.all_timings):
             buffer_pbar = tqdm(total=self.mini_batch_size, initial=0, desc="Generation Buffer Progress", position=1)
             while len(kept_groups) < self.mini_batch_size:
@@ -874,6 +893,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             uid=uids[0],
                             global_step_when_scheduled=global_step_at_start,
                             group_completion_time_s=group_completion_time_s,
+                            prompts=generator_input["prompts"],
                         )
                     )
                 except asyncio.QueueFull:
@@ -921,6 +941,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         dropped_groups = dropped_groups or []
         generator_outputs = []
+        # Prompts for the kept groups, kept parallel to the concatenated `generator_output` so the
+        # trajectory logger can render prompt + response (mirrors the sync trainer's use of
+        # `generator_input["prompts"]`).
+        prompts: List[Any] = []
         uids = []
         stalenesses = []
         staleness_violation_count = 0
@@ -933,6 +957,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
+            if cur_generated_output_group.prompts is not None:
+                prompts.extend(cur_generated_output_group.prompts)
 
             # Collect per-group / per-trajectory completion-time stats for this group.
             if cur_generated_output_group.group_completion_time_s is not None:
@@ -1064,6 +1090,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
         logger.info(f"Example generated: {vis}")
+
+        # Optionally upload up to `num_logger_train_samples` samples to tracker (mirrors the
+        # synchronous trainer's train trajectory logging).
+        if self.trajectory_logger is not None:
+            with Timer("log_train_results"):
+                self.trajectory_logger.log(
+                    tracker=self.tracker,
+                    num_samples=self.cfg.trainer.num_logger_train_samples,
+                    prompts=prompts,
+                    generator_output=generator_output,
+                    tokenizer=self.tokenizer,
+                    global_step=self.global_step,
+                    wandb_key="trajectories/train",
+                    include_idx=False,
+                )
 
         return self.convert_to_training_input(generator_output, uids)
 

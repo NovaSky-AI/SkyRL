@@ -22,6 +22,7 @@ from skyrl.train.generators.base import GeneratorInterface
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.tracking import Tracking
+from skyrl.train.utils.trajectory_logging import TrajectoryLogger
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
@@ -187,10 +188,24 @@ class BasePPOExp:
         return Tracking(
             project_name=self.cfg.trainer.project_name,
             experiment_name=self.cfg.trainer.run_name,
-            backends=self.cfg.trainer.logger,
+            backend=self.cfg.trainer.logger,
             config=self.cfg,
             tags=self.cfg.trainer.tags,
         )
+
+    def get_trajectory_logger(self) -> TrajectoryLogger:
+        """Initializes the trajectory logger used during eval (and optionally
+        training) to upload (prompt, response, reward) samples to wandb.
+
+        Override in a subclass to swap in a project-specific
+        :class:`TrajectoryLogger` (custom columns, trajectory rendering, or
+        wandb key). The instance is cheap and statefully accumulates rows
+        across evals via the wandb-Table re-create workaround.
+
+        Returns:
+            TrajectoryLogger: The trajectory logger.
+        """
+        return TrajectoryLogger()
 
     def get_inference_client(self) -> InferenceEngineInterface:
         """Setup and return the inference engine client.
@@ -277,6 +292,8 @@ class BasePPOExp:
             generator=generator,
             colocate_pg=self.colocate_pg,
         )
+        # Install the trajectory logger after construction
+        trainer.trajectory_logger = self.get_trajectory_logger()
         # Expose the trainer on self so callers can log exceptions raised
         # during `build_models` (which happens before _setup_trainer returns).
         self.trainer = trainer

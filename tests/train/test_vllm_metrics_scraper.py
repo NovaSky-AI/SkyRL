@@ -79,6 +79,35 @@ def _snapshot(
     return "\n".join(lines) + "\n"
 
 
+def _spec_snapshot(*, drafts: float, draft_tokens: float, accepted_tokens: float, per_pos, replicas: int = 2) -> str:
+    """Prometheus payload with the four vLLM spec-decode counters split across ``replicas``.
+
+    ``per_pos`` is a list of accepted-token counts indexed by draft position (0-based); each is
+    emitted on the ``..._per_pos`` counter with a ``position`` label so ``sum_by_position`` can
+    recover the per-depth breakdown.
+    """
+    lines = []
+
+    def split(value: float):
+        return [value / replicas] * replicas
+
+    def emit_counter(name_base: str, value: float):
+        lines.append(f"# TYPE {name_base} counter")
+        for i, v in enumerate(split(value)):
+            lines.append(f'{name_base}_total{{ReplicaId="r{i}"}} {v}')
+
+    emit_counter("ray_vllm_spec_decode_num_drafts", drafts)
+    emit_counter("ray_vllm_spec_decode_num_draft_tokens", draft_tokens)
+    emit_counter("ray_vllm_spec_decode_num_accepted_tokens", accepted_tokens)
+    lines.append("# TYPE ray_vllm_spec_decode_num_accepted_tokens_per_pos counter")
+    for pos, count in enumerate(per_pos):
+        for i, v in enumerate(split(count)):
+            lines.append(
+                f'ray_vllm_spec_decode_num_accepted_tokens_per_pos_total{{ReplicaId="r{i}",position="{pos}"}} {v}'
+            )
+    return "\n".join(lines) + "\n"
+
+
 def test_parse_and_aggregate_sum_and_mean():
     text = _snapshot(
         running=4,
@@ -216,6 +245,59 @@ async def test_scraper_second_call_derives_rates_and_averages():
     # Gauges still flow through.
     assert out["vllm/num_requests_running"] == pytest.approx(5)
     assert out["vllm/kv_cache_usage_perc"] == pytest.approx(0.35)
+    # No spec-decode counters in these snapshots => no draft metrics.
+    assert not any(k.startswith("vllm/draft_") for k in out)
+
+
+@pytest.mark.asyncio
+async def test_scraper_derives_spec_decode_acceptance():
+    """Spec-decode counters reduce to an overall acceptance rate plus a per-position (1-based) rate.
+
+    snap1 -> snap2 delta: 100 drafts, 200 draft tokens, 150 accepted (0.75 overall);
+    per position accepted 90 and 60 over 100 drafts => pos_1=0.9, pos_2=0.6. Counters are summed
+    across the two replicas before the delta.
+    """
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+    snap1 = _spec_snapshot(drafts=0, draft_tokens=0, accepted_tokens=0, per_pos=[0, 0])
+    snap2 = _spec_snapshot(drafts=100, draft_tokens=200, accepted_tokens=150, per_pos=[90, 60])
+    texts = iter([snap1, snap2])
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    with patch.object(scraper, "_fetch_all", fake_fetch_all):
+        await scraper.sample()
+        out = await scraper.sample()
+
+    assert out["vllm/draft_num_draft_tokens"] == pytest.approx(200)
+    assert out["vllm/draft_num_accepted_tokens"] == pytest.approx(150)
+    assert out["vllm/draft_acceptance_rate"] == pytest.approx(0.75)
+    assert out["vllm/draft_acceptance_rate_pos_1"] == pytest.approx(0.9)
+    assert out["vllm/draft_acceptance_rate_pos_2"] == pytest.approx(0.6)
+    # Mean acceptance length = 1 + accepted/drafts = 1 + 150/100 = 2.5.
+    assert out["vllm/draft_mean_acceptance_length"] == pytest.approx(2.5)
+
+
+@pytest.mark.asyncio
+async def test_spec_decode_acceptance_flows_through_windows():
+    """Windowed start/stop nests the draft metrics under the window label (train vs eval)."""
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+    texts = iter(
+        [
+            _spec_snapshot(drafts=0, draft_tokens=0, accepted_tokens=0, per_pos=[0]),
+            _spec_snapshot(drafts=50, draft_tokens=50, accepted_tokens=40, per_pos=[40]),
+        ]
+    )
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    with patch.object(scraper, "_fetch_all", fake_fetch_all):
+        await scraper.start("vllm/train")
+        out = await scraper.stop()
+
+    assert out["vllm/train/draft_acceptance_rate"] == pytest.approx(0.8)
+    assert out["vllm/train/draft_acceptance_rate_pos_1"] == pytest.approx(0.8)
 
 
 @pytest.mark.asyncio
