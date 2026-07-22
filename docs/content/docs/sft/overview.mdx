@@ -5,8 +5,7 @@ title: "SFT Trainer Overview"
 SkyRL ships a native **supervised fine-tuning (SFT)** trainer, `SFTTrainer`, that
 reuses the same distributed backends (FSDP and Megatron), checkpointing, and
 logging as the RL trainer -- but without any inference engine, reference model,
-or reward machinery. It is the recommended way to run an SFT warmup before RL,
-or to train a standalone instruction-tuned model.
+or reward machinery.
 
 <Callout type="info">
 The SFT trainer is invoked as a module: `python -m skyrl.train.main_sft`.
@@ -85,6 +84,67 @@ or `disable_cache`); for multi-node runs point `cache_dir` at a shared/NFS path.
 - `all_assistant_messages` -- loss on every assistant message in the
   conversation.
 
+## Pretokenized datasets
+
+If your data pipeline tokenizes **offline** (e.g. on a Spark or Ray data
+cluster), point the trainer at the pretokenized store to skip online
+tokenization entirely. Pretokenized rows are normalized to the same internal
+format as online-tokenized data, so collators, sequence packing, samplers, and
+checkpoint/resume all work unchanged. Ingestion is implemented in
+[`skyrl/train/dataset/pretokenized.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/dataset/pretokenized.py).
+
+Pass local paths to `pretokenized_dataset_paths` (and, optionally,
+`eval_pretokenized_dataset_paths`):
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    "pretokenized_dataset_paths=['$HOME/data/tokenized-train']" \
+    "eval_pretokenized_dataset_paths=['$HOME/data/tokenized-eval']"  # optional
+```
+
+Each entry is a local path to a file or directory (a directory may hold multiple
+shards) in one of these auto-detected formats: **Parquet**, **JSON-lines**, **raw
+Arrow IPC**, or a HuggingFace **`Dataset.save_to_disk`** directory. Like
+`train_datasets`, multiple stores are concatenated and mixed per
+`train_dataset_weights`; multiple eval stores are evaluated separately under
+`eval/{name}/`, with names from `eval_dataset_names` (defaulting to each path's
+basename).
+
+Each row must contain:
+
+- **`input_ids`** -- unpadded token ids for the full sequence (SkyRL pads at
+  collation time).
+- **`loss_mask`** -- a full-sequence 0/1 mask, same length as `input_ids`, with
+  `1` on the tokens to compute loss on. This single form covers both
+  instruction-following (1s on the response) and multi-turn data (1s on every
+  assistant turn). The number of action tokens is inferred from the first
+  nonzero entry.
+- for VLM data: `pixel_values` and `image_grid_thw` (Qwen-style image tensors,
+  stored as nested lists).
+
+```python
+# Instruction-following: 3 prompt tokens, loss on the 2 response tokens.
+{"input_ids": [5091, 374, 220, 8949, 13], "loss_mask": [0, 0, 0, 1, 1]}
+
+# Multi-turn: loss on every assistant turn; 0s on the user turn between them.
+{"input_ids": [5091, 374, 8949, 220, 748], "loss_mask": [0, 1, 1, 0, 1]}
+```
+
+`max_length` truncation still applies (rows whose loss window is fully truncated
+are dropped; over-length VLM rows are always dropped rather than truncated). A
+`num_actions` column, window-form masks, and HuggingFace-style `labels` are
+rejected -- provide the full-sequence `loss_mask` instead.
+
+<Callout type="warn">
+`pretokenized_dataset_paths` cannot be combined with `train_datasets` /
+`train_dataset_splits` (nor `eval_pretokenized_dataset_paths` with
+`eval_datasets`) -- a run either tokenizes online or ingests pretokenized
+stores, and mixing them raises an explicit error. Only local paths are supported
+today (cloud S3/GCS ingestion is a follow-up). Token ids cannot be verified at
+train time, so the offline pipeline **must apply the same chat template as the
+trained model**.
+</Callout>
+
 ## Sequence packing
 
 By default `remove_microbatch_padding=true` packs multiple sequences per
@@ -146,6 +206,7 @@ for the full set.
 | `model.path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path |
 | `train_datasets` | `[yahma/alpaca-cleaned]` | Datasets to train on (mixed per `train_dataset_weights`) |
 | `train_dataset_splits` | `[train[:100]]` | Split/slice per training dataset |
+| `pretokenized_dataset_paths` | `None` | Local paths to pretokenized stores; skips tokenization, exclusive with `train_datasets` |
 | `eval_datasets` | `None` | Eval datasets (`None` disables eval) |
 | `max_length` | `None` | Max sequence length (no truncation if unset) |
 | `num_steps` / `num_epochs` | `None` / `1` | Training length (mutually exclusive) |

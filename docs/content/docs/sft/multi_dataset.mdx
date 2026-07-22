@@ -54,8 +54,15 @@ uninterrupted run.
 
 ### Constraints
 
-All training datasets must share the same `messages_key` / `tools_key` /
-`system_key` columns and the same modality (all-text or all-image).
+Each training dataset is independently detected as either chat format
+(`messages_key`) or Alpaca format (`instruction` / `input` / `output`), so the
+two text formats can be mixed. Chat-format datasets use the configured
+`messages_key`; the optional `tools_key` and `system_key` columns need not be
+present in every source.
+
+All datasets must use the same modality (all-text or all-image), because a
+training batch cannot mix text-only and image-bearing examples. Image datasets
+must use chat format.
 
 ## Multi-dataset evaluation
 
