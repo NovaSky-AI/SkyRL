@@ -12,10 +12,12 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.gpu.gpu_ci.delta_weight_sync_utils import (
+    init_policy_worker_for_delta,
+)
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     get_test_prompts,
-    init_worker_with_type,
     run_inference,
 )
 
@@ -81,12 +83,11 @@ async def test_delta_weight_sync_sparse_update_e2e(ray_init_fixture, tmp_path, s
         distributed_executor_backend=cfg.generator.inference_engine.distributed_executor_backend,
     ) as engines:
         client = engines.client
-        policy = init_worker_with_type(
-            "policy",
+        policy = init_policy_worker_for_delta(
+            cfg=cfg,
             shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-            cfg=cfg,
         )
         ray.get(
             policy.async_run_ray_method(

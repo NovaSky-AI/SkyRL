@@ -21,9 +21,11 @@ import ray
 
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import initialize_ray, validate_cfg
+from tests.backends.skyrl_train.gpu.gpu_ci.delta_weight_sync_utils import (
+    init_policy_worker_for_delta,
+)
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
-    init_worker_with_type,
 )
 
 
@@ -121,13 +123,12 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         language_model_only=args.language_model_only,
     ) as engines:
         client = engines.client
-        policy = init_worker_with_type(
-            "policy",
+        policy = init_policy_worker_for_delta(
+            cfg=cfg,
             shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=args.trainer_gpus_per_node,
             num_nodes=args.trainer_num_nodes,
-            cfg=cfg,
         )
         ray.get(
             policy.async_run_ray_method(

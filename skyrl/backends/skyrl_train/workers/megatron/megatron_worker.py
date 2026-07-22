@@ -45,7 +45,6 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import (
-    ExtractorShardInfo,
     LoraLoadRequest,
     WeightChunk,
     WeightExtractor,
@@ -257,43 +256,6 @@ class MegatronWeightExtractor(WeightExtractor):
         if self.enable_bucketing:
             self._init_param_buckets()
         self._buckets_initialized = True
-
-    def get_shard_info(self) -> ExtractorShardInfo:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            rank = torch.distributed.get_rank()
-            world_size = torch.distributed.get_world_size()
-        else:
-            rank = 0
-            world_size = 1
-
-        try:
-            dp = mpu.get_data_parallel_rank(with_context_parallel=True)
-            dp_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
-            cp = mpu.get_context_parallel_rank()
-            tp = mpu.get_tensor_model_parallel_rank()
-            pp = mpu.get_pipeline_model_parallel_rank()
-            pp_size = mpu.get_pipeline_model_parallel_world_size()
-        except Exception:
-            dp = rank
-            dp_size = world_size
-            cp = 0
-            tp = 0
-            pp = 0
-            pp_size = 1
-
-        # Megatron Bridge's export_hf_weights path gathers/broadcasts the full
-        # HF tensor stream to every rank. For checkpoint-delta publishing, that
-        # makes the stream replicated, so each rank can publish a modulo-shard
-        # of chunks while all ranks still participate in Bridge collectives.
-        return ExtractorShardInfo(
-            is_source_rank=True,
-            replicate=["dp", "sp", "tp", "pp", "cp", "ep", "etp"],
-            split=[],
-            mesh_rank=MeshRank(dp=dp, sp=cp, tp=tp, pp=pp, world_size=world_size, dp_size=dp_size, pp_size=pp_size),
-            replicate_world_size=world_size,
-            source_index_in_replicate_world=rank,
-            rank=rank,
-        )
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from Megatron model.
@@ -1399,7 +1361,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 await self._weight_transfer_sender.send_chunks(
                     self.weight_extractor.extract_weights(generator_dtype),
                     weight_metadata=weight_metadata,
-                    extractor_shard_info=self.weight_extractor.get_shard_info(),
                 )
 
         if cache_reset_task is not None:
@@ -1435,63 +1396,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             init_fn = getattr(_opt, "_init_optimizer_states_with_dummy_values", None)
             if init_fn is not None:
                 init_fn()
-
-    def benchmark_apply_sparse_weight_delta(
-        self,
-        sparsity: float = 0.04,
-        delta: float = 1.0e-3,
-        phase: int = 0,
-    ) -> dict[str, float | int]:
-        """Apply a deterministic sparse in-place perturbation for sync benchmarks.
-
-        This is intended for isolated weight-sync benchmarks where we want a
-        real Megatron -> publisher -> receiver update without optimizer init or
-        a training step. It avoids allocating a full random mask by updating a
-        strided subset of each floating-point parameter shard.
-        """
-        if not 0.0 < sparsity <= 1.0:
-            raise ValueError(f"sparsity must be in (0, 1], got {sparsity}")
-        if self.actor_module is None:
-            raise RuntimeError("actor_module is not initialized")
-
-        stride = max(1, round(1.0 / sparsity))
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        start_offset = (rank + phase) % stride
-        total_elements = 0
-        updated_elements = 0
-        tensors = 0
-
-        with torch.no_grad():
-            for module in self.actor_module:
-                for _, param in module.named_parameters():
-                    if not param.is_floating_point():
-                        continue
-                    flat = param.data.view(-1)
-                    total_elements += flat.numel()
-                    if flat.numel() <= start_offset:
-                        continue
-                    view = flat[start_offset::stride]
-                    if view.numel() == 0:
-                        continue
-                    view.add_(delta)
-                    updated_elements += view.numel()
-                    tensors += 1
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
-
-        result = {
-            "rank": rank,
-            "phase": phase,
-            "stride": stride,
-            "tensors": tensors,
-            "total_elements": total_elements,
-            "updated_elements": updated_elements,
-            "actual_sparsity": (updated_elements / total_elements) if total_elements else 0.0,
-        }
-        return result
 
     def register_pristine_adapter(self) -> None:
         """Capture the current (freshly-initialised) LoRA state as the

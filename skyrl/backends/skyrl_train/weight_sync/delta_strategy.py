@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
 import torch
@@ -21,7 +21,6 @@ from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightTransferSender,
     WeightTransferStrategy,
 )
-from skyrl.backends.skyrl_train.weight_sync.weight_extractor import ExtractorShardInfo
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -90,7 +89,6 @@ class DeltaWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
-        extractor_shard_info: Optional[ExtractorShardInfo] = None,
     ) -> None:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             rank = torch.distributed.get_rank()
@@ -105,8 +103,6 @@ class DeltaWeightTransferSender(WeightTransferSender):
                 max_file_size_in_gb=self._init_info.max_file_size_in_gb,
                 publish_num_workers=self._init_info.publish_num_workers,
             )
-        if extractor_shard_info is None:
-            extractor_shard_info = self._publisher._default_shard_info()
 
         if not self._seed_complete:
             self._seed_complete = True
@@ -119,15 +115,10 @@ class DeltaWeightTransferSender(WeightTransferSender):
                 torch.distributed.barrier()
             return
 
-        source_shard_info = replace(
-            extractor_shard_info,
-            is_source_rank=(rank == 0),
-            replicate_world_size=1,
-            source_index_in_replicate_world=0,
-            rank=rank,
-        )
-
-        local_result = await asyncio.to_thread(self._publisher.publish, chunks, source_shard_info)
+        # The publisher determines its own rank; only rank 0 publishes deltas.
+        # All ranks call publish to drain the chunk stream and drive the
+        # extractor's collectives. Finalization happens on rank 0 below.
+        local_result = await asyncio.to_thread(self._publisher.create_delta_files, chunks)
         if not isinstance(local_result, DeltaPublishResult):
             raise TypeError(f"Expected DeltaPublishResult from sharded publisher, got {type(local_result)}")
 
@@ -143,7 +134,7 @@ class DeltaWeightTransferSender(WeightTransferSender):
         update_info = None
         if rank == 0:
             source_results = [result for result in gathered_results if result is not None and result.rank == 0]
-            update_info = self._publisher.finalize_publish(source_results)
+            update_info = self._publisher.publish(source_results)
 
         if is_distributed:
             update_info_box = [update_info]

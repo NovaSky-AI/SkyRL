@@ -148,7 +148,12 @@ def import_worker(strategy: str, worker_type: str):
 
 
 def init_worker_with_type(
-    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
+    worker_type: str,
+    shared_pg=None,
+    colocate_all=False,
+    num_gpus_per_node=1,
+    num_nodes=1,
+    cfg=None,
 ) -> PPORayActorGroup:
     if cfg is None:
         cfg = get_test_actor_config()

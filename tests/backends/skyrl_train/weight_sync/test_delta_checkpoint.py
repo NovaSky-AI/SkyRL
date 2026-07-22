@@ -7,7 +7,6 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
     _MANIFEST_NAME,
@@ -29,7 +28,6 @@ from skyrl.backends.skyrl_train.weight_sync.delta_strategy import (
     DeltaInitInfo,
     DeltaWeightTransferSender,
 )
-from skyrl.backends.skyrl_train.weight_sync.weight_extractor import ExtractorShardInfo
 
 
 def _chunk_from_tensors(tensors):
@@ -38,31 +36,6 @@ def _chunk_from_tensors(tensors):
         dtypes=[str(t.dtype) for t in tensors.values()],
         shapes=[list(t.shape) for t in tensors.values()],
         tensors=list(tensors.values()),
-    )
-
-
-def _shard_info(rank, world_size):
-    return ExtractorShardInfo(
-        is_source_rank=True,
-        replicate=["dp"],
-        split=[],
-        mesh_rank=MeshRank(dp=rank, sp=0, tp=0, pp=0, world_size=world_size, dp_size=world_size, pp_size=1),
-        replicate_world_size=world_size,
-        source_index_in_replicate_world=rank,
-        rank=rank,
-    )
-
-
-def _non_source_info(rank=1, world_size=2):
-    info = _shard_info(rank=rank, world_size=world_size)
-    return ExtractorShardInfo(
-        is_source_rank=False,
-        replicate=info.replicate,
-        split=info.split,
-        mesh_rank=info.mesh_rank,
-        replicate_world_size=1,
-        source_index_in_replicate_world=0,
-        rank=rank,
     )
 
 
@@ -106,7 +79,7 @@ def test_delta_checkpoint_publish_fetch_and_reload_roundtrip(tmp_path):
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
     )
-    update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+    update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
 
     store = LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
     stats = store.fetch(target_version=update_info["target_version"], sync_dir=update_info["sync_dir"])
@@ -135,7 +108,8 @@ def test_delta_checkpoint_payload_stores_xor_patch(tmp_path):
         sync_dir=str(sync_dir),
         publish_num_workers=1,
     )
-    publisher.publish([_chunk_from_tensors({"a.weight": updated})])
+    results = publisher.create_delta_files([_chunk_from_tensors({"a.weight": updated})])
+    publisher.publish(results)
 
     with (sync_dir / "delta-00000001" / _MANIFEST_NAME).open(encoding="utf-8") as f:
         manifest = json.load(f)
@@ -174,7 +148,7 @@ def test_delta_checkpoint_vllm_multi_thread_safetensors_iterator_roundtrip(tmp_p
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
     )
-    update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+    update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
 
     store = LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
     store.fetch(target_version=update_info["target_version"], sync_dir=update_info["sync_dir"])
@@ -197,7 +171,9 @@ def test_delta_checkpoint_publisher_converts_to_base_checkpoint_dtype(tmp_path):
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
     )
-    update_info = publisher.publish([_chunk_from_tensors(runtime_updated)])
+    update_info = publisher.create_delta_files([_chunk_from_tensors(runtime_updated)])
+    publisher.publish(update_info)
+
     with open(tmp_path / "sync" / "delta-00000001" / "manifest.json", encoding="utf-8") as f:
         manifest = json.load(f)
     assert manifest["tensors"][0]["dtype"] == "float32"
@@ -213,7 +189,7 @@ def test_delta_checkpoint_publisher_converts_to_base_checkpoint_dtype(tmp_path):
     assert torch.equal(received, expected_checkpoint_tensor)
 
 
-def test_delta_checkpoint_non_source_rank_drains_without_publishing(tmp_path):
+def test_delta_checkpoint_non_source_rank_drains_without_publishing(tmp_path, monkeypatch):
     base_tensors = {f"model.layers.{idx}.weight": torch.full((4, 4), idx, dtype=torch.bfloat16) for idx in range(4)}
     updated_tensors = {
         name: tensor + torch.tensor(idx + 1, dtype=torch.bfloat16)
@@ -229,7 +205,10 @@ def test_delta_checkpoint_non_source_rank_drains_without_publishing(tmp_path):
         sync_dir=str(sync_dir),
     )
 
-    result = publisher.publish(chunks, _non_source_info())
+    # Simulate a non-source rank (rank != 0): it drains the chunk stream but must
+    # not compute or upload any deltas.
+    monkeypatch.setattr(publisher, "_current_rank", lambda: 1)
+    result = publisher.create_delta_files(chunks, finalize=False)
     assert isinstance(result, DeltaPublishResult)
     assert result.records == []
     assert result.payload_files == []
@@ -250,12 +229,12 @@ def test_delta_checkpoint_replays_multiple_versions_for_late_join(tmp_path):
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
     )
-    publisher.publish([_chunk_from_tensors(v1_tensors)])
+    publisher.create_delta_files([_chunk_from_tensors(v1_tensors)])
     first_snapshot = publisher.snapshot["a.weight"]
     first_snapshot_id = id(first_snapshot)
     assert first_snapshot.tobytes() == v1_tensors["a.weight"].contiguous().view(torch.uint8).numpy().tobytes()
 
-    update_info = publisher.publish([_chunk_from_tensors(v2_tensors)])
+    update_info = publisher.create_delta_files([_chunk_from_tensors(v2_tensors)])
     assert id(publisher.snapshot["a.weight"]) == first_snapshot_id
     assert (
         publisher.snapshot["a.weight"].tobytes()
@@ -288,7 +267,8 @@ def test_delta_checkpoint_splits_payload_files_by_size(tmp_path):
         sync_dir=str(tmp_path / "sync"),
         max_file_size_in_gb=1e-9,
     )
-    update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+    update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
+    publisher.publish(update_info)
 
     with open(tmp_path / "sync" / "delta-00000001" / "manifest.json", encoding="utf-8") as f:
         manifest = json.load(f)
@@ -308,7 +288,7 @@ def test_delta_checkpoint_skips_missing_lm_head_when_checkpoint_ties_embeddings(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
     )
-    update_info = publisher.publish(
+    update_info = publisher.create_delta_files(
         [
             WeightChunk(
                 names=["model.embed_tokens.weight", "lm_head.weight"],
@@ -318,6 +298,7 @@ def test_delta_checkpoint_skips_missing_lm_head_when_checkpoint_ties_embeddings(
             )
         ]
     )
+    publisher.publish(update_info)
     with open(tmp_path / "sync" / "delta-00000001" / "manifest.json", encoding="utf-8") as f:
         manifest = json.load(f)
     assert [record["name"] for record in manifest["tensors"]] == ["model.embed_tokens.weight"]
@@ -343,7 +324,8 @@ def test_local_checkpoint_store_fetch_is_single_writer_with_concurrent_ray_actor
     counter_path.write_text(json.dumps({"count": 0}), encoding="utf-8")
 
     publisher = DeltaCheckpointPublisher(base_model_path=str(base_dir), sync_dir=str(sync_dir))
-    update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+    update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
+    publisher.publish(update_info)
 
     class FetchActor:
         def fetch(self, base_model_path, local_checkpoint_dir, target_version, uri, counter_file):
@@ -416,7 +398,8 @@ def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
     )
-    update_info = publisher.publish([_chunk_from_tensors({"a.weight": base_tensors["a.weight"].clone()})])
+    update_info = publisher.create_delta_files([_chunk_from_tensors({"a.weight": base_tensors["a.weight"].clone()})])
+    publisher.publish(update_info)
 
     assert update_info.get("noop") is not True
     assert update_info["target_version"] == 1
@@ -522,7 +505,8 @@ def test_delta_checkpoint_gcs_cli_publish_fetch_roundtrip(monkeypatch, tmp_path)
         sync_dir="gs://bucket/sync",
         publish_staging_dir=str(staging_dir),
     )
-    update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+    update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
+    publisher.publish(update_info)
 
     assert update_info["uri"] == "gs://bucket/sync/delta-00000001"
     assert "gs://bucket/sync/delta-00000001/manifest.json" in objects
@@ -547,7 +531,8 @@ def test_delta_checkpoint_checksum_failure_marks_write_in_progress(tmp_path):
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
     )
-    update_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+    update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
+    publisher.publish(update_info)
     manifest_path = tmp_path / "sync" / "delta-00000001" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["tensors"][0]["checksum"] = "0" * 32
@@ -564,7 +549,8 @@ def test_delta_checkpoint_checksum_failure_marks_write_in_progress(tmp_path):
         base_model_path=str(base_dir),
         sync_dir=str(shutil_sync),
     )
-    valid_info = publisher.publish([_chunk_from_tensors(updated_tensors)])
+    valid_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
+    publisher.publish(valid_info)
     store.fetch(target_version=1, uri=valid_info["uri"])
     assert _read_state(receiver_dir)["write_in_progress"] is False
     assert torch.equal(

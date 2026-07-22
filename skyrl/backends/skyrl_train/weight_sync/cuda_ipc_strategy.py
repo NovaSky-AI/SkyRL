@@ -23,9 +23,6 @@ if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
         RemoteInferenceClient,
     )
-    from skyrl.backends.skyrl_train.weight_sync.weight_extractor import (
-        ExtractorShardInfo,
-    )
     from skyrl.train.config import InferenceEngineConfig
 
 import torch
@@ -151,7 +148,6 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
-        extractor_shard_info: Optional["ExtractorShardInfo"] = None,
     ) -> None:
         """Send chunks via CUDA IPC.
 

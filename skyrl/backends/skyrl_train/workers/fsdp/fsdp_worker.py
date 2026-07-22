@@ -13,7 +13,7 @@ try:
 except ImportError:
     from torch.distributed._tensor import DTensor
 
-from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
+from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     should_use_meta_init,
@@ -26,7 +26,6 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import (
-    ExtractorShardInfo,
     LoraLoadRequest,
     WeightChunk,
     WeightExtractor,
@@ -122,23 +121,6 @@ class FSDPWeightExtractor(WeightExtractor):
             dtype_names.append(dtype_name)
             shapes.append(list(param.shape))
         return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
-
-    def get_shard_info(self) -> ExtractorShardInfo:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            rank = torch.distributed.get_rank()
-            world_size = torch.distributed.get_world_size()
-        else:
-            rank = 0
-            world_size = 1
-        return ExtractorShardInfo(
-            is_source_rank=True,
-            replicate=["dp"],
-            split=[],
-            mesh_rank=MeshRank(dp=rank, sp=0, tp=0, pp=0, world_size=world_size, dp_size=world_size, pp_size=1),
-            replicate_world_size=world_size,
-            source_index_in_replicate_world=rank,
-            rank=rank,
-        )
 
     def _gather_tensor(self, param: torch.Tensor) -> torch.Tensor:
         """Gather sharded tensor into full tensor."""
@@ -333,7 +315,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 await self._weight_transfer_sender.send_chunks(
                     weight_iterator,
                     weight_metadata=weight_metadata,
-                    extractor_shard_info=self.weight_extractor.get_shard_info(),
                 )
 
         if cache_reset_task is not None:
@@ -349,55 +330,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def _set_pad_token_id(self, pad_token_id):
         # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model.model -> AutoModelForCausalLM
         self.model.model.config.pad_token_id = pad_token_id
-
-    def benchmark_apply_sparse_weight_delta(
-        self,
-        sparsity: float = 0.04,
-        delta: float = 1.0e-3,
-        phase: int = 0,
-    ) -> dict[str, float | int]:
-        """Apply a deterministic sparse in-place perturbation for sync benchmarks."""
-        if not 0.0 < sparsity <= 1.0:
-            raise ValueError(f"sparsity must be in (0, 1], got {sparsity}")
-        if self.model is None:
-            raise RuntimeError("model is not initialized")
-
-        stride = max(1, round(1.0 / sparsity))
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        start_offset = (rank + phase) % stride
-        total_elements = 0
-        updated_elements = 0
-        tensors = 0
-
-        with torch.no_grad():
-            for param in self.model.model.parameters():
-                if not param.is_floating_point():
-                    continue
-                flat = param.data.view(-1)
-                total_elements += flat.numel()
-                if flat.numel() <= start_offset:
-                    continue
-                view = flat[start_offset::stride]
-                if view.numel() == 0:
-                    continue
-                view.add_(delta)
-                updated_elements += view.numel()
-                tensors += 1
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
-
-        return {
-            "rank": rank,
-            "phase": phase,
-            "stride": stride,
-            "tensors": tensors,
-            "total_elements": total_elements,
-            "updated_elements": updated_elements,
-            "actual_sparsity": (updated_elements / total_elements) if total_elements else 0.0,
-        }
 
     def forward(
         self,

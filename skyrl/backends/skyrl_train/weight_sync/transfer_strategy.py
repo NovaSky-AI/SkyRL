@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Iterable, Optional
 
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
-from skyrl.backends.skyrl_train.weight_sync.weight_extractor import ExtractorShardInfo
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -39,7 +38,6 @@ class WeightTransferSender(ABC):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
-        extractor_shard_info: Optional[ExtractorShardInfo] = None,
     ) -> None:
         """Send chunks using this transfer strategy.
 
@@ -51,7 +49,6 @@ class WeightTransferSender(ABC):
             weight_metadata: Optional pre-computed metadata (names, dtype_names, shapes).
                 When provided, allows the sender to avoid materializing all chunks
                 to collect metadata upfront.
-            extractor_shard_info: Optional backend stream-sharding metadata.
         """
         ...
 

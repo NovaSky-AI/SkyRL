@@ -18,7 +18,7 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator, Optional, Sequence, Tuple
+from typing import Iterable, Iterator, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -32,7 +32,6 @@ from skyrl.backends.skyrl_train.weight_sync.delta_payload import (
     decompress_bytes,
     uint8_tensor_to_bytes,
 )
-from skyrl.backends.skyrl_train.weight_sync.weight_extractor import ExtractorShardInfo
 
 logger = logging.getLogger(__name__)
 
@@ -905,24 +904,17 @@ class DeltaCheckpointPublisher:
         self._staging_pool: Optional[_PinnedStagingPool] = None
         self._staging_pool_signature: Optional[tuple[int, int]] = None
 
-    def _default_shard_info(self) -> ExtractorShardInfo:
-        from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank
+    @staticmethod
+    def _current_rank() -> int:
+        """Global rank of this publisher process (0 when not running distributed).
 
+        Only rank 0 is the delta source: it computes and uploads deltas. Other
+        ranks still drain the chunk stream (to participate in the extractor's
+        collectives) but publish nothing.
+        """
         if torch.distributed.is_available() and torch.distributed.is_initialized():
-            rank = torch.distributed.get_rank()
-            world_size = torch.distributed.get_world_size()
-        else:
-            rank = 0
-            world_size = 1
-        return ExtractorShardInfo(
-            is_source_rank=(rank == 0),
-            replicate=[],
-            split=[],
-            mesh_rank=MeshRank(dp=rank, sp=0, tp=0, pp=0, world_size=world_size, dp_size=world_size, pp_size=1),
-            replicate_world_size=1,
-            source_index_in_replicate_world=0,
-            rank=rank,
-        )
+            return torch.distributed.get_rank()
+        return 0
 
     def _ensure_base_locations(self) -> dict[str, TensorLocation]:
         if self._base_locations is None:
@@ -1086,15 +1078,16 @@ class DeltaCheckpointPublisher:
             self._staging_pool_signature = signature
         return self._staging_pool
 
-    def _publish_local(
+    def create_delta_files(
         self,
         chunks: Iterable[WeightChunk],
-        extractor_shard_info: ExtractorShardInfo,
     ) -> DeltaPublishResult:
+        """Iterate over weight chunks and create delta files locally"""
         base_version = self.version
         target_version = base_version + 1
         publish_uri = _join_uri(self.sync_dir, _version_name(target_version))
-        rank = extractor_shard_info.rank
+        rank = self._current_rank()
+        is_source_rank = rank == 0
         stats = self._empty_stats()
         records: list[DeltaTensorRecord] = []
         payload_files: list[str] = []
@@ -1104,7 +1097,7 @@ class DeltaCheckpointPublisher:
         pending: deque[Future[_TensorPublishResult]] = deque()
         skipped_names: set[str] = set()
         t_publish = time.perf_counter()
-        stats["source_rank"] = 1.0 if extractor_shard_info.is_source_rank else 0.0
+        stats["source_rank"] = 1.0 if is_source_rank else 0.0
 
         def current_payload_file() -> str:
             return f"delta-rank{rank:05d}-file{payload_file_idx:06d}.safetensors"
@@ -1160,18 +1153,18 @@ class DeltaCheckpointPublisher:
             num_workers = self._num_publish_workers()
             max_inflight = max(1, num_workers)
             staging_pool: Optional[_PinnedStagingPool] = None
-            if extractor_shard_info.is_source_rank:
+            if is_source_rank:
                 locations = self._ensure_base_locations()
                 max_tensor_bytes = max((loc.nbytes for loc in locations.values()), default=0)
                 staging_pool = self._staging_pool_for(max_tensor_bytes, num_workers)
-            executor = self._publish_executor_for(num_workers) if extractor_shard_info.is_source_rank else None
+            executor = self._publish_executor_for(num_workers) if is_source_rank else None
             chunk_iter = iter(chunks)
             while True:
                 try:
                     chunk = next(chunk_iter)
                 except StopIteration:
                     break
-                if not extractor_shard_info.is_source_rank:
+                if not is_source_rank:
                     continue
                 for name, tensor in zip(chunk.names, chunk.tensors):
                     try:
@@ -1249,9 +1242,13 @@ class DeltaCheckpointPublisher:
             stats=stats,
         )
 
-    def finalize_publish(self, results: Sequence[DeltaPublishResult]) -> dict:
+    def publish(self, results: Union[DeltaPublishResult, Sequence[DeltaPublishResult]]) -> dict:
+        """Publish one or more `DeltaPublishResult`s to cloud storage"""
         if not results:
             raise ValueError("No delta publish results to finalize")
+        if isinstance(results, DeltaPublishResult):
+            results: Sequence[DeltaPublishResult] = [results]
+
         target_version = results[0].target_version
         base_version = results[0].base_version
         publish_uri = _join_uri(self.sync_dir, _version_name(target_version))
@@ -1317,14 +1314,3 @@ class DeltaCheckpointPublisher:
             "sync_dir": self.sync_dir,
             "uri": publish_uri,
         }
-
-    def publish(
-        self,
-        chunks: Iterable[WeightChunk],
-        extractor_shard_info: Optional[ExtractorShardInfo] = None,
-    ) -> DeltaPublishResult | dict:
-        shard_info = extractor_shard_info or self._default_shard_info()
-        result = self._publish_local(chunks, shard_info)
-        if extractor_shard_info is None:
-            return self.finalize_publish([result])
-        return result

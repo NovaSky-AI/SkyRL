@@ -25,7 +25,7 @@ from .transfer_strategy import (
     WeightTransferSender,
     WeightTransferStrategy,
 )
-from .weight_extractor import ExtractorShardInfo, WeightExtractor
+from .weight_extractor import WeightExtractor
 
 
 def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> Type[WeightTransferStrategy]:
@@ -64,7 +64,6 @@ def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
 __all__ = [
     "WeightChunk",
     "WeightExtractor",
-    "ExtractorShardInfo",
     "WeightUpdateRequest",
     "LoraLoadRequest",
     "BroadcastWeightUpdateRequest",
