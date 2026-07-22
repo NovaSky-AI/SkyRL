@@ -64,6 +64,7 @@ from typing import (
 )
 
 import aiohttp
+import orjson
 
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
@@ -71,6 +72,9 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineOutput,
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
+)
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
+    decode_packed_routed_experts,
 )
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
@@ -312,8 +316,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
             try:
                 async with session.post(url, json=json, headers=headers) as resp:
                     try:
-                        body = await resp.json(content_type=None)
-                    except Exception as e:
+                        body = orjson.loads(await resp.read())
+                    except orjson.JSONDecodeError as e:
                         if 400 <= resp.status < 500:
                             # Non-JSON client error (e.g. plain text 422 from vllm-router).
                             # Raise immediately — client errors won't succeed on retry.
@@ -446,15 +450,16 @@ class RemoteInferenceClient(InferenceEngineInterface):
         raw_results = await asyncio.gather(*[_throttled_generate(idx) for idx in range(batch_size)])
         responses = await asyncio.gather(*[_throttled_detokenize(r["response_ids"]) for r in raw_results])
 
-        rollout_expert_indices = [r.get("routed_experts") for r in raw_results]
-        has_routed_experts = any(x is not None for x in rollout_expert_indices)
+        rollout_expert_indices = (
+            [result["routed_experts"] for result in raw_results] if self.enable_return_routed_experts else None
+        )
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=[r["stop_reason"] for r in raw_results],
             response_ids=[r["response_ids"] for r in raw_results],
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
-            rollout_expert_indices=rollout_expert_indices if has_routed_experts else None,
+            rollout_expert_indices=rollout_expert_indices,
         )
 
     async def _generate_single(
@@ -511,7 +516,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
             if logprobs_content:
                 response_logprobs = [logprob_info["logprob"] for logprob_info in logprobs_content]
 
-        routed_experts = choice.get("routed_experts")
+        routed_experts = None
+        if self.enable_return_routed_experts:
+            packed_routed_experts = choice.get("routed_experts")
+            if not isinstance(packed_routed_experts, dict):
+                raise ValueError("/skyrl/v1/generate must return packed routed_experts")
+            routed_experts = decode_packed_routed_experts(packed_routed_experts)
 
         return {
             "stop_reason": stop_reason,

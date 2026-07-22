@@ -36,6 +36,7 @@ from skyrl.train.generators.utils import (
     get_generation_prompt_ids,
     get_rollout_metrics,
 )
+from skyrl.utils.routed_experts import RoutedExpertIndices
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
 
@@ -50,7 +51,7 @@ class TrajectoryOutput:
     prompt_ids: List[int]
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
-    rollout_expert_indices: Optional[List[List[List[int]]]] = None
+    rollout_expert_indices: Optional[RoutedExpertIndices] = None
     pixel_values: Optional[torch.Tensor] = None
     image_grid_thw: Optional[torch.Tensor] = None
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
@@ -76,7 +77,7 @@ class AgentLoopState:
     rollout_logprobs: Optional[List[float]]
     response_end_idx: Optional[int]
     done: bool
-    rollout_expert_indices: Optional[List[List[List[int]]]] = None
+    rollout_expert_indices: Optional[RoutedExpertIndices] = None
 
 
 @dataclass
@@ -86,30 +87,13 @@ class TurnOutput:
     output_logprobs: Optional[List[float]]
     new_obs: ConversationType
     obs_ids: List[int]
-    rollout_expert_indices: Optional[List[List[List[int]]]]  # [seq_len, layer_num, topk]
+    rollout_expert_indices: Optional[RoutedExpertIndices]
     reward: Optional[float]
     added_eos: bool = False
 
-    def get_turn_rollout_expert_indices(self) -> Optional[List[List[List[int]]]]:
-        """
-        Get rollout inference indices for this turn's tokens (output tokens + observation tokens).
-
-        Returns indices for generated output tokens, with padding entries (all 0)
-        for any manually-added EOS token and observation tokens
-        Returns None if rollout_expert_indices is None.
-        """
-        if self.rollout_expert_indices is None:
-            return None
-        if not self.rollout_expert_indices:
-            return self.rollout_expert_indices
-        layer_num = len(self.rollout_expert_indices[0])
-        topk = len(self.rollout_expert_indices[0][0]) if layer_num > 0 else 0
-        pad_entry = [[0] * topk for _ in range(layer_num)]
-        indices = list(self.rollout_expert_indices)
-        if self.added_eos:
-            indices.append(pad_entry)
-        indices.extend(pad_entry for _ in range(len(self.obs_ids)))
-        return indices
+    def get_turn_rollout_expert_indices(self) -> Optional[RoutedExpertIndices]:
+        """Return only routes that the inference model actually executed."""
+        return self.rollout_expert_indices
 
     def get_turn_loss_mask(self) -> List[int]:
         """
@@ -472,9 +456,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                     rollout_expert_indices=rollout_expert_indices,
                 )
 
-                if turn_output.rollout_expert_indices is not None and agent_loop_state.rollout_expert_indices is None:
-                    agent_loop_state.rollout_expert_indices = []
-
                 if is_step_wise:
                     # current response + observation ids
                     turn_response_ids = turn_output.output_ids + turn_output.obs_ids
@@ -569,15 +550,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 assert response_ids is not None and loss_mask is not None
                 if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                     response_ids.append(self.tokenizer.eos_token_id)
-                    # TODO(Charlie): this should be 0? Otherwise logprobs will be extremely off. But if it is loss
-                    # masked with 0, why bother adding it?
                     loss_mask.append(1)
                     if rollout_logprobs is not None:
                         rollout_logprobs.append(0.0)
-                    if rollout_expert_indices_out is not None and rollout_expert_indices_out:
-                        layer_num = len(rollout_expert_indices_out[0])
-                        topk = len(rollout_expert_indices_out[0][0]) if layer_num > 0 else 0
-                        rollout_expert_indices_out.append([[0] * topk for _ in range(layer_num)])
                     appended_eos_token = True
 
             if self.generator_cfg.step_wise_trajectories:
@@ -770,7 +745,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_masks = []
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
-        truncated_indices: Optional[List] = [] if raw_rollout_expert_indices is not None else None
+        truncated_indices: Optional[List[RoutedExpertIndices]] = [] if raw_rollout_expert_indices is not None else None
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
@@ -1118,7 +1093,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             agent_loop_state.loss_mask += loss_mask_for_turn
             if agent_loop_state.rollout_logprobs is not None and rollout_logprobs_for_turn is not None:
                 agent_loop_state.rollout_logprobs += rollout_logprobs_for_turn
-            if agent_loop_state.rollout_expert_indices is not None and rollout_expert_indices_for_turn is not None:
+            if rollout_expert_indices_for_turn is not None:
                 # overwrite the existing rollout inference indices, since the inference engine should
                 # return the expert indices for the entire sequence including each turn's input
                 # and the final response should not have an observation appended to it

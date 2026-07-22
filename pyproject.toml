@@ -92,6 +92,8 @@ skyrl-train = [
     "polars",
     "s3fs",
     "fastapi",
+    "orjson>=3.11.9",
+    "pybase64>=1.4.2",
     "uvicorn",
     "vllm-router; sys_platform == 'linux'",
     "pybind11",
