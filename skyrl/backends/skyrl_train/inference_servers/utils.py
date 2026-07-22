@@ -97,7 +97,9 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         max_num_batched_tokens=ie_cfg.max_num_batched_tokens,
         enable_expert_parallel=ie_cfg.expert_parallel_size > 1,
         max_num_seqs=ie_cfg.max_num_seqs,
-        enable_sleep_mode=cfg.trainer.placement.colocate_all,
+        # Sleep mode is required for colocated (offload/backload each step) and also when
+        # non-colocated weight sync opts into freeing the KV cache around the sync.
+        enable_sleep_mode=cfg.trainer.placement.colocate_all or ie_cfg.sleep_engines_during_weight_sync,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         weight_transfer_config=WeightTransferConfig(
             backend=get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),

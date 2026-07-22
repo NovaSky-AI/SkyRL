@@ -34,6 +34,20 @@ Strategy choice is decided by the sender (`get_transfer_strategy_cls`). The init
 2. `update_weights_chunk(update_info)` — called repeatedly. Unpacks the SkyRL packed CUDA-IPC payload, slices the contiguous buffer per param, calls `model.load_weights(weights=...)` under `set_current_vllm_config`.
 3. `finish_weight_update()` — runs `finalize_layerwise_reload` (quantization repacking, attention weight postprocessing).
 
+## Sleep during non-colocated weight sync
+
+Non-colocated normally keeps the engine fully awake and does `pause_generation → broadcast → resume_generation`. Two opt-in `generator.inference_engine.*` flags let the engine free its KV-cache memory *during* the sync so `gpu_memory_utilization` can be pushed higher (no need to keep KV cache resident alongside the weight-transfer scratch buffers). Both require `enable_sleep_mode` on the engine, which `inference_servers/utils.py` turns on when `sleep_engines_during_weight_sync` is set.
+
+- **`sleep_engines_during_weight_sync`** (sync trainer): `sleep() → wake_up(["weights"]) → broadcast → wake_up(["kv_cache"])` — the same three-phase pattern colocated mode uses. The sleep discards the KV cache and aborts in-flight requests, which is correct for the synchronous trainer (generation is complete at sync time). Requires non-colocated + non-LoRA.
+- **`preserve_inflight_requests_during_weight_sync`** (fully-async trainer): a **KV-preserving suspend/resume**. `pause_generation` (KEEP, freezes in-flight requests with KV intact) → offload weights+KV to CPU and free GPU → wake weights → broadcast → restore KV → `resume_generation`. Frozen requests resume with no abort and no prefill recompute, at the cost of a GPU↔CPU copy of the whole KV pool each sync. Requires `sleep_engines_during_weight_sync=True`, `fully_async.enabled`, and `clear_kv_cache_on_weight_sync=False`.
+
+The preserve path is driven entirely from SkyRL — no vLLM patch. It deliberately avoids the `/sleep`+`/wake_up` HTTP endpoints (which route through `EngineCore.sleep`, force-clearing the prefix cache and preempting every running request at level ≥ 1). Instead it drives the per-worker `CuMemAllocator` directly via two `NewInferenceWorkerWrap` methods invoked over `/collective_rpc`:
+
+- `skyrl_sleep_preserve_kv` — `allocator.sleep(offload_tags=("weights","kv_cache"))`: offloads both pools to CPU (model buffers live in the `weights` pool, so they survive too) and frees the GPU memory. The scheduler is untouched, so the KEEP-paused requests stay frozen with valid block tables.
+- `skyrl_wake_preserved(tags)` — `allocator.wake_up(tags)` remaps to the **same virtual addresses** and copies CPU→GPU, so block tables remain valid; re-inits fp8 KV scales on the `kv_cache` wake. Does not resume the scheduler (the client does that via `/resume`).
+
+Orchestrated in `WorkerDispatch.save_weights_for_sampler` (non-colocated single-tenant branch). Validated in `validate_inference_engine_cfg`. vLLM-version coupled (mirrors `GPUWorker.sleep`/`wake_up` and the `CuMemAllocator` API) — re-verify on vLLM bumps via the GPU weight-sync test.
+
 ## Convention: vLLM imports
 
 `vllm` is a Linux-only optional dep. Import it **lazily inside methods**, not at module top. Match the existing pattern in `new_inference_worker_wrap.py`.

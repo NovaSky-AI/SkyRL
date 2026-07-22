@@ -176,3 +176,55 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
             )
 
         torch.accelerator.synchronize()
+
+    # ------------------------------------------------------------------
+    # Suspend / resume for non-colocated weight sync
+    # ------------------------------------------------------------------
+    # These drive the per-worker CuMemAllocator directly (rather than the
+    # engine's /sleep + /wake_up HTTP endpoints) precisely so they DON'T touch
+    # the scheduler. GPUWorker.sleep()/wake_up() are only reachable through
+    # EngineCore.sleep(), which force-clears the prefix cache and preempts every
+    # running request at level >= 1 (v1/engine/core.py). By operating on the
+    # allocator alone, the caller can hold a KEEP pause (in-flight requests
+    # frozen, KV blocks intact) across the sync and resume them afterward with
+    # their KV cache restored to the same virtual addresses -- so frozen
+    # requests continue with no abort and no prefill recompute.
+    #
+    # vLLM version coupling: mirrors GPUWorker.sleep/wake_up
+    # (vllm/v1/worker/gpu_worker.py). Re-verify on vLLM bumps; the GPU weight-
+    # sync test exercises this path.
+
+    def skyrl_sleep_preserve_kv(self) -> None:
+        """Offload weights + KV cache to CPU and free their GPU memory.
+
+        Both the ``weights`` and ``kv_cache`` allocator tags are offloaded (not
+        discarded), so model buffers (which live in the ``weights`` pool) and the
+        KV blocks survive on CPU and are restored bit-for-bit on wake. The GPU
+        memory is freed regardless of tag, which is what gives the weight-sync
+        broadcast room to run at high ``gpu_memory_utilization``.
+        """
+        from vllm.device_allocator import get_mem_allocator_instance
+
+        allocator = get_mem_allocator_instance()
+        # Back up both pools to CPU; wake restores them to the same addresses.
+        allocator.sleep(offload_tags=("weights", "kv_cache"))
+
+    def skyrl_wake_preserved(self, tags: list) -> None:
+        """Wake the given allocator tags, restoring their CPU-backed contents.
+
+        Call with ``["weights"]`` before the broadcast (so weights are resident
+        to receive it, while the KV pool stays freed) and ``["kv_cache"]`` after
+        (restoring the frozen requests' KV). Does NOT resume the scheduler --
+        the caller re-enables generation via ``/resume`` once the KV cache is
+        back.
+        """
+        from vllm.device_allocator import get_mem_allocator_instance
+
+        allocator = get_mem_allocator_instance()
+        allocator.wake_up(tags)
+        # After the KV pool is remapped, re-init fp8 KV scales the same way
+        # GPUWorker.wake_up does (no-op for non-fp8-kv-cache models).
+        if tags is None or "kv_cache" in tags:
+            post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
+            if post_wake is not None:
+                post_wake()
