@@ -573,7 +573,7 @@ class RdtTrainerActor:
     def sync_once(self):
         """Rendezvous (first call: spawn server + bake the inference side) and run
         one full weight sync through the vendored engine."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_strategy import (
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
             _FsdpWeightSource,
             _SyncInferenceClient,
         )

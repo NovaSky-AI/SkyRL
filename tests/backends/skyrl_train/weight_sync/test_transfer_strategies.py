@@ -8,8 +8,6 @@ from skyrl.backends.skyrl_train.weight_sync import (
     CudaIpcTransferStrategy,
     CudaIpcWeightUpdateRequest,
     LoraLoadRequest,
-    ShardedRdtInitInfo,
-    ShardedRdtTransferStrategy,
     get_transfer_strategy,
     get_transfer_strategy_cls,
 )
@@ -26,15 +24,18 @@ class TestGetTransferStrategyCls:
             ("nccl", False, BroadcastTransferStrategy),
             ("gloo", True, BroadcastTransferStrategy),
             ("gloo", False, BroadcastTransferStrategy),
-            # sharded_rdt always selects the RDT strategy (non-colocated only is
-            # enforced later in build_vllm_cli_args, not in strategy selection).
-            ("sharded_rdt", True, ShardedRdtTransferStrategy),
-            ("sharded_rdt", False, ShardedRdtTransferStrategy),
         ],
     )
     def test_returns_correct_strategy(self, backend, colocate_all, expected_strategy):
         """Should return correct strategy based on backend and colocate_all."""
         assert get_transfer_strategy_cls(backend, colocate_all) is expected_strategy
+
+    def test_sharded_rdt_bypasses_strategy_layer(self):
+        """sharded_rdt has no WeightTransferStrategy — it's driven directly by
+        RdtWeightSyncSender from init_weight_sync_state, so the class selector must
+        refuse it loudly rather than silently falling back to a push strategy."""
+        with pytest.raises(ValueError):
+            get_transfer_strategy_cls("sharded_rdt", False)
 
     @pytest.mark.parametrize(
         "backend,colocate_all,expected",
@@ -50,52 +51,21 @@ class TestGetTransferStrategyCls:
         assert get_transfer_strategy(backend, colocate_all) == expected
 
 
-class TestShardedRdtStrategy:
-    """Tests for the sharded_rdt (NIXL pull) strategy — no GPU/vLLM needed.
+class TestRdtSend:
+    """Tests for the sharded_rdt (NIXL pull) trainer-send glue — no GPU/vLLM.
 
-    The trainer-side machinery lives in the vendored ``sharded_rdt_trainer``
-    engine (a per-rank sidecar producer actor); the SkyRL strategy is a thin
-    adapter, so these cover the config-derived init info, the no-op receiver
-    hook, and the group-major ``WeightSource`` reorder.
-    """
-
-    def _make_ie_cfg(self, run_engines_locally: bool = False) -> InferenceEngineConfig:
-        return InferenceEngineConfig(
-            weight_sync_backend="sharded_rdt",
-            model_dtype="bfloat16",
-            run_engines_locally=run_engines_locally,
-        )
-
-    def test_create_init_info(self):
-        """create_init_info returns a ShardedRdtInitInfo with the config-derived knobs."""
-        init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg(), inference_world_size=4)
-        assert isinstance(init_info, ShardedRdtInitInfo)
-        assert init_info.num_consumers == 4
-        assert init_info.model_dtype_str == "bfloat16"
-        assert init_info.num_rdt_buffers == 2
-        # Non-local engines => override an existing receiver.
-        assert init_info.override_existing_receiver is True
-        assert init_info.strategy_type() is ShardedRdtTransferStrategy
-
-    def test_create_init_info_requires_world_size(self):
-        """The consumer count is mandatory (free ref-count target + M:N split)."""
-        with pytest.raises(ValueError):
-            ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg())
-
-    def test_create_init_info_override_disabled_for_local_engines(self):
-        init_info = ShardedRdtTransferStrategy.create_init_info(
-            self._make_ie_cfg(run_engines_locally=True), inference_world_size=1
-        )
-        assert init_info.override_existing_receiver is False
+    RDT bypasses the WeightTransferStrategy/Sender abstraction; the glue lives in
+    ``weight_sync/rdt_send.py`` (``_FsdpWeightSource`` + ``_SyncInferenceClient``,
+    driven by ``RdtWeightSyncSender``). These cover the group-major WeightSource
+    reorder and the sync-client -> RDT-route mapping without touching the vendored
+    engine (whose ``trainer_init`` needs Ray + GPU)."""
 
     def test_weight_source_reorders_group_major(self):
         """The FSDP WeightSource reorders metadata into group-major order (pre /
         per-layer / post) so the vendored trainer's group-contiguity check passes."""
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_strategy import (
-            _FsdpWeightSource,
-        )
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import _FsdpWeightSource
 
         class _FakeExtractor:
             weight_prefix = ""
@@ -125,23 +95,45 @@ class TestShardedRdtStrategy:
         assert [list(m.shape) for m in meta] == [[4, 8], [0, 8], [1, 8], [8, 4]]
         assert all(m.dtype is torch.bfloat16 for m in meta)
 
-    def test_initialize_receivers_is_noop(self):
-        """initialize_receivers must NOT touch the client (the vendored trainer's
-        trainer_init drives the inference-side init) and returns an awaitable."""
+    def test_sync_client_maps_to_rdt_routes(self):
+        """The VLLMWeightSyncClient adapter routes the engine's four synchronous
+        calls onto SkyRL's async RDT control-plane coroutines (never the native
+        NCCL init) and runs them on the bound event loop."""
         import asyncio
 
-        init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg(), inference_world_size=1)
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import _SyncInferenceClient
+
+        calls = []
 
         class _FakeClient:
-            def init_weight_transfer_engine_rdt(self, payload):
-                raise AssertionError("initialize_receivers must be a no-op for the sidecar")
+            async def init_weight_transfer_engine_rdt(self, payload):
+                calls.append(("init", payload))
+
+            async def start_weight_update(self, is_checkpoint_format=False):
+                calls.append(("start", is_checkpoint_format))
+
+            async def update_weights_rdt(self, update_info):
+                calls.append(("update", update_info))
+
+            async def finish_weight_update(self):
+                calls.append(("finish",))
 
             def init_weight_update_communicator(self, info):
                 raise AssertionError("RDT must not use the native NCCL init path")
 
-        ret = ShardedRdtTransferStrategy.initialize_receivers(init_info, _FakeClient())
-        assert asyncio.iscoroutine(ret)
-        assert asyncio.run(ret) is None
+        async def _drive():
+            loop = asyncio.get_running_loop()
+            sc = _SyncInferenceClient(_FakeClient(), loop)
+            # _run uses run_coroutine_threadsafe, so drive from a worker thread.
+            await asyncio.to_thread(sc.init_weight_transfer_engine, {"names": ["w"]})
+            await asyncio.to_thread(sc.start_weight_update)
+            await asyncio.to_thread(sc.update_weights, {})
+            await asyncio.to_thread(sc.finish_weight_update)
+
+        asyncio.run(_drive())
+        assert [c[0] for c in calls] == ["init", "start", "update", "finish"]
+        assert calls[0][1] == {"names": ["w"]}
+        assert calls[1][1] is True  # start_weight_update(is_checkpoint_format=True)
 
 
 class TestRdtReplicaConsumerMapping:

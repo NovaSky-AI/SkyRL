@@ -410,9 +410,46 @@ class Worker(DistributedTorchRayActor):
         .. note::
             This function should be called on all the ranks in the worker group simultaneously.
         """
-        from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy_cls
+        from skyrl.backends.skyrl_train.weight_sync import (
+            get_transfer_strategy,
+            get_transfer_strategy_cls,
+        )
 
         assert inference_engine_client is not None
+
+        # Fetch the total inference world size from the servers.
+        inference_world_size, _ = await inference_engine_client.get_world_size()
+
+        # sharded_rdt bypasses the WeightTransferStrategy/Sender abstraction: it
+        # already matches vLLM's trainer-send model (a WeightSource + trainer
+        # engine + sync client), so it is driven directly by RdtWeightSyncSender
+        # from broadcast_to_inference_engines (see weight_sync/rdt_send.py), not
+        # through create_sender/send_chunks. The strategy path below is only for
+        # the legacy push backends (nccl broadcast / cuda ipc).
+        if (
+            get_transfer_strategy(inference_engine_cfg.weight_sync_backend, self.cfg.placement.colocate_all)
+            == "sharded_rdt"
+        ):
+            import ray
+
+            from skyrl.backends.skyrl_train.weight_sync import rdt_vllm_register
+            from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+                RdtWeightSyncSender,
+            )
+
+            rdt_vllm_register.ensure_registered()
+            try:
+                namespace = ray.get_runtime_context().namespace or None
+            except Exception:  # noqa: BLE001
+                namespace = None
+            self._rdt_sender = RdtWeightSyncSender(
+                inference_engine_client,
+                inference_engine_cfg,
+                inference_world_size,
+                namespace,
+            )
+            torch.distributed.barrier()
+            return
 
         # Determine transfer strategy based on inference engine config and placement
         self._transfer_strategy_cls = get_transfer_strategy_cls(
@@ -420,26 +457,13 @@ class Worker(DistributedTorchRayActor):
             colocate_all=self.cfg.placement.colocate_all,
         )
 
-        # Fetch the total inference world size from the servers.
-        inference_world_size, _ = await inference_engine_client.get_world_size()
-
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(
             inference_engine_cfg, inference_world_size=inference_world_size
         )
 
-        # Engine-specific hook: let the strategy fill any init-info fields it
-        # derives from the trainer's live weights (no-op for the push backends;
-        # sharded_rdt fills the full param-name list it bakes its plan over).
-        # Runs before initialize_receivers, which may consume those fields.
-        self._transfer_strategy_cls.populate_init_info(
-            init_info, weight_extractor=getattr(self, "weight_extractor", None)
-        )
-
-        # Create the sender on all ranks, and (rank 0) initialize the receivers
-        # CONCURRENTLY: the broadcast backend needs create_sender (which joins a
-        # NCCL group) and the receiver init in flight together or it deadlocks.
-        # Each strategy picks the right inference-side init via initialize_receivers.
+        # Create sender on all ranks
+        # Strategy implementations may have different logic for different ranks
         tasks = [
             asyncio.to_thread(
                 self._transfer_strategy_cls.create_sender,
@@ -447,18 +471,15 @@ class Worker(DistributedTorchRayActor):
                 inference_client=inference_engine_client,
             ),
         ]
+
+        # Only rank 0 initializes receivers on inference engines
+        # NOTE: For broadcast strategy, sender and receiver init must run concurrently
+        # because both need to join the same process group to avoid deadlock
         if torch.distributed.get_rank() == 0:
-            tasks.append(self._transfer_strategy_cls.initialize_receivers(init_info, inference_engine_client))
+            tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
 
         results = await asyncio.gather(*tasks)
-        sender = results[0]  # sender is always the first task
-
-        # Engine-specific hook: bind this worker to the sender (no-op default;
-        # sharded_rdt's sender reads the worker's weight_extractor to build its
-        # WeightSource and drives the vendored trainer engine off it).
-        sender.bind_trainer_worker(self)
-
-        self._weight_transfer_sender = sender
+        self._weight_transfer_sender = results[0]  # sender is always first task
 
         # # Register signal handlers for termination only on rank 0
         # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.

@@ -15,11 +15,6 @@ from .cuda_ipc_strategy import (
     CudaIpcWeightTransferSender,
     CudaIpcWeightUpdateRequest,
 )
-from .sharded_rdt_strategy import (
-    ShardedRdtInitInfo,
-    ShardedRdtTransferStrategy,
-    ShardedRdtWeightTransferSender,
-)
 from .transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferSender,
@@ -46,13 +41,13 @@ def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> T
     """
     strategy = get_transfer_strategy(weight_sync_backend, colocate_all)
     if strategy == "sharded_rdt":
-        # Ensure the engine is registered in vLLM's factory driver-side too
-        # (idempotent; no-op without vLLM). Worker-side registration happens via
-        # the worker-extension import.
-        from . import rdt_vllm_register
-
-        rdt_vllm_register.ensure_registered()
-        return ShardedRdtTransferStrategy
+        # sharded_rdt does NOT use the WeightTransferStrategy abstraction — it is
+        # driven directly by RdtWeightSyncSender (see weight_sync/rdt_send.py),
+        # short-circuited in Worker.init_weight_sync_state before this is reached.
+        raise ValueError(
+            "sharded_rdt bypasses the WeightTransferStrategy layer; it is handled "
+            "in Worker.init_weight_sync_state via RdtWeightSyncSender, not here."
+        )
     if strategy == "ipc":
         return CudaIpcTransferStrategy
     return BroadcastTransferStrategy
@@ -83,9 +78,6 @@ __all__ = [
     "BroadcastWeightTransferSender",
     "CudaIpcTransferStrategy",
     "CudaIpcWeightTransferSender",
-    "ShardedRdtInitInfo",
-    "ShardedRdtTransferStrategy",
-    "ShardedRdtWeightTransferSender",
     "get_transfer_strategy",
     "get_transfer_strategy_cls",
 ]

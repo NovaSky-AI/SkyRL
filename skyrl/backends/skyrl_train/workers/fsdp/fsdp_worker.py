@@ -200,15 +200,21 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
-        # Call super first to set _transfer_strategy_cls and create sender/receivers
+        # Call super first to create the sender (push backends) or the RDT sender.
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
-        # Initialize weight extractor
+        # Initialize weight extractor (used by the push senders AND by the RDT
+        # sender's WeightSource at send time).
         # TODO(haochen): Module grouping for fused-weight loaders is only enabled for CUDA IPC.
         # transfer strategy, we can enable it for other strategies as well.
-        from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
+        from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 
-        group_by_module = self._transfer_strategy_cls is CudaIpcTransferStrategy
+        # Resolve from the backend string rather than self._transfer_strategy_cls:
+        # the RDT path bypasses the strategy layer, so _transfer_strategy_cls is
+        # unset there (and RDT wants ungrouped, one param per name).
+        group_by_module = (
+            get_transfer_strategy(inference_engine_cfg.weight_sync_backend, self.cfg.placement.colocate_all) == "ipc"
+        )
         weight_prefix = "language_model." if self._is_multimodal_lm_only else ""
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
@@ -300,6 +306,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             await self._save_lora_adapters_and_sync(
                 peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
             )
+        elif getattr(self, "_rdt_sender", None) is not None:
+            # sharded_rdt: bypass extraction + send_chunks entirely. The pull-based
+            # trainer engine gathers live params group-by-group off the weight
+            # extractor and the inference workers pull their slices; the extracted
+            # chunk iterator the push backends build is not used. Still disable
+            # expandable_segments — the sidecar shares gathered tensors over CUDA IPC.
+            with self._expandable_segments_disabled_for_sync():
+                await self._rdt_sender.send(self.weight_extractor)
         else:
             # Extract and send weights using the sender created at init time.
             # Disable expandable_segments around the send: under colocate_all the

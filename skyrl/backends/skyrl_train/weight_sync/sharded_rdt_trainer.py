@@ -24,7 +24,6 @@ process that can reach Ray and (for multi-rank) `torch.distributed` works.
 
 import contextlib
 import threading
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -167,18 +166,6 @@ class _RDTProducerServer:
 
         self._pack_check = pack_check
 
-        # profiling counters
-        self._timing_lock = threading.Lock()
-        self._produce_calls = self._produce_specs = self._produce_bytes = 0
-        self._produce_wait_seconds = self._produce_slice_seconds = 0.0
-        self._produce_method_seconds = 0.0
-
-        from skyrl.backends.skyrl_train.weight_sync._nixl_profile import (
-            install_nixl_timing,
-        )
-
-        install_nixl_timing()  # fail-soft inside
-
         # Freeze the static post-init object graph so gen-2 GC never stops the
         # world mid-serve (measured straggler fix in the old producer).
         gc.collect()
@@ -310,20 +297,15 @@ class _RDTProducerServer:
         consumer's identical layout), and returns the one packed blob.
         `pack=False` serves one tensor per spec (the rare unbaked path).
         """
-        t_m0 = time.perf_counter()
         needed = sorted({n for n, _ in specs})
-        t_w0 = time.perf_counter()
         with self._cache_cond:
             while not all(n in self._cache for n in needed):
                 if self._gather_error is not None:
                     raise RuntimeError(f"gather errored before {needed}: {self._gather_error!r}")
                 self._cache_cond.wait()
-        wait_s = time.perf_counter() - t_w0
 
-        t_s0 = time.perf_counter()
         sliced: list = []  # (byte_off, tensor)
         pack_cur = 0
-        nbytes = 0
         for name, chain in specs:
             t = self._cache[name]
             for op, args, kw in chain:
@@ -333,12 +315,10 @@ class _RDTProducerServer:
             off = (pack_cur + 15) & ~15
             pack_cur = off + t.numel() * t.element_size()
             sliced.append((off, t))
-            nbytes += t.numel() * t.element_size()
 
         if not pack:
             out = [t.contiguous().clone() for _off, t in sliced]
             torch.accelerator.synchronize()
-            self._bump_timing(t_m0, wait_s, t_s0, len(specs), nbytes)
             return out
 
         with self._serve_lock:
@@ -370,20 +350,7 @@ class _RDTProducerServer:
         blob = arena[:pack_cur]
         if self._pack_check:
             self._log_pack_check(blob, pack_cur)
-        self._bump_timing(t_m0, wait_s, t_s0, len(specs), nbytes)
         return [blob]
-
-    # ---------------- profiling ----------------
-
-    def _bump_timing(self, t_m0, wait_s, t_s0, nspecs, nbytes) -> None:
-        slice_s = time.perf_counter() - t_s0
-        with self._timing_lock:
-            self._produce_calls += 1
-            self._produce_specs += nspecs
-            self._produce_wait_seconds += wait_s
-            self._produce_slice_seconds += slice_s
-            self._produce_bytes += nbytes
-            self._produce_method_seconds += time.perf_counter() - t_m0
 
     def _log_pack_check(self, blob: torch.Tensor, pack_cur: int) -> None:
         import json
@@ -396,33 +363,6 @@ class _RDTProducerServer:
         os.makedirs("/tmp/rdt_profile", exist_ok=True)
         with open("/tmp/rdt_profile/packcheck_prod.jsonl", "a") as f:
             f.write(json.dumps({"pid": os.getpid(), "bytes": pack_cur, "sum": s}) + "\n")
-
-    def get_produce_timing(self) -> dict:
-        with self._timing_lock:
-            return dict(
-                calls=self._produce_calls,
-                specs=self._produce_specs,
-                wait_seconds=self._produce_wait_seconds,
-                slice_seconds=self._produce_slice_seconds,
-                bytes=self._produce_bytes,
-                method_seconds=self._produce_method_seconds,
-            )
-
-    def reset_produce_timing(self) -> None:
-        with self._timing_lock:
-            self._produce_calls = self._produce_specs = self._produce_bytes = 0
-            self._produce_wait_seconds = self._produce_slice_seconds = 0.0
-            self._produce_method_seconds = 0.0
-
-    def get_nixl_timing(self) -> dict:
-        from skyrl.backends.skyrl_train.weight_sync import _nixl_profile
-
-        return _nixl_profile.snapshot()
-
-    def reset_nixl_timing(self) -> None:
-        from skyrl.backends.skyrl_train.weight_sync import _nixl_profile
-
-        _nixl_profile.reset()
 
     def shutdown(self) -> None:
         with self._cache_cond:
@@ -463,7 +403,6 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # group key. CUDA-IPC exports must outlive the importer, so we hold them
         # until the server reports the group freed. See send_weights.
         self._inflight: dict[tuple, dict[str, torch.Tensor]] = {}
-        self._sync_timing: dict[str, float] = {}
 
     def _rpc(self, method: str, *args: Any) -> Any:
         """Call one of the server actor's methods and block for the result.
@@ -621,10 +560,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             self._run_gather_loop(update_future=None)
             return
 
-        wall0 = time.perf_counter()
-        t0 = time.perf_counter()
         self.client.start_weight_update()
-        self._sync_timing["start_seconds"] = time.perf_counter() - t0
 
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
             ShardedRDTWeightTransferUpdateInfo,
@@ -634,23 +570,17 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         with ThreadPoolExecutor(max_workers=1) as exe:
             # The workers block inside update_weights until they've pulled every
             # group, so it runs concurrently with the gather/publish loop.
-            tu0 = time.perf_counter()
             future = exe.submit(self.client.update_weights, empty_update)
             self._run_gather_loop(update_future=future)
             future.result()  # surface inference-side errors
-            self._sync_timing["update_weights_seconds"] = time.perf_counter() - tu0
 
-        tf0 = time.perf_counter()
         self.client.finish_weight_update()
-        self._sync_timing["finish_seconds"] = time.perf_counter() - tf0
-        self._sync_timing["wall_seconds"] = time.perf_counter() - wall0
 
     def _run_gather_loop(self, update_future) -> None:
         """Gather this rank's weights group-by-group and publish each into the
         server over CUDA IPC. `publish_group` blocks when the lookahead is full,
         so the loop self-paces to the consumers' pull rate. Runs on every rank;
         only the sender has an `update_future` to fail fast on."""
-        gather0 = time.perf_counter()
         assert self.source is not None  # guaranteed by trainer_init
         self._rpc("begin_sync")
         it = iter(self.source)
@@ -693,32 +623,12 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
                 self._rpc("set_gather_error", repr(e))
             self._inflight.clear()
             raise
-        finally:
-            self._sync_timing["gather_seconds"] = time.perf_counter() - gather0
 
     def _drop_inflight(self, freed_keys: list) -> None:
         for k in freed_keys:
             self._inflight.pop(tuple(k), None)
 
     # ---------------- misc ----------------
-
-    def get_sync_timing(self) -> dict:
-        """Coarse per-round timing (start / gather / update_weights / finish /
-        wall seconds) — the replacement for the example CriticalPathProfiler's
-        driver buckets. Producer/NIXL counters live on the server."""
-        return dict(self._sync_timing)
-
-    def get_produce_timing(self) -> dict:
-        return self._rpc("get_produce_timing")
-
-    def reset_produce_timing(self) -> None:
-        self._rpc("reset_produce_timing")
-
-    def get_nixl_timing(self) -> dict:
-        return self._rpc("get_nixl_timing")
-
-    def reset_nixl_timing(self) -> None:
-        self._rpc("reset_nixl_timing")
 
     def shutdown(self) -> None:
         if self._server is None:

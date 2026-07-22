@@ -1451,6 +1451,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # (model_id=None) keeps the legacy shared path + name.
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
+        elif getattr(self, "_rdt_sender", None) is not None:
+            # sharded_rdt weight sync needs an FSDP-shaped WeightSource; the
+            # Megatron export path (bridge / bucketing) needs its own WeightSource.
+            raise NotImplementedError(
+                "weight_sync_backend='sharded_rdt' is FSDP-only for now; Megatron "
+                "RDT support requires a Megatron WeightSource (follow-up)."
+            )
         else:
             # Extract and send weights using the sender created at init time.
             # Disable expandable_segments around the send: under colocate_all the
