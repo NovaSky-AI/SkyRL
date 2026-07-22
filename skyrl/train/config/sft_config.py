@@ -153,8 +153,10 @@ class SFTConfig(BaseConfig):
     dataset_split: Optional[str] = None
     """Deprecated: use ``train_dataset_splits`` instead."""
     train_datasets: Optional[List[str]] = None
-    """HuggingFace dataset names (or paths) to train on. With multiple datasets, batches are
-    mixed per-source by :class:`~skyrl.train.dataset.samplers.DataMixingSampler` according to
+    """HuggingFace dataset names, local paths, or cloud URIs (``s3://``, ``gs://``, ``gcs://``)
+    to train on. Cloud URIs are downloaded once and cached under ``cache_dir``. With multiple
+    datasets, batches are mixed per-source by
+    :class:`~skyrl.train.dataset.samplers.DataMixingSampler` according to
     ``train_dataset_weights``. Defaults to ``["yahma/alpaca-cleaned"]``. All datasets must share
     the same ``messages_key``/``tools_key``/``system_key`` columns and modality."""
     train_dataset_splits: Optional[List[str]] = None
@@ -165,15 +167,17 @@ class SFTConfig(BaseConfig):
     dataset, independent of dataset sizes. Only supported with ``sampler="random"`` (custom
     samplers receive ratios via ``sampler_kwargs``). Defaults to equal mixing (``1/N`` each)."""
     pretokenized_dataset_paths: Optional[List[str]] = None
-    """Local paths to *pretokenized* training datasets, each a file or
-    directory holding parquet/JSONL/arrow files or a HF
-    ``Dataset.save_to_disk`` directory. Rows must carry unpadded
-    ``input_ids`` and a full-sequence 0/1 ``loss_mask`` (``num_actions`` is
-    inferred); VLM rows additionally carry ``pixel_values`` /
-    ``image_grid_thw``. See ``skyrl.train.dataset.pretokenized``. When set,
-    online tokenization is skipped; cannot be combined with ``train_datasets``.
-    Multiple stores are concatenated and mixed per ``train_dataset_weights``
-    (like ``train_datasets``)."""
+    """Paths to *pretokenized* training datasets: local paths, ``s3://``,
+    ``gs://``, or ``gcs://`` URIs, each a file or directory holding
+    parquet/JSONL/arrow files or a HF ``Dataset.save_to_disk`` directory.
+    Cloud URIs are downloaded once and cached under ``cache_dir``. Rows must
+    carry unpadded ``input_ids`` and a full-sequence 0/1 ``loss_mask``
+    (``num_actions`` is inferred); VLM rows additionally carry
+    ``pixel_values`` / ``image_grid_thw``. See
+    ``skyrl.train.dataset.pretokenized``. When set, online tokenization is
+    skipped; cannot be combined with ``train_datasets``. Multiple stores are
+    concatenated and mixed per ``train_dataset_weights`` (like
+    ``train_datasets``)."""
     messages_key: str = "messages"  # column name for chat-format datasets
     tools_key: str = "tools"
     """Column name holding per-row tool/function schemas for tool-calling datasets

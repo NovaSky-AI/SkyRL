@@ -53,6 +53,7 @@ from skyrl.train.config.sft_config import (
     build_skyrl_config_for_sft,
 )
 from skyrl.train.dataset.pretokenized import load_from_pretokenized
+from skyrl.train.dataset.remote_storage import materialize_remote_dataset
 from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
@@ -1043,7 +1044,10 @@ class SFTTrainer:
         - Set ``disable_cache=True`` to disable caching entirely.
 
         Args:
-            dataset_name: HuggingFace dataset name (e.g. ``"yahma/alpaca-cleaned"``).
+            dataset_name: HuggingFace dataset name (e.g. ``"yahma/alpaca-cleaned"``),
+                local path, or cloud URI (``s3://``, ``gs://``, ``gcs://``) of a
+                raw dataset directory. Cloud URIs are downloaded once and cached
+                under ``cache_dir``.
             dataset_split: Dataset split (e.g. ``"train[:100]"`` or ``"test"``).
 
         Returns a list of tokenized examples (dicts with ``input_ids``,
@@ -1076,6 +1080,17 @@ class SFTTrainer:
 
             logger.info("Cache miss or force_recache=True, tokenizing dataset...")
             logger.info(f"Cache key: {cache_key}")
+
+        # Cloud-hosted (s3://, gs://) raw datasets are materialized to a
+        # persistent local copy before loading -- persistent because the
+        # parallel tokenization workers re-open the dataset by path. The
+        # original URI (not the resolved local path) is the cache key above,
+        # so tokenization caches stay stable across nodes and runs.
+        dataset_name = materialize_remote_dataset(
+            dataset_name,
+            cache_dir=None if self.sft_cfg.disable_cache else self.sft_cfg.cache_dir,
+            force_redownload=self.sft_cfg.force_recache,
+        )
 
         logger.info(f"Loading dataset '{dataset_name}' split='{dataset_split}'...")
         dataset = load_dataset(dataset_name, split=dataset_split)
@@ -1249,7 +1264,12 @@ class SFTTrainer:
         if self.sft_cfg.pretokenized_dataset_paths:
             for path in self.sft_cfg.pretokenized_dataset_paths:
                 # The loader raises on 0 usable rows, so no empty-source check.
-                source = load_from_pretokenized(path, max_length=self.sft_cfg.max_length)
+                source = load_from_pretokenized(
+                    path,
+                    max_length=self.sft_cfg.max_length,
+                    cache_dir=None if self.sft_cfg.disable_cache else self.sft_cfg.cache_dir,
+                    force_redownload=self.sft_cfg.force_recache,
+                )
                 tokenized.extend(source)
                 dataset_lengths.append(len(source))
             if len(dataset_lengths) > 1:
@@ -1286,7 +1306,15 @@ class SFTTrainer:
         """
         if self.sft_cfg.eval_pretokenized_dataset_paths:
             return [
-                (name, load_from_pretokenized(path, max_length=self.sft_cfg.max_length))
+                (
+                    name,
+                    load_from_pretokenized(
+                        path,
+                        max_length=self.sft_cfg.max_length,
+                        cache_dir=None if self.sft_cfg.disable_cache else self.sft_cfg.cache_dir,
+                        force_redownload=self.sft_cfg.force_recache,
+                    ),
+                )
                 for name, path in zip(self.sft_cfg.eval_dataset_names, self.sft_cfg.eval_pretokenized_dataset_paths)
             ]
         if not self.sft_cfg.eval_datasets:
