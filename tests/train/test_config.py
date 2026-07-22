@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from skyrl.train.config.config import (
     BaseConfig,
     SkyRLTrainConfig,
+    TrainerConfig,
     _resolve_class_type,
     build_nested_dataclass,
 )
@@ -126,6 +127,20 @@ def test_cli_overrides_empty_args():
     cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
     assert cfg.trainer.seed == 42
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("vocab_entropy_chunk_size", -1),
+        ("vocab_entropy_chunk_size", True),
+        ("vocab_entropy_chunk_memory_mb", 0),
+        ("vocab_entropy_chunk_memory_mb", True),
+    ],
+)
+def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value):
+    with pytest.raises(ValueError, match=field_name):
+        TrainerConfig(**{field_name: value})
 
 
 def test_cli_overrides_plus_prefix_rejected():
@@ -335,6 +350,65 @@ def test_cross_field_defaults():
     assert (
         cfg.generator.eval_sampling_params.max_generate_length == cfg.generator.sampling_params.max_generate_length
     )  # same as `generator.sampling_params.max_generate_length`
+
+
+def test_fake_int4_qat_defaults():
+    """Defaults must stay pinned to the llm-compressor RTN convention, disabled."""
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
+    fq = cfg.trainer.policy.model.fake_int4_qat
+    assert fq.enabled is False
+    assert fq.group_size == 32
+    assert fq.scale_divisor == 7.5
+    assert fq.q_min == -8.0
+    assert fq.bf16_base_path is None
+
+
+def test_fake_int4_qat_cli_overrides():
+    """All convention knobs must be settable from the CLI (the Kimi K2.x convention)."""
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.model.lora.rank=32",
+            "trainer.policy.megatron_config.lora_config.merge_lora=false",
+            "trainer.policy.model.fake_int4_qat.enabled=true",
+            "trainer.policy.model.fake_int4_qat.group_size=32",
+            "trainer.policy.model.fake_int4_qat.scale_divisor=7.0",
+            "trainer.policy.model.fake_int4_qat.q_min=-7",
+            "trainer.policy.model.fake_int4_qat.bf16_base_path=/data/bf16-dump",
+        ]
+    )
+    fq = cfg.trainer.policy.model.fake_int4_qat
+    assert fq.enabled is True
+    assert fq.scale_divisor == 7.0
+    assert fq.q_min == -7.0
+    assert fq.bf16_base_path == "/data/bf16-dump"
+
+
+def test_fake_int4_qat_requires_lora():
+    with pytest.raises(AssertionError, match="currently requires LoRA"):
+        SkyRLTrainConfig.from_cli_overrides(["trainer.policy.model.fake_int4_qat.enabled=true"])
+
+
+def test_fake_int4_qat_requires_megatron():
+    with pytest.raises(AssertionError, match="strategy=megatron"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.policy.model.lora.rank=32",
+                "trainer.policy.megatron_config.lora_config.merge_lora=false",
+                "trainer.policy.model.fake_int4_qat.enabled=true",
+            ]
+        )
+
+
+def test_fake_int4_qat_requires_unmerged_lora_sync():
+    with pytest.raises(AssertionError, match="merge_lora=False"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.lora.rank=32",
+                "trainer.policy.model.fake_int4_qat.enabled=true",
+            ]
+        )
 
 
 class TestTrainerUseSamplePackingAlias:

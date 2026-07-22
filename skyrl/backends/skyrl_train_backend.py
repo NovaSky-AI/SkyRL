@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import math
 import os
 import tarfile
 import tempfile
@@ -14,7 +15,11 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
-from skyrl.backends.renderer import VLLMRenderer
+from skyrl.backends.renderer import (
+    RendererClientProtocol,
+    VLLMRenderer,
+    render_model_input,
+)
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
@@ -23,6 +28,12 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
+)
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
@@ -125,6 +136,9 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engine_client = None
         self._inference_engines_initialized = False
         self._renderer = None
+        # CPU-only render server for multi-modal preprocessing; started
+        # lazily on the first image-bearing training batch.
+        self._render_server = None
         # Captured at first LoRA create_model; subsequent create_models must
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
@@ -369,6 +383,36 @@ class SkyRLTrainBackend(AbstractBackend):
         if is_colocated:
             asyncio.run(client.sleep())
 
+    def _create_render_client(self) -> RendererClientProtocol:
+        """Return a client for vLLM's ``/v1/chat/completions/render``.
+
+        Two branches:
+
+        - Inference engines already initialized (e.g. VLM RL, where sampling
+          brought them up): reuse ``RemoteInferenceClient`` so render requests
+          fan out across all engine API servers rather than funneling through
+          a single driver-local process.
+        - Engines not initialized (e.g. VLM SFT): lazily start a CPU-only
+          render server. It loads just the tokenizer and HF processor (no
+          weights, no KV cache, no GPU), keeping the training path
+          (forward / forward_backward) free of inference-engine startup.
+        """
+        if self._inference_engines_initialized:
+            return self._inference_engine_client
+
+        from skyrl.backends.skyrl_train.inference_servers.render_server import (
+            CPURenderServer,
+            RenderServerClient,
+        )
+
+        if self._render_server is None:
+            self._render_server = CPURenderServer(
+                self._cfg.trainer.policy.model.path,
+                log_path=self._cfg.trainer.log_path,
+            )
+            self._render_server.start()
+        return RenderServerClient(self._render_server.url)
+
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
         if self._inference_engines_initialized:
@@ -379,6 +423,15 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.set_inference_engine_client(self._inference_engine_client)
         self.init_weight_sync_state()
         self._inference_engines_initialized = True
+
+        # The engines' API servers also expose the render endpoint, fanning
+        # render requests across all engines. Drop any CPU-render-backed
+        # renderer so the next image batch rebuilds against the engine client.
+        if self._renderer is not None:
+            self._renderer = None
+        if self._render_server is not None:
+            self._render_server.shutdown()
+            self._render_server = None
 
     def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
         # Tinker's public LoraConfig only exposes rank + alpha (plus
@@ -511,6 +564,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._inference_router:
             self._inference_router.shutdown()
             self._inference_router = None
+        if self._render_server is not None:
+            self._render_server.shutdown()
+            self._render_server = None
         ray.shutdown()
         self._model_ids_to_role = {}
         self._model_metadata = {}
@@ -532,10 +588,20 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
 
-        if self._renderer is None:
-            self._ensure_inference_engines()
-            self._renderer = VLLMRenderer(self._inference_engine_client, self._cfg.trainer.policy.model.path)
-        rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
+        # Only image chunks need vLLM's render endpoint. Text-only batches
+        # render locally, and image batches use a CPU-only render server, so
+        # the training path never pays for inference-engine startup.
+        has_image_chunks = any(
+            isinstance(chunk, (types.ImageChunk, types.ImageAssetPointerChunk))
+            for model_input in prepared_batch.all_model_inputs
+            for chunk in model_input.chunks
+        )
+        if has_image_chunks:
+            if self._renderer is None:
+                self._renderer = VLLMRenderer(self._create_render_client(), self._cfg.trainer.policy.model.path)
+            rendered_inputs = asyncio.run(self._renderer(prepared_batch.all_model_inputs))
+        else:
+            rendered_inputs = render_model_input(prepared_batch.all_model_inputs)
 
         all_input_ids = [r.prompt_ids for r in rendered_inputs]
 
@@ -590,7 +656,16 @@ class SkyRLTrainBackend(AbstractBackend):
         has_values = any(len(v) > 0 for v in prepared_batch.all_values)
         has_returns = any(len(r) > 0 for r in prepared_batch.all_returns)
         if has_logprobs:
-            batch_dict["action_log_probs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
+            action_log_probs_tensor = torch.tensor(action_log_probs_list, dtype=torch.float32)
+            batch_dict["action_log_probs"] = action_log_probs_tensor
+            # Tinker datums carry the *sampling* (rollout-engine) logprobs.
+            # Mirror them into `rollout_logprobs` so the policy workers emit
+            # the train-vs-rollout logprob-gap metrics
+            # (`minibatch_rollout_logprobs_abs_diff_*`), surfaced by
+            # `_extract_metrics` below.  Loss behaviour only changes when
+            # `trainer.algorithm.off_policy_correction` is explicitly
+            # configured (rollout logprobs are its intended input).
+            batch_dict["rollout_logprobs"] = action_log_probs_tensor
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
         if role == "critic":
@@ -682,6 +757,31 @@ class SkyRLTrainBackend(AbstractBackend):
         if "critic_lr" in data:
             metrics["critic_lr:last"] = float(data["critic_lr"])
 
+        # Train-vs-rollout logprob gap, computed by the policy workers per
+        # micro-batch (masked |logp_train - logp_rollout| over action tokens)
+        # and reduced across micro-batches / DP ranks.  Reconstruct the std
+        # from the reduced first/second moments (std itself cannot be
+        # mean-reduced; same as finalize_minibatch_rollout_logprob_diff_std)
+        # and surface the family under skyrl-train's familiar
+        # `policy/rollout_train_logprobs_abs_diff_*` names.  The `:mean` /
+        # `:max` / `:min` suffixes drive the Tinker SDK's cross-chunk
+        # reduction when a request is split into multiple chunks.
+        if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY in data:
+            mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY])
+            metrics["policy/rollout_train_logprobs_abs_diff_mean:mean"] = mean
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY in data:
+                sq_mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY])
+                # max(0, ...) guards tiny negatives from float round-off.
+                metrics["policy/rollout_train_logprobs_abs_diff_std:mean"] = math.sqrt(max(0.0, sq_mean - mean**2))
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY in data:
+                metrics["policy/rollout_train_logprobs_abs_diff_max:max"] = float(
+                    data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY]
+                )
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY in data:
+                metrics["policy/rollout_train_logprobs_abs_diff_min:min"] = float(
+                    data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY]
+                )
+
         return metrics
 
     def _sleep_inference_engines(self):
@@ -704,10 +804,22 @@ class SkyRLTrainBackend(AbstractBackend):
         role: str,
         loss_fn: str,
         loss_fn_config: dict[str, float] | None,
-    ) -> tuple[str, dict[str, float] | None]:
+    ) -> tuple[str, dict | None]:
         """Normalize public Tinker loss names/config into SkyRL-Train policy settings."""
         if role == "critic":
             return loss_fn, loss_fn_config
+
+        if loss_fn == "dppo":
+            # DPPO thresholds live in the nested `algorithm.dppo` sub-config, but
+            # Tinker's loss_fn_config is a flat float dict. Re-nest so the
+            # worker-side OmegaConf merge lands them on AlgorithmConfig.dppo.
+            normalized_config = dict(loss_fn_config or {})
+            dppo_overrides = {
+                key: normalized_config.pop(key) for key in ("delta_low", "delta_high") if key in normalized_config
+            }
+            if dppo_overrides:
+                normalized_config["dppo"] = dppo_overrides
+            return loss_fn, normalized_config or None
 
         if loss_fn != "ppo":
             return loss_fn, loss_fn_config

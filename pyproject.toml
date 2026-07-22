@@ -46,7 +46,7 @@ tinker = [
 ]
 
 ray = [
-    "ray[default]==2.51.1",
+    "ray[default]==2.56.0",
 ]
 
 aws = [
@@ -82,7 +82,7 @@ skyrl-train = [
     "accelerate",
     "torchdata",
     "omegaconf",
-    "ray==2.51.1",
+    "ray==2.56.0",
     "peft==0.18.1",
     "debugpy==1.8.0",
     "hf_transfer",
@@ -130,7 +130,16 @@ fsdp = [
 megatron = [
     "skyrl[skyrl-train]",
     "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
-    "transformer-engine-torch==2.11.0; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
+    # Declared directly (not just via transformer-engine[pytorch]) so the
+    # [tool.uv.sources] URL below is honored — uv ignores sources for
+    # transitive-only packages, which would otherwise fall back to the PyPI sdist.
+    "transformer-engine-torch==2.11.0; sys_platform == 'linux'",
+    # TE core CUDA lib (libtransformer_engine.so). The meta `transformer-engine`
+    # package hardcodes `transformer-engine-cu13` as its core dep, which we
+    # override to `never` below because this image is CUDA 12.8. cu12 is the
+    # matching core — without it the meta package's sanity check fails with
+    # "Found empty `transformer-engine` meta package installed".
+    "transformer-engine-cu12==2.11.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
@@ -296,6 +305,8 @@ vllm = [
 flash-attn = { url = "https://github.com/erictang000/flash-attention/releases/download/v2.8.3-torch2.11-clean/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 causal-conv1d = { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 mamba-ssm = { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+# transformer-engine-torch 2.11.0 built against torch 2.11 (cu128 / cp312).
+transformer-engine-torch = { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
 # Linux uses the cu128 index (torch 2.11 wheels are published there).
 torch = [

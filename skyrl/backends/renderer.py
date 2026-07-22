@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from typing import TYPE_CHECKING, NamedTuple, Union
+from typing import Any, Dict, NamedTuple, Protocol, Union
 
 import torch
 
@@ -16,10 +16,16 @@ from skyrl.tinker.types import (
     RenderedModelInput,
 )
 
-if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-        RemoteInferenceClient,
-    )
+
+class RendererClientProtocol(Protocol):
+    """Anything that can serve vLLM's ``/v1/chat/completions/render``.
+
+    Satisfied by ``RemoteInferenceClient`` (render requests fan out across the
+    inference-engine API servers) and ``RenderServerClient`` (a single
+    CPU-only render server on the driver node).
+    """
+
+    async def render_chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
 
 def render_model_input(model_inputs: list[ModelInput]) -> list[RenderedModelInput]:
@@ -80,7 +86,7 @@ class VLLMRenderer:
     placeholder tokens and optional kwargs_data (serialized pixel_values, etc).
     """
 
-    def __init__(self, client: RemoteInferenceClient, model_name: str) -> None:
+    def __init__(self, client: RendererClientProtocol, model_name: str) -> None:
         self._client = client
         self._model_name = model_name
 

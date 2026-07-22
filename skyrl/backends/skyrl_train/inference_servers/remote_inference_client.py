@@ -225,6 +225,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
     _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
+    # Monotonic counter of weight syncs (see `increment_weight_version`); source of the prefix-cache salt.
+    _weight_version: int = field(default=0, repr=False)
+
+    @property
+    def weight_version(self) -> int:
+        """Number of weight syncs to the engines so far (0 before the first sync); the policy version."""
+        return self._weight_version
+
+    def increment_weight_version(self) -> None:
+        """Advance the weight version. Called once per completed weight sync to the engines."""
+        self._weight_version += 1
 
     def __post_init__(self):
         if self.data_parallel_size <= 0:
@@ -389,6 +400,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         session_ids = input_batch.get("session_ids")
         mm_features = input_batch.get("mm_features")
+        cache_salt = input_batch.get("cache_salt")
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -413,6 +425,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                     mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                     model=model,
+                    cache_salt=cache_salt,
                 )
             async with gen_sem:
                 return await self._generate_single(
@@ -421,6 +434,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                     mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
                     model=model,
+                    cache_salt=cache_salt,
                 )
 
         async def _throttled_detokenize(token_ids: List[int]) -> str:
@@ -450,6 +464,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         session_id: Optional[Any],
         model: str,
         mm_features: Optional[MultiModalFeatures] = None,
+        cache_salt: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate completion for a single prompt.
@@ -474,6 +489,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
         }
         if mm_features:
             payload["features"] = mm_features
+        # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
+        # param.
+        if cache_salt is not None:
+            payload["cache_salt"] = cache_salt
 
         headers = {"Content-Type": "application/json"}
         if session_id:

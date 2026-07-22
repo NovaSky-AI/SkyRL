@@ -518,7 +518,22 @@ class MegatronStrategy(DistributedStrategy):
                 raise ValueError(f"Unexpected keys in LoRA adapter state dict: {unexpected}")
             self.print(f"Loaded {len(state_dict['model_state_dict'])} LoRA adapters from {adapter_path}.")
 
-    def save_hf_model(self, bridge, model: MegatronModelWrapper, output_dir: str, tokenizer=None, **kwargs) -> None:
+    def save_hf_model(
+        self,
+        bridge,
+        model: MegatronModelWrapper,
+        output_dir: str,
+        tokenizer=None,
+        *,
+        distributed_save: bool = False,
+        save_every_n_ranks: int = 1,
+        **kwargs,
+    ) -> None:
+        if distributed_save and io.is_cloud_path(output_dir):
+            raise ValueError(
+                f"distributed_save=True is incompatible with cloud paths (got {output_dir}). "
+                "Please use a shared filesystem path for distributed_save."
+            )
         # Create checkpoint directory if it doesn't exist.
         if self.is_rank_0():
             io.makedirs(output_dir, exist_ok=True)
@@ -530,7 +545,17 @@ class MegatronStrategy(DistributedStrategy):
             # on a Qwen3.5 VL checkpoint, whose shards co-mingle vision and text
             # weights): the bridge writes a shard only once all its keys are yielded,
             # so strict=True silently writes zero weights. No-op for complete exports.
-            bridge.save_hf_weights(model.actor_module, work_dir, strict=False)
+            #
+            # distributed_save fans the shard writes across ranks (one saver per
+            # save_every_n_ranks) instead of serializing them on rank 0 -- the same
+            # standard HF sharded layout, just written in parallel.
+            bridge.save_hf_weights(
+                model.actor_module,
+                work_dir,
+                strict=False,
+                distributed_save=distributed_save,
+                save_every_n_ranks=save_every_n_ranks,
+            )
             self.print(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.
