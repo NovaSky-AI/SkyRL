@@ -26,7 +26,7 @@ def _build_test_sft_config(num_steps: int, batch_size: int) -> SFTConfig:
     cfg.placement = SFTPlacementConfig(num_nodes=1, num_gpus_per_node=1)
     cfg.dataset_name = "unused-monkeypatched"
     cfg.dataset_split = "train"
-    cfg.eval_dataset_name = ""  # no eval path
+    cfg.eval_datasets = None  # no eval path
     cfg.eval_interval = 0
     cfg.eval_before_train = False
     cfg.num_steps = num_steps
@@ -140,8 +140,8 @@ def _run_pair(monkeypatch, collator_factory, n_examples, batch_size, num_steps):
         cfg.async_batch_collation = collate_ahead_on
         tokenized = copy.deepcopy(base)
         trainer = _make_trainer(cfg, collator_factory(cfg))
-        monkeypatch.setattr(trainer, "load_dataset", lambda: tokenized)
-        monkeypatch.setattr(trainer, "load_eval_dataset", lambda: None)
+        monkeypatch.setattr(trainer, "load_dataset", lambda: (tokenized, [len(tokenized)]))
+        monkeypatch.setattr(trainer, "load_eval_datasets", lambda: None)
         return _capture_batches(trainer, monkeypatch)
 
     serial = _run(collate_ahead_on=False)
@@ -203,8 +203,8 @@ def test_checkpoint_state_excludes_collated_ahead_batch(monkeypatch):
     cfg.ckpt_interval = 1
     data = _distinct_tokenized(6)
     trainer = _make_trainer(cfg, DefaultCollator(MagicMock(pad_token_id=0), micro_train_batch_size_per_gpu=1))
-    monkeypatch.setattr(trainer, "load_dataset", lambda: copy.deepcopy(data))
-    monkeypatch.setattr(trainer, "load_eval_dataset", lambda: None)
+    monkeypatch.setattr(trainer, "load_dataset", lambda: (copy.deepcopy(data), [len(data)]))
+    monkeypatch.setattr(trainer, "load_eval_datasets", lambda: None)
     monkeypatch.setattr(trainer, "load_checkpoint", lambda: 0)
 
     batches = []
