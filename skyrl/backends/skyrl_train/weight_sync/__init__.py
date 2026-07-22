@@ -16,8 +16,6 @@ from .cuda_ipc_strategy import (
     CudaIpcWeightUpdateRequest,
 )
 from .sharded_rdt_strategy import (
-    RDT_TRAINER_ACTOR_NAME,
-    RdtProducerMixin,
     ShardedRdtInitInfo,
     ShardedRdtTransferStrategy,
     ShardedRdtWeightTransferSender,
@@ -88,8 +86,6 @@ __all__ = [
     "ShardedRdtInitInfo",
     "ShardedRdtTransferStrategy",
     "ShardedRdtWeightTransferSender",
-    "RdtProducerMixin",
-    "RDT_TRAINER_ACTOR_NAME",
     "get_transfer_strategy",
     "get_transfer_strategy_cls",
 ]

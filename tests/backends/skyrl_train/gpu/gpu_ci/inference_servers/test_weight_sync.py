@@ -501,18 +501,23 @@ class TestColocatedIpcWeightUpdateFlow:
 # Sharded RDT (NIXL pull) Weight Sync Test
 # -----------------------------------------------------------------
 
-# The real producer serve surface (packed pulls, ref-counted free_gather,
-# reserve_serve_arena, gather-ahead backpressure) lives in RdtProducerMixin; this
-# test mixes it into a standalone single-GPU trainer to exercise it end-to-end
-# against the vLLM consumer engine — the same code path FSDPPolicyWorkerBase uses.
-from skyrl.backends.skyrl_train.weight_sync import RdtProducerMixin  # noqa: E402
+# The trainer side is the VENDORED vLLM RDT sidecar engine
+# (ShardedRDTTrainerWeightTransferEngine): trainer_init spawns a per-rank
+# _RDTProducerServer actor (the NIXL serve surface) and shares gathered weights
+# into it over CUDA IPC; send_weights drives the concurrent start/update/finish
+# handshake. This test drives that engine from a single-GPU (no-FSDP) Ray actor
+# via the SkyRL adapter (_SyncInferenceClient + _FsdpWeightSource) — the same
+# code path FSDPPolicyWorkerBase uses in production, minus FSDP sharding.
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (  # noqa: E402
+    RemoteInferenceClient,
+)
 
 
 class _ShimExtractor:
     """Minimal weight-extractor for a single-GPU (no-FSDP) trainer: params are
     already whole, so gather is identity and there is no name prefix. Matches the
-    surface RdtProducerMixin.gather_layer reads (model / weight_prefix /
-    _gather_tensor)."""
+    surface ``_FsdpWeightSource`` reads (model / weight_prefix / _gather_tensor /
+    get_weight_metadata)."""
 
     weight_prefix = ""
 
@@ -522,58 +527,91 @@ class _ShimExtractor:
     def _gather_tensor(self, param):
         return param
 
+    def get_weight_metadata(self, dtype):
+        names, dtype_names, shapes = [], [], []
+        dtype_name = str(dtype).split(".")[-1]
+        for name, param in self.model.state_dict().items():
+            names.append(name)
+            dtype_names.append(dtype_name)
+            shapes.append(list(param.shape))
+        return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
 
-@ray.remote(num_gpus=1, max_concurrency=8, enable_tensor_transport=True)
-class RdtTrainer(RdtProducerMixin):
-    """Named NIXL trainer actor backed by the real RdtProducerMixin (TP=1, no FSDP).
 
-    The vLLM inference workers pull only the slice each one consumes from this
-    actor over NIXL. gather_layer caches the (whole) named params; the mixin's
-    packed rdt_produce_weights_batched / free_gather / reserve_serve_arena serve
-    them, driven by the whole-model concurrent pattern the test replicates below.
+@ray.remote(num_gpus=1, max_concurrency=4)
+class RdtTrainerActor:
+    """Single-GPU (no-FSDP) trainer that drives the vendored sidecar RDT engine.
+
+    Holds the model on its own GPU and owns a background asyncio loop so the
+    engine's synchronous control-plane calls (via ``_SyncInferenceClient``) can
+    drive SkyRL's async ``RemoteInferenceClient`` off the loop. ``num_gpus=1``
+    (a real GPU assignment) is what lets the trainer engine pin its spawned
+    ``_RDTProducerServer`` to this GPU for CUDA IPC.
     """
 
-    def __init__(self, model_name: str, num_consumers: int = 1, device: str = "cuda"):
-        self.device = torch.device(device)
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(self.device)
-        self.weight_extractor = _ShimExtractor(model)
-        self._rdt_configure(
-            num_consumers=num_consumers,
-            num_rdt_buffers=2,
-            arena_presize_gb=0.0,
-            pack_check=False,
-            gather_lookahead=2,
+    def __init__(self, model_name, proxy_url, server_urls, data_parallel_size, model_id, namespace, num_consumers):
+        import threading
+
+        self._model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to("cuda")
+        self._extractor = _ShimExtractor(self._model)
+        self._namespace = namespace
+        self._num_consumers = num_consumers
+        # Background event loop for the sync client (the engine calls it from a
+        # worker thread, never from this loop, so run_coroutine_threadsafe is safe).
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._loop.run_forever, daemon=True).start()
+        self._client = RemoteInferenceClient(
+            proxy_url=proxy_url,
+            server_urls=server_urls,
+            data_parallel_size=data_parallel_size,
+            model_name=model_id,
         )
+        self._engine = None
 
     def ready(self):
         return True
 
-    def get_weight_metadata(self) -> dict:
-        names, dtype_names, shapes = [], [], []
-        for name, param in self.weight_extractor.model.named_parameters():
-            names.append(name)
-            dtype_names.append(str(param.dtype).split(".")[-1])
-            shapes.append(list(param.shape))
-        return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
+    def sync_once(self):
+        """Rendezvous (first call: spawn server + bake the inference side) and run
+        one full weight sync through the vendored engine."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_strategy import (
+            _FsdpWeightSource,
+            _SyncInferenceClient,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer import (
+            ShardedRDTTrainerInitInfo,
+            ShardedRDTTrainerWeightTransferEngine,
+        )
 
-    # Public wrappers: Ray refuses to call underscore-prefixed methods remotely,
-    # and the SkyRL sender normally drives these locally from inside the worker.
-    def begin_sync(self) -> None:
-        self._rdt_begin_sync()
+        sync_client = _SyncInferenceClient(self._client, self._loop)
+        source = _FsdpWeightSource(self._extractor, torch.bfloat16)
+        if self._engine is None:
+            init_info = ShardedRDTTrainerInitInfo(
+                rank=0,
+                num_consumers=self._num_consumers,
+                trainer_actor_namespace=self._namespace,
+            )
+            self._engine = ShardedRDTTrainerWeightTransferEngine.trainer_init(
+                init_info,
+                client=sync_client,
+                source=source,
+            )
+        self._engine.send_weights()
 
-    def end_sync(self) -> None:
-        self._rdt_end_sync()
+    def shutdown(self):
+        if self._engine is not None:
+            self._engine.shutdown()
+            self._engine = None
 
 
 @pytest_asyncio.fixture(scope="class")
 async def rdt_weight_update_env(class_scoped_ray_init_fixture):
     """Non-colocated sharded_rdt (NIXL pull) environment, TP=1.
 
-    Trainer (named, tensor-transport) on its own GPU; vLLM server (TP=1,
-    distributed_executor_backend=ray) on another GPU. 2 GPUs total.
+    The trainer actor (1 GPU) drives the vendored sidecar engine, which spawns
+    its own producer server; the vLLM server (TP=1,
+    distributed_executor_backend=ray) runs on another GPU. 2 GPUs + the sidecar
+    (shares the trainer's GPU).
     """
-    from skyrl.backends.skyrl_train.weight_sync import RDT_TRAINER_ACTOR_NAME
-
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
     # Select the sharded_rdt weight-sync backend (build_vllm_cli_args reads this
@@ -589,16 +627,27 @@ async def rdt_weight_update_env(class_scoped_ray_init_fixture):
     )
 
     async with InferenceEngineState.create(cfg, **create_kwargs) as engines:
-        trainer = RdtTrainer.options(name=RDT_TRAINER_ACTOR_NAME).remote(MODEL)
+        client = engines.client
+        namespace = ray.get_runtime_context().namespace or None
+        trainer = RdtTrainerActor.remote(
+            MODEL,
+            client.proxy_url,
+            client.server_urls,
+            client.data_parallel_size,
+            client.model_name,
+            namespace,
+            1,  # num_consumers (TP=1, single engine)
+        )
         ray.get(trainer.ready.remote())
 
         yield {
             "engines": engines,
             "trainer": trainer,
-            "client": engines.client,
-            "router_url": engines.client.proxy_url,
+            "client": client,
+            "router_url": client.proxy_url,
         }
 
+        ray.get(trainer.shutdown.remote())
         await engines.client.teardown()
         ray.kill(trainer)
     if engines.pg:
@@ -611,24 +660,20 @@ class TestShardedRdtWeightUpdateFlow:
 
     async def test_update_weights_rdt(self, rdt_weight_update_env):
         """
-        Full E2E weight sync test (non-colocated, sharded RDT / NIXL pull):
-        1. Query with dummy weights -> gibberish
-        2. init_weight_transfer_engine_rdt (resolves trainer actor + bakes plan)
-        3. start_weight_update -> per layer-group: gather + update_weights_rdt
-           (workers pull their slices from the trainer over NIXL) + free
-           -> finish_weight_update
-        4. Query again -> correct output
+        Full E2E weight sync test (non-colocated, sharded RDT / NIXL pull) via
+        the VENDORED sidecar trainer engine:
+        1. Query with dummy weights -> gibberish.
+        2. trainer.sync_once(): the vendored engine spawns its producer server,
+           bakes the plan on the inference side (init_weight_transfer_engine_rdt),
+           then drives start_weight_update -> concurrent gather/publish +
+           update_weights_rdt (workers pull their slices over NIXL) ->
+           finish_weight_update.
+        3. Query again -> correct output.
         """
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_strategy import (
-            RDT_TRAINER_ACTOR_NAME,
-            layerwise_groups,
-        )
-
         router_url = rdt_weight_update_env["router_url"]
         trainer = rdt_weight_update_env["trainer"]
-        client = rdt_weight_update_env["client"]
 
-        print("\n[TEST] Running sharded_rdt (NIXL pull) weight sync test")
+        print("\n[TEST] Running sharded_rdt (NIXL pull) weight sync test (sidecar)")
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as http_client:
             payload = {
@@ -645,64 +690,18 @@ class TestShardedRdtWeightUpdateFlow:
             print(f"[Step 1] Dummy weights output: {text_before!r}")
             assert "Paris" not in text_before, "Dummy weights unexpectedly produced correct answer"
 
-            # ===== Step 2: init engine + bake on the inference side =====
-            # Reorder metadata into group-major order + build group_lens so the
-            # consumer pre-builds its whole-model static plan (single empty update).
-            meta = ray.get(trainer.get_weight_metadata.remote())
-            groups = layerwise_groups(meta["names"])
-            idx = {n: i for i, n in enumerate(meta["names"])}
-            order = [idx[n] for g in groups for n in g]
-            names = [meta["names"][i] for i in order]
-            dtype_names = [meta["dtype_names"][i] for i in order]
-            shapes = [meta["shapes"][i] for i in order]
-            group_lens = [len(g) for g in groups]
-            namespace = ray.get_runtime_context().namespace or None
-            init_payload = {
-                "trainer_actor_name": RDT_TRAINER_ACTOR_NAME,
-                "trainer_actor_namespace": namespace,
-                "produce_method_name": "rdt_produce_weights_batched",
-                "num_consumers": 1,
-                "num_rdt_buffers": 2,
-                "layerwise_split": 1,
-                "arena_presize_gb": 0.0,
-                "pack_check": False,
-                "names": names,
-                "dtype_names": dtype_names,
-                "shapes": shapes,
-                "group_lens": group_lens,
-            }
-            print(f"[Step 2] init_weight_transfer_engine_rdt: {len(names)} params, {len(groups)} groups")
-            result = await client.init_weight_transfer_engine_rdt(init_payload)
-            for url, resp_data in result.items():
-                assert resp_data["status"] == 200, f"Server {url} RDT init failed: {resp_data}"
+            # ===== Step 2: drive the vendored sidecar engine end-to-end =====
+            # sync_once rendezvouses (spawn server + bake) on the first call and
+            # runs the full concurrent gather/pull handshake.
+            print("[Step 2] trainer.sync_once() — bake + NIXL pull weight sync")
+            await asyncio.to_thread(lambda: ray.get(trainer.sync_once.remote()))
+            print("[Step 2] Weight sync complete")
 
-            # ===== Step 3: whole-model concurrent gather + pull =====
-            # Mirrors ShardedRdtWeightTransferSender: run the gather loop (caches
-            # groups, blocks on gather-ahead backpressure) CONCURRENTLY with one
-            # empty update_weights_rdt (workers pull, pipelined; their free_gather
-            # back-edge releases the backpressure).
-            dtype = torch.bfloat16
-            ray.get(trainer.begin_sync.remote())
-            await client.start_weight_update(is_checkpoint_format=True)
-
-            def _run_gather():
-                for group_names in groups:
-                    ray.get(trainer.gather_layer.remote(group_names, dtype))
-
-            gather_task = asyncio.create_task(asyncio.to_thread(_run_gather))
-            update_task = asyncio.create_task(client.update_weights_rdt({}))
-            _, update_result = await asyncio.gather(gather_task, update_task)
-            for url, resp_data in update_result.items():
-                assert resp_data["status"] == 200, f"Server {url} RDT update failed: {resp_data}"
-            ray.get(trainer.end_sync.remote())
-            await client.finish_weight_update()
-            print("[Step 3] Weight sync complete")
-
-            # ===== Step 4: real weights -> correct output =====
+            # ===== Step 3: real weights -> correct output =====
             resp = await http_client.post(f"{router_url}/v1/completions", json=payload)
             assert resp.status_code == 200
             text_after = resp.json()["choices"][0]["text"]
-            print(f"[Step 4] Real weights output: {text_after!r}")
+            print(f"[Step 3] Real weights output: {text_after!r}")
             assert "Paris" in text_after, f"RDT weight sync failed - expected 'Paris' but got: {text_after!r}"
 
-            print("[SUCCESS] sharded_rdt weight sync test passed!")
+            print("[SUCCESS] sharded_rdt (sidecar) weight sync test passed!")

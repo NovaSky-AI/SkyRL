@@ -1,7 +1,6 @@
 import pytest
 
 from skyrl.backends.skyrl_train.weight_sync import (
-    RDT_TRAINER_ACTOR_NAME,
     BroadcastInitInfo,
     BroadcastTransferStrategy,
     BroadcastWeightUpdateRequest,
@@ -52,7 +51,13 @@ class TestGetTransferStrategyCls:
 
 
 class TestShardedRdtStrategy:
-    """Tests for the sharded_rdt (NIXL pull) strategy — no GPU/vLLM needed."""
+    """Tests for the sharded_rdt (NIXL pull) strategy — no GPU/vLLM needed.
+
+    The trainer-side machinery lives in the vendored ``sharded_rdt_trainer``
+    engine (a per-rank sidecar producer actor); the SkyRL strategy is a thin
+    adapter, so these cover the config-derived init info, the no-op receiver
+    hook, and the group-major ``WeightSource`` reorder.
+    """
 
     def _make_ie_cfg(self, run_engines_locally: bool = False) -> InferenceEngineConfig:
         return InferenceEngineConfig(
@@ -62,17 +67,14 @@ class TestShardedRdtStrategy:
         )
 
     def test_create_init_info(self):
-        """create_init_info returns a ShardedRdtInitInfo with the trainer actor name."""
+        """create_init_info returns a ShardedRdtInitInfo with the config-derived knobs."""
         init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg(), inference_world_size=4)
         assert isinstance(init_info, ShardedRdtInitInfo)
-        assert init_info.trainer_actor_name == RDT_TRAINER_ACTOR_NAME
-        assert init_info.produce_method_name == "rdt_produce_weights_batched"
         assert init_info.num_consumers == 4
+        assert init_info.model_dtype_str == "bfloat16"
+        assert init_info.num_rdt_buffers == 2
         # Non-local engines => override an existing receiver.
         assert init_info.override_existing_receiver is True
-        # names/dtype_names/shapes/group_lens are filled later from the extractor.
-        assert init_info.names == []
-        assert init_info.group_lens == []
         assert init_info.strategy_type() is ShardedRdtTransferStrategy
 
     def test_create_init_info_requires_world_size(self):
@@ -86,45 +88,20 @@ class TestShardedRdtStrategy:
         )
         assert init_info.override_existing_receiver is False
 
-    def test_to_api_payload(self):
-        """to_api_payload matches the vLLM ShardedRDTWeightTransferInitInfo fields."""
-        init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg(), inference_world_size=2)
-        init_info.names = ["model.embed_tokens.weight", "model.layers.0.mlp.gate_proj.weight"]
-        init_info.dtype_names = ["bfloat16", "bfloat16"]
-        init_info.shapes = [[4, 8], [16, 8]]
-        init_info.group_lens = [1, 1]
-        payload = init_info.to_api_payload()
-        assert set(payload) == {
-            "trainer_actor_name",
-            "trainer_actor_namespace",
-            "produce_method_name",
-            "num_consumers",
-            "num_rdt_buffers",
-            "layerwise_split",
-            "arena_presize_gb",
-            "pack_check",
-            "names",
-            "dtype_names",
-            "shapes",
-            "group_lens",
-        }
-        # SkyRL-only / producer-only fields must NOT leak into the engine payload.
-        assert "override_existing_receiver" not in payload
-        assert "gather_lookahead" not in payload
-        assert payload["names"] == init_info.names
-        assert payload["num_consumers"] == 2
-        assert payload["produce_method_name"] == "rdt_produce_weights_batched"
+    def test_weight_source_reorders_group_major(self):
+        """The FSDP WeightSource reorders metadata into group-major order (pre /
+        per-layer / post) so the vendored trainer's group-contiguity check passes."""
+        import torch
 
-    def test_populate_init_info_fills_group_major_metadata(self):
-        """populate_init_info pulls names/dtypes/shapes from the extractor and
-        reorders them into group-major order with a matching group_lens."""
-        init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg(), inference_world_size=1)
-        assert init_info.names == []  # empty until populated
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_strategy import (
+            _FsdpWeightSource,
+        )
 
         class _FakeExtractor:
+            weight_prefix = ""
+
             def get_weight_metadata(self, dtype):
-                # Layer 1 before layer 0 => layerwise_groups must reorder them
-                # (pre / layer-0 / layer-1 / post) and carry dtypes/shapes along.
+                # Layer 1 before layer 0 => must reorder to pre / layer-0 / layer-1 / post.
                 return {
                     "names": [
                         "model.embed_tokens.weight",
@@ -132,47 +109,80 @@ class TestShardedRdtStrategy:
                         "model.layers.0.mlp.gate_proj.weight",
                         "lm_head.weight",
                     ],
-                    "dtype_names": ["bfloat16", "float16", "bfloat16", "float16"],
+                    "dtype_names": ["bfloat16", "bfloat16", "bfloat16", "bfloat16"],
                     "shapes": [[4, 8], [1, 8], [0, 8], [8, 4]],
                 }
 
-        ShardedRdtTransferStrategy.populate_init_info(init_info, weight_extractor=_FakeExtractor())
-        # pre (embed) -> layer 0 -> layer 1 -> post (lm_head): group-major.
-        assert init_info.names == [
+        source = _FsdpWeightSource(_FakeExtractor(), torch.bfloat16)
+        meta = source.metadata()
+        assert [m.name for m in meta] == [
             "model.embed_tokens.weight",
             "model.layers.0.mlp.gate_proj.weight",
             "model.layers.1.mlp.gate_proj.weight",
             "lm_head.weight",
         ]
-        # dtypes/shapes travel with their names through the reorder.
-        assert init_info.dtype_names == ["bfloat16", "bfloat16", "float16", "float16"]
-        assert init_info.shapes == [[4, 8], [0, 8], [1, 8], [8, 4]]
-        # 4 groups (pre / layer-0 / layer-1 / post), one name each.
-        assert init_info.group_lens == [1, 1, 1, 1]
-        assert sum(init_info.group_lens) == len(init_info.names)
+        # shapes travel with their names through the reorder; dtype is the wire dtype.
+        assert [list(m.shape) for m in meta] == [[4, 8], [0, 8], [1, 8], [8, 4]]
+        assert all(m.dtype is torch.bfloat16 for m in meta)
 
-    def test_initialize_receivers_routes_to_rdt_endpoint(self):
-        """initialize_receivers calls the RDT collective_rpc, not the NCCL init."""
+    def test_initialize_receivers_is_noop(self):
+        """initialize_receivers must NOT touch the client (the vendored trainer's
+        trainer_init drives the inference-side init) and returns an awaitable."""
+        import asyncio
+
         init_info = ShardedRdtTransferStrategy.create_init_info(self._make_ie_cfg(), inference_world_size=1)
-        init_info.names = ["a"]
-        init_info.dtype_names = ["bfloat16"]
-        init_info.shapes = [[1]]
-        init_info.group_lens = [1]
-        sentinel = object()
-        captured = {}
 
         class _FakeClient:
             def init_weight_transfer_engine_rdt(self, payload):
-                captured["payload"] = payload
-                return sentinel
+                raise AssertionError("initialize_receivers must be a no-op for the sidecar")
 
             def init_weight_update_communicator(self, info):
                 raise AssertionError("RDT must not use the native NCCL init path")
 
         ret = ShardedRdtTransferStrategy.initialize_receivers(init_info, _FakeClient())
-        assert ret is sentinel
-        assert captured["payload"]["names"] == ["a"]
-        assert "override_existing_receiver" not in captured["payload"]
+        assert asyncio.iscoroutine(ret)
+        assert asyncio.run(ret) is None
+
+
+class TestRdtReplicaConsumerMapping:
+    """The per-replica consumer identity the engine computes from the injected
+    replica_rank/num_replicas must give every worker in a multi-engine fleet a
+    DISTINCT global id and a correct 1:1 producer binding (the fix for the
+    multi-engine deadlock). This mirrors the engine's arithmetic over the shared
+    M:N helpers, so it runs without a GPU/vLLM."""
+
+    @staticmethod
+    def _consumer_id(replica_rank, num_replicas, num_consumers, local_index):
+        # Mirrors ShardedRDTWeightTransferEngine.init_transfer_engine.
+        workers_per_replica = num_consumers // max(1, num_replicas)
+        return replica_rank * workers_per_replica + local_index
+
+    def test_two_dense_engines_bind_distinct_producers(self):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+            assign_producer_indices,
+            count_consumers,
+        )
+
+        # 2 independent TP=1 engines (the 2x2 e2e): each engine's local index is 0,
+        # replica_rank 0 and 1 => consumer ids 0 and 1 (previously both 0 -> deadlock).
+        num_consumers, num_producers, num_replicas = 2, 2, 2
+        cids = [self._consumer_id(r, num_replicas, num_consumers, 0) for r in range(2)]
+        assert cids == [0, 1]
+        # Each consumer binds its own producer; each producer serves exactly one.
+        assert assign_producer_indices(num_producers, num_consumers, cids[0]) == [0]
+        assert assign_producer_indices(num_producers, num_consumers, cids[1]) == [1]
+        assert count_consumers(num_producers, num_consumers, 0) == 1
+        assert count_consumers(num_producers, num_consumers, 1) == 1
+
+    def test_single_replica_offset_is_zero(self):
+        # num_replicas=1 (default / single deployment) => offset 0, id == local index.
+        assert self._consumer_id(0, 1, 4, 3) == 3
+
+    def test_multi_engine_multi_worker_ids_are_contiguous(self):
+        # 2 engines x TP=2 = 4 consumers; ids must cover 0..3 with no collision.
+        num_consumers, num_replicas = 4, 2
+        ids = [self._consumer_id(r, num_replicas, num_consumers, local) for r in range(2) for local in range(2)]
+        assert sorted(ids) == [0, 1, 2, 3]
 
 
 class TestShardedRdtVllmRegistration:

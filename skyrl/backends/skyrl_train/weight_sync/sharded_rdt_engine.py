@@ -673,6 +673,25 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     when RDT_PACK_CHECK=1. Diffing the streams localizes any producer/consumer
     packed-layout divergence (the core invariant of the packed contract)."""
 
+    replica_rank: int = 0
+    """This inference engine's ordinal in the fleet (0..``num_replicas``-1).
+
+    Multi-engine deployments run several INDEPENDENT inference engines, each with
+    its own self-contained parallel config, so every engine's
+    ``_global_worker_index`` restarts at 0 and would collide across engines. The
+    driver assigns each engine a distinct ``replica_rank`` (with identical
+    ``num_replicas``) so the engine offsets its consumers into a globally distinct
+    range for the M:N block assignment. Default 0 (single engine) is unchanged."""
+
+    num_replicas: int = 1
+    """Number of independent inference engines in the fleet. Default 1 => the
+    per-replica offset is 0 and consumer identity is exactly
+    ``_global_worker_index`` (preserves single-engine and single-DP-deployment
+    behavior). When > 1, ``workers_per_replica = num_consumers // num_replicas``
+    and this engine's consumers occupy
+    ``replica_rank * workers_per_replica + _global_worker_index()``. Assumes a
+    uniform fleet (every replica has the same worker count)."""
+
 
 @dataclass
 class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
@@ -821,10 +840,6 @@ class ShardedRDTWeightTransferEngine(
         # rebuilt per sync). Non-None means update_weights ignores its (empty or
         # redundant) per-sync names.
         self._cached_plan: _CallPlan | None = None
-        # Names the cached plan was built from (empty tuple until built). A
-        # per-group driver passes a different name subset each call, so the plan
-        # is rebuilt when this key changes; a whole-model driver keeps it stable.
-        self._cached_plan_names: tuple[str, ...] = ()
         # Completed sync iterations (bumped in drain_pending). The FIRST sync
         # still grows/registers arenas on both sides; a producer-side
         # registration churns its NIXL agent-metadata version, and with pulls
@@ -897,13 +912,20 @@ class ShardedRDTWeightTransferEngine(
         # bound producer can serve any of this worker's keys.
         #
         # M:N identity: the block assignment needs each consumer's DISTINCT global
-        # index (0..C-1) and the total count C. The index is computed exactly like
-        # the sibling nccl_engine — ``data_parallel_index * world_size + rank`` (see
-        # _global_worker_index) — which is EP-independent (``data_parallel_index``
-        # is never reset for dense models, unlike ``data_parallel_rank``). The count
-        # C is the driver-supplied ``init_info.num_consumers`` (else inferred). Both
-        # hold for the supported serving modes: dense served via TP, MoE via DP+EP.
-        self._consumer_id = self._global_worker_index()
+        # index (0..C-1) and the total count C. Within one engine the index is
+        # ``data_parallel_index * world_size + rank`` (see _global_worker_index) —
+        # EP-independent (``data_parallel_index`` is never reset for dense models,
+        # unlike ``data_parallel_rank``). But a fleet of INDEPENDENT engines (each
+        # its own parallel config) restarts that index at 0 per engine, so each
+        # engine offsets into its own range using ``replica_rank``: with a uniform
+        # fleet, workers_per_replica = C // num_replicas and this engine's consumers
+        # occupy ``replica_rank * workers_per_replica + local index``. num_replicas
+        # defaults to 1 (offset 0), preserving single-engine / single-DP-deployment
+        # behavior. C is the driver-supplied ``init_info.num_consumers`` (else inferred).
+        num_replicas = max(1, int(getattr(init_info, "num_replicas", 1) or 1))
+        replica_rank = max(0, int(getattr(init_info, "replica_rank", 0) or 0))
+        workers_per_replica = self._num_consumers() // num_replicas
+        self._consumer_id = replica_rank * workers_per_replica + self._global_worker_index()
         producer_indices = self._select_producer_indices(len(producer_names))
 
         for producer_idx in producer_indices:
@@ -963,7 +985,6 @@ class ShardedRDTWeightTransferEngine(
                     f"but {len(init_info.names)} names were given."
                 )
             self._cached_plan = self._build_call_plan(init_info.names, init_info.group_lens)
-            self._cached_plan_names = tuple(init_info.names)
             logger.info(
                 "[RDT-PLAN] pre-built static call plan at init: %d chunks, " "%d residual name(s)",
                 len(self._cached_plan.chunks),
@@ -1073,7 +1094,7 @@ class ShardedRDTWeightTransferEngine(
         """
         if num_producers <= 1:
             return [0]
-        return assign_producer_indices(num_producers, self._num_consumers(), self._global_worker_index())
+        return assign_producer_indices(num_producers, self._num_consumers(), self._consumer_id)
 
     def start_weight_update(self) -> None:
         """Put the model's params on meta so layerwise reload streams them in
@@ -1108,21 +1129,15 @@ class ShardedRDTWeightTransferEngine(
     ) -> None:
         """Pull + replay the baked leaf modules the sync covers.
 
-        The chunk/free plan is a pure function of the baked plan + the driver's
-        group partition, so it is cached and reused whenever the same names
-        arrive. Two drive modes are supported:
-
-        * **Whole-model** (fork default): ``group_lens`` supplied at init or in
-          the first ``update_info`` covers every name; the plan is built once and
-          every later sync passes the SAME names (or empty, reusing the cache).
-        * **Per-group** (SkyRL driver): each ``update_info`` carries just one
-          gather group's names, so the incoming name list changes call-to-call.
-          The cache is keyed on the names it was built from and rebuilt whenever
-          they differ, so each group gets its own (still-cached-per-group) plan.
-
-        Residual names with no baked plan — attention scales, padded/partial
-        layers — take the plain per-slice load; ``load_weights`` is used only by
-        that path.
+        The chunk/free plan is STATIC across syncs (a pure function of the baked
+        plan + the driver's group partition), so it is built once and cached:
+        from ``init_info.group_lens`` at init if the driver supplied it — in
+        which case this ``update_info`` may be EMPTY — else lazily from the
+        first non-empty ``update_info`` (the driver keeps passing names +
+        group_lens). Either way every sync just re-runs the pipeline over the
+        self-describing chunks — no per-sync bookkeeping. Residual names with no
+        baked plan — attention scales, padded/partial layers — take the plain
+        per-slice load; ``load_weights`` is used only by that path.
 
         Assumes each baked module's source names fall within one gather group
         (true for the per-layer / pre / post partition); if not, the pull
@@ -1132,17 +1147,14 @@ class ShardedRDTWeightTransferEngine(
             raise RuntimeError("Sharded RDT engine not initialized. Call init_transfer_engine() first.")
         # Surface any error the background thread hit on a prior item promptly.
         self._raise_proc_error()
-        names_key = tuple(update_info.names)
-        if self._cached_plan is None or (names_key and names_key != self._cached_plan_names):
-            # Build from this call's names + group_lens (group_lens absent => one
-            # group); cache keyed on the names so a per-group driver rebuilds per
-            # group while a whole-model driver builds once and reuses.
+        if self._cached_plan is None:
+            # First call and no init-time plan: build from this call's names +
+            # group_lens (group_lens absent => one group), then cache and reuse.
             names = update_info.names
             group_lens = list(update_info.group_lens) or [len(names)]
             if sum(group_lens) != len(names):
                 raise ValueError(f"group_lens sums to {sum(group_lens)} but " f"{len(names)} names were passed.")
             self._cached_plan = self._build_call_plan(names, group_lens)
-            self._cached_plan_names = names_key
         residual = self._run_call_plan(self._cached_plan)
         if residual:
             # Rare/absent path (0% once unbaked-skip prunes dead names); runs
@@ -2144,7 +2156,6 @@ class ShardedRDTWeightTransferEngine(
         self._live_names.clear()
         # Drop the cached plan (holds _Scatter refs to the baked layers).
         self._cached_plan = None
-        self._cached_plan_names = ()
         # Release the receive arenas (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
         self._dest_arenas = [{} for _ in range(self._NSLOTS)]

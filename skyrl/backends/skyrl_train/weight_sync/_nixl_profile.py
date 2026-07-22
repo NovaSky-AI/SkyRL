@@ -235,16 +235,14 @@ def _wrap_agent(agent) -> None:
         try:
             return orig_add_remote(*a, **k)
         finally:
-            _add("add_remote_agent_seconds",
-                 time.perf_counter() - t0, "add_remote_agent_calls")
+            _add("add_remote_agent_seconds", time.perf_counter() - t0, "add_remote_agent_calls")
 
     def remove_remote_agent(*a, **k):
         t0 = time.perf_counter()
         try:
             return orig_rem_remote(*a, **k)
         finally:
-            _add("remove_remote_agent_seconds",
-                 time.perf_counter() - t0, "remove_remote_agent_calls")
+            _add("remove_remote_agent_seconds", time.perf_counter() - t0, "remove_remote_agent_calls")
 
     agent.register_memory = register_memory
     agent.deregister_memory = deregister_memory
@@ -299,9 +297,7 @@ def install_nixl_timing() -> bool:
         finally:
             _add("extract_seconds", time.perf_counter() - t0, "extract_calls")
 
-    NixlTensorTransport.extract_tensor_transport_metadata = (
-        extract_tensor_transport_metadata
-    )
+    NixlTensorTransport.extract_tensor_transport_metadata = extract_tensor_transport_metadata
 
     # Consumer-side: split pull into produce_wait (blocked on producer execution +
     # metadata + dispatch) vs recv_wall (the NIXL read). recv_multiple_tensors is

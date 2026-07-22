@@ -731,9 +731,6 @@ class RayPPOTrainer:
                 num_gpus_per_actor=0.75 if pg else 1,
                 colocate_all=False,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
-                # sharded_rdt: rank-0 policy actor must be named + tensor-transport
-                # enabled so vLLM workers can pull weight slices from it over NIXL.
-                rdt_master_actor=cfg.generator.inference_engine.weight_sync_backend == "sharded_rdt",
             )
             if use_ref_model:
                 ref_model = PPORayActorGroup(

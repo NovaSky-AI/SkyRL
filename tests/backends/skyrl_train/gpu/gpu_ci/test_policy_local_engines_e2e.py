@@ -52,31 +52,32 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
         "distributed_executor_backend",
         "model",
         "dp_size",
-        "use_new_inference_servers",
     ),
     [
-        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", MODEL, 1, None),
-        pytest.param(True, "nccl", "fsdp", 2, 2, "ray", MODEL, 1, None),
-        pytest.param(True, "nccl", "fsdp", 2, 2, "mp", MODEL, 1, None),
-        pytest.param(False, "nccl", "fsdp", 1, 2, "mp", MODEL, 1, None),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", MODEL, 1),
+        pytest.param(True, "nccl", "fsdp", 2, 2, "ray", MODEL, 1),
+        pytest.param(True, "nccl", "fsdp", 2, 2, "mp", MODEL, 1),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "mp", MODEL, 1),
         # moe model, dp > 1
-        pytest.param(True, "nccl", "fsdp", 2, 1, "ray", MOE_MODEL, 2, None),
-        pytest.param(False, "nccl", "fsdp", 1, 1, "ray", MOE_MODEL, 2, None),
+        pytest.param(True, "nccl", "fsdp", 2, 1, "ray", MOE_MODEL, 2),
+        pytest.param(False, "nccl", "fsdp", 1, 1, "ray", MOE_MODEL, 2),
         # sharded_rdt (NIXL pull): non-colocated TP=1 — 1 GPU for the FSDP policy
-        # (rank-0 named actor) + 1 GPU for vLLM. Requires the new inference server
-        # path so the worker extension registers the engine and bakes the plan.
-        pytest.param(False, "sharded_rdt", "fsdp", 1, 1, "ray", MODEL, 1, True),
+        # + 1 GPU for vLLM. The trainer engine spawns its own per-rank producer
+        # server (sidecar) sharing the policy GPU; the worker extension bakes the
+        # consumer plan.
+        pytest.param(False, "sharded_rdt", "fsdp", 1, 1, "ray", MODEL, 1),
         # sharded_rdt with 2 FSDP ranks + 2 vLLM engines — closer to the production
         # training run (4 ranks / 4 engines). With num_engines=2 the policy world
-        # size becomes 2, so gather_layer triggers a real FSDP2 all-gather collective
-        # rather than the trivial no-op that fires on a single rank.
-        pytest.param(False, "sharded_rdt", "fsdp", 2, 1, "ray", MODEL, 1, True),
+        # size becomes 2, so the WeightSource full_tensor() triggers a real FSDP2
+        # all-gather collective rather than the trivial no-op that fires on a
+        # single rank, and each rank spawns its own producer server.
+        pytest.param(False, "sharded_rdt", "fsdp", 2, 1, "ray", MODEL, 1),
         # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. "fsdp"
         # is fsdp2 in the current backend (FSDP1 was removed). Colocated
         # uses tp=4 across all 4 GPUs; non-colocated splits 2 GPUs for
         # vLLM (tp=2) and 2 for the FSDP policy.
-        pytest.param(True, "nccl", "fsdp", 1, 4, "ray", QWEN_LARGE_MOE_MODEL, 1, None, marks=_h100_only),
-        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", QWEN_LARGE_MOE_MODEL, 1, None, marks=_h100_only),
+        pytest.param(True, "nccl", "fsdp", 1, 4, "ray", QWEN_LARGE_MOE_MODEL, 1, marks=_h100_only),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", QWEN_LARGE_MOE_MODEL, 1, marks=_h100_only),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -101,7 +102,6 @@ async def test_policy_local_engines_e2e(
     distributed_executor_backend,
     model,
     dp_size,
-    use_new_inference_servers,
 ):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
@@ -129,7 +129,6 @@ async def test_policy_local_engines_e2e(
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         sleep_level=2,  # since we explicitly sync weights
-        use_new_inference_servers=use_new_inference_servers,
     ) as engines:
         client, pg = engines.client, engines.pg
 
@@ -148,7 +147,6 @@ async def test_policy_local_engines_e2e(
             * cfg.generator.inference_engine.num_engines
             * cfg.generator.inference_engine.data_parallel_size,
             cfg=cfg,
-            rdt_master_actor=(weight_sync_backend == "sharded_rdt"),
         )
 
         ray.get(
@@ -177,4 +175,3 @@ async def test_policy_local_engines_e2e(
         outputs = await run_inference(client, get_test_prompts(model), sampling_params, tokenizer=tokenizer)
 
         print(f"Example output after weight sync: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
-

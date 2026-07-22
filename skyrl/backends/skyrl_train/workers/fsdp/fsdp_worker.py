@@ -27,7 +27,6 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
-    RdtProducerMixin,
     WeightChunk,
     WeightExtractor,
 )
@@ -129,12 +128,7 @@ class FSDPWeightExtractor(WeightExtractor):
         return param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
 
 
-class FSDPPolicyWorkerBase(PolicyWorkerBase, RdtProducerMixin):
-    # RdtProducerMixin adds the trainer-side NIXL producer surface
-    # (gather_layer / rdt_produce_weights_batched / free_gather /
-    # reserve_serve_arena) for the sharded_rdt weight-sync backend; it is
-    # inert unless that backend is selected. The rank-0 policy actor is
-    # created named + tensor-transport-enabled (see PPORayActorGroup).
+class FSDPPolicyWorkerBase(PolicyWorkerBase):
     def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.strategy == "fsdp"
         strategy = FSDPStrategy(

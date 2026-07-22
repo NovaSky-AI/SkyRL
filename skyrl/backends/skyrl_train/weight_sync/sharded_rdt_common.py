@@ -35,9 +35,7 @@ ALLOWED_OPS = frozenset(
 )
 
 
-def assign_producer_indices(
-    num_producers: int, num_consumers: int, consumer_idx: int
-) -> list[int]:
+def assign_producer_indices(num_producers: int, num_consumers: int, consumer_idx: int) -> list[int]:
     """Producers (global indices) that consumer ``consumer_idx`` binds."""
     p = max(1, num_producers)
     c = max(1, num_consumers)

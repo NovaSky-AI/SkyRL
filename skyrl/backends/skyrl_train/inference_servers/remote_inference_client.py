@@ -1243,25 +1243,55 @@ class RemoteInferenceClient(InferenceEngineInterface):
         worker can inject the model/device and run the bake under
         set_current_vllm_config — neither of which the native GPUWorker path does.
 
-        Unlike the broadcast init, the sharded_rdt init info is identical for
-        every server (workers pull from a named trainer actor; there are no NCCL
-        rank offsets), so the same payload is fanned out to all servers.
+        Each independent inference DEPLOYMENT has its own self-contained parallel
+        config, so the vLLM ``ShardedRDTWeightTransferEngine`` can't tell
+        deployments apart on its own — every deployment's internal worker index
+        restarts at 0 and would collide under the M:N block assignment. So (unlike
+        the fully-identical broadcast NCCL init) we fan out a PER-SERVER payload
+        here, stamping each server with its DEPLOYMENT ordinal as ``replica_rank``
+        (with ``num_replicas`` = the deployment count). The engine offsets its
+        consumers into a globally distinct range from those two fields; everything
+        else in the payload is shared.
+
+        ``server_urls`` holds ``num_deployments * data_parallel_size`` entries —
+        the ``data_parallel_size`` servers of one deployment share a parallel
+        config in which vLLM already assigns each a distinct
+        ``data_parallel_index``, so they must share ONE ``replica_rank`` (their
+        deployment's) and let ``_global_worker_index`` separate them. Hence the
+        replica ordinal is ``server_index // data_parallel_size``, not the raw
+        server index — otherwise a DP deployment would double-count.
 
         Args:
             init_info: asdict(ShardedRDTWeightTransferInitInfo) — trainer actor
-                name/namespace, produce/warmup method names, and the full
-                names/dtype_names/shapes the bake plans over.
+                name(s)/namespace, produce method name, M:N + ring knobs, and the
+                group-major names/dtype_names/shapes/group_lens the bake plans over.
+                ``num_consumers`` must already be the whole-fleet total.
 
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {
-                "method": "init_weight_transfer_engine_rdt",
-                "kwargs": {"init_info": init_info},
-            },
+        dp = max(1, self.data_parallel_size)
+        num_replicas = max(1, len(self.server_urls) // dp)
+        results = await asyncio.gather(
+            *[
+                self._call_server(
+                    url,
+                    "/collective_rpc",
+                    {
+                        "method": "init_weight_transfer_engine_rdt",
+                        "kwargs": {
+                            "init_info": {
+                                **init_info,
+                                "replica_rank": i // dp,
+                                "num_replicas": num_replicas,
+                            },
+                        },
+                    },
+                )
+                for i, url in enumerate(self.server_urls)
+            ]
         )
+        return {url: resp for url, resp in results}
 
     async def update_weights_rdt(
         self,

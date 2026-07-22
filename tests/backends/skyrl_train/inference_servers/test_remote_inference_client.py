@@ -613,6 +613,55 @@ class TestWeightSync:
         result = await client.update_named_weights(update_info)
         assert len(result) == 2
 
+    @pytest.mark.asyncio
+    async def test_init_weight_transfer_engine_rdt_stamps_replica_rank(self, client, monkeypatch):
+        """RDT init fans out a PER-SERVER payload, stamping each server with its
+        deployment ordinal as replica_rank while sharing every other field."""
+        captured = {}
+
+        async def fake_call_server(url, endpoint, json=None, method="POST", params=None):
+            captured[url] = (endpoint, json)
+            return url, {"status": 200, "body": {}}
+
+        monkeypatch.setattr(client, "_call_server", fake_call_server)
+        result = await client.init_weight_transfer_engine_rdt({"num_consumers": 2, "names": ["w"]})
+        assert len(result) == 2  # one per server_url
+
+        infos = {}
+        for url, (endpoint, payload) in captured.items():
+            assert endpoint == "/collective_rpc"
+            assert payload["method"] == "init_weight_transfer_engine_rdt"
+            infos[url] = payload["kwargs"]["init_info"]
+        # data_parallel_size=1 => one replica per server, distinct ranks 0..N-1.
+        assert sorted(info["replica_rank"] for info in infos.values()) == [0, 1]
+        assert all(info["num_replicas"] == 2 for info in infos.values())
+        # Shared (non-replica) fields are preserved unchanged on every server.
+        assert all(info["num_consumers"] == 2 and info["names"] == ["w"] for info in infos.values())
+
+    @pytest.mark.asyncio
+    async def test_init_weight_transfer_engine_rdt_replica_rank_is_per_deployment(self, monkeypatch):
+        """With data_parallel_size>1, the dp servers of ONE deployment share a
+        replica_rank (vLLM's data_parallel_index separates them); the replica
+        ordinal is server_index // dp, so a DP deployment isn't double-counted."""
+        client = RemoteInferenceClient(
+            proxy_url="http://127.0.0.1:1",
+            server_urls=[f"http://127.0.0.1:{p}" for p in (1, 2, 3, 4)],
+            data_parallel_size=2,
+        )
+        captured = {}
+
+        async def fake_call_server(url, endpoint, json=None, method="POST", params=None):
+            captured[url] = json["kwargs"]["init_info"]
+            return url, {"status": 200, "body": {}}
+
+        monkeypatch.setattr(client, "_call_server", fake_call_server)
+        await client.init_weight_transfer_engine_rdt({"num_consumers": 4})
+        # 4 servers, dp=2 => 2 deployments; ranks [0,0,1,1], num_replicas=2.
+        ranks = [captured[u]["replica_rank"] for u in client.server_urls]
+        assert ranks == [0, 0, 1, 1]
+        assert all(info["num_replicas"] == 2 for info in captured.values())
+        await client.aclose()
+
 
 class TestServerInfo:
     """Test server info and world_size."""
