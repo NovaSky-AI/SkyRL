@@ -28,8 +28,7 @@ def validate_concurrent_lora_model_support(
 ) -> None:
     if is_multimodal and not language_model_only:
         raise NotImplementedError(
-            "Concurrent FSDP LoRA currently supports multimodal models only with "
-            "policy.language_model_only=True"
+            "Concurrent FSDP LoRA currently supports multimodal models only with " "policy.language_model_only=True"
         )
     if sequence_parallel_size != 1:
         raise NotImplementedError("Concurrent FSDP LoRA currently requires sequence_parallel_size=1")

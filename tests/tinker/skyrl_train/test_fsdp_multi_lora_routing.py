@@ -155,17 +155,13 @@ def test_concurrent_optimizer_requests_share_one_dispatch_call():
         "req-a": (
             "a",
             types.OptimStepInput(
-                adam_params=types.AdamParams(
-                    learning_rate=1e-3, beta1=0.8, beta2=0.9, eps=1e-6, weight_decay=0.0
-                )
+                adam_params=types.AdamParams(learning_rate=1e-3, beta1=0.8, beta2=0.9, eps=1e-6, weight_decay=0.0)
             ),
         ),
         "req-b": (
             "b",
             types.OptimStepInput(
-                adam_params=types.AdamParams(
-                    learning_rate=2e-4, beta1=0.7, beta2=0.95, eps=1e-5, weight_decay=0.1
-                )
+                adam_params=types.AdamParams(learning_rate=2e-4, beta1=0.7, beta2=0.95, eps=1e-5, weight_decay=0.1)
             ),
         ),
     }
