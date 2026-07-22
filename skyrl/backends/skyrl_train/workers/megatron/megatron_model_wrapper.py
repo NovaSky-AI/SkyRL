@@ -40,7 +40,6 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
-    pop_return_per_token_outputs,
 )
 from skyrl.train.config import TrainerConfig
 
@@ -408,6 +407,7 @@ class MegatronModelWrapper:
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
         forward_only: bool = False,
+        return_per_token_outputs: bool = True,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -423,11 +423,11 @@ class MegatronModelWrapper:
             loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
                      If provided, overrides the config's policy_loss_type.
             loss_fn_config: Optional config overrides for the loss function.
-                May include reserved key ``return_per_token_outputs`` to skip
-                per-token ``loss_fn_outputs`` when callers read only ``metrics``.
             forward_only: If True, run the forward pass without backward (no gradients).
                           Useful for evaluation / loss-only inference paths (e.g., SFT
                           ``forward(loss_fn=...)`` codepath).
+            return_per_token_outputs: When False, skip building per-token
+                ``loss_fn_outputs`` when callers read only ``metrics``.
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
@@ -442,9 +442,6 @@ class MegatronModelWrapper:
             current_loss_fn = PolicyLossRegistry.get(loss_fn)
         else:
             current_loss_fn = self.policy_loss_fn
-
-        # Consume the reserved gate before merging AlgorithmConfig overrides.
-        loss_fn_config, return_per_token_outputs = pop_return_per_token_outputs(loss_fn_config)
 
         # Build config for loss function, applying any overrides
         loss_config = self.cfg.algorithm

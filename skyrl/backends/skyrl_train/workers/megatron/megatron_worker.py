@@ -943,6 +943,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
+        return_per_token_outputs: bool = True,
     ) -> WorkerOutput:
         """Forward pass.
 
@@ -953,6 +954,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
           pipeline schedule with ``forward_only=True`` (no backward) and returns a
           :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` plus scalar
           ``metrics`` (including ``"loss"``).
+
+        ``return_per_token_outputs=False`` skips building per-token
+        ``loss_fn_outputs`` on the loss path for callers that read only
+        ``metrics``; it has no effect on the inference path.
         """
         from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
@@ -1027,6 +1032,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 loss_fn=loss_fn,
                 loss_fn_config=loss_fn_config,
                 forward_only=True,
+                return_per_token_outputs=return_per_token_outputs,
             )
 
         if self.empty_cuda_cache:
@@ -1056,6 +1062,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
+        return_per_token_outputs: bool = True,
     ) -> WorkerOutput:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
@@ -1069,6 +1076,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
                      If provided, overrides the config's policy_loss_type.
             loss_fn_config: Optional config overrides for the loss function.
+            return_per_token_outputs: When False, skip building per-token
+                ``loss_fn_outputs`` when callers read only ``metrics``.
 
         Returns:
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
@@ -1193,6 +1202,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             temperature=self.cfg.algorithm.temperature,
             loss_fn=loss_fn,
             loss_fn_config=loss_fn_config,
+            return_per_token_outputs=return_per_token_outputs,
         )
 
         if self.empty_cuda_cache:

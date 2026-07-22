@@ -9,7 +9,6 @@ import pytest
 import ray
 
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.backends.skyrl_train.workers.worker_utils import RETURN_PER_TOKEN_OUTPUTS_KEY
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
@@ -365,19 +364,19 @@ async def test_sft_forward_backward_return_per_token_outputs_gate(ray_init_fixtu
         batch_size = dp_size * 2
         num_actions = 4
 
-        def _run(loss_fn_config):
+        def _run(return_per_token_outputs):
             batch = make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions)
             refs = actor_group.async_run_ray_method(
                 "mesh",
                 "forward_backward",
                 data=batch,
                 loss_fn="cross_entropy",
-                loss_fn_config=loss_fn_config,
+                return_per_token_outputs=return_per_token_outputs,
             )
             return ray.get(refs)
 
-        kept_results = _run(None)
-        skipped_results = _run({RETURN_PER_TOKEN_OUTPUTS_KEY: False})
+        kept_results = _run(True)
+        skipped_results = _run(False)
 
         kept_outputs = []
         skipped_outputs = []
@@ -435,13 +434,13 @@ async def test_sft_forward_return_per_token_outputs_gate(ray_init_fixture, cfg, 
             "policy",
             make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions),
             loss_fn="cross_entropy",
-            loss_fn_config=None,
+            return_per_token_outputs=True,
         )
         skipped = dispatch.forward(
             "policy",
             make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions),
             loss_fn="cross_entropy",
-            loss_fn_config={RETURN_PER_TOKEN_OUTPUTS_KEY: False},
+            return_per_token_outputs=False,
         )
 
         assert kept.metrics["loss"] == skipped.metrics["loss"]

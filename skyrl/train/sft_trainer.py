@@ -44,7 +44,6 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.backends.skyrl_train.workers.worker_utils import RETURN_PER_TOKEN_OUTPUTS_KEY
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.config.sft_config import (
@@ -1552,7 +1551,7 @@ class SFTTrainer:
                 "policy",
                 batch,
                 loss_fn="cross_entropy",
-                loss_fn_config={RETURN_PER_TOKEN_OUTPUTS_KEY: False},
+                return_per_token_outputs=False,
             )
             batch_loss = float(output.metrics.get("loss", float("nan")))
             total_loss_weighted += batch_loss * nonpad_tokens
@@ -1578,7 +1577,7 @@ class SFTTrainer:
                 "policy",
                 batch,
                 loss_fn="cross_entropy",
-                loss_fn_config={RETURN_PER_TOKEN_OUTPUTS_KEY: False},
+                return_per_token_outputs=False,
             )
         with Timer("optim_step", timings):
             grad_norm = self.dispatch.optim_step("policy")

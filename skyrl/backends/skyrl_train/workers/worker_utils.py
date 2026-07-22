@@ -1,5 +1,5 @@
 import math
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -47,20 +47,6 @@ def compute_minibatch_rollout_logprob_diff_metrics(
         MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY: masked_abs_diff.max().item(),
         MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY: masked_abs_diff.min().item(),
     }
-
-
-# Reserved ``loss_fn_config`` key consumed before AlgorithmConfig validation.
-RETURN_PER_TOKEN_OUTPUTS_KEY = "return_per_token_outputs"
-
-
-def pop_return_per_token_outputs(
-    loss_fn_config: Optional[Dict[str, Any]],
-) -> Tuple[Optional[Dict[str, Any]], bool]:
-    """Return a copied config and whether per-token outputs should be built."""
-    if loss_fn_config is None:
-        return None, True
-    loss_fn_config = dict(loss_fn_config)
-    return loss_fn_config, loss_fn_config.pop(RETURN_PER_TOKEN_OUTPUTS_KEY, True)
 
 
 def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = False) -> Dict[str, float]:

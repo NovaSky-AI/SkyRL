@@ -22,7 +22,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from skyrl.backends.skyrl_train.workers.worker_utils import RETURN_PER_TOKEN_OUTPUTS_KEY
 from skyrl.train.config.sft_config import (
     SFTConfig,
     SFTPlacementConfig,
@@ -318,7 +317,7 @@ def test_sft_train_step_opts_out_of_per_token_outputs(mock_dispatch):
     mock_dispatch.forward_backward.assert_called_once()
     call = mock_dispatch.forward_backward.call_args
     assert call.kwargs["loss_fn"] == "cross_entropy"
-    assert call.kwargs["loss_fn_config"] == {RETURN_PER_TOKEN_OUTPUTS_KEY: False}
+    assert call.kwargs["return_per_token_outputs"] is False
 
 
 def test_sft_run_eval_opts_out_of_per_token_outputs(mock_dispatch):
@@ -332,4 +331,4 @@ def test_sft_run_eval_opts_out_of_per_token_outputs(mock_dispatch):
     mock_dispatch.forward.assert_called()
     for call in mock_dispatch.forward.call_args_list:
         assert call.kwargs["loss_fn"] == "cross_entropy"
-        assert call.kwargs["loss_fn_config"] == {RETURN_PER_TOKEN_OUTPUTS_KEY: False}
+        assert call.kwargs["return_per_token_outputs"] is False
