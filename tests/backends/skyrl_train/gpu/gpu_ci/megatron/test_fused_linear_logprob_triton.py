@@ -17,6 +17,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import triton
 
 from skyrl.backends.skyrl_train.distributed.megatron import fused_linear_logprob_triton
 from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
@@ -84,6 +85,18 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
     fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = dtype_str == "fp32"
     try:
         torch.cuda.set_device(0)
+        # L4/Ada cap per-block shared memory at ~99KB; the default 128x256 fp32 logits
+        # tile needs 128KB. Fall back to a 128x128 tile only when the GPU can't fit the
+        # production config, so A100/H100 CI still exercises the real tile.
+        _smem = torch.cuda.get_device_properties(0).shared_memory_per_block_optin
+        if _smem < 128 * 256 * 4:
+            fused_linear_logprob_triton.efficient_entropy_kernel_general_mainloop.configs = [
+                triton.Config(
+                    {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
+                    num_stages=2,
+                    num_warps=4,
+                )
+            ]
         device = torch.device("cuda")
         dtype = torch.bfloat16 if dtype_str == "bf16" else torch.float32
         torch.manual_seed(0)  # identical across ranks => identical hidden/weight/target
