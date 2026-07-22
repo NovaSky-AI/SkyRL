@@ -93,13 +93,24 @@ class WorkerDispatch:
             return
         ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
 
-    def register_adapter(self, role: str, model_id: str) -> None:
+    def _uses_concurrent_lora(self, role: str) -> bool:
+        lora = self.cfg.trainer.policy.model.lora
+        return role == "policy" and self.cfg.trainer.strategy == "fsdp" and lora.implementation == "concurrent"
+
+    def register_adapter(self, role: str, model_id: str, seed: int = 0) -> int:
         """Register a new adapter slot on every worker (subsequent
         create_model). Pristine must already exist.
         """
         if role not in self._actor_groups:
-            return
-        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "register_adapter", model_id))
+            return 0
+        kwargs = {"seed": seed} if self._uses_concurrent_lora(role) else {}
+        slots = ray.get(
+            self._actor_groups[role].async_run_ray_method("pass_through", "register_adapter", model_id, **kwargs)
+        )
+        concrete_slots = [slot for slot in slots if slot is not None]
+        if concrete_slots and len(set(concrete_slots)) != 1:
+            raise RuntimeError(f"Adapter '{model_id}' was assigned inconsistent worker slots: {concrete_slots}")
+        return concrete_slots[0] if concrete_slots else 0
 
     def delete_adapter(self, role: str, model_id: str) -> None:
         if role not in self._actor_groups:
@@ -399,7 +410,8 @@ class WorkerDispatch:
         For multi-tenant LoRA training, ``model_id`` is used to ensure the correct adapter is used.
         """
         self.ensure_active_adapter(model, model_id)
-        refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
+        kwargs = {"model_id": model_id} if self._uses_concurrent_lora(model) else {}
+        refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step", **kwargs)
         grad_norms = ray.get(refs)
 
         self._save_memory_snapshot(model, "optim_step")
@@ -414,6 +426,33 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         self.ensure_active_adapter(model, model_id)
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
+
+    def set_optimizer_hparams(
+        self,
+        model: str,
+        *,
+        learning_rate: float,
+        beta1: float,
+        beta2: float,
+        eps: float,
+        weight_decay: float,
+        model_id: Optional[str] = None,
+    ) -> None:
+        """Apply the next adapter step's Adam settings on every FSDP worker."""
+        self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
+        self.ensure_active_adapter(model, model_id)
+        ray.get(
+            self._actor_groups[model].async_run_ray_method(
+                "pass_through",
+                "set_optimizer_hparams",
+                model_id=model_id,
+                learning_rate=learning_rate,
+                beta1=beta1,
+                beta2=beta2,
+                eps=eps,
+                weight_decay=weight_decay,
+            )
+        )
 
     def set_algorithm_config(self, model: str, **kwargs) -> None:
         """Update algorithm config fields on all workers for a model."""
@@ -473,11 +512,10 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
 
-        ray.get(
-            self._actor_groups[model].async_run_ray_method(
-                "pass_through", "save_checkpoint", ckpt_dir=ckpt_dir, tokenizer=tokenizer
-            )
-        )
+        kwargs = {"ckpt_dir": ckpt_dir, "tokenizer": tokenizer}
+        if self._uses_concurrent_lora(model):
+            kwargs["model_id"] = model_id
+        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "save_checkpoint", **kwargs))
 
     def load_checkpoint(
         self,
@@ -491,15 +529,14 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=load_optimizer_states, need_model=True)
         self.ensure_active_adapter(model, model_id)
 
-        ray.get(
-            self._actor_groups[model].async_run_ray_method(
-                "pass_through",
-                "load_checkpoint",
-                ckpt_dir=ckpt_dir,
-                load_optimizer_states=load_optimizer_states,
-                load_lr_scheduler_states=load_lr_scheduler_states,
-            )
-        )
+        kwargs = {
+            "ckpt_dir": ckpt_dir,
+            "load_optimizer_states": load_optimizer_states,
+            "load_lr_scheduler_states": load_lr_scheduler_states,
+        }
+        if self._uses_concurrent_lora(model):
+            kwargs["model_id"] = model_id
+        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "load_checkpoint", **kwargs))
 
     def save_hf_model(self, model: str, export_dir: str, tokenizer) -> None:
         """Save model in HuggingFace format."""

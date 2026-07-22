@@ -6,20 +6,18 @@ module need at least one GPU and the ``tinker`` + ``fsdp`` extras installed. The
 sampling test additionally brings up a vLLM engine (non-colocated), so a second
 GPU is required for it.
 
-Scope: this mirrors ``test_multi_lora_megatron.py`` but exercises only the
-*single-adapter* (non multi-LoRA) path on FSDP — multi-tenant LoRA / the
-worker-side AdapterStore is currently Megatron-only and the FSDP worker raises
-a clear ``NotImplementedError`` for it. FSDP therefore supports exactly one
-adapter for the lifetime of a server, so every test shares one module-scoped
-training client. These tests confirm that initialising an FSDP Tinker engine
-and sending basic requests works:
+Scope: this mirrors ``test_multi_lora_megatron.py`` and exercises the resident
+concurrent multi-LoRA path on FSDP. Every adapter has an independent trainer
+slot, while mixed-adapter batches share one policy forward/backward pass.
 
   - test_forward_backward_optim_step_improves_loss: the adapter trains; loss on
     a fixed micro-batch decreases after an optim step.
   - test_forward_only_returns_logprobs: a forward-only pass returns per-token
     logprobs + elementwise loss without mutating optimizer state.
-  - test_second_adapter_rejected: creating a second adapter is rejected with a
-    clear NotImplementedError (multi-tenant LoRA is Megatron-only for now).
+  - test_second_adapter_trains_independently: a second adapter can train without
+    changing the first adapter during its optimizer step.
+  - test_adapter_checkpoint_loads_into_another_slot_with_adam_state: adapter
+    weights and Adam state survive a save/load into a different resident slot.
   - test_sample_after_training: weight-sync to vLLM + greedy sampling returns a
     deterministic token sequence.
 
@@ -61,14 +59,16 @@ TEST_PORT = 8012
 
 # Tiny config: 1 GPU for the FSDP policy worker, 1 for vLLM (non-colocated).
 # With a tiny model + LoRA rank 8 this fits comfortably on any modern GPU pair.
-# FSDP always serves LoRA adapters by name (it never merges), so the single
-# adapter created here is reachable for sampling. max_loras > 1 keeps vLLM's
-# LoRA slots warm even though we only register one adapter.
+# FSDP serves LoRA adapters by name (it never merges), so every resident
+# trainer adapter can be exported independently to a vLLM LoRA slot.
 BACKEND_CONFIG = {
     "strategy": "fsdp",
     "trainer.placement.policy_num_gpus_per_node": 1,
     "trainer.placement.policy_num_nodes": 1,
     "trainer.placement.colocate_all": False,
+    "trainer.remove_microbatch_padding": False,
+    "trainer.policy.model.lora.implementation": "concurrent",
+    "trainer.policy.model.lora.max_train_loras": 4,
     "trainer.policy.model.lora.max_loras": 4,
     "trainer.policy.model.lora.max_cpu_loras": 4,
 }
@@ -131,7 +131,12 @@ def _server_is_up(port: int) -> bool:
     try:
         urllib.request.urlopen(f"http://0.0.0.0:{port}/api/v1/healthz", timeout=2).read()
         return True
-    except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError):
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        ConnectionError,
+        TimeoutError,
+    ):
         return False
 
 
@@ -160,12 +165,7 @@ def service_client(server):
 
 @pytest.fixture(scope="module")
 def training_client(server):
-    """A single LoRA training client shared by every test.
-
-    FSDP supports exactly one adapter per server (multi-tenant LoRA is
-    Megatron-only), so all tests must reuse the same client. Tests are additive
-    (each mutates the shared adapter) but their assertions are self-contained.
-    """
+    """The primary LoRA training client shared by the smoke tests."""
     sc = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_PORT}/", api_key=TINKER_API_KEY)
     return sc.create_lora_training_client(base_model=BASE_MODEL, rank=8)
 
@@ -209,15 +209,56 @@ def test_forward_only_returns_logprobs(training_client):
     assert all(isinstance(x, float) for x in logprobs)
 
 
-def test_second_adapter_rejected(training_client, service_client):
-    """Test that creating a second adapter against the same FSDP server is rejected."""
-    with pytest.raises(Exception) as exc:
-        service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
-    msg = str(exc.value).lower()
-    assert "not implemented" in msg
+def test_second_adapter_trains_independently(training_client, service_client):
+    """A second resident adapter can train without consuming the first slot's gradients."""
+    second_client = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+    tok = second_client.get_tokenizer()
+    data = [_make_datum(tok, "Question: 3+3?\nAnswer:", " 6")]
+    primary_data = [_make_datum(training_client.get_tokenizer(), "Question: 5+5?\nAnswer:", " 10")]
+    primary_before = training_client.forward(primary_data, "cross_entropy").result()
+
+    pre = _sum_loss(second_client.forward_backward(data, "cross_entropy").result())
+    second_client.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
+    post = _sum_loss(second_client.forward_backward(data, "cross_entropy").result())
+    primary_after = training_client.forward(primary_data, "cross_entropy").result()
+
+    assert post <= pre + 1e-3, f"second adapter loss did not improve (pre={pre}, post={post})"
+    before_logprobs = primary_before.loss_fn_outputs[0]["logprobs"].data
+    after_logprobs = primary_after.loss_fn_outputs[0]["logprobs"].data
+    assert after_logprobs == pytest.approx(before_logprobs, abs=1e-6)
 
 
-@pytest.mark.skipif(cuda_device_count < 2, reason="sampling brings up a separate vLLM engine (needs a 2nd GPU)")
+def test_adapter_checkpoint_loads_into_another_slot_with_adam_state(service_client):
+    """A training checkpoint is portable across resident slot indices."""
+    source = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+    target = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+    tok = source.get_tokenizer()
+    data = [_make_datum(tok, "Question: 7+7?\nAnswer:", " 14")]
+    adam = tinker_types.AdamParams(learning_rate=1e-3, beta1=0.8, beta2=0.95, eps=1e-6, weight_decay=0.1)
+
+    source.forward_backward(data, "cross_entropy").result()
+    source.optim_step(adam).result()
+    checkpoint_path = source.save_state("fsdp_adapter_portable").result().path
+    target.load_state(checkpoint_path).result()
+
+    source_before = source.forward(data, "cross_entropy").result().loss_fn_outputs[0]["logprobs"].data
+    target_before = target.forward(data, "cross_entropy").result().loss_fn_outputs[0]["logprobs"].data
+    assert target_before == pytest.approx(source_before, abs=1e-6)
+
+    source.forward_backward(data, "cross_entropy").result()
+    source.optim_step(adam).result()
+    target.forward_backward(data, "cross_entropy").result()
+    target.optim_step(adam).result()
+
+    source_after = source.forward(data, "cross_entropy").result().loss_fn_outputs[0]["logprobs"].data
+    target_after = target.forward(data, "cross_entropy").result().loss_fn_outputs[0]["logprobs"].data
+    assert target_after == pytest.approx(source_after, abs=1e-6)
+
+
+@pytest.mark.skipif(
+    cuda_device_count < 2,
+    reason="sampling brings up a separate vLLM engine (needs a 2nd GPU)",
+)
 def test_sample_after_training(training_client):
     """Test that weight-sync the trained adapter to vLLM and greedy-sample works."""
     tok = training_client.get_tokenizer()
