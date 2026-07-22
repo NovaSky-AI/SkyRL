@@ -76,6 +76,15 @@ Raw pre-tokenized data and plain-text continuation formats are not supported.
 Tokenized datasets are cached under `cache_dir` (override with `force_recache`
 or `disable_cache`); for multi-node runs point `cache_dir` at a shared/NFS path.
 
+Online tokenization uses a local, spawn-based multiprocessing pool on the node
+running the SFT entrypoint; it is not distributed across the Ray cluster.
+`num_workers` controls this preprocessing pool (`8` by default, `0` for
+single-process tokenization). This is separate from
+`dataloader_num_workers`, which controls workers that load already-tokenized
+examples during training and defaults to `0`. VLM tokenization always runs
+single-process because its processor cannot be passed safely through the
+spawned worker pool.
+
 ### What to train on
 
 `train_on_what` controls which tokens contribute to the loss:
@@ -86,8 +95,7 @@ or `disable_cache`); for multi-node runs point `cache_dir` at a shared/NFS path.
 
 ## Pretokenized datasets
 
-If your data pipeline tokenizes **offline** (e.g. on a Spark or Ray data
-cluster), point the trainer at the pretokenized store to skip online
+If your data pipeline tokenizes **offline** , point the trainer at the pretokenized store to skip online
 tokenization entirely. Pretokenized rows are normalized to the same internal
 format as online-tokenized data, so collators, sequence packing, samplers, and
 checkpoint/resume all work unchanged. Ingestion is implemented in
