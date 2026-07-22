@@ -89,6 +89,15 @@ class SkyRLLoraConfig(BaseConfig):
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
 
+    implementation: str = "single"
+    """Trainer-side LoRA implementation. ``single`` uses the existing PEFT
+    path; ``concurrent`` preallocates resident adapter slots for mixed-adapter
+    FSDP batches."""
+
+    max_lora_adapters: int = 1
+    """Maximum number of resident trainer-side LoRA adapters in concurrent mode.
+    Independent from vLLM's ``max_loras`` serving capacity."""
+
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
     single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable
@@ -98,6 +107,14 @@ class SkyRLLoraConfig(BaseConfig):
     """Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
     ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
     >= ``max_loras`` if explicitly set."""
+
+    def __post_init__(self) -> None:
+        if self.implementation not in {"single", "concurrent"}:
+            raise ValueError("lora.implementation must be 'single' or 'concurrent'")
+        if self.max_lora_adapters < 1:
+            raise ValueError("lora.max_lora_adapters must be at least 1")
+        if self.implementation == "concurrent" and self.rank <= 0:
+            raise ValueError("concurrent LoRA requires lora.rank > 0")
 
 
 @dataclass

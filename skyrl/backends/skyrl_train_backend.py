@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import json
 import math
 import os
 import tarfile
@@ -10,7 +11,7 @@ from typing import Callable
 
 import ray
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
@@ -52,7 +53,11 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     All keys are applied as overrides to the default SkyRL-Train config.
     """
 
-    pass
+    max_lora_adapters: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum number of resident trainer-side LoRA adapters",
+    )
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
@@ -78,6 +83,7 @@ def _build_skyrl_train_config(
 
     # Apply user overrides from backend_config
     user_overrides = dict(overrides.model_extra)
+    user_overrides["trainer.policy.model.lora.max_lora_adapters"] = overrides.max_lora_adapters
     # override base model path
     # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
     # that resolves other config derived from the policy model path.
@@ -91,6 +97,11 @@ def _build_skyrl_train_config(
         "megatron",
     ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
     user_overrides["trainer.strategy"] = overrides.strategy
+    if lora_config is not None and lora_config.rank > 0:
+        # Apply these before dataclass validation so concurrent LoRA does not
+        # momentarily validate with the default rank=0.
+        user_overrides["trainer.policy.model.lora.rank"] = lora_config.rank
+        user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
@@ -166,26 +177,30 @@ class SkyRLTrainBackend(AbstractBackend):
     def _get_batch_role(self, model_ids: list[str]) -> str:
         if not model_ids:
             return "policy"
-        unique_model_ids = set(model_ids)
-        if len(unique_model_ids) != 1:
-            raise ValueError(f"Mixed model_ids in one batch are not supported: {sorted(unique_model_ids)}")
-        return self._get_role(next(iter(unique_model_ids)))
+        roles = {self._get_role(model_id) for model_id in model_ids}
+        if len(roles) != 1:
+            raise ValueError(f"Mixed model roles in one batch are not supported: {sorted(roles)}")
+        if len(set(model_ids)) != 1 and not self._supports_concurrent_lora():
+            raise ValueError(f"Mixed model_ids in one batch are not supported: {sorted(set(model_ids))}")
+        return next(iter(roles))
+
+    def _supports_concurrent_lora(self) -> bool:
+        return bool(
+            self._cfg is not None
+            and self._cfg.trainer.strategy == "fsdp"
+            and self._cfg.trainer.policy.model.lora.implementation == "concurrent"
+        )
 
     def _split_model_pass_batch_by_model_id(
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> list[types.PreparedModelPassBatch]:
-        """Split a mixed model-pass batch into per-model sub-batches.
+        """Split model-pass batches at execution-contract boundaries.
 
         The engine batches pending forward/forward_backward requests across all
-        models. Worker dispatch still executes one logical training model at a
-        time, so mixed batches must be partitioned here while preserving
-        request-level boundaries.
+        models. Concurrent FSDP LoRA can retain mixed adapter IDs, but one worker
+        call still requires a single role, loss function, and loss config.
         """
-        unique_model_ids = list(dict.fromkeys(prepared_batch.all_model_ids))
-        if len(unique_model_ids) <= 1:
-            return [prepared_batch]
-
         batch_fields = (
             "all_model_inputs",
             "all_targets",
@@ -199,14 +214,33 @@ class SkyRLTrainBackend(AbstractBackend):
             "all_loss_fn_configs",
         )
 
-        request_slices_by_model_id: dict[str, list[tuple[str, str, int, int]]] = {}
-        for request_id, model_id, start_idx, end_idx in prepared_batch.request_batch_slices:
+        concurrent_lora = self._supports_concurrent_lora()
+        request_groups: dict[tuple[str, str, str], list[tuple[str, str, int, int]]] = {}
+        for (
+            request_id,
+            model_id,
+            start_idx,
+            end_idx,
+        ) in prepared_batch.request_batch_slices:
             # Validate early so an unknown model_id still surfaces clearly.
-            self._get_role(model_id)
-            request_slices_by_model_id.setdefault(model_id, []).append((request_id, model_id, start_idx, end_idx))
+            role = self._get_role(model_id)
+            request_loss_fns = prepared_batch.all_loss_fns[start_idx:end_idx]
+            request_loss_configs = prepared_batch.all_loss_fn_configs[start_idx:end_idx]
+            if len(set(request_loss_fns)) != 1 or any(
+                config != request_loss_configs[0] for config in request_loss_configs
+            ):
+                raise ValueError(f"Request '{request_id}' contains inconsistent loss configuration")
+            loss_fn = request_loss_fns[0]
+            loss_config_key = json.dumps(request_loss_configs[0], sort_keys=True, separators=(",", ":"))
+            execution_model = role if concurrent_lora else model_id
+            key = (execution_model, loss_fn, loss_config_key)
+            request_groups.setdefault(key, []).append((request_id, model_id, start_idx, end_idx))
+
+        if len(request_groups) <= 1:
+            return [prepared_batch]
 
         sub_batches = []
-        for request_slices in request_slices_by_model_id.values():
+        for request_slices in request_groups.values():
             sub_batch_data = {field: [] for field in batch_fields}
             sub_request_batch_slices = []
 
@@ -226,7 +260,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return sub_batches
 
-    def _build_policy(self, PolicyWorker, model_id: str):
+    def _build_policy(self, PolicyWorker, model_id: str, seed: int = 0) -> int:
         cfg = self._cfg
         colocate_all = cfg.trainer.placement.colocate_all
         pg = self._colocate_pg
@@ -268,6 +302,7 @@ class SkyRLTrainBackend(AbstractBackend):
         )
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
 
+        adapter_index = 0
         if is_lora and cfg.trainer.strategy == "megatron":
             # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
             # the freshly-initialised LoRA into a per-worker pristine slot, then
@@ -277,6 +312,13 @@ class SkyRLTrainBackend(AbstractBackend):
             ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
+        elif (
+            is_lora and cfg.trainer.strategy == "fsdp" and cfg.trainer.policy.model.lora.implementation == "concurrent"
+        ):
+            slots = ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id, seed=seed))
+            if len(set(slots)) != 1:
+                raise RuntimeError(f"Adapter '{model_id}' was assigned inconsistent worker slots: {slots}")
+            adapter_index = slots[0]
 
         if colocate_all:
             policy_model.offload_to_cpu()
@@ -293,6 +335,7 @@ class SkyRLTrainBackend(AbstractBackend):
             self._dispatch.mark_as_offloaded("policy")
 
         logger.info("init policy model done")
+        return adapter_index
 
     def _build_critic(self, CriticWorker, lora_config: types.LoraConfig) -> None:
         cfg = self._cfg
@@ -472,9 +515,9 @@ class SkyRLTrainBackend(AbstractBackend):
                     "Multi-LoRA with the SkyRLTrainBackend requires identical (rank, alpha) across all "
                     "adapters; target_modules is fixed server-side."
                 )
-            self._dispatch.register_adapter("policy", model_id)
+            adapter_index = self._dispatch.register_adapter("policy", model_id, seed=lora_config.seed)
             self._model_ids_to_role[model_id] = model_role
-            self._model_metadata[model_id] = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
+            self._model_metadata[model_id] = types.ModelMetadata(adapter_index=adapter_index, lora_config=lora_config)
             logger.info(f"Registered additional LoRA adapter '{model_id}'")
             return
 
@@ -500,7 +543,11 @@ class SkyRLTrainBackend(AbstractBackend):
                 raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
             logger.info("Building models.")
-            self._build_policy(PolicyWorker, model_id=model_id)
+            adapter_index = self._build_policy(
+                PolicyWorker,
+                model_id=model_id,
+                seed=lora_config.seed if lora_config is not None else 0,
+            )
             if is_lora:
                 self._base_lora_signature = self._lora_signature_from(lora_config)
         elif model_role == "critic":
@@ -521,7 +568,10 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Unknown model_role: {model_role}")
 
         self._model_ids_to_role[model_id] = model_role
-        self._model_metadata[model_id] = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
+        self._model_metadata[model_id] = types.ModelMetadata(
+            adapter_index=adapter_index if model_role == "policy" else 0,
+            lora_config=lora_config,
+        )
         logger.info(f"Created {model_role} model {model_id} using RayPPOTrainer")
 
     def _create_colocate_pg(self):
@@ -649,6 +699,11 @@ class SkyRLTrainBackend(AbstractBackend):
             "loss_mask": loss_mask_tensor,
             "response_mask": response_mask_tensor,
         }
+        if SkyRLTrainBackend._supports_concurrent_lora(self):
+            batch_dict["adapter_indices"] = torch.tensor(
+                [self._model_metadata[model_id].adapter_index for model_id in prepared_batch.all_model_ids],
+                dtype=torch.long,
+            )
 
         # Include RL fields (action_log_probs, advantages) when data is present
         has_logprobs = any(len(lp) > 0 for lp in prepared_batch.all_sampling_logprobs)
@@ -674,7 +729,9 @@ class SkyRLTrainBackend(AbstractBackend):
             if has_values and any(
                 len(values) != len(weights) or len(returns) != len(weights)
                 for values, returns, weights in zip(
-                    prepared_batch.all_values, prepared_batch.all_returns, prepared_batch.all_token_weights
+                    prepared_batch.all_values,
+                    prepared_batch.all_returns,
+                    prepared_batch.all_token_weights,
                 )
             ):
                 raise ValueError("Critic batches with values/returns must align with response-token lengths")
@@ -856,7 +913,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if role == "critic" and any(
             len(values) != len(weights) or len(returns) != len(weights)
             for values, returns, weights in zip(
-                prepared_batch.all_values, prepared_batch.all_returns, prepared_batch.all_token_weights
+                prepared_batch.all_values,
+                prepared_batch.all_returns,
+                prepared_batch.all_token_weights,
             )
         ):
             raise ValueError("Critic forward_backward requires values and returns for every response token")
@@ -867,17 +926,12 @@ class SkyRLTrainBackend(AbstractBackend):
         batch, pad_size = self._pad_batch(batch, micro_batch_size=micro_bs)
 
         loss_fn = prepared_batch.all_loss_fns[0]
-        if len(set(prepared_batch.all_loss_fns)) > 1:
-            logger.warning(
-                "SkyRL backend received mixed loss functions %s in one batch; using '%s' for all",
-                set(prepared_batch.all_loss_fns),
-                loss_fn,
-            )
         loss_fn_config = next((c for c in prepared_batch.all_loss_fn_configs if c is not None), None)
         loss_fn, loss_fn_config = self._normalize_policy_loss_request(role, loss_fn, loss_fn_config)
-        # Single model_id per sub-batch (split upstream); pass it so the
-        # dispatch layer can swap to the right LoRA adapter before the op.
-        model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
+        # Legacy paths still dispatch one adapter at a time. Concurrent LoRA
+        # routes mixed IDs through the row-level adapter_indices tensor.
+        unique_model_ids = set(prepared_batch.all_model_ids)
+        model_id = next(iter(unique_model_ids)) if len(unique_model_ids) == 1 else None
         if role == "critic":
             self._dispatch.set_algorithm_config(
                 "critic",
@@ -948,7 +1002,8 @@ class SkyRLTrainBackend(AbstractBackend):
             self._cfg.trainer.micro_forward_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )
         batch, pad_size = self._pad_batch(batch, micro_batch_size=micro_bs)
-        model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
+        unique_model_ids = set(prepared_batch.all_model_ids)
+        model_id = next(iter(unique_model_ids)) if len(unique_model_ids) == 1 else None
         data = self._dispatch.forward(role, batch, model_id=model_id)
 
         # Workers emit per-sample loss_fn_outputs directly. Trim padding entries.
@@ -989,10 +1044,20 @@ class SkyRLTrainBackend(AbstractBackend):
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         role = self._get_role(model_id)
 
-        # Apply learning rate from AdamParams before optimizer step
-        # Note: beta1, beta2, eps are fixed at optimizer creation and cannot be changed dynamically
         adam_params = request_data.adam_params
-        self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
+        if role == "policy" and self._supports_concurrent_lora():
+            self._dispatch.set_optimizer_hparams(
+                role,
+                learning_rate=adam_params.learning_rate,
+                beta1=adam_params.beta1,
+                beta2=adam_params.beta2,
+                eps=adam_params.eps,
+                weight_decay=adam_params.weight_decay,
+                model_id=model_id,
+            )
+        else:
+            # Existing single-adapter and Megatron paths only support dynamic LR.
+            self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
         grad_norm = self._dispatch.optim_step(role, model_id=model_id)
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
@@ -1002,6 +1067,56 @@ class SkyRLTrainBackend(AbstractBackend):
             metrics["skyrl.ai/grad_norm"] = float(grad_norm)
         metrics["skyrl.ai/learning_rate"] = adam_params.learning_rate
         return types.OptimStepOutput(metrics=metrics)
+
+    def supports_batched_optim_steps(self) -> bool:
+        return self._supports_concurrent_lora()
+
+    def optim_steps(
+        self,
+        requests: dict[str, tuple[str, types.OptimStepInput]],
+    ) -> dict[str, types.OptimStepOutput | types.ErrorResponse]:
+        if not self._supports_concurrent_lora():
+            return super().optim_steps(requests)
+
+        errors: dict[str, types.ErrorResponse] = {}
+        optimizer_hparams: dict[str, dict[str, float]] = {}
+        request_ids_by_model: dict[str, str] = {}
+        for request_id, (model_id, request_data) in requests.items():
+            if not self.has_model(model_id):
+                errors[request_id] = types.ErrorResponse(error=f"Model {model_id} not found", status="error")
+                continue
+            if self._get_role(model_id) != "policy":
+                errors[request_id] = types.ErrorResponse(
+                    error=f"Batched optimizer steps only support policy adapters, got {model_id}",
+                    status="error",
+                )
+                continue
+            if model_id in request_ids_by_model:
+                errors[request_id] = types.ErrorResponse(
+                    error=f"Only one optimizer step per model can be batched: {model_id}",
+                    status="error",
+                )
+                continue
+
+            adam = request_data.adam_params
+            request_ids_by_model[model_id] = request_id
+            optimizer_hparams[model_id] = {
+                "learning_rate": adam.learning_rate,
+                "beta1": adam.beta1,
+                "beta2": adam.beta2,
+                "eps": adam.eps,
+                "weight_decay": adam.weight_decay,
+            }
+
+        grad_norms = self._dispatch.optim_steps("policy", optimizer_hparams) if optimizer_hparams else {}
+        results: dict[str, types.OptimStepOutput | types.ErrorResponse] = dict(errors)
+        for model_id, request_id in request_ids_by_model.items():
+            grad_norm = grad_norms.get(model_id)
+            metrics = {"skyrl.ai/learning_rate": optimizer_hparams[model_id]["learning_rate"]}
+            if grad_norm is not None:
+                metrics["skyrl.ai/grad_norm"] = float(grad_norm)
+            results[request_id] = types.OptimStepOutput(metrics=metrics)
+        return results
 
     def sample(
         self,
@@ -1024,7 +1139,8 @@ class SkyRLTrainBackend(AbstractBackend):
         unknown = [mid for mid in unique_models if mid not in self._model_ids_to_role]
         if unknown:
             error = types.ErrorResponse(
-                error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}", status="error"
+                error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}",
+                status="error",
             )
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
         non_policy = [mid for mid in unique_models if self._model_ids_to_role.get(mid) != "policy"]
@@ -1095,7 +1211,13 @@ class SkyRLTrainBackend(AbstractBackend):
                 yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
 
         results = {}
-        for request_id, model_id, start_idx, end_idx, prompt_logprobs_requested in prepared_batch.request_batch_slices:
+        for (
+            request_id,
+            model_id,
+            start_idx,
+            end_idx,
+            prompt_logprobs_requested,
+        ) in prepared_batch.request_batch_slices:
             sequences = []
             has_error = False
             error_msg = None
@@ -1198,7 +1320,12 @@ class SkyRLTrainBackend(AbstractBackend):
             ckpt_dir = os.path.join(temp_dir, "checkpoint")
 
             # Save checkpoint directory (includes optimizer state automatically)
-            self._dispatch.save_checkpoint(model=role, ckpt_dir=ckpt_dir, tokenizer=self._tokenizer, model_id=model_id)
+            self._dispatch.save_checkpoint(
+                model=role,
+                ckpt_dir=ckpt_dir,
+                tokenizer=self._tokenizer,
+                model_id=model_id,
+            )
 
             # Create tar archive
             self._create_tar_from_directory(ckpt_dir, output_path)
