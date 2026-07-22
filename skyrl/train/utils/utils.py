@@ -393,7 +393,9 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         # TODO (sumanthrh): Delta weight sync should be naturally supported for `merge_lora=true`, we should
         # test and enable this in a follow-up. `merge_lora=false` needs bookkeeping of per-LoRA safetensors
         # on the inference side.
-        assert cfg.generator.weight_sync_backend != "delta", "Delta weight sync is not yet support for LoRA"
+        assert (
+            cfg.generator.inference_engine.weight_sync_backend != "delta"
+        ), "Delta weight sync is not yet supported for LoRA"
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:

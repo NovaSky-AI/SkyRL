@@ -35,9 +35,8 @@ from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
 
 try:
     register_delta_weight_transfer_engine()
-except ModuleNotFoundError as e:
-    if e.name != "vllm":
-        raise
+except ModuleNotFoundError:
+    pass
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 

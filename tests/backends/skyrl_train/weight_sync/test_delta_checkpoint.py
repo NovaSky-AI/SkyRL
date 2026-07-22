@@ -360,28 +360,22 @@ def test_local_checkpoint_store_fetch_is_single_writer_with_concurrent_ray_actor
                 state = json.load(f)
             return {"stats": stats, "state": state}
 
-    started_ray = False
-    if not ray.is_initialized():
-        ray.init(num_cpus=2, include_dashboard=False, ignore_reinit_error=True)
-        started_ray = True
-    try:
-        actor_cls = ray.remote(num_cpus=1)(FetchActor)
-        actors = [actor_cls.remote(), actor_cls.remote()]
-        results = ray.get(
-            [
-                actor.fetch.remote(
-                    str(base_dir),
-                    str(receiver_dir),
-                    update_info["target_version"],
-                    update_info["uri"],
-                    str(counter_path),
-                )
-                for actor in actors
-            ]
-        )
-    finally:
-        if started_ray:
-            ray.shutdown()
+    # Ray is initialized by the session-scoped autouse ``ray_init`` fixture in
+    # tests/backends/skyrl_train/conftest.py; tests must not init/shutdown Ray.
+    actor_cls = ray.remote(num_cpus=1)(FetchActor)
+    actors = [actor_cls.remote(), actor_cls.remote()]
+    results = ray.get(
+        [
+            actor.fetch.remote(
+                str(base_dir),
+                str(receiver_dir),
+                update_info["target_version"],
+                update_info["uri"],
+                str(counter_path),
+            )
+            for actor in actors
+        ]
+    )
 
     assert json.loads(counter_path.read_text(encoding="utf-8"))["count"] == 1
     assert all(result["state"]["version"] == 1 for result in results)
@@ -405,7 +399,9 @@ def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
     update_info = publisher.create_delta_files([_chunk_from_tensors({"a.weight": base_tensors["a.weight"].clone()})])
     update_info = publisher.publish(update_info)
 
-    assert update_info.get("noop") is not True
+    # An unchanged publish is not skipped: it still advances the version and
+    # writes an (empty) delta rather than signalling a no-op.
+    assert "noop" not in update_info
     assert update_info["target_version"] == 1
     assert publisher.version == 1
 

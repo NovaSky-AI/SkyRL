@@ -6,12 +6,12 @@ uv run --isolated --extra dev --extra megatron pytest -s -vvv tests/backends/sky
 
 import pytest
 import ray
-from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.gpu_ci.delta_weight_sync_utils import (
     init_policy_worker_for_delta,
 )
@@ -68,7 +68,7 @@ def _delta_sync_cfg(strategy: str, tmp_path) -> SkyRLTrainConfig:
 )
 async def test_delta_weight_sync_sparse_update_e2e(ray_init_fixture, tmp_path, strategy):
     cfg = _delta_sync_cfg(strategy, tmp_path)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
+    tokenizer = get_tokenizer(MODEL)
 
     async with InferenceEngineState.create(
         model=MODEL,
