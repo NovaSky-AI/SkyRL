@@ -57,6 +57,15 @@ class WeightTransferSender(ABC):
         """Clean up resources used by the sender (e.g., destroy process groups)."""
         ...
 
+    def bind_trainer_worker(self, worker) -> None:
+        """Give the sender a handle to its training worker.
+
+        Default no-op. The sharded-RDT sender overrides this: its send path drives
+        gather/serve methods that live on the worker actor (the trainer produces
+        the weights the inference workers pull), so it needs the worker handle.
+        """
+        return None
+
 
 # NOTE (sumanthrh): WeightTransferStrategy is assymetric - only dictates sender send APIs
 # because we rely on the native vLLM WeightTransferEngine for the receive logic.
@@ -107,6 +116,34 @@ class WeightTransferStrategy(ABC):
         canonical strategy->engine mapping.
         """
         ...
+
+    @staticmethod
+    def populate_init_info(
+        init_info: WeightSyncInitInfo, *, weight_extractor=None
+    ) -> None:
+        """Fill init-info fields that require the live model, before receiver init.
+
+        Default no-op (broadcast / CUDA IPC send their metadata per-chunk at
+        update time). The sharded-RDT strategy overrides this to fill
+        names/dtypes/shapes from the weight extractor, since its receiver bakes a
+        replay plan over the full name list at init.
+        """
+        return None
+
+    @staticmethod
+    def initialize_receivers(
+        init_info: WeightSyncInitInfo,
+        inference_client: "RemoteInferenceClient",
+    ):
+        """Initialize the inference-side receivers. Returns an awaitable.
+
+        Default routes to vLLM's native weight-transfer init
+        (``init_weight_update_communicator``), used by broadcast/CUDA IPC. The
+        sharded-RDT strategy overrides this to drive its own init RPC. Called on
+        rank 0 only, concurrently with ``create_sender`` (broadcast needs the two
+        to join the same process group without deadlock).
+        """
+        return inference_client.init_weight_update_communicator(init_info)
 
     @staticmethod
     @abstractmethod
