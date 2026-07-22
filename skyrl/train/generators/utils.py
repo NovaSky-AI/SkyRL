@@ -745,19 +745,22 @@ def _is_prefix(maybe_prefix: List[int], candidate: List[int]) -> bool:
     return maybe_prefix == candidate[: len(maybe_prefix)]
 
 
-def _slice_generator_output(generator_output: GeneratorOutput, indices: List[int]) -> GeneratorOutput:
+def slice_generator_output(
+    generator_output: GeneratorOutput, indices: List[int], *, preserve_metrics: bool = True
+) -> GeneratorOutput:
     """Slice a GeneratorOutput to keep only the entries at the given indices.
 
-    All sliced entries must share the same TrajectoryID — this helper is used by
-    prefix-aware merging which operates on one trajectory at a time.
+    Generator-specific per-trajectory fields are sliced without naming them here.
+    Prefix-aware merging passes entries that all share one ``TrajectoryID``;
+    dynamic sampling may intentionally select entries from different trajectories.
     """
     assert len(indices) > 0, "indices must be non-empty"
     # Every key except `rollout_metrics` is either a per-entry list to slice, or None.
     sliced: GeneratorOutput = {}
     for key, value in generator_output.items():
         if key == "rollout_metrics":
-            # Skip since metrics are already recorded before calling `merge_stepwise_output()`.
-            continue
+            if preserve_metrics:
+                sliced[key] = value
         elif value is None:
             sliced[key] = None
         else:
@@ -913,7 +916,9 @@ def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
     start = 0
     for i in range(num_samples):
         if is_last_step[i]:
-            trajectory_slices.append(_slice_generator_output(generator_output, list(range(start, i + 1))))
+            trajectory_slices.append(
+                slice_generator_output(generator_output, list(range(start, i + 1)), preserve_metrics=False)
+            )
             start = i + 1
 
     merged_slices = [_merge_single_trajectory(s) for s in trajectory_slices]
