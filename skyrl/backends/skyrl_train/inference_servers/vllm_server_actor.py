@@ -398,9 +398,14 @@ class VLLMServerActor(ServerActorProtocol):
             body = await request.json()
             token_ids = body["token_ids"]
             sampling_params_dict = body.get("sampling_params", {})
+            cache_salt = body.get("cache_salt")
 
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
-            prompt = TokensPrompt(prompt_token_ids=token_ids)
+            # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
+            if cache_salt is not None:
+                prompt = TokensPrompt(prompt_token_ids=token_ids, cache_salt=cache_salt)
+            else:
+                prompt = TokensPrompt(prompt_token_ids=token_ids)
             request_id = random_uuid()
 
             final_res = None
