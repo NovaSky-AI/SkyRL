@@ -164,6 +164,16 @@ class SFTConfig(BaseConfig):
     """Per-dataset sampling weights: the approximate per-batch ratio of samples drawn from each
     dataset, independent of dataset sizes. Only supported with ``sampler="random"`` (custom
     samplers receive ratios via ``sampler_kwargs``). Defaults to equal mixing (``1/N`` each)."""
+    pretokenized_dataset_paths: Optional[List[str]] = None
+    """Local paths to *pretokenized* training datasets, each a file or
+    directory holding parquet/JSONL/arrow files or a HF
+    ``Dataset.save_to_disk`` directory. Rows must carry unpadded
+    ``input_ids`` and a full-sequence 0/1 ``loss_mask`` (``num_actions`` is
+    inferred); VLM rows additionally carry ``pixel_values`` /
+    ``image_grid_thw``. See ``skyrl.train.dataset.pretokenized``. When set,
+    online tokenization is skipped; cannot be combined with ``train_datasets``.
+    Multiple stores are concatenated and mixed per ``train_dataset_weights``
+    (like ``train_datasets``)."""
     messages_key: str = "messages"  # column name for chat-format datasets
     tools_key: str = "tools"
     """Column name holding per-row tool/function schemas for tool-calling datasets
@@ -188,7 +198,13 @@ class SFTConfig(BaseConfig):
     Must match ``eval_datasets`` in length. Defaults to ``["validation"]`` on the deprecated path."""
     eval_dataset_names: Optional[List[str]] = None
     """Optional shorthand names used only for logging (``eval/{name}/loss``). Must be unique and
-    match ``eval_datasets`` in length. Defaults to each dataset name with ``/`` replaced by ``_``."""
+    match ``eval_datasets`` (or ``eval_pretokenized_dataset_paths``) in length. Defaults to each
+    dataset name with ``/`` replaced by ``_`` (path basenames for pretokenized stores)."""
+    eval_pretokenized_dataset_paths: Optional[List[str]] = None
+    """Paths to *pretokenized* eval datasets (same formats and schema as
+    ``pretokenized_dataset_paths``). Cannot be combined with ``eval_datasets``.
+    Metrics are logged under ``eval/{name}/`` where the names come from
+    ``eval_dataset_names`` when set, defaulting to each path's basename."""
     eval_interval: int = 0
     """Run eval every N training steps. Eval also runs once at the end of training
     when an eval dataset is configured. ``0`` disables periodic eval."""
@@ -316,47 +332,10 @@ _DEFAULT_TRAIN_SPLIT = "train[:100]"
 _DEFAULT_EVAL_SPLIT = "validation"
 
 
-def _normalize_dataset_cfg(cfg: SFTConfig) -> None:
-    """Translate the deprecated single-dataset fields into the list-based fields
-    and validate the dataset configuration.
-
-    Post-conditions:
-
-    - ``train_datasets``/``train_dataset_splits`` are equal-length non-empty lists;
-      ``train_dataset_weights`` too when ``sampler="random"`` (``None`` otherwise).
-    - ``eval_datasets`` is ``None`` (eval disabled) or an equal-length triple with
-      ``eval_dataset_splits``/``eval_dataset_names`` (names unique).
-    - The deprecated ``dataset_name``/``dataset_split``/``eval_dataset_name``/
-      ``eval_dataset_split`` fields are ``None``.
-    """
-    import warnings
-
-    # ---- Train datasets ----
-    if cfg.train_datasets is not None and (cfg.dataset_name is not None or cfg.dataset_split is not None):
-        raise ValueError(
-            "Specify only one of train_datasets/train_dataset_splits and the deprecated "
-            "dataset_name/dataset_split, not both."
-        )
-    if cfg.train_datasets is None:
-        if cfg.dataset_name is not None or cfg.dataset_split is not None:
-            warnings.warn(
-                "dataset_name/dataset_split are deprecated; use train_datasets/train_dataset_splits instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        cfg.train_datasets = [cfg.dataset_name if cfg.dataset_name is not None else _DEFAULT_TRAIN_DATASET]
-        if cfg.train_dataset_splits is None:
-            cfg.train_dataset_splits = [cfg.dataset_split if cfg.dataset_split is not None else _DEFAULT_TRAIN_SPLIT]
-    cfg.dataset_name = None
-    cfg.dataset_split = None
-
-    if len(cfg.train_datasets) == 0:
-        raise ValueError("train_datasets must be a non-empty list.")
-    if cfg.train_dataset_splits is None or len(cfg.train_dataset_splits) != len(cfg.train_datasets):
-        raise ValueError(
-            f"train_dataset_splits must specify one split per entry of train_datasets "
-            f"({len(cfg.train_datasets)} datasets), got {cfg.train_dataset_splits}."
-        )
+def _normalize_mixing_weights(cfg: SFTConfig, num_sources: int, sources_field: str) -> None:
+    """Validate ``train_dataset_weights`` against the active training source list
+    (``train_datasets`` or ``pretokenized_dataset_paths``), defaulting to equal
+    mixing for ``sampler="random"``."""
     if cfg.train_dataset_weights is not None:
         if cfg.sampler != "random":
             raise ValueError(
@@ -364,17 +343,130 @@ def _normalize_dataset_cfg(cfg: SFTConfig) -> None:
                 f"DataMixingSampler), got sampler='{cfg.sampler}'. Pass mixing ratios to a custom "
                 f"sampler via sampler_kwargs instead."
             )
-        if len(cfg.train_dataset_weights) != len(cfg.train_datasets):
+        if len(cfg.train_dataset_weights) != num_sources:
             raise ValueError(
-                f"train_dataset_weights must specify one weight per entry of train_datasets "
-                f"({len(cfg.train_datasets)} datasets), got {cfg.train_dataset_weights}."
+                f"train_dataset_weights must specify one weight per entry of {sources_field} "
+                f"({num_sources} datasets), got {cfg.train_dataset_weights}."
             )
         if any(w <= 0 for w in cfg.train_dataset_weights):
             raise ValueError(f"train_dataset_weights must all be > 0, got {cfg.train_dataset_weights}.")
     elif cfg.sampler == "random":
         # Default: equal mixing. Left as None for other samplers (sequential
         # ignores mixing; custom samplers take ratios via sampler_kwargs).
-        cfg.train_dataset_weights = [1.0 / len(cfg.train_datasets)] * len(cfg.train_datasets)
+        cfg.train_dataset_weights = [1.0 / num_sources] * num_sources
+
+
+def _default_pretokenized_eval_names(paths: List[str]) -> List[str]:
+    """Default eval metric names for pretokenized eval stores: the path basenames.
+
+    Only eval stores need names: each one is evaluated separately and its
+    metrics are namespaced under ``eval/{name}/``. Training stores don't --
+    they are concatenated into a single dataset (mixed per
+    ``train_dataset_weights``), so there is no per-store metric to label.
+    """
+    names = [os.path.basename(path.rstrip("/")) for path in paths]
+    if any(not name for name in names) or len(set(names)) != len(names):
+        raise ValueError(
+            f"Default eval dataset names derived from eval_pretokenized_dataset_paths collide or are "
+            f"empty ({names}). Set eval_dataset_names explicitly to disambiguate."
+        )
+    return names
+
+
+def _normalize_dataset_cfg(cfg: SFTConfig) -> None:
+    """Translate the deprecated single-dataset fields into the list-based fields
+    and validate the dataset configuration.
+
+    Post-conditions:
+
+    - Either ``pretokenized_dataset_paths`` is a non-empty list (and
+      ``train_datasets`` is ``None``), or ``train_datasets``/
+      ``train_dataset_splits`` are equal-length non-empty lists;
+      ``train_dataset_weights`` matches the active source list when
+      ``sampler="random"`` (``None`` otherwise).
+    - Eval is disabled (all eval fields ``None``), or exactly one of
+      ``eval_pretokenized_dataset_paths`` / ``eval_datasets`` is a non-empty
+      list with ``eval_dataset_names`` filled in (unique); ``eval_datasets``
+      additionally pairs with ``eval_dataset_splits``.
+    - The deprecated ``dataset_name``/``dataset_split``/``eval_dataset_name``/
+      ``eval_dataset_split`` fields are ``None``.
+    """
+    import warnings
+
+    # ---- Train datasets ----
+    if cfg.pretokenized_dataset_paths is not None:
+        conflicting = (
+            cfg.train_datasets is not None
+            or cfg.train_dataset_splits is not None
+            or cfg.dataset_name is not None
+            or cfg.dataset_split is not None
+        )
+        if conflicting:
+            raise ValueError(
+                "Specify only one of pretokenized_dataset_paths and train_datasets/train_dataset_splits "
+                "(or the deprecated dataset_name/dataset_split), not both."
+            )
+        if len(cfg.pretokenized_dataset_paths) == 0:
+            raise ValueError("pretokenized_dataset_paths must be a non-empty list when set.")
+        _normalize_mixing_weights(cfg, len(cfg.pretokenized_dataset_paths), "pretokenized_dataset_paths")
+    else:
+        if cfg.train_datasets is not None and (cfg.dataset_name is not None or cfg.dataset_split is not None):
+            raise ValueError(
+                "Specify only one of train_datasets/train_dataset_splits and the deprecated "
+                "dataset_name/dataset_split, not both."
+            )
+        if cfg.train_datasets is None:
+            if cfg.dataset_name is not None or cfg.dataset_split is not None:
+                warnings.warn(
+                    "dataset_name/dataset_split are deprecated; use train_datasets/train_dataset_splits instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            cfg.train_datasets = [cfg.dataset_name if cfg.dataset_name is not None else _DEFAULT_TRAIN_DATASET]
+            if cfg.train_dataset_splits is None:
+                cfg.train_dataset_splits = [
+                    cfg.dataset_split if cfg.dataset_split is not None else _DEFAULT_TRAIN_SPLIT
+                ]
+
+        if len(cfg.train_datasets) == 0:
+            raise ValueError("train_datasets must be a non-empty list.")
+        if cfg.train_dataset_splits is None or len(cfg.train_dataset_splits) != len(cfg.train_datasets):
+            raise ValueError(
+                f"train_dataset_splits must specify one split per entry of train_datasets "
+                f"({len(cfg.train_datasets)} datasets), got {cfg.train_dataset_splits}."
+            )
+        _normalize_mixing_weights(cfg, len(cfg.train_datasets), "train_datasets")
+    cfg.dataset_name = None
+    cfg.dataset_split = None
+
+    # ---- Pretokenized eval datasets ----
+    if cfg.eval_pretokenized_dataset_paths is not None:
+        conflicting = (
+            cfg.eval_datasets is not None
+            or cfg.eval_dataset_splits is not None
+            or cfg.eval_dataset_name is not None
+            or cfg.eval_dataset_split is not None
+        )
+        if conflicting:
+            raise ValueError(
+                "Specify only one of eval_pretokenized_dataset_paths and eval_datasets/eval_dataset_splits "
+                "(or the deprecated eval_dataset_name/eval_dataset_split), not both."
+            )
+        if len(cfg.eval_pretokenized_dataset_paths) == 0:
+            raise ValueError("eval_pretokenized_dataset_paths must be a non-empty list when set.")
+        if cfg.eval_dataset_names is None:
+            cfg.eval_dataset_names = _default_pretokenized_eval_names(cfg.eval_pretokenized_dataset_paths)
+        else:
+            if len(cfg.eval_dataset_names) != len(cfg.eval_pretokenized_dataset_paths):
+                raise ValueError(
+                    f"eval_dataset_names must specify one name per entry of eval_pretokenized_dataset_paths "
+                    f"({len(cfg.eval_pretokenized_dataset_paths)} datasets), got {cfg.eval_dataset_names}."
+                )
+            if any(not name for name in cfg.eval_dataset_names):
+                raise ValueError(f"eval_dataset_names must be non-empty strings, got {cfg.eval_dataset_names}.")
+            if len(set(cfg.eval_dataset_names)) != len(cfg.eval_dataset_names):
+                raise ValueError(f"eval_dataset_names must be unique, got {cfg.eval_dataset_names}.")
+        return
 
     # ---- Eval datasets ----
     if cfg.eval_datasets is not None and (cfg.eval_dataset_name is not None or cfg.eval_dataset_split is not None):
@@ -476,10 +568,11 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
     # Eval config
     if cfg.eval_interval < 0:
         raise ValueError(f"eval_interval must be >= 0, got {cfg.eval_interval}")
-    if cfg.eval_interval > 0 and not cfg.eval_datasets:
-        raise ValueError("eval_interval > 0 requires eval_datasets to be set")
-    if cfg.eval_before_train and cfg.eval_datasets is None:
-        raise ValueError("eval_before_train=True requires eval_datasets to be set")
+    has_eval_dataset = bool(cfg.eval_datasets) or bool(cfg.eval_pretokenized_dataset_paths)
+    if cfg.eval_interval > 0 and not has_eval_dataset:
+        raise ValueError("eval_interval > 0 requires eval_datasets or eval_pretokenized_dataset_paths to be set")
+    if cfg.eval_before_train and not has_eval_dataset:
+        raise ValueError("eval_before_train=True requires eval_datasets or eval_pretokenized_dataset_paths to be set")
 
     #  checks for megatron
     if cfg.strategy == "megatron":

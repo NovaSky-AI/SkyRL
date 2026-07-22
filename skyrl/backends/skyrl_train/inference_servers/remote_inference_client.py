@@ -1063,15 +1063,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return await self._call_all_servers("/wake_up", params=params)
 
     async def sleep_preserving_inflight(self) -> Dict[str, Any]:
-        """Free the GPU weights + KV cache without disturbing the scheduler.
+        """Free GPU memory for weight sync while keeping in-flight requests frozen.
 
-        Unlike :meth:`sleep` (which routes through vLLM's ``/sleep`` endpoint and
-        thus preempts running requests + clears the prefix cache), this offloads
-        both allocator pools to CPU via ``/collective_rpc`` so that in-flight
-        requests held under a KEEP pause stay frozen with their KV blocks intact.
-        Pair with :meth:`wake_up_preserved`; the caller must KEEP-pause before
-        and ``resume`` after. Used by the non-colocated
-        ``offload_kv_for_weight_sync`` weight-sync path.
+        Offloads the KV cache to CPU via ``/collective_rpc`` without touching the
+        scheduler (unlike :meth:`sleep`, which preempts running requests and clears
+        the prefix cache). Pair with :meth:`wake_up_preserved`; the caller must
+        KEEP-pause before and ``resume`` after.
         """
         return await self._call_all_servers(
             "/collective_rpc",
@@ -1079,11 +1076,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
         )
 
     async def wake_up_preserved(self, tags: List[str]) -> Dict[str, Any]:
-        """Restore CPU-offloaded allocator pools by tag (see :meth:`sleep_preserving_inflight`).
+        """Restore allocator pools by tag (see :meth:`sleep_preserving_inflight`).
 
-        Wake ``["weights"]`` before the broadcast and ``["kv_cache"]`` after.
-        Does not resume generation -- call :meth:`resume_generation` once the KV
-        cache is back.
+        Wake ``["weights"]`` before the broadcast and ``["kv_cache"]`` after. Does
+        not resume generation -- call :meth:`resume_generation` once KV is back.
         """
         return await self._call_all_servers(
             "/collective_rpc",

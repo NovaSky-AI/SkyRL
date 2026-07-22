@@ -28,6 +28,7 @@ import torch
 
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
+    _empty_cuda_cache_rocm,
 )
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
@@ -176,70 +177,45 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
             )
 
         torch.accelerator.synchronize()
+        _empty_cuda_cache_rocm()
 
-    # ------------------------------------------------------------------
-    # Suspend / resume for non-colocated weight sync
-    # ------------------------------------------------------------------
-    # These drive the per-worker CuMemAllocator directly (rather than the
-    # engine's /sleep + /wake_up HTTP endpoints) precisely so they DON'T touch
-    # the scheduler. GPUWorker.sleep()/wake_up() are only reachable through
-    # EngineCore.sleep(), which force-clears the prefix cache and preempts every
-    # running request at level >= 1 (v1/engine/core.py). By operating on the
-    # allocator alone, the caller can hold a KEEP pause (in-flight requests
-    # frozen, KV blocks intact) across the sync and resume them afterward with
-    # their KV cache restored to the same virtual addresses -- so frozen
-    # requests continue with no abort and no prefill recompute.
+    # Suspend / resume for non-colocated weight sync.
     #
-    # vLLM version coupling: mirrors GPUWorker.sleep/wake_up
-    # (vllm/v1/worker/gpu_worker.py). Re-verify on vLLM bumps; the GPU weight-
-    # sync test exercises this path.
+    # Drive the per-worker CuMemAllocator directly instead of GPUWorker.sleep/
+    # wake_up (only reachable via EngineCore.sleep, which force-clears the prefix
+    # cache and preempts running requests at level >= 1). Touching the allocator
+    # alone lets the caller hold a KEEP pause across the sync and resume frozen
+    # requests with their KV restored to the same virtual addresses -- no abort,
+    # no prefill recompute. Mirrors GPUWorker.sleep/wake_up; re-verify on vLLM bumps.
 
     def skyrl_sleep_preserve_kv(self) -> None:
-        """Offload only the KV cache to CPU, discard the weights, free all GPU memory.
+        """Offload the KV cache to CPU, discard the weights, and free all GPU memory.
 
-        The ``kv_cache`` tag is offloaded (preserved on CPU); the ``weights`` pool
-        is *discarded*, not backed up -- the weight-sync broadcast overwrites every
-        parameter on wake anyway, so copying the old weights to CPU would be wasted
-        work (and, for large models, a large one). Model *buffers* live in the
-        weights pool but are NOT covered by the parameter broadcast (e.g.
-        non-persistent rotary ``inv_freq``), so we save them to CPU here and restore
-        them on wake -- mirroring what GPUWorker.sleep(level=2) does. The GPU memory
-        is freed for all tags regardless, which is what gives the broadcast room to
-        run at high ``gpu_memory_utilization``.
+        Weights are discarded rather than backed up since the broadcast overwrites
+        every parameter on wake. Model buffers live in the weights pool but are not
+        sent by the broadcast (e.g. non-persistent rotary ``inv_freq``), so save them
+        here and restore on wake -- as GPUWorker.sleep(level=2) does.
         """
         from vllm.device_allocator import get_mem_allocator_instance
 
-        # Save model buffers (tiny: rope caches etc.) before discarding the weights
-        # pool; the broadcast only restores parameters, not buffers.
         model = self.model_runner.model
         self._skyrl_saved_buffers = {name: buf.cpu().clone() for name, buf in model.named_buffers()}
-        allocator = get_mem_allocator_instance()
-        # Preserve KV on CPU; discard weights (re-synced by the broadcast).
-        allocator.sleep(offload_tags=("kv_cache",))
+        get_mem_allocator_instance().sleep(offload_tags=("kv_cache",))
 
     def skyrl_wake_preserved(self, tags: list) -> None:
-        """Wake the given allocator tags, restoring CPU-backed / discarded contents.
+        """Wake the given allocator tags, restoring CPU-backed contents.
 
-        Call with ``["weights"]`` before the broadcast (reallocates the weight
-        buffers -- garbage until the broadcast fills them -- and restores the saved
-        model buffers, while the KV pool stays freed) and ``["kv_cache"]`` after
-        (restoring the frozen requests' KV). Does NOT resume the scheduler -- the
-        caller re-enables generation via ``/resume`` once the KV cache is back.
+        Call ``["weights"]`` before the broadcast and ``["kv_cache"]`` after. Does
+        not resume the scheduler; the caller does that via ``/resume``.
         """
         from vllm.device_allocator import get_mem_allocator_instance
 
-        # Release the caching allocator's reserved-but-unallocated blocks (e.g. the
-        # transient buffers the NCCL broadcast/weight-load left behind) back to CUDA
-        # first. cumem's wake remaps physical pages at fixed virtual addresses and
-        # will fail if the regular allocator is still holding that physical memory --
-        # which is exactly what happens when we restore the (large) KV pool right
-        # after a broadcast.
+        # Return the broadcast's reserved-but-unallocated blocks to CUDA so cumem can
+        # remap the KV pool at its fixed virtual addresses.
         torch.cuda.empty_cache()
 
-        allocator = get_mem_allocator_instance()
-        allocator.wake_up(tags)
-        # Restore model buffers once the (discarded) weights pool is remapped. The
-        # parameter broadcast does not cover buffers. Mirrors GPUWorker.wake_up.
+        get_mem_allocator_instance().wake_up(tags)
+        # Restore model buffers (not covered by the broadcast) once weights remap.
         saved = getattr(self, "_skyrl_saved_buffers", None)
         if saved and (tags is None or "weights" in tags):
             model = self.model_runner.model
@@ -247,8 +223,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
                 if name in saved:
                     buf.data.copy_(saved[name].data)
             self._skyrl_saved_buffers = {}
-        # After the KV pool is remapped, re-init fp8 KV scales the same way
-        # GPUWorker.wake_up does (no-op for non-fp8-kv-cache models).
+        # Re-init fp8 KV scales after the KV pool remaps (no-op without fp8 KV cache).
         if tags is None or "kv_cache" in tags:
             post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
             if post_wake is not None:

@@ -220,9 +220,10 @@ class TestBuildTrainSampler:
         )
         assert list(sampler) == list(other)
 
-    def test_random_multi_dataset_defaults_to_equal_weights(self):
-        # Bare trainers skip config normalization; equal mixing is the fallback.
-        trainer = _make_trainer(sampler="random")
+    def test_random_multi_dataset_builds_mixing_sampler(self):
+        # train_dataset_weights is filled by config normalization
+        # (validate_sft_cfg) on every construction path.
+        trainer = _make_trainer(sampler="random", train_dataset_weights=[0.5, 0.5])
         sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[10, 10])
         assert isinstance(sampler, DataMixingSampler)
 
@@ -691,8 +692,9 @@ class TestMultiDatasetMixing:
         assert 0.75 < frac < 0.85, frac
 
     def test_default_weights_mix_equally(self):
+        # Equal weights (what config normalization fills by default) mix ~50/50.
         data = list(range(200))
-        trainer = _make_trainer(sampler="random", batch_size=20, seed=3)
+        trainer = _make_trainer(sampler="random", batch_size=20, seed=3, train_dataset_weights=[0.5, 0.5])
         frac = self._source0_fraction(trainer, data, [100, 100], boundary=100)
         assert 0.45 < frac < 0.55, frac
 

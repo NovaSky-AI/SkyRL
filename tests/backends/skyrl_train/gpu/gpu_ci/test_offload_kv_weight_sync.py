@@ -1,18 +1,10 @@
 """GPU test for the ``offload_kv_for_weight_sync`` weight-sync path.
 
-Exercises the non-colocated, KV-offloading suspend/resume added to
-``WorkerDispatch.save_weights_for_sampler``: with
-``generator.inference_engine.offload_kv_for_weight_sync=True`` (fully-async),
-weight sync does
-
-    pause_generation (KEEP) -> offload KV to CPU + discard weights (free GPU)
-    -> wake weights -> NCCL broadcast -> restore KV -> resume_generation
-
-so an in-flight generation request is *frozen* (not aborted) across the sync and
-resumes from its preserved KV cache with no prefill recompute. This is the code
-path validated end-to-end in the fully-async gsm8k example; the test isolates
-the correctness-critical claim (an in-flight request survives the CPU
-offload/restore of the KV cache and finishes cleanly) on a small model.
+With ``generator.inference_engine.offload_kv_for_weight_sync=True`` (fully-async),
+``WorkerDispatch.save_weights_for_sampler`` freezes in-flight requests (KEEP pause),
+offloads the KV cache to CPU, re-syncs weights into the freed space, then restores
+the KV cache. This asserts an in-flight request survives that offload/restore and
+finishes cleanly.
 
 GPU Requirements: 2 GPUs (1 inference + 1 policy).
 
@@ -42,8 +34,8 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
-# ignore_eos + large max_tokens keeps the request reliably mid-generation while
-# the training step + weight sync land underneath it.
+# Long prompt + ignore_eos + large max_tokens keeps a request mid-generation while
+# the training step and weight sync land underneath it.
 LONG_PROMPT = "Tell me a very long, detailed story about a dragon who learns to code."
 
 
@@ -56,9 +48,8 @@ def _offload_kv_cfg() -> SkyRLTrainConfig:
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.logger = "console"
-    # offload_kv_for_weight_sync requires the fully-async trainer with
-    # clear_kv_cache_on_weight_sync=False so the broadcast does not reset the
-    # prefix cache (which would preempt the very request we are preserving).
+    # Required by offload_kv_for_weight_sync so the broadcast doesn't reset the
+    # prefix cache and preempt the request we are preserving.
     cfg.trainer.fully_async.enabled = True
     cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = False
     ie = cfg.generator.inference_engine
@@ -66,8 +57,7 @@ def _offload_kv_cfg() -> SkyRLTrainConfig:
     ie.tensor_parallel_size = 1
     ie.run_engines_locally = True
     ie.max_num_seqs = 16
-    # Keep the KV pool modest so the CPU offload/restore is fast in CI; the
-    # correctness claim (in-flight survival) is independent of the exact size.
+    # Modest KV pool so the CPU offload/restore is fast in CI.
     ie.gpu_memory_utilization = 0.6
     ie.offload_kv_for_weight_sync = True
     validate_inference_engine_cfg(cfg)
@@ -93,9 +83,7 @@ def _sample_payload(prompt_token_ids: List[int], model: str, max_tokens: int) ->
                 "temperature": 0.7,
                 "max_tokens": max_tokens,
                 "seed": 1234,
-                # ignore_eos keeps the request emitting tokens past the natural
-                # EOS so it is reliably in-flight while the sync lands.
-                "ignore_eos": True,
+                "ignore_eos": True,  # keep emitting past EOS so the request stays in-flight
             },
         }
     }
@@ -111,8 +99,7 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
     non-empty token stream, and the offload path (``sleep_preserving_inflight`` +
     ``wake_up_preserved(["kv_cache"])``) must actually have been exercised.
     """
-    # ignore_eos isn't in the default Tinker->vLLM forwarding map; widen it so
-    # the request keeps emitting tokens past its natural EOS.
+    # ignore_eos isn't in the default Tinker->vLLM forwarding map; widen it.
     monkeypatch.setitem(_ric._TINKER_SAMPLE_TO_VLLM_PARAM_MAP, "ignore_eos", "ignore_eos")
 
     cfg = _offload_kv_cfg()
@@ -125,8 +112,7 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
         use_local=True,
         tp_size=1,
         colocate_all=False,
-        # enable_sleep_mode is turned on by offload_kv_for_weight_sync via
-        # build_vllm_cli_args; sleep_level here just needs to be >=1.
+        # enable_sleep_mode is turned on by offload_kv_for_weight_sync; sleep_level just needs >=1.
         sleep_level=1,
     ) as engines:
         client, pg = engines.client, engines.pg
@@ -145,8 +131,7 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
         dispatch = WorkerDispatch(cfg=cfg, policy_actor_group=policy_group, inference_engine_client=client)
         dispatch.init_weight_sync_state(client)
 
-        # Spy on the offload primitives to prove the new path actually ran (and
-        # that we didn't silently fall through to plain pause/broadcast/resume).
+        # Spy on the offload primitives to prove the path actually ran.
         sleep_calls: List[tuple] = []
         wake_tags: List[list] = []
         orig_sleep = client.sleep_preserving_inflight
@@ -192,8 +177,7 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
         assert any(tags and "weights" in tags for tags in wake_tags), "weights were never woken for the broadcast"
         assert any(tags and "kv_cache" in tags for tags in wake_tags), "KV cache was never restored"
 
-        # The engine remains healthy after restore: a fresh sample works with the
-        # newly synced weights.
+        # Engine still healthy after restore: a fresh sample works.
         await client.reset_prefix_cache()
         fresh = await _sample_via(client, _sample_payload(prompt_token_ids, MODEL, max_tokens=16))
         assert len(fresh["sequences"][0]["tokens"]) > 0, "engine produced no tokens after KV restore"

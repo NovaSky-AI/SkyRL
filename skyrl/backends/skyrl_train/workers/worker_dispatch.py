@@ -643,14 +643,12 @@ class WorkerDispatch:
                 self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
                 self._finish_weight_sync()
             elif self.cfg.generator.inference_engine.offload_kv_for_weight_sync:
-                # Non-colocated, KV-offloading suspend/resume: freeze in-flight requests
-                # (KEEP pause keeps their KV blocks), offload the KV cache to CPU (and
-                # discard the weights, which the broadcast re-syncs) to free GPU memory,
-                # wake the weights to receive the broadcast, then restore the KV cache and
-                # resume. Frozen requests continue with no abort and no prefill recompute.
-                # Requires the fully-async trainer with clear_kv_cache_on_weight_sync=False
-                # (validated in validate_inference_engine_cfg) so the broadcast below does
-                # not reset the prefix cache.
+                # KV-offloading suspend/resume: KEEP-pause (freezes in-flight requests
+                # with KV intact), offload KV to CPU + discard weights to free GPU, wake
+                # weights for the broadcast, restore KV, resume. Frozen requests continue
+                # with no abort or prefill recompute. Validation requires the fully-async
+                # trainer with clear_kv_cache_on_weight_sync=False so the broadcast does
+                # not reset the prefix cache out from under the frozen requests.
                 await self._inference_engine_client.pause_generation()
                 try:
                     await self._inference_engine_client.sleep_preserving_inflight()
