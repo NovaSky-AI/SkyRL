@@ -37,6 +37,7 @@ data_volume = modal.Volume.from_name("skyrl-expert-mxfp8-data", create_if_missin
 image = (
     modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12")
     .apt_install("git", "curl", "build-essential", "ca-certificates", "libnuma1", "numactl")
+    .pip_install("huggingface-hub")
     .run_commands("curl -LsSf https://astral.sh/uv/install.sh | sh")
     .env(
         {
@@ -44,8 +45,12 @@ image = (
             "HF_HOME": HF_HOME,
             "HF_XET_HIGH_PERFORMANCE": "1",
             "NVTE_FLASH_ATTN": "0",
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S": "1800",
+            "SKYRL_DUMP_INFRA_LOG_TO_STDOUT": "1",
             "UV_LINK_MODE": "copy",
             "UV_PROJECT_ENVIRONMENT": f"{REMOTE_REPO}/.venv",
+            "VLLM_USE_FLASHINFER_MOE_FP16": "0",
+            "VLLM_USE_FLASHINFER_SAMPLER": "0",
         }
     )
     .add_local_dir(str(repo_root), REMOTE_REPO, copy=True, ignore=[".venv", ".git", "**/__pycache__"])
@@ -69,6 +74,7 @@ def _run(mode: str, steps: int) -> None:
         "uv",
         "run",
         "--frozen",
+        "--no-sync",
         "--extra",
         "megatron",
         "-m",
@@ -82,19 +88,21 @@ def _run(mode: str, steps: int) -> None:
         "trainer.placement.policy_num_nodes=1",
         "trainer.placement.policy_num_gpus_per_node=8",
         "generator.inference_engine.num_engines=1",
-        "generator.inference_engine.tensor_parallel_size=8",
+        "generator.inference_engine.tensor_parallel_size=1",
+        "generator.inference_engine.data_parallel_size=8",
+        "generator.inference_engine.expert_parallel_size=8",
         "generator.inference_engine.distributed_executor_backend=mp",
         "generator.inference_engine.weight_sync_backend=nccl",
         "generator.inference_engine.gpu_memory_utilization=0.6",
-        "trainer.policy.megatron_config.tensor_model_parallel_size=4",
+        "trainer.policy.megatron_config.tensor_model_parallel_size=1",
         "trainer.policy.megatron_config.pipeline_model_parallel_size=1",
         "trainer.policy.megatron_config.context_parallel_size=1",
         "trainer.policy.megatron_config.expert_model_parallel_size=8",
         "trainer.policy.megatron_config.expert_tensor_parallel_size=1",
         "trainer.algorithm.advantage_estimator=grpo",
         "trainer.algorithm.use_kl_loss=false",
-        "trainer.train_batch_size=16",
-        "trainer.policy_mini_batch_size=16",
+        "trainer.train_batch_size=64",
+        "trainer.policy_mini_batch_size=64",
         "trainer.micro_forward_batch_size_per_gpu=1",
         "trainer.micro_train_batch_size_per_gpu=1",
         "trainer.eval_before_train=false",
@@ -105,7 +113,7 @@ def _run(mode: str, steps: int) -> None:
         f"trainer.max_training_steps={steps}",
         "trainer.max_prompt_length=512",
         "generator.sampling_params.max_generate_length=512",
-        "generator.n_samples_per_prompt=4",
+        "generator.n_samples_per_prompt=8",
         "generator.batched=true",
         "environment.env_class=gsm8k",
         "trainer.logger=wandb",
@@ -136,6 +144,7 @@ def prepare_assets() -> None:
                 "uv",
                 "run",
                 "--frozen",
+                "--no-sync",
                 "--extra",
                 "megatron",
                 "examples/train/gsm8k/gsm8k_dataset.py",
