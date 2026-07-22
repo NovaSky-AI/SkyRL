@@ -16,6 +16,7 @@ except ImportError:
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+    fsdp2_clip_grad_norm_,
     should_use_meta_init,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -178,7 +179,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             target_modules=self.cfg.policy.model.lora.target_modules,
             exclude_modules=self.cfg.policy.model.lora.exclude_modules,
             concurrent_lora=self._is_concurrent_lora,
-            max_train_loras=self.cfg.policy.model.lora.max_train_loras,
+            max_lora_adapters=self.cfg.policy.model.lora.max_lora_adapters,
             sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             use_torch_compile=self.cfg.policy.use_torch_compile,
@@ -270,10 +271,48 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             return super().optim_step()
         if model_id is None:
             raise ValueError("Concurrent FSDP LoRA optim_step requires model_id")
+        return self.optim_steps({model_id: self._multi_lora_manager.optimizer_hparams_for(model_id)})[model_id]
 
-        slot_index = self._multi_lora_manager.slot_for(model_id)
-        with self._multi_lora_manager.isolate_slot_gradients(slot_index):
-            return super().optim_step()
+    def optim_steps(self, optimizer_hparams: dict[str, dict[str, float]]) -> dict[str, Optional[float]]:
+        """Step independent adapter slots with one AdamW kernel traversal."""
+        if not self._is_concurrent_lora:
+            raise ValueError("Batched optimizer steps require concurrent FSDP LoRA")
+        if self.optimizer is None:
+            raise RuntimeError("Optimizer is not initialized")
+        if not optimizer_hparams:
+            return {}
+
+        manager = self._multi_lora_manager
+        for model_id, hparams in optimizer_hparams.items():
+            manager.set_optimizer_hparams(model_id, hparams)
+
+        grad_norms: dict[str, Optional[torch.Tensor]] = {}
+        finite_model_ids = []
+        for model_id in optimizer_hparams:
+            slot_index = manager.slot_for(model_id)
+            parameters = manager.parameters_for_slot(slot_index)
+            grad_norm = None
+            if self.strategy.max_norm > 0:
+                grad_norm = fsdp2_clip_grad_norm_(parameters, max_norm=self.strategy.max_norm)
+            grad_norms[model_id] = grad_norm
+            if grad_norm is None or torch.isfinite(grad_norm):
+                finite_model_ids.append(model_id)
+            else:
+                manager.clear_slot_gradients(slot_index)
+
+        if finite_model_ids:
+            with manager.select_optimizer_slots(self.optimizer, finite_model_ids):
+                self.optimizer.step()
+            for model_id in finite_model_ids:
+                manager.clear_slot_gradients(manager.slot_for(model_id))
+            if self.scheduler is not None:
+                for _ in finite_model_ids:
+                    self.scheduler.step()
+
+        return {
+            model_id: None if grad_norm is None else grad_norm.detach().cpu().item()
+            for model_id, grad_norm in grad_norms.items()
+        }
 
     def set_optimizer_hparams(
         self,

@@ -11,7 +11,7 @@ from typing import Callable
 
 import ray
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
@@ -53,7 +53,11 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     All keys are applied as overrides to the default SkyRL-Train config.
     """
 
-    pass
+    max_lora_adapters: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum number of resident trainer-side LoRA adapters",
+    )
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
@@ -79,6 +83,7 @@ def _build_skyrl_train_config(
 
     # Apply user overrides from backend_config
     user_overrides = dict(overrides.model_extra)
+    user_overrides["trainer.policy.model.lora.max_lora_adapters"] = overrides.max_lora_adapters
     # override base model path
     # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
     # that resolves other config derived from the policy model path.
@@ -1062,6 +1067,56 @@ class SkyRLTrainBackend(AbstractBackend):
             metrics["skyrl.ai/grad_norm"] = float(grad_norm)
         metrics["skyrl.ai/learning_rate"] = adam_params.learning_rate
         return types.OptimStepOutput(metrics=metrics)
+
+    def supports_batched_optim_steps(self) -> bool:
+        return self._supports_concurrent_lora()
+
+    def optim_steps(
+        self,
+        requests: dict[str, tuple[str, types.OptimStepInput]],
+    ) -> dict[str, types.OptimStepOutput | types.ErrorResponse]:
+        if not self._supports_concurrent_lora():
+            return super().optim_steps(requests)
+
+        errors: dict[str, types.ErrorResponse] = {}
+        optimizer_hparams: dict[str, dict[str, float]] = {}
+        request_ids_by_model: dict[str, str] = {}
+        for request_id, (model_id, request_data) in requests.items():
+            if not self.has_model(model_id):
+                errors[request_id] = types.ErrorResponse(error=f"Model {model_id} not found", status="error")
+                continue
+            if self._get_role(model_id) != "policy":
+                errors[request_id] = types.ErrorResponse(
+                    error=f"Batched optimizer steps only support policy adapters, got {model_id}",
+                    status="error",
+                )
+                continue
+            if model_id in request_ids_by_model:
+                errors[request_id] = types.ErrorResponse(
+                    error=f"Only one optimizer step per model can be batched: {model_id}",
+                    status="error",
+                )
+                continue
+
+            adam = request_data.adam_params
+            request_ids_by_model[model_id] = request_id
+            optimizer_hparams[model_id] = {
+                "learning_rate": adam.learning_rate,
+                "beta1": adam.beta1,
+                "beta2": adam.beta2,
+                "eps": adam.eps,
+                "weight_decay": adam.weight_decay,
+            }
+
+        grad_norms = self._dispatch.optim_steps("policy", optimizer_hparams) if optimizer_hparams else {}
+        results: dict[str, types.OptimStepOutput | types.ErrorResponse] = dict(errors)
+        for model_id, request_id in request_ids_by_model.items():
+            grad_norm = grad_norms.get(model_id)
+            metrics = {"skyrl.ai/learning_rate": optimizer_hparams[model_id]["learning_rate"]}
+            if grad_norm is not None:
+                metrics["skyrl.ai/grad_norm"] = float(grad_norm)
+            results[request_id] = types.OptimStepOutput(metrics=metrics)
+        return results
 
     def sample(
         self,

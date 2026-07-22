@@ -417,6 +417,32 @@ class WorkerDispatch:
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]
 
+    def optim_steps(
+        self,
+        model: str,
+        optimizer_hparams: dict[str, dict[str, float]],
+    ) -> dict[str, Optional[float]]:
+        """Apply independent concurrent-LoRA optimizer steps in one worker call."""
+        if not optimizer_hparams:
+            return {}
+        if not self._uses_concurrent_lora(model):
+            raise ValueError("Batched optimizer steps require concurrent FSDP LoRA")
+
+        self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
+        rank_results = ray.get(
+            self._actor_groups[model].async_run_ray_method(
+                "pass_through",
+                "optim_steps",
+                optimizer_hparams=optimizer_hparams,
+            )
+        )
+        first_result = rank_results[0]
+        if any(result.keys() != first_result.keys() for result in rank_results[1:]):
+            raise RuntimeError("Concurrent LoRA optimizer workers returned inconsistent adapter sets")
+
+        self._save_memory_snapshot(model, "optim_steps")
+        return first_result
+
     def set_lr(self, model: str, learning_rate: float, model_id: Optional[str] = None) -> None:
         """Set learning rate for model's optimizer.
 

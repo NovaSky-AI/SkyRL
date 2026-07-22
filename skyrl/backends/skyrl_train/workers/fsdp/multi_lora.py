@@ -167,26 +167,58 @@ class MultiLoRALinear(nn.Module):
             ]
         )
         self.adapter_indices: Optional[torch.Tensor] = None
+        self.active_adapter_slots: Optional[tuple[int, ...]] = None
+        self.compact_adapter_indices: Optional[torch.Tensor] = None
         self._grouped_mm_disabled = False
 
-    def set_adapter_indices(self, adapter_indices: Optional[torch.Tensor]) -> None:
-        self.adapter_indices = adapter_indices
+    @staticmethod
+    def compact_routing(adapter_indices: torch.Tensor) -> tuple[tuple[int, ...], torch.Tensor]:
+        active_slots, compact_indices = torch.unique(adapter_indices, sorted=True, return_inverse=True)
+        return tuple(int(slot) for slot in active_slots.tolist()), compact_indices
 
-    def _weight_banks(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Stack slot parameters without changing their optimizer ownership."""
-        lora_a = torch.stack([adapter.lora_A.weight for adapter in self.adapters])
-        lora_b = torch.stack([adapter.lora_B.weight for adapter in self.adapters])
+    def set_adapter_indices(
+        self,
+        adapter_indices: Optional[torch.Tensor],
+        *,
+        active_slots: Optional[tuple[int, ...]] = None,
+        compact_indices: Optional[torch.Tensor] = None,
+    ) -> None:
+        if (active_slots is None) != (compact_indices is None):
+            raise ValueError("active_slots and compact_indices must be provided together")
+        self.adapter_indices = adapter_indices
+        self.active_adapter_slots = active_slots
+        self.compact_adapter_indices = compact_indices
+
+    def _weight_banks(self, active_slots: Sequence[int]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stack only active slot parameters without changing optimizer ownership."""
+        lora_a = torch.stack([self.adapters[slot].lora_A.weight for slot in active_slots])
+        lora_b = torch.stack([self.adapters[slot].lora_B.weight for slot in active_slots])
         return lora_a, lora_b
+
+    def _resolve_compact_routing(
+        self,
+        adapter_indices: torch.Tensor,
+        active_slots: Optional[tuple[int, ...]],
+    ) -> tuple[tuple[int, ...], torch.Tensor]:
+        if active_slots is None:
+            return self.compact_routing(adapter_indices)
+        return active_slots, adapter_indices
 
     def _expanded_adapter_indices(self, inputs: torch.Tensor, adapter_indices: torch.Tensor) -> torch.Tensor:
         tokens_per_row = inputs.numel() // (inputs.shape[0] * inputs.shape[-1])
         return adapter_indices.repeat_interleave(tokens_per_row)
 
-    def _apply_lora_batched(self, inputs: torch.Tensor, adapter_indices: torch.Tensor) -> torch.Tensor:
+    def _apply_lora_batched(
+        self,
+        inputs: torch.Tensor,
+        adapter_indices: torch.Tensor,
+        active_slots: Optional[tuple[int, ...]] = None,
+    ) -> torch.Tensor:
         """Portable banked path using one batched matmul for A and one for B."""
-        lora_a, lora_b = self._weight_banks()
-        row_lora_a = lora_a.index_select(0, adapter_indices)
-        row_lora_b = lora_b.index_select(0, adapter_indices)
+        active_slots, compact_indices = self._resolve_compact_routing(adapter_indices, active_slots)
+        lora_a, lora_b = self._weight_banks(active_slots)
+        row_lora_a = lora_a.index_select(0, compact_indices)
+        row_lora_b = lora_b.index_select(0, compact_indices)
         flat_inputs = inputs.reshape(inputs.shape[0], -1, inputs.shape[-1])
         intermediate = torch.bmm(flat_inputs, row_lora_a.transpose(1, 2))
         delta = torch.bmm(intermediate, row_lora_b.transpose(1, 2))
@@ -210,14 +242,20 @@ class MultiLoRALinear(nn.Module):
         )
         return self._grouped_mm_eligible(inputs) and selected_weight_bytes > self._BATCHED_WEIGHT_BANK_LIMIT_BYTES
 
-    def _apply_lora_grouped(self, inputs: torch.Tensor, adapter_indices: torch.Tensor) -> torch.Tensor:
+    def _apply_lora_grouped(
+        self,
+        inputs: torch.Tensor,
+        adapter_indices: torch.Tensor,
+        active_slots: Optional[tuple[int, ...]] = None,
+    ) -> torch.Tensor:
         """Sort tokens by adapter and execute two ragged grouped GEMMs."""
-        lora_a, lora_b = self._weight_banks()
+        active_slots, compact_indices = self._resolve_compact_routing(adapter_indices, active_slots)
+        lora_a, lora_b = self._weight_banks(active_slots)
         flat_inputs = inputs.reshape(-1, inputs.shape[-1])
-        expanded_indices = self._expanded_adapter_indices(inputs, adapter_indices)
+        expanded_indices = self._expanded_adapter_indices(inputs, compact_indices)
         sorted_indices, sort_order = torch.sort(expanded_indices, stable=True)
         sorted_inputs = flat_inputs.index_select(0, sort_order)
-        group_sizes = torch.bincount(sorted_indices, minlength=len(self.adapters))
+        group_sizes = torch.bincount(sorted_indices, minlength=len(active_slots))
         group_offsets = torch.cumsum(group_sizes, dim=0, dtype=torch.int32)
 
         intermediate = torch._grouped_mm(sorted_inputs, lora_a.transpose(1, 2), offs=group_offsets)
@@ -248,16 +286,23 @@ class MultiLoRALinear(nn.Module):
                 "MultiLoRA routing is per batch row: "
                 f"input batch={inputs.shape[0]}, adapter_indices={adapter_indices.shape[0]}"
             )
+        if adapter_indices.numel() == 0:
+            return output
+
+        active_slots = self.active_adapter_slots
+        compact_indices = self.compact_adapter_indices
+        if active_slots is None or compact_indices is None:
+            active_slots, compact_indices = self.compact_routing(adapter_indices)
 
         lora_inputs = F.dropout(inputs, p=self.dropout_p, training=self.training)
         if self._should_use_grouped_mm(lora_inputs):
             try:
-                delta = self._apply_lora_grouped(lora_inputs, adapter_indices)
+                delta = self._apply_lora_grouped(lora_inputs, compact_indices, active_slots)
             except NotImplementedError:
                 # Some FSDP layouts may not have a grouped-mm DTensor strategy.
                 # Remember the failure per layer and use the banked bmm path.
                 self._grouped_mm_disabled = True
-                delta = self._apply_lora_batched(lora_inputs, adapter_indices)
+                delta = self._apply_lora_batched(lora_inputs, compact_indices, active_slots)
             except RuntimeError as exc:
                 unsupported_markers = (
                     "not implemented",
@@ -268,9 +313,9 @@ class MultiLoRALinear(nn.Module):
                 if not any(marker in str(exc).lower() for marker in unsupported_markers):
                     raise
                 self._grouped_mm_disabled = True
-                delta = self._apply_lora_batched(lora_inputs, adapter_indices)
+                delta = self._apply_lora_batched(lora_inputs, compact_indices, active_slots)
         else:
-            delta = self._apply_lora_batched(lora_inputs, adapter_indices)
+            delta = self._apply_lora_batched(lora_inputs, compact_indices, active_slots)
         return output + delta
 
 
@@ -344,6 +389,8 @@ class MultiLoRAManager:
             raise ValueError(f"Adapter '{model_id}' is not registered") from exc
 
     def set_adapter_indices(self, adapter_indices: Optional[torch.Tensor]) -> None:
+        active_slots = None
+        compact_indices = None
         if adapter_indices is not None:
             if adapter_indices.ndim != 1:
                 raise ValueError("adapter_indices must be a 1-D tensor")
@@ -353,8 +400,13 @@ class MultiLoRAManager:
                 adapter_indices.min().item() < 0 or adapter_indices.max().item() >= self.max_adapters
             ):
                 raise ValueError(f"adapter index must be in [0, {self.max_adapters})")
+            active_slots, compact_indices = MultiLoRALinear.compact_routing(adapter_indices)
         for _, layer in self.layers:
-            layer.set_adapter_indices(adapter_indices)
+            layer.set_adapter_indices(
+                adapter_indices,
+                active_slots=active_slots,
+                compact_indices=compact_indices,
+            )
 
     def parameters_for_slot(self, slot_index: int) -> list[nn.Parameter]:
         return [parameter for _, parameter in self.named_parameters_for_slot(slot_index)]
@@ -378,6 +430,37 @@ class MultiLoRAManager:
     def optimizer_hparams_for(self, model_id: str) -> dict[str, object]:
         self.slot_for(model_id)
         return deepcopy(self._optimizer_hparams.get(model_id, {}))
+
+    @contextmanager
+    def select_optimizer_slots(self, optimizer: torch.optim.Optimizer, model_ids: Sequence[str]):
+        """Expose only selected adapters to one optimizer call."""
+        if not optimizer.param_groups:
+            raise RuntimeError("Optimizer has no parameter groups")
+
+        original_groups = optimizer.param_groups
+        template = {key: value for key, value in original_groups[0].items() if key != "params"}
+        selected_groups = []
+        for model_id in model_ids:
+            slot_index = self.slot_for(model_id)
+            hparams = self.optimizer_hparams_for(model_id)
+            group = dict(template)
+            group["params"] = self.parameters_for_slot(slot_index)
+            if hparams:
+                group["lr"] = hparams["learning_rate"]
+                group["betas"] = (hparams["beta1"], hparams["beta2"])
+                group["eps"] = hparams["eps"]
+                group["weight_decay"] = hparams["weight_decay"]
+            selected_groups.append(group)
+
+        optimizer.param_groups = selected_groups
+        try:
+            yield
+        finally:
+            optimizer.param_groups = original_groups
+
+    def clear_slot_gradients(self, slot_index: int) -> None:
+        for parameter in self.parameters_for_slot(slot_index):
+            parameter.grad = None
 
     def training_state(self, model_id: str, optimizer: torch.optim.Optimizer) -> dict[str, object]:
         registration = self._registrations.get(model_id)

@@ -98,6 +98,23 @@ class AbstractBackend(ABC):
         """
         pass
 
+    def supports_batched_optim_steps(self) -> bool:
+        """Whether independent model optimizer requests can share one backend call."""
+        return False
+
+    def optim_steps(
+        self,
+        requests: dict[str, tuple[str, types.OptimStepInput]],
+    ) -> dict[str, types.OptimStepOutput | types.ErrorResponse]:
+        """Apply independent optimizer requests, preserving the single-step fallback."""
+        results: dict[str, types.OptimStepOutput | types.ErrorResponse] = {}
+        for request_id, (model_id, request_data) in requests.items():
+            try:
+                results[request_id] = self.optim_step(model_id, request_data)
+            except Exception as exc:
+                results[request_id] = types.ErrorResponse(error=str(exc), status="failed")
+        return results
+
     @abstractmethod
     def sample(
         self,

@@ -67,6 +67,25 @@ def test_backward_only_produces_nonzero_gradients_for_routed_slots():
     assert layer.adapters[2].lora_B.weight.grad is not None
 
 
+def test_sparse_routing_materializes_only_active_adapter_banks(monkeypatch):
+    layer = MultiLoRALinear(nn.Linear(3, 2, bias=False), max_adapters=8, rank=2, alpha=2, dropout=0)
+    recorded_slots = []
+    original_weight_banks = layer._weight_banks
+
+    def record_weight_banks(active_slots):
+        recorded_slots.append(tuple(active_slots))
+        return original_weight_banks(active_slots)
+
+    monkeypatch.setattr(layer, "_weight_banks", record_weight_banks)
+    layer.set_adapter_indices(torch.tensor([7, 2, 7]))
+    layer(torch.randn(3, 4, 3)).sum().backward()
+
+    assert recorded_slots == [(2, 7)]
+    assert layer.adapters[0].lora_A.weight.grad is None
+    assert layer.adapters[2].lora_A.weight.grad is not None
+    assert layer.adapters[7].lora_A.weight.grad is not None
+
+
 def _randomize_lora_weights(layer: MultiLoRALinear) -> None:
     with torch.no_grad():
         for adapter in layer.adapters:
@@ -221,6 +240,39 @@ def test_slot_scoped_adamw_preserves_other_weights_gradients_and_state():
         assert parameter not in optimizer.state
     for before, parameter in zip(b_grads_before, manager.parameters_for_slot(slot_b)):
         torch.testing.assert_close(parameter.grad, before)
+
+
+def test_batched_adapter_optimizer_uses_slot_specific_parameter_groups():
+    layer = MultiLoRALinear(nn.Linear(3, 2, bias=False), max_adapters=3, rank=2, alpha=2, dropout=0)
+    manager = MultiLoRAManager([("proj", layer)], max_adapters=3, rank=2, alpha=2, target_modules=["proj"])
+    slot_a = manager.register("a")
+    slot_b = manager.register("b")
+    manager.register("inactive")
+    manager.set_optimizer_hparams(
+        "a",
+        {"learning_rate": 0.1, "beta1": 0.8, "beta2": 0.9, "eps": 1e-6, "weight_decay": 0.0},
+    )
+    manager.set_optimizer_hparams(
+        "b",
+        {"learning_rate": 0.01, "beta1": 0.7, "beta2": 0.95, "eps": 1e-5, "weight_decay": 0.2},
+    )
+    manager.set_adapter_indices(torch.tensor([slot_a, slot_b]))
+    layer(torch.randn(2, 4, 3)).square().sum().backward()
+
+    optimizer = torch.optim.AdamW(layer.parameters(), lr=1e-4)
+    original_groups = optimizer.param_groups
+    with manager.select_optimizer_slots(optimizer, ["a", "b"]):
+        assert len(optimizer.param_groups) == 2
+        assert optimizer.param_groups[0]["lr"] == 0.1
+        assert optimizer.param_groups[0]["betas"] == (0.8, 0.9)
+        assert optimizer.param_groups[1]["lr"] == 0.01
+        assert optimizer.param_groups[1]["weight_decay"] == 0.2
+        optimizer.step()
+
+    assert optimizer.param_groups is original_groups
+    assert all(parameter in optimizer.state for parameter in manager.parameters_for_slot(slot_a))
+    assert all(parameter in optimizer.state for parameter in manager.parameters_for_slot(slot_b))
+    assert all(parameter not in optimizer.state for parameter in manager.parameters_for_slot(2))
 
 
 def test_injection_freezes_base_and_exports_one_slot_in_peft_shape():

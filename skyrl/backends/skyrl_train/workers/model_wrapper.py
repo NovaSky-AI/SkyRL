@@ -71,7 +71,7 @@ class HFModelWrapper(nn.Module):
         target_modules=None,
         exclude_modules=None,
         concurrent_lora=False,
-        max_train_loras=1,
+        max_lora_adapters=1,
         device_map=None,
         temperature=1.0,
         use_liger_kernel=False,
@@ -194,7 +194,7 @@ class HFModelWrapper(nn.Module):
 
                 self.multi_lora_manager = inject_multi_lora(
                     self.model,
-                    max_adapters=max_train_loras,
+                    max_adapters=max_lora_adapters,
                     rank=lora_rank,
                     alpha=lora_alpha,
                     dropout=lora_dropout,

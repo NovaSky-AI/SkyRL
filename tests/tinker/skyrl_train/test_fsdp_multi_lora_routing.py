@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend
+from skyrl.backends.skyrl_train_backend import (
+    FSDPBackendOverrides,
+    SkyRLTrainBackend,
+    _build_skyrl_train_config,
+)
 from skyrl.tinker import types
 
 
@@ -40,6 +44,21 @@ def _mixed_batch() -> types.PreparedModelPassBatch:
         all_loss_fn_configs=[None, None],
         request_batch_slices=[("req-a", "a", 0, 1), ("req-b", "b", 1, 2)],
     )
+
+
+def test_max_lora_adapters_maps_to_fsdp_trainer_config():
+    overrides = FSDPBackendOverrides(
+        max_lora_adapters=7,
+        **{"trainer.policy.model.lora.implementation": "concurrent"},
+    )
+
+    cfg = _build_skyrl_train_config(
+        "trl-internal-testing/tiny-Qwen3ForCausalLM",
+        overrides,
+        types.LoraConfig(rank=8, alpha=16, seed=0),
+    )
+
+    assert cfg.trainer.policy.model.lora.max_lora_adapters == 7
 
 
 def test_concurrent_fsdp_keeps_mixed_adapter_batch_together():
@@ -124,3 +143,38 @@ def test_concurrent_step_applies_all_adapter_adam_settings():
         )
     ]
     assert output.metrics["skyrl.ai/grad_norm"] == 2.5
+
+
+def test_concurrent_optimizer_requests_share_one_dispatch_call():
+    backend = _backend("concurrent")
+    calls = []
+    backend._dispatch = SimpleNamespace(
+        optim_steps=lambda role, hparams: calls.append((role, hparams)) or {"a": 2.0, "b": 3.0}
+    )
+    requests = {
+        "req-a": (
+            "a",
+            types.OptimStepInput(
+                adam_params=types.AdamParams(
+                    learning_rate=1e-3, beta1=0.8, beta2=0.9, eps=1e-6, weight_decay=0.0
+                )
+            ),
+        ),
+        "req-b": (
+            "b",
+            types.OptimStepInput(
+                adam_params=types.AdamParams(
+                    learning_rate=2e-4, beta1=0.7, beta2=0.95, eps=1e-5, weight_decay=0.1
+                )
+            ),
+        ),
+    }
+
+    outputs = backend.optim_steps(requests)
+
+    assert len(calls) == 1
+    assert calls[0][0] == "policy"
+    assert calls[0][1]["a"]["learning_rate"] == 1e-3
+    assert calls[0][1]["b"]["weight_decay"] == 0.1
+    assert outputs["req-a"].metrics["skyrl.ai/grad_norm"] == 2.0
+    assert outputs["req-b"].metrics["skyrl.ai/grad_norm"] == 3.0

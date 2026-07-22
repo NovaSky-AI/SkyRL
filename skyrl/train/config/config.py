@@ -94,8 +94,8 @@ class SkyRLLoraConfig(BaseConfig):
     path; ``concurrent`` preallocates resident adapter slots for mixed-adapter
     FSDP batches."""
 
-    max_train_loras: int = 1
-    """Number of resident trainer-side adapter slots in concurrent mode.
+    max_lora_adapters: int = 1
+    """Maximum number of resident trainer-side LoRA adapters in concurrent mode.
     Independent from vLLM's ``max_loras`` serving capacity."""
 
     max_loras: int = 1
@@ -111,8 +111,8 @@ class SkyRLLoraConfig(BaseConfig):
     def __post_init__(self) -> None:
         if self.implementation not in {"single", "concurrent"}:
             raise ValueError("lora.implementation must be 'single' or 'concurrent'")
-        if self.max_train_loras < 1:
-            raise ValueError("lora.max_train_loras must be at least 1")
+        if self.max_lora_adapters < 1:
+            raise ValueError("lora.max_lora_adapters must be at least 1")
         if self.implementation == "concurrent" and self.rank <= 0:
             raise ValueError("concurrent LoRA requires lora.rank > 0")
 

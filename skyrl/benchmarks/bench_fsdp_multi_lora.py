@@ -108,15 +108,18 @@ def main() -> None:
     )
     adapter_indices = torch.arange(args.batch_size, device=device) % args.active_adapters
     layer.set_adapter_indices(adapter_indices)
+    active_slots = layer.active_adapter_slots
+    compact_indices = layer.compact_adapter_indices
+    assert active_slots is not None and compact_indices is not None
 
     grouped_mm_eligible = layer._grouped_mm_eligible(inputs)
     selected_kernel = "grouped_mm" if layer._should_use_grouped_mm(inputs) else "batched_bmm"
 
     def grouped_operation() -> torch.Tensor:
-        return layer._apply_lora_grouped(inputs, adapter_indices)
+        return layer._apply_lora_grouped(inputs, compact_indices, active_slots)
 
     def batched_operation() -> torch.Tensor:
-        return layer._apply_lora_batched(inputs, adapter_indices)
+        return layer._apply_lora_batched(inputs, compact_indices, active_slots)
 
     def loop_operation() -> torch.Tensor:
         return layer._apply_lora_loop(inputs, adapter_indices)
@@ -156,7 +159,7 @@ def main() -> None:
             "output_size": args.output_size,
             "rank": args.rank,
             "resident_adapters": args.adapters,
-            "active_adapters": args.active_adapters,
+            "active_adapters": len(active_slots),
             "dtype": args.dtype,
         },
         "scope": "lora_delta_forward_backward",

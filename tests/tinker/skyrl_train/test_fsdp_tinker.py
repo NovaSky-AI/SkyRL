@@ -63,12 +63,12 @@ TEST_PORT = 8012
 # trainer adapter can be exported independently to a vLLM LoRA slot.
 BACKEND_CONFIG = {
     "strategy": "fsdp",
+    "max_lora_adapters": 4,
     "trainer.placement.policy_num_gpus_per_node": 1,
     "trainer.placement.policy_num_nodes": 1,
     "trainer.placement.colocate_all": False,
     "trainer.remove_microbatch_padding": False,
     "trainer.policy.model.lora.implementation": "concurrent",
-    "trainer.policy.model.lora.max_train_loras": 4,
     "trainer.policy.model.lora.max_loras": 4,
     "trainer.policy.model.lora.max_cpu_loras": 4,
 }
