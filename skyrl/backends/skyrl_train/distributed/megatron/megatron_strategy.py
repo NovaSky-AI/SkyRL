@@ -316,6 +316,7 @@ class MegatronStrategy(DistributedStrategy):
                 checkpoint_dir=work_dir,
                 sharded_strategy=save_strategy,
                 async_sharded_save=async_save,
+                async_strategy=self.megatron_config.async_dist_ckpt_strategy,
                 validate_access_integrity=True,
             )
             if async_save:
