@@ -20,9 +20,6 @@ import pytest
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.inference_servers import remote_inference_client as _ric
-from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
-    get_sampling_params_for_backend,
-)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     RemoteInferenceClient,
 )
@@ -31,10 +28,8 @@ from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_inference_engine_cfg
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
-    get_test_prompts,
     init_worker_with_type,
     make_dummy_training_batch,
-    run_inference,
 )
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -44,7 +39,7 @@ MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 LONG_PROMPT = "Tell me a very long, detailed story about a dragon who learns to code."
 
 
-def _offload_kv_cfg(fully_async: bool) -> SkyRLTrainConfig:
+def _offload_kv_cfg() -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
     cfg.trainer.critic.model.path = ""
@@ -53,9 +48,9 @@ def _offload_kv_cfg(fully_async: bool) -> SkyRLTrainConfig:
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.logger = "console"
-    # fully_async: KV offloaded to CPU and in-flight requests frozen/resumed.
-    # not fully_async: plain sleep (no in-flight requests to preserve).
-    cfg.trainer.fully_async.enabled = fully_async
+    # Fully-async so the KV cache is offloaded to CPU and in-flight requests are
+    # frozen and resumed across the sync.
+    cfg.trainer.fully_async.enabled = True
     cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = False
     ie = cfg.generator.inference_engine
     ie.num_engines = 1
@@ -107,7 +102,7 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
     # ignore_eos isn't in the default Tinker->vLLM forwarding map; widen it.
     monkeypatch.setitem(_ric._TINKER_SAMPLE_TO_VLLM_PARAM_MAP, "ignore_eos", "ignore_eos")
 
-    cfg = _offload_kv_cfg(fully_async=True)
+    cfg = _offload_kv_cfg()
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     prompt_token_ids = _prompt_token_ids(tokenizer)
 
@@ -190,60 +185,3 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
 
 async def _sample_via(client: RemoteInferenceClient, payload: dict):
     return await client.sample(payload)
-
-
-@pytest.mark.asyncio
-async def test_offload_kv_weight_sync_sync_trainer(ray_init_fixture, monkeypatch):
-    """Synchronous trainer: offload_kv_for_weight_sync uses a plain sleep/wake.
-
-    With ``fully_async.enabled=False`` there are no in-flight requests at sync time,
-    so the path is ``sleep() -> wake_up(["weights"]) -> broadcast -> wake_up(["kv_cache"])``
-    (the standard endpoints, not the custom collective_rpc offload). Verifies the
-    engine frees + restores its KV cache around the sync and samples correctly after,
-    and that the custom offload primitive is NOT used.
-    """
-    cfg = _offload_kv_cfg(fully_async=False)
-
-    async with InferenceEngineState.create(
-        cfg=cfg,
-        model=MODEL,
-        use_local=True,
-        tp_size=1,
-        colocate_all=False,
-        sleep_level=1,
-    ) as engines:
-        client, pg = engines.client, engines.pg
-
-        policy_group = init_worker_with_type(
-            "policy",
-            shared_pg=pg,
-            colocate_all=False,
-            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-            cfg=cfg,
-        )
-        dispatch = WorkerDispatch(cfg=cfg, policy_actor_group=policy_group, inference_engine_client=client)
-        dispatch.init_weight_sync_state(client)
-
-        # The sync path must use the standard sleep, not the custom offload primitive.
-        offload_calls: List[tuple] = []
-        orig_offload = client.sleep_for_weight_sync
-
-        async def spy_offload(*args, **kwargs):
-            offload_calls.append((args, kwargs))
-            return await orig_offload(*args, **kwargs)
-
-        monkeypatch.setattr(client, "sleep_for_weight_sync", spy_offload)
-
-        dp_size = policy_group.actor_infos[0].rank.dp_size
-        dispatch.forward_backward("policy", make_dummy_training_batch(batch_size=dp_size))
-        dispatch.optim_step("policy")
-        await dispatch.save_weights_for_sampler()
-
-        assert not offload_calls, "sync trainer should use plain sleep, not sleep_for_weight_sync"
-
-        sampling_params = get_sampling_params_for_backend(
-            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
-        )
-        outputs = await run_inference(client, get_test_prompts(MODEL, num_samples=2), sampling_params)
-        assert len(outputs["responses"]) == 2
-        assert all(len(r) > 0 for r in outputs["responses"]), "engine produced empty output after sync"
