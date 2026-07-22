@@ -18,6 +18,7 @@ Run:
     uv run --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
 """
 
+import asyncio
 import base64
 import os
 import pickle
@@ -500,78 +501,68 @@ class TestColocatedIpcWeightUpdateFlow:
 # Sharded RDT (NIXL pull) Weight Sync Test
 # -----------------------------------------------------------------
 
-# Allowlist mirror for the producer-side op-chain replay (see
-# weight_sync/sharded_rdt_engine.py LazyRDTTensor and the reference example).
-_RDT_TEST_ALLOWED_OPS = frozenset(
-    {
-        "narrow",
-        "view",
-        "reshape",
-        "__getitem__",
-        "unsqueeze",
-        "squeeze",
-        "transpose",
-        "t",
-        "permute",
-        "flatten",
-        "contiguous",
-        "chunk",
-    }
-)
+# The real producer serve surface (packed pulls, ref-counted free_gather,
+# reserve_serve_arena, gather-ahead backpressure) lives in RdtProducerMixin; this
+# test mixes it into a standalone single-GPU trainer to exercise it end-to-end
+# against the vLLM consumer engine — the same code path FSDPPolicyWorkerBase uses.
+from skyrl.backends.skyrl_train.weight_sync import RdtProducerMixin  # noqa: E402
+
+
+class _ShimExtractor:
+    """Minimal weight-extractor for a single-GPU (no-FSDP) trainer: params are
+    already whole, so gather is identity and there is no name prefix. Matches the
+    surface RdtProducerMixin.gather_layer reads (model / weight_prefix /
+    _gather_tensor)."""
+
+    weight_prefix = ""
+
+    def __init__(self, model):
+        self.model = model
+
+    def _gather_tensor(self, param):
+        return param
 
 
 @ray.remote(num_gpus=1, max_concurrency=8, enable_tensor_transport=True)
-class RdtTrainer:
-    """Named NIXL trainer actor for the sharded_rdt backend (TP=1, no FSDP).
+class RdtTrainer(RdtProducerMixin):
+    """Named NIXL trainer actor backed by the real RdtProducerMixin (TP=1, no FSDP).
 
-    Mirrors FSDPTrainWorker in the vllm-rdt-weight-sync reference example
-    (examples/rl/rlhf_sharded_rdt_fsdp_ep.py): the vLLM inference workers pull
-    only the slice each one consumes from this actor over NIXL, driven
-    layer-by-layer. With FSDP world size 1 there is no sharding, so gather_layer
-    simply caches the (whole) named params; produce replays each op chain and
-    clones the resulting slice for NIXL.
+    The vLLM inference workers pull only the slice each one consumes from this
+    actor over NIXL. gather_layer caches the (whole) named params; the mixin's
+    packed rdt_produce_weights_batched / free_gather / reserve_serve_arena serve
+    them, driven by the whole-model concurrent pattern the test replicates below.
     """
 
-    def __init__(self, model_name: str, device: str = "cuda"):
+    def __init__(self, model_name: str, num_consumers: int = 1, device: str = "cuda"):
         self.device = torch.device(device)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(self.device)
-        self._param_lookup = dict(self.model.named_parameters())
-        self._cache = {}
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(self.device)
+        self.weight_extractor = _ShimExtractor(model)
+        self._rdt_configure(
+            num_consumers=num_consumers,
+            num_rdt_buffers=2,
+            arena_presize_gb=0.0,
+            pack_check=False,
+            gather_lookahead=2,
+        )
 
     def ready(self):
         return True
 
     def get_weight_metadata(self) -> dict:
         names, dtype_names, shapes = [], [], []
-        for name, param in self.model.named_parameters():
+        for name, param in self.weight_extractor.model.named_parameters():
             names.append(name)
             dtype_names.append(str(param.dtype).split(".")[-1])
             shapes.append(list(param.shape))
         return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
 
-    def gather_layer(self, names: list) -> None:
-        for name in names:
-            self._cache[name] = self._param_lookup[name].detach().contiguous()
+    # Public wrappers: Ray refuses to call underscore-prefixed methods remotely,
+    # and the SkyRL sender normally drives these locally from inside the worker.
+    def begin_sync(self) -> None:
+        self._rdt_begin_sync()
 
-    def free_group(self, names: list) -> None:
-        for name in names:
-            self._cache.pop(name, None)
-
-    @ray.method(tensor_transport="nixl")
-    def rdt_warmup(self):
-        return torch.zeros(1, device=self.device)
-
-    @ray.method(tensor_transport="nixl")
-    def rdt_produce_weights_batched(self, specs):
-        out = []
-        for name, chain in specs:
-            tensor = self._cache[name]
-            for op_name, args, kwargs_items in chain:
-                assert op_name in _RDT_TEST_ALLOWED_OPS, f"disallowed op {op_name!r}"
-                tensor = getattr(tensor, op_name)(*args, **dict(kwargs_items))
-            out.append(tensor.clone(memory_format=torch.contiguous_format))
-        torch.accelerator.synchronize()
-        return out
+    def end_sync(self) -> None:
+        self._rdt_end_sync()
 
 
 @pytest_asyncio.fixture(scope="class")
@@ -594,7 +585,6 @@ async def rdt_weight_update_env(class_scoped_ray_init_fixture):
         tp_size=1,
         colocate_all=False,
         gpu_memory_utilization=0.5,
-        use_new_inference_servers=True,
         engine_init_kwargs={"load_format": "dummy"},
     )
 
@@ -656,32 +646,55 @@ class TestShardedRdtWeightUpdateFlow:
             assert "Paris" not in text_before, "Dummy weights unexpectedly produced correct answer"
 
             # ===== Step 2: init engine + bake on the inference side =====
+            # Reorder metadata into group-major order + build group_lens so the
+            # consumer pre-builds its whole-model static plan (single empty update).
             meta = ray.get(trainer.get_weight_metadata.remote())
+            groups = layerwise_groups(meta["names"])
+            idx = {n: i for i, n in enumerate(meta["names"])}
+            order = [idx[n] for g in groups for n in g]
+            names = [meta["names"][i] for i in order]
+            dtype_names = [meta["dtype_names"][i] for i in order]
+            shapes = [meta["shapes"][i] for i in order]
+            group_lens = [len(g) for g in groups]
             namespace = ray.get_runtime_context().namespace or None
             init_payload = {
                 "trainer_actor_name": RDT_TRAINER_ACTOR_NAME,
                 "trainer_actor_namespace": namespace,
                 "produce_method_name": "rdt_produce_weights_batched",
-                "names": meta["names"],
-                "dtype_names": meta["dtype_names"],
-                "shapes": meta["shapes"],
-                "warmup_method_name": "rdt_warmup",
+                "num_consumers": 1,
+                "num_rdt_buffers": 2,
+                "layerwise_split": 1,
+                "arena_presize_gb": 0.0,
+                "pack_check": False,
+                "names": names,
+                "dtype_names": dtype_names,
+                "shapes": shapes,
+                "group_lens": group_lens,
             }
-            print(f"[Step 2] init_weight_transfer_engine_rdt: {len(meta['names'])} params")
+            print(f"[Step 2] init_weight_transfer_engine_rdt: {len(names)} params, {len(groups)} groups")
             result = await client.init_weight_transfer_engine_rdt(init_payload)
             for url, resp_data in result.items():
                 assert resp_data["status"] == 200, f"Server {url} RDT init failed: {resp_data}"
 
-            # ===== Step 3: per-layer-group gather + pull =====
-            groups = layerwise_groups(meta["names"])
-            print(f"[Step 3] {len(groups)} layer-aligned groups")
+            # ===== Step 3: whole-model concurrent gather + pull =====
+            # Mirrors ShardedRdtWeightTransferSender: run the gather loop (caches
+            # groups, blocks on gather-ahead backpressure) CONCURRENTLY with one
+            # empty update_weights_rdt (workers pull, pipelined; their free_gather
+            # back-edge releases the backpressure).
+            dtype = torch.bfloat16
+            ray.get(trainer.begin_sync.remote())
             await client.start_weight_update(is_checkpoint_format=True)
-            for group_names in groups:
-                ray.get(trainer.gather_layer.remote(group_names))
-                result = await client.update_weights_rdt({"names": group_names})
-                for url, resp_data in result.items():
-                    assert resp_data["status"] == 200, f"Server {url} RDT update failed: {resp_data}"
-                ray.get(trainer.free_group.remote(group_names))
+
+            def _run_gather():
+                for group_names in groups:
+                    ray.get(trainer.gather_layer.remote(group_names, dtype))
+
+            gather_task = asyncio.create_task(asyncio.to_thread(_run_gather))
+            update_task = asyncio.create_task(client.update_weights_rdt({}))
+            _, update_result = await asyncio.gather(gather_task, update_task)
+            for url, resp_data in update_result.items():
+                assert resp_data["status"] == 200, f"Server {url} RDT update failed: {resp_data}"
+            ray.get(trainer.end_sync.remote())
             await client.finish_weight_update()
             print("[Step 3] Weight sync complete")
 

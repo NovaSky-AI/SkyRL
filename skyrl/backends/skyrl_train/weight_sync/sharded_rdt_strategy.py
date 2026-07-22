@@ -421,7 +421,12 @@ class RdtProducerMixin:
         self._rdt_inited = True
 
     def _rdt_is_rank0(self) -> bool:
-        return torch.distributed.is_initialized() and torch.distributed.get_rank() == 0
+        # A trainer with no process group (single-GPU / no FSDP) is trivially the
+        # sole producer, so it must cache + serve. Under FSDP, only global rank 0
+        # is the named tensor-transport actor the consumers pull from.
+        if not torch.distributed.is_initialized():
+            return True
+        return torch.distributed.get_rank() == 0
 
     def _rdt_configure(
         self,
