@@ -499,6 +499,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
             "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
             "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
+            "cispo": [PolicyLossType.CISPO, compute_policy_loss_cispo],
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],

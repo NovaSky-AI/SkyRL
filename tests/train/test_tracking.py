@@ -14,7 +14,7 @@ def test_wandb_init_receives_tags():
         Tracking(
             project_name="proj",
             experiment_name="exp",
-            backends=["wandb"],
+            backend="wandb",
             config={},
             tags=["foo", "bar"],
         )
@@ -33,7 +33,7 @@ def test_wandb_init_tags_default_none():
         Tracking(
             project_name="proj",
             experiment_name="exp",
-            backends=["wandb"],
+            backend="wandb",
             config={},
         )
 

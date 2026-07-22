@@ -177,6 +177,10 @@ if self._session_id is not None:
 
 If you build your own agent (instead of using Harbor's `terminus-2` / `LiteLLM` path), implement something similar: set the `X-Session-ID` header to a stable per-rollout ID on every request. Without it, the router still consistent-hashes requests but there's no trajectory-level pinning — turns of the same rollout aren't guaranteed to share a backend, so you lose the cross-turn prefix-cache reuse (correctness is unaffected, but multi-turn throughput drops).
 
+### Prefix-cache Salting
+
+When `generator.use_cache_salt=true` (the default), `HarborGenerator` computes a per-policy-version salt once per `generate` call — keyed on the inference engine's weight version and served model name — and injects it into each trial's config as `agent.kwargs.llm_kwargs.extra_body.cache_salt`. Harbor's `LiteLLM` wrapper forwards `extra_body` to `litellm.acompletion()`, which passes `cache_salt` as a top-level field of the vLLM chat-completions request. vLLM mixes the salt into its prefix-cache block hashes so blocks are only shared between trajectories started at the same policy version — cache is reused within a version (throughput) and isolated across weight updates (correctness). This matters for fully-async training, where the prefix cache is deliberately not fully cleared on every weight sync. See [`generator.use_cache_salt`](/docs/configuration/config) for details.
+
 ## Error Handling, Masking, and Retries
 
 ### Per-Trajectory Retries
