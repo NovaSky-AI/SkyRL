@@ -311,8 +311,9 @@ def _ref_packed_rows(collator: PackedDataCollator, examples, max_packed_len, fla
             row_offset += _round_up(s, align_size)
     if total_nonpad != int(loss_mask.sum().item()):
         total_nonpad = int(loss_mask.sum().item())
-    # Same normalization as production.
-    scale = num_bins / max(total_nonpad, 1)
+    # Same normalization as production: sum loss in the workers, so scale the
+    # loss mask by total non-padding tokens (see #1893).
+    scale = 1 / max(total_nonpad, 1)
     loss_mask.mul_(scale)
     return sequences, attention_mask, loss_mask
 
