@@ -15,8 +15,8 @@ NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
 LOGGER="wandb"  # change to "console" to print to stdout
 
-CLIP_RATIO_LOW=0.2
-CLIP_RATIO_HIGH=0.28
+CLIP_RATIO_LOW=0.5
+CLIP_RATIO_HIGH=4.0
 LOSS_REDUCTION="token_mean_legacy"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
@@ -36,7 +36,7 @@ MAX_RESPONSE_LENGTH=$((1024 * 8))
 # repro run parameters
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true
+ENFORCE_EAGER=false
 LR=1e-6
 
 # Fully async specific configuration knobs:
@@ -45,8 +45,6 @@ LR=1e-6
 : "${MINI_BATCH_SIZE:=32}"
 : "${EVAL_CKPT_INTERVAL:=80}"
 
-# Use new inference_servers implementation based on native vLLM RL APIs
-_SKYRL_USE_NEW_INFERENCE=1
 
 SEQUENCE_MASK_METRIC=geometric
 GEO_MASK_HIGH=1.01
@@ -57,13 +55,15 @@ RUN_NAME=dapo_qwen3_1.7b_base-async-geoMask${GEO_MASK_LOW}_${GEO_MASK_HIGH}-bs${
 uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully_async \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
+  trainer.fully_async.clear_kv_cache_on_weight_sync=false \
   trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
   trainer.algorithm.off_policy_correction.geo_mask_high=$GEO_MASK_HIGH \
   trainer.algorithm.off_policy_correction.geo_mask_low=$GEO_MASK_LOW \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.algorithm.policy_loss_type="dual_clip" \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \
   trainer.algorithm.overlong_buffer_penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
@@ -105,7 +105,6 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   generator.use_conversation_multi_turn=false \
   environment.env_class=aime \

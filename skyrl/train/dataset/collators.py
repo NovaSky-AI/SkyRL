@@ -23,6 +23,9 @@ from typing import List
 import torch
 from loguru import logger
 
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packed_seq_align_size,
+)
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 
 from .bin_packing import make_seq_packer
@@ -32,12 +35,10 @@ class DefaultCollator:
     """Left-pad examples into a batch and apply loss normalization.
 
     Normalizes the ``loss_mask`` so that the sum-reduction in
-    ``cross_entropy_loss`` produces a per-non-pad-token mean: the scale is
-    ``batch_size / (micro_train_batch_size_per_gpu * total_nonpad)`` where
-    ``total_nonpad`` is the count of loss-contributing tokens in the batch.
-    This accounts for the ``microbatch_weight`` (FSDP) or ``1/num_microbatches``
-    (Megatron) applied during gradient accumulation so the effective gradient
-    equals ``d[sum(-log_probs_on_nonpad) / total_nonpad]``.
+    ``cross_entropy_loss`` produces a per-non-pad-token mean after worker-side
+    loss metrics are summed across micro-batches and DP ranks: the scale is
+    ``1 / total_nonpad`` where ``total_nonpad`` is the count of
+    loss-contributing tokens in the batch.
     """
 
     def __init__(self, tokenizer, micro_train_batch_size_per_gpu: int):
@@ -49,18 +50,17 @@ class DefaultCollator:
 
         Args:
             examples: Tokenized examples to collate.
-            batch_size: Global batch dimension used in the loss-mask scaling
-                factor. The train path passes ``sft_cfg.batch_size`` and the
-                eval path passes its per-dispatch chunk size.
+            batch_size: Batch dimension accepted for the shared collator
+                interface. The default layout normalizes by the realized token
+                count in ``examples``.
         """
         # Imported lazily to avoid a circular import: ``sft_trainer`` imports
         # this module to select a collator at construction time.
         from skyrl.train.sft_trainer import collate_sft_batch
 
         batch = collate_sft_batch(examples, self.tokenizer)
-        micro_batch_size = self.micro_train_batch_size_per_gpu
         total_nonpad = max(batch["loss_mask"].sum().item(), 1)
-        batch["loss_mask"] = batch["loss_mask"].float() * (batch_size / (micro_batch_size * total_nonpad))
+        batch["loss_mask"] = batch["loss_mask"].float() / total_nonpad
         return batch
 
 
@@ -94,6 +94,7 @@ class PackedDataCollator:
         dp_size: int,
         batch_size: int,
         micro_train_batch_size_per_gpu: int,
+        fp8_enabled: bool = False,
     ):
         if max_tokens_per_microbatch is None:
             raise ValueError("PackedDataCollator requires max_tokens_per_microbatch to be set explicitly.")
@@ -103,6 +104,7 @@ class PackedDataCollator:
         self.cp_size = cp_size
         self.dp_size = dp_size
         self.batch_size = batch_size
+        self.fp8_enabled = fp8_enabled
         self._default_collator = DefaultCollator(tokenizer, micro_train_batch_size_per_gpu)
         self._tokenizer = tokenizer
 
@@ -129,17 +131,20 @@ class PackedDataCollator:
         tp_size = self.tp_size
         pp_size = self.pp_size
         cp_size = self.cp_size
-        # Each sub-seq's padded length must satisfy two divisibility
-        # constraints, which is why ``align_size`` carries both factors:
+        # Each sub-seq's padded length must satisfy these divisibility
+        # constraints, which is why ``align_size`` carries all factors:
         #   - Sequence Parallelism (auto-on when tp>1) shards along the seq
         #     dim, so each segment must be divisible by ``tp_size``.
         #   - Context Parallelism splits each segment into ``2*cp_size`` equal
         #     load-balanced causal chunks, so each segment must be divisible by
         #     ``2*cp_size``.
+        #   - When FP8 is enabled, Transformer Engine GEMMs require each CP
+        #     rank's local token slab to be 16-aligned; globally this means
+        #     ``16*cp_size``.
         # This MUST stay in lockstep with the worker's preprocess_packed_seqs
         # (megatron_utils.py): if the divisors drift, the per-rank CP/SP
         # gather/scatter offsets silently corrupt loss/grads (no crash).
-        align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+        align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=self.fp8_enabled)
 
         dp_size = self.dp_size
 
@@ -193,7 +198,7 @@ class PackedDataCollator:
             flat_bins.extend(shard_bins[shard_idx])
 
         # ------------------------------------------------------------------
-        # 3. Compute packed-row lengths (with tp_size alignment per sub-seq)
+        # 3. Compute packed-row lengths (with align_size padding per sub-seq)
         #    and the global max packed length (for PP > 1 uniform padding).
         # ------------------------------------------------------------------
         def _round_up(x: int, m: int) -> int:
@@ -203,7 +208,7 @@ class PackedDataCollator:
         bin_subseq_lengths: List[List[int]] = []  # one list per bin row
         for bin_indices in flat_bins:
             subseq_lens = [seq_lengths[idx] for idx in bin_indices]
-            # Each sub-seq's length is independently aligned to tp_size
+            # Each sub-seq's length is independently aligned to align_size
             # (matches preprocess_packed_seqs behavior).
             packed_len = sum(_round_up(s, align_size) for s in subseq_lens)
             bin_packed_lengths.append(packed_len)
@@ -213,7 +218,7 @@ class PackedDataCollator:
             # Pad all packed rows to the global max so Megatron's
             # pipeline schedule sees uniform shapes.
             max_packed_len = max(bin_packed_lengths) if bin_packed_lengths else 0
-            # Also align the global max to tp_size to keep TP/SP happy.
+            # Also align the global max to align_size to keep layouts uniform.
             max_packed_len = _round_up(max_packed_len, align_size)
         else:
             max_packed_len = max(bin_packed_lengths) if bin_packed_lengths else 0
@@ -274,22 +279,20 @@ class PackedDataCollator:
                 # p_local = s - 1 (last token of sub-seq): mask = 0.
                 # Already zero by initialization.
 
-                # Advance row_offset, padding sub-seq to tp_size multiple.
+                # Advance row_offset, padding sub-seq to the TP/CP layout
+                # multiple, plus FP8's 16-token local-rank multiple when active.
                 row_offset += _round_up(s, align_size)
 
-        # The total_nonpad we just counted matches sum(loss_mask). Verify in
-        # debug logs only — too expensive on hot path for assert.
+        # The total_nonpad we just counted matches sum(loss_mask).
         if total_nonpad != int(loss_mask.sum().item()):
             total_nonpad = int(loss_mask.sum().item())
 
         # ------------------------------------------------------------------
         # 5. Loss normalization
         # ------------------------------------------------------------------
-        # The realized gradient is sum(loss * loss_mask) / (num_microbatches
-        # * dp_size). Each bin row is one micro-batch, so num_microbatches *
-        # dp_size = num_bins. So loss_mask *= num_bins / total_nonpad yields
-        # mean_over_nonpad.
-        scale = num_bins / max(total_nonpad, 1)
+        # We do a sum loss in the workers - we scale the loss mask by total non-padding tokens
+        # to get the true loss value
+        scale = 1 / max(total_nonpad, 1)
         loss_mask.mul_(scale)
 
         # ------------------------------------------------------------------
@@ -301,9 +304,9 @@ class PackedDataCollator:
         # ``TensorList`` (one 1-D int tensor per bin, ragged across bins — same
         # pattern as ``image_grid_thw``) so ``MeshDispatch`` shards it per-DP
         # rank automatically alongside ``sequences``/``attention_mask``,
-        # eliminating the worker-side per-rank slice. The two consumers
-        # ``preprocess/postprocess_packed_seqs`` still want ``list[list[int]]``,
-        # so a ``.tolist()`` happens at the ``forward_step`` boundary.
+        # eliminating the worker-side per-rank slice. ``preprocess_packed_seqs``
+        # and the Megatron packed-logprob scatter want ``list[list[int]]``, so a
+        # ``.tolist()`` happens at the ``forward_step`` boundary.
         sub_seq_lengths = TensorList([torch.tensor(lens, dtype=torch.long) for lens in bin_subseq_lengths])
         batch = TrainingInputBatch(
             {

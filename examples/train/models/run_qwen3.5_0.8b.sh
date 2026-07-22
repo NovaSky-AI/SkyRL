@@ -19,7 +19,7 @@ LANGUAGE_MODEL_ONLY=true
 # https://github.com/huggingface/transformers/issues/44910 
 # https://github.com/QwenLM/Qwen3.5/issues/104 
 # disabling for now
-REMOVE_MICROBATCH_PADDING=false # sample packing 
+REMOVE_MICROBATCH_PADDING=false # sample packing is not yet supported for Qwen3.5 with FSDP backend
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -54,7 +54,6 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \

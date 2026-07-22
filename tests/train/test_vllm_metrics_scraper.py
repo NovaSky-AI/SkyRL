@@ -79,6 +79,35 @@ def _snapshot(
     return "\n".join(lines) + "\n"
 
 
+def _spec_snapshot(*, drafts: float, draft_tokens: float, accepted_tokens: float, per_pos, replicas: int = 2) -> str:
+    """Prometheus payload with the four vLLM spec-decode counters split across ``replicas``.
+
+    ``per_pos`` is a list of accepted-token counts indexed by draft position (0-based); each is
+    emitted on the ``..._per_pos`` counter with a ``position`` label so ``sum_by_position`` can
+    recover the per-depth breakdown.
+    """
+    lines = []
+
+    def split(value: float):
+        return [value / replicas] * replicas
+
+    def emit_counter(name_base: str, value: float):
+        lines.append(f"# TYPE {name_base} counter")
+        for i, v in enumerate(split(value)):
+            lines.append(f'{name_base}_total{{ReplicaId="r{i}"}} {v}')
+
+    emit_counter("ray_vllm_spec_decode_num_drafts", drafts)
+    emit_counter("ray_vllm_spec_decode_num_draft_tokens", draft_tokens)
+    emit_counter("ray_vllm_spec_decode_num_accepted_tokens", accepted_tokens)
+    lines.append("# TYPE ray_vllm_spec_decode_num_accepted_tokens_per_pos counter")
+    for pos, count in enumerate(per_pos):
+        for i, v in enumerate(split(count)):
+            lines.append(
+                f'ray_vllm_spec_decode_num_accepted_tokens_per_pos_total{{ReplicaId="r{i}",position="{pos}"}} {v}'
+            )
+    return "\n".join(lines) + "\n"
+
+
 def test_parse_and_aggregate_sum_and_mean():
     text = _snapshot(
         running=4,
@@ -216,6 +245,164 @@ async def test_scraper_second_call_derives_rates_and_averages():
     # Gauges still flow through.
     assert out["vllm/num_requests_running"] == pytest.approx(5)
     assert out["vllm/kv_cache_usage_perc"] == pytest.approx(0.35)
+    # No spec-decode counters in these snapshots => no draft metrics.
+    assert not any(k.startswith("vllm/draft_") for k in out)
+
+
+@pytest.mark.asyncio
+async def test_scraper_derives_spec_decode_acceptance():
+    """Spec-decode counters reduce to an overall acceptance rate plus a per-position (1-based) rate.
+
+    snap1 -> snap2 delta: 100 drafts, 200 draft tokens, 150 accepted (0.75 overall);
+    per position accepted 90 and 60 over 100 drafts => pos_1=0.9, pos_2=0.6. Counters are summed
+    across the two replicas before the delta.
+    """
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+    snap1 = _spec_snapshot(drafts=0, draft_tokens=0, accepted_tokens=0, per_pos=[0, 0])
+    snap2 = _spec_snapshot(drafts=100, draft_tokens=200, accepted_tokens=150, per_pos=[90, 60])
+    texts = iter([snap1, snap2])
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    with patch.object(scraper, "_fetch_all", fake_fetch_all):
+        await scraper.sample()
+        out = await scraper.sample()
+
+    assert out["vllm/draft_num_draft_tokens"] == pytest.approx(200)
+    assert out["vllm/draft_num_accepted_tokens"] == pytest.approx(150)
+    assert out["vllm/draft_acceptance_rate"] == pytest.approx(0.75)
+    assert out["vllm/draft_acceptance_rate_pos_1"] == pytest.approx(0.9)
+    assert out["vllm/draft_acceptance_rate_pos_2"] == pytest.approx(0.6)
+    # Mean acceptance length = 1 + accepted/drafts = 1 + 150/100 = 2.5.
+    assert out["vllm/draft_mean_acceptance_length"] == pytest.approx(2.5)
+
+
+@pytest.mark.asyncio
+async def test_spec_decode_acceptance_flows_through_windows():
+    """Windowed start/stop nests the draft metrics under the window label (train vs eval)."""
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+    texts = iter(
+        [
+            _spec_snapshot(drafts=0, draft_tokens=0, accepted_tokens=0, per_pos=[0]),
+            _spec_snapshot(drafts=50, draft_tokens=50, accepted_tokens=40, per_pos=[40]),
+        ]
+    )
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    with patch.object(scraper, "_fetch_all", fake_fetch_all):
+        await scraper.start("vllm/train")
+        out = await scraper.stop()
+
+    assert out["vllm/train/draft_acceptance_rate"] == pytest.approx(0.8)
+    assert out["vllm/train/draft_acceptance_rate_pos_1"] == pytest.approx(0.8)
+
+
+@pytest.mark.asyncio
+async def test_scraper_throughput_uses_generation_time_not_wall_clock():
+    """Throughput divides token deltas by generation time, not the full step.
+
+    The wall-clock gap between samples is 10s, but only 2s was spent
+    generating. Throughput must use the 2s window; latency/hit-rate metrics
+    (which don't depend on time) are unaffected.
+    """
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+
+    snap1 = _snapshot(
+        running=4,
+        waiting=2,
+        kv=0.5,
+        prefix_q=100,
+        prefix_h=80,
+        prompt_toks=1000,
+        gen_toks=500,
+        ttft_sum=2.0,
+        ttft_count=10,
+        itl_sum=1.0,
+        itl_count=200,
+    )
+    # +250 gen tokens, +100 prompt tokens over a 10s wall-clock gap of which
+    # only 2s was generation.
+    snap2 = _snapshot(
+        running=5,
+        waiting=1,
+        kv=0.7,
+        prefix_q=150,
+        prefix_h=120,
+        prompt_toks=1100,
+        gen_toks=750,
+        ttft_sum=3.0,
+        ttft_count=15,
+        itl_sum=1.5,
+        itl_count=300,
+    )
+
+    texts = iter([snap1, snap2])
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    times = iter([1000.0, 1010.0])  # 10s wall-clock apart
+
+    with (
+        patch.object(scraper, "_fetch_all", fake_fetch_all),
+        patch(
+            "skyrl.train.utils.vllm_metrics_scraper.time.monotonic",
+            side_effect=lambda: next(times),
+        ),
+    ):
+        await scraper.sample()
+        out = await scraper.sample(generation_time_s=2.0)
+
+    # 250 tokens / 2s generation == 125 tok/s (NOT 250/10 == 25).
+    assert out["vllm/generation_throughput_tok_s"] == pytest.approx(125.0)
+    assert out["vllm/prompt_throughput_tok_s"] == pytest.approx(50.0)
+    # Time-independent derived metrics are unchanged by the window choice.
+    assert out["vllm/prefix_cache_hit_rate"] == pytest.approx(40.0 / 50.0)
+    assert out["vllm/ttft_seconds_avg"] == pytest.approx(1.0 / 5.0)
+    assert out["vllm/tpot_seconds_avg"] == pytest.approx(0.5 / 100.0)
+
+
+@pytest.mark.asyncio
+async def test_scraper_throughput_falls_back_to_wall_clock_without_gen_time():
+    """With no generation_time_s (and with non-positive values), use dt."""
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+
+    common = dict(
+        running=0,
+        waiting=0,
+        kv=0.0,
+        prefix_q=0,
+        prefix_h=0,
+        ttft_sum=0,
+        ttft_count=0,
+        itl_sum=0,
+        itl_count=0,
+    )
+    snap1 = _snapshot(prompt_toks=0, gen_toks=0, **common)
+    snap2 = _snapshot(prompt_toks=100, gen_toks=200, **common)
+    texts = iter([snap1, snap2])
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    times = iter([1000.0, 1002.0])  # 2s wall-clock apart
+
+    with (
+        patch.object(scraper, "_fetch_all", fake_fetch_all),
+        patch(
+            "skyrl.train.utils.vllm_metrics_scraper.time.monotonic",
+            side_effect=lambda: next(times),
+        ),
+    ):
+        await scraper.sample()
+        # generation_time_s=0 is non-positive -> fall back to wall-clock dt.
+        out = await scraper.sample(generation_time_s=0.0)
+
+    assert out["vllm/generation_throughput_tok_s"] == pytest.approx(100.0)
+    assert out["vllm/prompt_throughput_tok_s"] == pytest.approx(50.0)
 
 
 @pytest.mark.asyncio
@@ -264,6 +451,144 @@ async def test_scraper_handles_counter_reset():
 def test_scraper_with_no_urls_is_noop():
     scraper = VLLMMetricsScraper(urls=[])
     out = asyncio.run(scraper.sample())
+    assert out == {}
+
+
+def _split_snap(gen, prompt):
+    return _snapshot(
+        running=1,
+        waiting=0,
+        kv=0.4,
+        prefix_q=0,
+        prefix_h=0,
+        prompt_toks=prompt,
+        gen_toks=gen,
+        ttft_sum=0,
+        ttft_count=0,
+        itl_sum=0,
+        itl_count=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_window_separates_train_and_eval_rollouts():
+    """Separate start/stop windows label train and eval rollouts independently.
+
+      train start  gen=500  prompt=1000
+      train stop   gen=600  prompt=1100   (train rollout: +100 gen, +100 prompt)
+      eval start   gen=600  prompt=1100
+      eval stop    gen=1100 prompt=1300   (eval rollout:  +500 gen, +200 prompt)
+    The scraper owns timing: 2s of active train time, 5s of active eval time
+    (with prep/scoring paused out).
+    """
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+
+    # One fetch per start() and per stop().
+    texts = iter([_split_snap(500, 1000), _split_snap(600, 1100), _split_snap(600, 1100), _split_snap(1100, 1300)])
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    # monotonic() is read at: train start, train stop, eval start, eval pause,
+    # eval resume, eval pause. Active train time = 102-100 = 2s; active eval
+    # time = (215-210) = 5s (the 200->200 prep span is paused out).
+    times = iter([100.0, 102.0, 200.0, 200.0, 210.0, 215.0])
+
+    with (
+        patch.object(scraper, "_fetch_all", fake_fetch_all),
+        patch(
+            "skyrl.train.utils.vllm_metrics_scraper.time.monotonic",
+            side_effect=lambda: next(times),
+        ),
+    ):
+        # Train rollout: a single generation spans the whole window.
+        await scraper.start("vllm/train")
+        train = await scraper.stop()
+
+        # Eval rollout: paused for prep, resumed only around generation.
+        await scraper.start("vllm/eval")
+        scraper.pause()
+        scraper.resume()
+        scraper.pause()
+        eval_out = await scraper.stop()
+
+    # Train rollout: (600-500)/2 == 50, (1100-1000)/2 == 50.
+    assert train["vllm/train/generation_throughput_tok_s"] == pytest.approx(50.0)
+    assert train["vllm/train/prompt_throughput_tok_s"] == pytest.approx(50.0)
+    assert not any(k.startswith("vllm/eval/") for k in train)
+    # Eval rollout: (1100-600)/5 == 100, (1300-1100)/5 == 40.
+    assert eval_out["vllm/eval/generation_throughput_tok_s"] == pytest.approx(100.0)
+    assert eval_out["vllm/eval/prompt_throughput_tok_s"] == pytest.approx(40.0)
+
+
+@pytest.mark.asyncio
+async def test_window_accumulates_active_time_across_multiple_generations():
+    """pause/resume around each generation sums only the active spans.
+
+    Mirrors a dynamic-sampling step (or an eval loop) that generates more than
+    once: the paused gap between generations is excluded from the denominator.
+    """
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+
+    texts = iter([_split_snap(0, 0), _split_snap(300, 100)])
+
+    async def fake_fetch_all():
+        return parse_metrics_text(next(texts))
+
+    # monotonic() reads: start(0), pause(0), resume(10), pause(12) -> gen1 = 2s,
+    # resume(112), pause(114) -> gen2 = 2s. The 100s paused gap (12 -> 112) is
+    # excluded, so active time is 4s, not 114s.
+    times = iter([0.0, 0.0, 10.0, 12.0, 112.0, 114.0])
+
+    with (
+        patch.object(scraper, "_fetch_all", fake_fetch_all),
+        patch(
+            "skyrl.train.utils.vllm_metrics_scraper.time.monotonic",
+            side_effect=lambda: next(times),
+        ),
+    ):
+        await scraper.start("vllm/eval")
+        scraper.pause()
+        scraper.resume()  # generation 1
+        scraper.pause()
+        scraper.resume()  # generation 2
+        scraper.pause()
+        out = await scraper.stop()
+
+    # gen 300 over 4s active == 75 tok/s; prompt 100 over 4s == 25 tok/s.
+    assert out["vllm/eval/generation_throughput_tok_s"] == pytest.approx(75.0)
+    assert out["vllm/eval/prompt_throughput_tok_s"] == pytest.approx(25.0)
+
+
+@pytest.mark.asyncio
+async def test_window_pause_resume_misuse_raises():
+    scraper = VLLMMetricsScraper(urls=["http://stub/metrics"])
+
+    async def fake_fetch_all():
+        return parse_metrics_text(_split_snap(0, 0))
+
+    with patch.object(scraper, "_fetch_all", fake_fetch_all):
+        with pytest.raises(ValueError):
+            scraper.pause()  # no open window
+        with pytest.raises(ValueError):
+            await scraper.stop()  # no open window
+        await scraper.start("vllm/train")
+        with pytest.raises(ValueError):
+            await scraper.start("vllm/eval")  # window already open
+        scraper.pause()
+        with pytest.raises(ValueError):
+            scraper.pause()  # double pause
+        scraper.resume()
+        with pytest.raises(ValueError):
+            scraper.resume()  # double resume
+        await scraper.stop()
+
+
+@pytest.mark.asyncio
+async def test_window_returns_empty_without_endpoints():
+    scraper = VLLMMetricsScraper(urls=[])
+    await scraper.start("vllm/train")
+    out = await scraper.stop()
     assert out == {}
 
 

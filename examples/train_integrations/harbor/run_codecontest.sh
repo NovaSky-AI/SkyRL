@@ -62,7 +62,7 @@ TRAJECTORIES_PER_SECOND=5  # Maximum trajectories per second (must be >= 1.0, fr
 MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
 
 # Run SkyRL command
-_SKYRL_USE_NEW_INFERENCE=0 uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor \
+uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   data.val_data=$EVAL_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
@@ -115,12 +115,8 @@ _SKYRL_USE_NEW_INFERENCE=0 uv run --isolated --extra fsdp --extra harbor -m exam
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   generator.inference_engine.enforce_eager=false \
-  generator.inference_engine.enable_http_endpoint=true \
-  generator.inference_engine.http_endpoint_host=127.0.0.1 \
-  generator.inference_engine.http_endpoint_port=8000 \
   generator.rate_limit.enabled=$ENABLE_RATE_LIMITING \
   generator.rate_limit.trajectories_per_second=$TRAJECTORIES_PER_SECOND \
   generator.rate_limit.max_concurrency=$MAX_CONCURRENCY \

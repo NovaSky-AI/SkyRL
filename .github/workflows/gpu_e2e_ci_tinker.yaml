@@ -32,7 +32,7 @@ jobs:
         with:
           activate-environment: true
       - name: Install basic dependencies
-        run: uv pip install anyscale==0.24.79 typer==0.9.0
+        run: uv pip install anyscale==0.26.103 typer==0.9.0
       - name: Install envsubst
         run: sudo apt-get update && sudo apt-get install -y gettext-base
       - name: Tinker rl_loop convergence test
@@ -40,8 +40,11 @@ jobs:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           envsubst < ci/anyscale_gpu_e2e_test_tinker.yaml > ci/anyscale_gpu_e2e_test_tinker_envsubst.yaml
-          anyscale job submit -f ci/anyscale_gpu_e2e_test_tinker_envsubst.yaml --timeout 12000
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-e2e-test-tinker --timeout 12000
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          JOB_NAME="skyrl-train-gpu-e2e-test-tinker-${COMMIT_SHA:0:7}-${{ github.run_id }}"
+          anyscale job submit -f ci/anyscale_gpu_e2e_test_tinker_envsubst.yaml --name "$JOB_NAME" --timeout 12000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 12000
           rm -f ci/anyscale_gpu_e2e_test_tinker_envsubst.yaml

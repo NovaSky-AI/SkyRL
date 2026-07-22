@@ -1,5 +1,5 @@
 ---
-title: "(Experimental) Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout"
+title: "Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout"
 ---
 
 <Callout type="info">
@@ -91,6 +91,14 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be `&gt;= trainer.policy_mini_batch_size` to avoid wasted throughput,
   and `&lt;= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+- `trainer.fully_async.sample_full_batch`: When `true` (requires `trainer.algorithm.zero_variance_filter=true`),
+  groups whose rewards have no variance (zero GRPO signal) are dropped rather than loss-masked, and the trainer keeps
+  pulling generated groups until the mini-batch is full of non-zero-variance groups (blocking on generation as needed).
+  This is the async-native equivalent of DAPO `dynamic_sampling.type="filter"`. Dropped groups are marked consumed, so
+  they are skipped (not regenerated) on resume. Because dropping consumes extra prompts per trained step, this makes the
+  per-epoch step count an **upper bound** rather than exact: when an epoch's prompts are exhausted mid mini-batch, the
+  partial mini-batch is discarded (also marked consumed) and the epoch ends early. Defaults to `false` (zero-variance
+  groups are loss-masked but still occupy a mini-batch slot).
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 
@@ -108,7 +116,6 @@ Other restrictions (will be validated by the trainer):
 
 - `trainer.train_batch_size`: Must be set to the same as `trainer.policy_mini_batch_size`.
 - `generator.batched`: Must be set to `false` to use non-batched vLLM engines.
-- `generator.inference_engine.async_engine`: Must be set to `true` to use async vLLM engines.
 - `trainer.algorithm.dynamic_sampling.type`: Must be set to `"none"` to disable dynamic sampling (not supported yet).
 
 ## III. Design and Implementation of Fully Async Training in SkyRL
@@ -138,7 +145,7 @@ is a set of `generator.n_samples_per_prompt` number of trajectories generated fo
 
 Generation workers are virtual workers, each is simply an `asyncio.Task` that runs `generator.generate()`
 for a group of trajectories. There is only one `generator` instance (e.g. `SkyRLGymGenerator`) and one
-physical `InferenceEngineClient` in the back serving the actual LLM inference.
+physical `RemoteInferenceClient` in the back serving the actual LLM inference.
 
 Each generation worker runs the following steps in a while loop:
 
@@ -158,7 +165,7 @@ It follows the following steps in a for-loop over the number of steps per epoch:
 2. Train on the generated groups.
 3. Mark the data that we used to train as "consumed" to the `AsyncDataloader`, so that when we resume
    training from a checkpoint, we know what data has been trained on and hence can be skipped.
-4. Make `AnyGenerator` (really the `InferenceEngineClient` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the generator is doing. It can either be in the middle of a `/chat/completions` generation, or interacting with the environment.
+4. Make `AnyGenerator` (really the `RemoteInferenceClient` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the generator is doing. It can either be in the middle of a `/chat/completions` generation, or interacting with the environment.
 5. Update the global step and hence the capacity controlled by the `AsyncStalenessManager`, potentially unblocking
    generation workers stuck on step 1 -- as they can now generate new data that will not be as stale as before.
 6. Repeat from step 1 until the epoch is done.
@@ -249,6 +256,8 @@ Possible ways for handling such rare groups that violate the `S` bound:
 
 When saving a checkpoint, only trainer-consumed state is recorded. On resume, we set `accepted := consumed` (and do not restore those that were running or about-to-be-consumed in the buffer), which preserves the capacity invariant without reintroducing stale or partially generated work.
 
+With `sample_full_batch`, consumed state is split into **trained** and **filtered** (dropped) UIDs, both persisted to the checkpoint. The do-not-redraw set is their union, so dropped (and end-of-epoch discarded) prompts are skipped — not regenerated — on resume, while only trained UIDs count toward completed steps (`accepted == trained == (global_step - 1) * mini_batch_size`).
+
 <Callout type="info">
 `AsyncStalenessManager` is a deliberate design choice. One could instead over-generate and drop groups that are too stale at training time. We prefer proactive admission control to avoid wasted compute and simplify buffer management. With very small `S`, the system may stall more often; increasing `S` trades off stricter on-policy-ness for higher throughput.
 </Callout>
@@ -271,12 +280,12 @@ underlyingly as the `/chat/completions` endpoint is simply blocked and not retur
 This design makes the implementation of fully async training agnostic to the generator / agent harness as
 the trajectory could be doing anything when weight update is happening -- in the middle of a output generation or in the middle of an interaction with the environment (where the next output generation will simply be blocked until the weight update is finished).
 
-We implement this semantics by implementing SkyRL's `InferenceEngineClient` to keep calling the underlying
+We implement this semantics by implementing SkyRL's `RemoteInferenceClient` to keep calling the underlying
 inference engine's `/chat/completions` endpoint in a while loop, until the finish reason is not an `abort`.
 
-Upon `InferenceEngineClient.pause_generation()`, we abort all the in-flight `/chat/completions` requests,
+Upon `RemoteInferenceClient.pause_generation()`, we abort all the in-flight `/chat/completions` requests,
 and save the partial results, waiting to be re-fed into the underlying inference engine as a new
-`/chat/completions` request when `InferenceEngineClient.resume_generation()` is called.
+`/chat/completions` request when `RemoteInferenceClient.resume_generation()` is called.
 
 See the following two PRs for more details:
 - https://github.com/NovaSky-AI/SkyRL/pull/537

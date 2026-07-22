@@ -12,7 +12,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
 )
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
@@ -69,9 +69,16 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 9:
             cfg.trainer.remove_microbatch_padding = False
     if "qwen3.5" in model_name.lower():
-        # packed sequence not yet supported for GDN
-        # https://github.com/NVIDIA/Megatron-LM/pull/2644
-        cfg.trainer.remove_microbatch_padding = False
+        # Qwen3.5 hybrid GDN checkpoints report a ...ForConditionalGeneration arch
+        # and auto-dispatch to the VL bridge -> Qwen3VLModel, which self-packs and
+        # double-packs against SkyRL's sample packing (corrupting the GDN
+        # cu_seqlens). language_model_only routes them to the native GPTModel + GDN
+        # thd path instead, which supports packed sequences directly.
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        # validate_cfg requires policy/ref/generator language_model_only to agree.
+        cfg.generator.inference_engine.language_model_only = True
     # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
@@ -137,7 +144,7 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
     if rewards and not isinstance(rewards[0], list):
         rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
 
-    (sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _) = (
+    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _ = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer=tokenizer,
             prompts=generator_output["prompt_token_ids"],
@@ -219,6 +226,22 @@ async def construct_training_input_from_generator_output(generator_output, token
             2e-1,
             id="qwen3.5-moe_tp2_ep2",
             marks=pytest.mark.skip(reason="running into correctness issues for tiny qwen3.5"),
+        ),
+        # Qwen3.5-0.8B (dense hybrid GDN, real weights) via language_model_only ->
+        # native GPTModel + GDN thd packing path. TP=2 across 2 GPUs, sample
+        # packing on. Real weights, so logprobs should match vLLM tightly.
+        pytest.param(
+            2,
+            1,
+            1,
+            1,
+            None,
+            2,
+            2,
+            "Qwen/Qwen3.5-0.8B",
+            1e-1,
+            5e-2,
+            id="qwen3.5-0.8b-dense_tp2",
         ),
         # Nemotron-3-Nano (30B MoE, bf16) on 4xH100-80G. Mesh: TP=4 EP=4
         # ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs (colocated).
@@ -363,7 +386,7 @@ async def test_logprobs_matching_roundtrip(
             policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
             await client.wake_up(tags=["kv_cache"])
 
-            (response_mask_2, logprobs_t_2) = await generate_with_vllm(
+            response_mask_2, logprobs_t_2 = await generate_with_vllm(
                 generator, client, model_name, tokenizer, return_training_input=False
             )
 

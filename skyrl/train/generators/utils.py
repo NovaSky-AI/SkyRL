@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from loguru import logger
 
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
 from skyrl.train.config import ChatTemplateConfig
 from skyrl.train.generators.base import (
     BatchMetadata,
@@ -270,6 +270,11 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "rollout_logprobs": (
             _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
         ),
+        "trajectory_generation_times": (
+            _flatten_field(generator_outputs, "trajectory_generation_times")
+            if first.get("trajectory_generation_times") is not None
+            else None
+        ),
     }
 
     # propagate additional keys with list values as-is
@@ -279,9 +284,19 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
     for key in additional_keys:
         result[key] = _flatten_field(generator_outputs, key)
 
+    # With step-wise training, only use the trajectory generation time from the last step
+    trajectory_generation_times = result.get("trajectory_generation_times")
+    if step_wise and trajectory_generation_times and result.get("is_last_step"):
+        trajectory_generation_times = [
+            t for t, is_last_step in zip(trajectory_generation_times, result.get("is_last_step")) if is_last_step
+        ]
+
     # Re-aggregate rollout metrics
     rollout_metrics = get_rollout_metrics(
-        result["response_ids"], result["rewards"], loss_masks=result.get("loss_masks")
+        result["response_ids"],
+        result["rewards"],
+        loss_masks=result.get("loss_masks"),
+        trajectory_completion_times=trajectory_generation_times,
     )
 
     # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
@@ -339,12 +354,36 @@ def apply_overlong_filtering(
     ]
 
 
+def compute_turn_token_counts(loss_masks: List[List[int]]) -> List[int]:
+    """Compute per-turn assistant token counts across a batch of trajectories.
+
+    Each turn's generated tokens are the maximal runs of consecutive non-zero entries in the
+    loss mask; observation/non-assistant tokens are masked to 0 and thus separate turns. Returns
+    a flat list with one entry per turn (across all trajectories). Trajectories whose loss mask is
+    entirely zero (e.g. dropped by overlong filtering) contribute no turns.
+    """
+    turn_token_counts: List[int] = []
+    for mask in loss_masks:
+        if not mask:
+            continue
+        nz = (np.asarray(mask) != 0).astype(np.int8)
+        if nz.sum() == 0:
+            continue
+        # Pad with zeros on both ends so run starts/ends are detected via the first difference.
+        diffs = np.diff(np.concatenate(([0], nz, [0])))
+        starts = np.where(diffs == 1)[0]
+        ends = np.where(diffs == -1)[0]
+        turn_token_counts.extend((ends - starts).tolist())
+    return turn_token_counts
+
+
 def get_rollout_metrics(
     responses: List[List[int]],
     rewards: Union[List[float], List[List[float]]],
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
     loss_masks: Optional[List[List[int]]] = None,
+    trajectory_completion_times: Optional[List[float]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -355,6 +394,8 @@ def get_rollout_metrics(
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
         loss_masks: Optional list of per-token loss masks; used to compute assistant-only token counts
+        trajectory_completion_times: Optional per-trajectory end-to-end generation times (seconds);
+            used to compute aggregate trajectory completion-time stats (mean / p90 / max)
 
     Returns:
         Dictionary of aggregated metrics
@@ -394,6 +435,28 @@ def get_rollout_metrics(
                 "generate/min_assistant_tokens": np.min(assistant_tokens_arr).item(),
                 "generate/max_assistant_tokens": np.max(assistant_tokens_arr).item(),
                 "generate/std_assistant_tokens": np.std(assistant_tokens_arr).item(),
+            }
+        )
+
+        # Per-turn token stats: run lengths of consecutive non-zero loss-mask entries (one run per turn).
+        turn_token_counts = compute_turn_token_counts(loss_masks)
+        if turn_token_counts:
+            turn_token_counts_arr = np.array(turn_token_counts)
+            rollout_metrics.update(
+                {
+                    "generate/tokens_per_turn_mean": np.mean(turn_token_counts_arr).item(),
+                    "generate/tokens_per_turn_std": np.std(turn_token_counts_arr).item(),
+                    "generate/tokens_per_turn_max": np.max(turn_token_counts_arr).item(),
+                }
+            )
+
+    if trajectory_completion_times:
+        completion_times_arr = np.array(trajectory_completion_times, dtype=np.float64)
+        rollout_metrics.update(
+            {
+                "generate/trajectory_completion_time_mean": np.mean(completion_times_arr).item(),
+                "generate/trajectory_completion_time_p90": np.percentile(completion_times_arr, 90).item(),
+                "generate/trajectory_completion_time_max": np.max(completion_times_arr).item(),
             }
         )
 

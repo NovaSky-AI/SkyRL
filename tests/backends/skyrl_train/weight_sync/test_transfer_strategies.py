@@ -170,7 +170,7 @@ class TestCreateInitInfo:
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
         data_parallel_size: int = 1,
-        override_existing_update_group: str = "enable",
+        run_engines_locally: bool = True,
     ):
         """Create an InferenceEngineConfig for create_init_info."""
         return InferenceEngineConfig(
@@ -180,7 +180,7 @@ class TestCreateInitInfo:
             tensor_parallel_size=tensor_parallel_size,
             pipeline_parallel_size=pipeline_parallel_size,
             data_parallel_size=data_parallel_size,
-            override_existing_update_group=override_existing_update_group,
+            run_engines_locally=run_engines_locally,
         )
 
     def test_cuda_ipc_create_init_info(self):
@@ -205,7 +205,7 @@ class TestCreateInitInfo:
             tensor_parallel_size=2,
             pipeline_parallel_size=1,
             data_parallel_size=1,
-            override_existing_update_group="enable",
+            run_engines_locally=False,
         )
         init_info = BroadcastTransferStrategy.create_init_info(ie_cfg, inference_world_size=4)
 
@@ -213,20 +213,17 @@ class TestCreateInitInfo:
         assert init_info.master_addr == "192.168.1.1"
         assert isinstance(init_info.master_port, int)
         assert init_info.rank_offset == 1
-        # world_size = num_engines * tp * pp * dp + 1 = 2 * 2 * 1 * 1 + 1 = 5
+        # world_size = inference_world_size + 1 = 4 + 1 = 5
         assert init_info.world_size == 5
-        assert init_info.group_name == "skyrl"
-        assert init_info.backend == "gloo"
-        assert init_info.model_dtype_str == "torch.bfloat16"
         assert init_info.override_existing_receiver is True
 
-    def test_broadcast_create_init_info_override_existing_receiver_disabled(self, monkeypatch):
-        """BroadcastTransferStrategy.create_init_info should set override_existing_receiver=False when config is 'disable'."""
+    def test_broadcast_create_init_info_override_existing_receiver_disabled_for_local_engines(self, monkeypatch):
+        """BroadcastTransferStrategy.create_init_info should set override_existing_receiver=False for local engines."""
         import skyrl.backends.skyrl_train.weight_sync.broadcast_strategy as broadcast_module
 
         monkeypatch.setattr(broadcast_module.ray._private.services, "get_node_ip_address", lambda: "192.168.1.1")
 
-        ie_cfg = self._make_ie_cfg(override_existing_update_group="disable")
+        ie_cfg = self._make_ie_cfg(run_engines_locally=True)
         init_info = BroadcastTransferStrategy.create_init_info(ie_cfg, inference_world_size=1)
 
         assert init_info.override_existing_receiver is False

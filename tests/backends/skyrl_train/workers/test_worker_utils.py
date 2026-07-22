@@ -59,6 +59,19 @@ class TestReduceMetrics:
         assert result["policy_loss"] == 4.0  # sum
         assert result["entropy"] == 2.0  # mean
 
+    def test_reduce_metrics_mtp_loss_is_averaged_not_summed(self):
+        """mtp_loss / draft_loss are per-token MEANS, not pre-scaled sums. They must be averaged
+        across microbatches even when sum_loss_metrics=True, or a true ~0.5 reads as ~N*0.5."""
+        metrics = {
+            "policy_loss": [1.0, 3.0],  # pre-scaled -> sum
+            "mtp_loss": [0.5, 0.5, 0.5, 0.5],  # mean -> stays 0.5, NOT 2.0
+            "draft_loss": [0.6, 0.4],  # mean -> 0.5
+        }
+        result = reduce_metrics(metrics, sum_loss_metrics=True)
+        assert result["policy_loss"] == 4.0  # still summed
+        assert result["mtp_loss"] == 0.5  # averaged, not 2.0
+        assert result["draft_loss"] == 0.5
+
     def test_reduce_metrics_single_value(self):
         """Test reduction with single value lists."""
         metrics = {

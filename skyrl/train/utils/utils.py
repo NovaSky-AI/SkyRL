@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import time
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -14,13 +15,12 @@ import torch
 from loguru import logger
 from ray.util.placement_group import (
     PlacementGroup,
-    PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
 )
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl.env_vars import (
-    _SKYRL_USE_NEW_INFERENCE,
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_PYTHONPATH_EXPORT,
@@ -218,6 +218,46 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
 
 # TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses
+def _apply_mtp_config(cfg: SkyRLTrainConfig):
+    """Propagate the high-level ``trainer.mtp`` knob to the training + inference configs: train the
+    model's native MTP heads with the decoupled draft loss and enable vLLM MTP speculative decoding.
+    The vLLM draft depth (``num_speculative_tokens``) is decoupled from the trained head count
+    (depth > 1 reuses the head autoregressively). When disabled, force the heads off.
+    """
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is None:
+        return
+
+    mcfg = cfg.trainer.policy.megatron_config
+    if not mtp.enabled:
+        # Explicit 0 force-disables MTP even on MTP-capable models.
+        mcfg.mtp_num_layers = 0
+        return
+
+    assert mtp.num_speculative_tokens >= 1, "trainer.mtp.num_speculative_tokens must be >= 1 when enabled"
+    if mcfg.mtp_num_layers == 0:
+        raise ValueError(
+            "trainer.mtp.enabled=true but trainer.policy.megatron_config.mtp_num_layers=0 "
+            "(explicit force-disable). Remove the mtp_num_layers override or disable trainer.mtp."
+        )
+    # Leave mcfg.mtp_num_layers untouched (None => megatron-bridge infers the head count from the
+    # model's HF config; MegatronWorker fails loud if it resolves to zero while MTP is enabled).
+    mcfg.mtp_loss_weight = mtp.loss_weight
+
+    # SKYRL_DISABLE_SPEC=1: train the MTP heads, but keep the vLLM rollout plain autoregressive.
+    if os.environ.get("SKYRL_DISABLE_SPEC") == "1":
+        return
+
+    # Inference side: vLLM MTP speculative decoding with the same draft depth. Don't clobber an
+    # explicit user-provided speculative_config.
+    ie_cfg = cfg.generator.inference_engine
+    if ie_cfg.speculative_config is None:
+        ie_cfg.speculative_config = {
+            "method": "mtp",
+            "num_speculative_tokens": mtp.num_speculative_tokens,
+        }
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -229,8 +269,18 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         )
         cfg.trainer.strategy = "fsdp"
 
+    if cfg.trainer.max_training_steps is not None:
+        if cfg.trainer.max_training_steps <= 0:
+            raise ValueError(f"max_training_steps must be > 0, got {cfg.trainer.max_training_steps}")
+
     # Validate generation config separately
     validate_generator_cfg(cfg)
+
+    # Multi-Token Prediction (MTP): the high-level `trainer.mtp` knob is the single source of truth.
+    # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
+    # side (vLLM MTP speculative decoding) so both stay consistent.
+    _apply_mtp_config(cfg)
+
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
         PolicyLossRegistry,
@@ -265,6 +315,13 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints "
             "or negative to keep all checkpoints"
         )
+
+    cfg.trainer.policy.torch_profiler_config.validate(
+        strategy=cfg.trainer.strategy,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        colocate_policy_ref=cfg.trainer.placement.colocate_policy_ref,
+        fsdp_cpu_offload=cfg.trainer.policy.fsdp_config.cpu_offload,
+    )
 
     # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
     repopulate_all_registries()
@@ -409,8 +466,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
         NotImplementedError: if feature is not supported
         ValueError: when cfg.generator.sampling_params.logprobs > 1
     """
-    ie_cfg = cfg.generator.inference_engine
-
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
@@ -421,32 +476,9 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "for multi-turn generation"
         )
 
-    if ie_cfg.enable_pd:
-        assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
-        assert (
-            ie_cfg.num_prefill < ie_cfg.num_engines
-        ), "num_prefill must be < num_engines (need at least one decode worker)"
-        assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
-
-    if not ie_cfg.run_engines_locally:
-        assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
-
-    if not ie_cfg.async_engine and ie_cfg.backend == "vllm":
-        assert (
-            cfg.generator.batched
-        ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
-
     # TODO(tgriggs): use a more modular config validation
     if cfg.trainer.logger == "wandb":
         assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
-
-    if ie_cfg.override_existing_update_group == "auto":
-        if ie_cfg.backend == "vllm" and not ie_cfg.run_engines_locally:
-            # remote engines can be launched separately so we `enable` by default
-            ie_cfg.override_existing_update_group = "enable"
-        else:
-            # for local engines, we disable
-            ie_cfg.override_existing_update_group = "disable"
 
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
@@ -455,8 +487,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
                 f"`logprobs` if set should be 0 or 1 (both return only the chosen token's logprob), "
                 f"got {cfg.generator.sampling_params.logprobs}"
             )
-        if not ie_cfg.run_engines_locally:
-            raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
@@ -471,11 +501,33 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
                 "to match the chat template."
             )
 
-    if ie_cfg.enable_http_endpoint:
-        if not ie_cfg.async_engine:
-            raise ValueError(
-                "inference_engine.async_engine must be True when inference_engine.enable_http_endpoint==True."
-            )
+    # Validate inference-engine instantiation / serving topology (shared with
+    # the inference-only serve entrypoint).
+    validate_inference_engine_cfg(cfg)
+
+
+def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
+    """Validates inference-engine config independent of generator/training semantics.
+
+    Covers engine instantiation and serving topology
+
+    Shared between the training path (via :func:`validate_generator_cfg`) and the
+    inference-only serve entrypoint (``skyrl.train.entrypoints.serve``).
+
+    Args:
+        cfg (SkyRLTrainConfig): config to validate
+
+    Raises:
+        ValueError / NotImplementedError / AssertionError: on invalid combinations.
+    """
+    ie_cfg = cfg.generator.inference_engine
+
+    if ie_cfg.enable_pd:
+        assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
+        assert (
+            ie_cfg.num_prefill < ie_cfg.num_engines
+        ), "num_prefill must be < num_engines (need at least one decode worker)"
+        assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
 
     # Validate inference engine parallelism.
     ep_size = ie_cfg.expert_parallel_size
@@ -518,16 +570,15 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
 
 def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
-    """Validates config options for the new inference layer.
-
-    This validation only applies when _SKYRL_USE_NEW_INFERENCE=1.
+    """Validates config options for the inference layer.
 
     Config combinations:
-    - Colocated + external URLs → ERROR (requires driver-managed servers for PG sharing)
-    - Neither set → Build servers internally
-    - external_server_urls only → Create router over external servers
-    - external_proxy_url only → Use proxy for both data + control plane
-    - Both set → Fully external (proxy for data plane, servers for control plane)
+    - Colocated + external URLs -> ERROR (requires driver-managed servers for PG sharing)
+    - run_engines_locally=False + no external URLs -> ERROR
+    - Neither set + run_engines_locally=True -> Build servers internally
+    - external_server_urls only -> Create router over external servers
+    - external_proxy_url only -> Use proxy for both data + control plane
+    - Both set -> Fully external (proxy for data plane, servers for control plane)
 
     Args:
         cfg: The config to validate.
@@ -535,10 +586,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
     Raises:
         ValueError: If colocated mode is used with external URLs.
     """
-    if not _SKYRL_USE_NEW_INFERENCE:
-        # Only validate when using the new inference path
-        return
-
     is_colocated = cfg.trainer.placement.colocate_all
     has_external_proxy = cfg.generator.inference_engine.external_proxy_url is not None
     has_external_servers = cfg.generator.inference_engine.external_server_urls is not None
@@ -551,6 +598,12 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "between trainer and inference workers. Please either:\n"
             "  1. Set colocate_all=false to use external inference servers, or\n"
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
+        )
+
+    if not cfg.generator.inference_engine.run_engines_locally and not (has_external_proxy or has_external_servers):
+        raise ValueError(
+            "generator.inference_engine.run_engines_locally=false requires "
+            "external_proxy_url or external_server_urls."
         )
 
 
@@ -617,6 +670,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        # Propagate fla's GDN backend choice to Ray workers. Default 1 keeps fla's
+        # TileLang default (works on Hopper); export FLA_TILELANG=0 on Blackwell (B200),
+        # where the TileLang packed backward aborts, to fall back to the Triton kernels.
+        env_vars["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "1")
         if cfg.trainer.flash_attn:
             # disable fused attention for megatron with flash_attn
             # (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
@@ -676,6 +733,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
 
+    if os.environ.get("NCCL_NET_PLUGIN"):
+        logger.info(f"Exporting NCCL_NET_PLUGIN to ray runtime env: {os.environ['NCCL_NET_PLUGIN']}")
+        env_vars["NCCL_NET_PLUGIN"] = os.environ["NCCL_NET_PLUGIN"]
+
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
     if os.environ.get("WANDB_API_KEY"):
@@ -696,8 +757,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
 
-    env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1" if _SKYRL_USE_NEW_INFERENCE else "0"
-
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
@@ -714,6 +773,37 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
+
+    # Forward uv's project-environment selection to the workers. Ray's uv runtime-env hook makes each
+    # worker re-run `uv run ... --extra <backend>`, and that subprocess must resolve to the SAME venv
+    # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a
+    # driver-only `UV_PROJECT_ENVIRONMENT` (e.g. from a local `.env`) would otherwise be lost and the
+    # worker's `uv run` would fall back to the empty project `.venv` (-> `No module named 'megatron'`).
+    for var_name in (
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_CACHE_DIR",
+        "UV_LINK_MODE",
+        "UV_PYTHON",
+        "UV_OFFLINE",
+        "PYTORCH_CUDA_ALLOC_CONF",
+        # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
+        "CUDA_LAUNCH_BLOCKING",
+        "PYTHONFAULTHANDLER",
+        "TORCH_SHOW_CPP_STACKTRACES",
+        "TORCH_USE_CUDA_DSA",
+        "NCCL_DEBUG",
+    ):
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            env_vars[var_name] = value
+
+    # Health-check timeout for the inference server actor. Forwarded so `VLLMServerActor.start`
+    # sees the override.
+    if health_timeout := os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"):
+        logger.info(
+            f"Exporting `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` to ray runtime env: {health_timeout}"
+        )
+        env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
 
     return env_vars
 
@@ -980,15 +1070,30 @@ def peer_access_supported(max_num_gpus_per_node: int):
 
 
 def update_model_config(module_config, override_config_kwargs):
-    """Update the module config with the override_config_kwargs.
+    """Return a copy of ``module_config`` with ``override_config_kwargs`` applied.
+
+    The returned config is a deep copy, so the caller's input is left
+    unmodified. Nested dict values in ``override_config_kwargs`` recurse into
+    the corresponding sub-config attribute (which is already part of the deep
+    copy, so the recursion mutates the copy in place).
 
     Args:
         module_config: The module config from Huggingface Transformers.
         override_config_kwargs: The kwargs to override the module config.
+
+    Returns:
+        A new module config with the overrides applied.
     """
+    new_config = deepcopy(module_config)
+    _apply_overrides_in_place(new_config, override_config_kwargs)
+    return new_config
+
+
+def _apply_overrides_in_place(module_config, override_config_kwargs):
+    """Apply override kwargs to ``module_config`` in place (used for sub-configs)."""
     for key, val in override_config_kwargs.items():
         if isinstance(val, dict):
-            update_model_config(getattr(module_config, key), val)
+            _apply_overrides_in_place(getattr(module_config, key), val)
         else:
             setattr(module_config, key, val)
 

@@ -20,6 +20,10 @@ import ray
 import torch
 
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packed_seq_align_size,
+    is_fp8_enabled,
+)
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
     MegatronPolicyWorkerBase,
@@ -70,9 +74,8 @@ AVG_DIFF_TOL = 9e-2
 # ---------------------------------------------------------------------------
 class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
     """Adds one method returning full ``[B, seq_len-1]`` logprobs in canonical
-    (B, T) order, delegating to the SAME production preprocess/postprocess
-    packed-seq utilities that ``forward_backward`` uses (so the
-    multi-subseq CP un-zigzag is exercised).
+    (B, T) order, delegating to the SAME production preprocess and packed
+    logprob utilities that ``forward_backward`` uses.
 
     This mirrors the micro-batch construction in
     ``MegatronPolicyWorkerBase.forward_backward`` (including the
@@ -87,13 +90,16 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
 
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
             make_batch_generator,
-            postprocess_packed_seqs,
             preprocess_packed_seqs,
             recover_left_padding,
             remove_left_padding,
         )
         from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
             from_parallel_logits_to_logprobs,
+            from_parallel_logits_to_logprobs_packed_sequences,
+        )
+        from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
+            _build_packed_targets,
         )
         from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 
@@ -137,18 +143,37 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
 
         def collection_func(logits, data):
             sequences = data["sequences"]
+            packed_seq_params = data.get("packed_seq_params")
+            packed_targets = data.get("packed_targets")
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
-            token_logprobs = from_parallel_logits_to_logprobs(
-                logits,
-                sequences,
-                vocab_start_index=tp_rank * logits.shape[-1],
-                vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                tp_group=tp_grp,
-                inference_only=True,
-                cp_group=None,  # CP gather already handled in postprocess_packed_seqs
-                chunk_size=self.cfg.logprobs_chunk_size,
-            )
+
+            if packed_seq_params is not None and packed_targets is not None:
+                token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
+                    logits,
+                    packed_targets,
+                    packed_seq_params.cu_seqlens_q_padded,
+                    sequences.shape[1],
+                    vocab_start_index=tp_rank * logits.shape[-1],
+                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+                    group=tp_grp,
+                    inference_only=True,
+                    cp_group=mpu.get_context_parallel_group(),
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    attention_mask=data["attention_mask"],
+                    sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                )
+            else:
+                token_logprobs = from_parallel_logits_to_logprobs(
+                    logits,
+                    sequences,
+                    vocab_start_index=tp_rank * logits.shape[-1],
+                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+                    tp_group=tp_grp,
+                    inference_only=True,
+                    cp_group=None,
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                )
             # token_logprobs: [B, seq_len-1] in canonical (B, T) order.
             captured.append(token_logprobs.detach().to("cpu"))
             return torch.tensor(0.0, device=token_logprobs.device), {}
@@ -159,12 +184,17 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
             sub_seq_lengths = batch["sub_seq_lengths_list"]
+            batch["sub_seq_lengths_list"] = sub_seq_lengths
             if remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                     sub_seq_lengths=sub_seq_lengths,
+                )
+                batch["packed_seq_params"] = packed_seq_params
+                batch["packed_targets"] = _build_packed_targets(
+                    sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
                 )
                 new_attention_mask = None
                 new_position_ids = None
@@ -179,17 +209,7 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
 
             outputs = model(new_sequences, new_position_ids, new_attention_mask, packed_seq_params=packed_seq_params)
 
-            if remove_microbatch_padding:
-                outputs = postprocess_packed_seqs(
-                    outputs,
-                    packed_seq_params,
-                    attention_mask,
-                    micro_bsz,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                    sub_seq_lengths=sub_seq_lengths,
-                )
-            else:
+            if not remove_microbatch_padding:
                 outputs = recover_left_padding(
                     outputs,
                     new_attention_mask,
@@ -240,7 +260,8 @@ def _make_sft_cfg(use_sequence_packing: bool, cp: int, gpus: int) -> SFTConfig:
         max_tokens_per_microbatch=MAX_LENGTH if use_sequence_packing else None,
         seed=SEED,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
-        dataset_name="allenai/tulu-3-sft-mixture",
+        train_datasets=["allenai/tulu-3-sft-mixture"],
+        train_dataset_splits=["train[:100]"],
         placement=SFTPlacementConfig(num_nodes=1, num_gpus_per_node=gpus),
         megatron_config=MegatronConfig(
             tensor_model_parallel_size=1,
@@ -383,7 +404,7 @@ def _compare(ref: List[List[float]], other: List[List[float]], label: str):
     response-token logprob vectors elementwise after length-aligning.
 
     Also prints a diagnostic histogram + top-k outliers so a max-diff failure
-    can be classified: a *systematic* permutation/un-zigzag bug shows many
+    can be classified: a *systematic* packed CP ordering bug shows many
     large diffs (and often a non-trivial avg); bf16 reduction-order noise on a
     handful of low-probability tokens shows a tiny avg + a few large-max
     outliers, with the baseline logprob at those tokens being very negative.
@@ -463,7 +484,12 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
             # Recompute flat_bins + align_size deterministically (same FFD call).
             flat_bins = _recompute_flat_bins(trainer, examples)
             tp = 1
-            align_size = tp * cp * 2 if cp > 1 else tp
+            transformer_config_kwargs = sft_cfg.megatron_config.transformer_config_kwargs or {}
+            align_size = get_packed_seq_align_size(
+                tp,
+                cp,
+                fp8_enabled=is_fp8_enabled(transformer_config_kwargs.get("fp8")),
+            )
             collated.metadata["align_size"] = align_size
         else:
             collated = collate_sft_batch(examples, tokenizer)
@@ -480,10 +506,9 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
             group.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
             # (b) Capture full canonical logprobs for the parity comparison.
-            #     This is the parity-critical step (runs the SAME
-            #     preprocess/postprocess_packed_seqs as forward_backward, i.e.
-            #     the multi-subseq CP un-zigzag). Run it FIRST while GPU
-            #     memory is freshest.
+            #     This is the parity-critical step (runs the SAME preprocess
+            #     and packed-logprob scatter as forward_backward). Run it FIRST
+            #     while GPU memory is freshest.
             lp_refs = group.async_run_ray_method("mesh", "forward_capture_full_logprobs", data=collated)
             gathered = WorkerOutput.cat(group.actor_infos, ray.get(lp_refs))
             canon = _canonical_masked_logprobs(gathered, collated, examples, packed, flat_bins)
@@ -542,14 +567,14 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
         print(f"[parity]   {r[0]:<18} {r[1]:.4e}   {r[2]:.4e}   {r[3]:<6} {r[4]}")
 
     # Assert config 2 first (isolates base packing), then config 3
-    # (isolates the CP un-zigzag).
+    # (isolates the CP packed ordering).
     assert verdicts["packing_dp2"], (
         f"Config 2 (packing, no CP) mismatches baseline -> the TensorList "
         f"sub_seq_lengths plumbing or base packing is WRONG. Rows: {table_rows}"
     )
     assert verdicts["packing_cp2_dp1"], (
         f"Config 3 (packing + CP=2) mismatches baseline while config 2 matches "
-        f"-> the multi-subseq CP un-zigzag is WRONG. Rows: {table_rows}"
+        f"-> the multi-subseq CP packed ordering is WRONG. Rows: {table_rows}"
     )
 
 

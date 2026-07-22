@@ -3,7 +3,10 @@ import gc
 import json
 import os
 import random
+import shutil
+import tempfile
 from collections import defaultdict
+from contextlib import contextmanager
 from typing import List, Optional, Union
 
 import numpy as np
@@ -35,6 +38,7 @@ from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
 from skyrl.train.config import FSDPConfig, ModelConfig, OptimizerConfig
+from skyrl.utils.tok import check_is_vlm, get_processor
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import (
@@ -476,10 +480,13 @@ class FSDPStrategy(DistributedStrategy):
         rank = self.get_rank()
         world_size = self.world_size
 
-        with io.local_read_dir(ckpt_dir) as read_dir:
-            model_path = os.path.join(read_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-            optim_path = os.path.join(read_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
-            extra_path = os.path.join(read_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
+        model_file = f"model_world_size_{world_size}_rank_{rank}.pt"
+        optim_file = f"optim_world_size_{world_size}_rank_{rank}.pt"
+        extra_file = f"extra_state_world_size_{world_size}_rank_{rank}.pt"
+        with io.local_read_files(ckpt_dir, [model_file, optim_file, extra_file]) as read_dir:
+            model_path = os.path.join(read_dir, model_file)
+            optim_path = os.path.join(read_dir, optim_file)
+            extra_path = os.path.join(read_dir, extra_file)
 
             # Check if checkpoint files exist
             if not io.exists(model_path):
@@ -568,7 +575,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 4: Save on rank 0 only
         if self.is_rank_0():
-            with io.local_work_dir(output_dir) as work_dir:
+            with self._atomic_local_export_dir(output_dir) as work_dir:
                 # Save the model in HuggingFace format using safetensors
                 model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
 
@@ -580,6 +587,49 @@ class FSDPStrategy(DistributedStrategy):
                 if tokenizer is not None:
                     tokenizer.save_pretrained(work_dir)
 
+                # This export path bypasses save_hf_configs, so replicate its VLM handling:
+                # AutoProcessor/vLLM can't reload a VLM without preprocessor_config.json.
+                # Guarded so a resolution failure can't abort the save; no-op for text-only.
+                try:
+                    if check_is_vlm(model_to_save.config):
+                        processor = get_processor(model_to_save.config.name_or_path)
+                        processor.save_pretrained(work_dir)
+                except Exception as e:
+                    logger.warning(f"Could not save processor for '{model_to_save.config.name_or_path}'. Error: {e}")
+
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 
         dist.barrier()
+
+    @contextmanager
+    def _atomic_local_export_dir(self, output_dir: str):
+        """Rank-0 HF export dir that appears at ``output_dir`` only once complete.
+
+        Atomic write to the local export path provides a consistent way to signal export
+        finish. Ex: An asynchronous watcher can watch for ``config.json`` file to populate
+        in the export directory.
+        """
+        if io.is_cloud_path(output_dir):
+            with io.local_work_dir(output_dir) as work_dir:
+                yield work_dir
+            return
+
+        parent = os.path.dirname(os.path.abspath(output_dir)) or "."
+        io.makedirs(parent, exist_ok=True)
+        staging_dir = tempfile.mkdtemp(prefix=".tmp-hf-export-", dir=parent)
+        old_dir = None
+        try:
+            yield staging_dir
+            # Swap via renames only (each atomic on the same filesystem) so a reader
+            # never sees output_dir mid-delete: move any prior export aside, move the
+            # new one in, then rmtree the old one afterwards.
+            if os.path.lexists(output_dir):
+                old_dir = tempfile.mktemp(prefix=".old-hf-export-", dir=parent)
+                os.replace(output_dir, old_dir)
+            os.replace(staging_dir, output_dir)
+            staging_dir = None
+        finally:
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            if old_dir is not None:
+                shutil.rmtree(old_dir, ignore_errors=True)

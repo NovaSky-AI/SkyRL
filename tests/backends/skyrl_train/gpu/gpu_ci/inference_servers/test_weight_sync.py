@@ -9,8 +9,13 @@ GPU CI tests for weight synchronization from trainer to inference server.
     - Trainer and server share GPU 0 (2 GPUs total, 1 shared)
     - Uses CUDA IPC handles for zero-copy weight transfer
 
+3. Legacy `WorkerWrap.load_weights` MoE reload, TP=1:
+    - Server on GPU 0 (1 GPU total, no separate trainer process)
+    - The NCCL or CUDA-IPC receiver is stubbed with safetensors-from-disk
+      to skip trainer-side sender setup
+
 Run:
-    uv run pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
+    uv run --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
 """
 
 import base64
@@ -29,7 +34,10 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     get_node_ip,
     get_open_port,
 )
-from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, CudaIpcInitInfo
+from skyrl.backends.skyrl_train.weight_sync import (
+    BroadcastInitInfo,
+    CudaIpcInitInfo,
+)
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
@@ -150,7 +158,6 @@ async def weight_update_env(class_scoped_ray_init_fixture, request):
             num_inference_engines=num_prefill + num_decode,
             colocate_all=False,
             gpu_memory_utilization=0.5,
-            use_new_inference_servers=True,
             engine_init_kwargs={
                 "load_format": "dummy",
                 "kv_transfer_config": {
@@ -166,7 +173,6 @@ async def weight_update_env(class_scoped_ray_init_fixture, request):
             tp_size=2,
             colocate_all=False,
             gpu_memory_utilization=0.5,
-            use_new_inference_servers=True,
             engine_init_kwargs={"load_format": "dummy"},
         )
 
@@ -241,9 +247,6 @@ class TestWeightUpdateFlow:
                 master_port=master_port,
                 rank_offset=1,
                 world_size=world_size,
-                group_name=group_name,
-                backend="nccl",
-                model_dtype_str="bfloat16",
                 override_existing_receiver=True,
             )
 
@@ -280,12 +283,21 @@ class TestWeightUpdateFlow:
                 "packed": True,
             }
             print(
-                f"[Step 3] Calling update_named_weights with {len(update_info['names'])} names, packed={update_info['packed']}"
+                f"[Step 3] Calling update_weights_nccl with {len(update_info['names'])} names, packed={update_info['packed']}"
             )
-            result = await client.update_named_weights(update_info)
-            print(f"[Step 3] update_named_weights returned: {list(result.keys())}")
+            # Use SkyRL's chunked weight-sync API (skyrl_start_weight_update ->
+            # update_weights_nccl -> skyrl_finish_weight_update) rather than vLLM's
+            # native /update_weights endpoint, which in vLLM 0.22.0+ requires
+            # vLLM's own native start_weight_update to be called first.
+            # skyrl_start_weight_update is local (layerwise-reload init), so it is
+            # safe to call while the trainer is blocked on the NCCL send; the
+            # actual receive happens in update_weights_nccl.
+            await client.start_weight_update()
+            result = await client.update_weights_nccl(update_info)
+            print(f"[Step 3] update_weights_nccl returned: {list(result.keys())}")
             for server_url, resp in result.items():
                 assert resp["status"] == 200, f"Server {server_url} update weights failed: {resp}"
+            await client.finish_weight_update()
 
             # Trainer should be done now (NCCL broadcast complete)
             ray.get(trainer_broadcast_ref)
@@ -330,36 +342,47 @@ class IpcTrainer:
         return True
 
     def create_ipc_update_info(self) -> dict:
-        """Create IPC handles for all model parameters.
+        """Create a single packed CUDA-IPC buffer for all model parameters.
 
-        Returns a dict matching the /update_weights API contract:
-        names, dtype_names, shapes, and ipc_handles_pickled (base64).
+        Matches SkyRL's ``update_weights_ipc`` contract (the packed format
+        produced by ``CudaIpcTransferStrategy``): all parameters are copied into
+        one contiguous CUDA buffer, a single IPC handle is created for that
+        buffer, and per-parameter ``sizes`` let the receiver slice it back out.
+        This differs from vLLM's native ``/update_weights`` (one handle per
+        parameter), which we no longer use.
         """
         from torch.multiprocessing.reductions import reduce_tensor
 
         gpu_uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
 
-        names, dtype_names, shapes = [], [], []
-        ipc_handles = []
-        tensor_refs = []
+        params = list(self.model.named_parameters())
+        # The model is loaded in a single dtype (bfloat16), so element offsets
+        # into one packed buffer are well-defined across all parameters.
+        dtype = params[0][1].dtype
+        total_numel = sum(p.numel() for _, p in params)
+        packed_tensor = torch.empty(total_numel, device=self.device, dtype=dtype)
 
-        for name, param in self.model.named_parameters():
-            weight = param.detach().contiguous()
-            tensor_refs.append(weight)
-            handle = reduce_tensor(weight)
-            ipc_handles.append({gpu_uuid: handle})
+        names, dtype_names, shapes, sizes = [], [], [], []
+        offset = 0
+        for name, param in params:
+            size = param.numel()
+            packed_tensor[offset : offset + size].copy_(param.detach().reshape(-1))
+            offset += size
             names.append(name)
-            dtype_names.append(str(weight.dtype).split(".")[-1])
-            shapes.append(list(weight.shape))
+            dtype_names.append(str(param.dtype).split(".")[-1])
+            shapes.append(list(param.shape))
+            sizes.append(size)
 
-        # Prevent GC so IPC handles remain valid
-        self._tensor_refs = tensor_refs
+        # Keep the packed buffer alive so the IPC handle stays valid on the receiver.
+        self._tensor_refs = [packed_tensor]
 
-        pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
+        ipc_handle = reduce_tensor(packed_tensor)
+        pickled = base64.b64encode(pickle.dumps({gpu_uuid: ipc_handle})).decode("utf-8")
         return {
             "names": names,
             "dtype_names": dtype_names,
             "shapes": shapes,
+            "sizes": sizes,
             "ipc_handles_pickled": pickled,
         }
 
@@ -374,7 +397,6 @@ async def ipc_weight_update_env(class_scoped_ray_init_fixture):
         tp_size=1,
         colocate_all=True,
         gpu_memory_utilization=0.5,
-        use_new_inference_servers=True,
         engine_init_kwargs={"load_format": "dummy"},
     )
 
@@ -453,9 +475,14 @@ class TestColocatedIpcWeightUpdateFlow:
             update_info = ray.get(trainer.create_ipc_update_info.remote())
             print(f"[Step 3] Created handles for {len(update_info['names'])} parameters")
 
-            result = await client.update_named_weights(update_info)
+            # Use SkyRL's chunked weight-sync API (skyrl_start_weight_update ->
+            # update_weights_ipc -> skyrl_finish_weight_update) rather than vLLM's
+            # native /update_weights endpoint.
+            await client.start_weight_update()
+            result = await client.update_weights_ipc(update_info)
             for server_url, resp_data in result.items():
                 assert resp_data["status"] == 200, f"Server {server_url} IPC update failed: {resp_data}"
+            await client.finish_weight_update()
             print("[Step 3] IPC weight update complete")
 
             # ===== Step 4: Query again — should produce correct output =====

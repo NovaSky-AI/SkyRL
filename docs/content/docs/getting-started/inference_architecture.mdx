@@ -2,11 +2,7 @@
 title: "Inference Architecture"
 ---
 
-This page explains how SkyRL's inference engine separates data and control planes, and how weight sync works during training. We design the architecture of SkyRL's HTTP-based inference implementation below.
-
-<Callout type="info">
-The feature flag `_SKYRL_USE_NEW_INFERENCE` gates this codepath. It defaults to `1` (on); set `_SKYRL_USE_NEW_INFERENCE=0` to fall back to the legacy path that uses vLLM engines wrapped via Ray actors. The flag will be removed once the legacy path is deleted.
-</Callout>
+This page explains how SkyRL's inference engine separates data and control planes, and how weight sync works during training. We detail the architecture of SkyRL's HTTP-based inference implementation below.
 
 ## System Architecture
 
@@ -45,6 +41,40 @@ The split exists because generation scales out via routing (the router picks a b
 ## Generation
 
 `client.generate(input_batch, model=...)` sends each prompt as a separate POST to `proxy_url`. Requests are issued concurrently (capped by `SKYRL_GENERATE_CONCURRENCY_PER_ENGINE × num_engines`) and the router distributes them across backends; an optional `X-Session-ID` header drives session-aware routing. `chat_completion`, `completion`, and `sample` are thin wrappers over the same routed proxy.
+
+## Routing policies
+
+### Session-aware routing
+
+`VLLMRouter` is started with vLLM's `consistent_hash` routing policy (see `inference_servers/utils.py`). When a request carries an `X-Session-ID` HTTP header, the router hashes on that header so all requests with the same session ID are pinned to the same backend replica. Without the header, the router still applies consistent hashing, but there is no trajectory-level pinning - the turns of a single rollout aren't guaranteed to land on the same backend.
+
+Pinning a logical request to one backend keeps that backend's **prefix cache** warm across the turns of a multi-turn rollout (and across retries of one request), which is a large throughput win for agentic / multi-turn generation. Distinct sessions still spread across replicas.
+
+`RemoteInferenceClient` sets this header automatically: every routed call (`generate`, `chat_completion`, `completion`, `sample`, and the `render` paths) accepts a `session_id`, and when one is present the client attaches `X-Session-ID: <session_id>` to the outgoing request (`inference_servers/remote_inference_client.py`). SkyRL's built-in generators pass the trajectory ID as the session ID so all turns of a trajectory co-locate.
+
+### Session-aware routing with load balancing
+
+SkyRL also supports an improved routing policy `sticky_least_loaded` for better load balancing across vLLM replicas. This routing policy functions as follows:
+
+a. For new trajectories / first turn, the policy picks the server with the least number of active sessions
+b. For future turns of the same trajectory, the policy routes to the same server with sticky routing.
+
+This is the recommended routing policy for multi-turn / agentic RL. For detailed benchmarking, please refer to the PR [here](https://github.com/NovaSky-AI/SkyRL/pull/1791).
+
+### Passing it from a custom agent
+
+If you write a custom agent / generator that talks to the data-plane proxy directly (instead of going through `RemoteInferenceClient`), set the header yourself on each request to get sticky routing. Use a **stable** ID per logical rollout - e.g. the trajectory or conversation ID - and reuse it across every turn and retry of that rollout:
+
+```python
+# OpenAI-compatible client talking to the VLLMRouter proxy
+resp = await client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_headers={"X-Session-ID": trajectory_id},  # stable across all turns of this rollout
+)
+```
+
+If you don't set the header, you lose trajectory-level pinning: turns of the same rollout aren't guaranteed to share a backend, so the cross-turn prefix-cache benefit is lost. Correctness is unaffected, but throughput on multi-turn workloads drops. See the [Harbor integration](/docs/harbor) for a concrete example of wiring this through an agent's LLM client.
 
 ## Pause / Resume
 
@@ -93,7 +123,7 @@ Endpoint summary:
 | `/sleep`, `/wake_up` | fan-out | Colocated memory management |
 | `/v1/completions`, `/v1/chat/completions`, generate | routed | Generation |
 
-\* Currently routed via `/collective_rpc`; see the callout above.
+\* Currently we use custom `/collective_rpc` + worker methods that mimick the native APIs because SkyRL makes some vLLM fixes for Qwen 3.6 model loading. We will migrate to the native `/start_weight_update` and `/finish_weight_update` soon.
 
 ## End-to-end Weight Sync Flow
 

@@ -20,8 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import gc
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -36,7 +35,12 @@ from megatron.core.transformer.moe.moe_utils import (
     get_moe_layer_wise_logging_tracker,
     reduce_aux_losses_tracker_across_ranks,
 )
-from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.utils import get_attr_wrapped_model, unwrap_model
+
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packed_seq_align_size,
+    get_unpacked_seq_align_size,
+)
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -162,6 +166,38 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
     return model_or_models
 
 
+def _convert_moe_experts_lora_to_vllm(
+    adapter_state: Dict[str, "torch.Tensor"],
+) -> Dict[str, "torch.Tensor"]:
+    """Rewrite fused-MoE expert LoRA tensors into the layout vLLM expects.
+
+    Megatron-Bridge exports fused experts as 3D tensors keyed
+    ``...mlp.experts.gate_up_proj`` (w13) / ``...mlp.experts.down_proj`` (w2),
+    with ``lora_A=(E, rank, in)`` and ``lora_B=(E, out, rank)``. vLLM's 3D-MoE
+    loader (``FusedMoE3DWithLoRA`` / ``_stack_moe_lora_weights``) instead expects
+    the flat PEFT layout keyed ``...experts.base_layer`` (w13) / ``...experts``
+    (w2), with ``lora_A=(rank*E, in)`` and ``lora_B=(out, rank*E)``. This is the
+    exact inverse of vLLM's per-expert reshape. Non-expert tensors pass through.
+    """
+    converted: Dict[str, "torch.Tensor"] = {}
+    for key, tensor in adapter_state.items():
+        is_gate_up = ".mlp.experts.gate_up_proj." in key
+        is_down = ".mlp.experts.down_proj." in key
+        if (is_gate_up or is_down) and tensor.ndim == 3:
+            if key.endswith(".lora_A.weight"):
+                # (E, rank, in) -> (rank*E [expert-major], in)
+                tensor = tensor.reshape(-1, tensor.shape[-1]).contiguous()
+            elif key.endswith(".lora_B.weight"):
+                # (E, out, rank) -> (out, rank*E [expert-minor])
+                tensor = tensor.permute(1, 2, 0).contiguous().reshape(tensor.shape[1], -1)
+            if is_gate_up:
+                key = key.replace(".mlp.experts.gate_up_proj.", ".mlp.experts.base_layer.")
+            else:
+                key = key.replace(".mlp.experts.down_proj.", ".mlp.experts.")
+        converted[key] = tensor
+    return converted
+
+
 @torch.no_grad()
 def offload_megatron_grads_to_cpu(models):
     for model_chunk in models:
@@ -173,8 +209,6 @@ def offload_megatron_grads_to_cpu(models):
             for _, param in model_chunk.named_parameters():
                 if param.grad is not None:
                     param.grad = param.grad.to("cpu", non_blocking=True)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -186,8 +220,6 @@ def load_megatron_grads_to_gpu(models):
             for _, param in model_chunk.named_parameters():
                 if param.grad is not None:
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -222,8 +254,6 @@ def offload_megatron_model_to_cpu(models):
         else:
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to("cpu", non_blocking=True)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -243,8 +273,6 @@ def load_megatron_model_to_gpu(models):
             device_id = torch.cuda.current_device()
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to(device_id, non_blocking=True)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -344,8 +372,6 @@ def offload_megatron_optimizer(optimizers):
                 v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
             if "exp_avg_sq" in v:
                 v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -367,8 +393,6 @@ def load_megatron_optimizer(optimizers):
                     v["exp_avg"] = v["exp_avg"].to(torch.cuda.current_device(), non_blocking=True)
                 if "exp_avg_sq" in v:
                     v["exp_avg_sq"] = v["exp_avg_sq"].to(torch.cuda.current_device(), non_blocking=True)
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 def preprocess_packed_seqs(
@@ -376,6 +400,7 @@ def preprocess_packed_seqs(
     attention_mask: torch.Tensor,
     pre_process: bool = True,
     sub_seq_lengths: Optional[list[list[int]]] = None,
+    fp8_enabled: bool = False,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences.
@@ -403,7 +428,7 @@ def preprocess_packed_seqs(
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
-    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
 
     batch_size = input_ids.shape[0]
 
@@ -515,144 +540,28 @@ def preprocess_packed_seqs(
         return input_ids, packed_seq_params
 
 
-def postprocess_packed_seqs(
-    output: torch.Tensor,
-    packed_seq_params: PackedSeqParams,
-    attention_mask: torch.Tensor,
-    batch_size: int,
-    seq_len: int,
-    post_process: bool = True,
-    sub_seq_lengths: Optional[list[list[int]]] = None,
-) -> torch.Tensor:
+def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -> bool:
+    """Whether the model packs sequences inside its own ``forward``.
+
+    True for ``Qwen3VLModel`` (e.g. Qwen3.5 via the VL bridge), which would
+    double-pack and corrupt the GDN ``cu_seqlens`` under SkyRL sample packing, so
+    :class:`MegatronModelWrapper` refuses packing for it. Returns ``False`` when
+    mbridge / Qwen3VL is not importable, so other models are unaffected.
     """
-    Postprocess packed sequences.
+    try:
+        from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (
+            Qwen3VLModel,
+        )
+    except ImportError:
+        return False
 
-    Two modes (mirroring :func:`preprocess_packed_seqs`):
-
-    - ``sub_seq_lengths is None`` (default): each batch row corresponds to a
-      single ``cu_seqlens`` segment.
-    - ``sub_seq_lengths is not None``: each batch row may contain multiple
-      sub-sequences concatenated end-to-end (controller-side mini-batch
-      packing). ``cu_seqlens_q_padded`` then has one entry **per sub-seq**,
-      not per row; we recover row-start offsets by accumulating padded
-      lengths across the row's sub-seqs. Each row's tokens are written back
-      into the contiguous valid-token region of ``output_new[i]`` (the
-      ``attention_mask`` for row ``i`` covers every sub-seq's valid tokens
-      and their TP-alignment gaps — see ``PackedDataCollator``).
-    """
-    if not post_process:
-        return output
-
-    # -------------------------------------------------------------------------
-    # Move the lengths and offsets needed for subsequent Python-level indexing to the CPU in advance,
-    # to avoid a large number of .item() calls in the loop
-    # -------------------------------------------------------------------------
-    cu_padded_cpu: list[int] = packed_seq_params.cu_seqlens_q_padded.tolist()
-
-    shape = [batch_size, seq_len] + list(output.shape[2:])  # 1,packed, dim -> batch_size, seq_len, dim
-    output_new = torch.zeros(shape, dtype=output.dtype, device=output.device)
-
-    cp_size = mpu.get_context_parallel_world_size()
-    # all gather output across context parallel group
-    if cp_size > 1:
-        # output shape: [1, packed_len, hidden_dim]
-        # need to gather across cp group and concatenate in sequence dimension
-        output_list = [torch.empty_like(output) for _ in range(cp_size)]
-        torch.distributed.all_gather(output_list, output.detach(), group=mpu.get_context_parallel_group())
-        output_list[mpu.get_context_parallel_rank()] = output
-    else:
-        output_list = [output]
-
-    if sub_seq_lengths is not None:
-        if len(sub_seq_lengths) != batch_size:
-            raise ValueError(f"sub_seq_lengths has {len(sub_seq_lengths)} rows but batch size is {batch_size}")
-        # Build an index mapping (batch_row, intra_row_subseq) -> flat sub-seq
-        # index inside cu_padded_cpu, so we can compute the offset for the
-        # *first* sub-seq of each row (== row start).
-        # Each row's start is cu_padded_cpu[flat_sub_idx_of_row_start[r]].
-        flat_sub_idx_of_row_start: list[int] = []
-        running = 0
-        for r in range(batch_size):
-            flat_sub_idx_of_row_start.append(running)
-            running += len(sub_seq_lengths[r])
-        # NOTE: in the multi-subseq path, row-i's slice covers all of
-        # row i's sub-seqs (including their TP-alignment pads). We read from
-        # ``cu_padded_cpu[flat_sub_idx_of_row_start[i]]`` (start of row i's
-        # first sub-seq) up to ``cu_padded_cpu[flat_sub_idx_of_row_start[i] +
-        # len(sub_seq_lengths[i])]`` (start of row i+1, exclusive) to "unpack"
-        # and recover row-i
-
-        for i in range(batch_size):
-            n_sub = len(sub_seq_lengths[i])
-            row_first_sub = flat_sub_idx_of_row_start[i]
-            row_last_sub_exclusive = row_first_sub + n_sub
-            if cp_size <= 1:
-                start_idx = cu_padded_cpu[row_first_sub]
-                end_idx = cu_padded_cpu[row_last_sub_exclusive]
-                row_len = end_idx - start_idx
-                output_new[i, :row_len] = output[0][start_idx:end_idx]
-                continue
-            # ----------------------------------------------------------------
-            # CP > 1, multi-subseq: un-zigzag each cu_seqlens segment (sub-seq)
-            # independently and write its FULL padded slab (sub-seq tokens +
-            # this sub-seq's own alignment pad) back-to-back into output_new[i],
-            # starting at column 0.
-            row_global_start = cu_padded_cpu[row_first_sub]
-            for seg in range(row_first_sub, row_last_sub_exclusive):
-                s_len_padded_chunk = (cu_padded_cpu[seg + 1] - cu_padded_cpu[seg]) // cp_size
-                half_seqlen = s_len_padded_chunk // 2
-                s_len_padded = s_len_padded_chunk * cp_size
-                # This segment's start in each rank's CP-sharded local buffer.
-                packed_start_idx = cu_padded_cpu[seg] // cp_size
-                # Destination column of this segment within row i's output
-                # buffer: its global offset relative to the row start.
-                # (== sum of preceding sub-seqs' padded lengths in this row,
-                # matching the collator's row_offset layout.)
-                dest_off = cu_padded_cpu[seg] - row_global_start
-                tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device, dtype=output.dtype)
-                for j in range(cp_size):
-                    o = output_list[j][0]
-                    # Rank j held chunk j (front half of its slab) and chunk
-                    # 2*cp_size-1-j (back half of its slab) for THIS segment.
-                    o0, o1 = (
-                        o[packed_start_idx : packed_start_idx + half_seqlen],
-                        o[packed_start_idx + half_seqlen : packed_start_idx + s_len_padded_chunk],
-                    )
-                    tmp[j * half_seqlen : (j + 1) * half_seqlen] = o0
-                    tmp[s_len_padded - (j + 1) * half_seqlen : s_len_padded - j * half_seqlen] = o1
-                output_new[i, dest_off : dest_off + s_len_padded] = tmp
-
-        return output_new
-
-    seq_lens_cpu: list[int] = attention_mask.sum(dim=1, dtype=torch.int32).cpu().tolist()
-
-    for i in range(batch_size):
-        if cp_size <= 1:
-            s = seq_lens_cpu[i]
-            start_idx = cu_padded_cpu[i]
-            # attention_mask[i] -> (seq_len,) # output_new[i, ...] (non-pad-seq-len)
-            # attention_mask tensor is a boolean here
-            # so it only selects the non-padding token positions and we place the sequence here
-            output_new[i, attention_mask[i]] = output[0][start_idx : start_idx + s]
-            continue
-        s_len_padded_chunk = (cu_padded_cpu[i + 1] - cu_padded_cpu[i]) // cp_size
-        half_seqlen = s_len_padded_chunk // 2
-        s_len = seq_lens_cpu[i]
-        s_len_padded = s_len_padded_chunk * cp_size
-        tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device)
-        for j in range(cp_size):
-            o = output_list[j][0]
-            # split to 2 chunks
-            packed_start_idx = cu_padded_cpu[i] // cp_size
-            o0, o1 = (
-                o[packed_start_idx : packed_start_idx + half_seqlen],
-                o[packed_start_idx + half_seqlen : packed_start_idx + s_len_padded_chunk],
-            )
-            tmp[j * half_seqlen : (j + 1) * half_seqlen] = o0
-            tmp[s_len_padded - (j + 1) * half_seqlen : s_len_padded - j * half_seqlen] = o1
-        output_new[i, attention_mask[i]] = tmp[:s_len]
-
-    return output_new
+    chunks = model if isinstance(model, (list, tuple)) else [model]
+    for chunk in chunks:
+        unwrapped = unwrap_model(chunk)
+        unwrapped_list = unwrapped if isinstance(unwrapped, (list, tuple)) else [unwrapped]
+        if any(isinstance(m, Qwen3VLModel) for m in unwrapped_list):
+            return True
+    return False
 
 
 def remove_left_padding(
@@ -660,6 +569,7 @@ def remove_left_padding(
     attention_mask: torch.Tensor,
     position_ids: torch.Tensor,
     pre_process: bool = True,
+    fp8_enabled: bool = False,
 ):
     """
     Remove left padding from input_ids, attention_mask and position_ids
@@ -673,10 +583,9 @@ def remove_left_padding(
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
-    if mpu.get_tensor_model_parallel_world_size() > 1:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
-        seq_len = seq_len + pad_size
+    align_size = get_unpacked_seq_align_size(mpu.get_tensor_model_parallel_world_size(), fp8_enabled=fp8_enabled)
+    pad_size = (align_size - seq_len % align_size) % align_size
+    seq_len = seq_len + pad_size
     shape[1] = seq_len
     if pre_process:
         new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
@@ -774,3 +683,18 @@ def broadcast_object_across_pp_ranks(obj):
     torch.distributed.broadcast_object_list(obj_list, src=global_src, group=pp_group)
 
     return obj_list[0]
+
+
+def to_te_attention_mask(attention_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """Convert a 2-D keep-mask to a 4-D padding mask for Transformer Engine attention.
+
+    ``remove_left_padding`` returns a 2-D ``[batch, seq]`` keep-mask where 1 marks a real token.
+    Transformer Engine's sliding-window ``get_full_mask`` expects a mask broadcastable to
+    ``[batch, 1, q_seq, kv_seq]``; a 2-D mask collides the batch dimension with the sequence
+    dimension and fails for ``micro_batch_size > 1``. Return a ``[batch, 1, 1, seq]`` padding mask
+    where True marks padding. A ``None`` mask (packed sequences) or an already higher-rank mask is
+    returned unchanged.
+    """
+    if attention_mask is None or attention_mask.dim() != 2:
+        return attention_mask
+    return (~attention_mask.bool())[:, None, None, :]

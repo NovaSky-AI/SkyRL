@@ -15,8 +15,8 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 # Configure CISPO parameters
 POLICY_LOSS="cispo"
-CISPO_EPS_CLIP_LOW=0
-CISPO_EPS_CLIP_HIGH=5
+CISPO_EPS_CLIP_LOW=1
+CISPO_EPS_CLIP_HIGH=4
 USE_KL_LOSS=false
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
@@ -48,7 +48,6 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \

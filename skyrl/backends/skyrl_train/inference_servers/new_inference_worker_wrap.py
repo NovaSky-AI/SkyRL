@@ -5,13 +5,11 @@ This module provides NewInferenceWorkerWrap, a vLLM worker extension that
 enables chunked weight updates from training to inference using the
 start/update/finish lifecycle:
 
-    start_weight_update   ->  one or more update_weights_ipc  ->  finish_weight_update
+    skyrl_start_weight_update   ->  one or more update_weights_ipc  ->  skyrl_finish_weight_update
 
 This separates the layerwise reload initialization/finalization from individual
 chunk transfers, allowing weights to be sent in bounded-memory chunks rather
 than all at once.
-
-Used only with the new inference path (_SKYRL_USE_NEW_INFERENCE=1).
 
 TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, vLLM will
 natively support start_weight_update / update_weights / finish_weight_update
@@ -28,51 +26,21 @@ Usage:
 
 import torch
 
-# Importing this registers the SkyRL ``sharded_rdt`` weight-transfer engine into
-# vLLM's factory and relaxes WeightTransferConfig.backend to accept it. vLLM
-# loads this module via --worker-extension-cls before model init on every
-# worker, so the registration is correctly ordered (it must run before
-# GPUWorker.__init__ builds the engine from weight_transfer_config.backend).
-from skyrl.backends.skyrl_train.weight_sync import rdt_vllm_register  # noqa: F401
-
-# Workaround for a vLLM layerwise-reload corruption affecting NemotronH/Mamba.
-# MambaMixer2 registers `conv_weights` as a non-persistent buffer that is a
-# view of `self.conv1d.weight.data` (shared storage). vLLM's reload code path
-# (model_executor/model_loader/reload/layerwise.py) materializes the buffer
-# into a fresh uninitialized GPU tensor and then runs
-# `kernel_conv_weights.data.copy_(fresh)` in `_copy_and_restore_kernel_tensors`.
-# Because the kernel buffer shares storage with `conv1d.weight.data`, this
-# writes garbage (NaN-bit-pattern bytes in bf16) into the conv1d weight,
-# corrupting all 23 Mamba layers after every weight sync.
-#
-# Adding "conv_weights" to vLLM's SKIP_TENSORS makes capture/restore/materialize
-# skip the buffer entirely, so the view stays intact and conv1d.weight is
-# preserved. Must be applied before `record_metadata_for_reloading` runs at
-# model construction; this module is imported by vLLM via
-# --worker-extension-cls before model init, so the import-time patch is
-# correctly ordered.
-# Remove this pending https://github.com/vllm-project/vllm/pull/42481 which should
-# be included in vLLM 0.21.0
-try:
-    from vllm.model_executor.model_loader.reload.meta import (
-        SKIP_TENSORS as _VLLM_SKIP_TENSORS,
-    )
-
-    _VLLM_SKIP_TENSORS.add("conv_weights")
-except ImportError:
-    pass
+from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
+    LayerwiseReloadWorkerMixin,
+)
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
 
-class NewInferenceWorkerWrap:
+class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
     """
     vLLM worker extension for chunked weight sync (new inference path).
 
     Provides a three-phase weight update protocol via collective_rpc:
-        1. start_weight_update: Prepare model for receiving weights
+        1. skyrl_start_weight_update: Prepare model for receiving weights
         2. update_weights_ipc: Receive and load one chunk of weights
-        3. finish_weight_update: Finalize the model after all chunks
+        3. skyrl_finish_weight_update: Finalize the model after all chunks
 
     Attributes accessed from the host GPUWorker (via mixin inheritance):
         self.weight_transfer_engine
@@ -80,40 +48,6 @@ class NewInferenceWorkerWrap:
         self.model_config
         self.device
     """
-
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        """
-        Prepare the model for a new weight update.
-
-        For checkpoint-format weights, initializes the layerwise reload
-        machinery which moves layers to meta device and wraps weight loaders
-        to defer processing until all weights for each layer are loaded.
-
-        Must be called before any update_weights_ipc calls.
-
-        Args:
-            is_checkpoint_format: True if incoming weights are in checkpoint
-                format (need layerwise processing). False if weights are
-                already in kernel format (direct copy).
-        """
-        if getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError(
-                "start_weight_update called while a weight update is "
-                "already active. Call finish_weight_update first."
-            )
-
-        if is_checkpoint_format:
-            from vllm.config import set_current_vllm_config
-            from vllm.model_executor.model_loader.reload import (
-                initialize_layerwise_reload,
-            )
-
-            model = self.model_runner.model
-            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-                initialize_layerwise_reload(model)
-
-        self._skyrl_is_checkpoint_format = is_checkpoint_format
-        self._skyrl_weight_update_active = True
 
     def update_weights_ipc(self, update_info: dict) -> None:
         """
@@ -134,7 +68,7 @@ class NewInferenceWorkerWrap:
                 - ipc_handles_pickled: b64(pickle({gpu_uuid: (func, args)}))
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_ipc.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_ipc.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -176,6 +110,14 @@ class NewInferenceWorkerWrap:
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             if self._skyrl_is_checkpoint_format:
                 model.load_weights(weights=weights)
+                # vLLM's load only updates the main model; the spec-decode (MTP/Eagle)
+                # drafter is a separate module and must be reloaded from the same
+                # checkpoint-format weights (see spec_decode_utils).
+                from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+                    _reload_spec_decode_drafter,
+                )
+
+                _reload_spec_decode_drafter(self.model_runner, weights)
             else:
                 for name, weight in weights:
                     param = model.get_parameter(name)
@@ -205,7 +147,7 @@ class NewInferenceWorkerWrap:
         https://github.com/vllm-project/vllm/pull/42577
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_nccl.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_nccl.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -214,105 +156,23 @@ class NewInferenceWorkerWrap:
 
         from vllm.config import set_current_vllm_config
 
+        from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+            _reload_spec_decode_drafter,
+        )
+
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
         model = self.model_runner.model
+
+        def _load_weights(weights):
+            weights = list(weights)
+            loaded = model.load_weights(weights=weights)
+            _reload_spec_decode_drafter(self.model_runner, weights)
+            return loaded
 
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             self.weight_transfer_engine.receive_weights(
                 typed_update_info,
-                load_weights=model.load_weights,
+                load_weights=_load_weights,
             )
 
         torch.accelerator.synchronize()
-
-    def _inject_rdt_model_device(self) -> None:
-        """Give the sharded_rdt engine the model/device/vllm_config it needs.
-
-        vLLM 0.20.2 builds the weight-transfer engine in GPUWorker.__init__,
-        before the model is loaded and with only (config, parallel_config) — so
-        the sharded_rdt engine has no model/device. This worker extension is
-        mixed into the GPUWorker, so it CAN reach ``self.model_runner.model``,
-        ``self.device``, and ``self.vllm_config`` and inject them. Idempotent.
-        """
-        engine = self.weight_transfer_engine
-        engine.model = self.model_runner.model
-        engine.device = self.device
-        engine.vllm_config = self.vllm_config
-
-    def init_weight_transfer_engine_rdt(self, init_info: dict) -> None:
-        """Initialize the sharded_rdt engine and bake the replay plan.
-
-        Routed here (via collective_rpc) instead of vLLM's native
-        /init_weight_transfer_engine because the native GPUWorker path passes no
-        model and does not wrap the call in set_current_vllm_config — but the
-        sharded_rdt bake drives model.load_weights + layerwise internals and
-        needs both. We inject the model/device, run the (model-free) actor
-        resolution + warmup in init_transfer_engine, then bake under the vLLM
-        config context.
-        """
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. Please set weight_transfer_config " "to enable weight transfer."
-            )
-        from vllm.config import set_current_vllm_config
-
-        self._inject_rdt_model_device()
-        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            self.weight_transfer_engine.bake()
-
-    def update_weights_rdt(self, update_info: dict) -> None:
-        """Receive one layer-group of weights via the sharded_rdt engine.
-
-        Mirror of update_weights_nccl: the engine's receive_weights pulls the
-        slices each worker consumes from the trainer actor over NIXL and scatters
-        them in. Bracketed by start_weight_update / finish_weight_update (which
-        run initialize/finalize_layerwise_reload) — the driver calls this once
-        per layer-aligned group between that pair.
-        """
-        if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_rdt.")
-
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
-            )
-
-        from vllm.config import set_current_vllm_config
-
-        self._inject_rdt_model_device()
-        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
-        model = self.model_runner.model
-
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            self.weight_transfer_engine.receive_weights(
-                typed_update_info,
-                load_weights=model.load_weights,
-            )
-
-        torch.accelerator.synchronize()
-
-    def finish_weight_update(self) -> None:
-        """
-        Finalize the current weight update.
-
-        For checkpoint-format weights, runs layerwise postprocessing
-        (quantization repacking, attention weight processing, etc.).
-        Must be called after all update_weights_ipc calls are done.
-        """
-        if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
-
-        if self._skyrl_is_checkpoint_format:
-            from vllm.config import set_current_vllm_config
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-            )
-
-            model = self.model_runner.model
-            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-                finalize_layerwise_reload(model, self.model_config)
-
-        self._skyrl_weight_update_active = False
-        self._skyrl_is_checkpoint_format = True

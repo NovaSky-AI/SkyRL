@@ -113,6 +113,7 @@ def create_inference_servers(
                 nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + i * servers_per_group,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
+                use_expandable_segments=ie_cfg.use_expandable_segments,
             )
             for i in range(num_prefill)
         ]
@@ -132,6 +133,7 @@ def create_inference_servers(
                 nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + (num_prefill + i) * servers_per_group,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
+                use_expandable_segments=ie_cfg.use_expandable_segments,
             )
             for i in range(num_decode)
         ]
@@ -188,6 +190,7 @@ def create_inference_servers(
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
+                use_expandable_segments=ie_cfg.use_expandable_segments,
             )
             for i in range(ie_cfg.num_engines)
         ]
@@ -272,6 +275,11 @@ def build_new_inference_client(
         )
         server_setup = InferenceServerSetup(proxy_url=proxy_url, server_urls=server_urls, router=router)
     else:
+        if not ie_cfg.run_engines_locally:
+            raise ValueError(
+                "generator.inference_engine.run_engines_locally=false requires "
+                "external_proxy_url or external_server_urls."
+            )
         cli_args = build_vllm_cli_args(cfg)
         server_setup = create_inference_servers(
             ie_cfg,
@@ -283,7 +291,7 @@ def build_new_inference_client(
     client = RemoteInferenceClient(
         proxy_url=server_setup.proxy_url,
         server_urls=server_setup.server_urls,
-        model_name=cfg.trainer.policy.model.path,
+        model_name=ie_cfg.served_model_name or cfg.trainer.policy.model.path,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,

@@ -27,7 +27,7 @@ The `generator.inference_engine.run_engines_locally` argument controls inference
 
 If `run_engines_locally=true`, then the inference engines are launched during the training run and managed by SkyRL.
 
-If `run_engines_locally=false`, then the user can specify inference engine URLs managed externally (with the `generator.inference_engine.remote_urls` parameter). In this case, the user is responsible for setup and teardown. Note that SkyRL expects certain additional endpoints in the inference engine specifically related to weight syncing. We provide scripts for launching remote inference engines [here](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/remote_inference_engine) for convenience.
+If `run_engines_locally=false`, then the user can specify inference server URLs managed externally with `generator.inference_engine.external_server_urls` (and routing managed by SkyRL) or routing + inference servers managed externally with `generator.inference_engine.external_proxy_url` and `generator.inference_engine.external_server_urls`. In this case, the user is responsible for setup and teardown. Note that SkyRL expects additional control-plane endpoints for weight syncing. We provide scripts for launching remote inference servers [here](https://github.com/NovaSky-AI/SkyRL/blob/fc829f830c039e9356e4c968b350e47cc7a1807d/examples/serve/run_serve_qwen1.5b.sh) for convenience.
 
 ## Inference Engine Placement
 
@@ -62,8 +62,18 @@ All training models (policy, critic, reward, reference) share the same GPUs.
 
 The policy and critic models are not colocated, but fine-grained placement of the reference and reward models can be controlled with two additional parameters:
 
-- `trainer.placement.colocate_policy_ref`: Colocate policy and reference models (`true`) or place them on separate GPUs (`false`)
+- `trainer.placement.colocate_policy_ref`: Colocate policy and reference models (`true`, the default) or place them on separate GPUs (`false`)
 - `trainer.placement.colocate_critic_reward`: Colocate critic and reward models (`true`) or place them on separate GPUs (`false`)
+
+<Callout type="warn">
+`colocate_all=false` does not separate the policy and reference models by itself.
+With the default `colocate_policy_ref=true`, policy and reference run on the same physical GPUs
+(one shared placement group): every GPU holds one policy shard and one reference shard at the same time,
+and their combined size must fit in that GPU's memory.
+To give policy and reference their own GPUs
+(separate nodes with whole-node bundles), set `colocate_policy_ref=false`;
+also consider `trainer.policy.fsdp_config.cpu_offload=true`.
+</Callout>
 
 ## Hardware Configuration
 
@@ -94,4 +104,4 @@ generator:
    **Resource Allocation Guidelines**
    
    - When `colocate_all=true`, all training models should have identical node and GPU counts.
-   - When `generator.inference_engine.run_engines_locally=true`, the total number of GPUs used for Inference engines should match the total number of GPUs used for training models.
+   - When `generator.inference_engine.run_engines_locally=true`, the total number of GPUs used for the inference engines should match the total number of GPUs used for training models.

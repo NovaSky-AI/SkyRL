@@ -12,7 +12,7 @@
 
 - Compute config: `l4_ci` (referenced from `ci/anyscale_*.yaml`).
 - Cloud: `sky-anyscale-aws-us-east-1`.
-- Image: `novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8` (varies per workflow).
+- Image: `novaskyai/skyrl-train-ray-2.56.0-py3.12-cu12.8` (varies per workflow).
 - Logs: visit the Anyscale job page linked from the GitHub Actions step output. Stderr from Ray workers shows up under the head node logs, not the entrypoint logs.
 
 ## Adding a New Test to CI

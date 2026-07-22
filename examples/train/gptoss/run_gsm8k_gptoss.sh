@@ -16,6 +16,7 @@ NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
 
 INFERENCE_BACKEND="vllm"
+ENFORCE_EAGER=false
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -30,7 +31,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.flash_attn=false \
   trainer.remove_microbatch_padding=false \
   generator.inference_engine.tensor_parallel_size=4 \
-  generator.inference_engine.enforce_eager=true \
+  generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   trainer.epochs=20 \
   trainer.eval_batch_size=32 \
   trainer.eval_before_train=false \
@@ -48,7 +49,6 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=4 \
