@@ -15,6 +15,13 @@ from .cuda_ipc_strategy import (
     CudaIpcWeightTransferSender,
     CudaIpcWeightUpdateRequest,
 )
+from .sharded_rdt_strategy import (
+    RDT_TRAINER_ACTOR_NAME,
+    RdtProducerMixin,
+    ShardedRdtInitInfo,
+    ShardedRdtTransferStrategy,
+    ShardedRdtWeightTransferSender,
+)
 from .transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferSender,
@@ -40,6 +47,14 @@ def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> T
         The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
     """
     strategy = get_transfer_strategy(weight_sync_backend, colocate_all)
+    if strategy == "sharded_rdt":
+        # Ensure the engine is registered in vLLM's factory driver-side too
+        # (idempotent; no-op without vLLM). Worker-side registration happens via
+        # the worker-extension import.
+        from . import rdt_vllm_register
+
+        rdt_vllm_register.ensure_registered()
+        return ShardedRdtTransferStrategy
     if strategy == "ipc":
         return CudaIpcTransferStrategy
     return BroadcastTransferStrategy
@@ -47,6 +62,8 @@ def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> T
 
 def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
     """Get the appropriate transfer strategy string based on config."""
+    if weight_sync_backend in ("sharded_rdt", "rdt"):
+        return "sharded_rdt"
     if weight_sync_backend == "nccl" and colocate_all:
         return "ipc"
     return "nccl"
@@ -68,5 +85,11 @@ __all__ = [
     "BroadcastWeightTransferSender",
     "CudaIpcTransferStrategy",
     "CudaIpcWeightTransferSender",
+    "ShardedRdtInitInfo",
+    "ShardedRdtTransferStrategy",
+    "ShardedRdtWeightTransferSender",
+    "RdtProducerMixin",
+    "RDT_TRAINER_ACTOR_NAME",
+    "get_transfer_strategy",
     "get_transfer_strategy_cls",
 ]

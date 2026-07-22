@@ -140,6 +140,16 @@ class LayerwiseReloadWorkerMixin:
         if not getattr(self, "_skyrl_weight_update_active", False):
             raise RuntimeError("skyrl_start_weight_update must be called before skyrl_finish_weight_update.")
 
+        # The sharded_rdt engine defers its GPU post-processing (scatter/quant/
+        # kernel-copy) to background threads during update, so drain it here —
+        # before finalize, which needs every layer fully loaded + reset. No-op
+        # for the ipc/nccl engines (they process synchronously per chunk).
+        engine = getattr(self, "weight_transfer_engine", None)
+        if engine is not None and getattr(engine, "defers_processing", False):
+            drain_pending = getattr(engine, "drain_pending", None)
+            if drain_pending is not None:
+                drain_pending()
+
         if self._skyrl_is_checkpoint_format:
             # Lazy import: vllm is a Linux-only optional dependency, so this module stays importable on macOS / CI.
             from vllm.config import set_current_vllm_config
