@@ -42,6 +42,20 @@ Trains on 4 GPUs with the Megatron backend. Scale to larger models by
 increasing the parallelism degrees, e.g.
 `megatron_config.tensor_model_parallel_size=2 megatron_config.pipeline_model_parallel_size=2`.
 
+### GPU placement
+
+The number of GPUs a run uses is controlled by `placement.num_nodes` and
+`placement.num_gpus_per_node` (defaults: 1 node with 4 GPUs). For Megatron, the
+total world size (`num_nodes * num_gpus_per_node`) must be divisible by
+`tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size`;
+the remaining GPUs form the data-parallel dimension.
+
+On FSDP, the flat `sequence_parallel_size` key additionally enables
+Ulysses-style sequence parallelism for long sequences. It is FSDP-only and must
+stay `1` on Megatron -- not to be confused with
+`megatron_config.sequence_parallel_size`, which is Megatron's own TP-coupled
+sequence parallelism.
+
 All example scripts forward extra positional arguments as config overrides:
 
 ```bash
@@ -173,6 +187,47 @@ each bin becomes one row of the dispatched batch and one worker micro-batch.
 `max_length` to be set, and `max_tokens_per_microbatch` (if given) must be
 `>= max_length`.
 
+## Optimizer and learning rate
+
+The optimizer and LR schedule are configured under `optimizer_config.*`:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `optimizer_config.lr` | `1e-6` | Peak learning rate |
+| `optimizer_config.num_warmup_steps` | `0` | Steps of LR warmup |
+| `optimizer_config.scheduler` | `constant_with_warmup` | LR schedule |
+| `optimizer_config.weight_decay` | `1e-2` | AdamW weight decay |
+| `optimizer_config.adam_betas` | `[0.9, 0.999]` | AdamW betas |
+| `optimizer_config.max_grad_norm` | `1.0` | Gradient-norm clipping |
+
+The default learning rate is shared with the RL trainer and is on the low end
+for SFT -- typical SFT runs raise it (e.g. the LoRA example uses
+`optimizer_config.lr=2e-5`).
+
+<Callout type="info">
+On FSDP, `optimizer_config.scheduler` accepts any HuggingFace
+`transformers.get_scheduler` name (`linear`, `cosine`, ...). The Megatron
+backend currently supports only `constant_with_warmup`.
+</Callout>
+
+## LoRA fine-tuning
+
+Set `model.lora.rank > 0` to train LoRA adapters instead of the full model
+(the default, `rank=0`, trains all weights):
+
+```bash
+bash examples/train/sft/run_sft_lora.sh
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `model.lora.rank` | `0` | LoRA rank; `0` disables LoRA (full fine-tuning) |
+| `model.lora.alpha` | `16` | LoRA scaling factor |
+| `model.lora.dropout` | `0.0` | Dropout on the LoRA path |
+| `model.lora.target_modules` | `all-linear` | Which modules receive adapters |
+| `model.lora.exclude_modules` | `None` | Modules to exclude from adaptation |
+| `model.lora.init_method` | `kaiming` | Adapter weight init (`init_lora_weights` in PEFT for FSDP; `lora_A_init_method` for Megatron) |
+
 ## Checkpointing, resume, and HF export
 
 - `ckpt_path` / `ckpt_interval` -- write a distributed checkpoint every N steps
@@ -212,6 +267,9 @@ for the full set.
 |-----------|---------|-------------|
 | `strategy` | `megatron` | Backend: `megatron` or `fsdp` |
 | `model.path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path |
+| `model.lora.rank` | `0` | LoRA rank (`0` = full fine-tuning) |
+| `placement.num_nodes` / `placement.num_gpus_per_node` | `1` / `4` | GPUs allocated to the run |
+| `optimizer_config.lr` | `1e-6` | Peak learning rate |
 | `train_datasets` | `[yahma/alpaca-cleaned]` | Datasets to train on (mixed per `train_dataset_weights`) |
 | `train_dataset_splits` | `[train[:100]]` | Split/slice per training dataset |
 | `pretokenized_dataset_paths` | `None` | Local paths to pretokenized stores; skips tokenization, exclusive with `train_datasets` |
@@ -235,3 +293,5 @@ for the full set.
   and per-dataset evaluation.
 - [Using Custom Samplers](./custom_sampler) -- plug in your own stateful,
   checkpointable sampler (e.g. curriculum learning).
+- [Training Callbacks](./callbacks) -- hook into training events for custom
+  logging or callback-driven checkpointing/eval.
