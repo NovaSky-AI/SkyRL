@@ -642,6 +642,36 @@ class WorkerDispatch:
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
                 self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
                 self._finish_weight_sync()
+            elif self.cfg.generator.inference_engine.offload_kv_for_weight_sync:
+                # Sleep the engine to free GPU memory during the sync (wake weights,
+                # broadcast, wake KV cache) so gpu_memory_utilization can run higher.
+                if self.cfg.trainer.fully_async.enabled:
+                    # Generation overlaps the sync: KEEP-pause to freeze in-flight
+                    # requests, then drive the allocator directly so the scheduler is
+                    # not resumed on the weights wake. Offload the KV cache to CPU to
+                    # resume frozen requests without recompute, unless the sync will
+                    # reset the prefix cache anyway (clear_kv_cache_on_weight_sync).
+                    offload_kv = not self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync
+                    await self._inference_engine_client.pause_generation()
+                    try:
+                        await self._inference_engine_client.sleep_for_weight_sync(offload_kv=offload_kv)
+                        await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
+                        self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+                        self._finish_weight_sync()
+                        await self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"])
+                    finally:
+                        await self._inference_engine_client.resume_generation()
+                else:
+                    # Synchronous trainer: generation is complete at sync time, so there
+                    # are no in-flight requests to preserve. A plain sleep (discards KV,
+                    # aborts nothing) is enough -- same three-phase pattern as colocated.
+                    await self._inference_engine_client.sleep()
+                    try:
+                        await self._inference_engine_client.wake_up(tags=["weights"])
+                        self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+                        self._finish_weight_sync()
+                    finally:
+                        await self._inference_engine_client.wake_up(tags=["kv_cache"])
             else:
                 # Non-colocated single tenant: pause generation to prevent in-flight requests from
                 # reading partially-updated weights during the NCCL broadcast.

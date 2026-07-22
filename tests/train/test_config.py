@@ -329,6 +329,43 @@ def test_run_engines_locally_false_requires_external_endpoint():
         validate_inference_engine_cfg(cfg)
 
 
+def test_offload_kv_for_weight_sync_rejects_colocated():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    with pytest.raises(AssertionError, match="non-colocated weight sync only"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_offload_kv_for_weight_sync_rejects_lora():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    cfg.trainer.policy.model.lora.rank = 8
+    with pytest.raises(AssertionError, match="does not support LoRA"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_offload_kv_for_weight_sync_sync_trainer_ok():
+    # Non-fully-async (synchronous trainer) is supported: plain sleep, no in-flight.
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.fully_async.enabled = False
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("clear_kv_cache", [False, True])
+def test_offload_kv_for_weight_sync_async_ok(clear_kv_cache):
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    cfg.trainer.fully_async.enabled = True
+    cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = clear_kv_cache
+    # Both clear_kv_cache settings are supported now.
+    validate_inference_engine_cfg(cfg)
+
+
 def test_temperature_propagation():
     """Test that temperature is copied from generator to algorithm config in __post_init__."""
     cfg = SkyRLTrainConfig.from_cli_overrides(["generator.sampling_params.temperature=0.7"])
