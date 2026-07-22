@@ -653,7 +653,7 @@ class TestMergeStepwiseOutput:
             "rollout_metrics": None,
             "rollout_logprobs": None,
             "trajectory_ids": [tid],
-            "rollout_expert_indices": [[[[1, 2]]]],
+            "rollout_expert_indices": [np.asarray([[[1, 2]]], dtype=np.uint8)],
             "is_last_step": [True],
         }
         with pytest.raises(AssertionError, match="rollout_expert_indices not supported"):

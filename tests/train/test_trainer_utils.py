@@ -10,6 +10,7 @@ import tempfile
 from typing import Union
 from unittest.mock import Mock, mock_open, patch
 
+import numpy as np
 import pytest
 import ray
 
@@ -393,6 +394,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
         "stop_reasons": ["length"] * 6,
         "rollout_metrics": None,
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.25], [0.15, 0.25], [0.1, 0.2], [0.3, 0.4]],
+        "rollout_expert_indices": [np.asarray([[[i, i + 1]]], dtype=np.uint8) for i in range(6)],
     }
     uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
@@ -408,6 +410,12 @@ def test_handle_replace_sampling_sufficient_good_samples():
     assert len(result_output["rewards"]) == 6
     assert len(result_output["rollout_logprobs"]) == 6
     assert len(result_uids) == 6
+    route_by_response = {
+        tuple(response): routes
+        for response, routes in zip(generator_output["response_ids"], generator_output["rollout_expert_indices"])
+    }
+    for response, routes in zip(result_output["response_ids"], result_output["rollout_expert_indices"]):
+        assert np.array_equal(routes, route_by_response[tuple(response)])
 
     # Check that bad uid2 samples were replaced with good samples
     uid2_indices = [i for i, uid in enumerate(result_uids) if uid == "uid2"]
@@ -636,6 +644,7 @@ def test_handle_filter_sampling_single_sample_per_prompt():
 
 def test_filter_generator_output():
     """Test the filter_generator_output utility function."""
+    routes = [np.asarray([[[i, i + 1]]], dtype=np.uint8) for i in range(3)]
     generator_output = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
         "response_ids": [[7, 8], [9, 10], [11, 12]],
@@ -644,6 +653,7 @@ def test_filter_generator_output():
         "stop_reasons": ["length", "length", "stop"],
         "rollout_metrics": {"metric": "value"},
         "rollout_logprobs": [[0.16, 0.4], [0.1, 0.2], [0.3, 0.4]],
+        "rollout_expert_indices": routes,
     }
     kept_indices = [0, 2]  # Keep first and third samples
 
@@ -656,6 +666,8 @@ def test_filter_generator_output():
     assert filtered["stop_reasons"] == ["length", "stop"]
     assert filtered["rollout_metrics"] == {"metric": "value"}
     assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
+    assert filtered["rollout_expert_indices"][0] is routes[0]
+    assert filtered["rollout_expert_indices"][1] is routes[2]
 
 
 def test_zero_variance_filter_mixed_groups():
