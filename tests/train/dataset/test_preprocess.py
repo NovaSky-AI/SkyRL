@@ -4,11 +4,13 @@ uv run --isolated --extra dev pytest tests/train/dataset/test_preprocess.py
 
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
 )
 
 
@@ -54,6 +56,119 @@ def tokenizer():
     mock_tokenizer.batch_decode.side_effect = fake_tokenizer_decode_list
 
     return mock_tokenizer
+
+
+def test_router_padding_mask_marks_left_padding_and_uncaptured_suffix():
+    attention_mask = torch.tensor([[0, 1, 1, 1], [1, 1, 1, 1]])
+
+    mask = make_router_padding_mask(attention_mask, [2, 4])
+
+    assert mask.tolist() == [[True, False, False, True], [False, False, False, False]]
+
+
+def test_routed_expert_tensor_uses_unique_dummy_routes(tokenizer):
+    routes = [
+        np.asarray(
+            [
+                [[2, 3], [4, 5]],
+                [[6, 7], [0, 1]],
+            ],
+            dtype=np.uint8,
+        ),
+        np.asarray(
+            [
+                [[1, 2], [3, 4]],
+                [[5, 6], [7, 0]],
+                [[2, 4], [6, 7]],
+            ],
+            dtype=np.uint8,
+        ),
+    ]
+
+    *_, routed = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts=[[10], [20]],
+        responses=[[11, 12], [21, 22]],
+        rewards=[[0.0, 0.0], [0.0, 0.0]],
+        loss_masks=[[1, 1], [1, 1]],
+        rollout_expert_indices=routes,
+    )
+
+    assert routed.shape == (2, 3, 2, 2)
+    assert routed.dtype == torch.uint8
+    assert routed[0, 2].tolist() == [[0, 1], [0, 1]]
+
+
+@pytest.mark.parametrize(
+    ("max_expert_id", "source_dtype", "expected_dtype"),
+    [(2**8, np.int16, torch.int16), (2**15, np.int32, torch.int32)],
+)
+def test_routed_expert_tensor_promotes_mixed_batch_dtype(
+    tokenizer,
+    max_expert_id,
+    source_dtype,
+    expected_dtype,
+):
+    routes = [
+        np.asarray([[[1, 2]]], dtype=np.uint8),
+        np.asarray([[[max_expert_id, max_expert_id + 1]]], dtype=source_dtype),
+    ]
+
+    *_, routed = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts=[[10], [20]],
+        responses=[[11], [21]],
+        rewards=[[0.0], [0.0]],
+        loss_masks=[[1], [1]],
+        rollout_expert_indices=routes,
+    )
+
+    assert routed.dtype == expected_dtype
+    assert routed[1, 0].tolist() == [[max_expert_id, max_expert_id + 1]]
+
+
+def test_routed_expert_tensor_accepts_read_only_arrays(tokenizer):
+    routes = np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)
+    routes.flags.writeable = False
+
+    *_, routed = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts=[[10]],
+        responses=[[11]],
+        rewards=[[0.0]],
+        loss_masks=[[1]],
+        rollout_expert_indices=[routes],
+    )
+
+    assert routed.dtype == torch.uint8
+    assert routed.tolist() == [[[[1, 2]], [[3, 4]]]]
+
+
+def test_routed_expert_tensor_rejects_nested_lists(tokenizer):
+    with pytest.raises(TypeError, match="NumPy arrays"):
+        convert_prompts_responses_to_batch_tensors(
+            tokenizer,
+            prompts=[[10]],
+            responses=[[11]],
+            rewards=[[0.0]],
+            loss_masks=[[1]],
+            rollout_expert_indices=[[[[1, 2]], [[3, 4]]]],
+        )
+
+
+@pytest.mark.parametrize("dtype", [np.uint16, np.int64])
+def test_routed_expert_tensor_rejects_unsupported_dtypes(tokenizer, dtype):
+    routes = np.asarray([[[1, 2]], [[3, 4]]], dtype=dtype)
+
+    with pytest.raises(TypeError, match="Unsupported routed expert dtype"):
+        convert_prompts_responses_to_batch_tensors(
+            tokenizer,
+            prompts=[[10]],
+            responses=[[11]],
+            rewards=[[0.0]],
+            loss_masks=[[1]],
+            rollout_expert_indices=[routes],
+        )
 
 
 def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):
@@ -290,8 +405,8 @@ def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
     topk = 2
     # rollout_expert_indices[i] has shape [prompt_len_i + response_len_i, num_layers, topk]
     # Sample 0: 5 tokens, sample 1: 6 tokens
-    rei_0 = [[[1, 2]] * num_layers for _ in range(5)]  # 5 tokens
-    rei_1 = [[[3, 4]] * num_layers for _ in range(6)]  # 6 tokens
+    rei_0 = np.asarray([[[1, 2]] * num_layers for _ in range(5)], dtype=np.uint8)  # 5 tokens
+    rei_1 = np.asarray([[[3, 4]] * num_layers for _ in range(6)], dtype=np.uint8)  # 6 tokens
 
     seq, attn, action, rew, lm, lp, rei_tensor = convert_prompts_responses_to_batch_tensors(
         tokenizer,
@@ -306,20 +421,21 @@ def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
     # Shape: [batch=2, max_total=6, layers=2, topk=2]
     assert rei_tensor.shape == (2, 6, num_layers, topk)
 
-    # Sample 0 has total=5, so 1 left-pad position → first position should be zeros
-    assert rei_tensor[0, 0].tolist() == [[0, 0]] * num_layers  # padding
+    dummy_routes = [[0, 1]] * num_layers
+    # Sample 0 has total=5, so the first position uses unique dummy routes.
+    assert rei_tensor[0, 0].tolist() == dummy_routes
     assert rei_tensor[0, 1].tolist() == [[1, 2]] * num_layers  # first real token
 
     # Sample 1 has total=6, no padding
     assert rei_tensor[1, 0].tolist() == [[3, 4]] * num_layers  # first real token
 
-    # Non-zero positions in rei_tensor align exactly with attention_mask==1
+    # Dummy positions in rei_tensor align exactly with attention_mask==0.
     for i in range(2):
         for pos in range(6):
             if attn[i, pos] == 0:
-                assert rei_tensor[i, pos].tolist() == [[0, 0]] * num_layers
+                assert rei_tensor[i, pos].tolist() == dummy_routes
             else:
-                assert rei_tensor[i, pos].tolist() != [[0, 0]] * num_layers
+                assert rei_tensor[i, pos].tolist() != dummy_routes
 
 
 def test_rollout_expert_indices_none_when_not_provided(tokenizer):
