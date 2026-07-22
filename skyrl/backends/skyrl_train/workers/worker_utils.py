@@ -9,6 +9,7 @@ from skyrl.backends.skyrl_train.training_batch import TensorBatch, TrainingInput
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
+from skyrl.utils.routed_experts import make_replay_padding_indices
 
 # Metrics that end in `_loss` but are plain per-token MEANS, not pre-scaled minibatch sums.
 # The `sum_loss_metrics` convention sums every `_loss` key because the *policy* losses are
@@ -162,6 +163,7 @@ class BaseBatchIterator:
             num_actions=batch.metadata["response_length"],  # int
             rollout_logprobs=batch.get("rollout_logprobs"),
             rollout_expert_indices=batch.get("rollout_expert_indices"),
+            router_padding_mask=batch.get("router_padding_mask"),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},
@@ -325,9 +327,13 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
         if self.data.get("rollout_expert_indices") is not None:
             ref_tensor = self.data["rollout_expert_indices"]
-            data["rollout_expert_indices"] = torch.zeros(
-                (batch_size, *ref_tensor.shape[1:]), dtype=ref_tensor.dtype, device=device
+            data["rollout_expert_indices"] = make_replay_padding_indices(
+                (batch_size, *ref_tensor.shape[1:]),
+                dtype=ref_tensor.dtype,
+                device=device,
             )
+        if self.data.get("router_padding_mask") is not None:
+            data["router_padding_mask"] = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
         data.metadata = {}
         if self.data.metadata:
             data.metadata.update(self.data.metadata)
