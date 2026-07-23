@@ -4,16 +4,24 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
+    MXFP8_1X32,
+    SERIALIZED_MXFP8,
     SKYRL_BATCHED_MOE_FP8_PREFIX,
     SerializedFp8Config,
     batched_blockwise_cast_to_fp8,
     batched_moe_expert_spec,
+    batched_mxfp8_cast_to_fp8,
     blockwise_cast_to_fp8,
+    get_moe_architecture_spec,
     get_qwen35_fp8_ignored_layers,
     get_serialized_fp8_quantization_config,
+    get_serialized_mxfp8_quantization_config,
+    is_per_expert_moe_weight,
     is_quantizable_weight,
     is_quantizable_weight_shape,
     iter_serialized_fp8_tensors,
+    mxfp8_cast_to_fp8,
+    serialized_fp8_config_for_mode,
 )
 
 
@@ -130,6 +138,30 @@ def test_vllm_serialized_fp8_quantization_config():
     }
 
 
+def test_vllm_serialized_mxfp8_quantization_config_is_expert_only():
+    config = get_serialized_mxfp8_quantization_config()
+
+    assert config["quant_method"] == "modelopt"
+    assert config["quant_algo"] == "MXFP8"
+    assert "*.self_attn.*" in config["ignore"]
+    assert "*.mlp.shared_expert*" in config["ignore"]
+    assert not any(pattern == "*.mlp.experts*" for pattern in config["ignore"])
+
+
+def test_serialized_mxfp8_mode_selects_registered_expert_layout():
+    config = serialized_fp8_config_for_mode(SERIALIZED_MXFP8, model_type="qwen3_moe")
+
+    assert config.scaling_mode == MXFP8_1X32
+    assert config.expert_only is True
+    assert config.weight_block_size == (1, 32)
+    assert get_moe_architecture_spec(config.model_type).batched is False
+
+
+def test_serialized_mxfp8_rejects_unknown_model_type():
+    with pytest.raises(ValueError, match="does not support model_type"):
+        serialized_fp8_config_for_mode(SERIALIZED_MXFP8, model_type="llama")
+
+
 def test_qwen35_fp8_ignored_layers_use_linear_attention_layers():
     hf_config = SimpleNamespace(
         model_type="qwen3_5_text",
@@ -209,6 +241,43 @@ def test_batched_blockwise_cast_matches_independent_expert_casts():
         assert torch.equal(scale_batched[expert_id], scale_expected)
 
 
+def test_mxfp8_cast_emits_row_major_e8m0_scales():
+    weight = torch.cat(
+        (
+            torch.full((2, 32), 1.0, dtype=torch.bfloat16),
+            torch.full((2, 32), 8.0, dtype=torch.bfloat16),
+        ),
+        dim=1,
+    )
+
+    q_weight, scale = mxfp8_cast_to_fp8(weight)
+    expected_weight, expected_scale = blockwise_cast_to_fp8(weight, (1, 32), power_2_scale=True)
+
+    assert q_weight.dtype == torch.float8_e4m3fn
+    assert q_weight.shape == weight.shape
+    assert scale.dtype == torch.uint8
+    assert scale.shape == (2, 2)
+    assert torch.equal(scale, torch.tensor([[119, 122], [119, 122]], dtype=torch.uint8))
+    assert torch.equal(q_weight.view(torch.uint8), expected_weight.view(torch.uint8))
+    assert torch.equal(torch.exp2(scale.float() - 127), expected_scale)
+
+
+def test_batched_mxfp8_cast_matches_batched_blockwise_cast():
+    torch.manual_seed(17)
+    weight = torch.randn(5, 96, 64, dtype=torch.bfloat16)
+
+    q_batched, scale_batched = batched_mxfp8_cast_to_fp8(weight, expert_batch_size=2)
+    q_expected, scale_expected = batched_blockwise_cast_to_fp8(
+        weight,
+        (1, 32),
+        power_2_scale=True,
+        expert_batch_size=2,
+    )
+
+    assert torch.equal(q_batched.view(torch.uint8), q_expected.view(torch.uint8))
+    assert torch.equal(torch.exp2(scale_batched.float() - 127), scale_expected)
+
+
 def test_batched_moe_experts_remain_fused_with_pow2_scales():
     num_experts, moe_inter, hidden = 3, 128, 256
     config = SerializedFp8Config(weight_block_size=(128, 128), power_2_scale=True)
@@ -245,6 +314,57 @@ def test_batched_moe_experts_remain_fused_with_pow2_scales():
         f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.down_proj.weight_scale_inv",
     }
     assert emitted_d[down_weight_name].shape == down.shape
+
+
+def test_batched_qwen35_moe_experts_serialize_as_mxfp8():
+    config = serialized_fp8_config_for_mode(SERIALIZED_MXFP8, model_type="qwen3_5_moe_text")
+    base = "model.language_model.layers.7.mlp.experts"
+    gate_up = torch.randn(3, 256, 64, dtype=torch.bfloat16)
+
+    emitted = dict(iter_serialized_fp8_tensors(f"{base}.gate_up_proj", gate_up, torch.bfloat16, config))
+
+    gate_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight"
+    assert emitted[gate_name].dtype == torch.float8_e4m3fn
+    assert emitted[f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight_scale"].dtype == torch.uint8
+    assert emitted[f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight_scale"].shape == (3, 128, 2)
+
+
+def test_qwen3_per_expert_weights_serialize_as_mxfp8_only():
+    config = serialized_fp8_config_for_mode(SERIALIZED_MXFP8, model_type="qwen3_moe")
+    expert_name = "model.layers.2.mlp.experts.4.gate_proj.weight"
+    expert = torch.randn(128, 64, dtype=torch.bfloat16)
+    attention = torch.randn(128, 64, dtype=torch.bfloat16)
+
+    assert is_per_expert_moe_weight(expert_name, "qwen3_moe")
+    expert_tensors = dict(iter_serialized_fp8_tensors(expert_name, expert, torch.bfloat16, config))
+    attention_tensors = list(
+        iter_serialized_fp8_tensors(
+            "model.layers.2.self_attn.q_proj.weight",
+            attention,
+            torch.bfloat16,
+            config,
+        )
+    )
+
+    assert expert_tensors[expert_name].dtype == torch.float8_e4m3fn
+    assert expert_tensors["model.layers.2.mlp.experts.4.gate_proj.weight_scale"].dtype == torch.uint8
+    assert [(name, tensor.dtype) for name, tensor in attention_tensors] == [
+        ("model.layers.2.self_attn.q_proj.weight", torch.bfloat16)
+    ]
+
+
+def test_serialized_mxfp8_rejects_unregistered_expert_export_name():
+    config = serialized_fp8_config_for_mode(SERIALIZED_MXFP8, model_type="qwen3_moe")
+
+    with pytest.raises(ValueError, match="Unsupported routed-expert export tensor"):
+        list(
+            iter_serialized_fp8_tensors(
+                "model.layers.2.mlp.experts.unexpected.weight",
+                torch.randn(128, 64),
+                torch.bfloat16,
+                config,
+            )
+        )
 
 
 def test_batched_moe_gate_up_rejects_odd_output_dimension():

@@ -107,6 +107,7 @@ class ExpertMxfp8Config(BaseConfig):
     enabled: bool = False
     training: bool = True
     rollout: bool = True
+    persistent: bool = False
 
 
 @dataclass
@@ -756,8 +757,9 @@ class InferenceEngineConfig(BaseConfig):
     model_dtype: str = "bfloat16"
     """Should match the dtype used by the inference engine."""
     fp8_weight_sync_mode: Optional[str] = None
-    """Optional rollout weight format. ``"serialized_blockwise"`` sends FP8
-    checkpoint weights and scales instead of ``model_dtype`` tensors."""
+    """Optional rollout weight format. ``"serialized_blockwise"`` serializes
+    supported linears with 128x128 scales; ``"serialized_mxfp8"`` serializes
+    routed experts with 1x32 E8M0 scales."""
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"
@@ -1061,6 +1063,13 @@ class TrainerConfig(BaseConfig):
                 raise ValueError("Expert MXFP8 is only supported with trainer.strategy=megatron")
             if not expert_mxfp8.training and not expert_mxfp8.rollout:
                 raise ValueError("Expert MXFP8 must enable training, rollout, or both")
+            if expert_mxfp8.persistent:
+                if not expert_mxfp8.training:
+                    raise ValueError("Persistent expert MXFP8 requires expert_mxfp8.training=true")
+                if not self.policy.megatron_config.ddp_config.fp8_param_gather:
+                    raise ValueError(
+                        "Persistent expert MXFP8 requires policy.megatron_config.ddp_config.fp8_param_gather=true"
+                    )
             if self.policy.model.fake_int4_qat.enabled:
                 raise ValueError("Expert MXFP8 and fake INT4 QAT are mutually exclusive")
             if expert_mxfp8.training:

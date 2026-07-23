@@ -23,6 +23,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
 from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
     SERIALIZED_BLOCKWISE_FP8,
+    SERIALIZED_MXFP8,
 )
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
@@ -538,18 +539,19 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     """
     ie_cfg = cfg.generator.inference_engine
 
-    if ie_cfg.fp8_weight_sync_mode not in (None, SERIALIZED_BLOCKWISE_FP8):
+    serialized_fp8_modes = (SERIALIZED_BLOCKWISE_FP8, SERIALIZED_MXFP8)
+    if ie_cfg.fp8_weight_sync_mode not in (None, *serialized_fp8_modes):
         raise ValueError(
             f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}; "
-            f"expected {SERIALIZED_BLOCKWISE_FP8!r} or None"
+            f"expected one of {serialized_fp8_modes!r} or None"
         )
-    if ie_cfg.fp8_weight_sync_mode == SERIALIZED_BLOCKWISE_FP8:
+    if ie_cfg.fp8_weight_sync_mode in serialized_fp8_modes:
         if cfg.trainer.strategy != "megatron":
-            raise ValueError("serialized_blockwise FP8 weight sync requires trainer.strategy='megatron'")
+            raise ValueError(f"{ie_cfg.fp8_weight_sync_mode} FP8 weight sync requires trainer.strategy='megatron'")
         lora_cfg = cfg.trainer.policy.model.lora
         if lora_cfg.rank > 0 and not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
             raise ValueError(
-                "serialized_blockwise FP8 weight sync requires full-weight updates; "
+                f"{ie_cfg.fp8_weight_sync_mode} FP8 weight sync requires full-weight updates; "
                 "Megatron LoRA with merge_lora=false syncs adapters only"
             )
 
@@ -633,8 +635,7 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
 
     if not cfg.generator.inference_engine.run_engines_locally and not (has_external_proxy or has_external_servers):
         raise ValueError(
-            "generator.inference_engine.run_engines_locally=false requires "
-            "external_proxy_url or external_server_urls."
+            "generator.inference_engine.run_engines_locally=false requires external_proxy_url or external_server_urls."
         )
 
 
@@ -856,7 +857,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if fp8_contract_enabled or configured_scale_mode is not None:
         scale_mode = configured_scale_mode or "1"
         if scale_mode not in {"0", "1"}:
-            raise ValueError("NVTE_FP8_BLOCK_SCALING_FP32_SCALES must be '0' (power-of-2) " "or '1' (FP32 scales).")
+            raise ValueError("NVTE_FP8_BLOCK_SCALING_FP32_SCALES must be '0' (power-of-2) or '1' (FP32 scales).")
 
         if scale_mode == "0" and (policy_fp8_param or ref_fp8_param):
             raise ValueError(
@@ -1097,7 +1098,7 @@ def str_to_torch_dtype(dtype: str) -> torch.dtype:
 
 
 def format_gib(mem_bytes: int) -> str:
-    return f"{mem_bytes / (1024 ** 3):.2f} GiB"
+    return f"{mem_bytes / (1024**3):.2f} GiB"
 
 
 def print_mem(tag: str, mem: dict):

@@ -33,6 +33,48 @@ def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monke
     }
 
 
+def test_serialized_mxfp8_weight_sync_configures_modelopt_experts(monkeypatch):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(
+        inference_utils,
+        "_serialized_mxfp8_quantization_config",
+        lambda _model_path: {
+            "quant_method": "modelopt",
+            "quant_algo": "MXFP8",
+            "ignore": ["*.self_attn.*"],
+        },
+    )
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.fp8_weight_sync_mode = "serialized_mxfp8"
+    engine_kwargs = {}
+
+    _apply_serialized_fp8_weight_sync_defaults(ie_cfg, engine_kwargs, model_path="qwen3-moe-test")
+
+    assert engine_kwargs == {
+        "quantization": "modelopt_mxfp8",
+        "load_format": "dummy",
+        "hf_overrides": {
+            "quantization_config": {
+                "quant_method": "modelopt",
+                "quant_algo": "MXFP8",
+                "ignore": ["*.self_attn.*"],
+            }
+        },
+    }
+
+
+def test_serialized_mxfp8_requires_bfloat16():
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.fp8_weight_sync_mode = "serialized_mxfp8"
+    ie_cfg.model_dtype = "float16"
+
+    with pytest.raises(ValueError, match="model_dtype='bfloat16'"):
+        _apply_serialized_fp8_weight_sync_defaults(ie_cfg, {}, model_path="qwen3-moe-test")
+
+
 @pytest.mark.parametrize(
     "engine_kwargs",
     [
@@ -120,6 +162,25 @@ def test_serialized_fp8_rejects_unsupported_model_layout(monkeypatch):
         )
 
 
+def test_serialized_mxfp8_rejects_unsupported_model_layout(monkeypatch):
+    import transformers
+
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "serialized_mxfp8"
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="llama"),
+    )
+
+    with pytest.raises(ValueError, match="does not support model_type"):
+        _apply_serialized_fp8_weight_sync_defaults(
+            cfg.generator.inference_engine,
+            {},
+            model_path="unsupported-model",
+        )
+
+
 @pytest.mark.vllm
 def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     import vllm.platforms
@@ -136,7 +197,13 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.served_model_name = "served-alias"
     cfg.generator.inference_engine.engine_init_kwargs = {
-        "hf_overrides": {"rope_parameters": {"rope_type": "linear", "factor": 2.0, "rope_theta": 10000.0}}
+        "hf_overrides": {
+            "rope_parameters": {
+                "rope_type": "linear",
+                "factor": 2.0,
+                "rope_theta": 10000.0,
+            }
+        }
     }
     args = build_vllm_cli_args(cfg)
 
@@ -144,7 +211,11 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     assert args.model == cfg.trainer.policy.model.path
     assert args.served_model_name == ["served-alias"]
     assert args.tensor_parallel_size == cfg.generator.inference_engine.tensor_parallel_size
-    assert args.hf_overrides["rope_parameters"] == {"rope_type": "linear", "factor": 2.0, "rope_theta": 10000.0}
+    assert args.hf_overrides["rope_parameters"] == {
+        "rope_type": "linear",
+        "factor": 2.0,
+        "rope_theta": 10000.0,
+    }
     assert vllm.platforms.current_platform.device_type == "cuda"
 
     # NOTE: the MTP speculative_config wiring test lives in

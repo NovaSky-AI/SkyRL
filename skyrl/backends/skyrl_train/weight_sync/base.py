@@ -84,7 +84,12 @@ class WeightChunk:
 
     def __post_init__(self):
         """Validate that all input lists have the same length."""
-        lengths = [len(self.names), len(self.dtypes), len(self.shapes), len(self.tensors)]
+        lengths = [
+            len(self.names),
+            len(self.dtypes),
+            len(self.shapes),
+            len(self.tensors),
+        ]
         if len(set(lengths)) != 1:
             raise ValueError(
                 f"All lists must have the same length. Got names={len(self.names)}, "
@@ -120,7 +125,7 @@ def iter_single_dtype_chunks(chunk: WeightChunk) -> Iterator[WeightChunk]:
     """Yield dtype-homogeneous subchunks in first-seen dtype order.
 
     CUDA IPC packs tensors into a typed buffer, while serialized FP8 chunks mix
-    FP8 weights, FP32 scales, and unquantized BF16 tensors. vLLM's NCCL path
+    FP8 weights, scale tensors, and unquantized BF16 tensors. vLLM's NCCL path
     byte-packs mixed dtypes and does not require this split.
     """
     by_dtype: Dict[torch.dtype, Dict[str, list]] = {}

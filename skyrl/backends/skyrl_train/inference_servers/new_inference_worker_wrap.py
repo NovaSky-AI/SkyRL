@@ -46,6 +46,9 @@ _BATCHED_MOE_TARGETS = {
     ".experts.gate_proj.weight_scale_inv": (".experts.w13_weight_scale_inv", "w1"),
     ".experts.up_proj.weight_scale_inv": (".experts.w13_weight_scale_inv", "w3"),
     ".experts.down_proj.weight_scale_inv": (".experts.w2_weight_scale_inv", "w2"),
+    ".experts.gate_proj.weight_scale": (".experts.w13_weight_scale", "w1"),
+    ".experts.up_proj.weight_scale": (".experts.w13_weight_scale", "w3"),
+    ".experts.down_proj.weight_scale": (".experts.w2_weight_scale", "w2"),
 }
 
 
@@ -193,7 +196,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
-                "Weight transfer not configured. " "Please set weight_transfer_config to enable weight transfer."
+                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
             )
 
         # --- unpack SkyRL packed CUDA IPC format ---
@@ -209,7 +212,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         device_index = torch.cuda.current_device()
         physical_gpu_id = cuda_uuid_to_str(torch.cuda.get_device_properties(device_index).uuid)
         if physical_gpu_id not in handles:
-            raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. " f"Available: {list(handles)}")
+            raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. Available: {list(handles)}")
         func, args = handles[physical_gpu_id]
         # Remap device index to the LOCAL current-device.
         list_args = list(args)

@@ -36,11 +36,32 @@ def test_expert_recipe_targets_only_routed_experts():
     assert not is_routed_expert_linear("decoder.layers.0.self_attention.linear_qkv")
 
 
+def test_persistent_expert_recipe_enables_fp8_params_only_for_routed_experts():
+    default_recipe = expert_mxfp8_recipe_dict()
+    persistent_recipe = expert_mxfp8_recipe_dict(persistent=True)
+
+    for phase in ("training_recipe", "evaluation_recipe"):
+        assert "fp8_param" not in default_recipe["configs"]["expert_mxfp8"][phase]
+        assert persistent_recipe["configs"]["expert_mxfp8"][phase]["fp8_param"] is True
+        assert "fp8_param" not in persistent_recipe["configs"]["high_precision"][phase]
+
+
 def test_rollout_config_enables_expert_only_mxfp8():
     args = Namespace()
     apply_expert_mxfp8_rollout_config(args, _enabled_config(), {})
     assert args.quantization == "online"
     assert args.quantization_config == {"moe": "mxfp8"}
+
+
+def test_rollout_config_preserves_serialized_mxfp8_settings():
+    cfg = _enabled_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "serialized_mxfp8"
+    args = Namespace()
+
+    apply_expert_mxfp8_rollout_config(args, cfg, {"quantization": "modelopt_mxfp8"})
+
+    assert not hasattr(args, "quantization")
+    assert not hasattr(args, "quantization_config")
 
 
 def test_rollout_config_rejects_float32():

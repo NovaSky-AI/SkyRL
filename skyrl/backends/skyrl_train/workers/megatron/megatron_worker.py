@@ -51,8 +51,9 @@ from skyrl.backends.skyrl_train.weight_sync import (
     WeightExtractor,
 )
 from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
-    SerializedFp8Config,
+    get_hf_model_type,
     iter_serialized_fp8_tensors,
+    serialized_fp8_config_for_mode,
     should_use_serialized_fp8,
 )
 from skyrl.backends.skyrl_train.workers.megatron._fp8_block_amax_epsilon_patch import (
@@ -121,6 +122,7 @@ class MegatronWeightExtractor(WeightExtractor):
         bucket_size_threshold_GB: float = 1.0,
         training_dtype: torch.dtype = torch.bfloat16,
         fp8_weight_sync_mode: Optional[str] = None,
+        model_type: Optional[str] = None,
     ):
         self.bridge = bridge
         self.actor_module = actor_module
@@ -130,7 +132,10 @@ class MegatronWeightExtractor(WeightExtractor):
         if fp8_weight_sync_mode is None:
             self.serialized_fp8_config = None
         elif should_use_serialized_fp8(fp8_weight_sync_mode):
-            self.serialized_fp8_config = SerializedFp8Config()
+            self.serialized_fp8_config = serialized_fp8_config_for_mode(
+                fp8_weight_sync_mode,
+                model_type=model_type,
+            )
         else:
             raise ValueError(f"Unsupported fp8_weight_sync_mode={fp8_weight_sync_mode!r}")
 
@@ -428,6 +433,7 @@ class MegatronWorker:
         language_model_only=False,
         bridge_weights_path=None,
         expert_mxfp8=False,
+        expert_mxfp8_persistent=False,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -469,7 +475,7 @@ class MegatronWorker:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
                 transformer_config_kwargs[key] = None
 
-        fp8_param_enabled = is_fp8_param_enabled(transformer_config_kwargs)
+        fp8_param_enabled = is_fp8_param_enabled(transformer_config_kwargs) or expert_mxfp8_persistent
         bridge_source = bridge_weights_path or model_path
         if bridge_weights_path:
             logger.info(
@@ -546,7 +552,7 @@ class MegatronWorker:
                 configure_expert_mxfp8_provider,
             )
 
-            configure_expert_mxfp8_provider(provider)
+            configure_expert_mxfp8_provider(provider, persistent=expert_mxfp8_persistent)
 
         # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
         if not enable_mtp:
@@ -1004,6 +1010,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bridge_weights_path=bridge_weights_path,
             enable_mtp=self.cfg.mtp.enabled,
             expert_mxfp8=expert_mxfp8.enabled and expert_mxfp8.training,
+            expert_mxfp8_persistent=expert_mxfp8.enabled and expert_mxfp8.training and expert_mxfp8.persistent,
         )
 
         if self.enable_router_replay:
@@ -1063,7 +1070,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
             fp8_param_masters = initialize_fp8_param_optimizer_masters(
                 self.optimizer,
-                fp8_param=is_fp8_param_enabled(self.cfg.policy.megatron_config.transformer_config_kwargs),
+                fp8_param=is_fp8_param_enabled(self.cfg.policy.megatron_config.transformer_config_kwargs)
+                or (expert_mxfp8.enabled and expert_mxfp8.training and expert_mxfp8.persistent),
                 fp8_param_gather=self.cfg.policy.megatron_config.ddp_config.fp8_param_gather,
                 state_dict=self._fp8_param_unquantized_state_dict,
             )
@@ -1484,6 +1492,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
             fp8_weight_sync_mode=inference_engine_cfg.fp8_weight_sync_mode,
+            model_type=get_hf_model_type(self.strategy.hf_config),
         )
 
     async def _save_lora_adapters_and_sync(

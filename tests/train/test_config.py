@@ -191,19 +191,21 @@ def test_serialized_fp8_runtime_defaults_to_fp32_scales(monkeypatch):
     assert env_vars["VLLM_USE_DEEP_GEMM_E8M0"] == "0"
 
 
-def test_serialized_fp8_weight_sync_requires_megatron():
+@pytest.mark.parametrize("mode", ["serialized_blockwise", "serialized_mxfp8"])
+def test_serialized_fp8_weight_sync_requires_megatron(mode):
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "fsdp"
-    cfg.generator.inference_engine.fp8_weight_sync_mode = "serialized_blockwise"
+    cfg.generator.inference_engine.fp8_weight_sync_mode = mode
 
     with pytest.raises(ValueError, match="requires trainer.strategy='megatron'"):
         validate_inference_engine_cfg(cfg)
 
 
-def test_serialized_fp8_weight_sync_rejects_adapter_only_megatron_lora():
+@pytest.mark.parametrize("mode", ["serialized_blockwise", "serialized_mxfp8"])
+def test_serialized_fp8_weight_sync_rejects_adapter_only_megatron_lora(mode):
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
-    cfg.generator.inference_engine.fp8_weight_sync_mode = "serialized_blockwise"
+    cfg.generator.inference_engine.fp8_weight_sync_mode = mode
     cfg.trainer.policy.model.lora.rank = 8
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
 
@@ -537,6 +539,7 @@ def test_expert_mxfp8_defaults():
     assert mxfp8.enabled is False
     assert mxfp8.training is True
     assert mxfp8.rollout is True
+    assert mxfp8.persistent is False
 
 
 def test_expert_mxfp8_cli_overrides():
@@ -545,10 +548,37 @@ def test_expert_mxfp8_cli_overrides():
             "trainer.strategy=megatron",
             "trainer.policy.model.expert_mxfp8.enabled=true",
             "trainer.policy.model.expert_mxfp8.rollout=false",
+            "trainer.policy.model.expert_mxfp8.persistent=true",
+            "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true",
         ]
     )
     assert cfg.trainer.policy.model.expert_mxfp8.enabled is True
     assert cfg.trainer.policy.model.expert_mxfp8.rollout is False
+    assert cfg.trainer.policy.model.expert_mxfp8.persistent is True
+
+
+def test_persistent_expert_mxfp8_requires_training():
+    with pytest.raises(ValueError, match="training=true"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+                "trainer.policy.model.expert_mxfp8.training=false",
+                "trainer.policy.model.expert_mxfp8.persistent=true",
+                "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true",
+            ]
+        )
+
+
+def test_persistent_expert_mxfp8_requires_fp8_param_gather():
+    with pytest.raises(ValueError, match="fp8_param_gather=true"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+                "trainer.policy.model.expert_mxfp8.persistent=true",
+            ]
+        )
 
 
 def test_expert_mxfp8_requires_megatron():

@@ -53,7 +53,25 @@ def test_batched_moe_scale_maps_to_fused_scale_parameter():
         apply_list=lambda names: [names[0].replace("model.language_model.", "language_model.model.", 1)]
     )
     model = SimpleNamespace(hf_to_vllm_mapper=mapper)
-    wire_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}" "model.language_model.layers.2.mlp.experts.up_proj.weight_scale_inv"
+    wire_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}model.language_model.layers.2.mlp.experts.up_proj.weight_scale_inv"
 
     assert _load_batched_moe_fp8_tensor(model, {target_name: param}, wire_name, loaded_weight)
     assert calls == [(target_name, "w3", (2, 3, 3))]
+
+
+def test_batched_moe_mxfp8_scale_maps_to_modelopt_scale_parameter():
+    calls = []
+
+    def weight_loader(param, loaded_weight, weight_name, *, shard_id, expert_id, return_success):
+        calls.append((weight_name, shard_id, loaded_weight.dtype))
+        return True
+
+    weight_loader.supports_moe_loading = True
+    param = torch.nn.Parameter(torch.empty(2, 6, 3, dtype=torch.uint8), requires_grad=False)
+    param.weight_loader = weight_loader
+    target_name = "model.layers.2.mlp.experts.w2_weight_scale"
+    loaded_weight = torch.zeros(2, 3, 3, dtype=torch.uint8)
+    wire_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}model.layers.2.mlp.experts.down_proj.weight_scale"
+
+    assert _load_batched_moe_fp8_tensor(SimpleNamespace(), {target_name: param}, wire_name, loaded_weight)
+    assert calls == [(target_name, "w2", torch.uint8)]

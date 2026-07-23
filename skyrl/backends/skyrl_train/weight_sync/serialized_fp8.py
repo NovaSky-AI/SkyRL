@@ -1,8 +1,9 @@
-"""Convert Megatron-exported tensors to vLLM's blockwise FP8 checkpoint format."""
+"""Convert Megatron-exported tensors to serialized vLLM FP8 formats."""
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from math import isfinite
 from operator import index
@@ -11,6 +12,9 @@ from typing import Any, Iterator, Sequence
 import torch
 
 SERIALIZED_BLOCKWISE_FP8 = "serialized_blockwise"
+SERIALIZED_MXFP8 = "serialized_mxfp8"
+BLOCKWISE_128X128 = "blockwise_128x128"
+MXFP8_1X32 = "mxfp8_1x32"
 # Internal wire-format marker for Qwen3.5 MoE tensors that remain batched over
 # experts. The receiver strips this marker and routes the tensor directly to
 # vLLM's fused-MoE parameter loader instead of the ordinary HF-name loader.
@@ -62,10 +66,6 @@ _QWEN35_FP8_WEIGHT_SUFFIXES = (
     ".mlp.shared_expert.up_proj.weight",
     ".mlp.shared_expert.down_proj.weight",
 )
-# Megatron Bridge exports routed experts in batched tensors. Keep the expert
-# dimension intact on the wire so the receiver can use vLLM's fused MoE loader.
-_QWEN35_MOE_GATE_UP_SUFFIX = ".mlp.experts.gate_up_proj"
-_QWEN35_MOE_DOWN_SUFFIX = ".mlp.experts.down_proj"
 _QWEN35_UNQUANTIZED_LINEAR_SUFFIXES = (
     ".in_proj_b",
     ".in_proj_a",
@@ -75,6 +75,71 @@ _QWEN35_LINEAR_ATTN_PREFIX_TEMPLATES = (
     "{model_prefix}.language_model.layers.{layer_idx}.linear_attn",
 )
 _QWEN35_VISION_ATTN_PROJ_PREFIX_TEMPLATES = ("{model_prefix}.visual.blocks.{block_idx}.attn.proj",)
+
+
+@dataclass(frozen=True)
+class MoeArchitectureSpec:
+    """HF expert export and vLLM projection naming for one model family."""
+
+    gate_up_suffixes: tuple[str, ...]
+    down_suffix: str
+    gate_up_fused: bool
+    vllm_projection_names: tuple[str, ...]
+    batched: bool
+
+
+_QWEN35_MOE_SPEC = MoeArchitectureSpec(
+    gate_up_suffixes=(".gate_up_proj",),
+    down_suffix=".down_proj",
+    gate_up_fused=True,
+    vllm_projection_names=("gate_proj", "up_proj", "down_proj"),
+    batched=True,
+)
+_QWEN3_MOE_SPEC = MoeArchitectureSpec(
+    gate_up_suffixes=(".gate_proj.weight", ".up_proj.weight"),
+    down_suffix=".down_proj.weight",
+    gate_up_fused=False,
+    vllm_projection_names=("gate_proj", "up_proj", "down_proj"),
+    batched=False,
+)
+MOE_ARCHITECTURE_SPECS = {
+    "qwen3_moe": _QWEN3_MOE_SPEC,
+    "qwen3_5_moe": _QWEN35_MOE_SPEC,
+    "qwen3_5_moe_text": _QWEN35_MOE_SPEC,
+}
+_EXPERT_ONLY_MXFP8_IGNORED_MODULES = (
+    "*.self_attn.*",
+    "*.linear_attn.*",
+    "*.mlp.gate",
+    "*.mlp.gate_up_proj",
+    "*.mlp.down_proj",
+    "*.mlp.shared_expert*",
+    "*lm_head*",
+    "*.visual.*",
+    "mtp.*",
+)
+_PER_EXPERT_WEIGHT_PATTERN = re.compile(
+    r"^(?P<base>.+\.mlp\.experts\.\d+)\.(?P<projection>gate_proj|up_proj|down_proj)\.weight$"
+)
+
+
+def get_hf_model_type(hf_config: Any) -> str:
+    """Return the text model type used for expert serialization dispatch."""
+
+    text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
+    return str(getattr(text_config, "model_type", "") or getattr(hf_config, "model_type", ""))
+
+
+def get_moe_architecture_spec(model_type: str) -> MoeArchitectureSpec:
+    """Return the registered MoE export layout."""
+
+    try:
+        return MOE_ARCHITECTURE_SPECS[model_type]
+    except KeyError as exc:
+        supported = ", ".join(sorted(MOE_ARCHITECTURE_SPECS))
+        raise ValueError(
+            f"Serialized MXFP8 does not support model_type={model_type!r}; supported: {supported}"
+        ) from exc
 
 
 def _normalize_block_size(block_size: Sequence[int]) -> tuple[int, int]:
@@ -94,16 +159,42 @@ def _normalize_block_size(block_size: Sequence[int]) -> tuple[int, int]:
 class SerializedFp8Config:
     """Configuration for serialized FP8 rollout weight sync."""
 
+    scaling_mode: str = BLOCKWISE_128X128
+    expert_only: bool = False
+    model_type: str | None = None
     weight_block_size: tuple[int, int] = (128, 128)
     power_2_scale: bool = field(default_factory=use_power_2_scales_default)
     amax_epsilon: float = field(default_factory=use_amax_epsilon_default)
 
     def __post_init__(self) -> None:
+        if self.scaling_mode not in (BLOCKWISE_128X128, MXFP8_1X32):
+            raise ValueError(f"scaling_mode must be {BLOCKWISE_128X128!r} or {MXFP8_1X32!r}, got {self.scaling_mode!r}")
+        if type(self.expert_only) is not bool:
+            raise ValueError(f"expert_only must be a bool, got {self.expert_only!r}")
         object.__setattr__(self, "weight_block_size", _normalize_block_size(self.weight_block_size))
         if type(self.power_2_scale) is not bool:
             raise ValueError(f"power_2_scale must be a bool, got {self.power_2_scale!r}")
         if not isfinite(self.amax_epsilon) or self.amax_epsilon < 0:
             raise ValueError(f"amax_epsilon must be finite and non-negative, got {self.amax_epsilon}")
+        if self.expert_only:
+            if not self.model_type:
+                raise ValueError("expert_only serialized FP8 requires model_type")
+            get_moe_architecture_spec(self.model_type)
+
+
+def serialized_fp8_config_for_mode(mode: str, *, model_type: str | None = None) -> SerializedFp8Config:
+    """Build the serializer configuration for a weight-sync mode."""
+
+    if mode == SERIALIZED_BLOCKWISE_FP8:
+        return SerializedFp8Config(model_type=model_type)
+    if mode == SERIALIZED_MXFP8:
+        return SerializedFp8Config(
+            scaling_mode=MXFP8_1X32,
+            expert_only=True,
+            model_type=model_type,
+            weight_block_size=(1, 32),
+        )
+    raise ValueError(f"Unsupported fp8_weight_sync_mode={mode!r}")
 
 
 def get_serialized_fp8_quantization_config(
@@ -123,12 +214,20 @@ def get_serialized_fp8_quantization_config(
     return qconfig
 
 
+def get_serialized_mxfp8_quantization_config() -> dict:
+    """Return vLLM's ModelOpt config for expert-only serialized MXFP8."""
+
+    return {
+        "quant_method": "modelopt",
+        "quant_algo": "MXFP8",
+        "ignore": list(_EXPERT_ONLY_MXFP8_IGNORED_MODULES),
+    }
+
+
 def is_qwen35_config(hf_config: Any) -> bool:
     """Return whether an HF config uses the supported Qwen3.5 text layout."""
 
-    text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
-    model_type = str(getattr(text_config, "model_type", "") or getattr(hf_config, "model_type", ""))
-    return model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
+    return get_hf_model_type(hf_config) in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
 
 
 def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -> list[str]:
@@ -176,17 +275,17 @@ def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -
 
 
 def should_use_serialized_fp8(mode: str | None) -> bool:
-    return mode == SERIALIZED_BLOCKWISE_FP8
+    return mode in (SERIALIZED_BLOCKWISE_FP8, SERIALIZED_MXFP8)
 
 
-def is_quantizable_weight(name: str, tensor: torch.Tensor) -> bool:
+def is_quantizable_weight(name: str, tensor: torch.Tensor, *, expert_only: bool = False) -> bool:
     """Return whether an exported HF tensor should be serialized as FP8.
 
     vLLM's FP8 config applies to Linear modules. HF checkpoints also contain 2D
     embedding/output weights, so keep known non-Linear weight tables unquantized.
     """
 
-    if not name.endswith(".weight") or tensor.ndim != 2:
+    if expert_only or not name.endswith(".weight") or tensor.ndim != 2:
         return False
 
     return is_quantizable_weight_shape(name, tensor.shape)
@@ -202,6 +301,12 @@ def scale_name_for_weight(name: str) -> str:
     if not name.endswith(".weight"):
         raise ValueError(f"FP8 scale can only be derived from .weight tensors: {name}")
     return name[: -len(".weight")] + ".weight_scale_inv"
+
+
+def mxfp8_scale_name_for_weight(name: str) -> str:
+    if not name.endswith(".weight"):
+        raise ValueError(f"MXFP8 scale can only be derived from .weight tensors: {name}")
+    return name[: -len(".weight")] + ".weight_scale"
 
 
 def blockwise_cast_to_fp8(
@@ -308,17 +413,79 @@ def batched_blockwise_cast_to_fp8(
     return q_weight, scales
 
 
-def batched_moe_expert_spec(name: str) -> tuple[str, tuple[str, ...], bool] | None:
-    """Parse a Megatron Bridge batched Qwen3.5 MoE tensor name.
+def _power_2_scales_to_e8m0(scales: torch.Tensor) -> torch.Tensor:
+    """Encode positive power-of-two FP32 scales as biased E8M0 exponents."""
+
+    exponent_bits = (scales.contiguous().view(torch.int32) >> 23) & 0xFF
+    return exponent_bits.to(torch.uint8)
+
+
+def mxfp8_cast_to_fp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a 2D tensor to vLLM's row-major MXFP8 checkpoint format."""
+
+    if weight.ndim != 2:
+        raise ValueError(f"MXFP8 expects a 2D tensor, got shape={tuple(weight.shape)}")
+    if weight.shape[-1] % 32 != 0:
+        raise ValueError(f"MXFP8 requires the last dimension to be divisible by 32, got shape={tuple(weight.shape)}")
+    q_weight, scales = blockwise_cast_to_fp8(weight, (1, 32), power_2_scale=True)
+    return q_weight, _power_2_scales_to_e8m0(scales)
+
+
+def batched_mxfp8_cast_to_fp8(
+    weight: torch.Tensor,
+    expert_batch_size: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a 3D expert tensor to row-major MXFP8 weights and E8M0 scales."""
+
+    if weight.ndim != 3:
+        raise ValueError(f"Batched MXFP8 expects a 3D tensor, got shape={tuple(weight.shape)}")
+    if isinstance(expert_batch_size, bool) or not isinstance(expert_batch_size, int) or expert_batch_size <= 0:
+        raise ValueError(f"expert_batch_size must be a positive integer, got {expert_batch_size!r}")
+    if weight.shape[-1] % 32 != 0:
+        raise ValueError(f"MXFP8 requires the last dimension to be divisible by 32, got shape={tuple(weight.shape)}")
+
+    q_weight, scales = batched_blockwise_cast_to_fp8(
+        weight,
+        (1, 32),
+        power_2_scale=True,
+        expert_batch_size=expert_batch_size,
+    )
+    return q_weight, _power_2_scales_to_e8m0(scales)
+
+
+def batched_moe_expert_spec(
+    name: str,
+    model_type: str | None = None,
+) -> tuple[str, tuple[str, ...], bool] | None:
+    """Parse a registered Megatron Bridge batched MoE tensor name.
 
     Returns ``(experts_base, projection_names, split_gate_up)`` or ``None``.
     """
 
-    if name.endswith(_QWEN35_MOE_GATE_UP_SUFFIX):
-        return name[: -len(".gate_up_proj")], ("gate_proj", "up_proj"), True
-    if name.endswith(_QWEN35_MOE_DOWN_SUFFIX):
-        return name[: -len(".down_proj")], ("down_proj",), False
+    spec = _QWEN35_MOE_SPEC if model_type is None else get_moe_architecture_spec(model_type)
+    if not spec.batched or ".mlp.experts" not in name:
+        return None
+    gate_up_suffix = spec.gate_up_suffixes[0]
+    if name.endswith(gate_up_suffix):
+        return name[: -len(gate_up_suffix)], spec.vllm_projection_names[:2], spec.gate_up_fused
+    if name.endswith(spec.down_suffix):
+        return name[: -len(spec.down_suffix)], (spec.vllm_projection_names[-1],), False
     return None
+
+
+def is_per_expert_moe_weight(name: str, model_type: str) -> bool:
+    """Return whether a tensor is a registered per-expert HF projection."""
+
+    spec = get_moe_architecture_spec(model_type)
+    if spec.batched:
+        return False
+    match = _PER_EXPERT_WEIGHT_PATTERN.fullmatch(name)
+    suffixes = (*spec.gate_up_suffixes, spec.down_suffix)
+    return (
+        match is not None
+        and match.group("projection") in spec.vllm_projection_names
+        and name.endswith(suffixes)
+    )
 
 
 def iter_batched_moe_expert_fp8_tensors(
@@ -333,7 +500,7 @@ def iter_batched_moe_expert_fp8_tensors(
     routed MoE layer from ``6 * num_experts`` tensors to six and lets vLLM use
     its fused 3D loader.
     """
-    spec = batched_moe_expert_spec(name)
+    spec = batched_moe_expert_spec(name, config.model_type)
     if spec is None:
         raise ValueError(f"Not a batched MoE expert tensor: {name}")
     if tensor.ndim != 3:
@@ -348,15 +515,23 @@ def iter_batched_moe_expert_fp8_tensors(
         projection_tensors = (tensor,)
 
     for proj, projection_tensor in zip(proj_names, projection_tensors):
-        q_weight, scale = batched_blockwise_cast_to_fp8(
-            projection_tensor,
-            config.weight_block_size,
-            config.power_2_scale,
-            config.amax_epsilon,
-        )
+        if config.scaling_mode == MXFP8_1X32:
+            q_weight, scale = batched_mxfp8_cast_to_fp8(projection_tensor)
+        else:
+            q_weight, scale = batched_blockwise_cast_to_fp8(
+                projection_tensor,
+                config.weight_block_size,
+                config.power_2_scale,
+                config.amax_epsilon,
+            )
         weight_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{experts_base}.{proj}.weight"
         yield weight_name, q_weight
-        yield scale_name_for_weight(weight_name), scale
+        scale_name = (
+            mxfp8_scale_name_for_weight(weight_name)
+            if config.scaling_mode == MXFP8_1X32
+            else scale_name_for_weight(weight_name)
+        )
+        yield scale_name, scale
 
 
 def iter_serialized_fp8_tensors(
@@ -367,19 +542,33 @@ def iter_serialized_fp8_tensors(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Yield vLLM checkpoint tensors for one Megatron-exported weight."""
 
-    if batched_moe_expert_spec(name) is not None:
+    if batched_moe_expert_spec(name, config.model_type) is not None:
         yield from iter_batched_moe_expert_fp8_tensors(name, tensor, config)
         return
 
-    if is_quantizable_weight(name, tensor):
-        q_weight, scale = blockwise_cast_to_fp8(
-            tensor,
-            config.weight_block_size,
-            config.power_2_scale,
-            config.amax_epsilon,
-        )
+    if config.expert_only and config.model_type and is_per_expert_moe_weight(name, config.model_type):
+        q_weight, scale = mxfp8_cast_to_fp8(tensor)
         yield name, q_weight
-        yield scale_name_for_weight(name), scale
+        yield mxfp8_scale_name_for_weight(name), scale
+        return
+
+    if config.expert_only and ".mlp.experts." in name and tensor.ndim >= 2:
+        raise ValueError(f"Unsupported routed-expert export tensor for model_type={config.model_type!r}: {name}")
+
+    if is_quantizable_weight(name, tensor, expert_only=config.expert_only):
+        if config.scaling_mode == MXFP8_1X32:
+            q_weight, scale = mxfp8_cast_to_fp8(tensor)
+            scale_name = mxfp8_scale_name_for_weight(name)
+        else:
+            q_weight, scale = blockwise_cast_to_fp8(
+                tensor,
+                config.weight_block_size,
+                config.power_2_scale,
+                config.amax_epsilon,
+            )
+            scale_name = scale_name_for_weight(name)
+        yield name, q_weight
+        yield scale_name, scale
         return
 
     yield name, tensor.to(dtype=target_dtype)

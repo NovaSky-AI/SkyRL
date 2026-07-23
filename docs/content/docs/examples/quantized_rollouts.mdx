@@ -38,17 +38,22 @@ MXFP8 while vLLM serves the same experts with online MXFP8 quantization:
 
 ```bash
 trainer.strategy=megatron \
-trainer.policy.model.expert_mxfp8.enabled=true
+trainer.policy.model.expert_mxfp8.enabled=true \
+trainer.policy.model.expert_mxfp8.persistent=true \
+trainer.policy.megatron_config.ddp_config.fp8_param_gather=true \
+generator.inference_engine.fp8_weight_sync_mode=serialized_mxfp8
 ```
 
-SkyRL keeps model checkpoints and weight-sync payloads in their existing
-high-precision formats. Transformer Engine quantizes expert compute operands
-at runtime, and vLLM requantizes expert weights after each sync. Attention,
-dense layers, the router, and the LM head remain high precision.
+Persistent expert weights are quantized after each optimizer step and reused by
+Transformer Engine until the next update. Weight sync sends routed experts as
+MXFP8 data with E8M0 scales, while checkpoints remain high precision. Attention,
+dense layers, shared experts, the router, and the LM head remain high precision.
 
 This mode requires SM100 or SM103 and does not support unmerged LoRA. Set
 `training=false` or `rollout=false` under `expert_mxfp8` to enable only one
-side for benchmarking.
+side for benchmarking. Set `persistent=false` to quantize expert weights during
+each forward pass. Set `fp8_weight_sync_mode=null` to let vLLM quantize experts
+after each weight sync.
 
 Run the Modal benchmark with identical BF16 and MXFP8 workloads:
 

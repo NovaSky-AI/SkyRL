@@ -6,7 +6,7 @@ import torch
 from loguru import logger
 
 
-def expert_mxfp8_recipe_dict() -> dict:
+def expert_mxfp8_recipe_dict(*, persistent: bool = False) -> dict:
     """Return the per-module Transformer Engine recipe."""
 
     high_precision = {
@@ -29,6 +29,9 @@ def expert_mxfp8_recipe_dict() -> dict:
             "override_nonquantized_autocast": True,
         },
     }
+    if persistent:
+        mxfp8["training_recipe"]["fp8_param"] = True
+        mxfp8["evaluation_recipe"]["fp8_param"] = True
     return {
         "configs": {"expert_mxfp8": mxfp8, "high_precision": high_precision},
         "matchers": {
@@ -54,7 +57,7 @@ def expert_mxfp8_recipe_dict() -> dict:
     }
 
 
-def configure_expert_mxfp8_provider(provider) -> None:
+def configure_expert_mxfp8_provider(provider, *, persistent: bool = False) -> None:
     """Configure routed experts for MXFP8 compute."""
 
     from megatron.core.quantization.quant_config import RecipeConfig
@@ -67,13 +70,19 @@ def configure_expert_mxfp8_provider(provider) -> None:
         raise ValueError("Expert MXFP8 requires moe_grouped_gemm=true")
     if provider.moe_router_dtype != "fp32":
         raise ValueError("Expert MXFP8 requires moe_router_dtype=fp32")
-    for option in ("fp8_dot_product_attention", "fp8_multi_head_attention", "fp8_output_proj"):
+    for option in (
+        "fp8_dot_product_attention",
+        "fp8_multi_head_attention",
+        "fp8_output_proj",
+    ):
         if getattr(provider, option, False):
             raise ValueError(f"Expert MXFP8 requires {option}=false")
     provider.fp8 = "e4m3"
     provider.fp8_recipe = "mxfp8"
-    provider.moe_router_padding_for_quantization = True
-    provider.quant_recipe = RecipeConfig.from_config_dict(expert_mxfp8_recipe_dict())
+    # Pad each local expert immediately before GroupedLinear. Router-side
+    # padding can lose MXFP8 alignment after EP all-to-all redistribution.
+    provider.moe_router_padding_for_quantization = False
+    provider.quant_recipe = RecipeConfig.from_config_dict(expert_mxfp8_recipe_dict(persistent=persistent))
 
 
 def validate_expert_mxfp8_hardware() -> None:
@@ -106,7 +115,11 @@ def audit_expert_mxfp8_modules(model_chunks) -> int:
             targeted = is_routed_expert_linear(name)
             quantized = module.will_execute_quantized(True)
             quant_params = getattr(module, "te_quant_params", None)
-            recipe = getattr(getattr(quant_params, "training_recipe", None), "fp8_quantization_recipe", None)
+            recipe = getattr(
+                getattr(quant_params, "training_recipe", None),
+                "fp8_quantization_recipe",
+                None,
+            )
             uses_mxfp8 = getattr(recipe, "value", recipe) == "mxfp8"
             if targeted and (not quantized or not uses_mxfp8):
                 errors.append(f"{name} did not enable MXFP8")

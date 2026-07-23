@@ -18,6 +18,8 @@ MODEL = "Qwen/Qwen3-30B-A3B"
 REMOTE_REPO = "/root/SkyRL"
 HF_HOME = "/root/hf-cache"
 DATA_DIR = "/root/data/gsm8k"
+PROFILE_ROOT = "/root/profiles"  # profiler
+PROFILE_COMMIT_INTERVAL_S = 120  # profiler
 GPU = os.environ.get("MODAL_GPU", "B200:8")
 
 
@@ -33,6 +35,7 @@ def _repo_root() -> pathlib.Path:
 repo_root = _repo_root()
 hf_volume = modal.Volume.from_name("skyrl-hf-cache", create_if_missing=True)
 data_volume = modal.Volume.from_name("skyrl-expert-mxfp8-data", create_if_missing=True)
+profile_volume = modal.Volume.from_name("skyrl-expert-mxfp8-profiles", create_if_missing=True)  # profiler
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12")
@@ -53,7 +56,12 @@ image = (
             "VLLM_USE_FLASHINFER_SAMPLER": "0",
         }
     )
-    .add_local_dir(str(repo_root), REMOTE_REPO, copy=True, ignore=[".venv", ".git", "**/__pycache__"])
+    .add_local_dir(
+        str(repo_root),
+        REMOTE_REPO,
+        copy=True,
+        ignore=[".venv", ".git", "**/__pycache__"],
+    )
     .workdir(REMOTE_REPO)
     .run_commands("uv sync --extra megatron", gpu="any")
     .run_commands(f"rm -rf {HF_HOME}")
@@ -84,6 +92,8 @@ def _run(mode: str, steps: int) -> None:
         "trainer.strategy=megatron",
         f"trainer.policy.model.path={MODEL}",
         f"trainer.policy.model.expert_mxfp8.enabled={enabled}",
+        f"trainer.policy.model.expert_mxfp8.persistent={enabled}",
+        f"trainer.policy.megatron_config.ddp_config.fp8_param_gather={enabled}",
         "trainer.placement.colocate_all=true",
         "trainer.placement.policy_num_nodes=1",
         "trainer.placement.policy_num_gpus_per_node=8",
@@ -116,12 +126,33 @@ def _run(mode: str, steps: int) -> None:
         "generator.n_samples_per_prompt=8",
         "generator.batched=true",
         "environment.env_class=gsm8k",
+        # profiler
+        "trainer.policy.torch_profiler_config.enable=true",
+        "trainer.policy.torch_profiler_config.ranks=[0]",
+        f"trainer.policy.torch_profiler_config.save_path={PROFILE_ROOT}/trainer/{mode}",
+        "trainer.policy.torch_profiler_config.skip_first=3",
+        "trainer.policy.torch_profiler_config.wait=0",
+        "trainer.policy.torch_profiler_config.warmup=1",
+        "trainer.policy.torch_profiler_config.active=2",
+        "trainer.policy.torch_profiler_config.repeat=1",
+        "trainer.policy.torch_profiler_config.record_shapes=false",
+        "trainer.policy.torch_profiler_config.with_stack=false",
         "trainer.logger=wandb",
         "trainer.project_name=skyrl-expert-mxfp8",
         f"trainer.run_name={run_name}",
     ]
+    if mode == "mxfp8":
+        command.append("generator.inference_engine.fp8_weight_sync_mode=serialized_mxfp8")
     started = time.perf_counter()
-    subprocess.run(command, cwd=REMOTE_REPO, check=True)
+    process = subprocess.Popen(command, cwd=REMOTE_REPO)
+    while True:
+        try:
+            returncode = process.wait(timeout=PROFILE_COMMIT_INTERVAL_S)
+            break
+        except subprocess.TimeoutExpired:
+            profile_volume.commit()  # profiler
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command)
     print(f"{mode} benchmark completed in {time.perf_counter() - started:.1f}s")
 
 
@@ -161,11 +192,18 @@ def prepare_assets() -> None:
     image=image,
     gpu=GPU,
     secrets=[modal.Secret.from_name("wandb-secret")],
-    volumes={HF_HOME: hf_volume, "/root/data": data_volume},
+    volumes={
+        HF_HOME: hf_volume,
+        "/root/data": data_volume,
+        PROFILE_ROOT: profile_volume,
+    },  # profiler
     timeout=24 * 60 * 60,
 )
 def benchmark(mode: str, steps: int) -> None:
-    _run(mode, steps)
+    try:
+        _run(mode, steps)
+    finally:
+        profile_volume.commit()  # profiler
 
 
 @app.local_entrypoint()
