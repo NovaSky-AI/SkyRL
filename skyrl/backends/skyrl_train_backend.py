@@ -433,6 +433,17 @@ class SkyRLTrainBackend(AbstractBackend):
             self._render_server.shutdown()
             self._render_server = None
 
+    def prewarm_inference(self) -> None:
+        """Start base-model inference before a Tinker adapter is created."""
+        if self._inference_engines_initialized:
+            return
+        self._cfg = _build_skyrl_train_config(self.base_model, self.config)
+        if not ray.is_initialized():
+            initialize_ray(self._cfg)
+        self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
+        self._create_new_inference_client()
+        self._inference_engines_initialized = True
+
     def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
         # Tinker's public LoraConfig only exposes rank + alpha (plus
         # seed/train_attn/train_mlp/train_unembed) - pending support https://github.com/NovaSky-AI/SkyRL/issues/1632.
@@ -501,6 +512,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
             logger.info("Building models.")
             self._build_policy(PolicyWorker, model_id=model_id)
+            if self._inference_engines_initialized:
+                self._dispatch.set_inference_engine_client(self._inference_engine_client)
+                self.init_weight_sync_state()
             if is_lora:
                 self._base_lora_signature = self._lora_signature_from(lora_config)
         elif model_role == "critic":

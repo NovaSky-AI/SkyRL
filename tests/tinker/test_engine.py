@@ -16,6 +16,22 @@ from skyrl.tinker.engine import (
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
 
+def test_prewarm_inference_is_opt_in(monkeypatch: pytest.MonkeyPatch):
+    class Backend:
+        def __init__(self, *_args):
+            self.prewarmed = False
+
+        def set_inference_state_publisher(self, _publisher):
+            pass
+
+        def prewarm_inference(self):
+            self.prewarmed = True
+
+    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_: (Backend, dict))
+    engine = TinkerEngine(EngineConfig(base_model=BASE_MODEL, prewarm_inference=True))
+    assert engine.backend.prewarmed
+
+
 def test_process_unload_model():
     """Test that process_unload_model removes model from backend."""
     config = EngineConfig(
