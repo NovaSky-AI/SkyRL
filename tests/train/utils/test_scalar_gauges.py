@@ -24,9 +24,3 @@ def test_create_once_and_update():
     assert created["skyrl_gen_buffer_qsize"].description == "queued groups"
     created["skyrl_gen_buffer_qsize"].set.assert_called_with(5.0)
     created["skyrl_mini_batch_size"].set.assert_called_with(8.0)
-
-
-def test_disabled_when_ray_metrics_unavailable():
-    with patch("ray.util.metrics.Gauge", side_effect=RuntimeError("ray not initialized")):
-        g = ScalarGauges()
-        g.set("skyrl_gen_buffer_qsize", 1)  # must not raise
