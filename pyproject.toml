@@ -297,11 +297,36 @@ vllm = [
 # +cu12torch2.11cxx11abiTRUE local-version stripped from METADATA — PEP 440
 # treats 2.8.3+local > 2.8.3, so TE's get_attention_backend (max_version=
 # "2.8.3") rejected it and silently fell back to broken unfused attention.
-flash-attn = { url = "https://github.com/erictang000/flash-attention/releases/download/v2.8.3-torch2.11-clean/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
-causal-conv1d = { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
-mamba-ssm = { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+flash-attn = [
+    { url = "https://github.com/erictang000/flash-attention/releases/download/v2.8.3-torch2.11-clean/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" },
+    # aarch64/GB200: built from erictang000/flash-attention @ v2.8.3-torch2.11-clean
+    # (tag code is __version__=2.8.4; relabeled to 2.8.3 in module + METADATA to match the x86
+    # artifact, the ==2.8.3 pin, and TE get_attention_backend max_version="2.8.3"). Built for
+    # sm_100 only, torch 2.11+cu128 cp312 cxx11abi=TRUE.
+    { url = "https://github.com/erictang000/flash-attention/releases/download/v2.8.3-torch2.11-clean/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'aarch64'" },
+]
+causal-conv1d = [
+    { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" },
+    # aarch64/GB200: built from erictang000/causal-conv1d @ v1.6.1.post4-torch2.11
+    # against torch 2.11+cu128 cp312 (cxx11abi=TRUE), archs incl. sm_100.
+    { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'aarch64'" },
+]
+mamba-ssm = [
+    { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" },
+    # aarch64/GB200: built from UPSTREAM state-space/mamba @ v2.3.1 (the erictang000 fork tag was
+    # moved onto newer mamba3 code that hard-deps tilelang==0.1.8, conflicting with vllm's 0.1.9;
+    # upstream v2.3.1 has clean deps matching the x86 wheel). torch 2.11+cu128 cp312, sm_100 only.
+    { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'aarch64'" },
+]
 # transformer-engine-torch 2.11.0 built against torch 2.11 (cu128 / cp312).
-transformer-engine-torch = { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+transformer-engine-torch = [
+    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" },
+    # aarch64/GB200: built from UPSTREAM NVIDIA/TransformerEngine tag v2.11 (VERSION.txt=2.11.0,
+    # matching the transformer-engine-cu12==2.11.0 core) against torch 2.11+cu128 cp312, sm_100.
+    # NOTE: unlike the x86 fork wheel (which requires transformer-engine-cu13), this wheel correctly
+    # requires transformer-engine-cu12==2.11.0, so the cu13->never override isn't needed on aarch64.
+    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'aarch64'" },
+]
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
 # Linux uses the cu128 index (torch 2.11 wheels are published there).
 torch = [

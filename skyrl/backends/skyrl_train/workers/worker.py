@@ -219,11 +219,31 @@ class DistributedTorchRayActor:
             LIBNUMA.numa_run_on_node_mask(bitmask)
             LIBNUMA.numa_set_membind(bitmask)
 
-        numa_nodes = LIBNUMA.numa_num_configured_nodes()
-        if numa_nodes <= 0:
-            numa_nodes = 1
-        num_gpu_pre_numa_node = max(1, 8 // numa_nodes)
-        target_nid = min(numa_nodes - 1, self._local_rank // num_gpu_pre_numa_node)
+        # Only bind to NUMA nodes that actually have CPUs. On Grace-Blackwell (GB200),
+        # GPU HBM is exposed as additional CPU-less NUMA nodes (e.g. 34 nodes total, only
+        # nodes 0-1 have CPUs). The old `min(numa_nodes-1, local_rank)` selection could pick
+        # a CPU-less node, which makes numa_run_on_node_mask bind to an empty CPU set
+        # (EINVAL) or an out-of-range node (SIGSEGV), silently killing the worker.
+        cpu_nodes = []
+        node_root = "/sys/devices/system/node"
+        try:
+            node_names = sorted(
+                (n for n in os.listdir(node_root) if n.startswith("node") and n[4:].isdigit()),
+                key=lambda n: int(n[4:]),
+            )
+        except OSError:
+            node_names = []
+        for name in node_names:
+            try:
+                with open(os.path.join(node_root, name, "cpulist")) as f:
+                    if f.read().strip():
+                        cpu_nodes.append(int(name[4:]))
+            except OSError:
+                continue
+        if not cpu_nodes:
+            cpu_nodes = [0]
+        num_gpu_per_numa_node = max(1, torch.cuda.device_count() // len(cpu_nodes))
+        target_nid = cpu_nodes[min(len(cpu_nodes) - 1, self._local_rank // num_gpu_per_numa_node)]
         numa_bind(target_nid)
         _SET_AFFINITY = True
 
