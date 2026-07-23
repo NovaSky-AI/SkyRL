@@ -33,6 +33,7 @@ import torch
 from datasets import Dataset, load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
+from torch.utils.data import ConcatDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
@@ -1231,13 +1232,14 @@ class SFTTrainer:
         """Load the training dataset(s): pretokenized stores or tokenize-on-load.
 
         When ``pretokenized_dataset_paths`` is set, each store is loaded through
-        :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized` (same
-        ``list[dict]`` shape as :meth:`_load_and_tokenize`, no online
-        tokenization) and concatenated in config order. Otherwise each
-        ``(name, split)`` pair from ``train_datasets``/``train_dataset_splits``
-        is tokenized independently through :meth:`_load_and_tokenize`
-        (preserving per-dataset cache keys), then concatenated in config order.
-        Either way, multiple sources are mixed per ``train_dataset_weights``.
+        :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized` (a
+        map-style, memory-mapped dataset yielding the same normalized row
+        dicts as :meth:`_load_and_tokenize`, no online tokenization) and
+        concatenated in config order. Otherwise each ``(name, split)`` pair
+        from ``train_datasets``/``train_dataset_splits`` is tokenized
+        independently through :meth:`_load_and_tokenize` (preserving
+        per-dataset cache keys), then concatenated in config order. Either
+        way, multiple sources are mixed per ``train_dataset_weights``.
 
         Returns:
             ``(tokenized, dataset_lengths)`` where ``dataset_lengths`` holds the
@@ -1247,17 +1249,20 @@ class SFTTrainer:
         tokenized: list = []
         dataset_lengths: list[int] = []
         if self.sft_cfg.pretokenized_dataset_paths:
-            for path in self.sft_cfg.pretokenized_dataset_paths:
-                # The loader raises on 0 usable rows, so no empty-source check.
-                source = load_from_pretokenized(path, max_length=self.sft_cfg.max_length)
-                tokenized.extend(source)
-                dataset_lengths.append(len(source))
-            if len(dataset_lengths) > 1:
+            # The loader raises on 0 usable rows, so no empty-source check.
+            sources = [
+                load_from_pretokenized(path, max_length=self.sft_cfg.max_length)
+                for path in self.sft_cfg.pretokenized_dataset_paths
+            ]
+            dataset_lengths = [len(source) for source in sources]
+            if len(sources) > 1:
                 per_dataset = ", ".join(
                     f"{path}={length}" for path, length in zip(self.sft_cfg.pretokenized_dataset_paths, dataset_lengths)
                 )
                 logger.info(f"Concatenated {len(dataset_lengths)} pretokenized datasets: {per_dataset}")
-            return tokenized, dataset_lengths
+            # Memory-mapped datasets are concatenated as a map-style view (no
+            # row materialization), not merged into a list.
+            return sources[0] if len(sources) == 1 else ConcatDataset(sources), dataset_lengths
         for name, split in zip(self.sft_cfg.train_datasets, self.sft_cfg.train_dataset_splits):
             source = self._load_and_tokenize(name, split)
             if len(source) == 0:
@@ -1304,17 +1309,35 @@ class SFTTrainer:
             eval_sets.append((name, eval_tokenized))
         return eval_sets
 
+    @staticmethod
+    def _sequence_lengths(tokenized) -> Optional[list[int]]:
+        """Sequence lengths without materializing rows, when the dataset can
+        provide them (pretokenized memory-mapped stores, possibly concatenated).
+        Returns ``None`` when only row iteration can produce them."""
+        lengths = getattr(tokenized, "sequence_lengths", None)
+        if lengths is not None:
+            return lengths.tolist()
+        if isinstance(tokenized, ConcatDataset):
+            parts = [getattr(d, "sequence_lengths", None) for d in tokenized.datasets]
+            if all(part is not None for part in parts):
+                return [int(v) for part in parts for v in part]
+        return None
+
     def _log_dataset_stats(self, tokenized: list) -> None:
         """Log tokenized sequence length statistics over the training set.
 
         Reports count, mean, median (q50), q25, q75, min, max of the tokenized
         ``input_ids`` lengths. Logs once via ``logger.info``.
         """
-        if not tokenized:
+        if len(tokenized) == 0:
             logger.warning("No tokenized examples to compute stats over")
             return
 
-        lengths = [len(ex["input_ids"]) for ex in tokenized]
+        # Memory-mapped datasets expose lengths from arrow offsets; falling
+        # back to row iteration would materialize the whole store once.
+        lengths = self._sequence_lengths(tokenized)
+        if lengths is None:
+            lengths = [len(ex["input_ids"]) for ex in tokenized]
         n = len(lengths)
         sorted_lengths = sorted(lengths)
 
