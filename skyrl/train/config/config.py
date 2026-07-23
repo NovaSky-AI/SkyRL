@@ -302,6 +302,24 @@ class TorchProfilerConfig(BaseConfig):
 
 
 @dataclass
+class MegatronHFExportConfig(BaseConfig):
+    distributed_save: bool = False
+    """Fan the Megatron->HF safetensors export across ranks instead of writing the
+    whole checkpoint from rank 0. The on-disk result is the standard HF sharded
+    format either way; this only parallelizes the write, which is decisive for
+    multi-hundred-GB checkpoints whose serial rank-0 write stalls every rank."""
+    save_every_n_ranks: int = 1
+    """In distributed save, only ranks 0, N, 2N, ... write shards (e.g. 8 = one
+    writer per 8-GPU node). Ignored when ``distributed_save`` is False."""
+
+    def __post_init__(self) -> None:
+        # save_every_n_ranks indexes ranks via modulo/floor-div in the bridge's
+        # distributed save; < 1 raises ZeroDivisionError there. Fail fast instead.
+        if self.save_every_n_ranks < 1:
+            raise ValueError(f"save_every_n_ranks must be >= 1, got {self.save_every_n_ranks}")
+
+
+@dataclass
 class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
     merge_lora: bool = True
@@ -345,6 +363,7 @@ class MegatronConfig(BaseConfig):
     moe_router_dtype: str = "fp32"
     """Pass through to Megatron-Bridge - can be set to 'fp64' for additional numerical stability."""
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
+    hf_export_config: MegatronHFExportConfig = field(default_factory=MegatronHFExportConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
     optimizer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_MEGATRON_OPTIMIZER_KWARGS)
@@ -358,6 +377,23 @@ class MegatronConfig(BaseConfig):
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+    mtp_num_layers: Optional[int] = None
+    """Number of Multi-Token Prediction (MTP) heads to build. ``None`` honors the model's HF config
+    (``num_nextn_predict_layers``); an int overrides it (``0`` force-disables MTP). Active heads are
+    trained with the decoupled draft loss and synced to vLLM for speculative decoding."""
+    mtp_loss_weight: float = 0.1
+    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``. The draft loss is fully
+    decoupled: trunk, re-embedding, output weight and teacher are all detached, so its gradient
+    reaches only the ``.mtp.`` head params. Only used when MTP heads are active."""
+    mtp_loss_chunk_size: Optional[int] = 1024
+    """Sequence-chunk size for the draft loss, with gradient checkpointing, to bound peak memory at
+    large vocab (e.g. Qwen3.5's 248K, where the full-sequence softmax OOMs). Numerically identical to
+    no chunking. ``None`` disables it; ignored when ``mtp_loss_topk`` is set."""
+    mtp_loss_topk: Optional[int] = None
+    """If set, use a top-k approximation of the soft-CE draft loss: distill only the teacher's top-k
+    tokens (renormalized), ``O(seq*k)`` memory instead of ``O(seq*vocab)`` -- fits at large vocab
+    without fragmentation. Reconciled across the TP group, so it scales to any parallel size.
+    ``None`` uses the exact full-vocab loss. Typical: 64-128."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict
@@ -504,10 +540,16 @@ class KLCovConfig(BaseConfig):
 @dataclass
 class CISPOConfig(BaseConfig):
 
-    cispo_eps_clip_low: float = 0.0
-    """Offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
-    cispo_eps_clip_high: float = 5.0
-    """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
+    cispo_eps_clip_low: float = 1.0
+    """Offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping).
+    
+    The lower bound used is ``1-cispo_eps_clip_low``. The default lower bound is 0 following the ScaleRL recipe: https://arxiv.org/abs/2510.13786
+    """
+    cispo_eps_clip_high: float = 4.0
+    """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping).
+    
+    The upper bound used is ``1+cispo_eps_clip_high``. The default upper bound is 5 following the ScaleRL recipe: https://arxiv.org/abs/2510.13786
+    """
 
 
 # DPPO parameters (only used when policy_loss_type="dppo")
@@ -726,6 +768,14 @@ class InferenceEngineConfig(BaseConfig):
     enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
+    offload_kv_for_weight_sync: bool = False
+    """Non-colocated only. Sleep the engine (freeing the KV cache from GPU) during weight
+    sync so ``gpu_memory_utilization`` can be pushed higher without OOMing on the weight-
+    transfer buffers. On the fully-async trainer, in-flight requests are frozen (KEEP
+    pause) and, unless ``trainer.fully_async.clear_kv_cache_on_weight_sync`` is set, their
+    KV cache is offloaded to CPU and restored so they resume with no abort or prefill
+    recompute (at the cost of a GPU<->CPU copy of the KV pool each sync). Requires
+    non-colocated and non-LoRA weight sync."""
     use_expandable_segments: bool = False
     """Set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` on the inference-engine
     processes to reduce fragmentation. Independent of the trainer-side
@@ -746,6 +796,9 @@ class InferenceEngineConfig(BaseConfig):
     multimodal models (e.g. Qwen3.5) skip vision encoder initialization."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
+    speculative_config: Optional[Dict[str, Any]] = None
+    """Speculative-decoding config passed through to vLLM for MTP drafter decoding. 
+    (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train mtp). ``None`` disables it."""
     external_proxy_url: Optional[str] = None
     """Data-plane URL (load-balanced router) for the new inference layer."""
     external_server_urls: Optional[List[str]] = None
@@ -840,6 +893,18 @@ class EnvironmentConfig(BaseConfig):
     skyrl_gym: SkyRLGymConfig = field(default_factory=SkyRLGymConfig)
 
 
+@dataclass
+class MTPConfig(BaseConfig):
+    enabled: bool = False
+    """Whether to train MTP draft heads and use them for speculative decoding."""
+    num_speculative_tokens: int = 1
+    """Draft depth vLLM speculates per step, independent of the trained head count. Single-head
+    checkpoints (Qwen3.5/Qwen3-Next/DeepSeek-V3) reuse the one head autoregressively at depths > 1;
+    expect acceptance to decay with depth (the head is trained at depth 1)."""
+    loss_weight: float = 0.1
+    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``."""
+
+
 # ---------------------------------------------------------------------------
 # Trainer (top-level)
 # ---------------------------------------------------------------------------
@@ -859,6 +924,7 @@ class TrainerConfig(BaseConfig):
     ref: RefConfig = field(default_factory=RefConfig)
     critic: CriticConfig = field(default_factory=CriticConfig)
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
+    mtp: MTPConfig = field(default_factory=MTPConfig)
     fully_async: FullyAsyncConfig = field(default_factory=FullyAsyncConfig)
     gradient_checkpointing: bool = True
     gradient_checkpointing_use_reentrant: bool = False
@@ -947,6 +1013,12 @@ class TrainerConfig(BaseConfig):
     This lowers peak GPU memory at the cost of ~2x wall-clock time.
     ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
     See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
+    vocab_entropy_chunk_size: Optional[int] = 0
+    """Chunk size along the sequence dimension when computing Megatron vocab entropy.
+    ``0`` auto-sizes from the local vocab shard size and ``vocab_entropy_chunk_memory_mb``.
+    ``None`` disables chunking."""
+    vocab_entropy_chunk_memory_mb: int = 512
+    """Approximate per-chunk temporary memory budget for auto-sized Megatron vocab entropy chunks."""
     fused_lm_head_logprob: bool = False
     """Megatron only. Fuse the LM-head projection into log-prob / entropy
     computation so the full ``[B, S, vocab//TP]`` logits tensor is never
@@ -997,6 +1069,24 @@ class TrainerConfig(BaseConfig):
             raise ValueError(
                 "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
                 f"got {self.fused_lm_head_logprob_backend!r}."
+            )
+        if self.vocab_entropy_chunk_size is not None and (
+            isinstance(self.vocab_entropy_chunk_size, bool)
+            or not isinstance(self.vocab_entropy_chunk_size, int)
+            or self.vocab_entropy_chunk_size < 0
+        ):
+            raise ValueError(
+                "vocab_entropy_chunk_size must be a non-negative integer or None, "
+                f"got {self.vocab_entropy_chunk_size!r}."
+            )
+        if (
+            isinstance(self.vocab_entropy_chunk_memory_mb, bool)
+            or not isinstance(self.vocab_entropy_chunk_memory_mb, int)
+            or self.vocab_entropy_chunk_memory_mb <= 0
+        ):
+            raise ValueError(
+                "vocab_entropy_chunk_memory_mb must be a positive integer, "
+                f"got {self.vocab_entropy_chunk_memory_mb!r}."
             )
 
 

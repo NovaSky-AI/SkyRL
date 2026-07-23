@@ -7,4 +7,5 @@ compute_config: l4_ci
 working_dir: . # (Optional) Use current working directory "." as the working_dir. Can be any local path or remote .zip file in cloud storage.
 env_vars:
   WANDB_API_KEY: $WANDB_API_KEY
+  HF_TOKEN: $HF_TOKEN
 max_retries: 1 # (Optional) Maximum number of times the job will be retried before being marked failed. Defaults to `1`.

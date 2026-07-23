@@ -28,6 +28,7 @@ import torch
 
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
+    _empty_cuda_cache_rocm,
 )
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
@@ -110,6 +111,14 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             if self._skyrl_is_checkpoint_format:
                 model.load_weights(weights=weights)
+                # vLLM's load only updates the main model; the spec-decode (MTP/Eagle)
+                # drafter is a separate module and must be reloaded from the same
+                # checkpoint-format weights (see spec_decode_utils).
+                from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+                    _reload_spec_decode_drafter,
+                )
+
+                _reload_spec_decode_drafter(self.model_runner, weights)
             else:
                 for name, weight in weights:
                     param = model.get_parameter(name)
@@ -148,13 +157,76 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
 
         from vllm.config import set_current_vllm_config
 
+        from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+            _reload_spec_decode_drafter,
+        )
+
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
         model = self.model_runner.model
+
+        def _load_weights(weights):
+            weights = list(weights)
+            loaded = model.load_weights(weights=weights)
+            _reload_spec_decode_drafter(self.model_runner, weights)
+            return loaded
 
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             self.weight_transfer_engine.receive_weights(
                 typed_update_info,
-                load_weights=model.load_weights,
+                load_weights=_load_weights,
             )
 
         torch.accelerator.synchronize()
+        _empty_cuda_cache_rocm()
+
+    # Suspend / resume for non-colocated weight sync.
+    #
+    # Drive the per-worker CuMemAllocator directly instead of GPUWorker.sleep/
+    # wake_up (only reachable via EngineCore.sleep, which force-clears the prefix
+    # cache and preempts running requests at level >= 1). Touching the allocator
+    # alone lets the caller hold a KEEP pause across the sync and resume frozen
+    # requests with their KV restored to the same virtual addresses -- no abort,
+    # no prefill recompute. Mirrors GPUWorker.sleep/wake_up; re-verify on vLLM bumps.
+
+    def skyrl_sleep_for_weight_sync(self, offload_kv: bool = True) -> None:
+        """Free GPU memory for weight sync by sleeping the allocator.
+
+        Weights are discarded rather than backed up since the broadcast overwrites
+        every parameter on wake. ``offload_kv`` controls whether the KV cache is
+        offloaded to CPU (preserved for frozen in-flight requests) or discarded. Model
+        buffers live in the weights pool but are not sent by the broadcast (e.g.
+        non-persistent rotary ``inv_freq``), so save them here and restore on wake --
+        as GPUWorker.sleep(level=2) does.
+        """
+        from vllm.device_allocator import get_mem_allocator_instance
+
+        model = self.model_runner.model
+        self._skyrl_saved_buffers = {name: buf.cpu().clone() for name, buf in model.named_buffers()}
+        get_mem_allocator_instance().sleep(offload_tags=("kv_cache",) if offload_kv else ())
+
+    def skyrl_wake_for_weight_sync(self, tags: list) -> None:
+        """Wake the given allocator tags, restoring CPU-backed contents.
+
+        Call ``["weights"]`` before the broadcast and ``["kv_cache"]`` after. Does
+        not resume the scheduler; the caller does that via ``/resume``.
+        """
+        from vllm.device_allocator import get_mem_allocator_instance
+
+        # Return the broadcast's reserved-but-unallocated blocks to CUDA so cumem can
+        # remap the KV pool at its fixed virtual addresses.
+        torch.cuda.empty_cache()
+
+        get_mem_allocator_instance().wake_up(tags)
+        # Restore model buffers (not covered by the broadcast) once weights remap.
+        saved = getattr(self, "_skyrl_saved_buffers", None)
+        if saved and (tags is None or "weights" in tags):
+            model = self.model_runner.model
+            for name, buf in model.named_buffers():
+                if name in saved:
+                    buf.data.copy_(saved[name].data)
+            self._skyrl_saved_buffers = {}
+        # Re-init fp8 KV scales after the KV pool remaps (no-op without fp8 KV cache).
+        if tags is None or "kv_cache" in tags:
+            post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
+            if post_wake is not None:
+                post_wake()

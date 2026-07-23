@@ -15,8 +15,8 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 # Configure CISPO parameters
 POLICY_LOSS="cispo"
-CISPO_EPS_CLIP_LOW=0
-CISPO_EPS_CLIP_HIGH=5
+CISPO_EPS_CLIP_LOW=1
+CISPO_EPS_CLIP_HIGH=4
 USE_KL_LOSS=false
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \

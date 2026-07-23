@@ -183,6 +183,16 @@ megatron_config:
   lora_config:
     # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
     lora_type: "lora"
+  hf_export_config:
+    # Fan Megatron-to-HF safetensors export writes across ranks instead of writing the model from rank 0.
+    # NOTE: for sharded multi-node exports, use a shared filesystem path.
+    # Node-local paths and cloud paths can split shards across per-rank local work directories.
+    # Megatron-Bridge will build the safetensors index.json based on node-local files on rank 0,
+    # and this can be incorrect if not all shard files are visible.
+    distributed_save: false
+    # In distributed save, only ranks 0, N, 2N, ... write shards. For one writer per node,
+    # set this to the number of Megatron worker GPUs per node.
+    save_every_n_ranks: 1
   # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
   # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
   empty_cuda_cache: true
@@ -199,6 +209,12 @@ megatron_config:
 - `megatron_config.context_parallel_size`: Context parallel size for reducing activation memory across the sequence length dimension.
 - `megatron_config.expert_model_parallel_size`: The expert parallel size for sharding expert modules across multiple GPUs.
 - `megatron_config.expert_tensor_parallel_size`: The tensor parallel size for each expert module. If set to `null`, then the value will be resolved to `tensor_model_parallel_size` by Megatron. It is recommended to set this to `1` when enabling `expert_model_parallel_size > 1` for the best performance.
+- `megatron_config.hf_export_config.distributed_save`: Whether to parallelize Megatron-to-HuggingFace safetensors export writes across ranks. This only affects HF model exports from `hf_save_interval` or explicit `save_hf_model` calls.
+- `megatron_config.hf_export_config.save_every_n_ranks`: Rank stride for distributed HF export writers. When `distributed_save=true`, ranks `0`, `N`, `2N`, ... write shards, where `N` is `save_every_n_ranks`. Set this to the number of Megatron worker GPUs per node for one writer per node. Must be at least `1`; ignored when `distributed_save=false`.
+
+<Callout type="warn">
+For sharded multi-node HF exports with `megatron_config.hf_export_config.distributed_save=true`, set `trainer.export_path` to a shared filesystem path visible to all Megatron ranks. Node-local paths and cloud paths can split shards across per-rank local work directories. Megatron-Bridge builds `model.safetensors.index.json` from the shard files visible to rank 0, so the index can be incomplete if rank 0 cannot see every shard written by the other ranks.
+</Callout>
 
 Some rules for configuring these parameters:
 
@@ -453,8 +469,8 @@ algorithm:
 
   # cispo parameters (only used when policy_loss_type: "cispo")
   cispo:
-    cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
-    cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+    cispo_eps_clip_low: 1  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+    cispo_eps_clip_high: 4 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
 
   # value loss parameters
   value_clip: 0.2

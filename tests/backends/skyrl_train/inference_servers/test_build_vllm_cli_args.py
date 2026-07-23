@@ -36,6 +36,9 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     assert args.hf_overrides["rope_parameters"] == {"rope_type": "linear", "factor": 2.0, "rope_theta": 10000.0}
     assert vllm.platforms.current_platform.device_type == "cuda"
 
+    # NOTE: the MTP speculative_config wiring test lives in
+    # tests/backends/skyrl_train/mtp/test_build_vllm_cli_args_mtp.py
+
 
 def test_resolve_policy_model_name_uses_served_model_name():
     cfg = SkyRLTrainConfig()
