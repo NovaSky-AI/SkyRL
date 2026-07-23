@@ -264,6 +264,8 @@ class TinkerEngine:
         # DB-free; only the engine owns the connection.
         if hasattr(self.backend, "set_inference_state_publisher"):
             self.backend.set_inference_state_publisher(self._write_inference_state_to_db)
+        if config.prewarm_inference:
+            self.backend.prewarm_inference()
 
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()
