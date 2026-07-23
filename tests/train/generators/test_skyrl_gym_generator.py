@@ -1740,14 +1740,123 @@ async def test_step_wise_trajectory_completion_time_metrics(mock_make, mock_toke
     # Aggregate stats are present and computed over the per-prompt times.
     rollout_metrics = generator_output["rollout_metrics"]
     for key in (
-        "generate/trajectory_completion_time_mean",
-        "generate/trajectory_completion_time_p90",
-        "generate/trajectory_completion_time_max",
+        "generate/trajectory_time_completion_mean",
+        "generate/trajectory_time_completion_p90",
+        "generate/trajectory_time_completion_max",
     ):
         assert key in rollout_metrics, f"missing metric {key}"
     expected = np.array(metrics_times, dtype=np.float64)
-    assert rollout_metrics["generate/trajectory_completion_time_mean"] == pytest.approx(np.mean(expected).item())
-    assert rollout_metrics["generate/trajectory_completion_time_p90"] == pytest.approx(
+    assert rollout_metrics["generate/trajectory_time_completion_mean"] == pytest.approx(np.mean(expected).item())
+    assert rollout_metrics["generate/trajectory_time_completion_p90"] == pytest.approx(
         np.percentile(expected, 90).item()
     )
-    assert rollout_metrics["generate/trajectory_completion_time_max"] == pytest.approx(np.max(expected).item())
+    assert rollout_metrics["generate/trajectory_time_completion_max"] == pytest.approx(np.max(expected).item())
+
+    # The time splits are stored per step and replicated like the completion times above.
+    time_splits = generator_output["trajectory_time_splits"]
+    assert time_splits is not None and set(time_splits) == {"llm", "env"}
+    for split_times in time_splits.values():
+        assert len(split_times) == num_steps
+        assert split_times[0] == split_times[1] and split_times[2] == split_times[3]
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
+    """agent_loop attributes engine sleep to "llm" and env sleep to "env", not swapped or merged.
+    Metric math over the splits is covered by exact-value tests in test_generator_output_utils.py."""
+    import asyncio
+    import time
+
+    from skyrl.train.generators.base import TrajectoryID
+
+    llm_sleep_s = 0.02
+    env_sleep_s = 0.06
+    num_turns = 2
+
+    mock_tokenizer.eos_token_id = 4
+
+    def apply_chat_template_side_effect(messages, **kwargs):
+        if kwargs.get("tokenize", True):
+            return [201, 202]
+        return "".join([m.get("content", "") for m in messages])
+
+    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
+
+    async def llm_generate_side_effect(input_batch, model=None):
+        await asyncio.sleep(llm_sleep_s)
+        num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
+        return {
+            "responses": ["step"] * num,
+            "stop_reasons": ["stop"] * num,
+            "response_logprobs": None,
+            "response_ids": [[10, 11, 12, mock_tokenizer.eos_token_id] for _ in range(num)],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    class SlowEnv(BaseTextEnv):
+        def __init__(self):
+            super().__init__()
+            self.turns = 0
+
+        def init(self, prompt):
+            return prompt, {}
+
+        def step(self, action):
+            time.sleep(env_sleep_s)
+            self.turns += 1
+            if self.turns < num_turns:
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": "obs"}], reward=0.0, done=False, metadata={}
+                )
+            return BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+
+    mock_make.side_effect = lambda *args, **kwargs: SlowEnv()
+
+    # Run env.step on the executor as in production; a blocking step inline would stall the event
+    # loop and inflate a sibling trajectory's measured LLM time.
+    mock_env_cfg.max_env_workers = 4
+
+    cfg = GeneratorConfig()
+    cfg.sampling_params.max_generate_length = 50
+    cfg.sampling_params.logprobs = None
+    cfg.apply_overlong_filtering = False
+    cfg.max_input_length = 512
+    cfg.batched = False
+    cfg.max_turns = 10
+    cfg.zero_reward_on_non_stop = False
+    cfg.use_conversation_multi_turn = True
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    num_trajectories = 2
+    prompts = [[{"role": "user", "content": f"Q{i}?"}] for i in range(num_trajectories)]
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": [{} for _ in prompts],
+        "env_classes": [mock_env_cfg.env_class for _ in prompts],
+        "trajectory_ids": [TrajectoryID(instance_id=f"uid{i}", repetition_id=0) for i in range(num_trajectories)],
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    time_splits = generator_output["trajectory_time_splits"]
+    assert time_splits is not None and set(time_splits) == {"llm", "env"}
+    llm_times, env_times = time_splits["llm"], time_splits["env"]
+    assert len(llm_times) == num_trajectories
+    assert len(env_times) == num_trajectories
+
+    for llm_t, env_t, e2e_t in zip(llm_times, env_times, generator_output["trajectory_generation_times"]):
+        assert llm_t >= llm_sleep_s * num_turns
+        assert env_t >= env_sleep_s * num_turns
+        # The environment is ~3x slower than the engine here, so a swapped attribution would flip this.
+        assert env_t > llm_t
+        assert llm_t + env_t <= e2e_t + 1e-6
