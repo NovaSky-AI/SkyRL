@@ -524,7 +524,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
         self,
         prompt: Dict[str, Any],
         session_id: Optional[str],
-        model: str,
     ) -> Tuple[List[int], Optional[MultiModalFeatures]]:
         """Build token_ids and optional multi-modal features from a Tinker prompt.
 
@@ -532,6 +531,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
         When image chunks are present, calls /v1/chat/completions/render to
         process images, then splices the resulting placeholder tokens into the
         pre-tokenized text stream and adjusts placeholder offsets.
+
+        The render request always targets the base model (``self.model_name``):
+        rendering (chat-template application, tokenization, and multimodal
+        preprocessing) is adapter-independent, and vLLM's render endpoint does
+        not resolve LoRA adapter names, so passing one returns 404 (#1860).
 
         Returns:
             (token_ids, features) where features is None for text-only prompts.
@@ -558,7 +562,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         render_payload: Dict[str, Any] = {
             "json": {
-                "model": model,
+                "model": self.model_name,
                 "messages": [{"role": "user", "content": content_parts}],
             }
         }
@@ -645,7 +649,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         # Render prompt: flatten text tokens and, if images are present,
         # call the render endpoint to get placeholder tokens + features.
-        token_ids, mm_features = await self._render_for_sample(prompt, session_id, model=model)
+        token_ids, mm_features = await self._render_for_sample(prompt, session_id)
 
         # Map Tinker SamplingParams → vLLM format
         sampling_params: Dict[str, Any] = {
@@ -776,8 +780,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
             request_payload: Dict with {"json": <request-body>}.
                 The request body should be OpenAI-compatible chat completion
                 request. ``model`` is optional and resolved via
-                ``_resolve_model``. session_id can be included in json for
-                consistent routing.
+                ``_resolve_model``; note that vLLM's render endpoint only
+                resolves base model names, so under LoRA pass the base model
+                explicitly (adapter names return 404, #1860; see
+                ``_render_for_sample``). session_id can be included in json
+                for consistent routing.
 
         Returns:
             Rendered chat completion response (template-applied prompt and token IDs).

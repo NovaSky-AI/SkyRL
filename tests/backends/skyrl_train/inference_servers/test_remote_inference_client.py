@@ -1024,6 +1024,10 @@ class TestExplicitModelRequired:
       ``client.model_name``.
     - If no model is supplied and LoRA **is** in use, the call raises
       ``ValueError`` so requests don't silently target the base model.
+
+    One exception: ``sample`` threads the resolved model to the generate
+    endpoint, but its internal render sub-request for image prompts always
+    targets the base model (see ``_render_for_sample``).
     """
 
     @pytest.mark.asyncio
@@ -1270,6 +1274,44 @@ class TestExplicitModelRequired:
             await client.sample(request_payload)
             captured = await _get_last_models(mock_servers["server_urls"])
             assert captured[0]["generate"] == "lora-sample"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_sample_with_image_renders_under_base_model(self, mock_servers):
+        """With LoRA, sample's render sub-request targets the base model while
+        generate targets the adapter (#1860); see ``_render_for_sample``.
+        """
+        import base64
+
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="base-model",
+            uses_lora_weight_sync=True,
+            data_parallel_size=1,
+        )
+        try:
+            image_bytes = base64.b64encode(b"fake-jpeg-data").decode("ascii")
+            request_payload = {
+                "json": {
+                    "model": "lora-adapter",
+                    "prompt": {
+                        "chunks": [
+                            {"type": "encoded_text", "tokens": [100, 101, 102]},
+                            {"type": "image", "data": image_bytes, "format": "jpeg"},
+                            {"type": "encoded_text", "tokens": [200, 201]},
+                        ]
+                    },
+                    "num_samples": 1,
+                    "sampling_params": {"temperature": 0.7, "max_tokens": 16},
+                }
+            }
+            result = await client.sample(request_payload)
+            assert result["type"] == "sample"
+            captured = await _get_last_models(mock_servers["server_urls"])
+            assert captured[0]["render"] == "base-model"
+            assert captured[0]["generate"] == "lora-adapter"
         finally:
             await client.teardown()
 
