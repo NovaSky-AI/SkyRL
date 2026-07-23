@@ -240,6 +240,20 @@ def _flatten_field(generator_outputs: List[GeneratorOutput], key: str) -> list:
     return flat
 
 
+def _concat_field(generator_outputs: List[GeneratorOutput], key: str) -> Optional[list]:
+    """Flatten an optional per-trajectory field, keyed off the first output (None if absent)."""
+    if generator_outputs[0].get(key) is None:
+        return None
+    return _flatten_field(generator_outputs, key)
+
+
+def _last_step_only(values: Optional[list], is_last_step: Optional[List[bool]]) -> Optional[list]:
+    """Keep only last-step entries when step-wise, so one trajectory contributes one value."""
+    if values is None or not is_last_step:
+        return values
+    return [v for v, last in zip(values, is_last_step) if last]
+
+
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step_wise: bool = False) -> GeneratorOutput:
     """
     Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
@@ -264,17 +278,12 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "response_ids": _flatten_field(generator_outputs, "response_ids"),
         "rewards": _flatten_field(generator_outputs, "rewards"),
         "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
-        "stop_reasons": (
-            _flatten_field(generator_outputs, "stop_reasons") if first.get("stop_reasons") is not None else None
-        ),
-        "rollout_logprobs": (
-            _flatten_field(generator_outputs, "rollout_logprobs") if first.get("rollout_logprobs") is not None else None
-        ),
-        "trajectory_generation_times": (
-            _flatten_field(generator_outputs, "trajectory_generation_times")
-            if first.get("trajectory_generation_times") is not None
-            else None
-        ),
+        "stop_reasons": _concat_field(generator_outputs, "stop_reasons"),
+        "rollout_logprobs": _concat_field(generator_outputs, "rollout_logprobs"),
+        "trajectory_generation_times": _concat_field(generator_outputs, "trajectory_generation_times"),
+        "trajectory_llm_times": _concat_field(generator_outputs, "trajectory_llm_times"),
+        "trajectory_env_times": _concat_field(generator_outputs, "trajectory_env_times"),
+        "trajectory_env_setup_times": _concat_field(generator_outputs, "trajectory_env_setup_times"),
     }
 
     # propagate additional keys with list values as-is
@@ -284,19 +293,22 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
     for key in additional_keys:
         result[key] = _flatten_field(generator_outputs, key)
 
-    # With step-wise training, only use the trajectory generation time from the last step
-    trajectory_generation_times = result.get("trajectory_generation_times")
-    if step_wise and trajectory_generation_times and result.get("is_last_step"):
-        trajectory_generation_times = [
-            t for t, is_last_step in zip(trajectory_generation_times, result.get("is_last_step")) if is_last_step
-        ]
+    # With step-wise training each trajectory spans multiple rows; keep only its last-step timing.
+    is_last_step = result.get("is_last_step") if step_wise else None
+    trajectory_generation_times = _last_step_only(result.get("trajectory_generation_times"), is_last_step)
+    trajectory_llm_times = _last_step_only(result.get("trajectory_llm_times"), is_last_step)
+    trajectory_env_times = _last_step_only(result.get("trajectory_env_times"), is_last_step)
+    trajectory_env_setup_times = _last_step_only(result.get("trajectory_env_setup_times"), is_last_step)
 
-    # Re-aggregate rollout metrics
+    # Re-aggregate rollout metrics; the extra_keys fallback below cannot aggregate a p90 or a ratio.
     rollout_metrics = get_rollout_metrics(
         result["response_ids"],
         result["rewards"],
         loss_masks=result.get("loss_masks"),
         trajectory_completion_times=trajectory_generation_times,
+        trajectory_llm_times=trajectory_llm_times,
+        trajectory_env_times=trajectory_env_times,
+        trajectory_env_setup_times=trajectory_env_setup_times,
     )
 
     # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
@@ -377,6 +389,21 @@ def compute_turn_token_counts(loss_masks: List[List[int]]) -> List[int]:
     return turn_token_counts
 
 
+def _add_time_stats(rollout_metrics: Dict[str, Any], name: str, times: Optional[List[float]]) -> Optional[float]:
+    """Add mean/p90/max for a per-trajectory time list; returns its sum, or None if absent."""
+    if not times:
+        return None
+    arr = np.array(times, dtype=np.float64)
+    rollout_metrics.update(
+        {
+            f"generate/trajectory_time_{name}_mean": np.mean(arr).item(),
+            f"generate/trajectory_time_{name}_p90": np.percentile(arr, 90).item(),
+            f"generate/trajectory_time_{name}_max": np.max(arr).item(),
+        }
+    )
+    return np.sum(arr).item()
+
+
 def get_rollout_metrics(
     responses: List[List[int]],
     rewards: Union[List[float], List[List[float]]],
@@ -384,6 +411,9 @@ def get_rollout_metrics(
     env_classes: Optional[List[str]] = None,
     loss_masks: Optional[List[List[int]]] = None,
     trajectory_completion_times: Optional[List[float]] = None,
+    trajectory_llm_times: Optional[List[float]] = None,
+    trajectory_env_times: Optional[List[float]] = None,
+    trajectory_env_setup_times: Optional[List[float]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -396,6 +426,12 @@ def get_rollout_metrics(
         loss_masks: Optional list of per-token loss masks; used to compute assistant-only token counts
         trajectory_completion_times: Optional per-trajectory end-to-end generation times (seconds);
             used to compute aggregate trajectory completion-time stats (mean / p90 / max)
+        trajectory_llm_times: Optional per-trajectory time (seconds) spent awaiting the inference
+            engine, summed over turns
+        trajectory_env_times: Optional per-trajectory time (seconds) spent in ``env.step()``, summed
+            over turns
+        trajectory_env_setup_times: Optional per-trajectory time (seconds) spent constructing and
+            initializing the env
 
     Returns:
         Dictionary of aggregated metrics
@@ -450,15 +486,26 @@ def get_rollout_metrics(
                 }
             )
 
-    if trajectory_completion_times:
-        completion_times_arr = np.array(trajectory_completion_times, dtype=np.float64)
-        rollout_metrics.update(
-            {
-                "generate/trajectory_completion_time_mean": np.mean(completion_times_arr).item(),
-                "generate/trajectory_completion_time_p90": np.percentile(completion_times_arr, 90).item(),
-                "generate/trajectory_completion_time_max": np.max(completion_times_arr).item(),
-            }
+    _add_time_stats(rollout_metrics, "completion", trajectory_completion_times)
+    llm_sum = _add_time_stats(rollout_metrics, "llm", trajectory_llm_times)
+    env_sum = _add_time_stats(rollout_metrics, "env", trajectory_env_times)
+    _add_time_stats(rollout_metrics, "env_setup", trajectory_env_setup_times)
+
+    if llm_sum is not None and env_sum is not None and llm_sum + env_sum > 0:
+        # Time-weighted (sum over sum), not a mean of per-trajectory ratios, so long trajectories
+        # count proportionally.
+        rollout_metrics["generate/frac_time_in_env"] = env_sum / (llm_sum + env_sum)
+
+    # Remainder of e2e not attributed to the engine, env steps, or env setup. Tokenization, chat
+    # templating, output assembly, env teardown, and event-loop scheduling.
+    if trajectory_completion_times and trajectory_llm_times and trajectory_env_times and trajectory_env_setup_times:
+        other = (
+            np.array(trajectory_completion_times, dtype=np.float64)
+            - np.array(trajectory_llm_times, dtype=np.float64)
+            - np.array(trajectory_env_times, dtype=np.float64)
+            - np.array(trajectory_env_setup_times, dtype=np.float64)
         )
+        _add_time_stats(rollout_metrics, "other", other.tolist())
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)

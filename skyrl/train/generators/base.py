@@ -46,6 +46,11 @@ class GeneratorOutput(TypedDict):
     # trajectory in the input batch (i.e. per ``agent_loop`` call). Used by the fully
     # async trainer to compute per-group / intra-group completion-time metrics.
     trajectory_generation_times: Optional[List[float]]
+    # Split of ``trajectory_generation_times`` into engine-wait vs ``env.step()`` time (seconds),
+    # plus env construction/init time. None if any trajectory did not record it.
+    trajectory_llm_times: Optional[List[float]]
+    trajectory_env_times: Optional[List[float]]
+    trajectory_env_setup_times: Optional[List[float]]
     rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
