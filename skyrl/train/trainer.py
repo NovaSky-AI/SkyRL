@@ -1,6 +1,7 @@
 import math
 import os
 import shutil
+import time
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -164,6 +165,19 @@ class RayPPOTrainer:
         self._num_training_gpus = (
             cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
         )
+
+    def _mark_step_start(self, epoch: int, start_time: float) -> None:
+        """Publish the step/epoch join gauges at step start, so a mid-step scrape reads the
+        in-progress step. The gauge names match what ``Tracking.log`` publishes for the trainer/*
+        metrics, so the start-timed value here and the commit-time publish are one series. Callers
+        pass the step's own start time."""
+        self.tracker.log_gauge("skyrl_trainer_global_step", self.global_step, "Step the loop is working on.")
+        self.tracker.log_gauge("skyrl_trainer_epoch", epoch, "Current epoch, zero-indexed.")
+        self.tracker.log_gauge("skyrl_step_start_unixtime", start_time, "Wall-clock start of the current step.")
+
+    def _mark_step_end(self) -> None:
+        """Publish the step-end timestamp. Must run before global_step increments."""
+        self.tracker.log_gauge("skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step.")
 
     def add_callback(self, callback: TrainingCallback) -> None:
         """Register a callback. Events fired after this call reach the new callback."""
@@ -330,6 +344,9 @@ class RayPPOTrainer:
                     if not step_started:
                         self._fire("on_step_start")
                         step_started = True
+                        # time.time() rather than a step Timer: dynamic sampling re-enters
+                        # Timer("step") several times per logical step, so there is no single one.
+                        self._mark_step_start(epoch, time.time())
                         # Open the train-rollout metrics window once per logical
                         # step; paused so only the generation spans count toward the
                         # throughput denominator (dynamic sampling may generate more
@@ -534,6 +551,7 @@ class RayPPOTrainer:
                     self._fire("on_log", logs=log_payload)
 
                     self.tracker.log(log_payload, step=self.global_step, commit=True)
+                    self._mark_step_end()
                     self.all_metrics = {}
                     self.all_timings = {}
 

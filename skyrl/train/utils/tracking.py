@@ -16,7 +16,9 @@
 # limitations under the License.
 
 import dataclasses
+import numbers
 import pprint
+import re
 import traceback
 from enum import Enum
 from functools import partial
@@ -27,6 +29,9 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
+from skyrl.train.utils.scalar_gauges import ScalarGauges
+
+_PROMETHEUS_NAME_RE = re.compile(r"[^a-zA-Z0-9_]")
 
 
 # TODO(tgriggs): Test all backends.
@@ -75,12 +80,27 @@ class Tracking:
             self.logger = ConsoleLogger()
 
         self._exception_logged = False
+        self._prometheus = ScalarGauges()
 
     def log(self, data, step, commit=False):
         if self.backend == "wandb":
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
+        # Publish numeric values to Prometheus, one gauge per key; bool subtypes numbers.Real so exclude it.
+        for key, value in data.items():
+            if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                continue
+            self._prometheus.set(f"skyrl_{_PROMETHEUS_NAME_RE.sub('_', key)}", value)
+
+    def log_gauge(self, name: str, value: float, description: Optional[str] = None) -> None:
+        """Set a Prometheus gauge directly, on the same gauges ``log`` publishes metrics to.
+
+        The trainer uses this for step-timed gauges (e.g. step-start values), whose timing the
+        commit-time metric publish cannot reproduce. Sharing the gauges means a dedicated gauge and
+        the metric published under the same name are one series, not two.
+        """
+        self._prometheus.set(name, value, description)
 
     def finish(self):
         if self.backend == "console":

@@ -39,6 +39,7 @@ from skyrl.train.generators.utils import (
 )
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
+from skyrl.train.utils.scalar_gauges import ScalarGauges
 from skyrl.train.utils.trainer_utils import (
     ResumeMode,
     build_dataloader,
@@ -335,6 +336,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self.sample_full_batch = cfg.trainer.fully_async.sample_full_batch
 
+        self._gen_buffer_maxsize = self.mini_batch_size * (self.max_staleness_steps + 1)
+
         assert (
             # otherwise wasted throughput
             self.mini_batch_size <= self.num_parallel_generation_workers
@@ -349,6 +352,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Initialize base trainer
         super().__init__(*args, **kwargs)
+
+        # Buffer-depth gauges are async-loop specific; step/epoch gauges go through the tracker.
+        self._loop_gauges = ScalarGauges()
+        self._loop_gauges.set(
+            "skyrl_mini_batch_size", self.mini_batch_size, "Generation groups consumed per training step."
+        )
+        self._loop_gauges.set(
+            "skyrl_gen_buffer_maxsize", self._gen_buffer_maxsize, "Staleness-bounded generation-buffer capacity."
+        )
 
         # Callbacks aren't wired into FullyAsyncRayPPOTrainer.train() yet — fail
         # fast
@@ -479,9 +491,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
 
                 # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
-                generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
-                    maxsize=self.mini_batch_size * (self.max_staleness_steps + 1)
-                )
+                generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](maxsize=self._gen_buffer_maxsize)
 
                 # Maintain self.num_parallel_generation_workers concurrent group-generation workers
                 generator_tasks = [
@@ -507,7 +517,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # already reflects this epoch's trained steps. The range below is just an upper bound.
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
-                    with Timer("step", self.all_timings):
+                    with Timer("step", self.all_timings) as step_timer:
+                        self._mark_step_start(epoch, step_timer.start_time)
+                        self._loop_gauges.set(
+                            "skyrl_gen_buffer_qsize",
+                            generation_output_group_buffer.qsize(),
+                            "Completed generation groups buffered at step start.",
+                        )
+
                         # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups if
                         # sample_full_batch).
                         (
@@ -542,7 +559,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             break
 
                         if self.sample_full_batch:
-                            self.all_metrics["async/num_groups_dropped"] = len(cur_dropped_groups)
+                            # The collect loop returns exactly mini_batch_size kept groups here.
+                            num_dropped = len(cur_dropped_groups)
+                            keep_rate = self.mini_batch_size / (self.mini_batch_size + num_dropped)
+                            self.all_metrics["async/num_groups_dropped"] = num_dropped
+                            self.all_metrics["async/keep_rate"] = keep_rate
+                            self._loop_gauges.set(
+                                "skyrl_gen_group_keep_rate",
+                                keep_rate,
+                                "Fraction of drained groups kept while collecting the last mini-batch.",
+                            )
 
                         # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
                         with Timer("convert_to_training_input", self.all_timings):
@@ -605,6 +631,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if self._vllm_metrics_scraper is not None:
                         timing_payload.update(await self._vllm_metrics_scraper.sample())
                     self.tracker.log(timing_payload, step=self.global_step, commit=True)
+                    self._mark_step_end()
                     self.all_timings = {}
                     self.global_step += 1
 
