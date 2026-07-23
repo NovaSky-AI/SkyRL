@@ -1,9 +1,12 @@
-"""Loading of pretokenized SFT datasets.
+"""Loading of pretokenized SFT datasets from local or cloud storage.
 
-Some data pipelines tokenize offline (e.g. on a Spark/Ray data cluster). This
-module lets the SFT trainer ingest such a dataset directly from a local file
-or directory -- skipping online tokenization (``tokenize_chat_example`` and
-``tokenize_sft_example`` in ``skyrl.train.sft_trainer``) entirely.
+Some data pipelines tokenize offline (e.g. on a Spark/Ray data cluster) and
+publish the result to an object store. This module lets the SFT trainer ingest
+such a dataset directly -- skipping online tokenization (``tokenize_chat_example``
+and ``tokenize_sft_example`` in ``skyrl.train.sft_trainer``) entirely -- from a
+local file or directory, or an ``s3://``, ``gs://``, or ``gcs://`` URI. Cloud
+paths are materialized locally through
+:mod:`skyrl.train.dataset.remote_storage` before loading.
 
 Supported on-disk formats (auto-detected):
 
@@ -34,6 +37,8 @@ from typing import Any, Optional
 
 from datasets import Dataset, concatenate_datasets, load_dataset
 from loguru import logger
+
+from skyrl.train.dataset.remote_storage import materialize_local
 
 # Keys consumed (and re-emitted in normalized form) by ``_normalize_row``.
 # ``num_actions`` and ``labels`` are consumed-but-dropped: ``num_actions`` is
@@ -233,48 +238,56 @@ def _normalize_row(row: dict, row_idx: int, max_length: Optional[int]) -> Option
 def load_from_pretokenized(
     path: str,
     max_length: Optional[int] = None,
+    cache_dir: Optional[str] = None,
+    force_redownload: bool = False,
 ) -> list[dict[str, Any]]:
-    """Load a pretokenized SFT dataset from a local file or directory.
+    """Load a pretokenized SFT dataset from a local path or object store.
 
     The pretokenized counterpart of ``SFTTrainer._load_and_tokenize``: returns
     the same ``list[dict]`` representation the trainer's dataloaders and
     collators consume.
 
     Args:
-        path: Local path to a file or directory in one of the supported
-            formats (see module docstring).
+        path: Local path, ``s3://``, ``gs://``, or ``gcs://`` URI pointing to a
+            file or directory in one of the supported formats (see module
+            docstring).
         max_length: Optional sequence-length cap. Longer text rows are
             truncated (keeping the prompt prefix) and dropped if no loss tokens
             survive; longer VLM rows are always dropped with a warning,
             matching the online tokenization path.
+        cache_dir: Base directory for caching cloud downloads. ``None``
+            downloads to a temporary directory instead (no reuse across runs).
+        force_redownload: Re-download a cloud path even if a cached copy
+            exists.
 
     Returns:
         List of normalized examples (``input_ids`` / ``attention_mask`` /
         ``num_actions`` / window ``loss_mask``, plus pass-through columns like
         ``pixel_values`` / ``image_grid_thw``) ready for the SFT collators.
     """
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Pretokenized dataset path does not exist: {path}")
+    # The dataset is arrow-backed (memory-mapped from the store's files), so
+    # rows must be materialized before the context exits and an uncached
+    # temporary download is removed.
+    with materialize_local(path, cache_dir, force_redownload) as local_path:
+        dataset = _load_as_hf_dataset(local_path)
+        logger.info(f"Loaded pretokenized dataset from '{path}': {len(dataset)} rows, columns={dataset.column_names}")
 
-    dataset = _load_as_hf_dataset(path)
-    logger.info(f"Loaded pretokenized dataset from '{path}': {len(dataset)} rows, columns={dataset.column_names}")
+        global _warned_attention_mask_dropped
+        if "attention_mask" in dataset.column_names and not _warned_attention_mask_dropped:
+            _warned_attention_mask_dropped = True
+            logger.warning(
+                "Pretokenized dataset carries an 'attention_mask' column; its values are dropped and "
+                "regenerated as all-ones (rows must be stored unpadded; padding is applied at collation time)."
+            )
 
-    global _warned_attention_mask_dropped
-    if "attention_mask" in dataset.column_names and not _warned_attention_mask_dropped:
-        _warned_attention_mask_dropped = True
-        logger.warning(
-            "Pretokenized dataset carries an 'attention_mask' column; its values are dropped and "
-            "regenerated as all-ones (rows must be stored unpadded; padding is applied at collation time)."
-        )
-
-    normalized: list[dict] = []
-    num_dropped = 0
-    for row_idx, row in enumerate(dataset):
-        example = _normalize_row(row, row_idx, max_length)
-        if example is None:
-            num_dropped += 1
-        else:
-            normalized.append(example)
+        normalized: list[dict] = []
+        num_dropped = 0
+        for row_idx, row in enumerate(dataset):
+            example = _normalize_row(row, row_idx, max_length)
+            if example is None:
+                num_dropped += 1
+            else:
+                normalized.append(example)
 
     if num_dropped:
         logger.warning(
