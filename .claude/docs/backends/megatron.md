@@ -24,6 +24,18 @@ Key strategies:
 
 Note: Sequence parallelism is auto-enabled when `tensor_model_parallel_size > 1` — there is no separate config field for it.
 
+## Expert MXFP8
+
+Set `trainer.policy.model.expert_mxfp8.enabled=true` on SM100/SM103 to run
+routed expert GEMMs with Transformer Engine MXFP8 and configure vLLM for
+expert-only online MXFP8. Checkpoints and weight sync remain high precision.
+Set `trainer.policy.model.expert_mxfp8.persistent=true` with
+`trainer.policy.megatron_config.ddp_config.fp8_param_gather=true` to keep
+routed-expert primary parameters in MXFP8 between optimizer steps. Set
+`generator.inference_engine.fp8_weight_sync_mode=serialized_mxfp8` to send
+routed experts to vLLM as MXFP8 data and E8M0 scales. Unmerged LoRA is not
+supported.
+
 ## Test Requirements
 
 Megatron GPU tests need: `NVTE_FLASH_ATTN=0`

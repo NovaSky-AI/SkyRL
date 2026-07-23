@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, field
 from functools import cached_property
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 import torch
 
@@ -84,7 +84,12 @@ class WeightChunk:
 
     def __post_init__(self):
         """Validate that all input lists have the same length."""
-        lengths = [len(self.names), len(self.dtypes), len(self.shapes), len(self.tensors)]
+        lengths = [
+            len(self.names),
+            len(self.dtypes),
+            len(self.shapes),
+            len(self.tensors),
+        ]
         if len(set(lengths)) != 1:
             raise ValueError(
                 f"All lists must have the same length. Got names={len(self.names)}, "
@@ -104,3 +109,53 @@ class WeightChunk:
     def total_size_bytes(self) -> int:
         """Calculate total memory footprint in bytes."""
         return sum(t.numel() * t.element_size() for t in self.tensors)
+
+
+def torch_dtype_name(dtype: torch.dtype) -> str:
+    """Return the dtype spelling expected by vLLM weight-transfer metadata."""
+    return str(dtype).split(".")[-1]
+
+
+def cuda_uuid_to_str(uuid: str | bytes) -> str:
+    """Normalize CUDA UUIDs identically on both sides of an IPC transfer."""
+    return uuid.decode("ascii") if isinstance(uuid, bytes) else str(uuid)
+
+
+def iter_single_dtype_chunks(chunk: WeightChunk) -> Iterator[WeightChunk]:
+    """Yield dtype-homogeneous subchunks in first-seen dtype order.
+
+    CUDA IPC packs tensors into a typed buffer, while serialized FP8 chunks mix
+    FP8 weights, scale tensors, and unquantized BF16 tensors. vLLM's NCCL path
+    byte-packs mixed dtypes and does not require this split.
+    """
+    by_dtype: Dict[torch.dtype, Dict[str, list]] = {}
+    dtype_order: List[torch.dtype] = []
+
+    for name, tensor in zip(chunk.names, chunk.tensors):
+        dtype = tensor.dtype
+        if dtype not in by_dtype:
+            dtype_order.append(dtype)
+            by_dtype[dtype] = {"names": [], "dtypes": [], "shapes": [], "tensors": []}
+        group = by_dtype[dtype]
+        group["names"].append(name)
+        group["dtypes"].append(str(dtype))
+        group["shapes"].append(list(tensor.shape))
+        group["tensors"].append(tensor)
+
+    for dtype in dtype_order:
+        group = by_dtype[dtype]
+        yield WeightChunk(
+            names=group["names"],
+            dtypes=group["dtypes"],
+            shapes=group["shapes"],
+            tensors=group["tensors"],
+        )
+
+
+def get_weight_chunk_metadata(chunk: WeightChunk) -> Dict[str, List]:
+    """Return vLLM metadata for the tensors in a transfer chunk."""
+    return {
+        "names": list(chunk.names),
+        "dtype_names": [torch_dtype_name(tensor.dtype) for tensor in chunk.tensors],
+        "shapes": [list(tensor.shape) for tensor in chunk.tensors],
+    }

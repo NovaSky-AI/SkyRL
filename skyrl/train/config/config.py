@@ -101,6 +101,16 @@ class SkyRLLoraConfig(BaseConfig):
 
 
 @dataclass
+class ExpertMxfp8Config(BaseConfig):
+    """MXFP8 compute for routed MoE experts."""
+
+    enabled: bool = False
+    training: bool = True
+    rollout: bool = True
+    persistent: bool = False
+
+
+@dataclass
 class FakeInt4QatConfig(BaseConfig):
     """Fake-INT4 quantization-aware training for MoE experts (Megatron only).
 
@@ -138,6 +148,7 @@ class FakeInt4QatConfig(BaseConfig):
 class ModelConfig(BaseConfig):
     path: Optional[str] = None
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
+    expert_mxfp8: ExpertMxfp8Config = field(default_factory=ExpertMxfp8Config)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
 
     def __post_init__(self) -> None:
@@ -196,6 +207,7 @@ class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
+    fp8_param_gather: bool = False
     average_in_collective: bool = True
 
 
@@ -744,6 +756,10 @@ class InferenceEngineConfig(BaseConfig):
 
     model_dtype: str = "bfloat16"
     """Should match the dtype used by the inference engine."""
+    fp8_weight_sync_mode: Optional[str] = None
+    """Optional rollout weight format. ``"serialized_blockwise"`` serializes
+    supported linears with 128x128 scales; ``"serialized_mxfp8"`` serializes
+    routed experts with 1x32 E8M0 scales."""
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"
@@ -1048,6 +1064,46 @@ class TrainerConfig(BaseConfig):
                 "`trainer.policy.megatron_config.lora_config.merge_lora=False` so weight "
                 "sync preserves the inference engine's INT4 base weights."
             )
+
+        expert_mxfp8 = self.policy.model.expert_mxfp8
+        if expert_mxfp8.enabled:
+            if self.strategy != "megatron":
+                raise ValueError("Expert MXFP8 is only supported with trainer.strategy=megatron")
+            if not expert_mxfp8.training and not expert_mxfp8.rollout:
+                raise ValueError("Expert MXFP8 must enable training, rollout, or both")
+            if expert_mxfp8.persistent:
+                if not expert_mxfp8.training:
+                    raise ValueError("Persistent expert MXFP8 requires expert_mxfp8.training=true")
+                if not self.policy.megatron_config.ddp_config.fp8_param_gather:
+                    raise ValueError(
+                        "Persistent expert MXFP8 requires policy.megatron_config.ddp_config.fp8_param_gather=true"
+                    )
+            if self.policy.model.fake_int4_qat.enabled:
+                raise ValueError("Expert MXFP8 and fake INT4 QAT are mutually exclusive")
+            if expert_mxfp8.training:
+                if not self.policy.megatron_config.moe_grouped_gemm:
+                    raise ValueError("Expert MXFP8 training requires moe_grouped_gemm=true")
+                if self.policy.megatron_config.moe_router_dtype != "fp32":
+                    raise ValueError("Expert MXFP8 training requires moe_router_dtype=fp32")
+                transformer_overrides = self.policy.megatron_config.transformer_config_kwargs
+                if transformer_overrides.get("moe_grouped_gemm") is False:
+                    raise ValueError("Expert MXFP8 training requires moe_grouped_gemm=true")
+                if transformer_overrides.get("moe_router_dtype", "fp32") != "fp32":
+                    raise ValueError("Expert MXFP8 training requires moe_router_dtype=fp32")
+                conflicts = {"fp8", "quant_recipe"} & transformer_overrides.keys()
+                conflicts.update(
+                    option
+                    for option in ("fp8_dot_product_attention", "fp8_multi_head_attention", "fp8_output_proj")
+                    if transformer_overrides.get(option)
+                )
+                if conflicts:
+                    raise ValueError(f"Expert MXFP8 conflicts with transformer_config_kwargs: {sorted(conflicts)}")
+            if (
+                expert_mxfp8.rollout
+                and self.policy.model.lora.rank > 0
+                and not self.policy.megatron_config.lora_config.merge_lora
+            ):
+                raise ValueError("Expert MXFP8 rollout does not support unmerged LoRA")
 
         if self.logprobs_chunk_size is not None and (
             not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0

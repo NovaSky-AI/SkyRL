@@ -17,7 +17,12 @@ from skyrl.train.config.config import (
     _resolve_class_type,
     build_nested_dataclass,
 )
-from skyrl.train.utils.utils import validate_cfg, validate_inference_engine_cfg
+from skyrl.train.utils import utils as train_utils
+from skyrl.train.utils.utils import (
+    prepare_runtime_environment,
+    validate_cfg,
+    validate_inference_engine_cfg,
+)
 from tests.train.util import example_dummy_config
 
 
@@ -129,6 +134,11 @@ def test_cli_overrides_empty_args():
     assert cfg.trainer.seed == 42
 
 
+def test_cli_overrides_fp8_param_gather():
+    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.policy.megatron_config.ddp_config.fp8_param_gather=true"])
+    assert cfg.trainer.policy.megatron_config.ddp_config.fp8_param_gather is True
+
+
 @pytest.mark.parametrize(
     ("field_name", "value"),
     [
@@ -141,6 +151,118 @@ def test_cli_overrides_empty_args():
 def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value):
     with pytest.raises(ValueError, match=field_name):
         TrainerConfig(**{field_name: value})
+
+
+def test_runtime_env_forwards_te_block_scale_mode(monkeypatch):
+    monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1")
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+
+    env_vars = prepare_runtime_environment(example_dummy_config())
+
+    assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "1"
+
+
+def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
+    monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
+    monkeypatch.delenv("NVTE_FP8_BLOCK_AMAX_EPSILON", raising=False)
+    monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = example_dummy_config()
+    cfg.trainer.strategy = "fsdp"
+    cfg.trainer.policy.megatron_config = None
+    cfg.trainer.ref.megatron_config = None
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert "NVTE_FP8_BLOCK_SCALING_FP32_SCALES" not in env_vars
+    assert "VLLM_USE_DEEP_GEMM_E8M0" not in env_vars
+
+
+def test_serialized_fp8_runtime_defaults_to_fp32_scales(monkeypatch):
+    monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
+    monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "serialized_blockwise"
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "1"
+    assert env_vars["VLLM_USE_DEEP_GEMM_E8M0"] == "0"
+
+
+@pytest.mark.parametrize("mode", ["serialized_blockwise", "serialized_mxfp8"])
+def test_serialized_fp8_weight_sync_requires_megatron(mode):
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "fsdp"
+    cfg.generator.inference_engine.fp8_weight_sync_mode = mode
+
+    with pytest.raises(ValueError, match="requires trainer.strategy='megatron'"):
+        validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("mode", ["serialized_blockwise", "serialized_mxfp8"])
+def test_serialized_fp8_weight_sync_rejects_adapter_only_megatron_lora(mode):
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.generator.inference_engine.fp8_weight_sync_mode = mode
+    cfg.trainer.policy.model.lora.rank = 8
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+
+    with pytest.raises(ValueError, match="requires full-weight updates"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_megatron_fp8_compute_defaults_to_fp32_scales_without_serialized_sync(monkeypatch):
+    monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = example_dummy_config()
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs["fp8"] = "hybrid"
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "1"
+
+
+def test_power_2_mode_rejects_persistent_fp8_without_serialized_sync(monkeypatch):
+    monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0")
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = example_dummy_config()
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs["fp8_param"] = True
+
+    with pytest.raises(ValueError, match="fp8_param=false on Blackwell"):
+        prepare_runtime_environment(cfg)
+
+
+def test_megatron_validation_requires_fp8_param_gather_for_training():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs["fp8_param"] = True
+    cfg.trainer.policy.megatron_config.ddp_config.fp8_param_gather = False
+
+    with pytest.raises(ValueError, match="fp8_param_gather=true"):
+        train_utils.validate_megatron_cfg(cfg)
+
+
+def test_megatron_validation_allows_inference_only_fp8_param_without_gather():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.inference_only_init = True
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs["fp8_param"] = True
+    cfg.trainer.policy.megatron_config.ddp_config.fp8_param_gather = False
+
+    train_utils.validate_megatron_cfg(cfg)
+
+
+def test_serialized_fp8_fp32_scales_reject_vllm_e8m0(monkeypatch):
+    monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1")
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_E8M0", "1")
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "serialized_blockwise"
+
+    with pytest.raises(ValueError, match="VLLM_USE_DEEP_GEMM_E8M0=0"):
+        prepare_runtime_environment(cfg)
 
 
 def test_cli_overrides_plus_prefix_rejected():
@@ -444,6 +566,104 @@ def test_fake_int4_qat_requires_unmerged_lora_sync():
                 "trainer.strategy=megatron",
                 "trainer.policy.model.lora.rank=32",
                 "trainer.policy.model.fake_int4_qat.enabled=true",
+            ]
+        )
+
+
+def test_expert_mxfp8_defaults():
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
+    mxfp8 = cfg.trainer.policy.model.expert_mxfp8
+    assert mxfp8.enabled is False
+    assert mxfp8.training is True
+    assert mxfp8.rollout is True
+    assert mxfp8.persistent is False
+
+
+def test_expert_mxfp8_cli_overrides():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.model.expert_mxfp8.enabled=true",
+            "trainer.policy.model.expert_mxfp8.rollout=false",
+            "trainer.policy.model.expert_mxfp8.persistent=true",
+            "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true",
+        ]
+    )
+    assert cfg.trainer.policy.model.expert_mxfp8.enabled is True
+    assert cfg.trainer.policy.model.expert_mxfp8.rollout is False
+    assert cfg.trainer.policy.model.expert_mxfp8.persistent is True
+
+
+def test_persistent_expert_mxfp8_requires_training():
+    with pytest.raises(ValueError, match="training=true"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+                "trainer.policy.model.expert_mxfp8.training=false",
+                "trainer.policy.model.expert_mxfp8.persistent=true",
+                "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true",
+            ]
+        )
+
+
+def test_persistent_expert_mxfp8_requires_fp8_param_gather():
+    with pytest.raises(ValueError, match="fp8_param_gather=true"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+                "trainer.policy.model.expert_mxfp8.persistent=true",
+            ]
+        )
+
+
+def test_expert_mxfp8_requires_megatron():
+    with pytest.raises(ValueError, match="strategy=megatron"):
+        SkyRLTrainConfig.from_cli_overrides(["trainer.policy.model.expert_mxfp8.enabled=true"])
+
+
+def test_expert_mxfp8_rejects_unmerged_lora_rollout():
+    with pytest.raises(ValueError, match="unmerged LoRA"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.lora.rank=32",
+                "trainer.policy.megatron_config.lora_config.merge_lora=false",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+            ]
+        )
+
+
+def test_expert_mxfp8_conflicts_with_fake_int4():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.lora.rank=32",
+                "trainer.policy.megatron_config.lora_config.merge_lora=false",
+                "trainer.policy.model.fake_int4_qat.enabled=true",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+                "trainer.policy.model.expert_mxfp8.rollout=false",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "override,match",
+    [
+        ("moe_grouped_gemm=false", "moe_grouped_gemm=true"),
+        ("moe_router_dtype=bf16", "moe_router_dtype=fp32"),
+        ("fp8_dot_product_attention=true", "transformer_config_kwargs"),
+    ],
+)
+def test_expert_mxfp8_rejects_transformer_overrides(override, match):
+    with pytest.raises(ValueError, match=match):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+                f"trainer.policy.megatron_config.transformer_config_kwargs.{override}",
             ]
         )
 

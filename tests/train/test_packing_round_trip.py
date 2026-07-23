@@ -155,9 +155,8 @@ class TestPreprocessPackedRows:
         - ``mbs = 2`` so the THD offset stride matters per micro-batch row.
         - ``tp_size = 4`` so the TP-alignment padding inside rows kicks in.
         - Multi-subseq rows ``[(7, 5)]`` and ``[(3, 11)]`` to expose offset
-          mismatches in both directions (sub-seq 0 length 7 is NOT a multiple
-          of 4, sub-seq 1 length 5 is also not; row 1's sub-seq 0 length 3 is
-          shorter than its sub-seq 1 length 11).
+          mismatches in both directions (none of the lengths are alignment
+          multiples, and row 1's first sub-seq is shorter than its second).
         """
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
             preprocess_packed_seqs,
@@ -177,17 +176,15 @@ class TestPreprocessPackedRows:
         )
 
         # Sanity: collator layout matches what PackedDataCollator does.
-        #   row 0: [101..107] + pad-to-16 + [201..205] + pad-to-16 => 32 slots
-        #   row 1: [301..303] + pad-to-16 + [401..411] + pad-to-16 => 32 slots
-        assert sequences.shape == (2, 32)
+        assert sequences.shape == (2, 2 * align_size)
         assert sequences[0, :7].tolist() == row_0_sub_0
-        assert sequences[0, 7:16].tolist() == [0] * 9
-        assert sequences[0, 16:21].tolist() == row_0_sub_1
+        assert sequences[0, 7:align_size].tolist() == [0] * (align_size - 7)
+        assert sequences[0, align_size : align_size + 5].tolist() == row_0_sub_1
         assert sequences[1, :3].tolist() == row_1_sub_0
-        assert sequences[1, 3:16].tolist() == [0] * 13
-        assert sequences[1, 16:27].tolist() == row_1_sub_1
+        assert sequences[1, 3:align_size].tolist() == [0] * (align_size - 3)
+        assert sequences[1, align_size : align_size + 11].tolist() == row_1_sub_1
         # attention_mask is True ONLY at valid slots (NOT at TP-alignment gaps).
-        assert attention_mask[0, 7:16].any().item() is False
+        assert attention_mask[0, 7:align_size].any().item() is False
         assert attention_mask[0].sum().item() == 7 + 5
         assert attention_mask[1].sum().item() == 3 + 11
 
@@ -207,19 +204,14 @@ class TestPreprocessPackedRows:
             )
 
         # cu_seqlens_q (== cu_seqlens_q_padded for THD) enumerates 4 sub-seqs:
-        assert params.cu_seqlens_q.tolist() == [0, 16, 32, 48, 64]
-        # Packed slab is 64 tokens. Verify each sub-seq's *valid* tokens were
-        # read from the *correct intra-row offset* — i.e. preprocess respected
-        # the TP-alignment gap that the collator inserted.
-        assert packed.shape == (1, 64)
-        assert packed[0, :7].tolist() == row_0_sub_0  # row 0 sub 0
-        assert packed[0, 7:16].tolist() == [0] * 9  # alignment pad
-        assert packed[0, 16:21].tolist() == row_0_sub_1  # row 0 sub 1
-        assert packed[0, 21:32].tolist() == [0] * 11  # alignment pad
-        assert packed[0, 32:35].tolist() == row_1_sub_0  # row 1 sub 0
-        assert packed[0, 35:48].tolist() == [0] * 13  # alignment pad
-        assert packed[0, 48:59].tolist() == row_1_sub_1  # row 1 sub 1
-        assert packed[0, 59:64].tolist() == [0] * 5  # alignment pad
+        assert params.cu_seqlens_q.tolist() == [i * align_size for i in range(5)]
+        # Verify valid tokens are read from offsets produced by alignment padding.
+        assert packed.shape == (1, 4 * align_size)
+        assert packed[0, :7].tolist() == row_0_sub_0
+        assert packed[0, 7:align_size].tolist() == [0] * (align_size - 7)
+        assert packed[0, align_size : align_size + 5].tolist() == row_0_sub_1
+        assert packed[0, 2 * align_size : 2 * align_size + 3].tolist() == row_1_sub_0
+        assert packed[0, 3 * align_size : 3 * align_size + 11].tolist() == row_1_sub_1
 
     def test_mbs2_tp1_singlesubseq_rows_match_legacy_preprocess_path(self):
         """No regression in the legacy path: when each row has 1 sub-seq and tp_size=1."""
