@@ -1,4 +1,7 @@
+import asyncio
+
 import pytest
+import torch
 
 from skyrl.backends.skyrl_train.weight_sync import (
     BroadcastInitInfo,
@@ -9,6 +12,10 @@ from skyrl.backends.skyrl_train.weight_sync import (
     CudaIpcWeightUpdateRequest,
     LoraLoadRequest,
     get_transfer_strategy_cls,
+)
+from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
+from skyrl.backends.skyrl_train.weight_sync.broadcast_strategy import (
+    BroadcastWeightTransferSender,
 )
 from skyrl.train.config import InferenceEngineConfig
 
@@ -55,7 +62,7 @@ class TestCreateInitInfo:
         )
 
     def test_cuda_ipc_create_init_info(self):
-        """CudaIpcTransferStrategy.create_init_info should create CudaIpcInitInfo with model_dtype_str."""
+        """Preserve model-dtype metadata in CUDA IPC initialization."""
         ie_cfg = self._make_ie_cfg(model_dtype="torch.float32")
         init_info = CudaIpcTransferStrategy.create_init_info(ie_cfg)
 
@@ -120,6 +127,89 @@ class TestBroadcastWeightUpdateRequest:
                 dtypes=["bfloat16"],
                 shapes=[[4096, 4096]],
             )
+
+
+def test_broadcast_sender_preserves_mixed_dtype_logical_chunk(monkeypatch):
+    """vLLM's byte-packed NCCL path accepts one mixed-dtype logical update."""
+    import skyrl.backends.skyrl_train.weight_sync.broadcast_strategy as broadcast_module
+
+    class FakeInferenceClient:
+        def __init__(self):
+            self.events = []
+
+        async def start_weight_update(self, is_checkpoint_format):
+            self.events.append(("start", is_checkpoint_format))
+
+        async def finish_weight_update(self):
+            self.events.append(("finish",))
+
+    client = FakeInferenceClient()
+    sender = BroadcastWeightTransferSender(
+        init_info=BroadcastInitInfo(
+            master_addr="127.0.0.1",
+            master_port=12345,
+            rank_offset=1,
+            world_size=2,
+            override_existing_receiver=False,
+        ),
+        model_update_group=object(),
+        inference_client=client,
+    )
+    sent_chunks = []
+
+    async def record_chunk(chunk):
+        sent_chunks.append((list(chunk.names), [tensor.dtype for tensor in chunk.tensors]))
+
+    monkeypatch.setattr(sender, "_send_chunk_vllm_native", record_chunk)
+    monkeypatch.setattr(broadcast_module.torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(broadcast_module.torch.distributed, "barrier", lambda: None)
+
+    mixed_chunk = WeightChunk(
+        names=["w0", "scale", "w1", "norm"],
+        dtypes=["ignored"] * 4,
+        shapes=[[4], [1], [8], [2]],
+        tensors=[
+            torch.empty((4,), dtype=torch.float8_e4m3fn),
+            torch.empty((1,), dtype=torch.float32),
+            torch.empty((8,), dtype=torch.float8_e4m3fn),
+            torch.empty((2,), dtype=torch.bfloat16),
+        ],
+    )
+
+    asyncio.run(sender.send_chunks(iter([mixed_chunk]), derive_metadata_from_chunks=True))
+
+    assert client.events == [("start", True), ("finish",)]
+    assert sent_chunks == [
+        (
+            ["w0", "scale", "w1", "norm"],
+            [torch.float8_e4m3fn, torch.float32, torch.float8_e4m3fn, torch.bfloat16],
+        )
+    ]
+
+
+def test_broadcast_sender_retains_precomputed_metadata_path(monkeypatch):
+    sender = BroadcastWeightTransferSender(
+        init_info=BroadcastInitInfo(
+            master_addr="127.0.0.1",
+            master_port=12345,
+            rank_offset=1,
+            world_size=2,
+            override_existing_receiver=False,
+        ),
+        model_update_group=object(),
+        inference_client=object(),
+    )
+    calls = []
+
+    async def record_batched(chunks, weight_metadata):
+        calls.append((list(chunks), weight_metadata))
+
+    monkeypatch.setattr(sender, "_send_chunks_vllm_native", record_batched)
+    metadata = {"names": ["w"], "dtype_names": ["bfloat16"], "shapes": [[1]]}
+
+    asyncio.run(sender.send_chunks(iter([]), weight_metadata=metadata))
+
+    assert calls == [([], metadata)]
 
 
 class TestCudaIpcWeightUpdateRequest:
