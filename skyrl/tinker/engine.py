@@ -2,6 +2,7 @@
 
 import argparse
 import time
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -728,6 +729,7 @@ class TinkerEngine:
         requests: dict[str, tuple[str, BaseModel]],
         processor: Callable[[dict[str, tuple[str, BaseModel]]], dict[str, BaseModel]],
         name: str,
+        per_model: bool = False,
     ):
         """Process a batch of requests with error handling and future completion.
 
@@ -735,21 +737,31 @@ class TinkerEngine:
             requests: Dict mapping request_id to (model_id, request_data) tuples
             processor: Function that processes requests and returns results dict
             name: Name for logging
+            per_model: Process one model's requests at a time, completing each
+                model's futures as soon as its sub-batch finishes (GPU execution
+                is serialized per model anyway; this only changes completion
+                granularity, not batching within a model).
         """
         if not requests:
             return
-        with log_timing(f"process_batch_requests({name}, n={len(requests)})"):
-            try:
-                error_results, valid_requests = self._filter_valid_requests(requests)
-                if valid_requests:
-                    results = processor(valid_requests)
-                    results.update(error_results)
-                else:
-                    results = error_results
-            except Exception as e:
-                logger.exception(f"Error processing batch: {e}")
-                results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
-        self._complete_futures(results)
+        error_results, valid_requests = self._filter_valid_requests(requests)
+        if error_results:
+            self._complete_futures(error_results)
+        if per_model:
+            grouped: dict[str, dict] = defaultdict(dict)
+            for request_id, item in valid_requests.items():
+                grouped[item[0]][request_id] = item
+            groups = list(grouped.values())
+        else:
+            groups = [valid_requests] if valid_requests else []
+        for group in groups:
+            with log_timing(f"process_batch_requests({name}, n={len(group)})"):
+                try:
+                    results = processor(group)
+                except Exception as e:
+                    logger.exception(f"Error processing batch: {e}")
+                    results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in group}
+            self._complete_futures(results)
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
@@ -767,8 +779,10 @@ class TinkerEngine:
                 other_requests = self.find_single_requests(session)
 
             # Process batches outside of session context
-            self.process_batch_requests(forward_backward_requests, self.process_forward_backward, "forward_backward")
-            self.process_batch_requests(forward_requests, self.process_forward, "forward")
+            self.process_batch_requests(
+                forward_backward_requests, self.process_forward_backward, "forward_backward", per_model=True
+            )
+            self.process_batch_requests(forward_requests, self.process_forward, "forward", per_model=True)
             self.process_batch_requests(sample_requests, self.process_sample, "sample")
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
