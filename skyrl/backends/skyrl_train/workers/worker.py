@@ -706,6 +706,13 @@ class PPORayActorGroup:
             raise RuntimeError("Cannot determine data-parallel size before actor group initialization.")
         return self._last_dp_size
 
+    def shutdown(self) -> None:
+        """Terminate all workers in this training actor group."""
+        for actor in self._actor_handlers:
+            ray.kill(actor, no_restart=True)
+        self._actor_handlers = []
+        self.actor_infos = []
+
     def offload_to_cpu(self, nonblocking=False, offload_optimizer=True, offload_model=True):
         """Offload all worker state to CPU.
 

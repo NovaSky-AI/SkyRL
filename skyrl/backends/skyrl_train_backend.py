@@ -135,6 +135,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._keep_inference_warm = False
         self._renderer = None
         # CPU-only render server for multi-modal preprocessing; started
         # lazily on the first image-bearing training batch.
@@ -437,6 +438,7 @@ class SkyRLTrainBackend(AbstractBackend):
         """Start base-model inference before a Tinker adapter is created."""
         if self._inference_engines_initialized:
             return
+        self._keep_inference_warm = True
         self._cfg = _build_skyrl_train_config(self.base_model, self.config)
         if not ray.is_initialized():
             initialize_ray(self._cfg)
@@ -568,6 +570,20 @@ class SkyRLTrainBackend(AbstractBackend):
                 logger.info(f"Removed LoRA adapter '{model_id}'")
                 return
             # Fall through to teardown for non-LoRA roles or unexpected mixes.
+
+        if self._keep_inference_warm:
+            # A service-level prewarm owns the vLLM/router actors. A short-lived
+            # adapter must not tear them down when its client session ends.
+            self._dispatch.shutdown()
+            self._model_ids_to_role = {}
+            self._model_metadata = {}
+            self._cfg = None
+            self._dispatch = None
+            self._renderer = None
+            self._colocate_pg = None
+            self._base_lora_signature = None
+            logger.info(f"Deleted model {model_id}; kept prewarmed inference runtime")
+            return
 
         # Last model (or non-LoRA path): tear down the shared Ray runtime.
         # The Tinker engine will rebuild on the next create_model().

@@ -76,6 +76,13 @@ class WorkerDispatch:
         self._actor_groups[model] = actor_group
         self._gpu_state[model] = GPUState()
 
+    def shutdown(self) -> None:
+        """Stop training workers without affecting shared inference actors."""
+        for group in self._actor_groups.values():
+            group.shutdown()
+        self._actor_groups.clear()
+        self._gpu_state.clear()
+
     # ------------------------------------------------------------------
     # Multi-LoRA: per-model adapter swap orchestration.
     # ------------------------------------------------------------------
