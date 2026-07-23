@@ -92,8 +92,6 @@ def _run(mode: str, steps: int) -> None:
         "trainer.strategy=megatron",
         f"trainer.policy.model.path={MODEL}",
         f"trainer.policy.model.expert_mxfp8.enabled={enabled}",
-        f"trainer.policy.model.expert_mxfp8.persistent={enabled}",
-        f"trainer.policy.megatron_config.ddp_config.fp8_param_gather={enabled}",
         "trainer.placement.colocate_all=true",
         "trainer.placement.policy_num_nodes=1",
         "trainer.placement.policy_num_gpus_per_node=8",
@@ -142,7 +140,13 @@ def _run(mode: str, steps: int) -> None:
         f"trainer.run_name={run_name}",
     ]
     if mode == "mxfp8":
-        command.append("generator.inference_engine.fp8_weight_sync_mode=serialized_mxfp8")
+        command.extend(
+            [
+                "trainer.policy.model.expert_mxfp8.persistent=true",
+                "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true",
+                "generator.inference_engine.fp8_weight_sync_mode=serialized_mxfp8",
+            ]
+        )
     started = time.perf_counter()
     process = subprocess.Popen(command, cwd=REMOTE_REPO)
     while True:
