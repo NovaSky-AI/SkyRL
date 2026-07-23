@@ -9,6 +9,9 @@ import torch
 
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
+    maybe_repo_r_rescale,
+    repo_r_rescale_advantages,
+    repo_r_update_zeta,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.config import (
@@ -18,6 +21,7 @@ from skyrl.train.config import (
     DPPOConfig,
     KLCovConfig,
     OffPolicyCorrectionConfig,
+    REPOConfig,
     SAPOConfig,
 )
 
@@ -591,3 +595,98 @@ def test_dppo_policy_loss(
         assert metrics["clip_ratio"] > 0.0, f"{name}: expected some masking"
     elif expect_clip_gt_zero is False:
         assert metrics["clip_ratio"] == pytest.approx(0.0, abs=1e-6), f"{name}: expected no masking"
+
+
+def test_repo_r_rescale_advantages():
+    """REPO-R rescaling: boosts rare correct actions, softens penalties on rare incorrect ones,
+    and clamps each rescaled advantage to preserve its original sign."""
+    zeta = 0.1
+    advantages = torch.tensor([2.0, -2.0, 0.0])
+    # Rare tokens (very negative logp). logp is detached inside the fn.
+    log_probs = torch.tensor([-3.0, -3.0, -3.0], requires_grad=True)
+
+    rescaled = repo_r_rescale_advantages(advantages, log_probs, zeta)
+    # A>0: 2 * (1 - 0.1 * -3) = 2 * 1.3 = 2.6 (boosted)
+    # A<0: -2 * (1 + 0.1 * -3) = -2 * 0.7 = -1.4 (softened penalty)
+    # A==0 stays 0
+    torch.testing.assert_close(rescaled, torch.tensor([2.6, -1.4, 0.0]), rtol=1e-5, atol=1e-6)
+    # logp is stop-grad: rescaling must not backprop into log_probs
+    assert not rescaled.requires_grad
+
+    # Sign clamp: a common correct token (large positive logp) would flip sign -> clamped to 0
+    clamped = repo_r_rescale_advantages(torch.tensor([1.0]), torch.tensor([20.0]), zeta)
+    assert clamped.item() == 0.0
+
+
+def test_maybe_repo_r_rescale_gating_and_composition():
+    """maybe_repo_r_rescale is a no-op unless repo.enabled, and composes with any policy loss."""
+    advantages = torch.tensor([[2.0, -2.0, 1.0]])
+    log_probs = torch.tensor([[-3.0, -3.0, -3.0]])
+
+    # Disabled -> advantages returned unchanged (even with a non-zero zeta configured).
+    disabled = AlgorithmConfig(repo=REPOConfig(enabled=False, zeta=0.1))
+    torch.testing.assert_close(maybe_repo_r_rescale(advantages, log_probs, disabled), advantages)
+
+    # Enabled -> matches the standalone rescale helper.
+    enabled = AlgorithmConfig(repo=REPOConfig(enabled=True, zeta=0.1))
+    torch.testing.assert_close(
+        maybe_repo_r_rescale(advantages, log_probs, enabled),
+        repo_r_rescale_advantages(advantages, log_probs, 0.1),
+    )
+
+    # Composition: rescale-then-loss equals calling the loss on pre-rescaled advantages, for an
+    # arbitrary policy loss (here rollout_is, which REPO-R could not previously be combined with).
+    old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]])
+    rollout_logprobs = torch.tensor([[-1.1, -0.8, -2.9]])
+    common = dict(eps_clip_low=0.2, eps_clip_high=0.2, off_policy_correction=NULL_OFF_POLICY_CORR)
+    loss_config = AlgorithmConfig(policy_loss_type="rollout_is", repo=REPOConfig(enabled=True, zeta=0.1), **common)
+    loss_fn = PolicyLossRegistry.get("rollout_is")
+
+    rescaled = maybe_repo_r_rescale(advantages, log_probs, loss_config)
+    composed_loss, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=rescaled,
+        config=loss_config,
+        rollout_logprobs=rollout_logprobs,
+    )
+    expected_loss, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=repo_r_rescale_advantages(advantages, log_probs, 0.1),
+        config=loss_config,
+        rollout_logprobs=rollout_logprobs,
+    )
+    torch.testing.assert_close(composed_loss, expected_loss)
+
+
+def test_repo_r_update_zeta_controller():
+    """Adaptive controller: halve/double toward the entropy target, flipping sign at zeta_min."""
+    zmin, zmax = 1e-4, 1.0
+    # entropy above target, zeta >= 0 -> halve
+    assert repo_r_update_zeta(0.08, current_entropy=1.0, target_entropy=0.5, zeta_min=zmin, zeta_max=zmax) == 0.04
+    # entropy above target, zeta >= 0 but would drop below zeta_min -> flip sign to -zeta_min
+    assert repo_r_update_zeta(zmin, 1.0, 0.5, zmin, zmax) == -zmin
+    # entropy above target, zeta < 0 -> grow magnitude (double), clamped at -zeta_max
+    assert repo_r_update_zeta(-0.5, 1.0, 0.5, zmin, zmax) == -1.0
+    # entropy below target, zeta >= 0 -> double, clamped at zeta_max
+    assert repo_r_update_zeta(0.1, 0.1, 0.5, zmin, zmax) == 0.2
+    # entropy below target, zeta < 0 shrinking past -zeta_min -> flip sign to +zeta_min
+    assert repo_r_update_zeta(-zmin, 0.1, 0.5, zmin, zmax) == zmin
+    # entropy exactly at target -> unchanged
+    assert repo_r_update_zeta(0.07, 0.5, 0.5, zmin, zmax) == 0.07
+    # entropy below target but zeta == 0.0 -> bootstrap from zeta_min (doubling 0 stays 0)
+    assert repo_r_update_zeta(0.0, 0.1, 0.5, zmin, zmax) == zmin
+
+
+def test_repo_config_validation():
+    """REPOConfig rejects non-positive zeta_min and zeta_max < zeta_min."""
+    from skyrl.train.config import REPOConfig
+
+    REPOConfig(zeta_min=1e-4, zeta_max=0.05)  # valid
+    with pytest.raises(ValueError):
+        REPOConfig(zeta_min=0.0)
+    with pytest.raises(ValueError):
+        REPOConfig(zeta_min=-1e-4)
+    with pytest.raises(ValueError):
+        REPOConfig(zeta_min=0.1, zeta_max=0.05)

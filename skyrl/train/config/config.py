@@ -568,6 +568,39 @@ class DPPOConfig(BaseConfig):
             raise ValueError("Invalid DPPO type")
 
 
+# REPO-R parameters (only used when repo.enabled=true).
+# Entropy-aware advantage rescaling applied *before* the configured policy loss, so it composes
+# with any policy_loss_type: A_repo-r = A * (1 - zeta * logp) for A > 0 and A * (1 + zeta * logp)
+# for A < 0, followed by a sign-preserving clamp.
+# See the REPO paper (ICLR 2026), Appendix D.2: https://arxiv.org/pdf/2603.11682
+@dataclass
+class REPOConfig(BaseConfig):
+    enabled: bool = False
+    """Enable REPO-R advantage rescaling on top of whatever ``policy_loss_type`` is configured."""
+    zeta: float = 1e-3
+    """Initial/current REPO-R rescaling coefficient. Positive boosts rare correct actions and
+    attenuates common ones; negative reverses the effect. When the adaptive controller is enabled
+    (``target_entropy`` set), this is only the starting value and is updated each iteration."""
+    zeta_min: float = 1e-4
+    """Minimum magnitude of ``|zeta|`` used by the adaptive controller before flipping its sign.
+    The REPO paper uses ``1e-4`` for REPO-R (and ``1e-3`` for REPO-D)."""
+    zeta_max: float = 0.05
+    """Maximum magnitude of ``|zeta|`` the adaptive controller will grow to.
+    The REPO paper clips ``|zeta|`` to ``[1e-4, 0.05]`` for REPO-R (and ``[1e-3, 10]`` for REPO-D)."""
+    target_entropy: Optional[float] = None
+    """If set, enables the adaptive controller: once per iteration ``zeta`` is halved/doubled
+    (and sign-flipped at the bounds) to drive ``policy_entropy`` toward this target. ``None`` keeps
+    ``zeta`` fixed at its configured value."""
+
+    def __post_init__(self):
+        if self.zeta_min <= 0:
+            raise ValueError(f"repo.zeta_min must be positive, got {self.zeta_min}")
+        if self.zeta_max < self.zeta_min:
+            raise ValueError(
+                f"repo.zeta_max ({self.zeta_max}) must be greater than or equal to " f"repo.zeta_min ({self.zeta_min})"
+            )
+
+
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
@@ -623,7 +656,8 @@ class AlgorithmConfig(BaseConfig):
     advantage_batch_normalize: bool = False
     value_head_prefix: str = "value_head"
     policy_loss_type: str = "regular"
-    """``"regular"``, ``"dual_clip"``, ``"gspo"``, ``"clip_cov"``, ``"kl_cov"``, ``cispo``, ``sapo``, ``"rollout_is"``, ``"dppo"``, or custom via ``PolicyLossRegistry``."""
+    """``"regular"``, ``"dual_clip"``, ``"gspo"``, ``"clip_cov"``, ``"kl_cov"``, ``cispo``, ``sapo``, ``"rollout_is"``, ``"dppo"``, or custom via ``PolicyLossRegistry``.
+    REPO-R entropy-aware advantage rescaling can be layered on top of any of these via ``algorithm.repo.enabled``."""
     loss_reduction: str = "token_mean"
     """``"token_mean"``, ``"sequence_mean"``, ``"prompt_mean"``, or ``"seq_mean_token_sum_norm"``. ``max_seq_len`` must be set explicitly for ``"seq_mean_token_sum_norm"``."""
     grpo_norm_by_std: bool = True
@@ -656,6 +690,9 @@ class AlgorithmConfig(BaseConfig):
     """Only used when ``policy_loss_type="cispo"``."""
     dppo: DPPOConfig = field(default_factory=DPPOConfig)
     """Only used when ``policy_loss_type="dppo"``."""
+    repo: REPOConfig = field(default_factory=REPOConfig)
+    """REPO-R entropy-aware advantage rescaling; only used when ``repo.enabled=true``.
+    Composes with any ``policy_loss_type``."""
     max_seq_len: Optional[int] = None
     """Used for ``seq_mean_token_sum_norm`` loss reduction.
     Must be set explicitly for that reduction mode; otherwise can remain ``None``."""

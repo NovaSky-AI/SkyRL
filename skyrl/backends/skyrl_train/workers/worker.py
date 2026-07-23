@@ -44,6 +44,7 @@ from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
+    maybe_repo_r_rescale,
     ppo_critic_loss,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
@@ -902,6 +903,8 @@ class PolicyWorkerBase(Worker):
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
             )
+            # potentially rescale advantages for adaptive entropy control using REPO-R
+            advantages = maybe_repo_r_rescale(advantages, action_log_probs, loss_config)
             # loss function
             # TODO: recompute advantages
             policy_loss, loss_metrics = current_loss_fn(
@@ -1154,6 +1157,7 @@ class PolicyWorkerBase(Worker):
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
             )
+            advantages = maybe_repo_r_rescale(advantages, action_log_probs, loss_config)
             policy_loss, _ = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,

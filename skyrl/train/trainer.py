@@ -152,6 +152,11 @@ class RayPPOTrainer:
 
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
 
+        # REPO-R: current rescaling coefficient, updated once per iteration by the adaptive
+        # controller (see `train_critic_and_policy`) and pushed to the policy workers via the
+        # loss-config override channel (see `_execute_training_step`).
+        self._repo_zeta: float = cfg.trainer.algorithm.repo.zeta
+
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         self.dispatch: WorkerDispatch = None
 
@@ -1504,6 +1509,12 @@ class RayPPOTrainer:
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
+        # REPO-R: deliver the current (possibly adaptively-controlled) zeta to the policy
+        # workers so the advantage rescaling uses an up-to-date coefficient.
+        loss_fn_config = None
+        if model == "policy" and self.cfg.trainer.algorithm.repo.enabled:
+            loss_fn_config = {"repo": {"zeta": self._repo_zeta}}
+
         # Pre-stage all per-DP mini-batch chunks in the object store so that
         # serialization is fully off the critical path during training.
         all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
@@ -1511,7 +1522,7 @@ class RayPPOTrainer:
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             for chunk_refs in all_chunk_refs:
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                status = self.dispatch.forward_backward_from_staged(model, chunk_refs, loss_fn_config=loss_fn_config)
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
 
@@ -1548,6 +1559,20 @@ class RayPPOTrainer:
 
         for k, v in policy_status.items():
             self.all_metrics.update({f"policy/{k}": v})
+
+        # REPO-R adaptive controller: once per iteration, nudge zeta toward the entropy target.
+        # Runs after the policy step so the update takes effect on the next iteration.
+        repo_cfg = self.cfg.trainer.algorithm.repo
+        if repo_cfg.enabled:
+            self.all_metrics["policy/repo_r_zeta"] = self._repo_zeta
+            if repo_cfg.target_entropy is not None and "policy_entropy" in policy_status:
+                self._repo_zeta = ppo_utils.repo_r_update_zeta(
+                    self._repo_zeta,
+                    current_entropy=policy_status["policy_entropy"],
+                    target_entropy=repo_cfg.target_entropy,
+                    zeta_min=repo_cfg.zeta_min,
+                    zeta_max=repo_cfg.zeta_max,
+                )
 
         self.dispatch.empty_cache()
 
