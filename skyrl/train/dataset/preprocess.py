@@ -29,6 +29,43 @@ def _verify_inputs(
     )
 
 
+def pad_rollout_expert_indices(per_sample_indices, row_lengths, max_total):
+    """Pad per-sample MoE routing indices into a ``[B, max_total, layers, topk]`` tensor.
+
+    Each sample's rows are written starting at that row's left-pad offset
+    (sequence-start alignment against ``attention_mask`` — unlike the
+    response-aligned loss tensors), with uncovered positions left zero.
+    Downcast to uint8/int16 when the expert count allows.
+
+    Args:
+        per_sample_indices: per-sample ``[seq][layers][topk]`` nested lists or
+            arrays; falsy/None entries contribute all-zero rows.
+        row_lengths: real (unpadded) sequence length per row.
+        max_total: padded sequence length of the batch.
+
+    Returns:
+        Integer tensor, or None if no sample carries indices.
+    """
+    first_non_empty = next((x for x in per_sample_indices if x is not None and len(x) > 0), None)
+    if first_non_empty is None:
+        return None
+    num_layers = len(first_non_empty[0])
+    topk = len(first_non_empty[0][0]) if num_layers > 0 else 0
+    padded = torch.zeros(len(per_sample_indices), max_total, num_layers, topk, dtype=torch.int32)
+    for i, sample_indices in enumerate(per_sample_indices):
+        if sample_indices is not None and len(sample_indices) > 0:
+            left_pad = max_total - row_lengths[i]
+            n = min(len(sample_indices), max_total - left_pad)
+            padded[i, left_pad : left_pad + n] = torch.as_tensor(sample_indices[:n], dtype=torch.int32)
+
+    # downcast to uint8 if possible, otherwise int16 to save memory
+    if padded.max().item() < 2**8:
+        return padded.to(torch.uint8)
+    if padded.max().item() < 2**15:
+        return padded.to(torch.int16)
+    return padded
+
+
 def convert_prompts_responses_to_batch_tensors(
     tokenizer: AutoTokenizer,
     prompts: List[List[int]],
@@ -161,23 +198,10 @@ def convert_prompts_responses_to_batch_tensors(
 
     rollout_expert_indices_tensor = None
     if rollout_expert_indices:
-        first_non_empty = next((x for x in rollout_expert_indices if x), None)
-        if first_non_empty:
-            num_layers = len(first_non_empty[0])
-            topk = len(first_non_empty[0][0]) if num_layers > 0 else 0
-            padded = torch.zeros(len(rollout_expert_indices), max_total, num_layers, topk, dtype=torch.int32)
-            for i, sample_indices in enumerate(rollout_expert_indices):
-                if sample_indices:
-                    left_pad = max_total - (prompt_token_lens[i] + response_token_lens[i])
-                    n = min(len(sample_indices), max_total - left_pad)
-                    padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.int32)
-            rollout_expert_indices_tensor = padded
-
-            # downcast to uint8 if possible, otherwise int16 to save memory
-            if rollout_expert_indices_tensor.max().item() < 2**8:
-                rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.uint8)
-            elif rollout_expert_indices_tensor.max().item() < 2**15:
-                rollout_expert_indices_tensor = rollout_expert_indices_tensor.to(torch.int16)
+        row_lengths = [p + r for p, r in zip(prompt_token_lens, response_token_lens)]
+        rollout_expert_indices_tensor = pad_rollout_expert_indices(
+            rollout_expert_indices, row_lengths=row_lengths, max_total=max_total
+        )
 
     return (
         sequences,

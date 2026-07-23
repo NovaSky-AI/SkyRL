@@ -796,6 +796,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "UV_LINK_MODE",
         "UV_PYTHON",
         "UV_OFFLINE",
+        # UV_NO_SYNC=1 keeps the workers' `uv run` re-invocations from re-syncing a
+        # shared venv concurrently. Without it, each worker's sync flip-flops the
+        # editable install (driver path vs ray working_dir path), and an actor that
+        # imports transformer-engine during a sibling's uninstall->install window
+        # dies with "Found empty `transformer-engine` meta package installed".
+        "UV_NO_SYNC",
         "PYTORCH_CUDA_ALLOC_CONF",
         # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
         "CUDA_LAUNCH_BLOCKING",
