@@ -1,4 +1,5 @@
-set -x
+set -ex
+set -o pipefail
 
 # Colocated DAPO training+generation for dense Qwen3.6-27B on DAPO with Megatron.
 # Runs on 4 nodes of 8xH200s.
