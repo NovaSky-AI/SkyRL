@@ -23,7 +23,8 @@ def _fft_dispatch_cfg() -> SimpleNamespace:
                 model=SimpleNamespace(lora=SimpleNamespace(rank=0)),
                 megatron_config=SimpleNamespace(lora_config=SimpleNamespace(merge_lora=False)),
             ),
-        )
+        ),
+        generator=SimpleNamespace(inference_engine=SimpleNamespace(offload_kv_for_weight_sync=False)),
     )
 
 
