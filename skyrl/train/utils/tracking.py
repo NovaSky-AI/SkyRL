@@ -81,7 +81,6 @@ class Tracking:
 
         self._exception_logged = False
         self._prometheus = ScalarGauges()
-        self._prometheus_enabled = True
 
     def log(self, data, step, commit=False):
         if self.backend == "wandb":
@@ -92,7 +91,7 @@ class Tracking:
         for key, value in data.items():
             if isinstance(value, bool) or not isinstance(value, numbers.Real):
                 continue
-            self._publish_gauge(f"skyrl_{_PROMETHEUS_NAME_RE.sub('_', key)}", value)
+            self._prometheus.set(f"skyrl_{_PROMETHEUS_NAME_RE.sub('_', key)}", value)
 
     def log_gauge(self, name: str, value: float, description: Optional[str] = None) -> None:
         """Set a Prometheus gauge directly, on the same gauges ``log`` publishes metrics to.
@@ -101,18 +100,7 @@ class Tracking:
         commit-time metric publish cannot reproduce. Sharing the gauges means a dedicated gauge and
         the metric published under the same name are one series, not two.
         """
-        self._publish_gauge(name, value, description)
-
-    def _publish_gauge(self, name: str, value: float, description: Optional[str] = None) -> None:
-        """Mirror one value to Prometheus, disabling on first failure so a metrics fault never
-        interrupts training. The guard lives here, not in ScalarGauges, because these names are dynamic."""
-        if not self._prometheus_enabled:
-            return
-        try:
-            self._prometheus.set(name, value, description)
-        except Exception as e:
-            logger.warning(f"Prometheus mirror disabled ({e}); training metrics will not be published.")
-            self._prometheus_enabled = False
+        self._prometheus.set(name, value, description)
 
     def finish(self):
         if self.backend == "console":
