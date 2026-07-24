@@ -55,10 +55,10 @@ class TestRdtSend:
     """Tests for the sharded_rdt (NIXL pull) trainer-send glue — no GPU/vLLM.
 
     RDT bypasses the WeightTransferStrategy/Sender abstraction; the glue lives in
-    ``weight_sync/rdt_send.py`` (``_FsdpWeightSource`` + ``_SyncInferenceClient``,
-    driven by ``RdtWeightSyncSender``). These cover the group-major WeightSource
-    reorder and the sync-client -> RDT-route mapping without touching the vendored
-    engine (whose ``trainer_init`` needs Ray + GPU)."""
+    ``weight_sync/rdt_send.py`` (``_FsdpWeightSource`` driven by
+    ``RdtWeightSyncSender``). This covers the group-major WeightSource reorder
+    without touching the vendored engine (whose ``trainer_init`` needs Ray + GPU).
+    The synchronous control-plane client is covered in ``test_rdt_control_plane``."""
 
     def test_weight_source_reorders_group_major(self):
         """The FSDP WeightSource reorders metadata into group-major order (pre /
@@ -95,45 +95,84 @@ class TestRdtSend:
         assert [list(m.shape) for m in meta] == [[4, 8], [0, 8], [1, 8], [8, 4]]
         assert all(m.dtype is torch.bfloat16 for m in meta)
 
-    def test_sync_client_maps_to_rdt_routes(self):
-        """The VLLMWeightSyncClient adapter routes the engine's four synchronous
-        calls onto SkyRL's async RDT control-plane coroutines (never the native
-        NCCL init) and runs them on the bound event loop."""
-        import asyncio
+    def test_megatron_weight_source_streams_bridge_export(self):
+        """MegatronWeightSource wraps the extractor's Megatron-Bridge: metadata()
+        and iteration both run the non-bucketed export (so their order agrees), and
+        iteration casts each full tensor to the wire dtype."""
+        import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import _SyncInferenceClient
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import MegatronWeightSource
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+            layerwise_groups,
+        )
 
-        calls = []
+        # HF-canonical (group-contiguous) order, fp32 source tensors.
+        items = [
+            ("model.embed_tokens.weight", torch.ones(4, 8, dtype=torch.float32)),
+            ("model.layers.0.mlp.gate_proj.weight", torch.ones(2, 8, dtype=torch.float32)),
+            ("model.layers.1.mlp.gate_proj.weight", torch.ones(2, 8, dtype=torch.float32)),
+            ("lm_head.weight", torch.ones(8, 4, dtype=torch.float32)),
+        ]
+        export_calls = []
 
-        class _FakeClient:
-            async def init_weight_transfer_engine_rdt(self, payload):
-                calls.append(("init", payload))
+        class _FakeBridge:
+            def export_hf_weights(self, module, show_progress=False, conversion_tasks=None):
+                # RDT must use the NON-bucketed export (conversion_tasks=None) so
+                # MoE-expert grouping doesn't break group-major contiguity.
+                assert conversion_tasks is None
+                export_calls.append(module)
+                for name, tensor in items:
+                    yield name, tensor
 
-            async def start_weight_update(self, is_checkpoint_format=False):
-                calls.append(("start", is_checkpoint_format))
+        class _FakeMegatronExtractor:
+            bridge = _FakeBridge()
+            actor_module = object()
 
-            async def update_weights_rdt(self, update_info):
-                calls.append(("update", update_info))
+        source = MegatronWeightSource(_FakeMegatronExtractor(), torch.bfloat16)
 
-            async def finish_weight_update(self):
-                calls.append(("finish",))
+        meta = source.metadata()
+        names = [m.name for m in meta]
+        assert names == [n for n, _ in items]  # order preserved (no reorder)
+        assert [list(m.shape) for m in meta] == [[4, 8], [2, 8], [2, 8], [8, 4]]
+        assert all(m.dtype is torch.bfloat16 for m in meta)
+        # Order is already group-contiguous -> layerwise_groups partitions it exactly
+        # (this is what the trainer engine's trainer_init validates).
+        assert [n for g in layerwise_groups(names) for n in g] == names
 
-            def init_weight_update_communicator(self, info):
-                raise AssertionError("RDT must not use the native NCCL init path")
+        yielded = list(source)
+        assert [n for n, _ in yielded] == names
+        assert all(t.dtype is torch.bfloat16 and t.is_contiguous() for _, t in yielded)
+        # metadata() cached: iteration ran a fresh export, so the bridge was
+        # exported twice total (one dry-run for metadata, one for the stream).
+        assert len(export_calls) == 2
 
-        async def _drive():
-            loop = asyncio.get_running_loop()
-            sc = _SyncInferenceClient(_FakeClient(), loop)
-            # _run uses run_coroutine_threadsafe, so drive from a worker thread.
-            await asyncio.to_thread(sc.init_weight_transfer_engine, {"names": ["w"]})
-            await asyncio.to_thread(sc.start_weight_update)
-            await asyncio.to_thread(sc.update_weights, {})
-            await asyncio.to_thread(sc.finish_weight_update)
+    def test_make_weight_source_selects_by_extractor_flavor(self):
+        """make_weight_source picks Megatron (has .bridge) vs FSDP (has .model)."""
+        import torch
 
-        asyncio.run(_drive())
-        assert [c[0] for c in calls] == ["init", "start", "update", "finish"]
-        assert calls[0][1] == {"names": ["w"]}
-        assert calls[1][1] is True  # start_weight_update(is_checkpoint_format=True)
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+            MegatronWeightSource,
+            _FsdpWeightSource,
+            make_weight_source,
+        )
+
+        class _FakeBridge:
+            def export_hf_weights(self, module, show_progress=False, conversion_tasks=None):
+                return iter(())
+
+        class _FakeMegatronExtractor:
+            bridge = _FakeBridge()
+            actor_module = object()
+
+        class _FakeFsdpExtractor:
+            weight_prefix = ""
+            model = object()
+
+            def get_weight_metadata(self, dtype):
+                return {"names": [], "dtype_names": [], "shapes": []}
+
+        assert isinstance(make_weight_source(_FakeMegatronExtractor(), torch.bfloat16), MegatronWeightSource)
+        assert isinstance(make_weight_source(_FakeFsdpExtractor(), torch.bfloat16), _FsdpWeightSource)
 
 
 class TestRdtReplicaConsumerMapping:

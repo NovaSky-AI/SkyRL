@@ -1270,26 +1270,15 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Returns:
             Dict mapping server_url to response.
         """
-        dp = max(1, self.data_parallel_size)
-        num_replicas = max(1, len(self.server_urls) // dp)
+        # Shared with the sync trainer-side control plane so both stamp identical
+        # per-server payloads (single source of truth for the replica_rank fan-out).
+        from skyrl.backends.skyrl_train.inference_servers.rdt_control_protocol import (
+            build_rdt_init_payloads,
+        )
+
+        payloads = build_rdt_init_payloads(init_info, self.server_urls, self.data_parallel_size)
         results = await asyncio.gather(
-            *[
-                self._call_server(
-                    url,
-                    "/collective_rpc",
-                    {
-                        "method": "init_weight_transfer_engine_rdt",
-                        "kwargs": {
-                            "init_info": {
-                                **init_info,
-                                "replica_rank": i // dp,
-                                "num_replicas": num_replicas,
-                            },
-                        },
-                    },
-                )
-                for i, url in enumerate(self.server_urls)
-            ]
+            *[self._call_server(url, "/collective_rpc", payload) for url, payload in payloads]
         )
         return {url: resp for url, resp in results}
 
