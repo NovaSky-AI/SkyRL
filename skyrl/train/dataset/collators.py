@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import List
 
+import numpy as np
 import torch
 from loguru import logger
 
@@ -151,19 +152,23 @@ class PackedDataCollator:
         # ------------------------------------------------------------------
         # 1. Sequence lengths and full-sequence loss masks
         # ------------------------------------------------------------------
-        # We need the *full-sequence* loss mask (one entry per token, not
-        # just over the response window) so the packed bin row can have a
-        # per-position mask with correct boundary zeros.
+        # Build one mask per token so packed rows can shift loss by one position.
         seq_lengths: List[int] = []
-        full_loss_masks: List[List[int]] = []
+        full_input_ids: List[np.ndarray] = []
+        full_loss_masks: List[np.ndarray] = []
         for ex in examples:
-            seq_lengths.append(len(ex["input_ids"]))
-            n_pad = len(ex["input_ids"]) - ex["num_actions"]
-            full_mask = [0] * n_pad + list(ex["loss_mask"])
-            assert len(full_mask) == len(ex["input_ids"]), (
-                f"Reconstructed full loss_mask length {len(full_mask)} != seq length " f"{len(ex['input_ids'])}"
-            )
+            s = len(ex["input_ids"])
+            seq_lengths.append(s)
+            n_pad = s - ex["num_actions"]
+            # Prompt prefix is zero; response mask is copied as float32.
+            full_mask = np.empty(s, dtype=np.float32)
+            full_mask[:n_pad] = 0.0
+            full_mask[n_pad:] = np.asarray(ex["loss_mask"], dtype=np.float32)
+            assert (
+                full_mask.shape[0] == s
+            ), f"Reconstructed full loss_mask length {full_mask.shape[0]} != seq length {s}"
             full_loss_masks.append(full_mask)
+            full_input_ids.append(np.asarray(ex["input_ids"], dtype=np.int64))
 
         # ------------------------------------------------------------------
         # 2. FFD pack with DP-symmetry constraints
@@ -242,50 +247,40 @@ class PackedDataCollator:
             f"(~{num_bins // dp_size}/DP rank, bin_capacity={bin_capacity} tokens)"
         )
 
-        sequences = torch.full((num_bins, max_packed_len), pad_token_id, dtype=torch.long)
-        attention_mask = torch.zeros((num_bins, max_packed_len), dtype=torch.long)
+        # Fill NumPy buffers by slice, then convert once.
+        sequences_np = np.full((num_bins, max_packed_len), pad_token_id, dtype=np.int64)
+        attention_mask_np = np.zeros((num_bins, max_packed_len), dtype=np.int64)
         # loss_mask is one position shorter than the row to match
         # `token_logprobs[:, :-1]` semantics inside the loss function.
-        loss_mask = torch.zeros((num_bins, max_packed_len - 1), dtype=torch.float)
-
-        total_nonpad = 0  # sum of all 1s in loss_mask (BEFORE scaling)
+        loss_mask_np = np.zeros((num_bins, max_packed_len - 1), dtype=np.float32)
+        loss_mask_width = max_packed_len - 1
 
         for row_idx, bin_indices in enumerate(flat_bins):
             row_offset = 0
-            for sub_idx, ex_idx in enumerate(bin_indices):
-                ex = examples[ex_idx]
+            for ex_idx in bin_indices:
                 s = seq_lengths[ex_idx]
-                # Write the sub-seq tokens into the row.
-                ids = torch.tensor(ex["input_ids"], dtype=torch.long)
-                sequences[row_idx, row_offset : row_offset + s] = ids
-                attention_mask[row_idx, row_offset : row_offset + s] = 1
+                sequences_np[row_idx, row_offset : row_offset + s] = full_input_ids[ex_idx]
+                attention_mask_np[row_idx, row_offset : row_offset + s] = 1
 
-                # Build the per-position loss mask for this sub-seq.
-                # Position p (in row coords, p in [row_offset, row_offset + s))
-                # predicts token at p+1. The loss_mask at p (in the [B, S-1]
-                # action_log_probs slot) is 1 iff p+1 is a response/assistant
-                # token AND p+1 is in the same sub-seq.
-                full_mask = full_loss_masks[ex_idx]  # length s
-                # For p in [0, s - 1): mask[p] = full_mask[p + 1].
-                # For p == s - 1: 0 (sub-seq boundary or row end).
-                # row position p_row = row_offset + p_local.
-                for p_local in range(s - 1):
-                    target_is_response = full_mask[p_local + 1]
-                    row_p = row_offset + p_local
-                    if row_p < max_packed_len - 1:
-                        loss_mask[row_idx, row_p] = float(target_is_response)
-                        if target_is_response:
-                            total_nonpad += 1
-                # p_local = s - 1 (last token of sub-seq): mask = 0.
-                # Already zero by initialization.
+                # loss_mask[p] predicts token p+1; leave each sub-seq's final
+                # token zero to prevent cross-boundary loss.
+                if s > 1:
+                    write_end = min(row_offset + s - 1, loss_mask_width)
+                    n_write = write_end - row_offset
+                    if n_write > 0:
+                        loss_mask_np[row_idx, row_offset:write_end] = full_loss_masks[ex_idx][1 : 1 + n_write]
 
                 # Advance row_offset, padding sub-seq to the TP/CP layout
                 # multiple, plus FP8's 16-token local-rank multiple when active.
                 row_offset += _round_up(s, align_size)
 
-        # The total_nonpad we just counted matches sum(loss_mask).
-        if total_nonpad != int(loss_mask.sum().item()):
-            total_nonpad = int(loss_mask.sum().item())
+        # Count response-token loss slots before normalization. The vectorized
+        # build makes this exact, so no post-hoc reconciliation is needed.
+        total_nonpad = int(loss_mask_np.sum())
+
+        sequences = torch.from_numpy(sequences_np)
+        attention_mask = torch.from_numpy(attention_mask_np)
+        loss_mask = torch.from_numpy(loss_mask_np)
 
         # ------------------------------------------------------------------
         # 5. Loss normalization

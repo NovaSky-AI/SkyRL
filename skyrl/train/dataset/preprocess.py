@@ -1,6 +1,7 @@
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from jaxtyping import Float, Integer
 from transformers import AutoTokenizer
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 def _verify_inputs(
     prompts: List[List[int]],
     responses: List[List[int]],
-    rewards: Optional[List[torch.Tensor]],
+    rewards: Optional[List[Union[List[float], torch.Tensor]]],
     loss_masks: List[List[int]],
 ):
     assert (
@@ -29,11 +30,22 @@ def _verify_inputs(
     )
 
 
+def _reward_to_numpy(custom_reward: Union[List[float], torch.Tensor]) -> np.ndarray:
+    if isinstance(custom_reward, torch.Tensor):
+        reward_arr = custom_reward.detach().to(device="cpu", dtype=torch.float32).numpy()
+    else:
+        reward_arr = np.asarray(custom_reward, dtype=np.float32)
+
+    if reward_arr.ndim != 1:
+        raise ValueError(f"Expected a 1D per-token reward sequence, got shape {reward_arr.shape}")
+    return reward_arr
+
+
 def convert_prompts_responses_to_batch_tensors(
     tokenizer: AutoTokenizer,
     prompts: List[List[int]],
     responses: List[List[int]],
-    rewards: List[List[float]],
+    rewards: List[Union[List[float], torch.Tensor]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
     rollout_expert_indices: Optional[List[List[List[List[int]]]]] = None,
@@ -84,7 +96,7 @@ def convert_prompts_responses_to_batch_tensors(
         tokenizer: Model tokenizer
         prompts: List of tokenized prompts
         responses: List of tokenized responses
-        rewards: List of rewards for each response
+        rewards: List of rewards for each response (lists or 1D tensors)
         loss_masks: List of loss masks for each response
         logprobs: List of rollout log probs for each response
         max_seq_len: Optional. If provided and ``max(prompt_i + response_i)``
@@ -114,50 +126,56 @@ def convert_prompts_responses_to_batch_tensors(
         )
 
     pad_token_id = tokenizer.pad_token_id
-    sequences = []
-    attention_masks = []
-    action_masks = []
-    for i in range(len(prompts)):
-        total_real = prompt_token_lens[i] + response_token_lens[i]
-        pad_len = max_total - total_real
+    num_samples = len(prompts)
 
-        # Unified left-pad: [PAD ... PAD  PROMPT  RESPONSE]
-        seq = [pad_token_id] * pad_len + prompts[i] + responses[i]
-        attention_mask_i = [0] * pad_len + [1] * total_real
+    # Fill NumPy buffers by slice, then convert once.
+    prompt_lens = np.asarray(prompt_token_lens, dtype=np.int64)
+    response_lens = np.asarray(response_token_lens, dtype=np.int64)
+    total_real = prompt_lens + response_lens  # (num_samples,)
+    pad_lens = max_total - total_real  # left-pad width per sample
 
-        # Response indicator within the last max_response positions (right-aligned).
-        resp_pad = max_response - response_token_lens[i]
-        action_mask_i = [0] * resp_pad + [1] * response_token_lens[i]
+    # Left-pad each prompt+response row.
+    sequences_np = np.full((num_samples, max_total), pad_token_id, dtype=np.int64)
+    for i in range(num_samples):
+        start = int(pad_lens[i])
+        p_len = int(prompt_lens[i])
+        sequences_np[i, start : start + p_len] = prompts[i]
+        sequences_np[i, start + p_len :] = responses[i]
 
-        sequences.append(seq)
-        attention_masks.append(attention_mask_i)
-        action_masks.append(action_mask_i)
+    # Real tokens occupy the trailing total_real positions.
+    col_total = np.arange(max_total, dtype=np.int64)
+    attention_mask_np = (col_total[None, :] >= pad_lens[:, None]).astype(np.int64)
 
-    sequences = torch.tensor(sequences)
-    attention_mask = torch.tensor(attention_masks, dtype=torch.int64)
-    action_mask = torch.tensor(action_masks, dtype=torch.int64)
+    # Response tokens occupy the trailing response_len positions.
+    col_resp = np.arange(max_response, dtype=np.int64)
+    resp_pad = max_response - response_lens
+    action_mask_np = (col_resp[None, :] >= resp_pad[:, None]).astype(np.int64)
 
-    # Response-level tensors are RIGHT-ALIGNED to match the model output.
-    # The model's log_probs[:, -num_actions-1:-1] returns logprobs where
-    # response tokens occupy the last response_len_i positions.
-    ret_loss_masks = torch.zeros(len(prompts), max_response, dtype=torch.float)
+    sequences = torch.from_numpy(sequences_np)
+    attention_mask = torch.from_numpy(attention_mask_np)
+    action_mask = torch.from_numpy(action_mask_np)
+
+    # Response-level tensors are right-aligned to match the model output.
+    ret_loss_masks_np = np.zeros((num_samples, max_response), dtype=np.float32)
     for i, lm in enumerate(loss_masks):
-        ret_loss_masks[i, max_response - len(lm) :] = torch.tensor(lm, dtype=torch.float)
+        ret_loss_masks_np[i, max_response - len(lm) :] = lm
 
-    # Same thing for rewards.
-    ret_rewards = torch.zeros(len(prompts), max_response, dtype=torch.float)
+    # Tensor rewards need explicit CPU/detach handling before NumPy packing.
+    ret_rewards_np = np.zeros((num_samples, max_response), dtype=np.float32)
     for i, custom_reward in enumerate(rewards):
-        if isinstance(custom_reward, list):
-            custom_reward = torch.tensor(custom_reward)
-        ret_rewards[i, max_response - len(custom_reward) :] = custom_reward
+        reward_arr = _reward_to_numpy(custom_reward)
+        ret_rewards_np[i, max_response - reward_arr.shape[0] :] = reward_arr
 
-    # Same thing for logprobs.
+    ret_loss_masks = torch.from_numpy(ret_loss_masks_np)
+    ret_rewards = torch.from_numpy(ret_rewards_np)
+
+    # Rollout logprobs are right-aligned like rewards and loss masks.
     logprobs_tensor = None
     if logprobs:
-        logprobs_tensor = torch.zeros(len(prompts), max_response, dtype=torch.float)
+        logprobs_np = np.zeros((num_samples, max_response), dtype=np.float32)
         for i, sample_logprobs in enumerate(logprobs):
-            lp = torch.tensor(sample_logprobs, dtype=torch.float)
-            logprobs_tensor[i, max_response - len(sample_logprobs) :] = lp
+            logprobs_np[i, max_response - len(sample_logprobs) :] = sample_logprobs
+        logprobs_tensor = torch.from_numpy(logprobs_np)
 
     rollout_expert_indices_tensor = None
     if rollout_expert_indices:
