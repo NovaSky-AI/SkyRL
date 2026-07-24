@@ -11,9 +11,20 @@ SKYRL_REPO_ROOT=$(realpath "$SCRIPT_DIR/../../..")
 LOG_DIR="$HOME/tinker_logs/$RUN_NAME"
 mkdir -p "$LOG_DIR"
 
-# TODO: tighten thresholds after 3-5 nightly runs (5% allowance from min observed),
-# matching the convention in gsm8k_colocate.sh.
-REWARD_MIN_VALUE=0.0
+# Thresholds derived from the successful Qwen3-0.6B validation runs logged to the
+# `gsm8k_tinker_ci` wandb project. The one clean 14-step colocated run ended at
+# env/all/reward/total ~0.55 (rising from ~0.22 at step 0) with optim/kl_sample_train_v2
+# ~6e-4 held flat across all steps. Because clean automated nightlies have not accumulated
+# yet, these are intentionally loose regression guards rather than the tight 5% allowance
+# used in gsm8k_colocate.sh:
+#   * REWARD_MIN_VALUE catches a "no learning" regression (reward would sit around the
+#     ~0.22 starting point) while leaving generous headroom below the observed ~0.55.
+#   * KL_SAMPLE_TRAIN_MAX_VALUE catches a sampling/training logprob mismatch in the Tinker
+#     SkyRLTrainBackend (the KL between the vLLM sampling logprobs and the FSDP policy's
+#     training logprobs would blow up); colocate is effectively on-policy so it stays tiny.
+# TODO: tighten to a 5% allowance from the min observed once several clean nightly runs exist.
+REWARD_MIN_VALUE=0.35
+KL_SAMPLE_TRAIN_MAX_VALUE=0.01
 
 BACKEND_CONFIG='{"trainer.placement.colocate_all": true, "trainer.placement.policy_num_gpus_per_node": 4, "trainer.micro_forward_batch_size_per_gpu": 8, "trainer.micro_train_batch_size_per_gpu": 8, "generator.inference_engine.num_engines": 4, "generator.inference_engine.tensor_parallel_size": 1, "generator.inference_engine.backend": "vllm", "generator.inference_engine.run_engines_locally": true, "generator.inference_engine.weight_sync_backend": "nccl", "generator.inference_engine.gpu_memory_utilization": 0.8, "generator.batched": true}'
 
@@ -69,4 +80,5 @@ TINKER_API_KEY=tml-dummy uv run --extra math-rl --extra wandb --with tinker --wi
 cd "$SKYRL_REPO_ROOT"
 uv run --isolated --extra fsdp "$SCRIPT_DIR/get_summary.py" \
   --run_name "$RUN_NAME" --project_name "$PROJECT_NAME" \
-  --asserts "env/all/reward/total >= $REWARD_MIN_VALUE"
+  --asserts "env/all/reward/total >= $REWARD_MIN_VALUE" \
+            "optim/kl_sample_train_v2 <= $KL_SAMPLE_TRAIN_MAX_VALUE"
