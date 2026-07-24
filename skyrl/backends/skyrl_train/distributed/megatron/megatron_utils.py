@@ -20,7 +20,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import gc
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -210,8 +209,6 @@ def offload_megatron_grads_to_cpu(models):
             for _, param in model_chunk.named_parameters():
                 if param.grad is not None:
                     param.grad = param.grad.to("cpu", non_blocking=True)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -223,8 +220,6 @@ def load_megatron_grads_to_gpu(models):
             for _, param in model_chunk.named_parameters():
                 if param.grad is not None:
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -259,8 +254,6 @@ def offload_megatron_model_to_cpu(models):
         else:
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to("cpu", non_blocking=True)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -280,8 +273,6 @@ def load_megatron_model_to_gpu(models):
             device_id = torch.cuda.current_device()
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to(device_id, non_blocking=True)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -381,8 +372,6 @@ def offload_megatron_optimizer(optimizers):
                 v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
             if "exp_avg_sq" in v:
                 v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -404,8 +393,6 @@ def load_megatron_optimizer(optimizers):
                     v["exp_avg"] = v["exp_avg"].to(torch.cuda.current_device(), non_blocking=True)
                 if "exp_avg_sq" in v:
                     v["exp_avg_sq"] = v["exp_avg_sq"].to(torch.cuda.current_device(), non_blocking=True)
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 def preprocess_packed_seqs(

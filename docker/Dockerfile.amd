@@ -1,0 +1,58 @@
+FROM vllm/vllm-openai-rocm:v0.23.0
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG RAY_VERSION=2.56.0
+ARG UV_VERSION=0.11.11
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV HF_HUB_ENABLE_HF_TRANSFER=1 \
+    PATH=/root/.local/bin:${PATH} \
+    RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook \
+    UV_FIND_LINKS=/opt/wheels \
+    UV_PROJECT_ENVIRONMENT=/usr
+
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        iproute2 \
+        iputils-ping \
+        kmod \
+        libnuma-dev \
+        libxml2 \
+        net-tools \
+        netcat-openbsd \
+        openssh-server \
+        traceroute \
+        tzdata \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN if ! command -v uv >/dev/null 2>&1; then \
+        curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh; \
+    fi \
+    && mkdir -p /opt/wheels \
+    && uv --version
+
+# The parent vLLM ROCm image supplies ROCm builds of torch, vLLM, and flash-attn.
+# Keep those packages in the system environment and install only the SkyRL
+# runtime pieces that are not provided by the parent image.
+RUN python -m pip install --no-cache-dir "ray[default]==${RAY_VERSION}" \
+    && python -m pip install --no-cache-dir "flash-linear-attention[rocm]" orjson torchdata \
+    && python -m pip install --no-cache-dir boto3==1.43.0 botocore==1.43.0 s3transfer==0.17.1 \
+    && python -m pip install --no-cache-dir "pyOpenSSL<26" "cryptography<49,>=2.5" \
+    && python -m pip install --no-cache-dir --upgrade "importlib-metadata>=6.0,<8.8.0"
+
+WORKDIR /workspace/SkyRL
+COPY . /workspace/SkyRL
+
+# Use an AMD dependency view that omits GPU-specific CUDA packages. The ROCm
+# variants of torch/vLLM/flash-attn come from the parent image instead.
+RUN cp docker/pyproject.amd.toml pyproject.toml \
+    && uv pip install --system --no-cache-dir -e ".[fsdp,tinker]" \
+    && python -c "import ray, torch, vllm; print('ray', ray.__version__); print('vllm', vllm.__version__); print('torch', torch.__version__, 'hip', torch.version.hip)"
+
+ENTRYPOINT []
+CMD ["/bin/bash"]

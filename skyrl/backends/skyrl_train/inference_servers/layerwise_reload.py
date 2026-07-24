@@ -65,6 +65,18 @@ def patch_numel_loaded():
 _PATCHED_LAYERWISE_NUMEL_LOADED = False
 
 
+def _empty_cuda_cache_rocm() -> None:
+    """Release unused ROCm cached blocks after full-weight sync."""
+    is_rocm = torch.version.hip is not None
+    if not torch.cuda.is_available() or not is_rocm:
+        return
+
+    device = torch.cuda.current_device()
+    torch.cuda.synchronize(device)
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize(device)
+
+
 class LayerwiseReloadWorkerMixin:
     """Bracket a multi-chunk weight sync with one vLLM layerwise-reload init/finalize.
 
@@ -153,3 +165,4 @@ class LayerwiseReloadWorkerMixin:
 
         self._skyrl_weight_update_active = False
         self._skyrl_is_checkpoint_format = True
+        _empty_cuda_cache_rocm()

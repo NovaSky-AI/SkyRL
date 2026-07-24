@@ -38,6 +38,7 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     shift_mask_for_mtp,
     unpadded_vocab_shard_width,
 )
+from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
@@ -123,6 +124,23 @@ def _build_packed_valid_mask(
     packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
     mask[packed_indices[attn]] = 1.0
     return mask.unsqueeze(0)
+
+
+def _copy_tensor_tree_to_device(value: Any, device: int) -> Any:
+    """Move all tensors in a nested microbatch to a CUDA device."""
+    if torch.is_tensor(value) or isinstance(value, TensorList):
+        return value.to(device=device, non_blocking=True)
+    if isinstance(value, dict):
+        return {key: _copy_tensor_tree_to_device(item, device) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_tensor_tree_to_device(item, device) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_tensor_tree_to_device(item, device) for item in value)
+    return value
+
+
+def _copy_tensor_dict_to_device(batch: Dict[str, Any], device: int) -> Dict[str, Any]:
+    return {key: _copy_tensor_tree_to_device(value, device) for key, value in batch.items()}
 
 
 def _fused_lm_head_output_processor(**kwargs):
@@ -325,6 +343,9 @@ class MegatronModelWrapper:
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
+            # Microbatches are held on CPU and transferred just before their forward
+            # step to cap resident input memory (no-op if already on device).
+            batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
@@ -793,10 +814,16 @@ class MegatronModelWrapper:
                         loss_mask,
                         mpu.get_context_parallel_group(),
                         sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                        chunk_size=self.cfg.vocab_entropy_chunk_size,
+                        chunk_memory_mb=self.cfg.vocab_entropy_chunk_memory_mb,
                     )
                 else:
                     action_logits = logits[:, -num_actions - 1 : -1, :]
-                    entropy_BS = vocab_parallel_entropy(action_logits)
+                    entropy_BS = vocab_parallel_entropy(
+                        action_logits,
+                        chunk_size=self.cfg.vocab_entropy_chunk_size,
+                        chunk_memory_mb=self.cfg.vocab_entropy_chunk_memory_mb,
+                    )
                     entropy = masked_mean(entropy_BS, loss_mask)
                     entropy_for_loss = entropy
 
@@ -891,6 +918,9 @@ class MegatronModelWrapper:
             # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
             # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
             batch = next(batch_iter)
+            # Microbatches are held on CPU and transferred just before their forward
+            # step to cap resident input memory (no-op if already on device).
+            batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))

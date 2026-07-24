@@ -52,10 +52,12 @@ from skyrl.train.config.sft_config import (
     _normalize_dataset_cfg,
     build_skyrl_config_for_sft,
 )
+from skyrl.train.dataset.pretokenized import load_from_pretokenized
 from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.async_batch_collator import AsyncBatchCollator
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
@@ -822,6 +824,7 @@ class SFTTrainer:
         # when eval is disabled. Names are unique (enforced in config validation)
         # and namespace the eval metrics as ``eval/{name}/...``.
         self.eval_dataloaders: list[tuple[str, StatefulDataLoader]] | None = None
+        self._checkpoint_dataloader_state: dict | None = None
         self.global_step = 0
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
@@ -1227,11 +1230,16 @@ class SFTTrainer:
             shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
 
     def load_dataset(self) -> tuple[list, list[int]]:
-        """Load and tokenize the training dataset(s).
+        """Load the training dataset(s): pretokenized stores or tokenize-on-load.
 
-        Each ``(name, split)`` pair from ``train_datasets``/``train_dataset_splits``
-        is tokenized independently through :meth:`_load_and_tokenize` (preserving
-        per-dataset cache keys), then concatenated in config order.
+        When ``pretokenized_dataset_paths`` is set, each store is loaded through
+        :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized` (same
+        ``list[dict]`` shape as :meth:`_load_and_tokenize`, no online
+        tokenization) and concatenated in config order. Otherwise each
+        ``(name, split)`` pair from ``train_datasets``/``train_dataset_splits``
+        is tokenized independently through :meth:`_load_and_tokenize`
+        (preserving per-dataset cache keys), then concatenated in config order.
+        Either way, multiple sources are mixed per ``train_dataset_weights``.
 
         Returns:
             ``(tokenized, dataset_lengths)`` where ``dataset_lengths`` holds the
@@ -1240,6 +1248,18 @@ class SFTTrainer:
         """
         tokenized: list = []
         dataset_lengths: list[int] = []
+        if self.sft_cfg.pretokenized_dataset_paths:
+            for path in self.sft_cfg.pretokenized_dataset_paths:
+                # The loader raises on 0 usable rows, so no empty-source check.
+                source = load_from_pretokenized(path, max_length=self.sft_cfg.max_length)
+                tokenized.extend(source)
+                dataset_lengths.append(len(source))
+            if len(dataset_lengths) > 1:
+                per_dataset = ", ".join(
+                    f"{path}={length}" for path, length in zip(self.sft_cfg.pretokenized_dataset_paths, dataset_lengths)
+                )
+                logger.info(f"Concatenated {len(dataset_lengths)} pretokenized datasets: {per_dataset}")
+            return tokenized, dataset_lengths
         for name, split in zip(self.sft_cfg.train_datasets, self.sft_cfg.train_dataset_splits):
             source = self._load_and_tokenize(name, split)
             if len(source) == 0:
@@ -1256,11 +1276,21 @@ class SFTTrainer:
     def load_eval_datasets(self) -> Optional[list[tuple[str, list]]]:
         """Load and tokenize the eval dataset(s), or return ``None`` if not configured.
 
+        When ``eval_pretokenized_dataset_paths`` is set, each store is loaded
+        through :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized`
+        and named by the corresponding entry of ``eval_dataset_names`` (filled
+        from the path basenames by config normalization when not set
+        explicitly).
+
         Returns:
-            One ``(name, tokenized)`` pair per entry of ``eval_datasets``, where
-            ``name`` comes from ``eval_dataset_names`` and namespaces the eval
-            metrics (``eval/{name}/...``).
+            One ``(name, tokenized)`` pair per eval source, where ``name``
+            namespaces the eval metrics (``eval/{name}/...``).
         """
+        if self.sft_cfg.eval_pretokenized_dataset_paths:
+            return [
+                (name, load_from_pretokenized(path, max_length=self.sft_cfg.max_length))
+                for name, path in zip(self.sft_cfg.eval_dataset_names, self.sft_cfg.eval_pretokenized_dataset_paths)
+            ]
         if not self.sft_cfg.eval_datasets:
             return None
         eval_sets: list[tuple[str, list]] = []
@@ -1361,15 +1391,12 @@ class SFTTrainer:
         if sampler_type == "random":
             if not multi_dataset:
                 return None
-            weights = self.sft_cfg.train_dataset_weights
-            if weights is None:
-                # Config normalization fills this on the standard path; default
-                # to equal mixing for directly-constructed trainers.
-                weights = [1.0 / len(dataset_lengths)] * len(dataset_lengths)
+            # Config normalization (validate_sft_cfg) fills equal weights for
+            # the random sampler on every construction path.
             return DataMixingSampler(
                 tokenized,
                 lengths=dataset_lengths,
-                weights=weights,
+                weights=self.sft_cfg.train_dataset_weights,
                 seed=self.sft_cfg.seed,
             )
         if sampler_type == "sequential":
@@ -1946,6 +1973,16 @@ class SFTTrainer:
         # their state across the (conceptual) epoch boundaries.
         data_iter = iter(self.train_dataloader)
 
+        collate_ahead_enabled = self.sft_cfg.async_batch_collation
+        async_collator: Optional[AsyncBatchCollator] = (
+            AsyncBatchCollator(lambda _step: next(data_iter, None), thread_name_prefix="sft-batch-collate")
+            if collate_ahead_enabled
+            else None
+        )
+        logger.info(
+            f"SFT async batch collation (double-buffering): {'ENABLED' if collate_ahead_enabled else 'disabled'}"
+        )
+
         if self._torch_profiler_enabled:
             self.dispatch.start_profile("policy")
         try:
@@ -1954,10 +1991,14 @@ class SFTTrainer:
 
                 with Timer("step", all_timings):
 
-                    # Fetch the next batch; on epoch exhaustion, close the epoch and
-                    # restart the iterator (reshuffles the random/sequential samplers).
+                    # With async enabled, this is usually just the wait for an
+                    # already-running collate. ``None`` marks epoch exhaustion.
                     with Timer("data_loading", all_timings):
-                        batch = next(data_iter, None)
+                        if async_collator is not None and async_collator.pending_step() == self.global_step:
+                            batch = async_collator.get(self.global_step)
+                            self._checkpoint_dataloader_state = None
+                        else:
+                            batch = next(data_iter, None)
                     if batch is None:
                         self._fire("on_epoch_end")
                         current_epoch += 1
@@ -1966,6 +2007,13 @@ class SFTTrainer:
                         data_iter = iter(self.train_dataloader)
                         with Timer("data_loading", all_timings):
                             batch = next(data_iter)
+
+                    if async_collator is not None and self.global_step < num_steps:
+                        # Advancing the iterator in the worker moves the live
+                        # dataloader state one batch ahead. Preserve the state after
+                        # the current batch so checkpoints still resume exactly.
+                        self._checkpoint_dataloader_state = self.train_dataloader.state_dict()
+                        async_collator.submit(self.global_step + 1)
 
                     self._fire("on_step_start", batch=batch)
 
@@ -2061,6 +2109,13 @@ class SFTTrainer:
 
                 self.global_step += 1
         finally:
+            # Always tear down the async collation thread (drains any in-flight
+            # batch and joins the worker) so neither the background thread
+            # nor the dataset reference is leaked, even on exception. No-op
+            # when async collation is disabled.
+            if async_collator is not None:
+                async_collator.shutdown()
+            self._checkpoint_dataloader_state = None
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
         self.global_step = min(self.global_step, num_steps)
@@ -2135,7 +2190,12 @@ class SFTTrainer:
             dataloader_save_path = os.path.join(global_step_folder, "data.pt")
             try:
                 with io.open_file(dataloader_save_path, "wb") as f:
-                    torch.save(self.train_dataloader.state_dict(), f)
+                    dataloader_state = (
+                        self._checkpoint_dataloader_state
+                        if self._checkpoint_dataloader_state is not None
+                        else self.train_dataloader.state_dict()
+                    )
+                    torch.save(dataloader_state, f)
                 logger.info(f"Saved dataloader state to {dataloader_save_path}")
             except Exception as e:
                 logger.warning(f"Failed to save dataloader state: {e}")

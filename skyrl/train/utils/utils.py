@@ -565,6 +565,17 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             "Each inference engine DP rank (TP*PP workers) must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
         )
 
+    # Validate the non-colocated sleep-during-weight-sync option.
+    if ie_cfg.offload_kv_for_weight_sync:
+        assert not cfg.trainer.placement.colocate_all, (
+            "offload_kv_for_weight_sync is for non-colocated weight sync only; "
+            "colocated mode already sleeps the engines and wakes weights/KV cache around sync."
+        )
+        assert cfg.trainer.policy.model.lora.rank == 0, (
+            "offload_kv_for_weight_sync does not support LoRA weight sync "
+            "(the in-place LoRA adapter swap path does not go through the sleep/wake broadcast)."
+        )
+
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
 
