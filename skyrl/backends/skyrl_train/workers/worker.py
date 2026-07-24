@@ -806,6 +806,15 @@ class PolicyWorkerBase(Worker):
                 experience, microbatch_weight, loss_fn=loss_fn, loss_fn_config=loss_fn_config
             )
 
+            # Skip fully-padding microbatches: their loss_fn_outputs are dummy entries
+            # for samples that don't exist, and their metrics (clip_ratio=0,
+            # policy_entropy=0, ...) are meaningless and would drag down the
+            # mean-reduced metrics. Summed metrics (e.g. policy_loss) are unaffected
+            # since padding contributes 0, but excluding them here keeps both
+            # reductions correct.
+            if experience.metadata and experience.metadata.get("is_padding_batch", False):
+                continue
+
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
             if "loss_fn_outputs" in metrics:
                 all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
@@ -1330,6 +1339,11 @@ class CriticWorkerBase(Worker):
             else:
                 metrics = self._forward_backward_micro(experience)
                 self._micro_batches_accumulated += 1
+
+            # Skip fully-padding microbatches: their all-zero metrics (e.g. critic_loss=0)
+            # would drag down the mean-reduced metrics. Mirrors PolicyWorkerBase.forward_backward.
+            if experience.metadata and experience.metadata.get("is_padding_batch", False):
+                continue
 
             for k, v in metrics.items():
                 all_metrics[k].append(v)
