@@ -20,6 +20,21 @@ from skyrl.train.config import (
 logger = logging.getLogger(__name__)
 
 
+def apply_expert_mxfp8_rollout_config(args: Namespace, cfg: SkyRLTrainConfig, engine_kwargs: dict) -> None:
+    """Configure expert-only online MXFP8 in vLLM."""
+
+    expert_mxfp8 = cfg.trainer.policy.model.expert_mxfp8
+    if not expert_mxfp8.enabled or not expert_mxfp8.rollout:
+        return
+    if cfg.generator.inference_engine.model_dtype not in ("bfloat16", "float16"):
+        raise ValueError("Expert MXFP8 rollout requires model_dtype=bfloat16 or float16")
+    conflicts = {"quantization", "quantization_config"} & engine_kwargs.keys()
+    if conflicts:
+        raise ValueError(f"Expert MXFP8 conflicts with engine_init_kwargs: {sorted(conflicts)}")
+    args.quantization = "online"
+    args.quantization_config = {"moe": "mxfp8"}
+
+
 def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
     """Return True when the trainer syncs LoRA adapters (not merged weights).
 
@@ -155,6 +170,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    apply_expert_mxfp8_rollout_config(args, cfg, engine_kwargs)
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
 

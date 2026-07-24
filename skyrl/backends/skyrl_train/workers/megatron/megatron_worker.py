@@ -382,6 +382,7 @@ class MegatronWorker:
         enable_mtp=False,
         language_model_only=False,
         bridge_weights_path=None,
+        expert_mxfp8=False,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -488,6 +489,13 @@ class MegatronWorker:
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
+
+        if expert_mxfp8:
+            from skyrl.backends.skyrl_train.workers.megatron.expert_mxfp8 import (
+                configure_expert_mxfp8_provider,
+            )
+
+            configure_expert_mxfp8_provider(provider)
 
         # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
         if not enable_mtp:
@@ -889,6 +897,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Fake-INT4 QAT: install the MoE expert fake-quant hook and (when the
         # served checkpoint is INT4) redirect the trainer's BF16 master weights.
         bridge_weights_path = self._maybe_setup_fake_int4_qat()
+        expert_mxfp8 = self.cfg.policy.model.expert_mxfp8
+        if expert_mxfp8.enabled and expert_mxfp8.training:
+            from skyrl.backends.skyrl_train.workers.megatron.expert_mxfp8 import (
+                validate_expert_mxfp8_hardware,
+            )
+
+            validate_expert_mxfp8_hardware()
 
         # initialize the bridge and provider objects
         self.init_configs(
@@ -901,6 +916,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             language_model_only=self.cfg.policy.language_model_only,
             bridge_weights_path=bridge_weights_path,
             enable_mtp=self.cfg.mtp.enabled,
+            expert_mxfp8=expert_mxfp8.enabled and expert_mxfp8.training,
         )
 
         if self.enable_router_replay:
@@ -926,6 +942,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             lora_type=self.cfg.policy.megatron_config.lora_config.lora_type,
             bf16=self.cfg.bf16,
         )
+        if expert_mxfp8.enabled and expert_mxfp8.training:
+            from skyrl.backends.skyrl_train.workers.megatron.expert_mxfp8 import (
+                audit_expert_mxfp8_modules,
+            )
+
+            audit_expert_mxfp8_modules(self.actor_module)
 
         if self._local_rank == 0 and not os.path.exists(
             model_path
