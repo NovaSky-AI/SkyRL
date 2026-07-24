@@ -227,9 +227,9 @@ no-build-isolation-package = [
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
-    "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
+    "transformers>=5.6.1,<=5.8.0",
     "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
-    "ml_dtypes>=0.5.0; sys_platform == 'linux'",
+    "ml_dtypes>=0.5.0",
     "transformer-engine-cu13; sys_platform == 'never'",
     # `nixl` hard-depends on both nixl-cu12 and nixl-cu13; drop the cu13 variant
     # so it doesn't pull the CUDA-13 stack and bump torch off the cu12 pin.
