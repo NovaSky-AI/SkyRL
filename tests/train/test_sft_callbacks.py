@@ -20,6 +20,8 @@ uv run --isolated --extra dev --extra fsdp pytest tests/train/test_sft_callbacks
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from skyrl.train.config.sft_config import (
     SFTConfig,
     SFTPlacementConfig,
@@ -32,6 +34,35 @@ from skyrl.train.utils.callbacks import (
 )
 
 _FAKE_CKPT_PATH = "/fake/sft-callback-test/global_step_2"
+
+
+def _make_mock_dispatch() -> MagicMock:
+    """Worker-dispatch mock for SFT orchestration tests."""
+    step_output = MagicMock()
+    step_output.metrics = {"loss": 0.42, "final_loss": 0.42}
+    eval_output = MagicMock()
+    eval_output.metrics = {"loss": 0.31}
+
+    dispatch_mock = MagicMock()
+    dispatch_mock.forward_backward = MagicMock(return_value=step_output)
+    dispatch_mock.optim_step = MagicMock(return_value=1.0)
+    dispatch_mock.forward = MagicMock(return_value=eval_output)
+    dispatch_mock.dp_size = MagicMock(return_value=1)
+    return dispatch_mock
+
+
+def _attach_mock_sft_deps(trainer: SFTTrainer, dispatch_mock: MagicMock) -> None:
+    """Wire mocked setup outputs onto the trainer."""
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    trainer.tokenizer = tokenizer
+    trainer.collator = trainer._build_collator(tokenizer)
+    trainer.dispatch = dispatch_mock
+
+
+@pytest.fixture
+def mock_dispatch() -> MagicMock:
+    return _make_mock_dispatch()
 
 
 class RecorderCallback(TrainingCallback):
@@ -160,7 +191,7 @@ def _dummy_tokenized() -> list[dict]:
     return [example, example]
 
 
-def test_callbacks_fire_during_sft_training(monkeypatch):
+def test_callbacks_fire_during_sft_training(monkeypatch, mock_dispatch):
     """A 2-step SFT run fires every relevant event, in order, with the right payloads."""
     cfg = _build_test_sft_config()
     skyrl_cfg = build_skyrl_config_for_sft(cfg)
@@ -170,29 +201,9 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
     force_save = ForceSaveAtStep(step=2)
     trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg, callbacks=[recorder, force_eval, force_save])
 
-    # Skip setup() (which would load the model + spin up workers). Replace
-    # what setup() would have set with mocks.
-    tokenizer = MagicMock()
-    tokenizer.pad_token_id = 0
-    trainer.tokenizer = tokenizer
-    # setup() also builds the collator once the tokenizer is available.
-    trainer.collator = trainer._build_collator(tokenizer)
+    # Skip setup() by wiring the deps it normally creates.
+    _attach_mock_sft_deps(trainer, mock_dispatch)
     trainer.tracker = MagicMock()
-
-    # Mock the worker dispatch — the only thing train_step / run_eval touch
-    # that requires real GPU workers. forward_backward returns an object with
-    # ``.metrics`` (loss); optim_step returns a grad_norm; forward (eval path)
-    # returns ``.metrics`` with a per-batch loss.
-    step_output = MagicMock()
-    step_output.metrics = {"loss": 0.42, "final_loss": 0.42}
-    eval_output = MagicMock()
-    eval_output.metrics = {"loss": 0.31}
-    dispatch_mock = MagicMock()
-    dispatch_mock.forward_backward = MagicMock(return_value=step_output)
-    dispatch_mock.optim_step = MagicMock(return_value=1.0)
-    dispatch_mock.forward = MagicMock(return_value=eval_output)
-    dispatch_mock.dp_size = MagicMock(return_value=1)
-    trainer.dispatch = dispatch_mock
 
     # Bypass HF network fetch + tokenization: both load_dataset() and
     # load_eval_dataset() funnel through _load_and_tokenize.
@@ -287,3 +298,39 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
             continue
         assert snap["total_steps"] == 2, f"{name}: total_steps={snap['total_steps']}"
         assert snap["steps_per_epoch"] == 2, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"
+
+
+def _build_minimal_trainer(dispatch_mock: MagicMock) -> SFTTrainer:
+    """Build an SFTTrainer with mocked dispatch."""
+    cfg = _build_test_sft_config()
+    skyrl_cfg = build_skyrl_config_for_sft(cfg)
+    trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
+    _attach_mock_sft_deps(trainer, dispatch_mock)
+    return trainer
+
+
+def test_sft_train_step_opts_out_of_per_token_outputs(mock_dispatch):
+    """train_step opts out of unused per-token outputs."""
+    trainer = _build_minimal_trainer(mock_dispatch)
+    batch = trainer.collator(_dummy_tokenized(), batch_size=1)
+
+    trainer.train_step(batch, step=1)
+
+    mock_dispatch.forward_backward.assert_called_once()
+    call = mock_dispatch.forward_backward.call_args
+    assert call.kwargs["loss_fn"] == "cross_entropy"
+    assert call.kwargs["return_per_token_outputs"] is False
+
+
+def test_sft_run_eval_opts_out_of_per_token_outputs(mock_dispatch):
+    """run_eval reads only ``output.metrics["loss"]``; it skips per-token outputs."""
+    trainer = _build_minimal_trainer(mock_dispatch)
+    trainer.eval_dataloaders = [("evalset", trainer.build_eval_dataloader(_dummy_tokenized()))]
+
+    metrics, _ = trainer.run_eval()
+
+    assert "evalset/loss" in metrics
+    mock_dispatch.forward.assert_called()
+    for call in mock_dispatch.forward.call_args_list:
+        assert call.kwargs["loss_fn"] == "cross_entropy"
+        assert call.kwargs["return_per_token_outputs"] is False
