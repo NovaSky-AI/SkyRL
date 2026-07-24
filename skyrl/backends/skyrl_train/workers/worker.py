@@ -425,7 +425,9 @@ class Worker(DistributedTorchRayActor):
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(
-            inference_engine_cfg, inference_world_size=inference_world_size
+            inference_engine_cfg,
+            inference_world_size=inference_world_size,
+            base_model_path=self.cfg.policy.model.path,
         )
 
         # Create sender on all ranks

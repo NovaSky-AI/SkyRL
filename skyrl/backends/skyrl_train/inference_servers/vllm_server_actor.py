@@ -330,9 +330,9 @@ class VLLMServerActor(ServerActorProtocol):
         entrypoint, so it takes the engine and CLI args explicitly rather than
         reading them off ``self``.
         """
-        # Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
-        # /update_weights, /get_world_size) registered by the RLHF router when
-        # VLLM_SERVER_DEV_MODE=1.
+        # Most weight-sync endpoints are registered by vLLM dev mode. SkyRL
+        # adds /fetch_weights because checkpoint-delta pulls and applies
+        # payloads before the paused /update_weights reload.
 
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
@@ -344,6 +344,22 @@ class VLLMServerActor(ServerActorProtocol):
             reset_running_requests = data.get("reset_running_requests", False)
             await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
             return {"status": "ok"}
+
+        @app.post("/fetch_weights")
+        async def _fetch_weights(request: Request):
+            """Fetch/apply checkpoint-delta payloads before the paused reload phase."""
+            body = await request.json()
+            target_version = body.get("target_version")
+            if target_version is None:
+                raise HTTPException(status_code=400, detail="'target_version' is required")
+
+            kwargs = {"target_version": int(target_version)}
+            if body.get("sync_dir") is not None:
+                kwargs["sync_dir"] = body["sync_dir"]
+            if body.get("uri") is not None:
+                kwargs["uri"] = body["uri"]
+            result = await engine.collective_rpc("fetch_weights", kwargs=kwargs)
+            return {"status": "ok", "result": result}
 
         @app.post("/skyrl/v1/load_lora_adapter")
         async def _skyrl_load_lora_adapter(request: Request):
@@ -552,9 +568,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     concerns (placement-group bundle indices, DP master rendezvous) do not apply
     here; pass standard vLLM flags to control parallelism and placement.
     """
-    # Match VLLMServerActor.__init__: enable vLLM dev-mode endpoints (sleep/wake,
-    # /init_weight_transfer_engine, /collective_rpc, /get_world_size), runtime
-    # LoRA load/unload, and CUDA-IPC weight transfer.
+    # Match VLLMServerActor.__init__: enable vLLM dev-mode endpoints
+    # (sleep/wake, /init_weight_transfer_engine, /collective_rpc,
+    # /get_world_size), SkyRL /fetch_weights, runtime LoRA load/unload, and
+    # CUDA-IPC weight transfer.
     os.environ["VLLM_SERVER_DEV_MODE"] = "1"
     os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"

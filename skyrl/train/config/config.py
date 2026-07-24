@@ -739,6 +739,41 @@ class ChatTemplateConfig(BaseConfig):
 
 
 @dataclass
+class DeltaWeightSyncConfig(BaseConfig):
+    """Disk/cloud checkpoint-delta weight sync configuration."""
+
+    sync_dir: Optional[str] = None
+    """Shared directory/URI where the trainer publishes per-version delta payloads.
+    Supports local paths, ``gs://`` URIs, and ``s3://`` URIs."""
+
+    local_checkpoint_dir: Optional[str] = None
+    """Receiver-side directory used to cache patched checkpoint versions.
+    If unset, a path under ``/tmp/skyrl_delta_checkpoints`` is used."""
+
+    publish_staging_dir: Optional[str] = None
+    """Trainer-side local directory used to stage cloud payload files before upload.
+    If unset, a path under ``/tmp/skyrl_delta_publish_staging`` is used."""
+
+    max_file_size_in_gb: float = 1.0
+    """Maximum compressed payload file size before starting a new safetensors file."""
+
+    gcs_download_workers: int = 4
+    """Maximum number of payload files to download concurrently for ``gs://`` sync dirs."""
+
+    publish_num_workers: Optional[int] = None
+    """Number of trainer-side worker threads used to compute and compress delta payloads.
+    If unset, the publisher uses ``min(8, os.cpu_count())``."""
+
+    checkpoint_load_format: str = "vllm_fastsafetensors"
+    """Receiver reload iterator for the prepared local checkpoint.
+    ``"vllm_fastsafetensors"`` is the default CUDA/GDS-oriented path.
+    ``"vllm_multi_thread_safetensors"`` is the CPU safetensors fallback."""
+
+    multi_thread_safetensors_max_workers: int = 8
+    """Number of worker threads for ``vllm_multi_thread_safetensors``."""
+
+
+@dataclass
 class InferenceEngineConfig(BaseConfig):
     """Configuration for inference engine instantiation and management."""
 
@@ -751,6 +786,7 @@ class InferenceEngineConfig(BaseConfig):
     weight_sync_backend: str = "nccl"
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
     """When using ``cuda_ipc``, send weights in batches of this size (GB)."""
+    delta_weight_sync: DeltaWeightSyncConfig = field(default_factory=DeltaWeightSyncConfig)
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     expert_parallel_size: int = 1

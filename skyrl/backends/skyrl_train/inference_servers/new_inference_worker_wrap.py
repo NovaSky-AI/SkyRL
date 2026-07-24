@@ -30,6 +30,14 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
     _empty_cuda_cache_rocm,
 )
+from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
+    register_delta_weight_transfer_engine,
+)
+
+try:
+    register_delta_weight_transfer_engine()
+except ModuleNotFoundError:
+    pass
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
@@ -49,6 +57,17 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         self.model_config
         self.device
     """
+
+    def fetch_weights(self, target_version: int, sync_dir: str | None = None, uri: str | None = None):
+        """Fetch/apply a checkpoint delta before the paused reload phase."""
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
+            )
+        fetch = getattr(self.weight_transfer_engine, "fetch_weights", None)
+        if fetch is None:
+            raise RuntimeError(f"{type(self.weight_transfer_engine).__name__} does not support fetch_weights")
+        return fetch(target_version=target_version, sync_dir=sync_dir, uri=uri)
 
     def update_weights_ipc(self, update_info: dict) -> None:
         """

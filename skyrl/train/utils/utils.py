@@ -194,7 +194,10 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
-    assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
+    assert ie_cfg.weight_sync_backend in {
+        "nccl",
+        "delta",
+    }, "only nccl and delta are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
@@ -431,6 +434,14 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
+
+        # delta weight sync is not yet supported
+        # TODO (sumanthrh): Delta weight sync should be naturally supported for `merge_lora=true`, we should
+        # test and enable this in a follow-up. `merge_lora=false` needs bookkeeping of per-LoRA safetensors
+        # on the inference side.
+        assert (
+            cfg.generator.inference_engine.weight_sync_backend != "delta"
+        ), "Delta weight sync is not yet supported for LoRA"
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
@@ -785,6 +796,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
 
+    if worker_nccl_timeout := os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S"):
+        logger.info(f"Exporting `SKYRL_WORKER_NCCL_TIMEOUT_IN_S` to ray runtime env: {worker_nccl_timeout}")
+        env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = worker_nccl_timeout
     # Forward uv's project-environment selection to the workers. Ray's uv runtime-env hook makes each
     # worker re-run `uv run ... --extra <backend>`, and that subprocess must resolve to the SAME venv
     # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a

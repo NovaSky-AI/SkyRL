@@ -1156,6 +1156,23 @@ class RemoteInferenceClient(InferenceEngineInterface):
             {"update_info": update_info},
         )
 
+    async def fetch_weights(
+        self,
+        target_version: int,
+        sync_dir: Optional[str] = None,
+        uri: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fetch/apply a published checkpoint delta on every inference worker before
+        pausing generation for reload.
+        """
+        kwargs: Dict[str, Any] = {"target_version": target_version}
+        if sync_dir is not None:
+            kwargs["sync_dir"] = sync_dir
+        if uri is not None:
+            kwargs["uri"] = uri
+        return await self._call_all_servers("/fetch_weights", kwargs)
+
     # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
     # these three methods from /collective_rpc to the native vLLM endpoints
     # (/start_weight_update, /update_weights, /finish_weight_update) and remove

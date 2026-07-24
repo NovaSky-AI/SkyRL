@@ -272,7 +272,9 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
 
     @staticmethod
     def create_init_info(
-        ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None
+        ie_cfg: "InferenceEngineConfig",
+        inference_world_size: Optional[int] = None,
+        base_model_path: Optional[str] = None,
     ) -> CudaIpcInitInfo:
         """Create init info with all config-derived args."""
         return CudaIpcInitInfo(

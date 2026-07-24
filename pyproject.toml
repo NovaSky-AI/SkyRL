@@ -22,6 +22,8 @@ dependencies = [
     "peft==0.18.1",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
+    "zstandard>=0.23.0",
+    "xxhash>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +51,7 @@ ray = [
 
 aws = [
     "cloudpathlib[s3]",
+    "s5cmd>=0.3.3; sys_platform == 'linux'",
 ]
 
 gcp = [
@@ -91,6 +94,8 @@ skyrl-train = [
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "polars",
     "s3fs",
+    "s5cmd>=0.3.3; sys_platform == 'linux'",
+    "gcsfs",
     "fastapi",
     "uvicorn",
     "vllm-router; sys_platform == 'linux'",
@@ -216,10 +221,10 @@ conflicts = [
         { extra = "miniswe" },
     ]
 ]
-# disable build isolation for megatron related dependencies
+# Disable build isolation only for packages that cannot use uv's extra build
+# dependencies. Transformer Engine uses isolated builds below so its undeclared
+# build imports are available without relying on a pre-seeded runtime venv.
 no-build-isolation-package = [
-    "transformer-engine-torch",
-    "transformer-engine",
     "nv-grouped-gemm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
@@ -381,4 +386,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["skyrl", "skyrl_gym"]
-

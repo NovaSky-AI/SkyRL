@@ -84,6 +84,13 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     args: Namespace = parser.parse_args(args=[])
 
     ie_cfg = cfg.generator.inference_engine
+    if ie_cfg.weight_sync_backend == "delta":
+        from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
+            register_delta_weight_transfer_engine,
+        )
+
+        register_delta_weight_transfer_engine()
+
     overrides = dict(
         model=cfg.trainer.policy.model.path,
         tensor_parallel_size=ie_cfg.tensor_parallel_size,

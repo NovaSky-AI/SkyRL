@@ -675,13 +675,15 @@ class WorkerDispatch:
             else:
                 # Non-colocated single tenant: pause generation to prevent in-flight requests from
                 # reading partially-updated weights during the NCCL broadcast.
-                await self._inference_engine_client.pause_generation()
-                try:
+                if self.cfg.generator.inference_engine.weight_sync_backend == "delta":
+                    # Delta disk sync performs publish/fetch before pausing and
+                    # pauses internally only around the final reload.
                     self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
                     self._finish_weight_sync()
-                finally:
-                    await self._inference_engine_client.resume_generation()
-
-        # Advance the policy version so prefix-cache salting isolates blocks from the previous weights
-        # (see `GeneratorConfig.use_cache_salt`).
-        self._inference_engine_client.increment_weight_version()
+                else:
+                    await self._inference_engine_client.pause_generation()
+                    try:
+                        self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+                        self._finish_weight_sync()
+                    finally:
+                        await self._inference_engine_client.resume_generation()

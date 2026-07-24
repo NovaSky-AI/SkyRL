@@ -9,6 +9,7 @@ def pytest_configure(config):
         "markers",
         "h100: opt-in tests that require H100 GPUs; auto-skipped unless `-m h100` is passed.",
     )
+    config.addinivalue_line("markers", "megatron: tests that require the Megatron backend extra.")
 
 
 def pytest_collection_modifyitems(config, items):

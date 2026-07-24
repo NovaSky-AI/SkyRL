@@ -1432,10 +1432,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
+        sender_handles_prefix_cache_reset = bool(
+            getattr(self._weight_transfer_sender, "handles_prefix_cache_reset", False)
+        )
 
         # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
         if (
             use_prefix_cache
+            and not sender_handles_prefix_cache_reset
             and torch.distributed.get_rank() == 0
             and (not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync)
         ):
@@ -1467,6 +1471,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+        sender_client = getattr(self._weight_transfer_sender, "_inference_client", None)
+        if inference_engine_client is not sender_client:
+            close_client = getattr(inference_engine_client, "aclose", None)
+            if close_client is not None:
+                await close_client()
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method

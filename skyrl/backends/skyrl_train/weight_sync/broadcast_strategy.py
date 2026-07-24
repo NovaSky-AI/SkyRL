@@ -200,7 +200,11 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(ie_cfg: "InferenceEngineConfig", inference_world_size: int) -> BroadcastInitInfo:
+    def create_init_info(
+        ie_cfg: "InferenceEngineConfig",
+        inference_world_size: int,
+        base_model_path: Optional[str] = None,
+    ) -> BroadcastInitInfo:
         """Create init info with all config-derived args.
 
         Args:
