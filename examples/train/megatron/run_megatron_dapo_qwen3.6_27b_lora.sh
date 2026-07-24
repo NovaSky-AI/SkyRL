@@ -53,7 +53,7 @@ TIS_TYPE=token
 OPTIMIZER_OFFLOAD=true
 OPTIMIZER_OFFLOAD_FRACTION=1.0
 
-LANGUAGE_MODEL_ONLY=True
+LANGUAGE_MODEL_ONLY=true
 ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton", "disable_custom_all_reduce": true, "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY"}}'
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
 REMOVE_MICROBATCH_PADDING="${REMOVE_MICROBATCH_PADDING:-true}"
