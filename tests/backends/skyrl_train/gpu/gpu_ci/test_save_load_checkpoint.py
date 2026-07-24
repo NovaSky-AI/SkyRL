@@ -63,18 +63,20 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
 
 
 @pytest.mark.parametrize(
-    ("strategy", "lora", "fully_reshardable", "optimizer_cpu_offload"),
+    ("strategy", "lora", "fully_reshardable", "optimizer_cpu_offload", "async_save"),
     [
-        ("fsdp", False, False, False),
-        pytest.param("megatron", False, False, False, marks=pytest.mark.megatron),
-        pytest.param("megatron", False, False, True, marks=pytest.mark.megatron),
-        pytest.param("megatron", True, False, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
-        pytest.param("megatron", False, True, False, marks=pytest.mark.megatron),
+        ("fsdp", False, False, False, False),
+        pytest.param("megatron", False, False, False, False, marks=pytest.mark.megatron),
+        pytest.param("megatron", False, False, False, True, marks=pytest.mark.megatron),
+        pytest.param("megatron", False, False, True, False, marks=pytest.mark.megatron),
+        pytest.param("megatron", True, False, False, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
+        pytest.param("megatron", False, True, False, False, marks=pytest.mark.megatron),
         pytest.param(
             "megatron",
             False,
             True,
             True,
+            False,
             marks=[
                 pytest.mark.megatron,
                 pytest.mark.skip(
@@ -88,13 +90,14 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
     ids=[
         "fsdp",
         "megatron",
+        "megatron_async_dist_ckpt_save",
         "megatron_optimizer_cpu_offload",
         "megatron_lora",
         "megatron_fully_reshardable",
         "megatron_fully_reshardable_optimizer_cpu_offload",
     ],
 )
-def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardable, optimizer_cpu_offload):
+def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardable, optimizer_cpu_offload, async_save):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -113,6 +116,8 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
     if optimizer_cpu_offload:
         cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_cpu_offload"] = True
         cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_offload_fraction"] = 1
+    if async_save:
+        cfg.trainer.policy.megatron_config.async_dist_ckpt_save = True
 
     checkpoint_dir = None
     try:
