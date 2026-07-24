@@ -1350,10 +1350,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 param_group["lr"] = learning_rate
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
-        # Call super first to set _transfer_strategy_cls and create sender/receivers
-        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
-
-        # Initialize weight extractor with bucketing enabled for all strategies
+        # Initialize the weight extractor BEFORE super(): the base sharded_rdt
+        # path eagerly rendezvouses the RDT trainer engine during
+        # init_weight_sync_state and needs self.weight_extractor (it only
+        # depends on the already-built bridge/actor_module, not on super()).
         self.weight_extractor = MegatronWeightExtractor(
             bridge=self.bridge,
             actor_module=self.actor_module,
@@ -1361,6 +1361,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
         )
+
+        # super sets _transfer_strategy_cls / creates sender-receivers (and for
+        # sharded_rdt performs the eager RDT rendezvous + bake).
+        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
     async def _save_lora_adapters_and_sync(
         self, lora_sync_path, inference_engine_client, lora_name: str = SKYRL_LORA_ADAPTER_NAME
@@ -1452,12 +1456,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         elif getattr(self, "_rdt_sender", None) is not None:
-            # sharded_rdt weight sync needs an FSDP-shaped WeightSource; the
-            # Megatron export path (bridge / bucketing) needs its own WeightSource.
-            raise NotImplementedError(
-                "weight_sync_backend='sharded_rdt' is FSDP-only for now; Megatron "
-                "RDT support requires a Megatron WeightSource (follow-up)."
-            )
+            # sharded_rdt: bypass extraction + send_chunks. The pull-based trainer
+            # engine streams live params off the Megatron-Bridge (MegatronWeightSource
+            # wraps self.weight_extractor) and the inference workers pull their
+            # slices; the extracted chunk iterator the push backends build is unused.
+            # Disable expandable_segments — the sidecar shares gathered tensors over
+            # CUDA IPC.
+            with self._expandable_segments_disabled_for_sync():
+                await self._rdt_sender.send(self.weight_extractor)
         else:
             # Extract and send weights using the sender created at init time.
             # Disable expandable_segments around the send: under colocate_all the

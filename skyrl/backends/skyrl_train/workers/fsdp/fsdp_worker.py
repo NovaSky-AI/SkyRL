@@ -200,11 +200,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
-        # Call super first to create the sender (push backends) or the RDT sender.
-        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
-
-        # Initialize weight extractor (used by the push senders AND by the RDT
-        # sender's WeightSource at send time).
+        # Initialize the weight extractor BEFORE super(): the base sharded_rdt
+        # path eagerly rendezvouses the RDT trainer engine during
+        # init_weight_sync_state and needs self.weight_extractor (it only
+        # depends on the already-built model, not on super()).
         # TODO(haochen): Module grouping for fused-weight loaders is only enabled for CUDA IPC.
         # transfer strategy, we can enable it for other strategies as well.
         from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
@@ -224,6 +223,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             ),
             weight_prefix=weight_prefix,
         )
+
+        # super sets _transfer_strategy_cls / creates sender-receivers (and for
+        # sharded_rdt performs the eager RDT rendezvous + bake).
+        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
     async def _save_lora_adapters_and_sync(
         self,

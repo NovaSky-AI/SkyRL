@@ -174,6 +174,27 @@ class _RDTProducerServer:
     def ping(self) -> int:
         return self._device_index
 
+    def warmup_nixl(self) -> None:
+        """Create this server's NIXL agent NOW, while the rank's GPU is quiet.
+
+        The engine calls this at spawn time, before the server-name all-gather
+        barrier — i.e. before any trainer rank can be spinning in a gather
+        collective. Lazily creating the agent later (first reserve_serve_arena,
+        during the sender's worker-init RPC) deadlocks on EFA: libfabric's
+        fi_getinfo probes CUDA HMEM support with a cudaMalloc/cudaFree, and
+        cudaFree blocks behind the co-resident trainer rank's persistent NCCL
+        collective kernel — which cannot finish because the collective is
+        waiting on the sender rank, which is waiting on the worker-init RPC,
+        which is waiting on this server. Creating (and HMEM-warming) the agent
+        up front breaks the cycle. The warmup buffer stays registered/alive so
+        the agent and its CUDA-HMEM path stay initialized.
+        """
+        from ray.experimental import register_nixl_memory
+
+        self._nixl_warmup_buf = torch.zeros(1 << 20, dtype=torch.uint8, device="cuda")
+        with self._reg_lock:
+            register_nixl_memory(self._nixl_warmup_buf)
+
     # ---------------- engine-facing (per sync) ----------------
 
     def begin_sync(self) -> None:
@@ -527,6 +548,9 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             gather_lookahead=ii.gather_lookahead,
         )
         ray.get(self._server.ping.remote())
+        # Pre-barrier NIXL warmup: must complete before _all_gather_server_names
+        # so no rank can be inside a gather collective yet (see warmup_nixl).
+        ray.get(self._server.warmup_nixl.remote())
 
     def _build_worker_init_info(self, server_names: list[str]):
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (

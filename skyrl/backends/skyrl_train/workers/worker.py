@@ -448,6 +448,12 @@ class Worker(DistributedTorchRayActor):
                 inference_world_size,
                 namespace,
             )
+            # Eager rendezvous/bake HERE, not on the first send(): every rank is
+            # inside init_weight_sync_state (barrier below), so no gather
+            # collective can be spinning while rank 0 waits on the inference-side
+            # init RPC. See RdtWeightSyncSender.initialize for the deadlock this
+            # avoids. Off-loop: it blocks on Ray + a torch.distributed all-gather.
+            await asyncio.to_thread(self._rdt_sender.initialize, getattr(self, "weight_extractor", None))
             torch.distributed.barrier()
             return
 
