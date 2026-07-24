@@ -768,6 +768,14 @@ class InferenceEngineConfig(BaseConfig):
     enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
+    offload_kv_for_weight_sync: bool = False
+    """Non-colocated only. Sleep the engine (freeing the KV cache from GPU) during weight
+    sync so ``gpu_memory_utilization`` can be pushed higher without OOMing on the weight-
+    transfer buffers. On the fully-async trainer, in-flight requests are frozen (KEEP
+    pause) and, unless ``trainer.fully_async.clear_kv_cache_on_weight_sync`` is set, their
+    KV cache is offloaded to CPU and restored so they resume with no abort or prefill
+    recompute (at the cost of a GPU<->CPU copy of the KV pool each sync). Requires
+    non-colocated and non-LoRA weight sync."""
     use_expandable_segments: bool = False
     """Set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` on the inference-engine
     processes to reduce fragmentation. Independent of the trainer-side
@@ -1005,6 +1013,12 @@ class TrainerConfig(BaseConfig):
     This lowers peak GPU memory at the cost of ~2x wall-clock time.
     ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
     See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
+    vocab_entropy_chunk_size: Optional[int] = 0
+    """Chunk size along the sequence dimension when computing Megatron vocab entropy.
+    ``0`` auto-sizes from the local vocab shard size and ``vocab_entropy_chunk_memory_mb``.
+    ``None`` disables chunking."""
+    vocab_entropy_chunk_memory_mb: int = 512
+    """Approximate per-chunk temporary memory budget for auto-sized Megatron vocab entropy chunks."""
     fused_lm_head_logprob: bool = False
     """Megatron only. Fuse the LM-head projection into log-prob / entropy
     computation so the full ``[B, S, vocab//TP]`` logits tensor is never
@@ -1055,6 +1069,24 @@ class TrainerConfig(BaseConfig):
             raise ValueError(
                 "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
                 f"got {self.fused_lm_head_logprob_backend!r}."
+            )
+        if self.vocab_entropy_chunk_size is not None and (
+            isinstance(self.vocab_entropy_chunk_size, bool)
+            or not isinstance(self.vocab_entropy_chunk_size, int)
+            or self.vocab_entropy_chunk_size < 0
+        ):
+            raise ValueError(
+                "vocab_entropy_chunk_size must be a non-negative integer or None, "
+                f"got {self.vocab_entropy_chunk_size!r}."
+            )
+        if (
+            isinstance(self.vocab_entropy_chunk_memory_mb, bool)
+            or not isinstance(self.vocab_entropy_chunk_memory_mb, int)
+            or self.vocab_entropy_chunk_memory_mb <= 0
+        ):
+            raise ValueError(
+                "vocab_entropy_chunk_memory_mb must be a positive integer, "
+                f"got {self.vocab_entropy_chunk_memory_mb!r}."
             )
 
 
