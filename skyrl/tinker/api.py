@@ -110,7 +110,19 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
     db_url = get_async_database_url(app.state.engine_config.database_url)
-    app.state.db_engine = create_async_engine(db_url, echo=False)
+    # Bump pool above SQLAlchemy defaults (5 + 10 = 15) so concurrent multi-LoRA
+    # async clients (each holding several in-flight requests during rollouts +
+    # forward_backward) don't saturate the connection pool. Observed at 4
+    # concurrent async clients × mbs=32: pool exhausts → HTTP 500s →
+    # client-side "Sampling session not found" cascading failures. With
+    # pool_size=20, max_overflow=40 (60 total) we measured 4 concurrent async
+    # clients running cleanly with 0 QueuePool errors.
+    app.state.db_engine = create_async_engine(
+        db_url,
+        echo=False,
+        pool_size=int(os.environ.get("SKYRL_DB_POOL_SIZE", "20")),
+        max_overflow=int(os.environ.get("SKYRL_DB_MAX_OVERFLOW", "40")),
+    )
     enable_sqlite_wal(app.state.db_engine.sync_engine)
 
     async with app.state.db_engine.begin() as conn:
