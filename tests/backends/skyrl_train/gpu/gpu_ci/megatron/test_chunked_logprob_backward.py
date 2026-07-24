@@ -12,7 +12,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     ChunkedDistributedLogprob,
     DistributedLogprob,
 )
-from skyrl.train.utils.utils import get_free_port
+from skyrl.backends.skyrl_train.distributed.utils import get_free_port
 
 
 @pytest.fixture(scope="module")
