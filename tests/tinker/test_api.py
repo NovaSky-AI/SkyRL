@@ -420,6 +420,45 @@ def test_sample_top_k(service_client):
     assert not all(seq == results_no_top_k[0] for seq in results_no_top_k), "Without top_k, outputs should vary"
 
 
+def test_sample_prompt_logprobs(service_client):
+    """Test that prompt logprob requests reach the backend and come back populated."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    prompt_tokens = tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True)
+    prompt = types.ModelInput.from_ints(prompt_tokens)
+    sampling_params = types.SamplingParams(temperature=0.0, max_tokens=4, seed=42)
+
+    result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=sampling_params,
+        num_samples=1,
+        include_prompt_logprobs=True,
+    ).result()
+    assert result.prompt_logprobs is not None
+    assert all(lp is None or isinstance(lp, float) for lp in result.prompt_logprobs)
+    # Not requested, so the field stays unset rather than being invented.
+    assert result.topk_prompt_logprobs is None
+
+    # Without the flag the backend must not pay for prompt logprobs at all.
+    assert (
+        sampling_client.sample(prompt=prompt, sampling_params=sampling_params, num_samples=1).result().prompt_logprobs
+        is None
+    )
+
+    # topk needs a full per-position distribution, which the JAX generator does
+    # not produce; the request must fail loudly instead of silently dropping it.
+    # The SkyRL-Train backend (megatron/fsdp) does support it -- see
+    # tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_new_inference_generation.py.
+    with pytest.raises(ValueError, match="topk_prompt_logprobs is not supported"):
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            num_samples=1,
+            include_prompt_logprobs=True,
+            topk_prompt_logprobs=4,
+        ).result()
+
+
 def test_sample_with_stop_strings(service_client):
     """Test the sample endpoint with string stop sequences."""
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)

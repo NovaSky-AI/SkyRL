@@ -585,7 +585,7 @@ class SampleRequest(BaseModel):
     sampling_session_id: str | None = None
     seq_id: int | None = None
     prompt_logprobs: bool | None = None
-    topk_prompt_logprobs: int = 0
+    topk_prompt_logprobs: int = Field(default=0, ge=0)
     type: Literal["sample"] = "sample"
 
     @model_validator(mode="after")
@@ -1123,7 +1123,10 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
-            prompt_logprobs=request.prompt_logprobs if request.prompt_logprobs is not None else False,
+            # A positive topk implies prompt logprobs: both are read off the same
+            # prompt forward pass, so asking for one asks for the other.
+            prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+            topk_prompt_logprobs=request.topk_prompt_logprobs,
             seq_id=request.seq_id,
             sampling_session_id=request.sampling_session_id,
         ),

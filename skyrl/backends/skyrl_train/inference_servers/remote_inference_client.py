@@ -72,6 +72,7 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
 )
+from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
     SKYRL_HTTP_CONNECTION_LIMIT,
@@ -684,28 +685,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
         result_prompt_logprobs: Optional[List[Optional[float]]] = None
         result_topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = None
 
-        raw_prompt_logprobs = response.get("prompt_logprobs")
-        if raw_prompt_logprobs is not None and include_prompt_logprobs:
-            result_prompt_logprobs = [
-                (pos_dict.get(str(tid)) or {}).get("logprob") if pos_dict is not None else None
-                for tid, pos_dict in zip(token_ids, raw_prompt_logprobs)
-            ]
-            if topk_prompt_logprobs_k > 0:
-                # vLLM returns k or k+1 logprobs per position (the extra entry is the
-                # prompt token when it falls outside the top-k). Tinker always returns
-                # exactly top-k, so we sort and truncate below.
-                result_topk_prompt_logprobs = [
-                    (
-                        sorted(
-                            [(int(tid), entry["logprob"]) for tid, entry in pos_dict.items()],
-                            key=lambda x: x[1],
-                            reverse=True,
-                        )[:topk_prompt_logprobs_k]
-                        if pos_dict is not None
-                        else None
-                    )
-                    for _, pos_dict in zip(token_ids, raw_prompt_logprobs)
-                ]
+        if include_prompt_logprobs:
+            result_prompt_logprobs, result_topk_prompt_logprobs = convert_vllm_prompt_logprobs(
+                token_ids,
+                response.get("prompt_logprobs"),
+                topk=topk_prompt_logprobs_k,
+            )
 
         # Transform response choices → sequences
         sequences = []

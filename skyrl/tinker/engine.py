@@ -89,7 +89,14 @@ def prepare_sample_batch(
             all_session_ids.append(session_id)
 
         request_batch_slices.append(
-            (request_id, model_id, request_start, len(all_model_inputs), request_data.prompt_logprobs)
+            (
+                request_id,
+                model_id,
+                request_start,
+                len(all_model_inputs),
+                request_data.prompt_logprobs,
+                request_data.topk_prompt_logprobs,
+            )
         )
 
     return types.PreparedSampleBatch(

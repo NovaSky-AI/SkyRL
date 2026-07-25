@@ -1026,14 +1026,14 @@ class SkyRLTrainBackend(AbstractBackend):
             error = types.ErrorResponse(
                 error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}", status="error"
             )
-            return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
+            return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
         non_policy = [mid for mid in unique_models if self._model_ids_to_role.get(mid) != "policy"]
         if non_policy:
             error = types.ErrorResponse(
                 error=f"Sampling is only supported for policy models, got non-policy: {sorted(non_policy)}",
                 status="error",
             )
-            return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
+            return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
 
         # 3. Dispatch to the sampling path
         return self._sample_with_remote_client(prepared_batch)
@@ -1054,9 +1054,19 @@ class SkyRLTrainBackend(AbstractBackend):
             for mid in prepared_batch.all_model_ids
         ]
 
+        # Prompt logprobs are a property of the prompt, and all `num_samples`
+        # samples of a request share one prompt, so only ask for them on the
+        # first sample of each request -- that's also the one
+        # _aggregate_sample_results reads them back from.
+        num_samples_total = len(prepared_batch.all_model_inputs)
+        prompt_logprobs_at: dict[int, int] = {}
+        for _, _, start_idx, _, prompt_logprobs_requested, topk in prepared_batch.request_batch_slices:
+            if prompt_logprobs_requested and start_idx < num_samples_total:
+                prompt_logprobs_at[start_idx] = topk
+
         async def sample_all():
             tasks = []
-            for i in range(len(prepared_batch.all_model_inputs)):
+            for i in range(num_samples_total):
                 model_input = prepared_batch.all_model_inputs[i]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
@@ -1066,6 +1076,11 @@ class SkyRLTrainBackend(AbstractBackend):
                     "num_samples": 1,
                     "sampling_params": sampling_params.model_dump(),
                 }
+
+                if i in prompt_logprobs_at:
+                    json_body["include_prompt_logprobs"] = True
+                    if prompt_logprobs_at[i] > 0:
+                        json_body["topk_prompt_logprobs"] = prompt_logprobs_at[i]
 
                 session_id = prepared_batch.all_session_ids[i]
                 if session_id is not None:
@@ -1095,7 +1110,14 @@ class SkyRLTrainBackend(AbstractBackend):
                 yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
 
         results = {}
-        for request_id, model_id, start_idx, end_idx, prompt_logprobs_requested in prepared_batch.request_batch_slices:
+        for (
+            request_id,
+            model_id,
+            start_idx,
+            end_idx,
+            prompt_logprobs_requested,
+            topk_prompt_logprobs,
+        ) in prepared_batch.request_batch_slices:
             sequences = []
             has_error = False
             error_msg = None
@@ -1139,18 +1161,24 @@ class SkyRLTrainBackend(AbstractBackend):
                     status="error",
                 )
             else:
-                # All samples for a request share the same prompt, so use the first sample's
-                # prompt logprobs (parity with JAX backend).
+                # All samples of a request share one prompt, and only the first
+                # sample asked the engine for prompt logprobs (see
+                # _sample_with_remote_client), so read them back from there.
+                # Both fields are flat, one entry per prompt token.
                 first_output = sample_outputs[start_idx]
                 prompt_logprobs = None
+                topk = None
                 if prompt_logprobs_requested:
-                    all_prompt_logprobs = first_output.get("prompt_logprobs")
-                    if all_prompt_logprobs and len(all_prompt_logprobs) > 0:
-                        prompt_logprobs = all_prompt_logprobs[0]
+                    prompt_logprobs = first_output.get("prompt_logprobs")
+                    if prompt_logprobs is None:
+                        logger.warning(f"Request {request_id} asked for prompt logprobs but the engine returned none")
+                    if topk_prompt_logprobs > 0:
+                        topk = first_output.get("topk_prompt_logprobs")
 
                 results[request_id] = types.SampleOutput(
                     sequences=sequences,
                     prompt_logprobs=prompt_logprobs,
+                    topk_prompt_logprobs=topk,
                 )
 
         return results
