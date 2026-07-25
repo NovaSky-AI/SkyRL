@@ -193,6 +193,46 @@ def test_policy_loss_cispo_rollout_anchor():
     assert not torch.allclose(actual_loss, old_loss)
 
 
+def test_policy_loss_cispo_ratio_min_max_ignore_masked_tokens():
+    """cispo/ratio_{min,max} must be computed over active tokens only.
+
+    Regression test: `ratio` is strictly positive (safe_exp_delta), so computing the min over
+    `ratio * loss_mask` would zero the masked positions and report cispo/ratio_min == 0.0 whenever
+    any token is masked, instead of the true minimum over the unmasked ratios.
+    """
+    device = "cpu"
+
+    advantages = torch.tensor([[1.0, -1.0, -4.0]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]], device=device)
+    log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)
+    # Mask out the middle token, whose ratio (== 1.0) is neither the min nor the max of the row.
+    loss_mask = torch.tensor([[1.0, 0.0, 1.0]], device=device)
+
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_eps_clip_low=0.2, cispo_eps_clip_high=0.2, cispo_anchor="old"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    loss_fn = PolicyLossRegistry.get("cispo")
+
+    ratio = torch.exp(log_probs - old_log_probs)
+    active_ratio = ratio[loss_mask.bool()]
+
+    _, metrics = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        loss_mask=loss_mask,
+    )
+
+    # min/max reflect only the unmasked ratios -- not 0.0 from the zeroed masked positions.
+    assert metrics["cispo/ratio_min"] > 0.0
+    assert metrics["cispo/ratio_min"] == pytest.approx(active_ratio.min().item(), rel=1e-3)
+    assert metrics["cispo/ratio_max"] == pytest.approx(active_ratio.max().item(), rel=1e-3)
+
+
 def test_policy_loss_cispo_rollout_anchor_requires_rollout_logprobs():
     """cispo_anchor='rollout' must be given rollout_logprobs."""
     config = AlgorithmConfig(

@@ -788,12 +788,19 @@ def compute_policy_loss_cispo(
     # gradient multiplier r = pi_theta / pi_behavior. Under cispo_anchor="rollout", r drifts from 1
     # via the vLLM-vs-train numerical gap + async staleness even at a single gradient pass, so mean(r)
     # and the raw-vs-clamped gap quantify how much the off-policy correction (and the cap) actually
-    # move the gradient -- not just how often the cap fires. The `* loss_mask` zeros masked tokens for
-    # max/min; masked_mean excludes them for the means.
+    # move the gradient -- not just how often the cap fires. For max/min we select only the active
+    # (unmasked) ratios: `ratio` is strictly positive (safe_exp_delta), so multiplying by loss_mask
+    # would zero masked tokens and force min to 0.0 whenever any token is masked. masked_mean excludes
+    # them for the means.
     cispo_ratio_mean = masked_mean(ratio, loss_mask).mean().detach().item()
     cispo_ratio_clamped_mean = masked_mean(clamped_ratio, loss_mask).mean().detach().item()
-    cispo_ratio_max = (ratio * loss_mask).max().detach().item() if loss_mask is not None else ratio.max().item()
-    cispo_ratio_min = (ratio * loss_mask).min().detach().item() if loss_mask is not None else ratio.min().item()
+    if loss_mask is not None and loss_mask.any():
+        active_ratio = ratio[loss_mask.bool()]
+        cispo_ratio_max = active_ratio.max().detach().item()
+        cispo_ratio_min = active_ratio.min().detach().item()
+    else:
+        cispo_ratio_max = ratio.max().detach().item()
+        cispo_ratio_min = ratio.min().detach().item()
 
     # apply off policy correction
     loss_metrics = {
