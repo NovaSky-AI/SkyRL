@@ -28,7 +28,7 @@ set -x
 : "${LOCAL_CHECKPOINT_DIR:=/tmp/skyrl-delta-checkpoints/${RUN_NAME}}"
 : "${PUBLISH_STAGING_DIR:=}"
 : "${MAX_FILE_SIZE_IN_GB:=2}"
-: "${GCS_DOWNLOAD_WORKERS:=4}"
+: "${CLOUD_DOWNLOAD_WORKERS:=4}"
 : "${PUBLISH_NUM_WORKERS:=8}"
 : "${CHECKPOINT_LOAD_FORMAT:=vllm_fastsafetensors}"
 : "${MULTI_THREAD_SAFETENSORS_MAX_WORKERS:=8}"
@@ -147,7 +147,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.delta_weight_sync.local_checkpoint_dir="$LOCAL_CHECKPOINT_DIR" \
   generator.inference_engine.delta_weight_sync.publish_staging_dir="$PUBLISH_STAGING_DIR" \
   generator.inference_engine.delta_weight_sync.max_file_size_in_gb=$MAX_FILE_SIZE_IN_GB \
-  generator.inference_engine.delta_weight_sync.gcs_download_workers=$GCS_DOWNLOAD_WORKERS \
+  generator.inference_engine.delta_weight_sync.cloud_download_workers=$CLOUD_DOWNLOAD_WORKERS \
   generator.inference_engine.delta_weight_sync.publish_num_workers="$PUBLISH_NUM_WORKERS" \
   generator.inference_engine.delta_weight_sync.checkpoint_load_format="$CHECKPOINT_LOAD_FORMAT" \
   generator.inference_engine.delta_weight_sync.multi_thread_safetensors_max_workers=$MULTI_THREAD_SAFETENSORS_MAX_WORKERS \

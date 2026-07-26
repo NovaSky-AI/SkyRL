@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 _MANIFEST_NAME = "manifest.json"
+_MAX_SAFE_PATH_NAME_LEN = 160
 _STATE_DIR_NAME = ".skyrl_weight_sync"
 _DEFAULT_CHECKSUM_ALGORITHM = "xxh3-128"
 _DEFAULT_PINNED_STAGING_BYTE_CAP = 32 * 1024**3
@@ -124,7 +125,11 @@ def _join_uri(base: str, child: str) -> str:
 
 
 def _safe_path_name(value: str) -> str:
-    return "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in value)[:160]
+    """Generates a fixed, safe UNIX file name from the provided string"""
+    filename = os.path.basename(value)
+    sanitized_filename = "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in filename)
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"{sanitized_filename[: _MAX_SAFE_PATH_NAME_LEN - len(digest) - 1]}_{digest}"
 
 
 def _uri_basename(uri: str) -> str:
@@ -228,7 +233,7 @@ def _copy_from_uri(uri: str, local_path: Path) -> None:
     os.replace(tmp_path, local_path)
 
 
-def fetch_delta_directory(uri: str, cache_dir: Path, gcs_download_workers: int = 4) -> Tuple[DeltaManifest, Path]:
+def fetch_delta_directory(uri: str, cache_dir: Path, cloud_download_workers: int = 4) -> Tuple[DeltaManifest, Path]:
     """Fetch a published delta directory into a local cache and return its manifest."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     lock = FileLock(cache_dir / ".fetch.lock")
@@ -244,9 +249,9 @@ def fetch_delta_directory(uri: str, cache_dir: Path, gcs_download_workers: int =
             dst = cache_dir / payload_file
             if not dst.exists():
                 missing_payload_files.append(payload_file)
-        if _is_gs_uri(uri) and len(missing_payload_files) > 1 and gcs_download_workers > 1:
-            workers = min(len(missing_payload_files), max(1, gcs_download_workers))
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="skyrl-delta-gcs-fetch") as executor:
+        if _is_cloud_uri(uri) and len(missing_payload_files) > 1 and cloud_download_workers > 1:
+            workers = min(len(missing_payload_files), max(1, cloud_download_workers))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="skyrl-delta-cloud-fetch") as executor:
                 futures = [
                     executor.submit(_copy_from_uri, _join_uri(uri, payload_file), cache_dir / payload_file)
                     for payload_file in missing_payload_files
@@ -531,7 +536,7 @@ def _tensor_locations(checkpoint_dir: Path) -> dict[str, TensorLocation]:
 class LocalCheckpointStore:
     """Mutable host-local checkpoint used by fetch-before-pause delta sync."""
 
-    def __init__(self, base_model_path: str, local_checkpoint_dir: str, gcs_download_workers: int = 4) -> None:
+    def __init__(self, base_model_path: str, local_checkpoint_dir: str, cloud_download_workers: int = 4) -> None:
         self.base_model_path = base_model_path
         self.root = Path(local_checkpoint_dir)
         self.weights_dir = _weights_dir(self.root)
@@ -539,7 +544,7 @@ class LocalCheckpointStore:
         self.state_dir = self.root / _STATE_DIR_NAME
         self.state_path = self.state_dir / "state.json"
         self.lock_path = self.state_dir / "writer.lock"
-        self.gcs_download_workers = max(1, int(gcs_download_workers))
+        self.cloud_download_workers = max(1, int(cloud_download_workers))
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.deltas_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_initialized()
@@ -557,6 +562,8 @@ class LocalCheckpointStore:
             f.flush()
 
     def _reset_from_base(self) -> None:
+        # We only reset the `weights_dir` to reuse previously downloaded deltas for the run if they
+        # exist in the `delta_dir`
         shutil.rmtree(self.weights_dir, ignore_errors=True)
         self._write_state(
             CheckpointState(
@@ -626,12 +633,13 @@ class LocalCheckpointStore:
                         sync_dir,
                         uri if version == target_version else None,
                     )
+                    # Key the cache on the delta URI: "delta-00000001_<digest of full uri>".
                     cache_dir = self.deltas_dir / _safe_path_name(delta_uri)
                     t_fetch = time.perf_counter()
                     manifest, payload_dir = fetch_delta_directory(
                         delta_uri,
                         cache_dir,
-                        gcs_download_workers=self.gcs_download_workers,
+                        cloud_download_workers=self.cloud_download_workers,
                     )
                     stats["fetch_s"] += time.perf_counter() - t_fetch
                     if manifest.version != version:
@@ -890,6 +898,9 @@ class DeltaCheckpointPublisher:
         self.publish_staging_dir = (
             Path(publish_staging_dir) if publish_staging_dir else _default_publish_staging_dir(sync_dir)
         )
+        # clear publish staging dir if files already exist.
+        with FileLock(self.publish_staging_dir.parent / (self.publish_staging_dir.name + ".tmp.lock")):
+            shutil.rmtree(self.publish_staging_dir, ignore_errors=True)
         if publish_num_workers is not None and publish_num_workers < 1:
             raise ValueError(f"publish_num_workers must be >= 1, got {publish_num_workers}")
         self.publish_num_workers = publish_num_workers

@@ -225,6 +225,8 @@ conflicts = [
 # dependencies. Transformer Engine uses isolated builds below so its undeclared
 # build imports are available without relying on a pre-seeded runtime venv.
 no-build-isolation-package = [
+    "transformer-engine-torch",
+    "transformer-engine",
     "nv-grouped-gemm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
@@ -253,6 +255,7 @@ transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "buil
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

@@ -25,7 +25,7 @@ except Exception:
 class DeltaTransferInitInfo:
     base_model_path: str
     local_checkpoint_dir: str
-    gcs_download_workers: int = 4
+    cloud_download_workers: int = 4
     checkpoint_load_format: str = "vllm_fastsafetensors"
     multi_thread_safetensors_max_workers: int = 8
 
@@ -77,7 +77,7 @@ class DeltaWeightTransferEngine:
         self._store: LocalCheckpointStore | None = None
         self._checkpoint_load_format = "vllm_fastsafetensors"
         self._multi_thread_safetensors_max_workers = 8
-        self._gcs_download_workers = 4
+        self._cloud_download_workers = 4
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> DeltaTransferInitInfo:
         try:
@@ -96,18 +96,18 @@ class DeltaWeightTransferEngine:
         self._store = LocalCheckpointStore(
             base_model_path=init_info.base_model_path,
             local_checkpoint_dir=init_info.local_checkpoint_dir,
-            gcs_download_workers=init_info.gcs_download_workers,
+            cloud_download_workers=init_info.cloud_download_workers,
         )
         self._checkpoint_load_format = init_info.checkpoint_load_format
         self._multi_thread_safetensors_max_workers = init_info.multi_thread_safetensors_max_workers
-        self._gcs_download_workers = init_info.gcs_download_workers
+        self._cloud_download_workers = init_info.cloud_download_workers
         logger.info(
             "Initialized delta weight transfer engine: base_model_path=%s local_checkpoint_dir=%s "
-            "checkpoint_load_format=%s gcs_download_workers=%s",
+            "checkpoint_load_format=%s cloud_download_workers=%s",
             init_info.base_model_path,
             init_info.local_checkpoint_dir,
             self._checkpoint_load_format,
-            self._gcs_download_workers,
+            self._cloud_download_workers,
         )
 
     def fetch_weights(self, target_version: int, sync_dir: str | None = None, uri: str | None = None) -> dict[str, Any]:

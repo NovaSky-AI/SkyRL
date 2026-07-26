@@ -17,13 +17,15 @@ set -x
 : "${PUBLISH_STAGING_DIR:=}"
 : "${MAX_TRAINING_STEPS:=20}"
 : "${MAX_FILE_SIZE_IN_GB:=1}"
-: "${GCS_DOWNLOAD_WORKERS:=4}"
+: "${CLOUD_DOWNLOAD_WORKERS:=4}"
 : "${PUBLISH_NUM_WORKERS:=8}"
-: "${RAY_DEDUP_LOGS:=0}"
+# Cloud CLI used to move delta payloads. gs:// needs the `gcloud` CLI on the node;
+# s3:// needs `s5cmd`, which the `aws` extra installs into the run's venv.
+: "${CLOUD_EXTRA:=gcp}"
 
 SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1 \
 RAY_DEDUP_LOGS="$RAY_DEDUP_LOGS" \
-uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
+uv run --isolated --extra fsdp --extra "$CLOUD_EXTRA" -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -57,7 +59,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.delta_weight_sync.local_checkpoint_dir="$LOCAL_CHECKPOINT_DIR" \
   generator.inference_engine.delta_weight_sync.publish_staging_dir="$PUBLISH_STAGING_DIR" \
   generator.inference_engine.delta_weight_sync.max_file_size_in_gb=$MAX_FILE_SIZE_IN_GB \
-  generator.inference_engine.delta_weight_sync.gcs_download_workers=$GCS_DOWNLOAD_WORKERS \
+  generator.inference_engine.delta_weight_sync.cloud_download_workers=$CLOUD_DOWNLOAD_WORKERS \
   generator.inference_engine.delta_weight_sync.publish_num_workers="$PUBLISH_NUM_WORKERS" \
   generator.batched=true \
   environment.env_class=gsm8k \

@@ -742,7 +742,7 @@ class ChatTemplateConfig(BaseConfig):
 class DeltaWeightSyncConfig(BaseConfig):
     """Disk/cloud checkpoint-delta weight sync configuration."""
 
-    sync_dir: Optional[str] = None
+    sync_dir: str
     """Shared directory/URI where the trainer publishes per-version delta payloads.
     Supports local paths, ``gs://`` URIs, and ``s3://`` URIs."""
 
@@ -757,8 +757,8 @@ class DeltaWeightSyncConfig(BaseConfig):
     max_file_size_in_gb: float = 1.0
     """Maximum compressed payload file size before starting a new safetensors file."""
 
-    gcs_download_workers: int = 4
-    """Maximum number of payload files to download concurrently for ``gs://`` sync dirs."""
+    cloud_download_workers: int = 4
+    """Maximum number of payload files to download concurrently for ``gs://`` and ``s3://`` sync dirs."""
 
     publish_num_workers: Optional[int] = None
     """Number of trainer-side worker threads used to compute and compress delta payloads.
@@ -786,7 +786,7 @@ class InferenceEngineConfig(BaseConfig):
     weight_sync_backend: str = "nccl"
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
     """When using ``cuda_ipc``, send weights in batches of this size (GB)."""
-    delta_weight_sync: DeltaWeightSyncConfig = field(default_factory=DeltaWeightSyncConfig)
+    delta_weight_sync: Optional[DeltaWeightSyncConfig] = None
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     expert_parallel_size: int = 1

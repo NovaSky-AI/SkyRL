@@ -13,6 +13,7 @@ from skyrl.backends.skyrl_train.weight_sync import (
     get_transfer_strategy_cls,
 )
 from skyrl.train.config import InferenceEngineConfig
+from skyrl.train.config.config import DeltaWeightSyncConfig
 
 
 class TestGetTransferStrategyCls:
@@ -105,12 +106,15 @@ class TestCreateInitInfo:
 
     def test_delta_create_init_info(self):
         ie_cfg = self._make_ie_cfg(weight_sync_backend="delta", run_engines_locally=False)
-        ie_cfg.delta_weight_sync.sync_dir = "gs://bucket/prefix"
-        ie_cfg.delta_weight_sync.local_checkpoint_dir = "/tmp/receiver"
-        ie_cfg.delta_weight_sync.max_file_size_in_gb = 2
-        ie_cfg.delta_weight_sync.publish_num_workers = 3
-        ie_cfg.delta_weight_sync.checkpoint_load_format = "vllm_multi_thread_safetensors"
-        ie_cfg.delta_weight_sync.multi_thread_safetensors_max_workers = 4
+        # delta_weight_sync defaults to None, so a delta run must supply the whole sub-config.
+        ie_cfg.delta_weight_sync = DeltaWeightSyncConfig(
+            sync_dir="gs://bucket/prefix",
+            local_checkpoint_dir="/tmp/receiver",
+            max_file_size_in_gb=2,
+            publish_num_workers=3,
+            checkpoint_load_format="vllm_multi_thread_safetensors",
+            multi_thread_safetensors_max_workers=4,
+        )
 
         init_info = DeltaTransferStrategy.create_init_info(
             ie_cfg,

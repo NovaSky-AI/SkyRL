@@ -15,6 +15,7 @@ from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
     SUPPORTED_CHECKPOINT_LOAD_FORMATS,
     DeltaCheckpointPublisher,
     DeltaPublishResult,
+    _safe_path_name,
 )
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
@@ -39,7 +40,7 @@ class DeltaInitInfo(WeightSyncInitInfo):
     local_checkpoint_dir: str
     publish_staging_dir: Optional[str] = None
     max_file_size_in_gb: float = 1.0
-    gcs_download_workers: int = 4
+    cloud_download_workers: int = 4
     publish_num_workers: Optional[int] = None
     checkpoint_load_format: str = "vllm_fastsafetensors"
     multi_thread_safetensors_max_workers: int = 8
@@ -51,7 +52,7 @@ class DeltaInitInfo(WeightSyncInitInfo):
         return {
             "base_model_path": self.base_model_path,
             "local_checkpoint_dir": self.local_checkpoint_dir,
-            "gcs_download_workers": self.gcs_download_workers,
+            "cloud_download_workers": self.cloud_download_workers,
             "checkpoint_load_format": self.checkpoint_load_format,
             "multi_thread_safetensors_max_workers": self.multi_thread_safetensors_max_workers,
         }
@@ -161,15 +162,14 @@ class DeltaTransferStrategy(WeightTransferStrategy):
         if base_model_path is None:
             raise ValueError("Delta weight sync requires base_model_path")
         delta_cfg = ie_cfg.delta_weight_sync
-        if not delta_cfg.sync_dir:
+        # Ensure valid `delta_cfg`
+        if delta_cfg is None or not delta_cfg.sync_dir:
             raise ValueError("Delta weight sync requires generator.inference_engine.delta_weight_sync.sync_dir")
 
-        from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
-            _safe_path_name,
+        local_checkpoint_dir = (
+            delta_cfg.local_checkpoint_dir
+            or f"/tmp/skyrl_delta_checkpoints/{_safe_path_name(ie_cfg.delta_weight_sync.sync_dir)}"
         )
-
-        safe_model_name = _safe_path_name(base_model_path)
-        local_checkpoint_dir = delta_cfg.local_checkpoint_dir or f"/tmp/skyrl_delta_checkpoints/{safe_model_name}"
         if delta_cfg.checkpoint_load_format not in SUPPORTED_CHECKPOINT_LOAD_FORMATS:
             raise ValueError(
                 "Delta checkpoint_load_format must be one of "
@@ -181,7 +181,7 @@ class DeltaTransferStrategy(WeightTransferStrategy):
             local_checkpoint_dir=local_checkpoint_dir,
             publish_staging_dir=delta_cfg.publish_staging_dir,
             max_file_size_in_gb=delta_cfg.max_file_size_in_gb,
-            gcs_download_workers=delta_cfg.gcs_download_workers,
+            cloud_download_workers=delta_cfg.cloud_download_workers,
             publish_num_workers=delta_cfg.publish_num_workers,
             checkpoint_load_format=delta_cfg.checkpoint_load_format,
             multi_thread_safetensors_max_workers=delta_cfg.multi_thread_safetensors_max_workers,

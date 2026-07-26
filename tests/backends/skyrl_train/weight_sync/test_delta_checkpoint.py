@@ -10,6 +10,7 @@ from safetensors.torch import save_file
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
     _MANIFEST_NAME,
+    _MAX_SAFE_PATH_NAME_LEN,
     CheckpointIndex,
     DeltaCheckpointPublisher,
     DeltaPublishResult,
@@ -342,13 +343,13 @@ def test_local_checkpoint_store_fetch_is_single_writer_with_concurrent_ray_actor
             original = delta_checkpoint.fetch_delta_directory
             counter = Path(counter_file)
 
-            def counted_fetch(delta_uri, cache_dir, gcs_download_workers=4):
+            def counted_fetch(delta_uri, cache_dir, cloud_download_workers=4):
                 with delta_checkpoint.FileLock(Path(f"{counter_file}.lock")):
                     data = json.loads(counter.read_text(encoding="utf-8"))
                     data["count"] += 1
                     counter.write_text(json.dumps(data), encoding="utf-8")
                 time.sleep(0.2)
-                return original(delta_uri, cache_dir, gcs_download_workers=gcs_download_workers)
+                return original(delta_uri, cache_dir, cloud_download_workers=cloud_download_workers)
 
             delta_checkpoint.fetch_delta_directory = counted_fetch
             store = delta_checkpoint.LocalCheckpointStore(
@@ -419,6 +420,17 @@ def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
         _store_tensors(store)["a.weight"],
         base_tensors["a.weight"],
     )
+
+
+def test_safe_path_name_disambiguates_long_sibling_uris():
+    # Sibling delta URIs differ only in their final component, which is exactly what a
+    # length cap truncates away. Long sync_dirs must not collapse every version onto one cache directory name.
+    prefix = "s3://bucket-with-a-long-name/" + "org_xc6lv84h3d7m9dljcc17esfw2i/" * 4 + "delta_weight_sync/run-name"
+    v1 = _safe_path_name(f"{prefix}/delta-00000001")
+    v2 = _safe_path_name(f"{prefix}/delta-00000002")
+
+    assert v1 != v2
+    assert len(v1) <= _MAX_SAFE_PATH_NAME_LEN and len(v2) <= _MAX_SAFE_PATH_NAME_LEN
 
 
 def test_delta_checkpoint_gcs_byte_io_uses_cli_staging(monkeypatch, tmp_path):
