@@ -30,9 +30,6 @@ set -x
 : "${MAX_FILE_SIZE_IN_GB:=2}"
 : "${CLOUD_DOWNLOAD_WORKERS:=4}"
 : "${PUBLISH_NUM_WORKERS:=8}"
-: "${CHECKPOINT_LOAD_FORMAT:=vllm_fastsafetensors}"
-: "${MULTI_THREAD_SAFETENSORS_MAX_WORKERS:=8}"
-: "${RAY_DEDUP_LOGS:=0}"
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
@@ -76,11 +73,12 @@ ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton", "kernel_config": {"moe_bac
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
 : "${GPU_MEMORY_UTILIZATION:=0.7}"
 
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
+# cloud extra - gcp/aws.
+# NFS transfer doesn't use either - leave it to be the default
+: "${CLOUD_EXTRA:=gcp}"
 
 SKYRL_DUMP_INFRA_LOG_TO_STDOUT="${SKYRL_DUMP_INFRA_LOG_TO_STDOUT:-1}" \
-RAY_DEDUP_LOGS="$RAY_DEDUP_LOGS" \
-uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
+uv run --isolated --extra megatron --extra "$CLOUD_EXTRA" -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -149,8 +147,6 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.delta_weight_sync.max_file_size_in_gb=$MAX_FILE_SIZE_IN_GB \
   generator.inference_engine.delta_weight_sync.cloud_download_workers=$CLOUD_DOWNLOAD_WORKERS \
   generator.inference_engine.delta_weight_sync.publish_num_workers="$PUBLISH_NUM_WORKERS" \
-  generator.inference_engine.delta_weight_sync.checkpoint_load_format="$CHECKPOINT_LOAD_FORMAT" \
-  generator.inference_engine.delta_weight_sync.multi_thread_safetensors_max_workers=$MULTI_THREAD_SAFETENSORS_MAX_WORKERS \
   generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \

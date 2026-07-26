@@ -221,9 +221,7 @@ conflicts = [
         { extra = "miniswe" },
     ]
 ]
-# Disable build isolation only for packages that cannot use uv's extra build
-# dependencies. Transformer Engine uses isolated builds below so its undeclared
-# build imports are available without relying on a pre-seeded runtime venv.
+# disable build isolation for megatron related dependencies
 no-build-isolation-package = [
     "transformer-engine-torch",
     "transformer-engine",

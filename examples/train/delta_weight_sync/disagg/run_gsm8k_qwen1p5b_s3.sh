@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -x
 
-# Non-colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K
-# using checkpoint-delta weight sync through Google Cloud Storage.
+# Disaggregated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K
+# using checkpoint-delta weight sync through S3.
+# Ensure that you populate the `EXTERNAL_PROXY_URL` and `EXTERNAL_SERVER_URLS`
+
+
+: "${EXTERNAL_PROXY_URL:?Set EXTERNAL_PROXY_URL to the proxy url launched with the serve entrypoint}"
+: "${EXTERNAL_SERVER_URLS:?Set EXTERNAL_SERVER_URLS to the server urls of the individual servers}"
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${MODEL:=Qwen/Qwen2.5-1.5B-Instruct}"
@@ -11,8 +16,8 @@ set -x
 : "${INFERENCE_TP_SIZE:=1}"
 : "${LOGGER:=wandb}"
 : "${RUN_ID:=$(date +%Y%m%d_%H%M%S)}"
-: "${RUN_NAME:=gsm8k-qwen1p5b-delta-gcs-${RUN_ID}}"
-: "${SYNC_DIR:?Set SYNC_DIR to a unique gs:// path for this run}"
+: "${RUN_NAME:=gsm8k-qwen1p5b-delta-s3-disagg-${RUN_ID}}"
+: "${SYNC_DIR:?Set SYNC_DIR to a unique s3:// path for this run}"
 : "${LOCAL_CHECKPOINT_DIR:=/tmp/skyrl-delta-checkpoints/${RUN_NAME}}"
 : "${PUBLISH_STAGING_DIR:=}"
 : "${MAX_TRAINING_STEPS:=20}"
@@ -21,7 +26,7 @@ set -x
 : "${PUBLISH_NUM_WORKERS:=8}"
 # Cloud CLI used to move delta payloads. gs:// needs the `gcloud` CLI on the node;
 # s3:// needs `s5cmd`, which the `aws` extra installs into the run's venv.
-: "${CLOUD_EXTRA:=gcp}"
+: "${CLOUD_EXTRA:=aws}"
 
 SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1 \
 uv run --isolated --extra fsdp --extra "$CLOUD_EXTRA" -m skyrl.train.entrypoints.main_base \
@@ -33,8 +38,6 @@ uv run --isolated --extra fsdp --extra "$CLOUD_EXTRA" -m skyrl.train.entrypoints
   trainer.placement.policy_num_gpus_per_node=$TRAINER_NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$TRAINER_NUM_GPUS \
   trainer.strategy=fsdp \
-  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
-  generator.inference_engine.tensor_parallel_size=$INFERENCE_TP_SIZE \
   trainer.epochs=20 \
   trainer.max_training_steps=$MAX_TRAINING_STEPS \
   trainer.eval_batch_size=1024 \
@@ -52,7 +55,9 @@ uv run --isolated --extra fsdp --extra "$CLOUD_EXTRA" -m skyrl.train.entrypoints
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   generator.inference_engine.backend=vllm \
-  generator.inference_engine.run_engines_locally=true \
+  generator.inference_engine.run_engines_locally=false \
+  generator.inference_engine.external_proxy_url=$EXTERNAL_PROXY_URL \
+  generator.inference_engine.external_server_urls="$EXTERNAL_SERVER_URLS" \
   generator.inference_engine.weight_sync_backend=delta \
   generator.inference_engine.delta_weight_sync.sync_dir="$SYNC_DIR" \
   generator.inference_engine.delta_weight_sync.local_checkpoint_dir="$LOCAL_CHECKPOINT_DIR" \
