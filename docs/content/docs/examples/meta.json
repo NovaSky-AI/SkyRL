@@ -16,6 +16,7 @@
     "quantized_rollouts",
     "spec_decode",
     "mini_swe_agent",
-    "openenv"
+    "openenv",
+    "delta_weight_sync"
   ]
 }

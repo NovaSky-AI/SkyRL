@@ -24,7 +24,7 @@ set -x
 : "${CLOUD_EXTRA:=aws}"
 
 SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1 \
-uv run --isolated --extra fsdp --extra "$CLOUD_EXTRA" --with ray==2.51.1 -m skyrl.train.entrypoints.serve \
+uv run --isolated --extra fsdp --extra "$CLOUD_EXTRA" -m skyrl.train.entrypoints.serve \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="$MODEL" \

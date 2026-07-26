@@ -139,6 +139,8 @@ def _uri_basename(uri: str) -> str:
 def _cloud_cp_command(src: str, dst: str) -> list[str]:
     if _is_gs_uri(src) or _is_gs_uri(dst):
         executable = "gcloud"
+        # NOTE (sumanthrh): We use gcloud CLI for the transfer instead of relying on SkyRL's native IO
+        # utilities since gcsfs (used by fssis much slower at transfers than gcloud storage CLI
         if shutil.which(executable) is None:
             raise RuntimeError("GCS delta transfer requires the gcloud CLI to be installed on this node")
         return [executable, "storage", "cp", src, dst]

@@ -1,0 +1,111 @@
+---
+title: "Delta Weight Sync in SkyRL"
+---
+
+
+In disaggregated RL, the trainer and inference nodes are in separate clusters. The lack of high-speed interconnect like RDMA between training and inference workers makes traditional weight transfer methods like NCCL broadcast infeasible.
+SkyRL supports delta weight updates, where we transmit compressed deltas (i.e changes in the weights) during the weight update. This allows us to perform weight updates for large 100B+ parameter models over cloud storage.
+
+In this example we will train `Qwen/Qwen3.5-35B-A3B` on the GSM8K dataset with delta weight updates.
+
+## Delta weight sync: Architecture
+
+Here's a brief overview of operations performed by the trainer during weight transfer:
+1. Store a CPU based snapshot of the previous version of the weights in uint8 on rank 0
+2. During a weight sync, iterate over the parameters chunk by chunk and all gather the weights for a chunk
+3. Copy a chunk from GPU to CPU 
+4. Convert to bytes and compute XOR deltas for all the weights
+5. Compress the deltas using lossless compression and store the deltas on CPU
+6. Update the CPU based snapshot to use the new uint8 bytes for the current weight chunk
+7. After computing deltas for all the weights, publish to cloud storage
+
+![Trainer overview](/images/examples/delta_weight_sync_train.png)
+
+On the inference side there is broadly two operations:
+1. Fetch + Process: Fetch the delta weights from the trainer and process them to compute the new updated weights
+2. Load: Load the new weights into the inference engines. This can involve additional postprocessing ex: quantization
+
+The overall inference flow is:
+1. Split up Fetch + Process and Load into two separate stages 
+2. Run Fetch + Process before pausing generation
+3. Pause generation and run Load
+
+![Inference overview](/images/examples/delta_weight_sync_inf.png)
+
+In summary, the trainer publishes compressed XOR deltas to a shared location, the inference side pulls and applies them into a local checkpoint before pausing generation, and the paused phase reloads from that prepared checkpoint.
+
+## Data Preparation
+
+Prepare GSM8K data first:
+
+```bash
+uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir "$HOME/data/gsm8k"
+```
+
+## Run training
+
+For Google Cloud Storage:
+
+```bash
+SYNC_DIR=gs://<bucket>/<prefix>/$(date +%Y%m%d_%H%M%S) \
+bash examples/train/delta_weight_sync/run_gsm8k_qwen1p5b_gcs.sh
+```
+
+<Callout type="info">
+For `gs://` paths, GCS credentials and the `gcloud` CLI must be available on the trainer and inference workers.
+</Callout>
+
+
+For NFS or another shared POSIX filesystem:
+
+```bash
+SYNC_DIR=/mnt/shared_storage/skyrl-delta-sync/$(date +%Y%m%d_%H%M%S) \
+bash examples/train/delta_weight_sync/run_gsm8k_qwen1p5b_nfs.sh
+```
+
+For S3:
+
+```bash
+SYNC_DIR=s3://<bucket>/<prefix>/$(date +%Y%m%d_%H%M%S) \
+bash examples/train/delta_weight_sync/run_gsm8k_qwen1p5b_s3.sh
+```
+
+<Callout type="info">
+For `s3://` paths, S3 credentials must be available on the trainer and inference workers. We utilize `s5cmd` installed with SkyRL for the upload, so no additional packages are required unlike GCS.
+</Callout>
+
+## Disaggregated RL 
+
+The same example can be modified for disaggregated RL where the trainer and inference workers are on different clusters
+
+### Spin up inference servers
+
+We will utilize the `serve` entrypoint to spin up standalone inference servers:
+
+```bash
+SYNC_DIR=s3://<bucket>/<prefix>/$(date +%Y%m%d_%H%M%S) \
+bash examples/train/delta_weight_sync/disagg/serve_qwen1p5b_s3.sh &> serve_qwen1p5b.log
+```
+
+Note down the proxy and server urls from the logs:
+
+```bash
+(skyrl_entrypoint pid=3397706) 2026-07-26 12:35:14.068 | INFO     | skyrl.backends.skyrl_train.inference_servers.setup:create_inference_servers:212 - HTTP Inference: proxy_url=http://10.1.138.226:52061, server_urls=['http://10.1.138.226:8000', 'http://10.1.138.226:8100', 'http://10.1.138.226:8202', 'http://10.1.138.226:8300'], colocated=False
+(skyrl_entrypoint pid=3397706) 2026-07-26 12:35:14.068 | INFO     | __main__:run:65 - Inference servers are up.
+(skyrl_entrypoint pid=3397706)   proxy_url (data plane):    http://10.1.138.226:52061
+(skyrl_entrypoint pid=3397706)   server_urls (control plane): ['http://10.1.138.226:8000', 'http://10.1.138.226:8100', 'http://10.1.138.226:8202', 'http://10.1.138.226:8300']
+(skyrl_entrypoint pid=3397706) Point your client at proxy_url for OpenAI-compatible requests. Press Ctrl+C to shut down.
+(VLLMServerActor pid=3400100) 
+```
+
+### Run training
+
+Using the proxy and server urls, launch disaggregated training in the training cluster:
+
+```bash
+SYNC_DIR=s3://<bucket>/<prefix>/$(date +%Y%m%d_%H%M%S) \
+EXTERNAL_PROXY_URL="http://my-ip/my-port" \
+EXTERNAL_SERVER_URLS="[server_url1,server_url2,server_url3,server_url4]"
+bash examples/train/delta_weight_sync/disagg/run_gsm8k_qwen1p5b_s3.sh &> train_qwen1p5b_disagg.log
+```
+
