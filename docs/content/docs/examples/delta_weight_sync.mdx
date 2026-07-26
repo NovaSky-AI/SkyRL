@@ -19,7 +19,7 @@ Here's a brief overview of operations performed by the trainer during weight tra
 6. Update the CPU based snapshot to use the new uint8 bytes for the current weight chunk
 7. After computing deltas for all the weights, publish to cloud storage
 
-![Trainer overview](/images/examples/delta_weight_sync_train.png)
+![Trainer overview](/images/examples/delta_weight_update_train.png)
 
 On the inference side there is broadly two operations:
 1. Fetch + Process: Fetch the delta weights from the trainer and process them to compute the new updated weights
@@ -30,11 +30,13 @@ The overall inference flow is:
 2. Run Fetch + Process before pausing generation
 3. Pause generation and run Load
 
-![Inference overview](/images/examples/delta_weight_sync_inf.png)
+![Inference overview](/images/examples/delta_weight_update_inf.png)
 
 In summary, the trainer publishes compressed XOR deltas to a shared location, the inference side pulls and applies them into a local checkpoint before pausing generation, and the paused phase reloads from that prepared checkpoint.
 
-## Data Preparation
+## Single Cluster, Non-Colocated training
+
+### Data Preparation
 
 Prepare GSM8K data first:
 
@@ -42,7 +44,7 @@ Prepare GSM8K data first:
 uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir "$HOME/data/gsm8k"
 ```
 
-## Run training
+### Run training
 
 For Google Cloud Storage:
 
@@ -76,11 +78,11 @@ For `s3://` paths, S3 credentials must be available on the trainer and inference
 
 ## Disaggregated RL 
 
-The same example can be modified for disaggregated RL where the trainer and inference workers are on different clusters
+We also show an example of disaggregated RL where the training and inference workers can be run on separate clusters and sync via S3.
 
 ### Spin up inference servers
 
-We will utilize the `serve` entrypoint to spin up standalone inference servers:
+Utilize the `serve` entrypoint to spin up standalone inference servers:
 
 ```bash
 SYNC_DIR=s3://<bucket>/<prefix>/$(date +%Y%m%d_%H%M%S) \
@@ -105,7 +107,7 @@ Using the proxy and server urls, launch disaggregated training in the training c
 ```bash
 SYNC_DIR=s3://<bucket>/<prefix>/$(date +%Y%m%d_%H%M%S) \
 EXTERNAL_PROXY_URL="http://my-ip/my-port" \
-EXTERNAL_SERVER_URLS="[server_url1,server_url2,server_url3,server_url4]"
+EXTERNAL_SERVER_URLS="[server_url1,server_url2,server_url3,server_url4]" \
 bash examples/train/delta_weight_sync/disagg/run_gsm8k_qwen1p5b_s3.sh &> train_qwen1p5b_disagg.log
 ```
 
