@@ -88,9 +88,6 @@ uv run --isolated --extra dev --extra megatron \
 
 The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the worker-extension class must be exercised by the GPU test above.
 
-The Megatron variants in `test_prefix_cache_reset.py` **skip silently** without megatron-core, so
-run that file under `--extra megatron` too before trusting a green CPU run.
-
 ## When to touch what
 
 | Change | Run |
