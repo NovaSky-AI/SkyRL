@@ -195,7 +195,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--publish-num-workers", type=int, default=None)
     parser.add_argument(
         "--checkpoint-load-format",
-        default="vllm_fastsafetensors",
+        default="vllm_multi_thread_safetensors",
         choices=[
             "vllm_fastsafetensors",
             "vllm_multi_thread_safetensors",

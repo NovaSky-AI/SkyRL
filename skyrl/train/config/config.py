@@ -12,7 +12,7 @@ import typing
 from abc import ABC
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Annotated, Any, Dict, List, Optional, Type, TypeVar, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Type, TypeVar, Union
 
 import yaml
 from omegaconf import DictConfig, OmegaConf
@@ -748,11 +748,13 @@ class DeltaWeightSyncConfig(BaseConfig):
 
     local_checkpoint_dir: Optional[str] = None
     """Receiver-side directory used to cache patched checkpoint versions.
-    If unset, a path under ``/tmp/skyrl_delta_checkpoints`` is used."""
+    If unset, resolved in ``__post_init__`` to a ``sync_dir``-derived path under
+    ``/tmp/skyrl_delta_checkpoints``."""
 
     publish_staging_dir: Optional[str] = None
     """Trainer-side local directory used to stage cloud payload files before upload.
-    If unset, a path under ``/tmp/skyrl_delta_publish_staging`` is used."""
+    If unset, resolved in ``__post_init__`` to a ``sync_dir``-derived path under
+    ``/tmp/skyrl_delta_publish_staging``."""
 
     max_file_size_in_gb: float = 1.0
     """Maximum compressed payload file size before starting a new safetensors file."""
@@ -764,13 +766,24 @@ class DeltaWeightSyncConfig(BaseConfig):
     """Number of trainer-side worker threads used to compute and compress delta payloads.
     If unset, the publisher uses ``min(8, os.cpu_count())``."""
 
-    checkpoint_load_format: str = "vllm_fastsafetensors"
-    """Receiver reload iterator for the prepared local checkpoint.
-    ``"vllm_fastsafetensors"`` is the default CUDA/GDS-oriented path.
-    ``"vllm_multi_thread_safetensors"`` is the CPU safetensors fallback."""
+    checkpoint_load_format: Literal["vllm_multi_thread_safetensors", "vllm_fastsafetensors"] = (
+        "vllm_multi_thread_safetensors"
+    )
+    """Receiver reload iterator for the prepared local checkpoint."""
 
     multi_thread_safetensors_max_workers: int = 8
     """Number of worker threads for ``vllm_multi_thread_safetensors``."""
+
+    def __post_init__(self) -> None:
+        from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
+            _default_local_checkpoint_dir,
+            _default_publish_staging_dir,
+        )
+
+        if self.local_checkpoint_dir is None:
+            self.local_checkpoint_dir = str(_default_local_checkpoint_dir(self.sync_dir))
+        if self.publish_staging_dir is None:
+            self.publish_staging_dir = str(_default_publish_staging_dir(self.sync_dir))
 
 
 @dataclass

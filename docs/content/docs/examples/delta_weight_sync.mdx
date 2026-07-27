@@ -6,7 +6,7 @@ title: "Delta Weight Sync in SkyRL"
 In disaggregated RL, the trainer and inference nodes are in separate clusters. The lack of high-speed interconnect like RDMA between training and inference workers makes traditional weight transfer methods like NCCL broadcast infeasible.
 SkyRL supports delta weight updates, where we transmit compressed deltas (i.e changes in the weights) during the weight update. This allows us to perform weight updates for large 100B+ parameter models over cloud storage.
 
-In this example we will train `Qwen/Qwen3.5-35B-A3B` on the GSM8K dataset with delta weight updates.
+In this example we will train `Qwen/Qwen2.5-1.5B-Instruct` on the GSM8K dataset with delta weight updates.
 
 ## Delta weight sync: Architecture
 

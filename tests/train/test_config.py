@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 
 from skyrl.train.config.config import (
     BaseConfig,
+    DeltaWeightSyncConfig,
     SkyRLTrainConfig,
     TrainerConfig,
     _resolve_class_type,
@@ -605,3 +606,15 @@ class TestTorchProfilerConfigValidation:
         cfg.trainer.policy.torch_profiler_config.save_path = "/tmp/skyrl_prof_test"
         cfg.trainer.policy.fsdp_config.cpu_offload = True
         validate_cfg(cfg)
+
+
+class TestDeltaWeightSyncConfig:
+    """Tests for `DeltaWeightSyncConfig`"""
+
+    def test_delta_weight_sync_defaults(self):
+        cfg = DeltaWeightSyncConfig(sync_dir="my_sync_dir", publish_staging_dir=None, local_checkpoint_dir=None)
+        assert cfg.publish_staging_dir is not None
+        assert cfg.local_checkpoint_dir is not None
+        # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
+        assert "my_sync_dir" in cfg.publish_staging_dir
+        assert "my_sync_dir" in cfg.local_checkpoint_dir

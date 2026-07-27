@@ -10,7 +10,7 @@ import ray
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import DeltaWeightSyncConfig, SkyRLTrainConfig
 from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.gpu_ci.delta_weight_sync_utils import (
     init_policy_worker_for_delta,
@@ -44,11 +44,13 @@ def _delta_sync_cfg(strategy: str, tmp_path) -> SkyRLTrainConfig:
     cfg.generator.inference_engine.tensor_parallel_size = 1
     cfg.generator.inference_engine.weight_sync_backend = "delta"
     cfg.generator.inference_engine.gpu_memory_utilization = 0.55
-    cfg.generator.inference_engine.delta_weight_sync.sync_dir = str(tmp_path / f"sync-{strategy}")
-    cfg.generator.inference_engine.delta_weight_sync.local_checkpoint_dir = str(tmp_path / f"receiver-{strategy}")
-    cfg.generator.inference_engine.delta_weight_sync.checkpoint_load_format = "vllm_multi_thread_safetensors"
-    cfg.generator.inference_engine.delta_weight_sync.multi_thread_safetensors_max_workers = 2
-    cfg.generator.inference_engine.delta_weight_sync.publish_num_workers = 2
+    cfg.generator.inference_engine.delta_weight_sync = DeltaWeightSyncConfig(
+        sync_dir=str(tmp_path / f"sync-{strategy}"),
+        local_checkpoint_dir=str(tmp_path / f"receiver-{strategy}"),
+        checkpoint_load_format="vllm_multi_thread_safetensors",
+        multi_thread_safetensors_max_workers=2,
+        publish_num_workers=2,
+    )
 
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1

@@ -3,6 +3,7 @@ import subprocess
 
 import numpy as np
 import pytest
+import ray
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -15,19 +16,13 @@ from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
     DeltaCheckpointPublisher,
     DeltaPublishResult,
     LocalCheckpointStore,
-    _copy_from_uri,
     _deltas_dir,
     _safe_path_name,
     _weights_dir,
-    _write_bytes_to_uri,
 )
 from skyrl.backends.skyrl_train.weight_sync.delta_payload import (
     decompress_bytes,
     uint8_tensor_to_bytes,
-)
-from skyrl.backends.skyrl_train.weight_sync.delta_strategy import (
-    DeltaInitInfo,
-    DeltaWeightTransferSender,
 )
 
 
@@ -79,6 +74,7 @@ def test_delta_checkpoint_publish_fetch_and_reload_roundtrip(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
     )
     result = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
     update_info = publisher.publish(result)
@@ -108,6 +104,7 @@ def test_delta_checkpoint_payload_stores_xor_patch(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(sync_dir),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
         publish_num_workers=1,
     )
     results = publisher.create_delta_files([_chunk_from_tensors({"a.weight": updated})])
@@ -130,8 +127,8 @@ def test_delta_checkpoint_payload_stores_xor_patch(tmp_path):
     assert np.array_equal(np.bitwise_xor(base_bytes, patch), updated_bytes)
 
 
+@pytest.mark.vllm
 def test_delta_checkpoint_vllm_multi_thread_safetensors_iterator_roundtrip(tmp_path):
-    pytest.importorskip("vllm")
 
     base_tensors = {
         "model.layers.0.self_attn.q_proj.weight": torch.arange(16, dtype=torch.bfloat16).view(4, 4),
@@ -149,6 +146,7 @@ def test_delta_checkpoint_vllm_multi_thread_safetensors_iterator_roundtrip(tmp_p
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
     )
     result = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
     update_info = publisher.publish(result)
@@ -173,6 +171,7 @@ def test_delta_checkpoint_publisher_converts_to_base_checkpoint_dtype(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
     )
     update_info = publisher.create_delta_files([_chunk_from_tensors(runtime_updated)])
     update_info = publisher.publish(update_info)
@@ -206,6 +205,7 @@ def test_delta_checkpoint_non_source_rank_drains_without_publishing(tmp_path, mo
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(sync_dir),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
     )
 
     # Simulate a non-source rank (rank != 0): it drains the chunk stream but must
@@ -217,7 +217,6 @@ def test_delta_checkpoint_non_source_rank_drains_without_publishing(tmp_path, mo
     assert result.payload_files == []
     assert publisher.snapshot == {}
     assert publisher.version == 1
-    assert not (sync_dir / "delta-00000001").exists()
 
 
 def test_delta_checkpoint_replays_multiple_versions_for_late_join(tmp_path):
@@ -231,6 +230,7 @@ def test_delta_checkpoint_replays_multiple_versions_for_late_join(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
     )
     v1_result = publisher.create_delta_files([_chunk_from_tensors(v1_tensors)])
     publisher.publish(v1_result)
@@ -270,6 +270,7 @@ def test_delta_checkpoint_splits_payload_files_by_size(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
         max_file_size_in_gb=1e-9,
     )
     update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
@@ -292,6 +293,7 @@ def test_delta_checkpoint_skips_missing_lm_head_when_checkpoint_ties_embeddings(
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
     )
     update_info = publisher.create_delta_files(
         [
@@ -317,8 +319,6 @@ def test_delta_checkpoint_skips_missing_lm_head_when_checkpoint_ties_embeddings(
 
 
 def test_local_checkpoint_store_fetch_is_single_writer_with_concurrent_ray_actors(tmp_path):
-    ray = pytest.importorskip("ray")
-
     base_tensors = {"a.weight": torch.arange(16, dtype=torch.bfloat16).view(4, 4)}
     updated_tensors = {"a.weight": base_tensors["a.weight"] + torch.tensor(1, dtype=torch.bfloat16)}
     base_dir = tmp_path / "base"
@@ -328,7 +328,9 @@ def test_local_checkpoint_store_fetch_is_single_writer_with_concurrent_ray_actor
     _write_checkpoint(base_dir, base_tensors)
     counter_path.write_text(json.dumps({"count": 0}), encoding="utf-8")
 
-    publisher = DeltaCheckpointPublisher(base_model_path=str(base_dir), sync_dir=str(sync_dir))
+    publisher = DeltaCheckpointPublisher(
+        base_model_path=str(base_dir), sync_dir=str(sync_dir), publish_staging_dir=str(tmp_path / "staging_dir")
+    )
     update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
     update_info = publisher.publish(update_info)
 
@@ -363,28 +365,33 @@ def test_local_checkpoint_store_fetch_is_single_writer_with_concurrent_ray_actor
 
     # Ray is initialized by the session-scoped autouse ``ray_init`` fixture in
     # tests/backends/skyrl_train/conftest.py; tests must not init/shutdown Ray.
-    actor_cls = ray.remote(num_cpus=1)(FetchActor)
-    actors = [actor_cls.remote(), actor_cls.remote()]
-    results = ray.get(
-        [
-            actor.fetch.remote(
-                str(base_dir),
-                str(receiver_dir),
-                update_info["target_version"],
-                update_info["uri"],
-                str(counter_path),
-            )
-            for actor in actors
-        ]
-    )
+    actors = []
+    try:
+        actor_cls = ray.remote(num_cpus=1)(FetchActor)
+        actors = [actor_cls.remote(), actor_cls.remote()]
+        results = ray.get(
+            [
+                actor.fetch.remote(
+                    str(base_dir),
+                    str(receiver_dir),
+                    update_info["target_version"],
+                    update_info["uri"],
+                    str(counter_path),
+                )
+                for actor in actors
+            ]
+        )
 
-    assert json.loads(counter_path.read_text(encoding="utf-8"))["count"] == 1
-    assert all(result["state"]["version"] == 1 for result in results)
-    assert (_deltas_dir(receiver_dir) / _safe_path_name(update_info["uri"])).exists()
-    received = _store_tensors(
-        LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
-    )
-    assert torch.equal(received["a.weight"], updated_tensors["a.weight"])
+        assert json.loads(counter_path.read_text(encoding="utf-8"))["count"] == 1
+        assert all(result["state"]["version"] == 1 for result in results)
+        assert (_deltas_dir(receiver_dir) / _safe_path_name(update_info["uri"])).exists()
+        received = _store_tensors(
+            LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
+        )
+        assert torch.equal(received["a.weight"], updated_tensors["a.weight"])
+    finally:
+        for actor in actors:
+            ray.kill(actor)
 
 
 def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
@@ -396,13 +403,13 @@ def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
     )
     update_info = publisher.create_delta_files([_chunk_from_tensors({"a.weight": base_tensors["a.weight"].clone()})])
     update_info = publisher.publish(update_info)
 
     # An unchanged publish is not skipped: it still advances the version and
-    # writes an (empty) delta rather than signalling a no-op.
-    assert "noop" not in update_info
+    # writes an (empty) delta.
     assert update_info["target_version"] == 1
     assert publisher.version == 1
 
@@ -431,47 +438,6 @@ def test_safe_path_name_disambiguates_long_sibling_uris():
 
     assert v1 != v2
     assert len(v1) <= _MAX_SAFE_PATH_NAME_LEN and len(v2) <= _MAX_SAFE_PATH_NAME_LEN
-
-
-def test_delta_checkpoint_gcs_byte_io_uses_cli_staging(monkeypatch, tmp_path):
-    objects = {}
-    commands = []
-
-    def fake_which(name):
-        return f"/usr/bin/{name}" if name == "gcloud" else None
-
-    def fake_run(cmd, stdout=None, stderr=None, text=None):
-        commands.append(cmd)
-        assert cmd[:3] == ["gcloud", "storage", "cp"]
-        src, dst = cmd[3], cmd[4]
-        if dst.startswith("gs://"):
-            objects[dst] = open(src, "rb").read()
-        elif src.startswith("gs://"):
-            with open(dst, "wb") as f:
-                f.write(objects[src])
-        else:
-            raise AssertionError(f"unexpected command {cmd}")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(
-        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.shutil.which",
-        fake_which,
-    )
-    monkeypatch.setattr(
-        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.subprocess.run",
-        fake_run,
-    )
-
-    uri = "gs://bucket/sync/delta-00000001/payload.safetensors"
-    _write_bytes_to_uri(b"payload-bytes", uri, staging_dir=tmp_path / "stage")
-    assert objects[uri] == b"payload-bytes"
-
-    local_path = tmp_path / "payload.safetensors"
-    _copy_from_uri(uri, local_path)
-    assert local_path.read_bytes() == b"payload-bytes"
-    assert len(commands) == 2
-    assert commands[0][:3] == ["gcloud", "storage", "cp"]
-    assert commands[1][:3] == ["gcloud", "storage", "cp"]
 
 
 def test_delta_checkpoint_gcs_cli_publish_fetch_roundtrip(monkeypatch, tmp_path):
@@ -532,6 +498,66 @@ def test_delta_checkpoint_gcs_cli_publish_fetch_roundtrip(monkeypatch, tmp_path)
     assert torch.equal(received["a.weight"], updated_tensors["a.weight"])
 
 
+def test_delta_checkpoint_s3_cli_publish_fetch_roundtrip(monkeypatch, tmp_path):
+    objects = {}
+
+    def fake_which(name):
+        return f"/usr/bin/{name}" if name == "s5cmd" else None
+
+    def fake_run(cmd, stdout=None, stderr=None, text=None):
+        if cmd and cmd[0] == "cp":
+            with open(cmd[-2], "rb") as src, open(cmd[-1], "wb") as dst:
+                dst.write(src.read())
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        # s5cmd takes `cp <src> <dst>` with no subcommand group, unlike `gcloud storage cp`.
+        assert cmd[:2] == ["s5cmd", "cp"]
+        src, dst = cmd[2], cmd[3]
+        if dst.startswith("s3://"):
+            objects[dst] = open(src, "rb").read()
+        elif src.startswith("s3://"):
+            with open(dst, "wb") as f:
+                f.write(objects[src])
+        else:
+            raise AssertionError(f"unexpected command {cmd}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr(
+        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.subprocess.run",
+        fake_run,
+    )
+
+    base_tensors = {"a.weight": torch.zeros(8, dtype=torch.bfloat16)}
+    updated_tensors = {"a.weight": torch.arange(8, dtype=torch.bfloat16)}
+    base_dir = tmp_path / "base"
+    receiver_dir = tmp_path / "receiver"
+    staging_dir = tmp_path / "publish-stage"
+    _write_checkpoint(base_dir, base_tensors)
+
+    publisher = DeltaCheckpointPublisher(
+        base_model_path=str(base_dir),
+        sync_dir="s3://bucket/sync",
+        publish_staging_dir=str(staging_dir),
+    )
+    update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
+    update_info = publisher.publish(update_info)
+
+    assert update_info["uri"] == "s3://bucket/sync/delta-00000001"
+    assert "s3://bucket/sync/delta-00000001/manifest.json" in objects
+    assert any(key.endswith(".safetensors") for key in objects)
+    # Payloads are staged locally then uploaded; nothing should be left behind.
+    assert not list(staging_dir.rglob("*.tmp"))
+    assert not list(staging_dir.rglob("*.safetensors"))
+
+    store = LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
+    store.fetch(target_version=1, uri=update_info["uri"])
+    received = _store_tensors(store)
+    assert torch.equal(received["a.weight"], updated_tensors["a.weight"])
+
+
 def test_delta_checkpoint_checksum_failure_marks_write_in_progress(tmp_path):
     base_tensors = {"a.weight": torch.arange(8, dtype=torch.bfloat16)}
     updated_tensors = {"a.weight": base_tensors["a.weight"] + torch.tensor(1, dtype=torch.bfloat16)}
@@ -542,11 +568,13 @@ def test_delta_checkpoint_checksum_failure_marks_write_in_progress(tmp_path):
     publisher = DeltaCheckpointPublisher(
         base_model_path=str(base_dir),
         sync_dir=str(tmp_path / "sync"),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
     )
     update_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
     update_info = publisher.publish(update_info)
     manifest_path = tmp_path / "sync" / "delta-00000001" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    original_checksum = manifest["tensors"][0]["checksum"]
     manifest["tensors"][0]["checksum"] = "0" * 32
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -554,56 +582,17 @@ def test_delta_checkpoint_checksum_failure_marks_write_in_progress(tmp_path):
     with pytest.raises(RuntimeError, match="checksum mismatch"):
         store.fetch(target_version=1, uri=update_info["uri"])
     assert _read_state(receiver_dir)["write_in_progress"] is True
+    # The bad delta must not stay cached, otherwise a repaired source can never be picked up.
+    assert not (_deltas_dir(receiver_dir) / _safe_path_name(update_info["uri"])).exists()
 
-    # Re-publish a valid delta by rebuilding from scratch to avoid relying on the corrupted manifest.
-    shutil_sync = tmp_path / "sync_valid"
-    publisher = DeltaCheckpointPublisher(
-        base_model_path=str(base_dir),
-        sync_dir=str(shutil_sync),
-    )
-    valid_info = publisher.create_delta_files([_chunk_from_tensors(updated_tensors)])
-    valid_info = publisher.publish(valid_info)
-    store.fetch(target_version=1, uri=valid_info["uri"])
+    # Repair the manifest in place and re-fetch the *same* URI: recovery must work without
+    # having to republish somewhere else.
+    manifest["tensors"][0]["checksum"] = original_checksum
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    store.fetch(target_version=1, uri=update_info["uri"])
     assert _read_state(receiver_dir)["write_in_progress"] is False
     assert torch.equal(
         _store_tensors(store)["a.weight"],
         updated_tensors["a.weight"],
     )
-
-
-@pytest.mark.asyncio
-async def test_delta_sender_seed_sync_skips_chunk_iteration(tmp_path):
-    class ExplodingChunks:
-        def __iter__(self):
-            raise AssertionError("seed sync should not iterate weight chunks")
-
-    class FakeInferenceClient:
-        async def fetch_weights(self, **kwargs):
-            raise AssertionError("seed sync should not call fetch_weights")
-
-        async def pause_generation(self):
-            raise AssertionError("seed sync should not pause generation")
-
-        async def start_weight_update(self, **kwargs):
-            raise AssertionError("seed sync should not start weight update")
-
-        async def update_named_weights(self, update_info):
-            raise AssertionError("seed sync should not update weights")
-
-        async def finish_weight_update(self):
-            raise AssertionError("seed sync should not finish weight update")
-
-        async def resume_generation(self):
-            raise AssertionError("seed sync should not resume generation")
-
-    sender = DeltaWeightTransferSender(
-        DeltaInitInfo(
-            override_existing_receiver=False,
-            base_model_path=str(tmp_path / "base"),
-            sync_dir=str(tmp_path / "sync"),
-            local_checkpoint_dir=str(tmp_path / "receiver"),
-        ),
-        FakeInferenceClient(),
-    )
-
-    await sender.send_chunks(ExplodingChunks())

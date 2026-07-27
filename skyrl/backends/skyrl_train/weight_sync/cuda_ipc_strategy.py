@@ -148,6 +148,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        **kwargs,
     ) -> None:
         """Send chunks via CUDA IPC.
 

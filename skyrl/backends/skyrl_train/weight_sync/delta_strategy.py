@@ -15,7 +15,6 @@ from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
     SUPPORTED_CHECKPOINT_LOAD_FORMATS,
     DeltaCheckpointPublisher,
     DeltaPublishResult,
-    _safe_path_name,
 )
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
@@ -38,11 +37,11 @@ class DeltaInitInfo(WeightSyncInitInfo):
     base_model_path: str
     sync_dir: str
     local_checkpoint_dir: str
-    publish_staging_dir: Optional[str] = None
+    publish_staging_dir: str
     max_file_size_in_gb: float = 1.0
     cloud_download_workers: int = 4
     publish_num_workers: Optional[int] = None
-    checkpoint_load_format: str = "vllm_fastsafetensors"
+    checkpoint_load_format: str = "vllm_multi_thread_safetensors"
     multi_thread_safetensors_max_workers: int = 8
 
     def for_servers(self, world_size_per_server: int, num_servers: int, dp_size: int = 1) -> List["DeltaInitInfo"]:
@@ -59,17 +58,17 @@ class DeltaInitInfo(WeightSyncInitInfo):
 
 
 class DeltaWeightTransferSender(WeightTransferSender):
+
     handles_prefix_cache_reset = True
+    """Indicates whether the transfer strategy handles resetting prefix cache
+    for the inference engines internally."""
 
     def __init__(self, init_info: DeltaInitInfo, inference_client: "RemoteInferenceClient") -> None:
         self._init_info = init_info
         self._inference_client = inference_client
         self._publisher: Optional[DeltaCheckpointPublisher] = None
-        self._seed_complete = False
 
-    async def _apply_receiver_update(self, update_info: Dict[str, Any], rank: int) -> None:
-        if update_info.get("noop", False):
-            return
+    async def _apply_receiver_update(self, update_info: Dict[str, Any], rank: int, reset_prefix_cache: bool) -> None:
 
         target_version = int(update_info.get("target_version", update_info.get("version")))
         await self._inference_client.fetch_weights(
@@ -78,7 +77,8 @@ class DeltaWeightTransferSender(WeightTransferSender):
             uri=update_info.get("uri"),
         )
         await self._inference_client.pause_generation()
-        await self._inference_client.reset_prefix_cache(reset_running_requests=True)
+        if reset_prefix_cache:
+            await self._inference_client.reset_prefix_cache(reset_running_requests=True)
         await self._inference_client.start_weight_update(is_checkpoint_format=True)
         await self._inference_client.update_named_weights(update_info)
         await self._inference_client.finish_weight_update()
@@ -88,6 +88,7 @@ class DeltaWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        reset_prefix_cache: bool = False,
     ) -> None:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             rank = torch.distributed.get_rank()
@@ -103,20 +104,9 @@ class DeltaWeightTransferSender(WeightTransferSender):
                 publish_num_workers=self._init_info.publish_num_workers,
             )
 
-        if not self._seed_complete:
-            self._seed_complete = True
-            if rank == 0:
-                logger.info(
-                    "delta checkpoint seed sync: treating base_model_path as version 0; "
-                    "skipping chunk extraction and delta publish"
-                )
-            if torch.distributed.is_available() and torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            return
-
-        # The publisher determines its own rank; only rank 0 publishes deltas.
         # All ranks call publish to drain the chunk stream and drive the
-        # extractor's collectives. Finalization happens on rank 0 below.
+        # extractor's collectives. Only rank 0 publishes the deltas and
+        # runs finalization.
         local_result = await asyncio.to_thread(self._publisher.create_delta_files, chunks)
         if not isinstance(local_result, DeltaPublishResult):
             raise TypeError(f"Expected DeltaPublishResult from sharded publisher, got {type(local_result)}")
@@ -140,13 +130,8 @@ class DeltaWeightTransferSender(WeightTransferSender):
             torch.distributed.broadcast_object_list(update_info_box, src=0)
             update_info = update_info_box[0]
 
-        control_rank = 1 if world_size > 1 else 0
-        if rank == control_rank and update_info is not None and not update_info.get("noop", False):
-            await self._apply_receiver_update(update_info, rank)
-        # The worker runs a process-group barrier after send_chunks returns. Every rank
-        # reaches it (non-control ranks return immediately; the control rank returns once
-        # the receiver-side reload finishes), so the barrier simply syncs all ranks on the
-        # slowest one -- which is what WorkerDispatch already waits for.
+        if rank == 0 and update_info is not None:
+            await self._apply_receiver_update(update_info, rank, reset_prefix_cache)
 
     def teardown(self) -> None:
         self._publisher = None
@@ -166,10 +151,8 @@ class DeltaTransferStrategy(WeightTransferStrategy):
         if delta_cfg is None or not delta_cfg.sync_dir:
             raise ValueError("Delta weight sync requires generator.inference_engine.delta_weight_sync.sync_dir")
 
-        local_checkpoint_dir = (
-            delta_cfg.local_checkpoint_dir
-            or f"/tmp/skyrl_delta_checkpoints/{_safe_path_name(ie_cfg.delta_weight_sync.sync_dir)}"
-        )
+        # local_checkpoint_dir and publish_staging_dir are resolved by
+        # DeltaWeightSyncConfig.__post_init__, so they are already concrete here.
         if delta_cfg.checkpoint_load_format not in SUPPORTED_CHECKPOINT_LOAD_FORMATS:
             raise ValueError(
                 "Delta checkpoint_load_format must be one of "
@@ -178,7 +161,7 @@ class DeltaTransferStrategy(WeightTransferStrategy):
         return DeltaInitInfo(
             base_model_path=base_model_path,
             sync_dir=delta_cfg.sync_dir,
-            local_checkpoint_dir=local_checkpoint_dir,
+            local_checkpoint_dir=delta_cfg.local_checkpoint_dir,
             publish_staging_dir=delta_cfg.publish_staging_dir,
             max_file_size_in_gb=delta_cfg.max_file_size_in_gb,
             cloud_download_workers=delta_cfg.cloud_download_workers,

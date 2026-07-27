@@ -33,11 +33,16 @@ class WeightTransferSender(ABC):
     with inference actors.
     """
 
+    handles_prefix_cache_reset: bool = False
+    """Indicates whether the transfer strategy handles resetting prefix cache
+        for the inference engines internally."""
+
     @abstractmethod
     async def send_chunks(
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        **kwargs,
     ) -> None:
         """Send chunks using this transfer strategy.
 

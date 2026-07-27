@@ -26,13 +26,13 @@ class DeltaTransferInitInfo:
     base_model_path: str
     local_checkpoint_dir: str
     cloud_download_workers: int = 4
-    checkpoint_load_format: str = "vllm_fastsafetensors"
+    checkpoint_load_format: str = "vllm_multi_thread_safetensors"
     multi_thread_safetensors_max_workers: int = 8
 
 
 @dataclass
 class DeltaTransferUpdateInfo:
-    target_version: int | None = None
+    target_version: int
     sync_dir: str | None = None
     uri: str | None = None
     version: int | None = None
@@ -75,7 +75,7 @@ class DeltaWeightTransferEngine:
         self.parallel_config = parallel_config
         self.model = model
         self._store: LocalCheckpointStore | None = None
-        self._checkpoint_load_format = "vllm_fastsafetensors"
+        self._checkpoint_load_format = "vllm_multi_thread_safetensors"
         self._multi_thread_safetensors_max_workers = 8
         self._cloud_download_workers = 4
 
@@ -116,13 +116,8 @@ class DeltaWeightTransferEngine:
         t0 = time.perf_counter()
         stats = self._store.fetch(target_version=target_version, sync_dir=sync_dir, uri=uri)
         total_s = time.perf_counter() - t0
-        message = ("delta checkpoint fetch: target_version=%s fetch_s=%.3f apply_s=%.3f reset_s=%.3f total_s=%.3f") % (
-            target_version,
-            stats.get("fetch_s", 0.0),
-            stats.get("apply_s", 0.0),
-            stats.get("reset_s", 0.0),
-            total_s,
-        )
+        fetch_s, apply_s, reset_s = stats.get("fetch_s", 0.0), stats.get("apply_s", 0.0), stats.get("reset_s", 0.0)
+        message = f"delta checkpoint fetch: target_version={target_version} fetch_s={fetch_s:.3f} apply_s={apply_s:.3f}  reset_s={reset_s:.3f} total_s={total_s:.3f}"
         logger.info(message)
         print(message, flush=True)
         return {"status": "ok", "target_version": target_version, "stats": {**stats, "total_s": total_s}}
@@ -162,7 +157,7 @@ class DeltaWeightTransferEngine:
         logger.info(message)
         print(message, flush=True)
 
-    def shutdown(self) -> None:
+    def shutdown(self):
         self._store = None
 
     @staticmethod

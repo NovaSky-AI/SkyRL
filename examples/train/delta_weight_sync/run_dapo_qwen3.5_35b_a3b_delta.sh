@@ -9,8 +9,11 @@ set -x
 # Prepare DAPO data first:
 #   bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 #
-# Example:
+# Examples:
 #   SYNC_DIR=gs://<bucket>/<prefix>/$(date +%Y%m%d_%H%M%S) \
+#   bash examples/train/delta_weight_sync/run_dapo_qwen3.5_35b_a3b_delta.sh
+#
+#   CLOUD_EXTRA=aws SYNC_DIR=s3://<bucket>/<prefix>/$(date +%Y%m%d_%H%M%S) \
 #   bash examples/train/delta_weight_sync/run_dapo_qwen3.5_35b_a3b_delta.sh
 
 : "${MODEL_NAME:=Qwen/Qwen3.5-35B-A3B-Base}"
@@ -24,12 +27,13 @@ set -x
 : "${LOGGER:=wandb}"  # change to "console" to print to stdout
 : "${RUN_ID:=$(date +%Y%m%d_%H%M%S)}"
 : "${RUN_NAME:=dapo-qwen35b-a3b-delta-${RUN_ID}}"
-: "${SYNC_DIR:?Set SYNC_DIR to a unique gs:// or shared filesystem path for this run}"
+: "${SYNC_DIR:?Set SYNC_DIR to a unique gs://, s3:// or shared filesystem path for this run}"
 : "${LOCAL_CHECKPOINT_DIR:=/tmp/skyrl-delta-checkpoints/${RUN_NAME}}"
 : "${PUBLISH_STAGING_DIR:=}"
 : "${MAX_FILE_SIZE_IN_GB:=2}"
 : "${CLOUD_DOWNLOAD_WORKERS:=4}"
 : "${PUBLISH_NUM_WORKERS:=8}"
+: "${RAY_DEDUP_LOGS:=0}"
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
@@ -78,6 +82,7 @@ DISTRIBUTED_EXECUTOR_BACKEND="mp"
 : "${CLOUD_EXTRA:=gcp}"
 
 SKYRL_DUMP_INFRA_LOG_TO_STDOUT="${SKYRL_DUMP_INFRA_LOG_TO_STDOUT:-1}" \
+RAY_DEDUP_LOGS="$RAY_DEDUP_LOGS" \
 uv run --isolated --extra megatron --extra "$CLOUD_EXTRA" -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \

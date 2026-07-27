@@ -96,6 +96,10 @@ class DeltaManifest:
         )
 
 
+class ChecksumMismatchError(Exception):
+    pass
+
+
 def _version_name(version: int) -> str:
     return f"delta-{version:08d}"
 
@@ -140,7 +144,7 @@ def _cloud_cp_command(src: str, dst: str) -> list[str]:
     if _is_gs_uri(src) or _is_gs_uri(dst):
         executable = "gcloud"
         # NOTE (sumanthrh): We use gcloud CLI for the transfer instead of relying on SkyRL's native IO
-        # utilities since gcsfs (used by fssis much slower at transfers than gcloud storage CLI
+        # utilities since gcsfs (used by fsspec is much slower at transfers than gcloud storage CLI
         if shutil.which(executable) is None:
             raise RuntimeError("GCS delta transfer requires the gcloud CLI to be installed on this node")
         return [executable, "storage", "cp", src, dst]
@@ -163,6 +167,10 @@ def _run_cloud_cp(src: str, dst: str) -> None:
 
 def _default_publish_staging_dir(sync_dir: str) -> Path:
     return Path(tempfile.gettempdir()) / "skyrl_delta_publish_staging" / _safe_path_name(sync_dir)
+
+
+def _default_local_checkpoint_dir(sync_dir: str) -> Path:
+    return Path(tempfile.gettempdir()) / "skyrl_delta_checkpoints" / _safe_path_name(sync_dir)
 
 
 def _atomic_write_bytes_local(data: bytes, dst: Path) -> None:
@@ -654,7 +662,12 @@ class LocalCheckpointStore:
                             f"{current_version}"
                         )
                     t_apply = time.perf_counter()
-                    self._apply_delta_manifest(manifest, payload_dir)
+                    try:
+                        self._apply_delta_manifest(manifest, payload_dir)
+                    except ChecksumMismatchError as e:
+                        # delete cached directory and raise
+                        shutil.rmtree(str(cache_dir), ignore_errors=True)
+                        raise RuntimeError(f"Checksum mismatch for delta URI: {delta_uri}: {e}")
                     stats["apply_s"] += time.perf_counter() - t_apply
                     current_version = version
 
@@ -749,7 +762,7 @@ class LocalCheckpointStore:
                 fh.close()
 
         if mismatches:
-            raise RuntimeError(
+            raise ChecksumMismatchError(
                 f"Post-apply checksum mismatch for {len(mismatches)} tensor(s): {sorted(mismatches)[:20]}"
             )
 
@@ -766,16 +779,19 @@ class LocalCheckpointStore:
             raise RuntimeError(
                 f"Local checkpoint version {state.version} does not match target_version {target_version}"
             )
-        self._current_checkpoint_dir()
 
     def iter_tensors(
         self,
-        load_format: str = "vllm_fastsafetensors",
+        load_format: str = "vllm_multi_thread_safetensors",
         multi_thread_safetensors_max_workers: int = 8,
     ) -> Iterator[tuple[str, torch.Tensor]]:
         checkpoint_dir = self._current_checkpoint_dir()
         files = _checkpoint_safetensors_files(checkpoint_dir)
         if load_format == "vllm_multi_thread_safetensors":
+            # NOTE (sumanthrh): this has lesser peak memory relative to the fastsafetensors iterator, but still more than NCCL based
+            # weight sync. Reads are still parallelized across up to multi_thread_safetensors_max_workers files at
+            # once, so layerwise buffers are still allocated for multiple layers at once. The blowup is bounded by the worker count
+            # rather than by the total file count -- lower `max_workers` to tighten the bound.
             from vllm.model_executor.model_loader.weight_utils import (
                 multi_thread_safetensors_weights_iterator,
             )
@@ -889,7 +905,7 @@ class DeltaCheckpointPublisher:
         self,
         base_model_path: str,
         sync_dir: str,
-        publish_staging_dir: Optional[str] = None,
+        publish_staging_dir: str,
         max_file_size_in_gb: float = 1.0,
         publish_num_workers: Optional[int] = None,
     ) -> None:
@@ -897,9 +913,7 @@ class DeltaCheckpointPublisher:
         self.sync_dir = sync_dir
         if publish_staging_dir is not None and _is_cloud_uri(publish_staging_dir):
             raise ValueError("publish_staging_dir must be a local filesystem path")
-        self.publish_staging_dir = (
-            Path(publish_staging_dir) if publish_staging_dir else _default_publish_staging_dir(sync_dir)
-        )
+        self.publish_staging_dir = Path(publish_staging_dir)
         # clear publish staging dir if files already exist.
         with FileLock(self.publish_staging_dir.parent / (self.publish_staging_dir.name + ".tmp.lock")):
             shutil.rmtree(self.publish_staging_dir, ignore_errors=True)
@@ -919,12 +933,7 @@ class DeltaCheckpointPublisher:
 
     @staticmethod
     def _current_rank() -> int:
-        """Global rank of this publisher process (0 when not running distributed).
-
-        Only rank 0 is the delta source: it computes and uploads deltas. Other
-        ranks still drain the chunk stream (to participate in the extractor's
-        collectives) but publish nothing.
-        """
+        """Global rank of this publisher process (0 when not running distributed)."""
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             return torch.distributed.get_rank()
         return 0
@@ -1100,6 +1109,7 @@ class DeltaCheckpointPublisher:
         target_version = base_version + 1
         publish_uri = _join_uri(self.sync_dir, _version_name(target_version))
         rank = self._current_rank()
+        # only rank 0 publishes
         is_source_rank = rank == 0
         stats = self._empty_stats()
         records: list[DeltaTensorRecord] = []
