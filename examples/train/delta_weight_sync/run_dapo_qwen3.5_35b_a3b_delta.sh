@@ -136,7 +136,7 @@ uv run --isolated --extra megatron --extra "$CLOUD_EXTRA" -m examples.train.algo
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.ckpt_interval=-1 \
+  trainer.ckpt_interval=20 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.policy.optimizer_config.lr=$LR \

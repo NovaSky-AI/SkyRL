@@ -788,10 +788,6 @@ class LocalCheckpointStore:
         checkpoint_dir = self._current_checkpoint_dir()
         files = _checkpoint_safetensors_files(checkpoint_dir)
         if load_format == "vllm_multi_thread_safetensors":
-            # NOTE (sumanthrh): this has lesser peak memory relative to the fastsafetensors iterator, but still more than NCCL based
-            # weight sync. Reads are still parallelized across up to multi_thread_safetensors_max_workers files at
-            # once, so layerwise buffers are still allocated for multiple layers at once. The blowup is bounded by the worker count
-            # rather than by the total file count -- lower `max_workers` to tighten the bound.
             from vllm.model_executor.model_loader.weight_utils import (
                 multi_thread_safetensors_weights_iterator,
             )

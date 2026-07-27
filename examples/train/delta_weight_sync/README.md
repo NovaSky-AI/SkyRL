@@ -35,5 +35,5 @@ bash examples/train/delta_weight_sync/run_dapo_qwen3.5_35b_a3b_delta.sh
 
 Use a unique `SYNC_DIR` per run. For `gs://` paths, GCS credentials and the
 `gcloud` CLI must be available on the trainer and inference workers. For
-`s3://` paths, install `s5cmd` on those workers. For shared filesystem paths,
-all workers must see the same path.
+`s3://` paths, ensure that S3 credentials are available on all the workers. 
+For shared filesystem paths, all workers must see the same path.
