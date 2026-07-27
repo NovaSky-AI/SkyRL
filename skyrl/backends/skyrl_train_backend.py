@@ -115,10 +115,6 @@ class SkyRLTrainBackend(AbstractBackend):
     """SkyRL-Train backend for supervised training."""
 
     def __init__(self, base_model: str, config: SkyRLTrainBackendOverrides):
-        logger.warning("=" * 80)
-        logger.warning("SkyRLTrainBackend is currently EXPERIMENTAL!")
-        logger.warning("=" * 80)
-
         if ray is None:
             raise ImportError(
                 "SkyRLTrainBackend requires `ray`. Install the appropriate extras (e.g. `--extra skyrl_train`)."
