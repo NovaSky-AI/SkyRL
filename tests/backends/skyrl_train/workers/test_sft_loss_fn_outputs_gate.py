@@ -5,6 +5,7 @@ skip, config-pop, and RL-ungated behavior. GPU parity lives in
 ``tests/backends/skyrl_train/gpu/gpu_ci/test_training_step.py``.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -46,6 +47,8 @@ def _make_cpu_policy_worker() -> PolicyWorkerBase:
     worker.scheduler = MagicMock()
     worker.scheduler.get_last_lr.return_value = [1e-4]
     worker.optimizer = MagicMock()
+    # Both loss branches scale by dp_size; real workers get this from init_model().
+    worker.mesh_rank = SimpleNamespace(dp_size=1)
     return worker
 
 
@@ -113,8 +116,6 @@ def _run_forward_backward_micro_rl(return_per_token_outputs=True):
     # Disable extra PPO terms so this test isolates loss_fn_outputs.
     worker.cfg.algorithm.use_kl_loss = False
     worker.cfg.algorithm.use_entropy_loss = False
-    worker.mesh_rank = MagicMock()
-    worker.mesh_rank.dp_size = 1
 
     action_log_probs = torch.full((BATCH_SIZE, NUM_ACTIONS), -0.5)
     model = MagicMock()
