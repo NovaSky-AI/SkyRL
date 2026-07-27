@@ -29,7 +29,7 @@ def _fft_dispatch_cfg(weight_sync_backend: str = "nccl") -> SimpleNamespace:
             ),
         ),
         generator=SimpleNamespace(
-            inference_engine=SimpleNamespace(weight_sync_backend=weight_sync_backend),
+            inference_engine=SimpleNamespace(weight_sync_backend=weight_sync_backend, offload_kv_for_weight_sync=False),
         ),
     )
 
