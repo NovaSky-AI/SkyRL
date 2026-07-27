@@ -13,12 +13,16 @@ from skyrl.train.config import SkyRLTrainConfig
 
 
 def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monkeypatch):
-    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+    import transformers
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path: [])
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen3_5_text", layer_types=[]),
+    )
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
-    ie_cfg.fp8_weight_sync_mode = "serialized_blockwise"
+    ie_cfg.serialized_weight_sync_mode = "serialized_blockwise"
     engine_kwargs = {"hf_overrides": {"rope_theta": 10000.0}}
 
     _apply_serialized_fp8_weight_sync_defaults(ie_cfg, engine_kwargs, model_path="qwen35-test")
@@ -34,16 +38,12 @@ def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monke
 
 
 def test_serialized_mxfp8_weight_sync_configures_modelopt_experts(monkeypatch):
-    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+    import transformers
 
     monkeypatch.setattr(
-        inference_utils,
-        "_serialized_mxfp8_quantization_config",
-        lambda _model_path: {
-            "quant_method": "modelopt",
-            "quant_algo": "MXFP8",
-            "ignore": ["*.self_attn.*"],
-        },
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen3_moe"),
     )
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
@@ -59,7 +59,17 @@ def test_serialized_mxfp8_weight_sync_configures_modelopt_experts(monkeypatch):
             "quantization_config": {
                 "quant_method": "modelopt",
                 "quant_algo": "MXFP8",
-                "ignore": ["*.self_attn.*"],
+                "ignore": [
+                    "*.self_attn.*",
+                    "*.linear_attn.*",
+                    "*.mlp.gate",
+                    "*.mlp.gate_up_proj",
+                    "*.mlp.down_proj",
+                    "*.mlp.shared_expert*",
+                    "*lm_head*",
+                    "*.visual.*",
+                    "mtp.*",
+                ],
             }
         },
     }
@@ -84,9 +94,13 @@ def test_serialized_mxfp8_requires_bfloat16():
     ],
 )
 def test_serialized_fp8_weight_sync_rejects_conflicting_vllm_settings(engine_kwargs, monkeypatch):
-    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+    import transformers
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path: [])
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen3_5_text", layer_types=[]),
+    )
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.fp8_weight_sync_mode = "serialized_blockwise"
 

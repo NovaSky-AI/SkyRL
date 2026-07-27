@@ -11,15 +11,12 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
 )
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
-from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
-    SERIALIZED_BLOCKWISE_FP8,
+from skyrl.backends.skyrl_train.weight_sync.serialization import (
     SERIALIZED_MXFP8,
     get_hf_model_type,
-    get_moe_architecture_spec,
-    get_qwen35_fp8_ignored_layers,
-    get_serialized_fp8_quantization_config,
-    get_serialized_mxfp8_quantization_config,
-    is_qwen35_config,
+    get_serialized_weight_strategy,
+    get_serialized_weight_sync_mode,
+    resolve_model_quantization_spec,
 )
 from skyrl.train.config import (
     InferenceEngineConfig,
@@ -30,38 +27,25 @@ from skyrl.train.config import (
 logger = logging.getLogger(__name__)
 
 
-def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
+def _load_serialized_quantization_context(mode: str, model_path: Optional[str]):
     if not model_path:
-        raise ValueError("A model path is required when serialized FP8 weight sync is enabled")
+        raise ValueError("A model path is required when serialized weight sync is enabled")
     try:
         from transformers import AutoConfig
 
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     except Exception as exc:
         raise RuntimeError(
-            "Could not inspect the model config required to derive serialized FP8 ignored layers: "
-            f"model_path={model_path!r}"
+            f"Could not inspect the model config required for serialized weight sync: model_path={model_path!r}"
         ) from exc
-    if not is_qwen35_config(hf_config):
-        raise ValueError(
-            f"Serialized FP8 weight sync currently supports only Qwen3.5 checkpoint layouts; model_path={model_path!r}"
-        )
-    return get_qwen35_fp8_ignored_layers(hf_config)
 
-
-def _serialized_mxfp8_quantization_config(model_path: Optional[str]) -> dict:
-    if not model_path:
-        raise ValueError("A model path is required when serialized MXFP8 weight sync is enabled")
-    try:
-        from transformers import AutoConfig
-
-        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Could not inspect the model config required for serialized MXFP8 weight sync: model_path={model_path!r}"
-        ) from exc
-    get_moe_architecture_spec(get_hf_model_type(hf_config))
-    return get_serialized_mxfp8_quantization_config()
+    strategy = get_serialized_weight_strategy(mode)
+    model_type = get_hf_model_type(hf_config)
+    model_spec = resolve_model_quantization_spec(model_type)
+    strategy.validate_model_type(model_type, model_path)
+    if model_spec is None:
+        raise ValueError(f"No model quantization spec matched model_type={model_type!r}")
+    return strategy, hf_config, model_spec
 
 
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
@@ -72,32 +56,22 @@ def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, contex
     mapping[key] = copy.deepcopy(expected)
 
 
-def _apply_serialized_fp8_weight_sync_defaults(
+def _apply_serialized_weight_sync_defaults(
     ie_cfg: InferenceEngineConfig,
     engine_kwargs: Dict[str, Any],
     model_path: Optional[str] = None,
 ) -> None:
-    """Configure vLLM for checkpoint-format FP8 weight reloads."""
+    """Configure vLLM for serialized checkpoint weight reloads."""
 
-    mode = ie_cfg.fp8_weight_sync_mode
+    mode = get_serialized_weight_sync_mode(ie_cfg)
     if mode is None:
         return
-    if mode == SERIALIZED_BLOCKWISE_FP8:
-        quantization = "fp8"
-    elif mode == SERIALIZED_MXFP8:
-        if ie_cfg.model_dtype != "bfloat16":
-            raise ValueError("serialized_mxfp8 weight sync requires model_dtype='bfloat16'")
-        quantization = "modelopt_mxfp8"
-    else:
-        raise ValueError(
-            f"Unsupported fp8_weight_sync_mode={mode!r}. "
-            f"Supported values: {SERIALIZED_BLOCKWISE_FP8!r}, {SERIALIZED_MXFP8!r}."
-        )
+    strategy = get_serialized_weight_strategy(mode)
+    if strategy.required_model_dtype is not None and ie_cfg.model_dtype != strategy.required_model_dtype:
+        raise ValueError(f"{mode} weight sync requires model_dtype={strategy.required_model_dtype!r}")
 
-    _set_or_validate(engine_kwargs, "quantization", quantization, context="engine_init_kwargs")
-    # Build FP8 modules without a bootstrap checkpoint; the first full-weight
-    # sync replaces the dummy values.
-    _set_or_validate(engine_kwargs, "load_format", "dummy", context="engine_init_kwargs")
+    _set_or_validate(engine_kwargs, "quantization", strategy.vllm_quantization, context="engine_init_kwargs")
+    _set_or_validate(engine_kwargs, "load_format", strategy.vllm_load_format, context="engine_init_kwargs")
 
     hf_overrides_value = engine_kwargs.get("hf_overrides")
     hf_overrides = {} if hf_overrides_value is None else copy.deepcopy(hf_overrides_value)
@@ -112,21 +86,16 @@ def _apply_serialized_fp8_weight_sync_defaults(
             "when serialized FP8 weight sync is enabled"
         )
 
-    if mode == SERIALIZED_BLOCKWISE_FP8:
-        ignored_layers = _serialized_fp8_ignored_layers(model_path)
-        if ignored_layers:
-            logger.info(
-                "Serialized FP8 weight sync will leave %d vLLM modules unquantized "
-                "to match the Qwen3.5 serialized FP8 policy.",
-                len(ignored_layers),
-            )
-        serialized_quantization_config = get_serialized_fp8_quantization_config(
-            ignored_layers=ignored_layers,
+    strategy, hf_config, model_spec = _load_serialized_quantization_context(mode, model_path)
+    serialized_config = strategy.vllm_config(ie_cfg, hf_config, model_spec)
+    ignored_layers = serialized_config.quantization_config.get("ignored_layers", [])
+    if ignored_layers:
+        logger.info(
+            "Serialized weight sync will leave %d vLLM modules unquantized.",
+            len(ignored_layers),
         )
-    else:
-        serialized_quantization_config = _serialized_mxfp8_quantization_config(model_path)
 
-    for key, value in serialized_quantization_config.items():
+    for key, value in serialized_config.quantization_config.items():
         _set_or_validate(
             qcfg,
             key,
@@ -137,13 +106,23 @@ def _apply_serialized_fp8_weight_sync_defaults(
     engine_kwargs["hf_overrides"] = hf_overrides
 
 
+def _apply_serialized_fp8_weight_sync_defaults(
+    ie_cfg: InferenceEngineConfig,
+    engine_kwargs: Dict[str, Any],
+    model_path: Optional[str] = None,
+) -> None:
+    """Compatibility wrapper for serialized FP8 configuration."""
+
+    _apply_serialized_weight_sync_defaults(ie_cfg, engine_kwargs, model_path)
+
+
 def apply_expert_mxfp8_rollout_config(args: Namespace, cfg: SkyRLTrainConfig, engine_kwargs: dict) -> None:
     """Configure expert-only online MXFP8 in vLLM."""
 
     expert_mxfp8 = cfg.trainer.policy.model.expert_mxfp8
     if not expert_mxfp8.enabled or not expert_mxfp8.rollout:
         return
-    if cfg.generator.inference_engine.fp8_weight_sync_mode == SERIALIZED_MXFP8:
+    if get_serialized_weight_sync_mode(cfg.generator.inference_engine) == SERIALIZED_MXFP8:
         return
     if cfg.generator.inference_engine.model_dtype not in ("bfloat16", "float16"):
         raise ValueError("Expert MXFP8 rollout requires model_dtype=bfloat16 or float16")
@@ -287,7 +266,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
-    _apply_serialized_fp8_weight_sync_defaults(
+    _apply_serialized_weight_sync_defaults(
         ie_cfg,
         engine_kwargs,
         cfg.trainer.policy.model.path,

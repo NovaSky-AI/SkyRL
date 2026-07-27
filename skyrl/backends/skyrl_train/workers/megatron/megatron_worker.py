@@ -50,15 +50,15 @@ from skyrl.backends.skyrl_train.weight_sync import (
     WeightChunk,
     WeightExtractor,
 )
-from skyrl.backends.skyrl_train.weight_sync.megatron_bridge_mappings import (
-    get_packed_qwen3_moe_conversion_tasks,
-)
-from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
+from skyrl.backends.skyrl_train.weight_sync.serialization import (
+    ExpertExportLayout,
     get_hf_model_type,
-    iter_serialized_fp8_tensors,
-    serialized_fp8_config_for_mode,
-    should_use_serialized_fp8,
+    get_model_quantization_spec,
+    get_serialized_weight_strategy,
+    get_serialized_weight_sync_mode,
+    iter_serialized_weight_tensors,
 )
+from skyrl.backends.skyrl_train.weight_sync.serialization.bridge_export import get_serialized_conversion_tasks
 from skyrl.backends.skyrl_train.workers.megatron._fp8_block_amax_epsilon_patch import (
     apply_fp8_block_amax_epsilon_patch,
 )
@@ -125,6 +125,7 @@ class MegatronWeightExtractor(WeightExtractor):
         bucket_size_threshold_GB: float = 1.0,
         training_dtype: torch.dtype = torch.bfloat16,
         fp8_weight_sync_mode: Optional[str] = None,
+        serialized_weight_sync_mode: Optional[str] = None,
         model_type: Optional[str] = None,
     ):
         self.bridge = bridge
@@ -132,16 +133,26 @@ class MegatronWeightExtractor(WeightExtractor):
         self.enable_bucketing = enable_bucketing
         self.bucket_size_threshold_GB = bucket_size_threshold_GB
         self.training_dtype = training_dtype
-        if fp8_weight_sync_mode is None:
-            self.serialized_fp8_config = None
-        elif should_use_serialized_fp8(fp8_weight_sync_mode):
-            self.serialized_fp8_config = serialized_fp8_config_for_mode(
-                fp8_weight_sync_mode,
-                model_type=model_type,
-            )
+        if fp8_weight_sync_mode is not None and serialized_weight_sync_mode is not None:
+            raise ValueError("Set only one of serialized_weight_sync_mode and fp8_weight_sync_mode")
+        self.serialized_weight_sync_mode = serialized_weight_sync_mode or fp8_weight_sync_mode
+        self.serialized_weight_strategy = (
+            get_serialized_weight_strategy(self.serialized_weight_sync_mode)
+            if self.serialized_weight_sync_mode is not None
+            else None
+        )
+        self.model_type = model_type
+        if self.serialized_weight_strategy is not None:
+            if model_type is None:
+                raise ValueError("Serialized weight sync requires model_type")
+            self.serialized_weight_strategy.validate_model_type(model_type)
+            self.model_quantization_spec = get_model_quantization_spec(model_type)
         else:
-            raise ValueError(f"Unsupported fp8_weight_sync_mode={fp8_weight_sync_mode!r}")
-        self._packed_qwen3_moe_export = self.serialized_fp8_config is not None and model_type == "qwen3_moe"
+            self.model_quantization_spec = None
+        self._uses_custom_conversion_tasks = (
+            self.model_quantization_spec is not None
+            and self.model_quantization_spec.expert_export_layout is ExpertExportLayout.PACKED
+        )
 
         # Defer bucket init to first extract_weights call.
         # At __init__ time the model may be CPU-offloaded (colocate_all),
@@ -152,8 +163,12 @@ class MegatronWeightExtractor(WeightExtractor):
         self._buckets_initialized = False
 
     def _get_conversion_tasks(self):
-        if self._packed_qwen3_moe_export:
-            return get_packed_qwen3_moe_conversion_tasks(self.bridge, self.actor_module)
+        if self._uses_custom_conversion_tasks:
+            return get_serialized_conversion_tasks(
+                self.bridge,
+                self.actor_module,
+                self.model_quantization_spec,
+            )
         return self.bridge.get_conversion_tasks(self.actor_module)
 
     def _init_param_buckets(self):
@@ -244,9 +259,9 @@ class MegatronWeightExtractor(WeightExtractor):
         (tensors are discarded immediately). Result is cached for subsequent calls.
         TODO (aaron): find a better way to get all metadata without materializing tensors.
         """
-        if self.serialized_fp8_config is not None:
+        if self.serialized_weight_strategy is not None:
             raise RuntimeError(
-                "Serialized FP8 metadata depends on quantized tensor contents; "
+                "Serialized weight metadata depends on quantized tensor contents; "
                 "consume extract_weights() chunks instead."
             )
         if hasattr(self, "_weight_metadata_cache"):
@@ -303,9 +318,16 @@ class MegatronWeightExtractor(WeightExtractor):
         dtype: torch.dtype,
         device: int,
     ):
-        if self.serialized_fp8_config is not None:
+        if self.serialized_weight_strategy is not None:
             tensor = tensor.to(device=device, non_blocking=True)
-            return iter_serialized_fp8_tensors(name, tensor, dtype, self.serialized_fp8_config)
+            return iter_serialized_weight_tensors(
+                name,
+                tensor,
+                dtype,
+                self.model_quantization_spec,
+                self.serialized_weight_strategy,
+                model_type=self.model_type,
+            )
         return [(name, tensor.to(device=device, dtype=dtype, non_blocking=True))]
 
     def extract_weights(self, dtype: torch.dtype):
@@ -325,7 +347,7 @@ class MegatronWeightExtractor(WeightExtractor):
             hf_params_generator = self.bridge.export_hf_weights(
                 self.actor_module,
                 show_progress=False,
-                conversion_tasks=self._get_conversion_tasks() if self._packed_qwen3_moe_export else None,
+                conversion_tasks=self._get_conversion_tasks() if self._uses_custom_conversion_tasks else None,
             )
 
             for name, tensor in hf_params_generator:
@@ -1500,7 +1522,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             enable_bucketing=True,
             bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
-            fp8_weight_sync_mode=inference_engine_cfg.fp8_weight_sync_mode,
+            serialized_weight_sync_mode=get_serialized_weight_sync_mode(inference_engine_cfg),
             model_type=get_hf_model_type(self.strategy.hf_config),
         )
 
@@ -1600,7 +1622,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # VMM addresses expandable segments uses.
             with self._expandable_segments_disabled_for_sync():
                 weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
-                derive_metadata_from_chunks = self.weight_extractor.serialized_fp8_config is not None
+                derive_metadata_from_chunks = self.weight_extractor.serialized_weight_strategy is not None
                 weight_metadata = (
                     None if derive_metadata_from_chunks else self.weight_extractor.get_weight_metadata(generator_dtype)
                 )

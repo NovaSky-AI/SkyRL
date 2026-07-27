@@ -32,24 +32,12 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
 )
 from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
-from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
-    SKYRL_BATCHED_MOE_FP8_PREFIX,
+from skyrl.backends.skyrl_train.weight_sync.serialization import (
+    parse_serialized_wire_name,
+    resolve_serialized_receiver_target,
 )
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
-
-
-_BATCHED_MOE_TARGETS = {
-    ".experts.gate_proj.weight": (".experts.w13_weight", "w1"),
-    ".experts.up_proj.weight": (".experts.w13_weight", "w3"),
-    ".experts.down_proj.weight": (".experts.w2_weight", "w2"),
-    ".experts.gate_proj.weight_scale_inv": (".experts.w13_weight_scale_inv", "w1"),
-    ".experts.up_proj.weight_scale_inv": (".experts.w13_weight_scale_inv", "w3"),
-    ".experts.down_proj.weight_scale_inv": (".experts.w2_weight_scale_inv", "w2"),
-    ".experts.gate_proj.weight_scale": (".experts.w13_weight_scale", "w1"),
-    ".experts.up_proj.weight_scale": (".experts.w13_weight_scale", "w3"),
-    ".experts.down_proj.weight_scale": (".experts.w2_weight_scale", "w2"),
-}
 
 
 def _map_hf_weight_name(model: torch.nn.Module, name: str) -> str:
@@ -63,39 +51,33 @@ def _map_hf_weight_name(model: torch.nn.Module, name: str) -> str:
     return mapped[0]
 
 
-def _load_batched_moe_fp8_tensor(
+def _load_serialized_moe_tensor(
     model: torch.nn.Module,
     params_dict: dict[str, torch.nn.Parameter],
     wire_name: str,
     loaded_weight: torch.Tensor,
 ) -> bool:
-    """Load one expert-batched FP8 weight/scale through FusedMoE's loader.
+    """Load one serialized expert tensor through FusedMoE's loader.
 
     Returns ``False`` for ordinary checkpoint tensors. Marked tensors are
     required to resolve successfully so a protocol mismatch cannot silently
     leave stale rollout weights behind.
     """
-    if not wire_name.startswith(SKYRL_BATCHED_MOE_FP8_PREFIX):
+    parsed_name = parse_serialized_wire_name(wire_name)
+    if parsed_name is None:
         return False
     if loaded_weight.ndim != 3:
         raise ValueError(
             f"Batched MoE wire tensor must be 3D, got name={wire_name!r}, shape={tuple(loaded_weight.shape)}"
         )
 
-    checkpoint_name = wire_name.removeprefix(SKYRL_BATCHED_MOE_FP8_PREFIX)
+    mode, checkpoint_name = parsed_name
     mapped_name = _map_hf_weight_name(model, checkpoint_name)
-    target_name = None
-    shard_id = None
-    for checkpoint_suffix, (
-        target_suffix,
-        candidate_shard_id,
-    ) in _BATCHED_MOE_TARGETS.items():
-        if mapped_name.endswith(checkpoint_suffix):
-            target_name = mapped_name[: -len(checkpoint_suffix)] + target_suffix
-            shard_id = candidate_shard_id
-            break
-    if target_name is None or shard_id is None:
+    receiver_target = resolve_serialized_receiver_target(mode, mapped_name)
+    if receiver_target is None:
         raise ValueError(f"Unsupported batched MoE wire tensor name {wire_name!r}")
+    target_name = receiver_target.parameter_name
+    shard_id = receiver_target.shard_id
     if target_name not in params_dict:
         raise ValueError(f"Batched MoE target parameter {target_name!r} was not found for wire tensor {wire_name!r}")
 
@@ -141,15 +123,26 @@ def _load_batched_moe_fp8_tensor(
     return True
 
 
+def _load_batched_moe_fp8_tensor(
+    model: torch.nn.Module,
+    params_dict: dict[str, torch.nn.Parameter],
+    wire_name: str,
+    loaded_weight: torch.Tensor,
+) -> bool:
+    """Compatibility wrapper for serialized MoE tensors."""
+
+    return _load_serialized_moe_tensor(model, params_dict, wire_name, loaded_weight)
+
+
 def _load_checkpoint_weights(model: torch.nn.Module, weights: list[tuple[str, torch.Tensor]]) -> Any:
     """Load ordinary HF tensors plus SkyRL's compact batched-MoE tensors."""
     params_dict: dict[str, torch.nn.Parameter] | None = None
     ordinary_weights: list[tuple[str, torch.Tensor]] = []
     for name, weight in weights:
-        if name.startswith(SKYRL_BATCHED_MOE_FP8_PREFIX):
+        if parse_serialized_wire_name(name) is not None:
             if params_dict is None:
                 params_dict = dict(model.named_parameters())
-            _load_batched_moe_fp8_tensor(model, params_dict, name, weight)
+            _load_serialized_moe_tensor(model, params_dict, name, weight)
         else:
             ordinary_weights.append((name, weight))
     if ordinary_weights:

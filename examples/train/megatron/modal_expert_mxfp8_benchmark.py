@@ -155,7 +155,7 @@ def _run(mode: str, steps: int, max_prompt_length: int, max_generate_length: int
                 "trainer.policy.megatron_config.ddp_config.reuse_grad_buf_for_mxfp8_param_ag=true",
                 "trainer.policy.megatron_config.optimizer_config_kwargs.fp8_recipe=mxfp8",
                 "trainer.policy.megatron_config.optimizer_config_kwargs.reuse_grad_buf_for_mxfp8_param_ag=true",
-                "generator.inference_engine.fp8_weight_sync_mode=serialized_mxfp8",
+                "generator.inference_engine.serialized_weight_sync_mode=serialized_mxfp8",
             ]
         )
     started = time.perf_counter()

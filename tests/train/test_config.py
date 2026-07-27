@@ -201,6 +201,24 @@ def test_serialized_fp8_weight_sync_requires_megatron(mode):
         validate_inference_engine_cfg(cfg)
 
 
+def test_serialized_weight_sync_mode_rejects_legacy_alias_when_both_are_set():
+    cfg = _make_validated_test_config()
+    cfg.generator.inference_engine.serialized_weight_sync_mode = "serialized_mxfp8"
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "serialized_mxfp8"
+
+    with pytest.raises(ValueError, match="Set only one"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_serialized_weight_sync_mode_uses_registered_strategy_validation():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "fsdp"
+    cfg.generator.inference_engine.serialized_weight_sync_mode = "serialized_mxfp8"
+
+    with pytest.raises(ValueError, match="requires trainer.strategy='megatron'"):
+        validate_inference_engine_cfg(cfg)
+
+
 @pytest.mark.parametrize("mode", ["serialized_blockwise", "serialized_mxfp8"])
 def test_serialized_fp8_weight_sync_rejects_adapter_only_megatron_lora(mode):
     cfg = _make_validated_test_config()

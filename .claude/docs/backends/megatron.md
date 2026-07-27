@@ -32,7 +32,7 @@ expert-only online MXFP8. Checkpoints and weight sync remain high precision.
 Set `trainer.policy.model.expert_mxfp8.persistent=true` with
 `trainer.policy.megatron_config.ddp_config.fp8_param_gather=true` to keep
 routed-expert primary parameters in MXFP8 between optimizer steps. Set
-`generator.inference_engine.fp8_weight_sync_mode=serialized_mxfp8` to send
+`generator.inference_engine.serialized_weight_sync_mode=serialized_mxfp8` to send
 routed experts to vLLM as MXFP8 data and E8M0 scales. Unmerged LoRA is not
 supported.
 

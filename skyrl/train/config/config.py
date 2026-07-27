@@ -757,10 +757,10 @@ class InferenceEngineConfig(BaseConfig):
 
     model_dtype: str = "bfloat16"
     """Should match the dtype used by the inference engine."""
+    serialized_weight_sync_mode: Optional[str] = None
+    """Optional serialized rollout weight strategy."""
     fp8_weight_sync_mode: Optional[str] = None
-    """Optional rollout weight format. ``"serialized_blockwise"`` serializes
-    supported linears with 128x128 scales; ``"serialized_mxfp8"`` serializes
-    routed experts with 1x32 E8M0 scales."""
+    """Deprecated alias for ``serialized_weight_sync_mode``."""
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"

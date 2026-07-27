@@ -133,7 +133,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         if derive_metadata_from_chunks:
             if weight_metadata is not None:
                 raise ValueError("weight_metadata must be omitted when deriving metadata from chunks")
-            await self._send_serialized_fp8_chunks_vllm_native(chunks)
+            await self._send_serialized_weight_chunks_vllm_native(chunks)
         else:
             await self._send_chunks_vllm_native(chunks, weight_metadata)
 
@@ -188,11 +188,11 @@ class BroadcastWeightTransferSender(WeightTransferSender):
 
         torch.distributed.barrier()
 
-    async def _send_serialized_fp8_chunks_vllm_native(
+    async def _send_serialized_weight_chunks_vllm_native(
         self,
         chunks: Iterable[WeightChunk],
     ) -> None:
-        """Send lazy mixed-dtype serialized-FP8 chunks through vLLM NCCL."""
+        """Send lazy mixed-dtype serialized weight chunks through vLLM NCCL."""
         if torch.distributed.get_rank() == 0:
             await self._inference_client.start_weight_update(is_checkpoint_format=True)
 
