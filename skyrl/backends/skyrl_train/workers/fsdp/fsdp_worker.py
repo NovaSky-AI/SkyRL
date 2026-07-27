@@ -319,11 +319,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
-        sender_client = getattr(self._weight_transfer_sender, "_inference_client", None)
-        if inference_engine_client is not sender_client:
-            close_client = getattr(inference_engine_client, "aclose", None)
-            if close_client is not None:
-                await close_client()
 
     def _set_pad_token_id(self, pad_token_id):
         # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model.model -> AutoModelForCausalLM
