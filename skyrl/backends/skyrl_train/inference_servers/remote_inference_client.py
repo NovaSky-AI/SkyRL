@@ -722,6 +722,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     "tokens": choice["token_ids"],
                     "logprobs": seq_logprobs,
                     "stop_reason": choice.get("finish_reason"),
+                    # MoE routing indices (base64 .npy), present when the server
+                    # runs with enable_return_routed_experts. Passed through
+                    # verbatim; the client decodes.
+                    "routing_matrix": choice.get("routed_experts"),
                 }
             )
 

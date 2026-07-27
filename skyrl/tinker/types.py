@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Annotated, Any, Literal, TypedDict
 from urllib.parse import urlparse
 
+import numpy as np
 from pydantic import Base64Bytes, BaseModel, Discriminator, Field
 
 
@@ -142,6 +143,14 @@ class RenderedModelInput(BaseModel):
 
 class TensorData(BaseModel):
     data: list[int] | list[float]
+    dtype: Literal["int64", "float32"] | None = None
+    shape: list[int] | None = None
+    """Optional dtype/shape, matching the tinker SDK's TensorData wire format.
+    ``data`` is always the flattened values; ``shape`` restores dimensionality."""
+
+    def to_numpy(self) -> "np.ndarray":
+        arr = np.asarray(self.data)
+        return arr.reshape(self.shape) if self.shape is not None else arr
 
 
 class LossFnInputs(BaseModel):
@@ -151,6 +160,9 @@ class LossFnInputs(BaseModel):
     logprobs: TensorData
     values: TensorData = Field(default_factory=lambda: TensorData(data=[]))
     returns: TensorData = Field(default_factory=lambda: TensorData(data=[]))
+    routing_matrix: TensorData | None = None
+    """MoE rollout routing indices for replay, shape (num_input_tokens, num_moe_layers, topk).
+    Covers every forwarded token of ``model_input`` (the pre-shifted prompt + response[:-1])."""
 
 
 class Datum(BaseModel):
@@ -264,6 +276,11 @@ class GeneratedSequence(BaseModel):
     stop_reason: Literal["length", "stop"]
     tokens: list[int]
     logprobs: list[float]
+    routing_matrix: str | None = None
+    """MoE expert indices for every forwarded token (prompt + generated - 1), as
+    base64-encoded ``.npy`` bytes passed through from vLLM. Present only when the
+    server runs with ``enable_return_routed_experts``. Decode with
+    ``np.load(io.BytesIO(base64.b64decode(s)))``."""
 
 
 class SampleOutput(BaseModel):
@@ -295,6 +312,7 @@ class PreparedModelPassBatch(BaseModel):
     all_advantages: list[list[float]]
     all_values: list[list[float]]
     all_returns: list[list[float]]
+    all_routing_matrices: list[TensorData | None] = Field(default_factory=list)
 
     # Per-example scalars
     all_model_ids: list[str]

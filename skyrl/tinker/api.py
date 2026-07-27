@@ -417,9 +417,14 @@ class ModelInput(BaseModel):
 
 class TensorData(BaseModel):
     data: list[int] | list[float]
+    # Optional dtype/shape, matching the tinker SDK's TensorData wire format
+    # (the SDK flattens multi-dimensional arrays into `data` and sends the
+    # shape alongside).
+    dtype: Literal["int64", "float32"] | None = None
+    shape: list[int] | None = None
 
     def to_types(self) -> types.TensorData:
-        return types.TensorData(data=self.data)
+        return types.TensorData(data=self.data, dtype=self.dtype, shape=self.shape)
 
 
 class Datum(BaseModel):
@@ -442,6 +447,7 @@ class Datum(BaseModel):
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
                 values=inp["values"].to_types() if "values" in inp else types.TensorData(data=[]),
                 returns=inp["returns"].to_types() if "returns" in inp else types.TensorData(data=[]),
+                routing_matrix=inp["routing_matrix"].to_types() if "routing_matrix" in inp else None,
             ),
             model_input=self.model_input.to_types(),
         )
