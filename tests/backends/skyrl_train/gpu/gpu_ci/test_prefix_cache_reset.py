@@ -8,12 +8,9 @@ this.
 uv run --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_prefix_cache_reset.py
 """
 
-import ast
 from contextlib import contextmanager
-from typing import Dict
-from types import SimpleNamespace, ModuleType
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-import sys
 
 import pytest
 import torch
@@ -22,6 +19,7 @@ from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorker
 from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
     MegatronPolicyWorkerBase,
 )
+
 
 # TODO (sumanthrh): Ideally we avoid all this mocking with an easier way to construct dummy policy workers
 def _make_worker(worker_cls, handles_prefix_cache_reset: bool):
@@ -58,6 +56,7 @@ def _patch_collectives(monkeypatch):
 
 def _ie_cfg():
     return SimpleNamespace(enable_prefix_caching=True, model_dtype="bfloat16")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("worker_cls", [FSDPPolicyWorkerBase, MegatronPolicyWorkerBase])
