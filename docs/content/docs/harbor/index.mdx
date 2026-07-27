@@ -18,6 +18,7 @@ export DAYTONA_API_KEY=your_daytona_api_key
 # export MODAL_TOKEN_ID=your_modal_token_id
 # export MODAL_TOKEN_SECRET=your_modal_token_secret
 # export FYSTASH_API_KEY=your_fystash_api_key   # experimental; needs Harbor --env fystash
+# export FYSTASH_TEMPLATE_ID=default             # optional; docker for Dockerfile-heavy tasks
 # export FYSTASH_API=https://api.fystash.ai
 
 # 2. Prepare datasets (downloads from HuggingFace, extracts tasks to ~/data/harbor/)
@@ -386,7 +387,6 @@ uv run --isolated --extra fsdp --extra harbor \
   generator.inference_engine.served_model_name=Qwen3-8B \
   harbor_trial_config.trials_dir=$TRIALS_DIR \
   harbor_trial_config.environment.type=daytona \
-  # harbor_trial_config.environment.type=fystash \  # experimental; Harbor Fystash + FYSTASH_API_KEY
   trainer.algorithm.max_seq_len=32768 \
   generator.apply_overlong_filtering=true \
   generator.n_samples_per_prompt=8 \
@@ -395,6 +395,12 @@ uv run --isolated --extra fsdp --extra harbor \
   generator.rate_limit.enabled=true \
   generator.rate_limit.trajectories_per_second=5 \
   generator.rate_limit.max_concurrency=512
+```
+
+For experimental Fystash sandboxes (requires Harbor `--env fystash` + `FYSTASH_API_KEY`), swap the environment type:
+
+```bash
+  harbor_trial_config.environment.type=fystash \
 ```
 
 ### Metrics
