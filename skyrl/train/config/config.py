@@ -782,7 +782,7 @@ class DeltaWeightSyncConfig(BaseConfig):
     
     `vllm_multi_thread_safetensors` loads safetensor files from disk to CPU storage with N parallel workers using vLLM's native safetensors iterator. Tensors are then loaded onto GPU memory iterately.
 
-    `vllm_fasttensors` loads tensors from safetensor files on disk directly into GPU memory in a highly parallelized way.
+    `vllm_fastsafetensors` loads tensors from safetensor files on disk directly into GPU memory in a highly parallelized way.
     This setting is currently not recommended for large models because of large memory requirements.
     See: https://github.com/vllm-project/vllm/issues/48644 for more details
     """
