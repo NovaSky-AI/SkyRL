@@ -70,11 +70,7 @@ def configure_expert_mxfp8_provider(provider, *, persistent: bool = False) -> No
         raise ValueError("Expert MXFP8 requires moe_grouped_gemm=true")
     if provider.moe_router_dtype != "fp32":
         raise ValueError("Expert MXFP8 requires moe_router_dtype=fp32")
-    for option in (
-        "fp8_dot_product_attention",
-        "fp8_multi_head_attention",
-        "fp8_output_proj",
-    ):
+    for option in ("fp8_dot_product_attention", "fp8_multi_head_attention", "fp8_output_proj"):
         if getattr(provider, option, False):
             raise ValueError(f"Expert MXFP8 requires {option}=false")
     provider.fp8 = "e4m3"
@@ -115,11 +111,7 @@ def audit_expert_mxfp8_modules(model_chunks) -> int:
             targeted = is_routed_expert_linear(name)
             quantized = module.will_execute_quantized(True)
             quant_params = getattr(module, "te_quant_params", None)
-            recipe = getattr(
-                getattr(quant_params, "training_recipe", None),
-                "fp8_quantization_recipe",
-                None,
-            )
+            recipe = getattr(getattr(quant_params, "training_recipe", None), "fp8_quantization_recipe", None)
             uses_mxfp8 = getattr(recipe, "value", recipe) == "mxfp8"
             if targeted and (not quantized or not uses_mxfp8):
                 errors.append(f"{name} did not enable MXFP8")

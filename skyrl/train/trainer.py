@@ -1511,12 +1511,14 @@ class RayPPOTrainer:
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             for chunk_refs in all_chunk_refs:
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                with Timer(f"{model}_forward_backward", self.all_timings):
+                    status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
 
                 # Optimizer step after each mini batch
-                grad_norm = self.dispatch.optim_step(model)
+                with Timer(f"{model}_optim_step", self.all_timings):
+                    grad_norm = self.dispatch.optim_step(model)
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
 

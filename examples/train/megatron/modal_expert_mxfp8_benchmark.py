@@ -1,4 +1,4 @@
-"""Benchmark BF16 versus expert-only MXFP8 on one Modal node.
+"""Benchmark BF16 versus expert-only MXFP8 on DAPO with one Modal node.
 
 Run:
     uv run --isolated --with modal modal run --detach \
@@ -17,10 +17,12 @@ APP_NAME = "skyrl-expert-mxfp8-benchmark"
 MODEL = "Qwen/Qwen3-30B-A3B"
 REMOTE_REPO = "/root/SkyRL"
 HF_HOME = "/root/hf-cache"
-DATA_DIR = "/root/data/gsm8k"
+DATA_DIR = "/root/data/dapo"
+TRAIN_FILE = f"{DATA_DIR}/dapo-math-17k-cleaned.parquet"
+VAL_FILE = f"{DATA_DIR}/aime-2024-cleaned.parquet"
 PROFILE_ROOT = "/root/profiles"  # profiler
 PROFILE_COMMIT_INTERVAL_S = 120  # profiler
-GPU = os.environ.get("MODAL_GPU", "B200:8")
+GPU = os.environ.get("MODAL_GPU", "B300:8")
 
 
 def _repo_root() -> pathlib.Path:
@@ -70,14 +72,12 @@ image = (
 app = modal.App(APP_NAME)
 
 
-def _run(mode: str, steps: int) -> None:
+def _run(mode: str, steps: int, max_prompt_length: int, max_generate_length: int) -> None:
     import subprocess
     import time
 
-    train_file = f"{DATA_DIR}/train.parquet"
-    val_file = f"{DATA_DIR}/validation.parquet"
     enabled = str(mode == "mxfp8").lower()
-    run_name = f"qwen3-30b-a3b-{mode}"
+    run_name = f"qwen3-30b-a3b-dapo-{mode}"
     command = [
         "uv",
         "run",
@@ -86,9 +86,9 @@ def _run(mode: str, steps: int) -> None:
         "--extra",
         "megatron",
         "-m",
-        "skyrl.train.entrypoints.main_base",
-        f"data.train_data=['{train_file}']",
-        f"data.val_data=['{val_file}']",
+        "examples.train.algorithms.dapo.main_dapo",
+        f"data.train_data=['{TRAIN_FILE}']",
+        f"data.val_data=['{VAL_FILE}']",
         "trainer.strategy=megatron",
         f"trainer.policy.model.path={MODEL}",
         f"trainer.policy.model.expert_mxfp8.enabled={enabled}",
@@ -100,6 +100,7 @@ def _run(mode: str, steps: int) -> None:
         "generator.inference_engine.data_parallel_size=8",
         "generator.inference_engine.expert_parallel_size=8",
         "generator.inference_engine.distributed_executor_backend=mp",
+        "generator.inference_engine.enforce_eager=false",
         "generator.inference_engine.weight_sync_backend=nccl",
         "generator.inference_engine.gpu_memory_utilization=0.6",
         "trainer.policy.megatron_config.tensor_model_parallel_size=1",
@@ -108,6 +109,12 @@ def _run(mode: str, steps: int) -> None:
         "trainer.policy.megatron_config.expert_model_parallel_size=8",
         "trainer.policy.megatron_config.expert_tensor_parallel_size=1",
         "trainer.algorithm.advantage_estimator=grpo",
+        "trainer.algorithm.policy_loss_type=dual_clip",
+        "trainer.algorithm.loss_reduction=token_mean_legacy",
+        "trainer.algorithm.overlong_buffer_len=4096",
+        "trainer.algorithm.overlong_buffer_penalty_factor=1.0",
+        "trainer.algorithm.eps_clip_low=0.2",
+        "trainer.algorithm.eps_clip_high=0.28",
         "trainer.algorithm.use_kl_loss=false",
         "trainer.train_batch_size=64",
         "trainer.policy_mini_batch_size=64",
@@ -119,13 +126,14 @@ def _run(mode: str, steps: int) -> None:
         "trainer.hf_save_interval=0",
         "trainer.resume_mode=none",
         f"trainer.max_training_steps={steps}",
-        "trainer.max_prompt_length=512",
-        "generator.sampling_params.max_generate_length=512",
+        f"trainer.max_prompt_length={max_prompt_length}",
+        f"generator.sampling_params.max_generate_length={max_generate_length}",
+        "generator.apply_overlong_filtering=true",
         "generator.n_samples_per_prompt=8",
         "generator.batched=true",
-        "environment.env_class=gsm8k",
+        "environment.env_class=aime",
         # profiler
-        "trainer.policy.torch_profiler_config.enable=true",
+        "trainer.policy.torch_profiler_config.enable=false",
         "trainer.policy.torch_profiler_config.ranks=[0]",
         f"trainer.policy.torch_profiler_config.save_path={PROFILE_ROOT}/trainer/{mode}",
         "trainer.policy.torch_profiler_config.skip_first=3",
@@ -136,7 +144,7 @@ def _run(mode: str, steps: int) -> None:
         "trainer.policy.torch_profiler_config.record_shapes=false",
         "trainer.policy.torch_profiler_config.with_stack=false",
         "trainer.logger=wandb",
-        "trainer.project_name=skyrl-expert-mxfp8",
+        "trainer.project_name=skyrl-expert-mxfp8-dapo",
         f"trainer.run_name={run_name}",
     ]
     if mode == "mxfp8":
@@ -144,6 +152,9 @@ def _run(mode: str, steps: int) -> None:
             [
                 "trainer.policy.model.expert_mxfp8.persistent=true",
                 "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true",
+                "trainer.policy.megatron_config.ddp_config.reuse_grad_buf_for_mxfp8_param_ag=true",
+                "trainer.policy.megatron_config.optimizer_config_kwargs.fp8_recipe=mxfp8",
+                "trainer.policy.megatron_config.optimizer_config_kwargs.reuse_grad_buf_for_mxfp8_param_ag=true",
                 "generator.inference_engine.fp8_weight_sync_mode=serialized_mxfp8",
             ]
         )
@@ -162,18 +173,33 @@ def _run(mode: str, steps: int) -> None:
 
 @app.function(
     image=image,
+    cpu=4,
+    memory=16384,
     volumes={HF_HOME: hf_volume, "/root/data": data_volume},
     timeout=2 * 60 * 60,
 )
 def prepare_assets() -> None:
+    import shutil
     import subprocess
 
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download
 
     snapshot_download(MODEL)
     hf_volume.commit()
     os.makedirs(DATA_DIR, exist_ok=True)
-    if not os.path.exists(f"{DATA_DIR}/train.parquet"):
+    if not os.path.exists(TRAIN_FILE) or not os.path.exists(VAL_FILE):
+        train_download = hf_hub_download(
+            repo_id="BytedTsinghua-SIA/DAPO-Math-17k",
+            filename="data/dapo-math-17k.parquet",
+            repo_type="dataset",
+        )
+        val_download = hf_hub_download(
+            repo_id="BytedTsinghua-SIA/AIME-2024",
+            filename="data/aime-2024.parquet",
+            repo_type="dataset",
+        )
+        shutil.copyfile(train_download, f"{DATA_DIR}/dapo-math-17k.parquet")
+        shutil.copyfile(val_download, f"{DATA_DIR}/aime-2024.parquet")
         subprocess.run(
             [
                 "uv",
@@ -182,8 +208,9 @@ def prepare_assets() -> None:
                 "--no-sync",
                 "--extra",
                 "megatron",
-                "examples/train/gsm8k/gsm8k_dataset.py",
-                "--output_dir",
+                "-m",
+                "examples.train.algorithms.dapo.data_preprocess_dapo_aime",
+                "--data-dir",
                 DATA_DIR,
             ],
             cwd=REMOTE_REPO,
@@ -203,18 +230,25 @@ def prepare_assets() -> None:
     },  # profiler
     timeout=24 * 60 * 60,
 )
-def benchmark(mode: str, steps: int) -> None:
+def benchmark(mode: str, steps: int, max_prompt_length: int, max_generate_length: int) -> None:
     try:
-        _run(mode, steps)
+        _run(mode, steps, max_prompt_length, max_generate_length)
     finally:
         profile_volume.commit()  # profiler
 
 
 @app.local_entrypoint()
-def main(mode: str = "both", steps: int = 10) -> None:
+def main(
+    mode: str = "both",
+    steps: int = 10,
+    max_prompt_length: int = 2048,
+    max_generate_length: int = 4096,
+) -> None:
     if mode not in {"bf16", "mxfp8", "both"}:
         raise ValueError("mode must be bf16, mxfp8, or both")
+    if max_prompt_length <= 0 or max_generate_length <= 0:
+        raise ValueError("max_prompt_length and max_generate_length must be positive")
     prepare_assets.remote()
     modes = ("bf16", "mxfp8") if mode == "both" else (mode,)
     for selected in modes:
-        benchmark.remote(selected, steps)
+        benchmark.remote(selected, steps, max_prompt_length, max_generate_length)

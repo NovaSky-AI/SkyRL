@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field
 from math import isfinite
 from operator import index
@@ -96,11 +95,11 @@ _QWEN35_MOE_SPEC = MoeArchitectureSpec(
     batched=True,
 )
 _QWEN3_MOE_SPEC = MoeArchitectureSpec(
-    gate_up_suffixes=(".gate_proj.weight", ".up_proj.weight"),
-    down_suffix=".down_proj.weight",
-    gate_up_fused=False,
+    gate_up_suffixes=(".gate_up_proj",),
+    down_suffix=".down_proj",
+    gate_up_fused=True,
     vllm_projection_names=("gate_proj", "up_proj", "down_proj"),
-    batched=False,
+    batched=True,
 )
 MOE_ARCHITECTURE_SPECS = {
     "qwen3_moe": _QWEN3_MOE_SPEC,
@@ -117,9 +116,6 @@ _EXPERT_ONLY_MXFP8_IGNORED_MODULES = (
     "*lm_head*",
     "*.visual.*",
     "mtp.*",
-)
-_PER_EXPERT_WEIGHT_PATTERN = re.compile(
-    r"^(?P<base>.+\.mlp\.experts\.\d+)\.(?P<projection>gate_proj|up_proj|down_proj)\.weight$"
 )
 
 
@@ -473,21 +469,6 @@ def batched_moe_expert_spec(
     return None
 
 
-def is_per_expert_moe_weight(name: str, model_type: str) -> bool:
-    """Return whether a tensor is a registered per-expert HF projection."""
-
-    spec = get_moe_architecture_spec(model_type)
-    if spec.batched:
-        return False
-    match = _PER_EXPERT_WEIGHT_PATTERN.fullmatch(name)
-    suffixes = (*spec.gate_up_suffixes, spec.down_suffix)
-    return (
-        match is not None
-        and match.group("projection") in spec.vllm_projection_names
-        and name.endswith(suffixes)
-    )
-
-
 def iter_batched_moe_expert_fp8_tensors(
     name: str,
     tensor: torch.Tensor,
@@ -544,12 +525,6 @@ def iter_serialized_fp8_tensors(
 
     if batched_moe_expert_spec(name, config.model_type) is not None:
         yield from iter_batched_moe_expert_fp8_tensors(name, tensor, config)
-        return
-
-    if config.expert_only and config.model_type and is_per_expert_moe_weight(name, config.model_type):
-        q_weight, scale = mxfp8_cast_to_fp8(tensor)
-        yield name, q_weight
-        yield mxfp8_scale_name_for_weight(name), scale
         return
 
     if config.expert_only and ".mlp.experts." in name and tensor.ndim >= 2:

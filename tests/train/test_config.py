@@ -550,11 +550,17 @@ def test_expert_mxfp8_cli_overrides():
             "trainer.policy.model.expert_mxfp8.rollout=false",
             "trainer.policy.model.expert_mxfp8.persistent=true",
             "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true",
+            "trainer.policy.megatron_config.ddp_config.reuse_grad_buf_for_mxfp8_param_ag=true",
+            "trainer.policy.megatron_config.optimizer_config_kwargs.fp8_recipe=mxfp8",
+            "trainer.policy.megatron_config.optimizer_config_kwargs.reuse_grad_buf_for_mxfp8_param_ag=true",
         ]
     )
     assert cfg.trainer.policy.model.expert_mxfp8.enabled is True
     assert cfg.trainer.policy.model.expert_mxfp8.rollout is False
     assert cfg.trainer.policy.model.expert_mxfp8.persistent is True
+    assert cfg.trainer.policy.megatron_config.ddp_config.reuse_grad_buf_for_mxfp8_param_ag is True
+    assert cfg.trainer.policy.megatron_config.optimizer_config_kwargs["fp8_recipe"] == "mxfp8"
+    assert cfg.trainer.policy.megatron_config.optimizer_config_kwargs["reuse_grad_buf_for_mxfp8_param_ag"] is True
 
 
 def test_persistent_expert_mxfp8_requires_training():

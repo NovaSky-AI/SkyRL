@@ -208,6 +208,7 @@ class MegatronDDPConfig(BaseConfig):
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
     fp8_param_gather: bool = False
+    reuse_grad_buf_for_mxfp8_param_ag: bool = False
     average_in_collective: bool = True
 
 

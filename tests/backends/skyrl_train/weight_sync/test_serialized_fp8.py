@@ -16,7 +16,6 @@ from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
     get_qwen35_fp8_ignored_layers,
     get_serialized_fp8_quantization_config,
     get_serialized_mxfp8_quantization_config,
-    is_per_expert_moe_weight,
     is_quantizable_weight,
     is_quantizable_weight_shape,
     iter_serialized_fp8_tensors,
@@ -154,7 +153,7 @@ def test_serialized_mxfp8_mode_selects_registered_expert_layout():
     assert config.scaling_mode == MXFP8_1X32
     assert config.expert_only is True
     assert config.weight_block_size == (1, 32)
-    assert get_moe_architecture_spec(config.model_type).batched is False
+    assert get_moe_architecture_spec(config.model_type).batched is True
 
 
 def test_serialized_mxfp8_rejects_unknown_model_type():
@@ -329,14 +328,15 @@ def test_batched_qwen35_moe_experts_serialize_as_mxfp8():
     assert emitted[f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight_scale"].shape == (3, 128, 2)
 
 
-def test_qwen3_per_expert_weights_serialize_as_mxfp8_only():
+def test_qwen3_packed_expert_weights_serialize_as_mxfp8_only():
     config = serialized_fp8_config_for_mode(SERIALIZED_MXFP8, model_type="qwen3_moe")
-    expert_name = "model.layers.2.mlp.experts.4.gate_proj.weight"
-    expert = torch.randn(128, 64, dtype=torch.bfloat16)
+    base = "model.layers.2.mlp.experts"
+    gate_up = torch.randn(3, 64, 64, dtype=torch.bfloat16)
     attention = torch.randn(128, 64, dtype=torch.bfloat16)
 
-    assert is_per_expert_moe_weight(expert_name, "qwen3_moe")
-    expert_tensors = dict(iter_serialized_fp8_tensors(expert_name, expert, torch.bfloat16, config))
+    expert_tensors = dict(
+        iter_serialized_fp8_tensors(f"{base}.gate_up_proj", gate_up, torch.bfloat16, config)
+    )
     attention_tensors = list(
         iter_serialized_fp8_tensors(
             "model.layers.2.self_attn.q_proj.weight",
@@ -346,8 +346,12 @@ def test_qwen3_per_expert_weights_serialize_as_mxfp8_only():
         )
     )
 
-    assert expert_tensors[expert_name].dtype == torch.float8_e4m3fn
-    assert expert_tensors["model.layers.2.mlp.experts.4.gate_proj.weight_scale"].dtype == torch.uint8
+    assert set(expert_tensors) == {
+        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight",
+        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight_scale",
+        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.up_proj.weight",
+        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.up_proj.weight_scale",
+    }
     assert [(name, tensor.dtype) for name, tensor in attention_tensors] == [
         ("model.layers.2.self_attn.q_proj.weight", torch.bfloat16)
     ]

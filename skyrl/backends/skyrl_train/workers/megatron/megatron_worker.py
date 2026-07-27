@@ -50,6 +50,9 @@ from skyrl.backends.skyrl_train.weight_sync import (
     WeightChunk,
     WeightExtractor,
 )
+from skyrl.backends.skyrl_train.weight_sync.megatron_bridge_mappings import (
+    get_packed_qwen3_moe_conversion_tasks,
+)
 from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
     get_hf_model_type,
     iter_serialized_fp8_tensors,
@@ -138,6 +141,7 @@ class MegatronWeightExtractor(WeightExtractor):
             )
         else:
             raise ValueError(f"Unsupported fp8_weight_sync_mode={fp8_weight_sync_mode!r}")
+        self._packed_qwen3_moe_export = self.serialized_fp8_config is not None and model_type == "qwen3_moe"
 
         # Defer bucket init to first extract_weights call.
         # At __init__ time the model may be CPU-offloaded (colocate_all),
@@ -146,6 +150,11 @@ class MegatronWeightExtractor(WeightExtractor):
         # called prepare_for_weight_sync → _ensure_on_gpu.
         self.bucket_index_groups = None
         self._buckets_initialized = False
+
+    def _get_conversion_tasks(self):
+        if self._packed_qwen3_moe_export:
+            return get_packed_qwen3_moe_conversion_tasks(self.bridge, self.actor_module)
+        return self.bridge.get_conversion_tasks(self.actor_module)
 
     def _init_param_buckets(self):
         """Compute bucket boundaries (index groups) from parameter sizes.
@@ -164,7 +173,7 @@ class MegatronWeightExtractor(WeightExtractor):
         present in one call; splitting them across buckets causes expert
         weights to never be yielded.
         """
-        weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+        weight_conversion_tasks = self._get_conversion_tasks()
 
         def calculate_size_in_bytes(param, tp_size, ep_size):
             if param is None:
@@ -263,7 +272,7 @@ class MegatronWeightExtractor(WeightExtractor):
         else:
             # Build fresh tasks each sync so mapping objects have clean
             # PP-collective caches; reuse the pre-computed bucket structure.
-            fresh_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+            fresh_tasks = self._get_conversion_tasks()
             for index_group in self.bucket_index_groups:
                 bucket_tasks = [fresh_tasks[i] for i in index_group]
                 for name, tensor in self.bridge.export_hf_weights(
@@ -316,7 +325,7 @@ class MegatronWeightExtractor(WeightExtractor):
             hf_params_generator = self.bridge.export_hf_weights(
                 self.actor_module,
                 show_progress=False,
-                conversion_tasks=None,
+                conversion_tasks=self._get_conversion_tasks() if self._packed_qwen3_moe_export else None,
             )
 
             for name, tensor in hf_params_generator:
@@ -338,7 +347,7 @@ class MegatronWeightExtractor(WeightExtractor):
         else:
             # Build fresh tasks each sync so mapping objects have clean
             # PP-collective caches; reuse the pre-computed bucket structure.
-            fresh_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+            fresh_tasks = self._get_conversion_tasks()
 
             for index_group in self.bucket_index_groups:
                 bucket_tasks = [fresh_tasks[i] for i in index_group]
