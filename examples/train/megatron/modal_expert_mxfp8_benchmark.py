@@ -22,7 +22,7 @@ TRAIN_FILE = f"{DATA_DIR}/dapo-math-17k-cleaned.parquet"
 VAL_FILE = f"{DATA_DIR}/aime-2024-cleaned.parquet"
 PROFILE_ROOT = "/root/profiles"  # profiler
 PROFILE_COMMIT_INTERVAL_S = 120  # profiler
-GPU = os.environ.get("MODAL_GPU", "B300:8")
+GPU = os.environ.get("MODAL_GPU", "B200:8")
 
 
 def _repo_root() -> pathlib.Path:
@@ -40,7 +40,7 @@ data_volume = modal.Volume.from_name("skyrl-expert-mxfp8-data", create_if_missin
 profile_volume = modal.Volume.from_name("skyrl-expert-mxfp8-profiles", create_if_missing=True)  # profiler
 
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12")
+    modal.Image.from_registry("nvidia/cuda:12.9.1-devel-ubuntu22.04", add_python="3.12")
     .apt_install("git", "curl", "build-essential", "ca-certificates", "libnuma1", "numactl")
     .pip_install("huggingface-hub")
     .run_commands("curl -LsSf https://astral.sh/uv/install.sh | sh")
