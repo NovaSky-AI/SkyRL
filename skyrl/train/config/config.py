@@ -394,6 +394,15 @@ class MegatronConfig(BaseConfig):
     tokens (renormalized), ``O(seq*k)`` memory instead of ``O(seq*vocab)`` -- fits at large vocab
     without fragmentation. Reconciled across the TP group, so it scales to any parallel size.
     ``None`` uses the exact full-vocab loss. Typical: 64-128."""
+    async_dist_ckpt_save: bool = False
+    """Write the torch_dist checkpoint from a background process so training resumes
+    immediately; the pending write is finalized at the next checkpoint and at shutdown.
+    The on-disk format is identical to a synchronous save. Only the sharded
+    model/optimizer state is async -- the rank-0 HF config/tokenizer write stays inline.
+    Falls back to synchronous for cloud paths."""
+    async_dist_ckpt_strategy: str = "mcore"
+    """Backend for the async write. ``mcore`` needs no extra deps; megatron-core's own
+    default ``nvrx`` requires nvidia-resiliency-ext. Only used when async saves are on."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict
@@ -817,6 +826,14 @@ class InferenceEngineConfig(BaseConfig):
     enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
+    offload_kv_for_weight_sync: bool = False
+    """Non-colocated only. Sleep the engine (freeing the KV cache from GPU) during weight
+    sync so ``gpu_memory_utilization`` can be pushed higher without OOMing on the weight-
+    transfer buffers. On the fully-async trainer, in-flight requests are frozen (KEEP
+    pause) and, unless ``trainer.fully_async.clear_kv_cache_on_weight_sync`` is set, their
+    KV cache is offloaded to CPU and restored so they resume with no abort or prefill
+    recompute (at the cost of a GPU<->CPU copy of the KV pool each sync). Requires
+    non-colocated and non-LoRA weight sync."""
     use_expandable_segments: bool = False
     """Set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` on the inference-engine
     processes to reduce fragmentation. Independent of the trainer-side

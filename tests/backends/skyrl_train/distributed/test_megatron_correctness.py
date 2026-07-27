@@ -27,9 +27,7 @@ def _fft_dispatch_cfg(weight_sync_backend: str = "nccl") -> SimpleNamespace:
                 megatron_config=SimpleNamespace(lora_config=SimpleNamespace(merge_lora=False)),
             ),
         ),
-        generator=SimpleNamespace(
-            inference_engine=SimpleNamespace(weight_sync_backend=weight_sync_backend),
-        ),
+        generator=SimpleNamespace(inference_engine=SimpleNamespace(offload_kv_for_weight_sync=False, weight_sync_backend=weight_sync_backend)),
     )
 
 
