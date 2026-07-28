@@ -333,3 +333,125 @@ async def test_sft_forward_with_cross_entropy(ray_init_fixture, cfg, strategy):
     for out in result.loss_fn_outputs:
         assert "logprobs" in out and len(out["logprobs"]) == num_actions
         assert "elementwise_loss" in out and len(out["elementwise_loss"]) == num_actions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("strategy"),
+    ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp", "megatron"],
+)
+async def test_sft_forward_backward_return_per_token_outputs_gate(ray_init_fixture, cfg, strategy):
+    """The gate affects per-token outputs, not loss or consumed metrics."""
+    cfg.trainer.remove_microbatch_padding = False
+    cfg.trainer.strategy = strategy
+    if strategy == "megatron":
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = 2
+    validate_cfg(cfg)
+
+    try:
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        batch_size = dp_size * 2
+        num_actions = 4
+
+        def _run(return_per_token_outputs):
+            batch = make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions)
+            refs = actor_group.async_run_ray_method(
+                "mesh",
+                "forward_backward",
+                data=batch,
+                loss_fn="cross_entropy",
+                return_per_token_outputs=return_per_token_outputs,
+            )
+            return ray.get(refs)
+
+        kept_results = _run(True)
+        skipped_results = _run(False)
+
+        kept_outputs = []
+        skipped_outputs = []
+        for kept, skipped in zip(kept_results, skipped_results):
+            # Consumed metrics are unaffected by the gate.
+            assert kept.metrics["loss"] == skipped.metrics["loss"]
+            assert kept.metrics["response_length"] == skipped.metrics["response_length"]
+            assert kept.loss_fn_output_type == skipped.loss_fn_output_type == "scalar"
+            kept_outputs.extend(kept.loss_fn_outputs)
+            skipped_outputs.extend(skipped.loss_fn_outputs)
+
+        assert len(kept_outputs) == batch_size
+        assert len(skipped_outputs) == batch_size
+        for out in kept_outputs:
+            assert len(out["logprobs"]) == num_actions
+            assert len(out["elementwise_loss"]) == num_actions
+        for out in skipped_outputs:
+            assert out == {}
+
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy",
+    ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp", "megatron"],
+)
+async def test_sft_forward_return_per_token_outputs_gate(ray_init_fixture, cfg, strategy):
+    """Eval uses the same per-token-output gate."""
+    cfg.trainer.remove_microbatch_padding = False
+    cfg.trainer.strategy = strategy
+    if strategy == "megatron":
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = 2
+    validate_cfg(cfg)
+
+    try:
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        batch_size = dp_size * 2
+        num_actions = 4
+        dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
+
+        kept = dispatch.forward(
+            "policy",
+            make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions),
+            loss_fn="cross_entropy",
+            return_per_token_outputs=True,
+        )
+        skipped = dispatch.forward(
+            "policy",
+            make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions),
+            loss_fn="cross_entropy",
+            return_per_token_outputs=False,
+        )
+
+        assert kept.metrics["loss"] == skipped.metrics["loss"]
+        assert kept.loss_fn_output_type == skipped.loss_fn_output_type == "scalar"
+        assert len(kept.loss_fn_outputs) == batch_size
+        assert len(skipped.loss_fn_outputs) == batch_size
+        for out in kept.loss_fn_outputs:
+            assert len(out["logprobs"]) == num_actions
+            assert len(out["elementwise_loss"]) == num_actions
+        for out in skipped.loss_fn_outputs:
+            assert out == {}
+
+    finally:
+        ray.shutdown()

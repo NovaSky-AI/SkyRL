@@ -8,6 +8,43 @@ By default, the example uses the [Alpaca-Cleaned](https://huggingface.co/dataset
 
 You can switch to a different dataset by overriding `train_datasets` and `train_dataset_splits` on the command line, or train on a weighted mixture of several datasets (see [Multi-dataset training](#multi-dataset-training-and-evaluation)). The singular `dataset_name`/`dataset_split` (and `eval_dataset_name`/`eval_dataset_split`) fields are deprecated: they still work but emit a `DeprecationWarning` and are translated to the list form internally.
 
+### Pretokenized datasets
+
+If your data pipeline tokenizes offline, point the trainer directly at the pretokenized store to skip
+online tokenization (`tokenize_chat_example` / `tokenize_sft_example`) entirely:
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    "pretokenized_dataset_paths=['$HOME/data/tokenized-train']" \
+    "eval_pretokenized_dataset_paths=['$HOME/data/tokenized-eval']"  # optional
+```
+
+Each entry of `pretokenized_dataset_paths` is a local path to a file or directory in any of these formats
+(auto-detected): Parquet, JSON-lines, raw Arrow IPC files, or a HuggingFace `Dataset.save_to_disk` directory.
+Like `train_datasets`, multiple stores are concatenated and mixed per `train_dataset_weights`; multiple eval
+stores are evaluated separately under `eval/{name}/`, with names from `eval_dataset_names` (defaulting to each
+path's basename).
+
+Each row must contain:
+
+- `input_ids` — unpadded token ids for the full sequence (SkyRL pads at collation time);
+- `loss_mask` — full-sequence 0/1 mask, same length as `input_ids`: 1 on tokens to compute loss on;
+- for VLM data: `pixel_values` and `image_grid_thw` (Qwen-style image tensors, stored as nested lists).
+
+```python
+# Instruction-following: 3 prompt tokens, loss on the 2 response tokens.
+{"input_ids": [5091, 374, 220, 8949, 13], "loss_mask": [0, 0, 0, 1, 1]}
+
+# Multi-turn: loss on every assistant turn; 0s on the user turn between them.
+{"input_ids": [5091, 374, 8949, 220, 748], "loss_mask": [0, 1, 1, 0, 1]}
+```
+
+Rows are normalized to the trainer's internal format; `max_length` truncation still applies (rows whose loss
+window is fully truncated are dropped, and over-length VLM rows are always dropped rather than truncated).
+`pretokenized_dataset_paths` cannot be combined with `train_datasets` (nor `eval_pretokenized_dataset_paths`
+with `eval_datasets`) — a run either tokenizes online or ingests pretokenized stores. See
+[`skyrl/train/dataset/pretokenized.py`](../../../skyrl/train/dataset/pretokenized.py) for details.
+
 ## Quickstart
 
 ### FSDP (single GPU)
@@ -88,9 +125,11 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `train_datasets` | `[yahma/alpaca-cleaned]` | List of HuggingFace dataset names to train on; multiple entries are mixed per `train_dataset_weights` |
 | `train_dataset_splits` | `[train[:100]]` | Split/slice per training dataset (same length as `train_datasets`) |
 | `train_dataset_weights` | equal (`1/N`) | Per-dataset sampling ratios within a batch, independent of dataset sizes; `sampler=random` only |
+| `pretokenized_dataset_paths` | `None` | List of local paths to pretokenized datasets (Parquet/JSONL/Arrow/`save_to_disk`); skips tokenization, mixed per `train_dataset_weights`; exclusive with `train_datasets` |
 | `eval_datasets` | `None` | List of eval dataset names; `None` disables eval. Metrics logged under `eval/{name}/` |
 | `eval_dataset_splits` | `None` | Split per eval dataset (same length as `eval_datasets`) |
 | `eval_dataset_names` | dataset names | Shorthand names used only for logging (`eval/{name}/loss`); must be unique |
+| `eval_pretokenized_dataset_paths` | `None` | Same as `pretokenized_dataset_paths`, for eval; exclusive with `eval_datasets`, logged under `eval/{name}/` (names from `eval_dataset_names`, default path basenames) |
 | `dataset_name` / `dataset_split` | deprecated | Use `train_datasets` / `train_dataset_splits` (still accepted with a `DeprecationWarning`) |
 | `eval_dataset_name` / `eval_dataset_split` | deprecated | Use `eval_datasets` / `eval_dataset_splits` |
 | `max_length` | `None` | Maximum sequence length |

@@ -394,6 +394,15 @@ class MegatronConfig(BaseConfig):
     tokens (renormalized), ``O(seq*k)`` memory instead of ``O(seq*vocab)`` -- fits at large vocab
     without fragmentation. Reconciled across the TP group, so it scales to any parallel size.
     ``None`` uses the exact full-vocab loss. Typical: 64-128."""
+    async_dist_ckpt_save: bool = False
+    """Write the torch_dist checkpoint from a background process so training resumes
+    immediately; the pending write is finalized at the next checkpoint and at shutdown.
+    The on-disk format is identical to a synchronous save. Only the sharded
+    model/optimizer state is async -- the rank-0 HF config/tokenizer write stays inline.
+    Falls back to synchronous for cloud paths."""
+    async_dist_ckpt_strategy: str = "mcore"
+    """Backend for the async write. ``mcore`` needs no extra deps; megatron-core's own
+    default ``nvrx`` requires nvidia-resiliency-ext. Only used when async saves are on."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict
@@ -550,6 +559,18 @@ class CISPOConfig(BaseConfig):
     
     The upper bound used is ``1+cispo_eps_clip_high``. The default upper bound is 5 following the ScaleRL recipe: https://arxiv.org/abs/2510.13786
     """
+    cispo_anchor: str = "old"
+    """Behavior policy the IS ratio is anchored on: ``"old"`` (default) uses the recomputed
+    old log-probs (``ratio = pi_theta / pi_old``), matching the original CISPO paper. ``"rollout"``
+    uses the rollout/sampler log-probs (``ratio = pi_theta / pi_rollout``), which makes the clamped
+    objective engage under fully-async training where the sampler lags the trainer (with ``"old"``
+    the ratio is ~1 at a single gradient step and the clamp never bites). With ``"rollout"`` the
+    ratio is the full off-policy correction, so ``off_policy_correction.tis_ratio_type`` must be
+    ``None`` (else the off-policy gap is double-counted)."""
+
+    def __post_init__(self):
+        if self.cispo_anchor not in ("old", "rollout"):
+            raise ValueError(f"cispo_anchor must be 'old' or 'rollout', got {self.cispo_anchor!r}")
 
 
 # DPPO parameters (only used when policy_loss_type="dppo")
@@ -768,6 +789,14 @@ class InferenceEngineConfig(BaseConfig):
     enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
+    offload_kv_for_weight_sync: bool = False
+    """Non-colocated only. Sleep the engine (freeing the KV cache from GPU) during weight
+    sync so ``gpu_memory_utilization`` can be pushed higher without OOMing on the weight-
+    transfer buffers. On the fully-async trainer, in-flight requests are frozen (KEEP
+    pause) and, unless ``trainer.fully_async.clear_kv_cache_on_weight_sync`` is set, their
+    KV cache is offloaded to CPU and restored so they resume with no abort or prefill
+    recompute (at the cost of a GPU<->CPU copy of the KV pool each sync). Requires
+    non-colocated and non-LoRA weight sync."""
     use_expandable_segments: bool = False
     """Set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` on the inference-engine
     processes to reduce fragmentation. Independent of the trainer-side
@@ -1005,6 +1034,12 @@ class TrainerConfig(BaseConfig):
     This lowers peak GPU memory at the cost of ~2x wall-clock time.
     ``None`` disables chunking (Megatron backend only; FSDP requires a positive int).
     See https://github.com/NovaSky-AI/SkyRL/pull/1610 for more details."""
+    vocab_entropy_chunk_size: Optional[int] = 0
+    """Chunk size along the sequence dimension when computing Megatron vocab entropy.
+    ``0`` auto-sizes from the local vocab shard size and ``vocab_entropy_chunk_memory_mb``.
+    ``None`` disables chunking."""
+    vocab_entropy_chunk_memory_mb: int = 512
+    """Approximate per-chunk temporary memory budget for auto-sized Megatron vocab entropy chunks."""
     fused_lm_head_logprob: bool = False
     """Megatron only. Fuse the LM-head projection into log-prob / entropy
     computation so the full ``[B, S, vocab//TP]`` logits tensor is never
@@ -1055,6 +1090,24 @@ class TrainerConfig(BaseConfig):
             raise ValueError(
                 "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
                 f"got {self.fused_lm_head_logprob_backend!r}."
+            )
+        if self.vocab_entropy_chunk_size is not None and (
+            isinstance(self.vocab_entropy_chunk_size, bool)
+            or not isinstance(self.vocab_entropy_chunk_size, int)
+            or self.vocab_entropy_chunk_size < 0
+        ):
+            raise ValueError(
+                "vocab_entropy_chunk_size must be a non-negative integer or None, "
+                f"got {self.vocab_entropy_chunk_size!r}."
+            )
+        if (
+            isinstance(self.vocab_entropy_chunk_memory_mb, bool)
+            or not isinstance(self.vocab_entropy_chunk_memory_mb, int)
+            or self.vocab_entropy_chunk_memory_mb <= 0
+        ):
+            raise ValueError(
+                "vocab_entropy_chunk_memory_mb must be a positive integer, "
+                f"got {self.vocab_entropy_chunk_memory_mb!r}."
             )
 
 
