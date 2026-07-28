@@ -299,16 +299,31 @@ class MegatronStrategy(DistributedStrategy):
             save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
         )
 
+        async_save = self.megatron_config.async_dist_ckpt_save
+        if async_save and io.is_cloud_path(ckpt_dir):
+            # local_work_dir uploads on context exit, which would race the still-running
+            # background write. Async is only safe writing in-place to a local/shared FS.
+            self.print(f"async_dist_ckpt_save unsupported for cloud path {ckpt_dir}; saving synchronously")
+            async_save = False
+        if async_save:
+            # The queue holds one in-flight write; the prior checkpoint dir must be
+            # fully written before this save reuses it.
+            ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
+
         with io.local_work_dir(ckpt_dir) as work_dir:
-            # TODO(tgriggs): Support configurable async saves.
             async_save_request = dist_checkpointing.save(
                 sharded_state_dict=sharded_state_dict,
                 checkpoint_dir=work_dir,
                 sharded_strategy=save_strategy,
-                async_sharded_save=False,
+                async_sharded_save=async_save,
+                async_strategy=self.megatron_config.async_dist_ckpt_strategy,
                 validate_access_integrity=True,
             )
-            assert async_save_request is None, "Async save is not yet supported for Megatron"
+            if async_save:
+                # Shards are staged to host; the disk write runs in the background.
+                ckpt_base.async_calls.schedule_async_request(async_save_request)
+            else:
+                assert async_save_request is None, "save() must not return a request when sync"
 
             # Only global rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
@@ -319,9 +334,19 @@ class MegatronStrategy(DistributedStrategy):
             self._save_lora_adapters(unwrapped_model, ckpt_dir)
 
         dist.barrier()
-        ckpt_base.async_calls.close()
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+        if not async_save:
+            # Async path keeps the pending request alive in the queue until its finalize;
+            # tearing it down here would orphan that write.
+            ckpt_base.async_calls.close()
+            ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
+
+    def finalize_pending_saves(self) -> None:
+        """Block until any in-flight async checkpoint write completes.
+
+        No-op when ``async_dist_ckpt_save`` is off or nothing is pending.
+        """
+        ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
 
     def _get_rank_path(self, ckpt_dir):
         tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -364,6 +389,9 @@ class MegatronStrategy(DistributedStrategy):
     ):
         if not ckpt_dir or not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+
+        # A reload must observe a fully-written checkpoint.
+        self.finalize_pending_saves()
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module

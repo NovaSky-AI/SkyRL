@@ -394,6 +394,15 @@ class MegatronConfig(BaseConfig):
     tokens (renormalized), ``O(seq*k)`` memory instead of ``O(seq*vocab)`` -- fits at large vocab
     without fragmentation. Reconciled across the TP group, so it scales to any parallel size.
     ``None`` uses the exact full-vocab loss. Typical: 64-128."""
+    async_dist_ckpt_save: bool = False
+    """Write the torch_dist checkpoint from a background process so training resumes
+    immediately; the pending write is finalized at the next checkpoint and at shutdown.
+    The on-disk format is identical to a synchronous save. Only the sharded
+    model/optimizer state is async -- the rank-0 HF config/tokenizer write stays inline.
+    Falls back to synchronous for cloud paths."""
+    async_dist_ckpt_strategy: str = "mcore"
+    """Backend for the async write. ``mcore`` needs no extra deps; megatron-core's own
+    default ``nvrx`` requires nvidia-resiliency-ext. Only used when async saves are on."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict

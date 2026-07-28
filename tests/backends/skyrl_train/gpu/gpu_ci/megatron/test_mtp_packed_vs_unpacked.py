@@ -209,6 +209,8 @@ def _cfg():
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
     cfg.trainer.mtp.enabled = True
     cfg.trainer.mtp.num_speculative_tokens = 1
+    # Skip optimizer init since we only do model forward pass
+    cfg.trainer.policy.inference_only_init = True
     validate_cfg(cfg)
     return cfg
 
