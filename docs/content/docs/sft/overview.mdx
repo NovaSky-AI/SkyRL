@@ -187,47 +187,6 @@ each bin becomes one row of the dispatched batch and one worker micro-batch.
 `max_length` to be set, and `max_tokens_per_microbatch` (if given) must be
 `>= max_length`.
 
-## Optimizer and learning rate
-
-The optimizer and LR schedule are configured under `optimizer_config.*`:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `optimizer_config.lr` | `1e-6` | Peak learning rate |
-| `optimizer_config.num_warmup_steps` | `0` | Steps of LR warmup |
-| `optimizer_config.scheduler` | `constant_with_warmup` | LR schedule |
-| `optimizer_config.weight_decay` | `1e-2` | AdamW weight decay |
-| `optimizer_config.adam_betas` | `[0.9, 0.999]` | AdamW betas |
-| `optimizer_config.max_grad_norm` | `1.0` | Gradient-norm clipping |
-
-The default learning rate is shared with the RL trainer and is on the low end
-for SFT -- typical SFT runs raise it (e.g. the LoRA example uses
-`optimizer_config.lr=2e-5`).
-
-<Callout type="info">
-On FSDP, `optimizer_config.scheduler` accepts any HuggingFace
-`transformers.get_scheduler` name (`linear`, `cosine`, ...). The Megatron
-backend currently supports only `constant_with_warmup`.
-</Callout>
-
-## LoRA fine-tuning
-
-Set `model.lora.rank > 0` to train LoRA adapters instead of the full model
-(the default, `rank=0`, trains all weights):
-
-```bash
-bash examples/train/sft/run_sft_lora.sh
-```
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `model.lora.rank` | `0` | LoRA rank; `0` disables LoRA (full fine-tuning) |
-| `model.lora.alpha` | `16` | LoRA scaling factor |
-| `model.lora.dropout` | `0.0` | Dropout on the LoRA path |
-| `model.lora.target_modules` | `all-linear` | Which modules receive adapters |
-| `model.lora.exclude_modules` | `None` | Modules to exclude from adaptation |
-| `model.lora.init_method` | `kaiming` | Adapter weight init (`init_lora_weights` in PEFT for FSDP; `lora_A_init_method` for Megatron) |
-
 ## Checkpointing, resume, and HF export
 
 - `ckpt_path` / `ckpt_interval` -- write a distributed checkpoint every N steps
