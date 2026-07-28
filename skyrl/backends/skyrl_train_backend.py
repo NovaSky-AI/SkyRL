@@ -103,6 +103,13 @@ def _build_skyrl_train_config(
     user_overrides.setdefault("trainer.algorithm.loss_reduction", "token_sum")
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
+    valid_reductions = {"token_mean", "sequence_mean", "seq_mean_token_sum_norm", "token_sum"}
+    if cfg.trainer.algorithm.loss_reduction not in valid_reductions:
+        raise ValueError(
+            f"Invalid or unsupported loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
+            f"Must be one of {sorted(valid_reductions)} on the Tinker-serving path."
+        )
+
     if cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm" and cfg.trainer.algorithm.max_seq_len is None:
         # Mirror `validate_cfg`; the Tinker-serving path never calls it.
         raise ValueError(
