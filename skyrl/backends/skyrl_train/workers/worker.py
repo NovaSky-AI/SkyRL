@@ -275,16 +275,33 @@ class Worker(DistributedTorchRayActor):
             logger.warning(f"Failed to set {setting!r}: {e}")
 
     @contextmanager
-    def _expandable_segments_disabled_for_sync(self):
+    def _expandable_segments_disabled_for_sync(self, force: bool = False):
         """Disable expandable_segments for the duration of CUDA-IPC weight sync.
 
-        Only toggles under ``colocate_all`` (the IPC path); under non-colocated runs
-        weight sync uses NCCL broadcast, which has its own buffers and is unaffected.
-        :meth:`_set_expandable_segments` itself no-ops when the feature is disabled.
+        By default only toggles under ``colocate_all`` (the legacy IPC path, which
+        only shares CUDA memory when trainer and inference share GPUs); under
+        non-colocated runs the push backends use NCCL broadcast, which has its own
+        buffers and is unaffected. Pass ``force=True`` for paths that CUDA-IPC
+        share regardless of colocation — sharded_rdt shares every gathered group
+        with its sidecar producer server over ``reduce_tensor``/CUDA IPC, and
+        expandable-segment (VMM) memory makes that export/rebuild ~5-10x slower
+        per storage (measured: publish rebuild 7.2s/rank/sync at 30B, the
+        dominant weight-sync cost). :meth:`_set_expandable_segments` itself
+        no-ops when the feature is disabled.
         """
-        toggle = self.cfg.placement.colocate_all and self.cfg.use_expandable_segments
+        toggle = (force or self.cfg.placement.colocate_all) and self.cfg.use_expandable_segments
         if toggle:
             self._set_expandable_segments(False)
+            # The setting only affects NEW segment creation; freed blocks inside
+            # existing expandable segments are still eligible for reuse. Release
+            # cached segments so the gather buffers allocated during the sync
+            # land in fresh, IPC-fast classic segments. Once per process: later
+            # syncs re-use the classic blocks the first sync created (identical
+            # allocation sizes), and a per-sync empty_cache costs ~0.5-1s at
+            # 235B allocator scale.
+            if not getattr(self, "_rdt_ipc_cache_flushed", False):
+                self._rdt_ipc_cache_flushed = True
+                torch.cuda.empty_cache()
         try:
             yield
         finally:

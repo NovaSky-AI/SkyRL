@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     )
     from skyrl.train.config.config import InferenceEngineConfig
 
-import skyrl.backends.skyrl_train.workers.megatron.model_bridges as _  # noqa: F401  # register extra bridges
+import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
     maybe_force_qwen35_text_bridge,
 )
@@ -1427,6 +1427,61 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         torch.distributed.barrier()
 
+    def rdt_source_bench(self, iters: int = 1):
+        """Time RDT WeightSource iteration, bucketed (debug/bench; no engine)."""
+        import time as _t
+
+        import torch
+
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+            MegatronStackedWeightSource as M,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+            make_weight_source,
+        )
+
+        extractor = MegatronWeightExtractor(
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            enable_bucketing=True,
+            bucket_size_threshold_GB=1.0,
+            training_dtype=torch.bfloat16,
+        )
+        src = make_weight_source(extractor, torch.bfloat16)
+        out = {"source": type(src).__name__}
+        t0 = _t.time()
+        out["names"] = sum(1 for _ in iter(src))
+        out["iter0_s"] = round(_t.time() - t0, 2)
+        b = {"expert_gather": 0.0, "lora_merge": 0.0}
+        og, om = M._gather_layer_stacks, M._merge_lora_into_stacks
+
+        def g(x, d):
+            t = _t.time()
+            r = og(x, d)
+            torch.cuda.synchronize()
+            b["expert_gather"] += _t.time() - t
+            return r
+
+        def mm(x, *a):
+            t = _t.time()
+            r = om(x, *a)
+            torch.cuda.synchronize()
+            b["lora_merge"] += _t.time() - t
+            return r
+
+        M._gather_layer_stacks, M._merge_lora_into_stacks = g, mm
+        try:
+            for _ in range(iters):
+                t0 = _t.time()
+                for _n, _tns in iter(src):
+                    del _tns
+                out["iter1_s"] = round(_t.time() - t0, 2)
+        finally:
+            M._gather_layer_stacks, M._merge_lora_into_stacks = og, om
+        out.update({k: round(v, 2) for k, v in b.items()})
+        out["bridge_nonexpert_s"] = round(out["iter1_s"] - b["expert_gather"] - b["lora_merge"], 2)
+        return out
+
     async def broadcast_to_inference_engines(
         self,
         inference_engine_client: "InferenceEngineInterface",
@@ -1461,8 +1516,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # wraps self.weight_extractor) and the inference workers pull their
             # slices; the extracted chunk iterator the push backends build is unused.
             # Disable expandable_segments — the sidecar shares gathered tensors over
-            # CUDA IPC.
-            with self._expandable_segments_disabled_for_sync():
+            # CUDA IPC on every run (not just colocate_all), so force the toggle.
+            with self._expandable_segments_disabled_for_sync(force=True):
                 await self._rdt_sender.send(self.weight_extractor)
         else:
             # Extract and send weights using the sender created at init time.

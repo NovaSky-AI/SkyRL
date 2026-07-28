@@ -24,6 +24,7 @@ process that can reach Ray and (for multi-rank) `torch.distributed` works.
 
 import contextlib
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -51,6 +52,12 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
 
 if TYPE_CHECKING:
     pass
+
+from skyrl.backends.skyrl_train.weight_sync.rdt_libfabric_shim import (
+    ensure_ray_rdt_libfabric,
+)
+
+ensure_ray_rdt_libfabric()
 
 logger = init_logger(__name__)
 
@@ -166,6 +173,36 @@ class _RDTProducerServer:
 
         self._pack_check = pack_check
 
+        # profiling counters
+        self._timing_lock = threading.Lock()
+        self._produce_calls = self._produce_specs = self._produce_bytes = 0
+        self._produce_wait_seconds = self._produce_slice_seconds = 0.0
+        self._produce_method_seconds = 0.0
+        # [RDT-LINK-TIMING] Decompose the publish -> serve -> free credit loop
+        # into non-overlapping links so the slow one can be named (see
+        # multi_node_rdt.md Part X.8). All wall-clock, this process only.
+        self._publish_calls = 0
+        self._publish_bp_wait_seconds = 0.0  # publish blocked on lookahead credit
+        self._publish_rebuild_seconds = 0.0  # CUDA-IPC rebuild_cuda_tensor loop
+        self._publish_open_seconds = 0.0  # first-encounter storage opens
+        self._publish_open_count = 0
+        self._publish_view_seconds = 0.0  # repeat-storage view rebuilds
+        self._publish_time: dict[tuple, float] = {}  # key -> publish done (cache_cond)
+        self._serve_done: dict[tuple, float] = {}  # key -> last produce done (cache_cond)
+        self._serve_lag_waited_seconds = 0.0  # publish -> produce wake (produce waited)
+        self._serve_lag_waited_calls = 0
+        self._serve_lag_ready_seconds = 0.0  # publish -> produce arrival (consumer late)
+        self._serve_lag_ready_calls = 0
+        self._free_lag_seconds = 0.0  # last serve done -> freeing free_gather arrival
+        self._free_lag_count = 0
+        self._publish_to_free_seconds = 0.0  # publish done -> freed (downstream RTT)
+
+        from skyrl.backends.skyrl_train.weight_sync._nixl_profile import (
+            install_nixl_timing,
+        )
+
+        install_nixl_timing()  # fail-soft inside
+
         # Freeze the static post-init object graph so gen-2 GC never stops the
         # world mid-serve (measured straggler fix in the old producer).
         gc.collect()
@@ -208,26 +245,55 @@ class _RDTProducerServer:
             self._inflight_keys.clear()
             self._name_to_key.clear()
             self._freed_pending.clear()
+            self._publish_time.clear()
+            self._serve_done.clear()
 
-    def publish_group(self, group_key: tuple, entries: dict[str, tuple]) -> list[tuple]:
+    def publish_group(self, group_key: tuple, entries: tuple) -> list[tuple]:
         """Rebuild one gather group's CUDA-IPC tensors and publish to the serve
         cache. Blocks while `gather_lookahead` groups are already in flight so
         trainer memory stays bounded (the consumer's `free_gather` drains it).
         Returns the group keys freed since the last call so the engine can drop
-        its refs to the shared storage."""
+        its refs to the shared storage.
+
+        ``entries`` is ``(storages, views)``: ``storages`` maps a storage id to
+        the ``reduce_tensor`` args of a whole-storage uint8 view (ONE CUDA-IPC
+        export per storage), ``views`` maps each served name to
+        ``(sid, dtype_name, shape, stride, storage_offset)`` — rebuilt here as
+        ``as_strided`` views so the per-name cost is microseconds."""
+        _t_bp0 = time.perf_counter()
         with self._cache_cond:
             while len(self._inflight_keys) >= self._lookahead:
                 if self._gather_error is not None:
                     break
                 self._cache_cond.wait()
+        _t_bp1 = time.perf_counter()
 
+        storages, views = entries
         rebuilt: dict[str, torch.Tensor] = {}
-        for name, (reduce_args, _dtype_name, _shape) in entries.items():
+        # [RDT-STORAGE-PUBLISH] One rebuild_cuda_tensor per unique STORAGE (the
+        # IPC open + event sync), then cheap as_strided views per name. The
+        # per-name rebuild_cuda_tensor loop this replaces cost ~32us/name of
+        # pure Python on ~19k names/sync (plus the open amplification under
+        # expandable segments, see _expandable_segments_disabled_for_sync).
+        _open_s = _view_s = 0.0
+        _opens = 0
+        _t_r0 = time.perf_counter()
+        bases: dict[int, torch.Tensor] = {}
+        for sid, reduce_args in storages.items():
             list_args = list(reduce_args)
             # Index 6 of reduce_tensor's args is the exporter's device index;
             # rebuild on this server's device (same physical GPU as the rank).
             list_args[6] = self._device_index
-            rebuilt[name] = rebuild_cuda_tensor(*list_args)
+            bases[sid] = rebuild_cuda_tensor(*list_args)
+            _opens += 1
+        _open_s = time.perf_counter() - _t_r0
+        _t_v0 = time.perf_counter()
+        for name, (sid, dtype_name, shape, stride, storage_offset) in views.items():
+            typed = bases[sid].view(getattr(torch, dtype_name))
+            rebuilt[name] = torch.as_strided(typed, shape, stride, storage_offset)
+        _view_s = time.perf_counter() - _t_v0
+        del bases
+        _t_rb = time.perf_counter()
 
         ev = None
         if self._serve_stream is not None:
@@ -241,9 +307,17 @@ class _RDTProducerServer:
             self._inflight_keys.append(group_key)
             for n in rebuilt:
                 self._name_to_key[n] = group_key
+            self._publish_time[group_key] = time.perf_counter()
             freed = self._freed_pending
             self._freed_pending = []
             self._cache_cond.notify_all()
+        with self._timing_lock:
+            self._publish_calls += 1
+            self._publish_bp_wait_seconds += _t_bp1 - _t_bp0
+            self._publish_rebuild_seconds += _t_rb - _t_bp1
+            self._publish_open_seconds += _open_s
+            self._publish_open_count += _opens
+            self._publish_view_seconds += _view_s
         return freed
 
     def end_sync(self) -> list[tuple]:
@@ -280,6 +354,7 @@ class _RDTProducerServer:
                 del self._free_counts[tuple(names)]
         if not do_free:
             return
+        _now = time.perf_counter()
         with self._cache_cond:
             for name in names:
                 self._cache.pop(name, None)
@@ -288,7 +363,15 @@ class _RDTProducerServer:
             if key is not None and key in self._inflight_keys:
                 self._inflight_keys.remove(key)
                 self._freed_pending.append(key)
+            _sd = self._serve_done.pop(key, None) if key is not None else None
+            _pt = self._publish_time.pop(key, None) if key is not None else None
             self._cache_cond.notify_all()
+        with self._timing_lock:
+            if _sd is not None:
+                self._free_lag_seconds += _now - _sd
+                self._free_lag_count += 1
+            if _pt is not None:
+                self._publish_to_free_seconds += _now - _pt
 
     def reserve_serve_arena(self, consumer_id: int, nbytes: int) -> None:
         """Pre-allocate + NIXL-register this consumer's serve ring before any
@@ -318,15 +401,34 @@ class _RDTProducerServer:
         consumer's identical layout), and returns the one packed blob.
         `pack=False` serves one tensor per spec (the rare unbaked path).
         """
+        t_m0 = time.perf_counter()
         needed = sorted({n for n, _ in specs})
+        t_w0 = time.perf_counter()
         with self._cache_cond:
             while not all(n in self._cache for n in needed):
                 if self._gather_error is not None:
                     raise RuntimeError(f"gather errored before {needed}: {self._gather_error!r}")
                 self._cache_cond.wait()
+            _grp_key = self._name_to_key.get(needed[0])
+            _pub_t = self._publish_time.get(_grp_key) if _grp_key is not None else None
+        wait_s = time.perf_counter() - t_w0
+        # [RDT-LINK-TIMING] publish -> here: if we waited, this is the notify/wake
+        # latency; if the group was already cached, it is how late this produce
+        # ARRIVED after publish (consumer-side credit / issue lateness).
+        if _pub_t is not None:
+            _lag = time.perf_counter() - _pub_t
+            with self._timing_lock:
+                if wait_s > 0.001:
+                    self._serve_lag_waited_seconds += _lag
+                    self._serve_lag_waited_calls += 1
+                else:
+                    self._serve_lag_ready_seconds += _lag
+                    self._serve_lag_ready_calls += 1
 
+        t_s0 = time.perf_counter()
         sliced: list = []  # (byte_off, tensor)
         pack_cur = 0
+        nbytes = 0
         for name, chain in specs:
             t = self._cache[name]
             for op, args, kw in chain:
@@ -336,10 +438,12 @@ class _RDTProducerServer:
             off = (pack_cur + 15) & ~15
             pack_cur = off + t.numel() * t.element_size()
             sliced.append((off, t))
+            nbytes += t.numel() * t.element_size()
 
         if not pack:
             out = [t.contiguous().clone() for _off, t in sliced]
             torch.accelerator.synchronize()
+            self._bump_timing(t_m0, wait_s, t_s0, len(specs), nbytes, _grp_key)
             return out
 
         with self._serve_lock:
@@ -371,7 +475,25 @@ class _RDTProducerServer:
         blob = arena[:pack_cur]
         if self._pack_check:
             self._log_pack_check(blob, pack_cur)
+        self._bump_timing(t_m0, wait_s, t_s0, len(specs), nbytes, _grp_key)
         return [blob]
+
+    # ---------------- profiling ----------------
+
+    def _bump_timing(self, t_m0, wait_s, t_s0, nspecs, nbytes, grp_key=None) -> None:
+        slice_s = time.perf_counter() - t_s0
+        if grp_key is not None:
+            # [RDT-LINK-TIMING] last serve of the group; free_gather measures
+            # its arrival against this stamp.
+            with self._cache_cond:
+                self._serve_done[grp_key] = time.perf_counter()
+        with self._timing_lock:
+            self._produce_calls += 1
+            self._produce_specs += nspecs
+            self._produce_wait_seconds += wait_s
+            self._produce_slice_seconds += slice_s
+            self._produce_bytes += nbytes
+            self._produce_method_seconds += time.perf_counter() - t_m0
 
     def _log_pack_check(self, blob: torch.Tensor, pack_cur: int) -> None:
         import json
@@ -384,6 +506,74 @@ class _RDTProducerServer:
         os.makedirs("/tmp/rdt_profile", exist_ok=True)
         with open("/tmp/rdt_profile/packcheck_prod.jsonl", "a") as f:
             f.write(json.dumps({"pid": os.getpid(), "bytes": pack_cur, "sum": s}) + "\n")
+
+    def get_produce_timing(self) -> dict:
+        import os
+
+        # [RDT-LINK-TIMING] config echo: verifies env/flag propagation into THIS
+        # server process (SKYRL_RDT_NOSYNC reach was previously unverified) and
+        # whether the shim's extract patch is live.
+        _extract_patched = False
+        try:
+            import ray.experimental.rdt.nixl_tensor_transport as _t
+
+            _extract_patched = "ensure_ray_rdt_libfabric" in getattr(
+                _t.NixlTensorTransport.extract_tensor_transport_metadata, "__qualname__", ""
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        with self._timing_lock:
+            return dict(
+                calls=self._produce_calls,
+                specs=self._produce_specs,
+                wait_seconds=self._produce_wait_seconds,
+                slice_seconds=self._produce_slice_seconds,
+                bytes=self._produce_bytes,
+                method_seconds=self._produce_method_seconds,
+                publish_calls=self._publish_calls,
+                publish_bp_wait_seconds=self._publish_bp_wait_seconds,
+                publish_rebuild_seconds=self._publish_rebuild_seconds,
+                publish_open_seconds=self._publish_open_seconds,
+                publish_open_count=self._publish_open_count,
+                publish_view_seconds=self._publish_view_seconds,
+                serve_lag_waited_seconds=self._serve_lag_waited_seconds,
+                serve_lag_waited_calls=self._serve_lag_waited_calls,
+                serve_lag_ready_seconds=self._serve_lag_ready_seconds,
+                serve_lag_ready_calls=self._serve_lag_ready_calls,
+                free_lag_seconds=self._free_lag_seconds,
+                free_lag_count=self._free_lag_count,
+                publish_to_free_seconds=self._publish_to_free_seconds,
+                cfg_lookahead=self._lookahead,
+                cfg_nring=self._nring,
+                cfg_free_target=self._free_target,
+                cfg_scoped_sync=self._scoped_sync,
+                cfg_nosync_env=os.environ.get("SKYRL_RDT_NOSYNC"),
+                cfg_extract_sync_patched=_extract_patched,
+            )
+
+    def reset_produce_timing(self) -> None:
+        with self._timing_lock:
+            self._produce_calls = self._produce_specs = self._produce_bytes = 0
+            self._produce_wait_seconds = self._produce_slice_seconds = 0.0
+            self._produce_method_seconds = 0.0
+            self._publish_calls = 0
+            self._publish_bp_wait_seconds = self._publish_rebuild_seconds = 0.0
+            self._publish_open_seconds = self._publish_view_seconds = 0.0
+            self._publish_open_count = 0
+            self._serve_lag_waited_seconds = self._serve_lag_ready_seconds = 0.0
+            self._serve_lag_waited_calls = self._serve_lag_ready_calls = 0
+            self._free_lag_seconds = self._publish_to_free_seconds = 0.0
+            self._free_lag_count = 0
+
+    def get_nixl_timing(self) -> dict:
+        from skyrl.backends.skyrl_train.weight_sync import _nixl_profile
+
+        return _nixl_profile.snapshot()
+
+    def reset_nixl_timing(self) -> None:
+        from skyrl.backends.skyrl_train.weight_sync import _nixl_profile
+
+        _nixl_profile.reset()
 
     def shutdown(self) -> None:
         with self._cache_cond:
@@ -424,6 +614,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # group key. CUDA-IPC exports must outlive the importer, so we hold them
         # until the server reports the group freed. See send_weights.
         self._inflight: dict[tuple, dict[str, torch.Tensor]] = {}
+        self._sync_timing: dict[str, float] = {}
 
     def _rpc(self, method: str, *args: Any) -> Any:
         """Call one of the server actor's methods and block for the result.
@@ -432,6 +623,23 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         import ray
 
         return ray.get(getattr(self._server, method).remote(*args))
+
+    def _publish_async(self, key, entries):
+        """Fire publish_group WITHOUT blocking (the gather loop overlaps the
+        publish with the next group's gather) and return a handle that
+        ``_drop_when_ready`` resolves. Ray actor handle in production; a plain
+        (non-Ray) fake server runs inline and returns its result directly."""
+        method = self._server.publish_group
+        remote = getattr(method, "remote", None)
+        if remote is not None:
+            return remote(key, entries)
+        return method(key, entries)
+
+    def _drop_when_ready(self, ref) -> None:
+        import ray
+
+        freed = ray.get(ref) if isinstance(ref, ray.ObjectRef) else ref
+        self._drop_inflight(freed)
 
     # ---------------- construction ----------------
 
@@ -534,7 +742,11 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             namespace=ii.trainer_actor_namespace,
             num_cpus=0,
             num_gpus=0,
-            max_concurrency=max(4, ii.num_rdt_buffers + 2),
+            # Thread budget: up to K produce calls sit BLOCKED in cache-wait per
+            # bound consumer, plus one backpressure-blocked publish_group, plus
+            # free_gather / begin/end_sync must still get a thread promptly (a
+            # queued free_gather stalls the whole credit loop). Keep real slack.
+            max_concurrency=max(8, 2 * ii.num_rdt_buffers + 4),
             enable_tensor_transport=True,
             scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
             runtime_env=runtime_env,
@@ -584,37 +796,69 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             self._run_gather_loop(update_future=None)
             return
 
+        wall0 = time.perf_counter()
+        t0 = time.perf_counter()
         self.client.start_weight_update()
+        self._sync_timing["start_seconds"] = time.perf_counter() - t0
 
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
             ShardedRDTWeightTransferUpdateInfo,
         )
 
         empty_update = asdict(ShardedRDTWeightTransferUpdateInfo())
+        import time as _t
+
         with ThreadPoolExecutor(max_workers=1) as exe:
             # The workers block inside update_weights until they've pulled every
             # group, so it runs concurrently with the gather/publish loop.
+            tu0 = time.perf_counter()
             future = exe.submit(self.client.update_weights, empty_update)
+            _t0 = _t.time()
             self._run_gather_loop(update_future=future)
+            _gather = _t.time() - _t0
             future.result()  # surface inference-side errors
+            _tail = _t.time() - _t0 - _gather
+            self._sync_timing["update_weights_seconds"] = time.perf_counter() - tu0
 
+        tf0 = time.perf_counter()
         self.client.finish_weight_update()
+        self._sync_timing["finish_seconds"] = time.perf_counter() - tf0
+        self._sync_timing["wall_seconds"] = time.perf_counter() - wall0
+        logger.info("[rdt-sync-timing] gather_publish_loop=%.2fs consumer_tail_after_gather=%.2fs", _gather, _tail)
 
     def _run_gather_loop(self, update_future) -> None:
         """Gather this rank's weights group-by-group and publish each into the
         server over CUDA IPC. `publish_group` blocks when the lookahead is full,
         so the loop self-paces to the consumers' pull rate. Runs on every rank;
         only the sender has an `update_future` to fail fast on."""
+        gather0 = time.perf_counter()
+        _t_next = _t_pub = _t_exp = 0.0
         assert self.source is not None  # guaranteed by trainer_init
         self._rpc("begin_sync")
         it = iter(self.source)
+        # [RDT-ASYNC-PUBLISH] Publishes are fired without an inline ray.get and
+        # harvested this window deep, so the publish RPC + server-side rebuild
+        # overlap the NEXT group's gather/export instead of serializing the
+        # loop. The server's lookahead backpressure still bounds resident
+        # groups (a queued publish blocks server-side; worst case
+        # lookahead + window - 1 groups are live at once).
+        _PUBLISH_WINDOW = 2
+        pending_publish: list = []
+
         try:
             for group in self._groups:
                 key = tuple(group)
-                entries: dict[str, tuple] = {}
+                # [RDT-STORAGE-PUBLISH] Share each unique STORAGE once (one
+                # cudaIpc export instead of one per name) and describe every
+                # name as an as_strided view spec relative to its storage.
+                storages: dict[int, tuple] = {}
+                views: dict[str, tuple] = {}
                 refs: dict[str, torch.Tensor] = {}
                 for expected in group:
+                    _tn = time.perf_counter()
                     name, tensor = next(it)
+                    _te = time.perf_counter()
+                    _t_next += _te - _tn
                     if name != expected:
                         raise RuntimeError(
                             f"WeightSource yielded {name!r} but expected "
@@ -625,34 +869,73 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
                         tensor = tensor.cuda()
                     tensor = tensor.contiguous()
                     refs[name] = tensor  # keep the export alive
-                    _rebuild, reduce_args = reduce_tensor(tensor)
-                    entries[name] = (
-                        reduce_args,
+                    ust = tensor.untyped_storage()
+                    sid = ust.data_ptr()
+                    if sid not in storages:
+                        base = torch.empty(0, dtype=torch.uint8, device=tensor.device)
+                        base.set_(ust, 0, (ust.nbytes(),))
+                        _rebuild, reduce_args = reduce_tensor(base)
+                        storages[sid] = reduce_args
+                    views[name] = (
+                        sid,
                         str(tensor.dtype).split(".")[-1],
                         list(tensor.shape),
+                        list(tensor.stride()),
+                        tensor.storage_offset(),
                     )
+                    _t_exp += time.perf_counter() - _te
                 # Hold our refs before publishing; drop them only when the
                 # server reports the group freed (IPC export must outlive import).
                 self._inflight[key] = refs
-                freed = self._rpc("publish_group", key, entries)
-                self._drop_inflight(freed)
+                _tp = time.perf_counter()
+                pending_publish.append(self._publish_async(key, (storages, views)))
+                while len(pending_publish) >= _PUBLISH_WINDOW:
+                    self._drop_when_ready(pending_publish.pop(0))
+                _t_pub += time.perf_counter() - _tp
                 if update_future is not None and update_future.done():
                     # update_weights returned/failed early — surface now instead
                     # of blocking further publishes.
                     update_future.result()
+            _tp = time.perf_counter()
+            while pending_publish:
+                self._drop_when_ready(pending_publish.pop(0))
             freed = self._rpc("end_sync")
+            _t_pub += time.perf_counter() - _tp
             self._drop_inflight(freed)
         except BaseException as e:
             with contextlib.suppress(Exception):
                 self._rpc("set_gather_error", repr(e))
             self._inflight.clear()
             raise
+        finally:
+            self._sync_timing["gather_seconds"] = time.perf_counter() - gather0
+            self._sync_timing["source_next_seconds"] = _t_next
+            self._sync_timing["publish_rpc_seconds"] = _t_pub
+            self._sync_timing["export_seconds"] = _t_exp
 
     def _drop_inflight(self, freed_keys: list) -> None:
         for k in freed_keys:
             self._inflight.pop(tuple(k), None)
 
     # ---------------- misc ----------------
+
+    def get_sync_timing(self) -> dict:
+        """Coarse per-round timing (start / gather / update_weights / finish /
+        wall seconds) — the replacement for the example CriticalPathProfiler's
+        driver buckets. Producer/NIXL counters live on the server."""
+        return dict(self._sync_timing)
+
+    def get_produce_timing(self) -> dict:
+        return self._rpc("get_produce_timing")
+
+    def reset_produce_timing(self) -> None:
+        self._rpc("reset_produce_timing")
+
+    def get_nixl_timing(self) -> dict:
+        return self._rpc("get_nixl_timing")
+
+    def reset_nixl_timing(self) -> None:
+        self._rpc("reset_nixl_timing")
 
     def shutdown(self) -> None:
         if self._server is None:

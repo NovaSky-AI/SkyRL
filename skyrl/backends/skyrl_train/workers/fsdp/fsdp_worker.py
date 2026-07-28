@@ -314,8 +314,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # trainer engine gathers live params group-by-group off the weight
             # extractor and the inference workers pull their slices; the extracted
             # chunk iterator the push backends build is not used. Still disable
-            # expandable_segments — the sidecar shares gathered tensors over CUDA IPC.
-            with self._expandable_segments_disabled_for_sync():
+            # expandable_segments — the sidecar shares gathered tensors over CUDA
+            # IPC on every run (not just colocate_all), so force the toggle.
+            with self._expandable_segments_disabled_for_sync(force=True):
                 await self._rdt_sender.send(self.weight_extractor)
         else:
             # Extract and send weights using the sender created at init time.
