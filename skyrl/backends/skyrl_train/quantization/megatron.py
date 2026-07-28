@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from types import MethodType
 
-from .base import ExpertExportLayout, ModelQuantizationPolicy
-from .mxfp8 import build_mxfp8_te_recipe, configure_mxfp8_provider
+from .base import ExpertExportLayout, QuantizationStrategy, QuantizedModelLayout
 
 
 def build_high_precision_te_recipe() -> dict:
@@ -18,11 +17,11 @@ def build_high_precision_te_recipe() -> dict:
     }
 
 
-def build_megatron_matchers(policy: ModelQuantizationPolicy) -> dict:
-    """Translate policy categories into Megatron module-name matchers."""
+def build_megatron_matchers(strategy: QuantizationStrategy) -> dict:
+    """Translate strategy categories into Megatron module-name matchers."""
 
-    gate = policy.quantizes_category("routed_expert_gate")
-    up = policy.quantizes_category("routed_expert_up")
+    gate = "routed_expert_gate" in strategy.quantized_categories
+    up = "routed_expert_up" in strategy.quantized_categories
     if gate != up:
         raise ValueError("Megatron fused expert FC1 requires gate and up to use the same precision")
 
@@ -34,7 +33,7 @@ def build_megatron_matchers(policy: ModelQuantizationPolicy) -> dict:
             "config": "quantized",
             "enabled": True,
         }
-    if policy.quantizes_category("routed_expert_down"):
+    if "routed_expert_down" in strategy.quantized_categories:
         matchers["routed_fc2"] = {
             "type": "glob",
             "pattern": "*.experts.linear_fc2",
@@ -52,44 +51,45 @@ def build_megatron_matchers(policy: ModelQuantizationPolicy) -> dict:
 
 def configure_megatron_quantization(
     provider,
-    policy: ModelQuantizationPolicy,
+    strategy: QuantizationStrategy,
     *,
-    format_name: str,
     persistent: bool,
 ) -> None:
-    """Apply a policy and format to a Megatron model provider."""
+    """Apply a quantization strategy to a Megatron model provider."""
 
     from megatron.core.quantization.quant_config import RecipeConfig
 
-    recipe = build_megatron_quantization_recipe(policy, format_name=format_name, persistent=persistent)
-    configure_mxfp8_provider(provider)
+    recipe = build_megatron_quantization_recipe(strategy, persistent=persistent)
+    strategy.configure_megatron_provider(provider)
     provider.quant_recipe = RecipeConfig.from_config_dict(recipe)
 
 
 def build_megatron_quantization_recipe(
-    policy: ModelQuantizationPolicy,
+    strategy: QuantizationStrategy,
     *,
-    format_name: str,
     persistent: bool,
 ) -> dict:
     """Build a complete Megatron per-module quantization recipe."""
 
-    if format_name != "mxfp8":
-        raise ValueError(f"Unsupported Megatron quantization format {format_name!r}")
     return {
         "configs": {
-            "quantized": build_mxfp8_te_recipe(persistent=persistent),
+            "quantized": strategy.build_te_recipe(persistent=persistent),
             "high_precision": build_high_precision_te_recipe(),
         },
-        "matchers": build_megatron_matchers(policy),
+        "matchers": build_megatron_matchers(strategy),
     }
 
 
 def get_packed_qwen3_moe_conversion_tasks(auto_bridge, model):
     """Build Qwen3 MoE export tasks with experts packed by layer."""
 
-    from megatron.bridge.models.conversion.mapping_registry import MegatronMappingRegistry
-    from megatron.bridge.models.conversion.param_mapping import FusedExpertMapping, FusedGatedExpertMapping
+    from megatron.bridge.models.conversion.mapping_registry import (
+        MegatronMappingRegistry,
+    )
+    from megatron.bridge.models.conversion.param_mapping import (
+        FusedExpertMapping,
+        FusedGatedExpertMapping,
+    )
 
     model_bridge = auto_bridge._model_bridge
     mappings = [
@@ -123,9 +123,9 @@ def get_packed_qwen3_moe_conversion_tasks(auto_bridge, model):
     return model_bridge.build_conversion_tasks(auto_bridge.hf_pretrained, model_list)
 
 
-def get_quantized_conversion_tasks(auto_bridge, model, policy: ModelQuantizationPolicy):
-    """Build Bridge export tasks required by a model quantization policy."""
+def get_quantized_conversion_tasks(auto_bridge, model, layout: QuantizedModelLayout):
+    """Build Bridge export tasks required by a quantized model layout."""
 
-    if policy.expert_export_layout is ExpertExportLayout.PACKED:
+    if layout.expert_export_layout is ExpertExportLayout.PACKED:
         return get_packed_qwen3_moe_conversion_tasks(auto_bridge, model)
     return auto_bridge.get_conversion_tasks(model)

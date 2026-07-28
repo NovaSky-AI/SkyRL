@@ -10,8 +10,8 @@ from typing import Any, ClassVar, Iterator, Sequence
 
 import torch
 
-from .base import ModelQuantizationPolicy, SerializedWeightStrategy, WeightCategory
-from .model_policies import is_qwen35_config
+from .base import QuantizationStrategy, QuantizedModelLayout, WeightCategory
+from .model_layouts import is_qwen35_config
 
 SERIALIZED_BLOCKWISE_FP8 = "serialized_blockwise"
 BLOCKWISE_128X128 = "blockwise_128x128"
@@ -204,8 +204,8 @@ def batched_blockwise_cast_to_fp8(
 
 
 @dataclass(frozen=True)
-class BlockwiseFp8Strategy(SerializedWeightStrategy):
-    """Serialize selected weights using 128x128 blockwise FP8."""
+class BlockwiseFp8LinearStrategy(QuantizationStrategy):
+    """Apply 128x128 blockwise FP8 to supported linear weights."""
 
     weight_block_size: tuple[int, int] = (128, 128)
     power_2_scale: bool = field(default_factory=use_power_2_scales_default)
@@ -222,7 +222,6 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
     supported_model_types: ClassVar[frozenset[str]] = frozenset(
         {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
     )
-    uses_block_scale_runtime_contract: ClassVar[bool] = True
     vllm_quantization: ClassVar[str] = "fp8"
 
     def __post_init__(self) -> None:
@@ -241,7 +240,24 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
                 f"model_path={model_path!r}"
             )
 
-    def serialize(
+    def build_runtime_env(self) -> dict[str, str]:
+        """Return the shared TE/vLLM block-scale environment."""
+
+        env = {
+            "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": "0" if self.power_2_scale else "1",
+            "NVTE_FP8_BLOCK_AMAX_EPSILON": str(self.amax_epsilon),
+        }
+        if not self.power_2_scale:
+            e8m0_mode = os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+            if e8m0_mode != "0":
+                raise ValueError(
+                    "FP32 block scales require VLLM_USE_DEEP_GEMM_E8M0=0 so vLLM "
+                    "does not requantize them to power-of-2 scales."
+                )
+            env["VLLM_USE_DEEP_GEMM_E8M0"] = e8m0_mode
+        return env
+
+    def serialize_weight(
         self,
         name: str,
         tensor: torch.Tensor,
@@ -271,11 +287,11 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
         self,
         inference_config: Any,
         hf_config: Any,
-        policy: ModelQuantizationPolicy,
+        layout: QuantizedModelLayout,
     ) -> dict[str, Any]:
         """Return blockwise FP8 settings for vLLM checkpoint loading."""
 
-        del inference_config, policy
+        del inference_config, layout
         return get_serialized_fp8_quantization_config(
             self.weight_block_size,
             get_qwen35_fp8_ignored_layers(hf_config),

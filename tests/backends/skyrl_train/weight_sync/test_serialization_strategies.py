@@ -6,7 +6,7 @@ from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_MXFP8,
     SERIALIZED_WEIGHT_PREFIX,
     SERIALIZED_WEIGHT_STRATEGIES,
-    get_model_quantization_policy,
+    get_quantized_model_layout,
     get_serialized_weight_strategy,
     iter_serialized_weight_tensors,
 )
@@ -25,7 +25,7 @@ def test_serialized_weight_strategy_rejects_unknown_mode():
 
 def test_qwen3_spec_and_mxfp8_strategy_emit_batched_wire_tensors():
     strategy = get_serialized_weight_strategy(SERIALIZED_MXFP8)
-    policy = get_model_quantization_policy("qwen3_moe", strategy.quantized_categories)
+    layout = get_quantized_model_layout("qwen3_moe")
     name = "model.layers.0.mlp.experts.down_proj"
     weight = torch.randn(2, 64, 64, dtype=torch.bfloat16)
 
@@ -34,7 +34,7 @@ def test_qwen3_spec_and_mxfp8_strategy_emit_batched_wire_tensors():
             name,
             weight,
             torch.bfloat16,
-            policy,
+            layout,
             strategy,
             model_type="qwen3_moe",
         )

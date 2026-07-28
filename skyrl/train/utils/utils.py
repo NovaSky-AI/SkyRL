@@ -23,6 +23,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
 from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_WEIGHT_STRATEGIES,
+    get_serialized_weight_strategy,
 )
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
@@ -837,11 +838,8 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         )
         env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
 
-    # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32;
-    # Blackwell launchers explicitly select power-of-two scales.
     serialized_mode = cfg.generator.inference_engine.resolved_serialized_weight_sync_mode
-    strategy_cls = SERIALIZED_WEIGHT_STRATEGIES.get(serialized_mode)
-    serialized_fp8 = strategy_cls is not None and strategy_cls.uses_block_scale_runtime_contract
+    strategy_env = get_serialized_weight_strategy(serialized_mode).build_runtime_env() if serialized_mode else {}
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     policy_megatron_config = getattr(cfg.trainer.policy, "megatron_config", None)
     ref_megatron_config = getattr(cfg.trainer.ref, "megatron_config", None)
@@ -852,10 +850,13 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     fp8_compute = is_fp8_enabled(policy_transformer_kwargs.get("fp8")) or (
         use_ref_model and is_fp8_enabled(ref_transformer_kwargs.get("fp8"))
     )
-    fp8_contract_enabled = serialized_fp8 or fp8_compute or policy_fp8_param or ref_fp8_param
+    fp8_contract_enabled = fp8_compute or policy_fp8_param or ref_fp8_param
 
     fp8_env_defaults: dict[str, str] = {}
-    configured_scale_mode = os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES")
+    configured_scale_mode = strategy_env.get(
+        "NVTE_FP8_BLOCK_SCALING_FP32_SCALES",
+        os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES"),
+    )
     if fp8_contract_enabled or configured_scale_mode is not None:
         scale_mode = configured_scale_mode or "1"
         if scale_mode not in {"0", "1"}:
@@ -869,21 +870,17 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
 
         if fp8_contract_enabled:
             fp8_env_defaults["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = scale_mode
-        if serialized_fp8 and scale_mode == "1":
-            e8m0_mode = os.environ.get("VLLM_USE_DEEP_GEMM_E8M0", "0")
-            if e8m0_mode != "0":
-                raise ValueError(
-                    "FP32 block scales require VLLM_USE_DEEP_GEMM_E8M0=0 so vLLM "
-                    "does not requantize them to power-of-2 scales."
-                )
-            fp8_env_defaults["VLLM_USE_DEEP_GEMM_E8M0"] = e8m0_mode
-
+    runtime_env = fp8_env_defaults | strategy_env
     for var_name in (
         "NVTE_FP8_BLOCK_SCALING_FP32_SCALES",
         "NVTE_FP8_BLOCK_AMAX_EPSILON",
         "VLLM_USE_DEEP_GEMM_E8M0",
     ):
-        if value := os.environ.get(var_name, fp8_env_defaults.get(var_name)):
+        if var_name not in runtime_env and (value := os.environ.get(var_name)):
+            runtime_env[var_name] = value
+
+    for var_name, value in runtime_env.items():
+        if value:
             logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
             env_vars[var_name] = value
 

@@ -35,7 +35,7 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
 from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_WEIGHT_PREFIX,
     get_hf_model_type,
-    get_model_quantization_policy,
+    get_quantized_model_layout,
     get_serialized_weight_strategy,
 )
 from skyrl.backends.skyrl_train.quantization.vllm import resolve_vllm_receiver_target
@@ -60,11 +60,12 @@ def _decode_serialized_name(name: str) -> tuple[str, str] | None:
 
 @cache
 def _get_receiver_context(mode: str, model_type: str):
-    """Resolve the format strategy and model policy used by this receiver."""
+    """Resolve the strategy and model layout used by this receiver."""
 
     strategy = get_serialized_weight_strategy(mode)
-    policy = get_model_quantization_policy(model_type, strategy.quantized_categories)
-    return strategy, policy
+    strategy.validate_model_type(model_type)
+    layout = get_quantized_model_layout(model_type)
+    return strategy, layout
 
 
 def _map_hf_weight_name(model: torch.nn.Module, name: str) -> str:
@@ -99,8 +100,8 @@ def _load_serialized_moe_tensor(
 
     mode, checkpoint_name = decoded_name
     mapped_name = _map_hf_weight_name(model, checkpoint_name)
-    strategy, policy = _get_receiver_context(mode, model_type)
-    receiver_target = resolve_vllm_receiver_target(strategy, policy, mapped_name)
+    strategy, layout = _get_receiver_context(mode, model_type)
+    receiver_target = resolve_vllm_receiver_target(strategy, layout, mapped_name)
     if receiver_target is None:
         raise ValueError(f"Unsupported serialized MoE tensor name {serialized_name!r}")
     target_name, shard_id = receiver_target

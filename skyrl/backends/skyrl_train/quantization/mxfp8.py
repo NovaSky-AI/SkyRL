@@ -6,7 +6,7 @@ from typing import Any, ClassVar, Iterator
 
 import torch
 
-from .base import ModelQuantizationPolicy, SerializedWeightStrategy, WeightCategory
+from .base import QuantizationStrategy, QuantizedModelLayout, WeightCategory
 from .blockwise_fp8 import batched_blockwise_cast_to_fp8, blockwise_cast_to_fp8
 
 SERIALIZED_MXFP8 = "serialized_mxfp8"
@@ -135,8 +135,8 @@ def batched_mxfp8_cast_to_fp8(
     return q_weight, power_2_scales_to_e8m0(scales)
 
 
-class Mxfp8Strategy(SerializedWeightStrategy):
-    """Serialize routed expert weights using MXFP8."""
+class Mxfp8ExpertStrategy(QuantizationStrategy):
+    """Apply MXFP8 to routed expert weights."""
 
     mode: ClassVar[str] = SERIALIZED_MXFP8
     quantized_categories: ClassVar[frozenset[WeightCategory]] = frozenset(
@@ -160,7 +160,17 @@ class Mxfp8Strategy(SerializedWeightStrategy):
             supported = ", ".join(sorted(self.supported_model_types))
             raise ValueError(f"Serialized MXFP8 does not support model_type={model_type!r}; supported: {supported}")
 
-    def serialize(
+    def build_te_recipe(self, *, persistent: bool) -> dict:
+        """Build Transformer Engine MXFP8 settings."""
+
+        return build_mxfp8_te_recipe(persistent=persistent)
+
+    def configure_megatron_provider(self, provider) -> None:
+        """Set provider fields required by MXFP8 training."""
+
+        configure_mxfp8_provider(provider)
+
+    def serialize_weight(
         self,
         name: str,
         tensor: torch.Tensor,
@@ -180,9 +190,9 @@ class Mxfp8Strategy(SerializedWeightStrategy):
         self,
         inference_config: Any,
         hf_config: Any,
-        policy: ModelQuantizationPolicy,
+        layout: QuantizedModelLayout,
     ) -> dict[str, Any]:
         """Return ModelOpt MXFP8 settings for vLLM."""
 
-        del inference_config, hf_config, policy
+        del inference_config, hf_config, layout
         return get_serialized_mxfp8_quantization_config()

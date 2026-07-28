@@ -1,9 +1,9 @@
-"""Shared model policy and serialized-weight interfaces."""
+"""Shared quantized-model layout and strategy interfaces."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, TypeAlias
@@ -45,19 +45,17 @@ class MoeExpertSpec:
 
 
 @dataclass(frozen=True)
-class ModelQuantizationPolicy:
-    """Model weight classification and quantization scope."""
+class QuantizedModelLayout:
+    """Model-specific weight naming, splitting, and classification."""
 
     name: str
     model_types: frozenset[str]
-    quantized_categories: frozenset[WeightCategory]
     quantizable_weight_suffixes: tuple[str, ...]
     moe_expert_specs: tuple[MoeExpertSpec, ...]
-    should_quantize_fn: Callable[[WeightCategory | None, str, Sequence[int]], bool] | None = None
     expert_export_layout: ExpertExportLayout = ExpertExportLayout.CHECKPOINT
 
     def matches(self, model_type: str) -> bool:
-        """Return whether this policy describes the model type."""
+        """Return whether this layout describes the model type."""
 
         return model_type in self.model_types
 
@@ -93,7 +91,7 @@ class ModelQuantizationPolicy:
         )
 
     def weight_category(self, name: str, shape: Sequence[int]) -> WeightCategory | None:
-        """Classify a logical checkpoint weight for policy evaluation."""
+        """Classify a logical checkpoint weight."""
 
         if ".mlp.experts." in name:
             for spec in self.moe_expert_specs:
@@ -104,33 +102,15 @@ class ModelQuantizationPolicy:
             return "linear"
         return None
 
-    def should_quantize(
-        self,
-        category: WeightCategory | None,
-        name: str,
-        shape: Sequence[int],
-    ) -> bool:
-        """Return whether a classified weight should use the selected format."""
 
-        if self.should_quantize_fn is not None:
-            return self.should_quantize_fn(category, name, shape)
-        return category in self.quantized_categories
-
-    def quantizes_category(self, category: WeightCategory) -> bool:
-        """Return whether a category is included in the policy scope."""
-
-        return category in self.quantized_categories
-
-
-class SerializedWeightStrategy(ABC):
-    """Format-specific checkpoint encoding for weight synchronization."""
+class QuantizationStrategy(ABC):
+    """Cross-stack quantization format and model scope."""
 
     mode: str
     quantized_categories: frozenset[WeightCategory]
     receiver_suffixes: Mapping[str, str]
     supported_model_types: frozenset[str]
     reject_unknown_routed_experts: bool = False
-    uses_block_scale_runtime_contract: bool = False
     required_model_dtype: str | None = None
     vllm_quantization: str
     vllm_load_format: str = "dummy"
@@ -146,8 +126,34 @@ class SerializedWeightStrategy(ABC):
         if not self.supports_model_type(model_type):
             raise ValueError(f"{self.mode} does not support model_type={model_type!r}")
 
+    def should_quantize(
+        self,
+        category: WeightCategory | None,
+        name: str,
+        shape: Sequence[int],
+    ) -> bool:
+        """Return whether a classified weight should use this strategy."""
+
+        del name, shape
+        return category in self.quantized_categories
+
+    def build_te_recipe(self, *, persistent: bool) -> dict:
+        """Build Transformer Engine settings for quantized modules."""
+
+        raise NotImplementedError(f"{self.mode} does not support Megatron training")
+
+    def configure_megatron_provider(self, provider) -> None:
+        """Set provider fields required by the strategy."""
+
+        raise NotImplementedError(f"{self.mode} does not support Megatron training")
+
+    def build_runtime_env(self) -> dict[str, str]:
+        """Return process-level environment required by the strategy."""
+
+        return {}
+
     @abstractmethod
-    def serialize(
+    def serialize_weight(
         self,
         name: str,
         tensor: torch.Tensor,
@@ -161,7 +167,7 @@ class SerializedWeightStrategy(ABC):
         self,
         inference_config: Any,
         hf_config: Any,
-        policy: ModelQuantizationPolicy,
+        layout: QuantizedModelLayout,
     ) -> dict[str, Any]:
         """Return vLLM's format-specific quantization configuration."""
 
@@ -175,17 +181,17 @@ def iter_serialized_weight_tensors(
     name: str,
     tensor: torch.Tensor,
     target_dtype: torch.dtype,
-    policy: ModelQuantizationPolicy,
-    strategy: SerializedWeightStrategy,
+    layout: QuantizedModelLayout,
+    strategy: QuantizationStrategy,
     *,
     model_type: str,
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Apply model policy and serialize one Megatron-Bridge export tensor."""
+    """Classify and serialize one Megatron-Bridge export tensor."""
 
-    for output_name, output_tensor in policy.split_exported_weight(name, tensor):
-        category = policy.weight_category(output_name, output_tensor.shape)
-        if policy.should_quantize(category, output_name, output_tensor.shape):
-            for serialized_name, serialized_tensor in strategy.serialize(
+    for output_name, output_tensor in layout.split_exported_weight(name, tensor):
+        category = layout.weight_category(output_name, output_tensor.shape)
+        if strategy.should_quantize(category, output_name, output_tensor.shape):
+            for serialized_name, serialized_tensor in strategy.serialize_weight(
                 output_name,
                 output_tensor,
                 batched_experts=output_tensor.ndim == 3,

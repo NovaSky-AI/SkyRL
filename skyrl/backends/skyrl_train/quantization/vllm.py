@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import ModelQuantizationPolicy, SerializedWeightStrategy, WeightCategory
+from .base import QuantizationStrategy, QuantizedModelLayout, WeightCategory
 
 VLLM_EXPERT_TARGETS: dict[WeightCategory, tuple[str, str]] = {
     "routed_expert_gate": (".experts.w13_weight", "w1"),
@@ -12,13 +12,13 @@ VLLM_EXPERT_TARGETS: dict[WeightCategory, tuple[str, str]] = {
 
 
 def resolve_vllm_receiver_target(
-    strategy: SerializedWeightStrategy,
-    policy: ModelQuantizationPolicy,
+    strategy: QuantizationStrategy,
+    layout: QuantizedModelLayout,
     checkpoint_name: str,
 ) -> tuple[str, str] | None:
     """Resolve a checkpoint tensor name to a fused vLLM parameter and shard."""
 
-    for expert_spec in policy.moe_expert_specs:
+    for expert_spec in layout.moe_expert_specs:
         for weight in expert_spec.output_weights:
             runtime_target = VLLM_EXPERT_TARGETS.get(weight.category)
             if runtime_target is None:

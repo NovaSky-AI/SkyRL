@@ -6,8 +6,10 @@ import pytest
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     apply_expert_mxfp8_rollout_config,
 )
-from skyrl.backends.skyrl_train.quantization import Mxfp8Strategy, get_model_quantization_policy
-from skyrl.backends.skyrl_train.quantization.megatron import build_megatron_quantization_recipe
+from skyrl.backends.skyrl_train.quantization import Mxfp8ExpertStrategy
+from skyrl.backends.skyrl_train.quantization.megatron import (
+    build_megatron_quantization_recipe,
+)
 from skyrl.train.config import SkyRLTrainConfig
 
 
@@ -21,8 +23,7 @@ def _enabled_config() -> SkyRLTrainConfig:
 
 
 def _recipe(*, persistent: bool = False) -> dict:
-    policy = get_model_quantization_policy("qwen3_moe", Mxfp8Strategy.quantized_categories)
-    return build_megatron_quantization_recipe(policy, format_name="mxfp8", persistent=persistent)
+    return build_megatron_quantization_recipe(Mxfp8ExpertStrategy(), persistent=persistent)
 
 
 def test_expert_recipe_targets_only_routed_experts():

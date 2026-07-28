@@ -43,11 +43,13 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.quantization import (
     ExpertExportLayout,
     get_hf_model_type,
-    get_model_quantization_policy,
+    get_quantized_model_layout,
     get_serialized_weight_strategy,
     iter_serialized_weight_tensors,
 )
-from skyrl.backends.skyrl_train.quantization.megatron import get_quantized_conversion_tasks
+from skyrl.backends.skyrl_train.quantization.megatron import (
+    get_quantized_conversion_tasks,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -145,15 +147,12 @@ class MegatronWeightExtractor(WeightExtractor):
             if model_type is None:
                 raise ValueError("Serialized weight sync requires model_type")
             self.serialized_weight_strategy.validate_model_type(model_type)
-            self.model_quantization_policy = get_model_quantization_policy(
-                model_type,
-                self.serialized_weight_strategy.quantized_categories,
-            )
+            self.quantized_model_layout = get_quantized_model_layout(model_type)
         else:
-            self.model_quantization_policy = None
+            self.quantized_model_layout = None
         self._uses_custom_conversion_tasks = (
-            self.model_quantization_policy is not None
-            and self.model_quantization_policy.expert_export_layout is ExpertExportLayout.PACKED
+            self.quantized_model_layout is not None
+            and self.quantized_model_layout.expert_export_layout is ExpertExportLayout.PACKED
         )
 
         # Defer bucket init to first extract_weights call.
@@ -169,7 +168,7 @@ class MegatronWeightExtractor(WeightExtractor):
             return get_quantized_conversion_tasks(
                 self.bridge,
                 self.actor_module,
-                self.model_quantization_policy,
+                self.quantized_model_layout,
             )
         return self.bridge.get_conversion_tasks(self.actor_module)
 
@@ -326,7 +325,7 @@ class MegatronWeightExtractor(WeightExtractor):
                 name,
                 tensor,
                 dtype,
-                self.model_quantization_policy,
+                self.quantized_model_layout,
                 self.serialized_weight_strategy,
                 model_type=self.model_type,
             )
@@ -581,17 +580,16 @@ class MegatronWorker:
             setattr(provider, k, v)
 
         if expert_mxfp8:
-            from skyrl.backends.skyrl_train.quantization import (
-                Mxfp8Strategy,
-                get_model_quantization_policy,
+            from skyrl.backends.skyrl_train.quantization import Mxfp8ExpertStrategy
+            from skyrl.backends.skyrl_train.quantization.megatron import (
+                configure_megatron_quantization,
             )
-            from skyrl.backends.skyrl_train.quantization.megatron import configure_megatron_quantization
 
-            policy = get_model_quantization_policy(hf_config, Mxfp8Strategy.quantized_categories)
+            quantization_strategy = Mxfp8ExpertStrategy()
+            quantization_strategy.validate_model_type(get_hf_model_type(hf_config))
             configure_megatron_quantization(
                 provider,
-                policy,
-                format_name="mxfp8",
+                quantization_strategy,
                 persistent=expert_mxfp8_persistent,
             )
 

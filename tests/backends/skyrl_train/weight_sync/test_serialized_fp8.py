@@ -7,12 +7,12 @@ from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_BLOCKWISE_FP8,
     SERIALIZED_MXFP8,
     SERIALIZED_WEIGHT_PREFIX,
-    BlockwiseFp8Strategy,
-    Mxfp8Strategy,
+    BlockwiseFp8LinearStrategy,
+    Mxfp8ExpertStrategy,
     batched_blockwise_cast_to_fp8,
     batched_mxfp8_cast_to_fp8,
     blockwise_cast_to_fp8,
-    get_model_quantization_policy,
+    get_quantized_model_layout,
     get_qwen35_fp8_ignored_layers,
     get_serialized_fp8_quantization_config,
     get_serialized_mxfp8_quantization_config,
@@ -26,13 +26,13 @@ def _wire_prefix(mode: str) -> str:
 
 
 def _serialize(name, tensor, *, mode, model_type, target_dtype=torch.bfloat16, strategy=None):
-    strategy = strategy or (Mxfp8Strategy() if mode == SERIALIZED_MXFP8 else BlockwiseFp8Strategy())
-    policy = get_model_quantization_policy(model_type, strategy.quantized_categories)
+    strategy = strategy or (Mxfp8ExpertStrategy() if mode == SERIALIZED_MXFP8 else BlockwiseFp8LinearStrategy())
+    layout = get_quantized_model_layout(model_type)
     return iter_serialized_weight_tensors(
         name,
         tensor,
         target_dtype,
-        policy,
+        layout,
         strategy,
         model_type=model_type,
     )
@@ -59,7 +59,7 @@ def test_blockwise_cast_defaults_to_exact_fp32_scales():
 def test_blockwise_cast_uses_training_amax_epsilon_for_near_zero_blocks(monkeypatch):
     monkeypatch.setenv("NVTE_FP8_BLOCK_AMAX_EPSILON", "1e-4")
     monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1")
-    strategy = BlockwiseFp8Strategy()
+    strategy = BlockwiseFp8LinearStrategy()
     weight = torch.full((128, 128), 1e-8, dtype=torch.float32)
     _, scale = blockwise_cast_to_fp8(
         weight,
@@ -83,14 +83,25 @@ def test_blockwise_cast_pow2_scales_match_te_ue8m0_rule():
 
 def test_blockwise_strategy_power_2_scale_follows_te_env(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
-    assert BlockwiseFp8Strategy().power_2_scale is False
+    assert BlockwiseFp8LinearStrategy().power_2_scale is False
     monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1")
-    assert BlockwiseFp8Strategy().power_2_scale is False
+    assert BlockwiseFp8LinearStrategy().power_2_scale is False
     monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0")
-    assert BlockwiseFp8Strategy().power_2_scale is True
+    assert BlockwiseFp8LinearStrategy().power_2_scale is True
     monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "invalid")
     with pytest.raises(ValueError, match="must be '0'.*or '1'"):
-        BlockwiseFp8Strategy()
+        BlockwiseFp8LinearStrategy()
+
+
+def test_blockwise_strategy_builds_runtime_env(monkeypatch):
+    monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
+    strategy = BlockwiseFp8LinearStrategy(power_2_scale=False, amax_epsilon=1e-4)
+
+    assert strategy.build_runtime_env() == {
+        "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": "1",
+        "NVTE_FP8_BLOCK_AMAX_EPSILON": "0.0001",
+        "VLLM_USE_DEEP_GEMM_E8M0": "0",
+    }
 
 
 @pytest.mark.parametrize("block_size", [[], [128], [128, 128, 128], [128, 0], [128, 1.5], [True, 128]])
@@ -99,15 +110,15 @@ def test_blockwise_cast_rejects_invalid_block_size(block_size):
         blockwise_cast_to_fp8(torch.ones((2, 2)), block_size)
 
 
-def test_policy_keeps_embeddings_in_target_dtype():
-    policy = get_model_quantization_policy("qwen3_5_text", BlockwiseFp8Strategy.quantized_categories)
+def test_layout_classifies_quantizable_weights():
+    layout = get_quantized_model_layout("qwen3_5_text")
     linear = torch.ones((256, 256), dtype=torch.bfloat16)
     embedding = torch.ones((32000, 256), dtype=torch.bfloat16)
-    assert policy.weight_category("model.layers.0.mlp.down_proj.weight", linear.shape) == "linear"
-    assert policy.weight_category("model.layers.0.linear_attn.in_proj_qkv.weight", linear.shape) == "linear"
-    assert policy.weight_category("model.layers.0.linear_attn.conv1d.weight", linear.shape) is None
-    assert policy.weight_category("model.layers.0.linear_attn.in_proj_b.weight", linear.shape) is None
-    assert policy.weight_category("model.embed_tokens.weight", embedding.shape) is None
+    assert layout.weight_category("model.layers.0.mlp.down_proj.weight", linear.shape) == "linear"
+    assert layout.weight_category("model.layers.0.linear_attn.in_proj_qkv.weight", linear.shape) == "linear"
+    assert layout.weight_category("model.layers.0.linear_attn.conv1d.weight", linear.shape) is None
+    assert layout.weight_category("model.layers.0.linear_attn.in_proj_b.weight", linear.shape) is None
+    assert layout.weight_category("model.embed_tokens.weight", embedding.shape) is None
 
     tensors = list(
         _serialize(
@@ -141,7 +152,7 @@ def test_vllm_serialized_mxfp8_quantization_config_is_expert_only():
 
 
 def test_serialized_mxfp8_rejects_unknown_model_type():
-    strategy = Mxfp8Strategy()
+    strategy = Mxfp8ExpertStrategy()
     with pytest.raises(ValueError, match="does not support model_type"):
         strategy.validate_model_type("llama")
 
@@ -181,11 +192,11 @@ def test_qwen35_ignored_layers_reject_unrelated_config():
     ) == []
 
 
-def test_policy_splits_batched_gate_up_weight():
-    policy = get_model_quantization_policy("qwen3_moe", Mxfp8Strategy.quantized_categories)
+def test_layout_splits_batched_gate_up_weight():
+    layout = get_quantized_model_layout("qwen3_moe")
     base = "model.layers.5.mlp.experts"
     tensor = torch.randn(3, 256, 64)
-    outputs = policy.split_exported_weight(f"{base}.gate_up_proj", tensor)
+    outputs = layout.split_exported_weight(f"{base}.gate_up_proj", tensor)
     assert [(name, value.shape) for name, value in outputs] == [
         (f"{base}.gate_proj.weight", torch.Size([3, 128, 64])),
         (f"{base}.up_proj.weight", torch.Size([3, 128, 64])),
@@ -245,7 +256,7 @@ def test_batched_mxfp8_cast_matches_batched_blockwise_cast():
 def test_batched_moe_experts_remain_fused_with_pow2_scales():
     num_experts, moe_inter, hidden = 3, 128, 256
     base = "model.language_model.layers.7.mlp.experts"
-    strategy = BlockwiseFp8Strategy(power_2_scale=True)
+    strategy = BlockwiseFp8LinearStrategy(power_2_scale=True)
     torch.manual_seed(0)
     gate_up = torch.randn(num_experts, 2 * moe_inter, hidden, dtype=torch.bfloat16)
     emitted = dict(
