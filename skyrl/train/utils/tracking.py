@@ -89,7 +89,6 @@ class Tracking:
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
-        # Mirror each numeric value to a Prometheus gauge, one per key.
         for key, value in data.items():
             if isinstance(value, (int, float)):
                 self._prometheus.set(_prometheus_name(key), value)

@@ -142,8 +142,7 @@ class RayPPOTrainer:
 
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
-        # Step-boundary timestamps published to Prometheus. global_step and epoch reach Prometheus
-        # through the normal metric mirror in Tracking.log, at commit, so they stay aligned with the metrics.
+        # global_step and epoch reach Prometheus through the Tracking.log mirror; these are the rest.
         self._step_gauges = ScalarGauges()
 
         # trajectory logger is installed after construction if needed
@@ -172,11 +171,9 @@ class RayPPOTrainer:
         )
 
     def _mark_step_start(self, start_time: float) -> None:
-        """Publish the wall-clock start time of the current step as a gauge."""
         self._step_gauges.set("skyrl_step_start_unixtime", start_time, "Wall-clock start of the current step.")
 
     def _mark_step_end(self) -> None:
-        """Publish the wall-clock end time of the just-committed step as a gauge."""
         self._step_gauges.set("skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step.")
 
     def add_callback(self, callback: TrainingCallback) -> None:
