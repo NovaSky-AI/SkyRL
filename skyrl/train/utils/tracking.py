@@ -94,14 +94,6 @@ class Tracking:
             if isinstance(value, (int, float)):
                 self._prometheus.set(_prometheus_name(key), value)
 
-    def log_gauge(self, name: str, value: float, description: Optional[str] = None) -> None:
-        """Set a Prometheus gauge by name, sharing the gauges ``log`` writes to.
-
-        A name used here and by ``log`` resolves to the same gauge object, so a value published at a
-        specific time (e.g. step start) and the same-named metric land on one series, not two.
-        """
-        self._prometheus.set(name, value, description)
-
     def finish(self):
         if self.backend == "console":
             return

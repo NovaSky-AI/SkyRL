@@ -55,20 +55,3 @@ def test_log_publishes_numeric_metrics_to_prometheus():
 
     assert set(created) == {"skyrl_timing_run_training", "skyrl_generate_n"}
     created["skyrl_timing_run_training"].set.assert_called_with(1.5)
-
-
-def test_log_gauge_and_metric_share_one_gauge():
-    """A gauge set via log_gauge and the same-named published metric are one gauge object."""
-    created = {}
-
-    def fake_gauge(name, description=None):
-        created[name] = MagicMock()
-        return created[name]
-
-    with patch("ray.util.metrics.Gauge", side_effect=fake_gauge):
-        t = Tracking(project_name="proj", experiment_name="exp", backend="console")
-        t.log_gauge("skyrl_trainer_global_step", 5, "step")  # step-start edge
-        t.log({"trainer/global_step": 5}, step=5)  # published at commit, same name
-
-    assert list(created) == ["skyrl_trainer_global_step"]
-    created["skyrl_trainer_global_step"].set.assert_called_with(5.0)
