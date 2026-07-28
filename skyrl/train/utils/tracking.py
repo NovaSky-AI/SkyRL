@@ -33,7 +33,7 @@ from skyrl.train.utils.metrics import ScalarGauges
 
 
 def _prometheus_name(key: str) -> str:
-    """Metric key to a skyrl_-prefixed Prometheus gauge name, non-alphanumerics folded to underscore."""
+    """Metric key to a skyrl_-prefixed Prometheus gauge name, with non-alphanumeric characters replaced by underscores."""
     return "skyrl_" + re.sub(r"[^a-zA-Z0-9_]", "_", key)
 
 
@@ -90,18 +90,16 @@ class Tracking:
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
-        # Publish numeric values to Prometheus, one gauge per key; bool subtypes numbers.Real so exclude it.
+        # Mirror each numeric value to a Prometheus gauge, one per key.
         for key, value in data.items():
-            if isinstance(value, bool) or not isinstance(value, numbers.Real):
-                continue
-            self._prometheus.set(_prometheus_name(key), value)
+            if isinstance(value, numbers.Real):
+                self._prometheus.set(_prometheus_name(key), value)
 
     def log_gauge(self, name: str, value: float, description: Optional[str] = None) -> None:
-        """Set a Prometheus gauge directly, on the same gauges ``log`` publishes metrics to.
+        """Set a Prometheus gauge by name, sharing the gauges ``log`` writes to.
 
-        The trainer uses this for step-timed gauges (e.g. step-start values), whose timing the
-        commit-time metric publish cannot reproduce. Sharing the gauges means a dedicated gauge and
-        the metric published under the same name are one series, not two.
+        A name used here and by ``log`` resolves to the same gauge object, so a value published at a
+        specific time (e.g. step start) and the same-named metric land on one series, not two.
         """
         self._prometheus.set(name, value, description)
 

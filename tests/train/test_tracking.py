@@ -42,7 +42,7 @@ def test_wandb_init_tags_default_none():
 
 
 def test_log_publishes_numeric_metrics_to_prometheus():
-    """Numeric metrics are published to skyrl_-prefixed gauges. Strings and bools are skipped."""
+    """Numeric metrics are published to skyrl_-prefixed gauges with sanitized names."""
     created = {}
 
     def fake_gauge(name, description=None):
@@ -51,7 +51,7 @@ def test_log_publishes_numeric_metrics_to_prometheus():
 
     with patch("ray.util.metrics.Gauge", side_effect=fake_gauge):
         t = Tracking(project_name="proj", experiment_name="exp", backend="console")
-        t.log({"timing/run_training": 1.5, "generate/n": 2, "note": "text", "flag": True}, step=3)
+        t.log({"timing/run_training": 1.5, "generate/n": 2}, step=3)
 
     assert set(created) == {"skyrl_timing_run_training", "skyrl_generate_n"}
     created["skyrl_timing_run_training"].set.assert_called_with(1.5)

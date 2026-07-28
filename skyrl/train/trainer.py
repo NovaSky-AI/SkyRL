@@ -167,14 +167,13 @@ class RayPPOTrainer:
         )
 
     def _mark_step_start(self, epoch: int, start_time: float) -> None:
-        """Publish the step/epoch/start-time gauges so a mid-step scrape reads the in-progress step.
-        Names match what ``Tracking.log`` emits for trainer/* metrics so the two publishes stay one series."""
+        """Publish the current step, epoch, and step-start time as gauges so a mid-step scrape reads the in-progress step."""
         self.tracker.log_gauge("skyrl_trainer_global_step", self.global_step, "Step the loop is working on.")
         self.tracker.log_gauge("skyrl_trainer_epoch", epoch, "Current epoch, zero-indexed.")
         self.tracker.log_gauge("skyrl_step_start_unixtime", start_time, "Wall-clock start of the current step.")
 
     def _mark_step_end(self) -> None:
-        """Publish the step-end timestamp. Must run before global_step increments."""
+        """Publish the wall-clock end time of the just-committed step as a gauge."""
         self.tracker.log_gauge("skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step.")
 
     def add_callback(self, callback: TrainingCallback) -> None:
