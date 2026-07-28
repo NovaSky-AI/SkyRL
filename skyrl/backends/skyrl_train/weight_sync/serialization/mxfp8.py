@@ -12,7 +12,6 @@ from .base import (
     QuantizationTarget,
     ReceiverTensorRole,
     SerializedWeightStrategy,
-    VllmSerializedWeightConfig,
     WeightKind,
 )
 from .blockwise_fp8 import batched_blockwise_cast_to_fp8, blockwise_cast_to_fp8
@@ -116,17 +115,11 @@ class Mxfp8Strategy(SerializedWeightStrategy):
         yield target.checkpoint_name, q_weight
         yield mxfp8_scale_name_for_weight(target.checkpoint_name), scale
 
-    def vllm_config(
+    def vllm_quantization_config(
         self,
         inference_config: Any,
         hf_config: Any,
         model_spec: ModelQuantizationSpec,
-    ) -> VllmSerializedWeightConfig:
-        del hf_config, model_spec
-        if inference_config.model_dtype != "bfloat16":
-            raise ValueError("serialized_mxfp8 weight sync requires model_dtype='bfloat16'")
-        return VllmSerializedWeightConfig(
-            quantization=self.vllm_quantization,
-            quantization_config=get_serialized_mxfp8_quantization_config(),
-            required_model_dtype="bfloat16",
-        )
+    ) -> dict[str, Any]:
+        del inference_config, hf_config, model_spec
+        return get_serialized_mxfp8_quantization_config()

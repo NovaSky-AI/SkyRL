@@ -11,7 +11,6 @@ from .base import (
     ReceiverTarget,
     ReceiverTensorRole,
     SerializedWeightStrategy,
-    VllmSerializedWeightConfig,
     WeightKind,
     iter_serialized_weight_tensors,
 )
@@ -81,7 +80,6 @@ __all__ = [
     "ReceiverTarget",
     "ReceiverTensorRole",
     "SerializedWeightStrategy",
-    "VllmSerializedWeightConfig",
     "WeightKind",
     "batched_blockwise_cast_to_fp8",
     "batched_mxfp8_cast_to_fp8",

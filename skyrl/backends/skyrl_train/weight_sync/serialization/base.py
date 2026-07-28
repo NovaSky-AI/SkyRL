@@ -61,14 +61,6 @@ class ReceiverTarget:
 
 
 @dataclass(frozen=True)
-class VllmSerializedWeightConfig:
-    quantization: str
-    quantization_config: dict[str, Any]
-    load_format: str = "dummy"
-    required_model_dtype: str | None = None
-
-
-@dataclass(frozen=True)
 class ModelQuantizationSpec:
     name: str
     model_types: frozenset[str]
@@ -155,13 +147,13 @@ class SerializedWeightStrategy(ABC):
         """Serialize one supported target."""
 
     @abstractmethod
-    def vllm_config(
+    def vllm_quantization_config(
         self,
         inference_config: Any,
         hf_config: Any,
         model_spec: ModelQuantizationSpec,
-    ) -> VllmSerializedWeightConfig:
-        """Return vLLM initialization settings."""
+    ) -> dict[str, Any]:
+        """Return vLLM's quantization configuration."""
 
     def wire_name(self, checkpoint_name: str) -> str:
         if self.use_legacy_wire_prefix:

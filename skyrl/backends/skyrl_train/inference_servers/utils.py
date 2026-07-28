@@ -87,15 +87,15 @@ def _apply_serialized_weight_sync_defaults(
         )
 
     strategy, hf_config, model_spec = _load_serialized_quantization_context(mode, model_path)
-    serialized_config = strategy.vllm_config(ie_cfg, hf_config, model_spec)
-    ignored_layers = serialized_config.quantization_config.get("ignored_layers", [])
+    quantization_config = strategy.vllm_quantization_config(ie_cfg, hf_config, model_spec)
+    ignored_layers = quantization_config.get("ignored_layers", [])
     if ignored_layers:
         logger.info(
             "Serialized weight sync will leave %d vLLM modules unquantized.",
             len(ignored_layers),
         )
 
-    for key, value in serialized_config.quantization_config.items():
+    for key, value in quantization_config.items():
         _set_or_validate(
             qcfg,
             key,

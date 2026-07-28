@@ -15,7 +15,6 @@ from .base import (
     QuantizationTarget,
     ReceiverTensorRole,
     SerializedWeightStrategy,
-    VllmSerializedWeightConfig,
     WeightKind,
 )
 
@@ -224,17 +223,14 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
         yield target.checkpoint_name, q_weight
         yield scale_name_for_weight(target.checkpoint_name), scale
 
-    def vllm_config(
+    def vllm_quantization_config(
         self,
         inference_config: Any,
         hf_config: Any,
         model_spec: ModelQuantizationSpec,
-    ) -> VllmSerializedWeightConfig:
+    ) -> dict[str, Any]:
         del inference_config
-        return VllmSerializedWeightConfig(
-            quantization=self.vllm_quantization,
-            quantization_config=get_serialized_fp8_quantization_config(
-                self.weight_block_size,
-                model_spec.ignored_layers(hf_config),
-            ),
+        return get_serialized_fp8_quantization_config(
+            self.weight_block_size,
+            model_spec.ignored_layers(hf_config),
         )
