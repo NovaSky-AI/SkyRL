@@ -6,10 +6,6 @@ ray_version: "2.56.0"
 compute_config: l4_ci
 working_dir: . # (Optional) Use current working directory "." as the working_dir. Can be any local path or remote .zip file in cloud storage.
 env_vars:
-  # SkyRL's ray.init() forwards WANDB_API_KEY into its runtime_env (see
-  # prepare_runtime_environment in skyrl/train/utils/utils.py), which collides with the
-  # WANDB_API_KEY this Anyscale job also sets. Without this override Ray refuses to merge
-  # the job and driver runtime envs (400 "conflict"). Matches every other GPU E2E config.
   RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
   WANDB_API_KEY: $WANDB_API_KEY
   HF_TOKEN: $HF_TOKEN
