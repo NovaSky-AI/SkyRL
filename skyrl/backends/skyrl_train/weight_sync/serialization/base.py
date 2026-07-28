@@ -95,7 +95,7 @@ class ModelQuantizationSpec:
                 return spec
         return None
 
-    def normalize_moe_target(self, name: str, tensor: torch.Tensor) -> tuple[QuantizationTarget, ...] | None:
+    def normalize_moe_targets(self, name: str, tensor: torch.Tensor) -> tuple[QuantizationTarget, ...] | None:
         if ".mlp.experts" not in name:
             return None
         spec = self.moe_expert_spec(name)
@@ -195,7 +195,7 @@ def iter_serialized_weight_tensors(
     *,
     model_type: str,
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    targets = model_spec.normalize_moe_target(name, tensor)
+    targets = model_spec.normalize_moe_targets(name, tensor)
     if targets is not None:
         for target in targets:
             if not strategy.supports(target):
