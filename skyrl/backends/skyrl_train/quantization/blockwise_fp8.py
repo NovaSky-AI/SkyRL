@@ -135,7 +135,7 @@ def blockwise_cast_to_fp8(
     padded_cols = ((cols + block_n - 1) // block_n) * block_n
 
     fp8_info = torch.finfo(torch.float8_e4m3fn)
-    weight_fp32 = weight.detach().to(torch.float32)
+    weight_fp32 = weight.detach().to(torch.float32).contiguous() 
     if padded_rows != rows or padded_cols != cols:
         padded = weight_fp32.new_zeros((padded_rows, padded_cols))
         padded[:rows, :cols].copy_(weight_fp32)

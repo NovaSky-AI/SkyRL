@@ -81,7 +81,8 @@ class QuantizedModelLayout:
             split_size = tensor.shape[spec.split_dim]
             if split_size % len(spec.output_weights) != 0:
                 raise ValueError(
-                    f"Batched MoE gate_up_proj output dimension must be even, got shape={tuple(tensor.shape)}"
+                    f"Packed expert dimension must be divisible by {len(spec.output_weights)} "
+                    f"for {spec.source_suffix}, got shape={tuple(tensor.shape)}"
                 )
             tensors = tensor.chunk(len(spec.output_weights), dim=spec.split_dim)
 
