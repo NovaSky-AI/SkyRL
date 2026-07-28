@@ -31,6 +31,36 @@ generator.inference_engine.engine_init_kwargs.quantization=fp8
 
 This uses vLLM's [online dynamic FP8 quantization](https://docs.vllm.ai/en/latest/features/quantization/fp8.html), so no calibration data or pre-quantized checkpoint is required.
 
+## Expert-only MXFP8
+
+On Blackwell GPUs, the Megatron backend can run routed MoE expert GEMMs in
+MXFP8 while vLLM serves the same experts with online MXFP8 quantization:
+
+```bash
+trainer.strategy=megatron \
+trainer.policy.model.expert_mxfp8.enabled=true
+```
+
+SkyRL keeps model checkpoints and weight-sync payloads in their existing
+high-precision formats. Transformer Engine quantizes expert compute operands
+at runtime, and vLLM requantizes expert weights after each sync. Attention,
+dense layers, the router, and the LM head remain high precision.
+
+This mode requires SM100 or SM103 and does not support unmerged LoRA. Set
+`training=false` or `rollout=false` under `expert_mxfp8` to enable only one
+side for benchmarking.
+
+Run the Modal benchmark with identical BF16 and MXFP8 workloads:
+
+```bash
+uv run --isolated --with modal modal run --detach \
+  examples/train/megatron/modal_expert_mxfp8_benchmark.py \
+  --mode both --steps 10
+```
+
+Use `--mode bf16` or `--mode mxfp8` for one side. Set `MODAL_GPU` to override
+the default `B200:8` allocation.
+
 ## Enabling off-policy correction (TIS)
 
 To apply TIS, we need the inference engine to return the rollout logprobs for the generated tokens, and we configure the correction on the policy loss:
