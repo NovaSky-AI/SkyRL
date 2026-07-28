@@ -53,8 +53,8 @@ class RayJaxBackendImpl:
         self.backend = JaxBackendImpl(self.base_model, self.config, self.process_id)
         logger.info(f"Worker {self.process_id} JaxBackendImpl initialized.")
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        self.backend.create_model(model_id, lora_config)
+    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+        self.backend.create_model(model_id, lora_config, model_role)
 
     def forward_backward(self, prepared_batch: types.PreparedModelPassBatch):
         return self.backend.forward_backward(prepared_batch)
@@ -155,8 +155,8 @@ class RayJaxBackend(AbstractBackend):
     def metrics(self) -> types.EngineMetrics:
         return ray.get(self.workers[0].get_metrics.remote())
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        ray.get([w.create_model.remote(model_id, lora_config) for w in self.workers])
+    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+        ray.get([w.create_model.remote(model_id, lora_config, model_role) for w in self.workers])
 
     def delete_model(self, model_id: str) -> None:
         ray.get([w.delete_model.remote(model_id) for w in self.workers])

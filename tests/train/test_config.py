@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from skyrl.train.config.config import (
     BaseConfig,
     SkyRLTrainConfig,
+    TrainerConfig,
     _resolve_class_type,
     build_nested_dataclass,
 )
@@ -126,6 +127,20 @@ def test_cli_overrides_empty_args():
     cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
     assert cfg.trainer.seed == 42
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("vocab_entropy_chunk_size", -1),
+        ("vocab_entropy_chunk_size", True),
+        ("vocab_entropy_chunk_memory_mb", 0),
+        ("vocab_entropy_chunk_memory_mb", True),
+    ],
+)
+def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value):
+    with pytest.raises(ValueError, match=field_name):
+        TrainerConfig(**{field_name: value})
 
 
 def test_cli_overrides_plus_prefix_rejected():
@@ -312,6 +327,43 @@ def test_run_engines_locally_false_requires_external_endpoint():
 
     with pytest.raises(ValueError, match="run_engines_locally=false requires"):
         validate_inference_engine_cfg(cfg)
+
+
+def test_offload_kv_for_weight_sync_rejects_colocated():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    with pytest.raises(AssertionError, match="non-colocated weight sync only"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_offload_kv_for_weight_sync_rejects_lora():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    cfg.trainer.policy.model.lora.rank = 8
+    with pytest.raises(AssertionError, match="does not support LoRA"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_offload_kv_for_weight_sync_sync_trainer_ok():
+    # Non-fully-async (synchronous trainer) is supported: plain sleep, no in-flight.
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.fully_async.enabled = False
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("clear_kv_cache", [False, True])
+def test_offload_kv_for_weight_sync_async_ok(clear_kv_cache):
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    cfg.trainer.fully_async.enabled = True
+    cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = clear_kv_cache
+    # Both clear_kv_cache settings are supported now.
+    validate_inference_engine_cfg(cfg)
 
 
 def test_temperature_propagation():
