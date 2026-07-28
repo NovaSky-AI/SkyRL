@@ -6,7 +6,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type
 
 import ray
 import torch
@@ -16,10 +16,10 @@ from loguru import logger
 from omegaconf import OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
-    PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
 )
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
@@ -35,9 +35,6 @@ from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.ulysses import (
     apply_monkey_patch,
     set_ulysses_sequence_parallel_group,
-)
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-    InferenceEngineClient,
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
@@ -59,7 +56,6 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     reduce_metrics,
 )
 from skyrl.env_vars import (
-    _SKYRL_USE_NEW_INFERENCE,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )
@@ -75,7 +71,7 @@ from skyrl.train.utils.utils import (
 _SET_AFFINITY = False
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.remote_inference_client import (
+    from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
         RemoteInferenceClient,
     )
     from skyrl.train.config.config import InferenceEngineConfig
@@ -237,6 +233,8 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         self._transfer_strategy_cls = None  # Set in init_weight_transfer_communicator
+        # Populated by init_model when torch profiling is enabled.
+        self.profiler = None
 
         if self.cfg.algorithm.temperature is None:
             raise ValueError("`cfg.algorithm.temperature` must be set")
@@ -246,8 +244,9 @@ class Worker(DistributedTorchRayActor):
         raise NotImplementedError()
 
     def empty_cache(self) -> None:
-        """Empty GPU memory cache on Worker's CUDA device"""
-        torch.cuda.empty_cache()
+        """Empty this worker's CUDA allocator cache."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _set_expandable_segments(self, enabled: bool) -> None:
         """Toggle PyTorch's CUDA ``expandable_segments`` allocator at runtime.
@@ -295,6 +294,29 @@ class Worker(DistributedTorchRayActor):
     def set_algorithm_config(self, **kwargs) -> None:
         for key, value in kwargs.items():
             setattr(self.cfg.algorithm, key, value)
+
+    # ------------------------------------------------------------------
+    # torch.profiler RPCs, dispatched via WorkerDispatch pass_through.
+    # ------------------------------------------------------------------
+
+    def start_profile(self) -> None:
+        """Arm the profiler before the training loop (no-op when disabled)."""
+        if self.profiler is not None:
+            self.profiler.start()
+
+    def profile_step(self) -> None:
+        """Advance the profiler schedule by one global step."""
+        if self.profiler is not None:
+            self.profiler.step()
+
+    def stop_profile(self) -> None:
+        """Stop the profiler after the training loop, flushing any open window."""
+        if self.profiler is not None:
+            self.profiler.stop()
+
+    def dump_profiler_summary(self):
+        """Return this rank's last-window kernel summary, or None."""
+        return self.profiler.get_kernel_summary() if self.profiler is not None else None
 
     def _get_module_for_offload(self):
         """Return the model module(s) to be offloaded/backloaded. Megatron offloads `self.actor_module`. FSDP workers use `self.model` directly."""
@@ -377,7 +399,7 @@ class Worker(DistributedTorchRayActor):
 
     async def init_weight_sync_state(
         self,
-        inference_engine_client: "Union[InferenceEngineClient, RemoteInferenceClient]",
+        inference_engine_client: "RemoteInferenceClient",
         inference_engine_cfg: "InferenceEngineConfig",
     ):
         """Initialize state for weight syncing with Inference Engine Client
@@ -398,11 +420,8 @@ class Worker(DistributedTorchRayActor):
             colocate_all=self.cfg.placement.colocate_all,
         )
 
-        # For new inference path, fetch world_size from servers
-        # For legacy path, calculate from config
-        inference_world_size = None
-        if _SKYRL_USE_NEW_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
-            inference_world_size, _ = await inference_engine_client.get_world_size()
+        # Fetch the total inference world size from the servers.
+        inference_world_size, _ = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(
@@ -458,6 +477,12 @@ class Worker(DistributedTorchRayActor):
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
         )
+
+    def finalize_pending_saves(self):
+        """Block until any in-flight async checkpoint write completes (no-op otherwise)."""
+        finalize = getattr(self.strategy, "finalize_pending_saves", None)
+        if finalize is not None:
+            finalize()
 
     def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
         _, states = self.strategy.load_checkpoint(
@@ -549,6 +574,7 @@ class PPORayActorGroup:
         self.colocate_all = colocate_all
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
+        self._last_dp_size: Optional[int] = None
         self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg: Optional[ResolvedPlacementGroup], num_gpus_per_actor: float):
@@ -660,6 +686,8 @@ class PPORayActorGroup:
         ray.get([actor.init_worker_process_group.remote() for actor in self._actor_handlers])
         logger.info("Initialized process group for RayActorGroup")
         self.actor_infos = [ActorInfo(actor, ray.get(actor.get_mesh_rank.remote())) for actor in self._actor_handlers]
+        if self.actor_infos:
+            self._last_dp_size = self.actor_infos[0].rank.dp_size
         logger.info(f"Mesh Ranks: {[actor_info.rank for actor_info in self.actor_infos]}")
 
     def async_init_model(
@@ -674,6 +702,15 @@ class PPORayActorGroup:
             A list of ray object refs.
         """
         return [actor.init_model.remote(*args, **kwargs) for actor in self._actor_handlers]
+
+    def get_dp_size(self) -> int:
+        """Return the current or last-known data-parallel size for this actor group."""
+        if self.actor_infos:
+            self._last_dp_size = self.actor_infos[0].rank.dp_size
+            return self._last_dp_size
+        if self._last_dp_size is None:
+            raise RuntimeError("Cannot determine data-parallel size before actor group initialization.")
+        return self._last_dp_size
 
     def offload_to_cpu(self, nonblocking=False, offload_optimizer=True, offload_model=True):
         """Offload all worker state to CPU.
@@ -782,14 +819,10 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # TODO: SFT path still averages metrics across microbatches and workers.
-        # This needs to be unified with the RL path which sums.
-        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
-        sum_loss_metrics = resolved_loss_name != "cross_entropy"
-
-        # Reduce across microbatches and all-reduce metrics across DP ranks
-        # NOTE: Sum loss metrics because scaling is already applied at the advantage level
-        result = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        # Reduce across microbatches and all-reduce metrics across DP ranks.
+        # Loss metrics are pre-scaled sums, so keep the same sum-reduction
+        # shape for RL and SFT.
+        result = reduce_metrics(all_metrics, sum_loss_metrics=True)
 
         # Token-based batching diagnostics: total microbatches this rank ran and how many
         # were purely-padding (added to equalize the microbatch count across DP ranks).
@@ -800,7 +833,7 @@ class PolicyWorkerBase(Worker):
             result["num_padding_microbatches"] = float(getattr(microbatch_iterator, "num_padding_microbatches", 0))
 
         dp_group = self.device_mesh.get_group("dp")
-        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
+        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
 
@@ -888,8 +921,13 @@ class PolicyWorkerBase(Worker):
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
+            # Policy loss masks are pre-scaled to achieve the correct reduction
+            # when summing across the entire minibatch (see `DefaultCollator`).
+            # FSDP averages loss value over DP ranks by default,
+            # so we multiply by dp_size to recover the correct sum reduction across workers.
+            grad_sum_correction_factor = self.mesh_rank.dp_size
+            loss = policy_loss * grad_sum_correction_factor
             unscaled_loss = policy_loss
-            loss = unscaled_loss * microbatch_weight
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -908,7 +946,7 @@ class PolicyWorkerBase(Worker):
             if action_mask is not None:
                 valid_lens_t = action_mask.sum(dim=-1).long()
             elif loss_mask is not None:
-                valid_lens_t = loss_mask.sum(dim=-1).long()
+                valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
             else:
                 valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
 
@@ -928,7 +966,7 @@ class PolicyWorkerBase(Worker):
                 )
 
             status = {
-                "loss": loss.item(),
+                "loss": unscaled_loss.item(),
                 "response_length": num_actions,
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
@@ -978,7 +1016,7 @@ class PolicyWorkerBase(Worker):
             if action_mask is not None:
                 valid_lens = action_mask.sum(dim=1).int().tolist()
             elif loss_mask is not None:
-                valid_lens = loss_mask.sum(dim=1).int().tolist()
+                valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
             else:
                 valid_lens = [seq_len] * batch_size
 
@@ -1070,13 +1108,9 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # SFT path averages metrics across microbatches and DP ranks (mirror forward_backward).
-        resolved_loss_name = loss_fn or self.cfg.algorithm.policy_loss_type
-        sum_loss_metrics = resolved_loss_name != "cross_entropy"
-
-        result = reduce_metrics(all_metrics, sum_loss_metrics=sum_loss_metrics)
+        result = reduce_metrics(all_metrics, sum_loss_metrics=True)
         dp_group = self.device_mesh.get_group("dp")
-        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=sum_loss_metrics)
+        result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
 
@@ -1147,7 +1181,7 @@ class PolicyWorkerBase(Worker):
             if action_mask is not None:
                 valid_lens_t = action_mask.sum(dim=-1).long()
             elif loss_mask is not None:
-                valid_lens_t = loss_mask.sum(dim=-1).long()
+                valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
             else:
                 valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
 

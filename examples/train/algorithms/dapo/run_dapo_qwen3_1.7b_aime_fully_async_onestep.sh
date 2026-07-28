@@ -45,8 +45,6 @@ LR=1e-6
 : "${MINI_BATCH_SIZE:=32}"
 : "${EVAL_CKPT_INTERVAL:=80}"
 
-# Use new inference_servers implementation based on native vLLM RL APIs
-_SKYRL_USE_NEW_INFERENCE=1
 
 SEQUENCE_MASK_METRIC=geometric
 GEO_MASK_HIGH=1.01
@@ -107,7 +105,6 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   generator.use_conversation_multi_turn=false \
   environment.env_class=aime \

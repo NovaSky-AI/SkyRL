@@ -1,9 +1,8 @@
 """Shared vLLM layerwise-reload lifecycle for SkyRL's vLLM worker-extension classes.
 
-Provides `LayerwiseReloadWorkerMixin`, the start/finish bracket that both
-`vllm_worker.WorkerWrap` and
-`new_inference_worker_wrap.NewInferenceWorkerWrap` use to run vLLM's
-layerwise reload once per weight sync rather than once per chunk.
+Provides `LayerwiseReloadWorkerMixin`, the start/finish bracket that
+`new_inference_worker_wrap.NewInferenceWorkerWrap` uses to run vLLM's layerwise
+reload once per weight sync rather than once per chunk.
 """
 
 import inspect
@@ -64,6 +63,18 @@ def patch_numel_loaded():
 
 
 _PATCHED_LAYERWISE_NUMEL_LOADED = False
+
+
+def _empty_cuda_cache_rocm() -> None:
+    """Release unused ROCm cached blocks after full-weight sync."""
+    is_rocm = torch.version.hip is not None
+    if not torch.cuda.is_available() or not is_rocm:
+        return
+
+    device = torch.cuda.current_device()
+    torch.cuda.synchronize(device)
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize(device)
 
 
 class LayerwiseReloadWorkerMixin:
@@ -154,3 +165,4 @@ class LayerwiseReloadWorkerMixin:
 
         self._skyrl_weight_update_active = False
         self._skyrl_is_checkpoint_format = True
+        _empty_cuda_cache_rocm()

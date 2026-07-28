@@ -12,13 +12,10 @@ SkyRL is designed with modularity as the most important principle. As shown in t
 
 2. **Implementing a custom generator** by following the `GeneratorInterface` abstraction, with the only required method being `async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput`. This is the path to take if you have an existing agent harness that is too complex to migrate into the `SkyRLGymGenerator` format. A canonical example is the Harbor generator — see: [Harbor](../harbor).
 
-## Prerequisite: Toggle on HTTP Endpoint
+## Prerequisite: Use the SkyRL HTTP Inference Endpoint
 
-SkyRL exposes the inference engine as an OpenAI-compatible HTTP endpoint, so your agent harness can send requests to it. Configure the following:
+SkyRL exposes the inference engine as an OpenAI-compatible HTTP endpoint, so your agent harness can send requests to it. Generators obtain the endpoint URL from the inference engine client via `get_endpoint_url()` rather than a fixed host/port.
 
-- **`generator.inference_engine.enable_http_endpoint`**: Set to `true` to launch an OpenAI-compatible HTTP endpoint. When using HTTP endpoints, propagate the temperature appropriately to `trainer.algorithm.temperature` if you are not utilizing `generator.sampling_params.temperature`.
-- **`generator.inference_engine.http_endpoint_host`**: Host for the inference HTTP endpoint.
-- **`generator.inference_engine.http_endpoint_port`**: Port for the inference HTTP endpoint.
 - **`generator.inference_engine.served_model_name`**: The model name to use for HTTP endpoint validation. If set, this name must be used in the `model` field of `/chat/completions` and `/completions` requests instead of the model path.
 
 ## Ways to Integrate Your Custom Agent

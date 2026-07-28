@@ -85,7 +85,6 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.max_prompt_length=2048 \
   generator.max_input_length=4096 \
   generator.sampling_params.max_generate_length=500 \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   $MULTI_TURN_ARGS \
   $STEP_WISE_ARGS \

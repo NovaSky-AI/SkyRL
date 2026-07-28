@@ -20,6 +20,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     PauseMode,
     RemoteInferenceClient,
 )
+from skyrl.backends.skyrl_train.inference_servers.setup import (
+    build_new_inference_client,
+)
+from skyrl.train.config import SkyRLTrainConfig
 
 
 def create_mock_vllm_server(server_id: int) -> FastAPI:
@@ -277,6 +281,32 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return PlainTextResponse(f"Success: LoRA adapter '{lora_name}' removed successfully on server {server_id}.")
 
     return app
+
+
+@pytest.mark.asyncio
+async def test_build_new_inference_client_uses_served_model_name_for_chat_requests(mock_servers):
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = "Qwen/Qwen2.5-1.5B-Instruct"
+    cfg.generator.inference_engine.served_model_name = "served-alias"
+    cfg.generator.inference_engine.external_proxy_url = mock_servers["proxy_url"]
+    cfg.generator.inference_engine.external_server_urls = mock_servers["server_urls"]
+
+    client, server_setup = build_new_inference_client(cfg, tokenizer=None)
+
+    try:
+        assert server_setup.proxy_url == mock_servers["proxy_url"]
+        assert server_setup.server_urls == mock_servers["server_urls"]
+
+        await client.chat_completion(
+            {
+                "json": {"messages": [{"role": "user", "content": "hi"}]},
+                "headers": {},
+            }
+        )
+        captured = await _get_last_models(mock_servers["server_urls"])
+        assert captured[0]["chat"] == "served-alias"
+    finally:
+        await client.teardown()
 
 
 def start_server(port: int, server_id: int) -> uvicorn.Server:

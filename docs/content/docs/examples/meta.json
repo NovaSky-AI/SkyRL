@@ -4,6 +4,7 @@
     "megatron",
     "ppo",
     "lora",
+    "amd",
     "llm_as_a_judge",
     "remote_server",
     "training_backends",
@@ -11,7 +12,8 @@
     "search",
     "geometry3k",
     "visgym",
-    "flash_rl",
+    "quantized_rollouts",
+    "spec_decode",
     "mini_swe_agent",
     "openenv"
   ]

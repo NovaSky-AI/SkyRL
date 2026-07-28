@@ -10,12 +10,12 @@ import ray
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
-    build_engine_runtime_env,
-)
 from skyrl.backends.skyrl_train.inference_servers.common import (
     SERVER_PORT_STRIDE,
     ServerInfo,
+)
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
+    build_engine_runtime_env,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.inference_servers.server_pool import ServerActorPool

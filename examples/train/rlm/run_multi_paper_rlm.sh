@@ -56,7 +56,6 @@ uv run --with "transformers==5.4.0" --extra fsdp --python 3.12 -m examples.train
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.inference_engine.gpu_memory_utilization=0.6\
   generator.max_input_length=32768 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \

@@ -19,7 +19,7 @@ const pageOrder: Record<string, string[]> = {
   'getting-started': ['installation', 'quickstart', 'overview', 'development'],
   'datasets': ['dataset-preparation'],
   'tutorials': ['new_env', 'one_step_off_async', 'fully_async', 'tools_guide', 'skyrl_gym_generator'],
-  'examples': ['megatron', 'ppo', 'lora', 'llm_as_a_judge', 'remote_server', 'training_backends', 'multi_turn_text2sql', 'search', 'flash_rl', 'mini_swe_agent', 'openenv'],
+  'examples': ['megatron', 'ppo', 'lora', 'llm_as_a_judge', 'remote_server', 'training_backends', 'multi_turn_text2sql', 'search', 'quantized_rollouts', 'mini_swe_agent', 'openenv'],
   'platforms': ['overview', 'anyscale', 'runpod', 'skypilot'],
   'recipes': ['overview', 'skyrl-sql', 'searchr1'],
   'algorithms': ['dapo', 'custom_algorithms'],

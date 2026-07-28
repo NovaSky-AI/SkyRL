@@ -9,7 +9,7 @@ from typing import Any
 import ray
 from loguru import logger
 
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import (
     BasePPOExp,

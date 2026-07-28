@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUN_NAME="run_$(date +%Y%m%d%H)"
+# Include seconds + PID so the name is unique per invocation. The wandb project is
+# shared, so an hour-granular name can collide with a concurrent run on another host,
+# and get_summary.py (which picks the newest run by that name) would read the wrong run.
+RUN_NAME="run_$(date +%Y%m%d%H%M%S)_$$"
 SCRIPT_DIR=$(dirname $(realpath $0))
 
 # Thresholds: 5% allowance from min/max of last 10 CI runs as of 23rd Feb 2026

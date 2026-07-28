@@ -267,6 +267,77 @@ def test_training_workflow(service_client):
     assert training_run.corrupted is False
 
 
+def test_delete_checkpoint(tmp_path):
+    """Test that deleting checkpoints removes them from the listing and from disk.
+
+    Mirrors the real-client style of ``test_training_workflow``: save several
+    training checkpoints plus a sampler checkpoint, then delete a subset via the
+    REST client and verify the deleted checkpoints disappear from both the
+    listing and the on-disk checkpoint store, while the rest are untouched. The
+    server is started with an explicit ``checkpoints-base`` so the test knows
+    where the artifacts live on disk.
+    """
+    checkpoints_base = tmp_path / "checkpoints"
+    with start_api_server(
+        overrides={"checkpoints-base": str(checkpoints_base)},
+        wait_for_up=True,
+        teardown_timeout=20.0,
+    ):
+        service_client = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/", api_key=TINKER_API_KEY)
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+        rest_client = service_client.create_rest_client()
+
+        # Save several training checkpoints and one sampler checkpoint.
+        training_run_id = None
+        for name in ["ckpt0", "ckpt1", "ckpt2", "ckpt3"]:
+            resume_path = training_client.save_state(name=name).result().path
+            training_run_id = urlparse(resume_path).netloc
+        training_client.save_weights_for_sampler(name="sampler0").result()
+
+        # On-disk layout: training -> <base>/<run>/<id>.tar.gz,
+        # sampler -> <base>/<run>/sampler_weights/<id>.tar.gz (see checkpoint_file_path).
+        def training_ckpt_file(checkpoint_id):
+            return checkpoints_base / training_run_id / f"{checkpoint_id}.tar.gz"
+
+        def sampler_ckpt_file(checkpoint_id):
+            return checkpoints_base / training_run_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
+
+        def listed_checkpoints():
+            return {
+                ckpt.checkpoint_id: ckpt for ckpt in rest_client.list_checkpoints(training_run_id).result().checkpoints
+            }
+
+        assert set(listed_checkpoints()) == {"ckpt0", "ckpt1", "ckpt2", "ckpt3", "sampler0"}
+        for checkpoint_id in ["ckpt0", "ckpt1", "ckpt2", "ckpt3"]:
+            assert training_ckpt_file(checkpoint_id).exists()
+        assert sampler_ckpt_file("sampler0").exists()
+
+        # Delete two training checkpoints and the sampler checkpoint. Delete via the
+        # type-qualified tinker path (the canonical tinker flow); the checkpoint type
+        # is carried by the path's "weights/"/"sampler_weights/" prefix.
+        checkpoints = listed_checkpoints()
+        for checkpoint_id in ["ckpt1", "ckpt3", "sampler0"]:
+            rest_client.delete_checkpoint_from_tinker_path(checkpoints[checkpoint_id].tinker_path).result()
+
+        # Deleted checkpoints are gone from both the listing and disk.
+        assert set(listed_checkpoints()) == {"ckpt0", "ckpt2"}
+        assert not training_ckpt_file("ckpt1").exists()
+        assert not training_ckpt_file("ckpt3").exists()
+        assert not sampler_ckpt_file("sampler0").exists()
+        # Un-deleted checkpoints remain on disk.
+        assert training_ckpt_file("ckpt0").exists()
+        assert training_ckpt_file("ckpt2").exists()
+
+        # A bare (untyped) id is rejected with 400 -- the checkpoint type must be
+        # explicit, since a training and sampler checkpoint could share an id. This
+        # matches upstream tinker. The rejected delete must leave the checkpoint intact.
+        with pytest.raises(Exception) as exc_info:
+            rest_client.delete_checkpoint(training_run_id, "ckpt0").result()
+        assert getattr(exc_info.value, "status_code", None) == 400
+        assert set(listed_checkpoints()) == {"ckpt0", "ckpt2"}
+        assert training_ckpt_file("ckpt0").exists()
+
+
 @pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
 def test_sample(service_client, use_lora):
     """Test the sample endpoint with base model or LoRA adapter."""

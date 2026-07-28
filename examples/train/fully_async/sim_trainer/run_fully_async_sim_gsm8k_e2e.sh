@@ -56,7 +56,6 @@ uv run --isolated --extra fsdp \
   generator.inference_engine.tensor_parallel_size=1 \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.batched=false \

@@ -6,8 +6,6 @@ from a provided inference configuration and keeps them alive so that client code
 and generation configurations can be iterated against a fixed deployment without
 re-launching the engines on every run.
 
-Only the new inference codepath (``_SKYRL_USE_NEW_INFERENCE=1``) is supported.
-
 Example::
 
     uv run --isolated --extra fsdp -m skyrl.train.entrypoints.serve \
@@ -27,7 +25,6 @@ import time
 import ray
 from loguru import logger
 
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.utils.utils import initialize_ray, validate_inference_engine_cfg
@@ -97,12 +94,6 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 
 def _validate_serve_cfg(cfg: SkyRLTrainConfig) -> None:
     """Validate the config for the inference-only serving path."""
-    if not _SKYRL_USE_NEW_INFERENCE:
-        raise ValueError(
-            "The serve entrypoint only supports the new inference codepath. "
-            "Unset `_SKYRL_USE_NEW_INFERENCE=0` (the default is enabled)."
-        )
-
     if cfg.trainer.policy.model.path is None:
         raise ValueError("trainer.policy.model.path must be set to the model to serve.")
 
@@ -129,7 +120,7 @@ def _validate_serve_cfg(cfg: SkyRLTrainConfig) -> None:
         )
 
     # Shared inference-engine validation (PD, parallelism, executor backend,
-    # new inference layer). Resolves `override_existing_update_group="auto"`.
+    # new inference layer).
     validate_inference_engine_cfg(cfg)
 
 

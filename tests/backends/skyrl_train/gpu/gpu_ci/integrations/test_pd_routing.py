@@ -58,7 +58,6 @@ def test_pd_routing_verification(ray_init_fixture):
         num_inference_engines=2,
         enable_pd=True,
         num_prefill=1,
-        use_new_inference_servers=True,
         engine_init_kwargs={
             "kv_transfer_config": {
                 "kv_connector": "NixlConnector",

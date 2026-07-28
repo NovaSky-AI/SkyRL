@@ -110,6 +110,15 @@ def test_cleanup_stale_sessions():
             id="cispo",
         ),
         pytest.param("ppo_critic", {"value_clip": 0.2}, [], [], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9], id="ppo_critic"),
+        pytest.param(
+            "dppo",
+            {"delta_low": 0.2, "delta_high": 0.2},
+            [0.1, 0.2, 0.3],
+            [-1.1, -1.0, -0.9],
+            [],
+            [],
+            id="dppo",
+        ),
     ],
 )
 def test_prepare_model_pass_batch_loss_fn_and_config(

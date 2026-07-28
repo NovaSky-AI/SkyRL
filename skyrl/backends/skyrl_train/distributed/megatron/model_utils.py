@@ -16,6 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
+from math import prod
 from typing import Any, Optional
 
 import megatron.core.parallel_state as mpu
@@ -421,6 +423,62 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         return grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None
 
 
+def _fused_lm_head_logprob_apply(
+    backend: str,
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    vocab_start_index: int,
+    vocab_end_index: int,
+    chunk_size: int,
+    tp_group: torch.distributed.ProcessGroup,
+    inference_only: bool,
+) -> torch.Tensor:
+    """Dispatch the fused LM-head token-logprob to the requested backend.
+
+    ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; ``"triton"``
+    uses ``FusedLinearLogprobTriton`` when CUDA + triton are available and
+    otherwise warns and falls back to torch. Both return TP-combined ``[B, S]``.
+    """
+    if backend == "triton":
+        try:
+            from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
+                TRITON_AVAILABLE,
+                FusedLinearLogprobTriton,
+                is_cuda_available,
+            )
+
+            if not (TRITON_AVAILABLE and is_cuda_available):
+                raise ImportError("triton is not installed or no CUDA device is available")
+            return FusedLinearLogprobTriton.apply(  # type: ignore[no-any-return]
+                hidden,
+                weight,
+                target,
+                vocab_start_index,
+                vocab_end_index,
+                chunk_size,
+                tp_group,
+                inference_only,
+            )
+        except (ImportError, RuntimeError) as e:
+            warnings.warn(
+                f"fused_lm_head_logprob_backend='triton' unavailable ({e}); falling back to the "
+                "pure-PyTorch backend. Use a CUDA environment with Triton available to run the fused Triton kernel.",
+                stacklevel=2,
+            )
+
+    return FusedLinearChunkedDistributedLogprob.apply(  # type: ignore[no-any-return]
+        hidden,
+        weight,
+        target,
+        vocab_start_index,
+        vocab_end_index,
+        chunk_size,
+        tp_group,
+        inference_only,
+    )
+
+
 def from_parallel_logits_to_logprobs(
     vocab_parallel_logits: torch.Tensor,
     target: torch.Tensor,
@@ -658,6 +716,7 @@ def from_parallel_hidden_to_logprobs(
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
     chunk_size: Optional[int] = None,
     temperature: float = 1.0,
+    fused_backend: str = "torch",
 ) -> torch.Tensor:
     """Fused-LM-head variant of :func:`from_parallel_logits_to_logprobs`.
 
@@ -685,7 +744,8 @@ def from_parallel_hidden_to_logprobs(
 
     seq_len_local = hidden.shape[1]
     eff_chunk = chunk_size if (chunk_size is not None and chunk_size < seq_len_local) else seq_len_local
-    logprobs: torch.Tensor = FusedLinearChunkedDistributedLogprob.apply(  # type: ignore
+    logprobs: torch.Tensor = _fused_lm_head_logprob_apply(
+        fused_backend,
         hidden,
         lm_head_weight,
         target,
@@ -720,6 +780,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     attention_mask: Optional[torch.Tensor] = None,
     sub_seq_lengths: Optional[list[list[int]]] = None,
     temperature: float = 1.0,
+    fused_backend: str = "torch",
 ) -> torch.Tensor:
     """Fused-LM-head variant of
     :func:`from_parallel_logits_to_logprobs_packed_sequences`.
@@ -763,7 +824,8 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
 
     seq_len_local = hidden.shape[1]
     eff_chunk = chunk_size if (chunk_size is not None and chunk_size < seq_len_local) else seq_len_local
-    probs: torch.Tensor = FusedLinearChunkedDistributedLogprob.apply(  # type: ignore
+    probs: torch.Tensor = _fused_lm_head_logprob_apply(
+        fused_backend,
         hidden,
         lm_head_weight,
         rolled_targets,
@@ -940,6 +1002,8 @@ def vocab_parallel_entropy_packed_sequences(
     loss_mask: Optional[torch.Tensor],
     cp_group: Optional[torch.distributed.ProcessGroup],
     sub_seq_lengths: Optional[list[list[int]]] = None,
+    chunk_size: Optional[int] = None,
+    chunk_memory_mb: int = 512,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute action-token entropy directly on TP+CP sharded packed logits.
 
@@ -948,9 +1012,8 @@ def vocab_parallel_entropy_packed_sequences(
         local term is normalized by the global action-token count. Megatron's
         schedule already applies the CP loss scale for two-output loss funcs.
     """
-    entropy_tokens = vocab_parallel_entropy(vocab_parallel_logits).squeeze(0)
-    device = entropy_tokens.device
-    dtype = entropy_tokens.dtype
+    device = vocab_parallel_logits.device
+    dtype = vocab_parallel_logits.dtype
 
     attention_mask = attention_mask.to(device=device, dtype=torch.bool)
     cu_seqlens_padded = cu_seqlens_padded.to(device=device, dtype=torch.long)
@@ -994,13 +1057,18 @@ def vocab_parallel_entropy_packed_sequences(
         cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
             cu_seqlens_padded, seq_indices, seq_offsets, seq_lens_padded, cp_size
         )
-        local_weights = torch.zeros_like(entropy_tokens)
+        local_weights = torch.zeros((int(vocab_parallel_logits.shape[-2]),), dtype=dtype, device=device)
         current_rank_mask = cp_rank_for_token == cp_rank
         local_weights[local_indices[current_rank_mask]] = packed_weights[current_rank_mask]
     else:
         local_weights = packed_weights
 
-    local_entropy_sum = (entropy_tokens * local_weights).sum()
+    local_entropy_sum = vocab_parallel_entropy_weighted_sum(
+        vocab_parallel_logits,
+        local_weights,
+        chunk_size=chunk_size,
+        chunk_memory_mb=chunk_memory_mb,
+    )
     local_count = local_weights.sum()
     global_count = local_count.detach().clone()
     global_entropy_sum = local_entropy_sum.detach().clone()
@@ -1272,7 +1340,51 @@ class _VocabParallelEntropy(torch.autograd.Function):
         return softmax_logits
 
 
-def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
+def _floor_power_of_two(value: int) -> int:
+    return 1 << (value.bit_length() - 1)
+
+
+def _resolve_vocab_entropy_chunk_size(
+    vocab_parallel_logits: torch.Tensor,
+    chunk_size: Optional[int],
+    chunk_memory_mb: int,
+    peak_factor: int = 4,
+) -> Optional[int]:
+    """Resolve the sequence chunk size for vocab entropy.
+
+    ``None`` disables chunking. ``0`` uses the runtime vocab shard and dtype to
+    choose a size. Positive values specify the number of tokens per chunk.
+    """
+    if chunk_size is None:
+        return None
+    if chunk_size < 0:
+        raise ValueError(f"chunk_size must be non-negative or None, got {chunk_size}")
+    if chunk_memory_mb <= 0:
+        raise ValueError(f"chunk_memory_mb must be positive, got {chunk_memory_mb}")
+    seq_len = int(vocab_parallel_logits.shape[-2])
+    if seq_len <= 0:
+        return None
+    if chunk_size > 0:
+        return chunk_size if chunk_size < seq_len else None
+
+    budget_bytes = int(chunk_memory_mb) * 1024 * 1024
+    leading_elements = prod(vocab_parallel_logits.shape[:-2])
+    bytes_per_token = (
+        leading_elements * int(vocab_parallel_logits.shape[-1]) * vocab_parallel_logits.element_size() * peak_factor
+    )
+    if bytes_per_token <= 0:
+        return None
+
+    auto_chunk = max(1, min(seq_len, budget_bytes // bytes_per_token))
+    auto_chunk = _floor_power_of_two(auto_chunk)
+    return auto_chunk if auto_chunk < seq_len else None
+
+
+def vocab_parallel_entropy(
+    vocab_parallel_logits: torch.Tensor,
+    chunk_size: Optional[int] = None,
+    chunk_memory_mb: int = 512,
+) -> torch.Tensor:
     """Compute entropy when the logits are sharded in tp ranks
 
     Args:
@@ -1281,4 +1393,38 @@ def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
     Returns: (total_nnz,)
 
     """
-    return _VocabParallelEntropy.apply(vocab_parallel_logits)
+    resolved_chunk_size = _resolve_vocab_entropy_chunk_size(vocab_parallel_logits, chunk_size, chunk_memory_mb)
+    if resolved_chunk_size is None:
+        return _VocabParallelEntropy.apply(vocab_parallel_logits)
+
+    entropy_chunks = []
+    seq_len = int(vocab_parallel_logits.shape[-2])
+    for start in range(0, seq_len, resolved_chunk_size):
+        end = min(start + resolved_chunk_size, seq_len)
+        entropy_chunks.append(_VocabParallelEntropy.apply(vocab_parallel_logits[..., start:end, :]))
+    return torch.cat(entropy_chunks, dim=-1)
+
+
+def vocab_parallel_entropy_weighted_sum(
+    vocab_parallel_logits: torch.Tensor,
+    weights: torch.Tensor,
+    chunk_size: Optional[int] = None,
+    chunk_memory_mb: int = 512,
+) -> torch.Tensor:
+    """Compute ``sum(entropy * weights)`` with bounded temporary memory."""
+    resolved_chunk_size = _resolve_vocab_entropy_chunk_size(vocab_parallel_logits, chunk_size, chunk_memory_mb)
+    if resolved_chunk_size is None:
+        entropy_tokens = _VocabParallelEntropy.apply(vocab_parallel_logits)
+        return (entropy_tokens * weights).sum()
+
+    # Keep an autograd edge even when every chunk is masked out.
+    local_entropy_sum = vocab_parallel_logits[..., :0, :].sum()
+    seq_len = int(vocab_parallel_logits.shape[-2])
+    for start in range(0, seq_len, resolved_chunk_size):
+        end = min(start + resolved_chunk_size, seq_len)
+        weight_chunk = weights[start:end]
+        if torch.count_nonzero(weight_chunk).item() == 0:
+            continue
+        entropy_chunk = _VocabParallelEntropy.apply(vocab_parallel_logits[..., start:end, :])
+        local_entropy_sum = local_entropy_sum + (entropy_chunk * weight_chunk).sum()
+    return local_entropy_sum

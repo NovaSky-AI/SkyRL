@@ -32,9 +32,10 @@ Start off any modification or debugging with SkyRL using this file as the primar
 
 1. **Check Megatron-Bridge support** — The model needs a provider in Megatron-Bridge. Check available branches/commits for the model's provider class.
 2. **Check dependency compatibility** — New architectures may need additional deps (e.g., `mamba-ssm` for Mamba). Verify no conflicts with existing pins.
-3. **Test inference first** — Add a test case to `test_engine_generation.py` (token-based generation).
-4. **Test Megatron forward** — Add a test case to `test_megatron_worker.py` comparing HF vs Megatron logprobs.
-5. **Create example script** — Add to `examples/train/<model>/` with README and training script.
+3. **Minimal Generation + Logprobs test** — Add a test case to `tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py` comparing HF vs Megatron logprobs and performing a test generation. If the model is large, you can use a tiny model similar to the `eatang/qwen3.5-moe-tiny-random` model in the test. Success criteria:
+    1. Logprobs difference should be low (typically < 0.01).
+    2. If using a model with pretrained weights (instead of a tiny model with random weights), then generation should be coherent before and after weight sync.
+4. **Create example script** — Add to `examples/train/<model>/` with README and training script.
 
 ## Tokenizer Quirks
 
@@ -57,7 +58,7 @@ Do:
 
 Don't:
 
-"Uses the start/update/finish lifecycle to enable chunked transfers. Per chunk, all tensors are packed into a single contiguous CUDA buffer (one dtype per chunk, guaranteed by the weight extractor) and one IPC handle is created for the packed buffer per rank. This mirrors the legacy path and avoids the one-handle-per-param ceiling of vLLM's default IPCWeightTransferEngine, which otherwise dominates latency for models with many small parameters."
+"Uses the start/update/finish lifecycle to enable chunked transfers. Per chunk, all tensors are packed into a single contiguous CUDA buffer (one dtype per chunk, guaranteed by the weight extractor) and one IPC handle is created for the packed buffer per rank. This avoids the one-handle-per-param ceiling of vLLM's default IPCWeightTransferEngine, which otherwise dominates latency for models with many small parameters."
 
 
 Do:

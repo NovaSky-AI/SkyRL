@@ -13,7 +13,7 @@ from skyrl.train.config import (
     SFTConfig,
     build_skyrl_config_for_sft,
 )
-from skyrl.train.config.sft_config import validate_sft_cfg
+from skyrl.train.config.sft_config import _normalize_dataset_cfg, validate_sft_cfg
 
 
 def _sft_cfg_from_overrides(overrides: list[str]) -> SFTConfig:
@@ -134,6 +134,61 @@ class TestLoraConfigOverrides:
         assert skyrl_cfg.trainer.policy.model.lora.rank == 0
 
 
+class TestTorchProfilerConfigOverrides:
+    """SFT profiler config bridge coverage."""
+
+    def test_disabled_by_default(self):
+        cfg = _sft_cfg_from_overrides([])
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.torch_profiler_config.enable is False
+
+    def test_enable_and_schedule_propagate(self):
+        cfg = _sft_cfg_from_overrides(
+            [
+                "torch_profiler_config.enable=true",
+                "torch_profiler_config.skip_first=3",
+                "torch_profiler_config.active=2",
+                "torch_profiler_config.repeat=0",
+                "torch_profiler_config.save_path=/tmp/sft_prof",
+            ]
+        )
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        prof = skyrl_cfg.trainer.policy.torch_profiler_config
+        assert prof.enable is True
+        assert prof.skip_first == 3
+        assert prof.active == 2
+        assert prof.repeat == 0
+        assert prof.save_path == "/tmp/sft_prof"
+
+    def test_capture_flags_propagate(self):
+        cfg = _sft_cfg_from_overrides(
+            [
+                "torch_profiler_config.enable=true",
+                "torch_profiler_config.profile_memory=true",
+                "torch_profiler_config.with_stack=false",
+                "torch_profiler_config.activities=[cuda]",
+                "torch_profiler_config.save_path=/tmp/sft_prof",
+            ]
+        )
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        prof = skyrl_cfg.trainer.policy.torch_profiler_config
+        assert prof.profile_memory is True
+        assert prof.with_stack is False
+        assert list(prof.activities) == ["cuda"]
+
+    def test_invalid_profiler_config_rejected_by_sft_validation(self):
+        cfg = _sft_cfg_from_overrides(
+            [
+                "model.path=test/my-model",
+                "torch_profiler_config.enable=true",
+                "torch_profiler_config.export_type=bogus",
+                "torch_profiler_config.save_path=/tmp/sft_prof",
+            ]
+        )
+        with pytest.raises(ValueError, match=r"export_type"):
+            build_skyrl_config_for_sft(cfg)
+
+
 class TestFSDPConfigOverrides:
     """FSDP config overrides propagate when strategy=fsdp."""
 
@@ -204,3 +259,149 @@ class TestMaxTokensPerMicrobatch:
         cfg = self._packed_cfg(max_tokens_per_microbatch=256, micro_train_batch_size_per_gpu=4)
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         assert skyrl_cfg.trainer.micro_train_batch_size_per_gpu == 1
+
+
+class TestDatasetConfigNormalization:
+    """Deprecated single-dataset fields translate to the list-based fields (RFC #1875)."""
+
+    def test_zero_config_defaults(self):
+        cfg = SFTConfig()
+        _normalize_dataset_cfg(cfg)
+        assert cfg.train_datasets == ["yahma/alpaca-cleaned"]
+        assert cfg.train_dataset_splits == ["train[:100]"]
+        assert cfg.train_dataset_weights == [1.0]
+        assert cfg.dataset_name is None and cfg.dataset_split is None
+        assert cfg.eval_datasets is None  # eval stays disabled
+
+    def test_deprecated_train_fields_translate_with_warning(self):
+        with pytest.warns(DeprecationWarning, match="dataset_name/dataset_split are deprecated"):
+            cfg = _sft_cfg_from_overrides(["dataset_name=foo/bar", "dataset_split=train[:50]"])
+            _normalize_dataset_cfg(cfg)
+        assert cfg.train_datasets == ["foo/bar"]
+        assert cfg.train_dataset_splits == ["train[:50]"]
+        assert cfg.dataset_name is None and cfg.dataset_split is None
+
+    def test_deprecated_translation_works_programmatically(self):
+        cfg = SFTConfig()
+        cfg.dataset_name = "foo/bar"
+        with pytest.warns(DeprecationWarning, match="dataset_name/dataset_split are deprecated"):
+            validate_sft_cfg(cfg)
+        assert cfg.train_datasets == ["foo/bar"]
+        assert cfg.train_dataset_splits == ["train[:100]"]  # split default preserved
+
+    def test_deprecated_eval_fields_translate_with_warning(self):
+        with pytest.warns(DeprecationWarning, match="eval_dataset_name/eval_dataset_split are deprecated"):
+            cfg = _sft_cfg_from_overrides(["eval_dataset_name=baz/qux"])
+            _normalize_dataset_cfg(cfg)
+        assert cfg.eval_datasets == ["baz/qux"]
+        assert cfg.eval_dataset_splits == ["validation"]  # old default preserved
+        assert cfg.eval_dataset_names == ["baz_qux"]  # "/" sanitized for logging
+        assert cfg.eval_dataset_name is None and cfg.eval_dataset_split is None
+
+    def test_old_and_new_train_fields_conflict(self):
+        cfg = _sft_cfg_from_overrides(["dataset_name=x", "train_datasets=[a]", "train_dataset_splits=[s]"])
+        with pytest.raises(ValueError, match="only one of train_datasets"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_old_and_new_eval_fields_conflict(self):
+        cfg = _sft_cfg_from_overrides(["eval_dataset_name=x", "eval_datasets=[a]", "eval_dataset_splits=[s]"])
+        with pytest.raises(ValueError, match="only one of eval_datasets"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_idempotent(self):
+        cfg = _sft_cfg_from_overrides(["train_datasets=[a,b]", "train_dataset_splits=[s1,s2]", "sampler=sequential"])
+        _normalize_dataset_cfg(cfg)
+        first = (cfg.train_datasets, cfg.train_dataset_splits, cfg.train_dataset_weights)
+        _normalize_dataset_cfg(cfg)
+        assert (cfg.train_datasets, cfg.train_dataset_splits, cfg.train_dataset_weights) == first
+
+
+class TestMultiDatasetValidation:
+    """List-shaped dataset fields are validated for lengths, weights and names."""
+
+    def test_bracketed_splits_parse_with_inner_quotes(self):
+        # HF slice syntax nests brackets inside the OmegaConf list, so each
+        # element must be quoted on the CLI: "train_dataset_splits=['train[:2000]']".
+        # (Unquoted elements with brackets are a YAML parse error.)
+        cfg = _sft_cfg_from_overrides(
+            [
+                "train_datasets=['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']",
+                "train_dataset_splits=['train[:50000]','train[:10000]']",
+            ]
+        )
+        _normalize_dataset_cfg(cfg)
+        assert list(cfg.train_datasets) == ["allenai/tulu-3-sft-mixture", "yahma/alpaca-cleaned"]
+        assert list(cfg.train_dataset_splits) == ["train[:50000]", "train[:10000]"]
+
+    def test_default_weights_are_equal_mixing(self):
+        cfg = _sft_cfg_from_overrides(["train_datasets=[a,b,c,d]", "train_dataset_splits=[s,s,s,s]"])
+        _normalize_dataset_cfg(cfg)
+        assert cfg.train_dataset_weights == pytest.approx([0.25] * 4)
+
+    def test_splits_length_mismatch_rejected(self):
+        cfg = _sft_cfg_from_overrides(["train_datasets=[a,b]", "train_dataset_splits=[s1]"])
+        with pytest.raises(ValueError, match="one split per entry"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_missing_splits_rejected(self):
+        cfg = _sft_cfg_from_overrides(["train_datasets=[a,b]"])
+        with pytest.raises(ValueError, match="one split per entry"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_weights_length_mismatch_rejected(self):
+        cfg = _sft_cfg_from_overrides(
+            ["train_datasets=[a,b]", "train_dataset_splits=[s,s]", "train_dataset_weights=[1.0]"]
+        )
+        with pytest.raises(ValueError, match="one weight per entry"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_nonpositive_weights_rejected(self):
+        cfg = _sft_cfg_from_overrides(
+            ["train_datasets=[a,b]", "train_dataset_splits=[s,s]", "train_dataset_weights=[1.0,0.0]"]
+        )
+        with pytest.raises(ValueError, match="must all be > 0"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_weights_require_random_sampler(self):
+        cfg = _sft_cfg_from_overrides(
+            [
+                "train_datasets=[a,b]",
+                "train_dataset_splits=[s,s]",
+                "train_dataset_weights=[0.5,0.5]",
+                "sampler=sequential",
+            ]
+        )
+        with pytest.raises(ValueError, match="only supported with sampler='random'"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_eval_names_default_collision_rejected(self):
+        cfg = _sft_cfg_from_overrides(["eval_datasets=[a/b,a/b]", "eval_dataset_splits=[s1,s2]"])
+        with pytest.raises(ValueError, match="names collide"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_eval_names_explicit_disambiguate(self):
+        cfg = _sft_cfg_from_overrides(
+            ["eval_datasets=[a/b,a/b]", "eval_dataset_splits=[s1,s2]", "eval_dataset_names=[early,late]"]
+        )
+        _normalize_dataset_cfg(cfg)
+        assert cfg.eval_dataset_names == ["early", "late"]
+
+    def test_eval_names_duplicates_rejected(self):
+        cfg = _sft_cfg_from_overrides(["eval_datasets=[a,b]", "eval_dataset_splits=[s,s]", "eval_dataset_names=[x,x]"])
+        with pytest.raises(ValueError, match="must be unique"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_eval_names_length_mismatch_rejected(self):
+        cfg = _sft_cfg_from_overrides(["eval_datasets=[a,b]", "eval_dataset_splits=[s,s]", "eval_dataset_names=[x]"])
+        with pytest.raises(ValueError, match="one name per entry"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_eval_lists_without_eval_datasets_rejected(self):
+        cfg = _sft_cfg_from_overrides(["eval_dataset_splits=[s]"])
+        with pytest.raises(ValueError, match="require eval_datasets"):
+            _normalize_dataset_cfg(cfg)
+
+    def test_eval_interval_requires_eval_datasets(self):
+        cfg = _sft_cfg_from_overrides(["eval_interval=5"])
+        with pytest.raises(ValueError, match="requires eval_datasets"):
+            validate_sft_cfg(cfg)

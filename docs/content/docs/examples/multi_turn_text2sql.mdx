@@ -91,8 +91,6 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     #### Multi-turn Async Rollouts configuration
     # this is used to set the max turns for the environment
     generator.max_turns=6 \
-    # we need to make sure to set async_engine=true for async rollouts
-    generator.inference_engine.async_engine=true \
     # we need to make sure to set batched=false for async rollouts
     generator.batched=false \
 
@@ -148,7 +146,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
 ```
 
 - All we have to do to enable multi-turn training with async rollouts is to simply set `generator.max_turns` to the maximum number of turns we want the agent to take,
-  and to make sure `generator.inference_engine.async_engine=true` and `generator.batched=false`. 
+  and to make sure `generator.batched=false`.
 
 - Chat templating and loss masking for multi-turn conversations are handled by the `SkyRLGymGenerator` class.
 

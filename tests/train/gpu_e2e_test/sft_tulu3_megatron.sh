@@ -15,7 +15,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-RUN_NAME="sft_megatron_run_$(date +%Y%m%d%H)"
+# Unique per invocation (seconds + PID): the shared wandb project means an hour-granular
+# name can collide with a concurrent run on another host, and check_sft_trend.py would then
+# read the wrong run.
+RUN_NAME="sft_megatron_run_$(date +%Y%m%d%H%M%S)_$$"
 PROJECT_NAME="skyrl_sft_ci"
 ENTITY="sky-posttraining-uc-berkeley"
 NUM_STEPS=100
@@ -31,7 +34,7 @@ LOG_FILE="${LOG_FILE:-/tmp/${RUN_NAME}.log}"
 #   * batch_size=8, micro_train_batch_size_per_gpu=2 are sized for L4_ci (4 GPUs).
 bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
   num_steps=$NUM_STEPS \
-  dataset_split="train[:2000]" \
+  train_dataset_splits="['train[:2000]']" \
   batch_size=8 \
   micro_train_batch_size_per_gpu=2 \
   max_length=1024 \

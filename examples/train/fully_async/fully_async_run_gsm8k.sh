@@ -70,7 +70,6 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \

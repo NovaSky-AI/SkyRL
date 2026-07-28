@@ -122,7 +122,7 @@ The wrapper defaults match the benchmark variant:
 - `RUN_PREFLIGHT_CHECKS=false`, `AGENT_RUNTIME_PREFLIGHT=false`
 
 The rollout launcher uses PR-core's native vLLM server module with
-`skyrl.backends.skyrl_train.inference_servers.vllm_worker.WorkerWrap` directly.
+`skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap` directly.
 
 For CUDA 12.9 drivers, `scripts/r2egym_32b/setup_env.sh` installs the official
 vLLM release asset `vllm-0.20.1+cu129`; installing plain `vllm==0.20.1` from

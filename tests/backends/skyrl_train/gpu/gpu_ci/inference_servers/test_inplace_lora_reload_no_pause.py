@@ -72,7 +72,6 @@ def _multi_lora_cfg() -> SkyRLTrainConfig:
     cfg.trainer.strategy = "fsdp"
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.placement.policy_num_gpus_per_node = 1
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.run_engines_locally = True
     cfg.generator.inference_engine.tensor_parallel_size = 1
@@ -153,7 +152,6 @@ async def test_inplace_lora_reload_during_inflight_does_not_corrupt(
         cfg=cfg,
         model=MODEL_QWEN3,
         use_local=True,
-        async_engine=True,
         tp_size=1,
         colocate_all=False,
         sleep_level=1,
@@ -234,7 +232,6 @@ async def test_inplace_lora_reload_does_not_pause_other_lora(
         cfg=cfg,
         model=MODEL_QWEN3,
         use_local=True,
-        async_engine=True,
         tp_size=1,
         colocate_all=False,
         sleep_level=1,

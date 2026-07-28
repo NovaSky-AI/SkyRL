@@ -349,7 +349,12 @@ def test_weight_sync_blocks_requests(env):
 async def test_remote_client_release_program(env):
     """ThunderAgentRemoteInferenceClient can explicitly release tracked programs."""
     servers = httpx.get(f"{env}/servers", timeout=5.0).json()["servers"]
-    client = ThunderAgentRemoteInferenceClient(proxy_url=env, server_urls=servers, model_name="test")
+    client = ThunderAgentRemoteInferenceClient(
+        proxy_url=env,
+        server_urls=servers,
+        data_parallel_size=1,
+        model_name="test",
+    )
     program_id = "client-release-1"
 
     await client.chat_completion(
@@ -372,7 +377,12 @@ async def test_remote_client_release_program(env):
 async def test_remote_client_pause_resume_wraps_weight_sync(env):
     """ThunderAgentRemoteInferenceClient pause/resume brackets ThunderAgent weight sync."""
     servers = httpx.get(f"{env}/servers", timeout=5.0).json()["servers"]
-    client = ThunderAgentRemoteInferenceClient(proxy_url=env, server_urls=servers, model_name="test")
+    client = ThunderAgentRemoteInferenceClient(
+        proxy_url=env,
+        server_urls=servers,
+        data_parallel_size=1,
+        model_name="test",
+    )
 
     await client.pause_generation()
 

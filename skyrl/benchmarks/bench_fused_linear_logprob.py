@@ -1,7 +1,7 @@
 """
-Benchmark: LM-head training signal — baseline vs NVIDIA fused CE vs Liger-style fused linear.
+Benchmark: LM-head training signal — baseline vs fused LM-head paths.
 
-Three ways SkyRL's Megatron backend can turn decoder hidden states + the
+SkyRL's Megatron backend can turn decoder hidden states + the
 output-layer weight into the per-token cross-entropy / log-prob used by the
 RL/SFT loss (all run forward+backward so grads flow to hidden *and* weight):
 
@@ -13,11 +13,14 @@ RL/SFT loss (all run forward+backward so grads flow to hidden *and* weight):
              softmax/CE *stages* but still materializes the logits).
   liger    : FusedLinearChunkedDistributedLogprob — folds the projection into the
              chunked, TP-parallel log-prob so the logits are *never* materialized.
+  triton   : FusedLinearLogprobTriton — the Triton backend for the same log-prob
+             contract.
 
 Takeaway the table makes concrete: the NVIDIA fused CE is a *compute* optimization
 (faster than eager) but not a *memory* one — like the baseline it materializes the
-logits and OOMs at long context. Liger is the *memory* optimization: it fits long
-context (at a modest compute cost), which the NVIDIA path cannot.
+logits and OOMs at long context. The fused LM-head paths are the *memory*
+optimization: they fit long context (at a modest compute cost), which the NVIDIA
+path cannot.
 
 Usage (single GPU; per-rank vocab shard = `vocab`):
     uv run --isolated --extra megatron torchrun --nproc_per_node=1 \\
@@ -41,7 +44,7 @@ SEQ_LENS = [8192, 32768, 65536, 131072, 262144]
 CHUNK_SIZE = 1024
 WARMUP_REPS = 1
 BENCH_REPS = 3
-MODES = ["baseline", "nvidia", "liger"]
+MODES = ["baseline", "nvidia", "liger", "triton"]
 
 
 def _loss(mode, hidden, weight, target, vocab_local, chunk_size, tp_group):
@@ -59,6 +62,13 @@ def _loss(mode, hidden, weight, target, vocab_local, chunk_size, tp_group):
         lp = FusedLinearChunkedDistributedLogprob.apply(
             hidden, weight, target, 0, vocab_local, chunk_size, tp_group, False
         )
+        return (-lp).sum()
+    if mode == "triton":
+        from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
+            FusedLinearLogprobTriton,
+        )
+
+        lp = FusedLinearLogprobTriton.apply(hidden, weight, target, 0, vocab_local, chunk_size, tp_group, False)
         return (-lp).sum()
     logits = torch.matmul(hidden, weight.t())  # [B, S, vocab//TP]
     if mode == "baseline":
@@ -98,22 +108,34 @@ def _measure(mode, seq_len, vocab_local, chunk_size, tp_group, device, reps):
     return sum(times) / len(times), sum(peaks) / len(peaks)
 
 
-def _correctness(vocab_local, tp_group, device):
-    """All three modes must produce the same loss + grad_hidden (fair comparison)."""
+def _active_modes():
+    modes = list(MODES)
+    from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
+        TRITON_AVAILABLE,
+        is_cuda_available,
+    )
+
+    if not (TRITON_AVAILABLE and is_cuda_available):
+        modes.remove("triton")
+    return modes
+
+
+def _correctness(modes, vocab_local, tp_group, device):
+    """All modes must produce the same loss + grad_hidden (fair comparison)."""
     torch.manual_seed(0)
     S = 64
     h0 = torch.randn(1, S, HIDDEN, dtype=torch.bfloat16, device=device)
     w0 = torch.randn(vocab_local, HIDDEN, dtype=torch.bfloat16, device=device) * (HIDDEN**-0.5)
     tgt = torch.randint(0, vocab_local, (1, S), device=device)
     ref = {}
-    for mode in MODES:
+    for mode in modes:
         h = h0.clone().requires_grad_(True)
         w = w0.clone().requires_grad_(True)
         _loss(mode, h, w, tgt, vocab_local, CHUNK_SIZE, tp_group).backward()
         ref[mode] = (h.grad.float().clone(),)
     base = ref["baseline"][0]
     out = []
-    for mode in MODES:
+    for mode in modes:
         gh = ref[mode][0]
         out.append(f"{mode}: max|dgrad_hidden vs baseline|={(gh - base).abs().max().item():.2e}")
     return out
@@ -137,6 +159,7 @@ def main():
     rank0 = dist.get_rank() == 0
 
     vocab_shards = [args.vocab // world] if args.vocab else VOCAB_SHARDS
+    modes = _active_modes()
     if rank0:
         print(
             f"Device {torch.cuda.get_device_name(device)} | TP(world)={world} | hidden={HIDDEN} | chunk={args.chunk_size}"
@@ -144,11 +167,14 @@ def main():
         print(
             "baseline = megatron vocab_parallel_cross_entropy (eager) | "
             "nvidia = fused_vocab_parallel_cross_entropy (@jit_fuser) | "
-            "liger = FusedLinearChunkedDistributedLogprob (no logits)"
+            "liger = FusedLinearChunkedDistributedLogprob (no logits) | "
+            "triton = FusedLinearLogprobTriton (no logits)"
         )
+        if "triton" not in modes:
+            print("triton mode unavailable; skipping")
         print("all: hidden+weight -> per-token CE -> sum -> backward\n")
         print("correctness (TP=%d, vocab=%d):" % (world, vocab_shards[0]))
-        for line in _correctness(vocab_shards[0], tp_group, device):
+        for line in _correctness(modes, vocab_shards[0], tp_group, device):
             print("  " + line)
         print()
 
@@ -158,14 +184,14 @@ def main():
             print(f"=== per-rank vocab shard = {vlocal:,} ===")
             hdr = (
                 f"{'seq_len':>9} |"
-                + "".join(f" {m + ' MB':>{cw}} |" for m in MODES)
-                + "".join(f" {m + ' ms':>{cw}} |" for m in MODES)
+                + "".join(f" {m + ' MB':>{cw}} |" for m in modes)
+                + "".join(f" {m + ' ms':>{cw}} |" for m in modes)
             )
             print(hdr)
             print("-" * len(hdr))
         for s in SEQ_LENS:
             res = {}
-            for mode in MODES:
+            for mode in modes:
                 for _ in range(WARMUP_REPS):
                     _measure(mode, s, vlocal, args.chunk_size, tp_group, device, 1)
                 res[mode] = _measure(mode, s, vlocal, args.chunk_size, tp_group, device, BENCH_REPS)
@@ -181,8 +207,8 @@ def main():
 
                 row = (
                     f"{s:>9} |"
-                    + "".join(f" {mb(m):>{cw}} |" for m in MODES)
-                    + "".join(f" {ms(m):>{cw}} |" for m in MODES)
+                    + "".join(f" {mb(m):>{cw}} |" for m in modes)
+                    + "".join(f" {ms(m):>{cw}} |" for m in modes)
                 )
                 print(row)
         if rank0:

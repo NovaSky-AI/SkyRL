@@ -84,7 +84,6 @@ uv run --isolated --extra fsdp -m examples.train.tis_correction.main_tis_dapo \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.batched=true \
   environment.env_class=gsm8k \

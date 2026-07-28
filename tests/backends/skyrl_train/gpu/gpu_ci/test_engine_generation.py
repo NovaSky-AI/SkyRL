@@ -8,11 +8,10 @@ import asyncio
 import pytest
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInput
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
@@ -140,7 +139,6 @@ async def test_token_based_generation(
                 )
 
 
-@pytest.mark.skipif(not _SKYRL_USE_NEW_INFERENCE, reason="PD requires new inference pathway")
 def test_pd_generation(ray_init_fixture):
     """Test generation with prefill-decode disaggregation (1P1D, 2 GPUs)."""
     cfg = get_test_actor_config(MODEL)
@@ -158,7 +156,6 @@ def test_pd_generation(ray_init_fixture):
         sleep_level=1,
         enable_pd=True,
         num_prefill=1,
-        use_new_inference_servers=True,
         engine_init_kwargs={
             "kv_transfer_config": {
                 "kv_connector": "NixlConnector",
@@ -184,7 +181,6 @@ def test_pd_generation(ray_init_fixture):
         assert len(single_responses) == len(prompts)
 
 
-@pytest.mark.skipif(not _SKYRL_USE_NEW_INFERENCE, reason="PD requires new inference pathway")
 @pytest.mark.parametrize(
     "num_prefill,num_decode,colocate_all",
     [
@@ -220,7 +216,6 @@ def test_pd_generation_non_colocated(
         enable_pd=True,
         num_prefill=num_prefill,
         colocate_all=colocate_all,
-        use_new_inference_servers=True,
         engine_init_kwargs={
             "kv_transfer_config": {
                 "kv_connector": "NixlConnector",

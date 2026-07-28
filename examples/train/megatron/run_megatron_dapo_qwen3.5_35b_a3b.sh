@@ -64,7 +64,6 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 LANGUAGE_MODEL_ONLY=True # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
 ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton"}' # see https://github.com/vllm-project/vllm/issues/36921#issuecomment-4109702738
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
-export _SKYRL_USE_NEW_INFERENCE=0
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 
 # On Blackwell, use the following env vars:
@@ -131,7 +130,6 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=false \
   generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \

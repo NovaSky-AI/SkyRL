@@ -17,7 +17,7 @@ set -euxo pipefail
 SKYRL_DIR=${SKYRL_DIR:-$(cd "$(dirname "$0")"/../../.. && pwd)}
 DATA_DIR=${DATA_DIR:-"$HOME/data/bird"}
 
-# Driver (same shape as flash_rl/harbor; see run_gsm8k_grpo_4gpu.sh for details).
+# Driver (same shape as harbor; see run_gsm8k_grpo_4gpu.sh for details).
 # FA3 (cp39-abi3 wheel from PyTorch's cu128 index) is the default on Hopper.
 FLASH_ATTN_WHL="https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 FLASH_ATTN3_WHL="https://download.pytorch.org/whl/cu128/flash_attn_3-3.0.0-cp39-abi3-manylinux_2_28_x86_64.whl"

@@ -275,6 +275,11 @@ def build_new_inference_client(
         )
         server_setup = InferenceServerSetup(proxy_url=proxy_url, server_urls=server_urls, router=router)
     else:
+        if not ie_cfg.run_engines_locally:
+            raise ValueError(
+                "generator.inference_engine.run_engines_locally=false requires "
+                "external_proxy_url or external_server_urls."
+            )
         cli_args = build_vllm_cli_args(cfg)
         server_setup = create_inference_servers(
             ie_cfg,
@@ -286,7 +291,7 @@ def build_new_inference_client(
     client = RemoteInferenceClient(
         proxy_url=server_setup.proxy_url,
         server_urls=server_setup.server_urls,
-        model_name=cfg.trainer.policy.model.path,
+        model_name=ie_cfg.served_model_name or cfg.trainer.policy.model.path,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,

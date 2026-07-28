@@ -12,16 +12,15 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
 )
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import (
-    MegatronTorchProfilerConfig,
     SkyRLLoraConfig,
     SkyRLTrainConfig,
+    TorchProfilerConfig,
 )
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
@@ -189,9 +188,7 @@ async def test_megatron_policy_weight_sync(
             sampling_params = get_sampling_params_for_backend(
                 cfg.generator.inference_engine.backend, cfg.generator.sampling_params
             )
-            tokenizer = (
-                AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True) if _SKYRL_USE_NEW_INFERENCE else None
-            )
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
             outputs = await run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
 
             print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
@@ -687,7 +684,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     cfg.trainer.micro_train_batch_size_per_gpu = 4
 
     # set torch profiler config
-    cfg.trainer.policy.megatron_config.torch_profiler_config = MegatronTorchProfilerConfig(
+    cfg.trainer.policy.torch_profiler_config = TorchProfilerConfig(
         enable=False, ranks=[0], save_path=f"/home/ray/megatron_prof/tp{tp}_pp{pp}/"
     )
 
@@ -729,7 +726,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
 
     # set torch profiler config
-    cfg.trainer.policy.megatron_config.torch_profiler_config = MegatronTorchProfilerConfig(
+    cfg.trainer.policy.torch_profiler_config = TorchProfilerConfig(
         enable=False, ranks=[0], save_path="/home/ray/megatron_prof/dp4/"
     )
 

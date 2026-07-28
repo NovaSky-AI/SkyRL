@@ -47,6 +47,8 @@ class _SimDispatch:
                 await asyncio.sleep(self._sync_sleep)
         finally:
             await self._client.resume_generation()
+        # Mirror the real dispatch: advance the policy version after the (simulated) sync.
+        self._client.increment_weight_version()
 
 
 class FullyAsyncTrainerSim(FullyAsyncRayPPOTrainer):

@@ -67,7 +67,6 @@ uv run --isolated --extra fsdp \
   generator.inference_engine.external_proxy_url=$EXTERNAL_PROXY_URL \
   generator.inference_engine.external_server_urls="$EXTERNAL_SERVER_URLS" \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.batched=false \
