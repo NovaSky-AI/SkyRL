@@ -17,6 +17,8 @@ SERIALIZED_WEIGHT_STRATEGIES: dict[SerializedWeightMode, type[SerializedWeightSt
 
 
 def get_serialized_weight_strategy(mode: str) -> SerializedWeightStrategy:
+    """Construct the serialized weight strategy registered for a mode."""
+
     try:
         strategy_cls = SERIALIZED_WEIGHT_STRATEGIES[mode]
     except KeyError as exc:

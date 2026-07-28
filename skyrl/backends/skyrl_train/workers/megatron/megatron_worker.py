@@ -40,6 +40,14 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.quantization import (
+    ExpertExportLayout,
+    get_hf_model_type,
+    get_model_quantization_policy,
+    get_serialized_weight_strategy,
+    iter_serialized_weight_tensors,
+)
+from skyrl.backends.skyrl_train.quantization.megatron import get_quantized_conversion_tasks
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -50,14 +58,6 @@ from skyrl.backends.skyrl_train.weight_sync import (
     WeightChunk,
     WeightExtractor,
 )
-from skyrl.backends.skyrl_train.weight_sync.serialization import (
-    ExpertExportLayout,
-    get_hf_model_type,
-    get_model_quantization_spec,
-    get_serialized_weight_strategy,
-    iter_serialized_weight_tensors,
-)
-from skyrl.backends.skyrl_train.weight_sync.serialization.bridge_export import get_serialized_conversion_tasks
 from skyrl.backends.skyrl_train.workers.megatron._fp8_block_amax_epsilon_patch import (
     apply_fp8_block_amax_epsilon_patch,
 )
@@ -145,12 +145,15 @@ class MegatronWeightExtractor(WeightExtractor):
             if model_type is None:
                 raise ValueError("Serialized weight sync requires model_type")
             self.serialized_weight_strategy.validate_model_type(model_type)
-            self.model_quantization_spec = get_model_quantization_spec(model_type)
+            self.model_quantization_policy = get_model_quantization_policy(
+                model_type,
+                self.serialized_weight_strategy.quantized_categories,
+            )
         else:
-            self.model_quantization_spec = None
+            self.model_quantization_policy = None
         self._uses_custom_conversion_tasks = (
-            self.model_quantization_spec is not None
-            and self.model_quantization_spec.expert_export_layout is ExpertExportLayout.PACKED
+            self.model_quantization_policy is not None
+            and self.model_quantization_policy.expert_export_layout is ExpertExportLayout.PACKED
         )
 
         # Defer bucket init to first extract_weights call.
@@ -163,10 +166,10 @@ class MegatronWeightExtractor(WeightExtractor):
 
     def _get_conversion_tasks(self):
         if self._uses_custom_conversion_tasks:
-            return get_serialized_conversion_tasks(
+            return get_quantized_conversion_tasks(
                 self.bridge,
                 self.actor_module,
-                self.model_quantization_spec,
+                self.model_quantization_policy,
             )
         return self.bridge.get_conversion_tasks(self.actor_module)
 
@@ -323,7 +326,7 @@ class MegatronWeightExtractor(WeightExtractor):
                 name,
                 tensor,
                 dtype,
-                self.model_quantization_spec,
+                self.model_quantization_policy,
                 self.serialized_weight_strategy,
                 model_type=self.model_type,
             )
@@ -578,11 +581,19 @@ class MegatronWorker:
             setattr(provider, k, v)
 
         if expert_mxfp8:
-            from skyrl.backends.skyrl_train.workers.megatron.expert_mxfp8 import (
-                configure_expert_mxfp8_provider,
+            from skyrl.backends.skyrl_train.quantization import (
+                Mxfp8Strategy,
+                get_model_quantization_policy,
             )
+            from skyrl.backends.skyrl_train.quantization.megatron import configure_megatron_quantization
 
-            configure_expert_mxfp8_provider(provider, persistent=expert_mxfp8_persistent)
+            policy = get_model_quantization_policy(hf_config, Mxfp8Strategy.quantized_categories)
+            configure_megatron_quantization(
+                provider,
+                policy,
+                format_name="mxfp8",
+                persistent=expert_mxfp8_persistent,
+            )
 
         # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
         if not enable_mtp:
@@ -1022,11 +1033,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         bridge_weights_path = self._maybe_setup_fake_int4_qat()
         expert_mxfp8 = self.cfg.policy.model.expert_mxfp8
         if expert_mxfp8.enabled and expert_mxfp8.training:
-            from skyrl.backends.skyrl_train.workers.megatron.expert_mxfp8 import (
-                validate_expert_mxfp8_hardware,
-            )
+            from skyrl.backends.skyrl_train.quantization import validate_mxfp8_hardware
 
-            validate_expert_mxfp8_hardware()
+            validate_mxfp8_hardware()
 
         # initialize the bridge and provider objects
         self.init_configs(
@@ -1066,12 +1075,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             lora_type=self.cfg.policy.megatron_config.lora_config.lora_type,
             bf16=self.cfg.bf16,
         )
-        if expert_mxfp8.enabled and expert_mxfp8.training:
-            from skyrl.backends.skyrl_train.workers.megatron.expert_mxfp8 import (
-                audit_expert_mxfp8_modules,
-            )
-
-            audit_expert_mxfp8_modules(self.actor_module)
 
         if self._local_rank == 0 and not os.path.exists(
             model_path

@@ -10,13 +10,13 @@ from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap impo
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
-from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
-from skyrl.backends.skyrl_train.weight_sync.serialization import (
+from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_MXFP8,
     get_hf_model_type,
+    get_model_quantization_policy,
     get_serialized_weight_strategy,
-    resolve_model_quantization_spec,
 )
+from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 from skyrl.train.config import (
     InferenceEngineConfig,
     SkyRLTrainConfig,
@@ -26,7 +26,9 @@ from skyrl.train.config import (
 logger = logging.getLogger(__name__)
 
 
-def _load_serialized_quantization_context(mode: str, model_path: Optional[str]):
+def _load_serialized_quantization_context(strategy, model_path: Optional[str]):
+    """Load the model config and resolve the strategy's model policy."""
+
     if not model_path:
         raise ValueError("A model path is required when serialized weight sync is enabled")
     try:
@@ -38,13 +40,10 @@ def _load_serialized_quantization_context(mode: str, model_path: Optional[str]):
             f"Could not inspect the model config required for serialized weight sync: model_path={model_path!r}"
         ) from exc
 
-    strategy = get_serialized_weight_strategy(mode)
     model_type = get_hf_model_type(hf_config)
-    model_spec = resolve_model_quantization_spec(model_type)
     strategy.validate_model_type(model_type, model_path)
-    if model_spec is None:
-        raise ValueError(f"No model quantization spec matched model_type={model_type!r}")
-    return strategy, hf_config, model_spec
+    policy = get_model_quantization_policy(model_type, strategy.quantized_categories)
+    return hf_config, policy
 
 
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
@@ -85,8 +84,8 @@ def _apply_serialized_weight_sync_defaults(
             "when serialized FP8 weight sync is enabled"
         )
 
-    strategy, hf_config, model_spec = _load_serialized_quantization_context(mode, model_path)
-    quantization_config = strategy.vllm_quantization_config(ie_cfg, hf_config, model_spec)
+    hf_config, policy = _load_serialized_quantization_context(strategy, model_path)
+    quantization_config = strategy.vllm_quantization_config(ie_cfg, hf_config, policy)
     ignored_layers = quantization_config.get("ignored_layers", [])
     if ignored_layers:
         logger.info(

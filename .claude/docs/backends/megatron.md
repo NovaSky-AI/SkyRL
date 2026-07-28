@@ -34,7 +34,8 @@ Set `trainer.policy.model.expert_mxfp8.persistent=true` with
 routed-expert primary parameters in MXFP8 between optimizer steps. Set
 `generator.inference_engine.serialized_weight_sync_mode=serialized_mxfp8` to send
 routed experts to vLLM as MXFP8 data and E8M0 scales. Unmerged LoRA is not
-supported.
+supported. Shared model policies, MXFP8 format handling, and Megatron/vLLM
+adapters live in `skyrl/backends/skyrl_train/quantization/`.
 
 ## Test Requirements
 

@@ -12,11 +12,12 @@ skyrl/backends/skyrl_train/weight_sync/
 ├── transfer_strategy.py    # WeightSyncInitInfo / Sender / Strategy ABCs (sender-side only; receive is vLLM-native)
 ├── broadcast_strategy.py   # NCCL broadcast (non-colocated)
 ├── cuda_ipc_strategy.py    # CUDA IPC (colocated)
-├── serialization/          # Model specs and serialized quantization strategies
-├── serialized_fp8.py       # Compatibility exports for FP8/MXFP8 APIs
 ├── weight_extractor.py     # Sharded-param -> dense tensor extraction
 └── weight_extractor_utils.py
 ```
+
+Quantization policies and serialized formats live in
+`skyrl/backends/skyrl_train/quantization/`.
 
 vLLM worker-extension class (loaded via `--worker-extension-cls`):
 

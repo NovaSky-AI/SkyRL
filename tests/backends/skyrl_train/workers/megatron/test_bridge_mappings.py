@@ -1,7 +1,7 @@
 import sys
 from types import ModuleType
 
-from skyrl.backends.skyrl_train.weight_sync.megatron_bridge_mappings import (
+from skyrl.backends.skyrl_train.quantization.megatron import (
     get_packed_qwen3_moe_conversion_tasks,
 )
 

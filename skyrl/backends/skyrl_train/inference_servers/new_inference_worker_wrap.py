@@ -32,17 +32,22 @@ import torch
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
 )
-from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
-from skyrl.backends.skyrl_train.weight_sync.serialization import (
-    MODEL_QUANTIZATION_SPECS,
+from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_WEIGHT_PREFIX,
+    get_hf_model_type,
+    get_model_quantization_policy,
     get_serialized_weight_strategy,
 )
+from skyrl.backends.skyrl_train.quantization.vllm import resolve_vllm_receiver_target
+from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
 def _decode_serialized_name(name: str) -> tuple[str, str] | None:
     """Decode a marked tensor name into its strategy mode and checkpoint name."""
+
+    # strategy mode: "serialized_mxfp8" 
+    # checkpoint name: "model.layers.0.self_attn.q_proj.weight"
 
     if not name.startswith(SERIALIZED_WEIGHT_PREFIX):
         return None
@@ -54,8 +59,12 @@ def _decode_serialized_name(name: str) -> tuple[str, str] | None:
 
 
 @cache
-def _get_receiver_strategy(mode: str):
-    return get_serialized_weight_strategy(mode)
+def _get_receiver_context(mode: str, model_type: str):
+    """Resolve the format strategy and model policy used by this receiver."""
+
+    strategy = get_serialized_weight_strategy(mode)
+    policy = get_model_quantization_policy(model_type, strategy.quantized_categories)
+    return strategy, policy
 
 
 def _map_hf_weight_name(model: torch.nn.Module, name: str) -> str:
@@ -72,8 +81,9 @@ def _map_hf_weight_name(model: torch.nn.Module, name: str) -> str:
 def _load_serialized_moe_tensor(
     model: torch.nn.Module,
     params_dict: dict[str, torch.nn.Parameter],
-    wire_name: str,
+    serialized_name: str,
     decoded_name: tuple[str, str],
+    model_type: str,
     loaded_weight: torch.Tensor,
 ) -> bool:
     """Load one serialized expert tensor through FusedMoE's loader.
@@ -83,17 +93,22 @@ def _load_serialized_moe_tensor(
     """
     if loaded_weight.ndim != 3:
         raise ValueError(
-            f"Batched MoE wire tensor must be 3D, got name={wire_name!r}, shape={tuple(loaded_weight.shape)}"
+            f"Batched serialized MoE tensor must be 3D, got name={serialized_name!r}, "
+            f"shape={tuple(loaded_weight.shape)}"
         )
 
     mode, checkpoint_name = decoded_name
     mapped_name = _map_hf_weight_name(model, checkpoint_name)
-    receiver_target = _get_receiver_strategy(mode).receiver_target(mapped_name, MODEL_QUANTIZATION_SPECS)
+    strategy, policy = _get_receiver_context(mode, model_type)
+    receiver_target = resolve_vllm_receiver_target(strategy, policy, mapped_name)
     if receiver_target is None:
-        raise ValueError(f"Unsupported batched MoE wire tensor name {wire_name!r}")
+        raise ValueError(f"Unsupported serialized MoE tensor name {serialized_name!r}")
     target_name, shard_id = receiver_target
     if target_name not in params_dict:
-        raise ValueError(f"Batched MoE target parameter {target_name!r} was not found for wire tensor {wire_name!r}")
+        raise ValueError(
+            f"Batched MoE target parameter {target_name!r} was not found for serialized tensor "
+            f"{serialized_name!r}"
+        )
 
     param = params_dict[target_name]
     weight_loader = getattr(param, "weight_loader", None)
@@ -112,7 +127,7 @@ def _load_serialized_moe_tensor(
             return_success=True,
         )
         if not success:
-            raise ValueError(f"Fused loading failed for batched MoE tensor {wire_name!r}")
+            raise ValueError(f"Fused loading failed for serialized MoE tensor {serialized_name!r}")
         return True
 
     # Expert-parallel vLLM keeps only a subset locally. Retain the compact wire
@@ -133,25 +148,15 @@ def _load_serialized_moe_tensor(
             or loaded_any
         )
     if not loaded_any:
-        raise ValueError(f"No local expert accepted batched MoE tensor {wire_name!r}")
+        raise ValueError(f"No local expert accepted serialized MoE tensor {serialized_name!r}")
     return True
 
 
-def _load_batched_moe_fp8_tensor(
+def _load_checkpoint_weights(
     model: torch.nn.Module,
-    params_dict: dict[str, torch.nn.Parameter],
-    wire_name: str,
-    loaded_weight: torch.Tensor,
-) -> bool:
-    """Compatibility wrapper for serialized MoE tensors."""
-
-    decoded_name = _decode_serialized_name(wire_name)
-    if decoded_name is None:
-        return False
-    return _load_serialized_moe_tensor(model, params_dict, wire_name, decoded_name, loaded_weight)
-
-
-def _load_checkpoint_weights(model: torch.nn.Module, weights: list[tuple[str, torch.Tensor]]) -> Any:
+    weights: list[tuple[str, torch.Tensor]],
+    model_type: str,
+) -> Any:
     """Load ordinary HF tensors plus SkyRL's compact batched-MoE tensors."""
     params_dict: dict[str, torch.nn.Parameter] | None = None
     ordinary_weights: list[tuple[str, torch.Tensor]] = []
@@ -160,7 +165,7 @@ def _load_checkpoint_weights(model: torch.nn.Module, weights: list[tuple[str, to
         if decoded_name is not None:
             if params_dict is None:
                 params_dict = dict(model.named_parameters())
-            _load_serialized_moe_tensor(model, params_dict, name, decoded_name, weight)
+            _load_serialized_moe_tensor(model, params_dict, name, decoded_name, model_type, weight)
         else:
             ordinary_weights.append((name, weight))
     if ordinary_weights:
@@ -242,9 +247,10 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         from vllm.config import set_current_vllm_config
 
         model = self.model_runner.model
+        model_type = get_hf_model_type(self.model_config.hf_config)
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             if self._skyrl_is_checkpoint_format:
-                _load_checkpoint_weights(model, weights)
+                _load_checkpoint_weights(model, weights, model_type)
                 # vLLM's load only updates the main model; the spec-decode (MTP/Eagle)
                 # drafter is a separate module and must be reloaded from the same
                 # checkpoint-format weights (see spec_decode_utils).
@@ -297,10 +303,11 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
 
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
         model = self.model_runner.model
+        model_type = get_hf_model_type(self.model_config.hf_config)
 
         def _load_weights(weights):
             weights = list(weights)
-            loaded = _load_checkpoint_weights(model, weights)
+            loaded = _load_checkpoint_weights(model, weights, model_type)
             _reload_spec_decode_drafter(self.model_runner, weights)
             return loaded
 

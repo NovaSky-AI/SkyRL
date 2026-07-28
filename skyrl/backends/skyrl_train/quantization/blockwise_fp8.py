@@ -1,4 +1,4 @@
-"""Serialized blockwise FP8 strategy."""
+"""Blockwise FP8 serialization and vLLM configuration."""
 
 from __future__ import annotations
 
@@ -10,13 +10,18 @@ from typing import Any, ClassVar, Iterator, Sequence
 
 import torch
 
-from .base import (
-    ModelQuantizationSpec,
-    SerializedWeightStrategy,
-)
+from .base import ModelQuantizationPolicy, SerializedWeightStrategy, WeightCategory
+from .model_policies import is_qwen35_config
 
 SERIALIZED_BLOCKWISE_FP8 = "serialized_blockwise"
 BLOCKWISE_128X128 = "blockwise_128x128"
+
+_QWEN35_UNQUANTIZED_LINEAR_SUFFIXES = (".in_proj_b", ".in_proj_a")
+_QWEN35_LINEAR_ATTN_PREFIX_TEMPLATES = (
+    "{model_prefix}.layers.{layer_idx}.linear_attn",
+    "{model_prefix}.language_model.layers.{layer_idx}.linear_attn",
+)
+_QWEN35_VISION_ATTN_PROJ_PREFIX_TEMPLATES = ("{model_prefix}.visual.blocks.{block_idx}.attn.proj",)
 
 
 def use_power_2_scales_default() -> bool:
@@ -44,6 +49,8 @@ def use_amax_epsilon_default() -> float:
 
 
 def normalize_block_size(block_size: Sequence[int]) -> tuple[int, int]:
+    """Validate and normalize a two-dimensional quantization block size."""
+
     try:
         raw_values = tuple(block_size)
         if any(isinstance(value, bool) for value in raw_values):
@@ -57,6 +64,8 @@ def normalize_block_size(block_size: Sequence[int]) -> tuple[int, int]:
 
 
 def scale_name_for_weight(name: str) -> str:
+    """Return the checkpoint name for a blockwise FP8 inverse scale."""
+
     if not name.endswith(".weight"):
         raise ValueError(f"FP8 scale can only be derived from .weight tensors: {name}")
     return name[: -len(".weight")] + ".weight_scale_inv"
@@ -66,15 +75,45 @@ def get_serialized_fp8_quantization_config(
     weight_block_size: Sequence[int] = (128, 128),
     ignored_layers: Sequence[str] | None = None,
 ) -> dict:
+    """Return vLLM's blockwise FP8 checkpoint configuration."""
+
     block_m, block_n = normalize_block_size(weight_block_size)
-    qconfig = {
+    config = {
         "quant_method": "fp8",
         "activation_scheme": "dynamic",
         "weight_block_size": [block_m, block_n],
     }
     if ignored_layers:
-        qconfig["ignored_layers"] = list(ignored_layers)
-    return qconfig
+        config["ignored_layers"] = list(ignored_layers)
+    return config
+
+
+def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -> list[str]:
+    """Return Qwen3.5 modules incompatible with blockwise FP8 loading."""
+
+    if not is_qwen35_config(hf_config):
+        return []
+    text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
+    ignored: list[str] = []
+    for layer_idx, layer_type in enumerate(list(getattr(text_config, "layer_types", []) or [])):
+        if layer_type != "linear_attention":
+            continue
+        for template in _QWEN35_LINEAR_ATTN_PREFIX_TEMPLATES:
+            prefix = template.format(model_prefix=model_prefix, layer_idx=layer_idx)
+            ignored.extend(f"{prefix}{suffix}" for suffix in _QWEN35_UNQUANTIZED_LINEAR_SUFFIXES)
+
+    vision_config = getattr(hf_config, "vision_config", None) or getattr(hf_config, "visual_config", None)
+    vision_depth = 0
+    if vision_config is not None:
+        for attr in ("depth", "num_hidden_layers", "num_layers"):
+            value = getattr(vision_config, attr, None)
+            if isinstance(value, int) and value > 0:
+                vision_depth = value
+                break
+    for block_idx in range(vision_depth):
+        for template in _QWEN35_VISION_ATTN_PROJ_PREFIX_TEMPLATES:
+            ignored.append(template.format(model_prefix=model_prefix, block_idx=block_idx))
+    return ignored
 
 
 def blockwise_cast_to_fp8(
@@ -83,7 +122,7 @@ def blockwise_cast_to_fp8(
     power_2_scale: bool = False,
     amax_epsilon: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a 2D tensor to vLLM's blockwise E4M3 format."""
+    """Quantize a 2D tensor to blockwise E4M3 weights and FP32 scales."""
 
     if weight.ndim != 2:
         raise ValueError(f"Blockwise FP8 expects a 2D tensor, got shape={tuple(weight.shape)}")
@@ -103,14 +142,12 @@ def blockwise_cast_to_fp8(
     else:
         padded = weight_fp32
 
-    blocks = padded.view(padded_rows // block_m, block_m, padded_cols // block_n, block_n)
-    blocks = blocks.permute(0, 2, 1, 3)
+    blocks = padded.view(padded_rows // block_m, block_m, padded_cols // block_n, block_n).permute(0, 2, 1, 3)
     scale = blocks.abs().amax(dim=(2, 3)).clamp(min=max(amax_epsilon, 1e-10)) / fp8_info.max
     if power_2_scale:
         scale = torch.pow(2.0, torch.ceil(torch.log2(scale)))
     q_blocks = (blocks / scale[:, :, None, None]).clamp(min=fp8_info.min, max=fp8_info.max)
-    q_blocks = q_blocks.to(torch.float8_e4m3fn)
-    q_padded = q_blocks.permute(0, 2, 1, 3).contiguous().view(padded_rows, padded_cols)
+    q_padded = q_blocks.to(torch.float8_e4m3fn).permute(0, 2, 1, 3).contiguous().view(padded_rows, padded_cols)
     return q_padded[:rows, :cols].contiguous(), scale.to(torch.float32).contiguous()
 
 
@@ -150,28 +187,34 @@ def batched_blockwise_cast_to_fp8(
         else:
             padded = weight_fp32
 
-        blocks = padded.view(end - start, row_blocks, block_m, col_blocks, block_n)
-        blocks = blocks.permute(0, 1, 3, 2, 4)
+        blocks = padded.view(end - start, row_blocks, block_m, col_blocks, block_n).permute(0, 1, 3, 2, 4)
         scale = blocks.abs().amax(dim=(3, 4)).clamp(min=max(amax_epsilon, 1e-10)) / fp8_info.max
         if power_2_scale:
             scale = torch.pow(2.0, torch.ceil(torch.log2(scale)))
         q_blocks = (blocks / scale[:, :, :, None, None]).clamp(min=fp8_info.min, max=fp8_info.max)
-        q_blocks = q_blocks.to(torch.float8_e4m3fn)
-        q_padded = q_blocks.permute(0, 1, 3, 2, 4).contiguous().view(end - start, padded_rows, padded_cols)
+        q_padded = (
+            q_blocks.to(torch.float8_e4m3fn)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+            .view(end - start, padded_rows, padded_cols)
+        )
         q_weight[start:end].copy_(q_padded[:, :rows, :cols])
         scales[start:end].copy_(scale)
-
     return q_weight, scales
 
 
 @dataclass(frozen=True)
 class BlockwiseFp8Strategy(SerializedWeightStrategy):
+    """Serialize selected weights using 128x128 blockwise FP8."""
+
     weight_block_size: tuple[int, int] = (128, 128)
     power_2_scale: bool = field(default_factory=use_power_2_scales_default)
     amax_epsilon: float = field(default_factory=use_amax_epsilon_default)
-    expert_only: bool = False
 
     mode: ClassVar[str] = SERIALIZED_BLOCKWISE_FP8
+    quantized_categories: ClassVar[frozenset[WeightCategory]] = frozenset(
+        {"linear", "routed_expert_gate", "routed_expert_up", "routed_expert_down"}
+    )
     receiver_suffixes: ClassVar[dict[str, str]] = {
         ".weight": "",
         ".weight_scale_inv": "_scale_inv",
@@ -189,11 +232,9 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
         if not isfinite(self.amax_epsilon) or self.amax_epsilon < 0:
             raise ValueError(f"amax_epsilon must be finite and non-negative, got {self.amax_epsilon}")
 
-    def supports(self, name: str, tensor: torch.Tensor, *, routed_expert: bool) -> bool:
-        del name, tensor
-        return routed_expert or not self.expert_only
-
     def validate_model_type(self, model_type: str, model_path: str | None = None) -> None:
+        """Require a Qwen3.5 checkpoint layout."""
+
         if not self.supports_model_type(model_type):
             raise ValueError(
                 "Serialized FP8 weight sync currently supports only Qwen3.5 checkpoint layouts; "
@@ -207,6 +248,8 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
         *,
         batched_experts: bool,
     ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Yield a quantized weight and its inverse-scale tensor."""
+
         if batched_experts:
             q_weight, scale = batched_blockwise_cast_to_fp8(
                 tensor,
@@ -228,10 +271,12 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
         self,
         inference_config: Any,
         hf_config: Any,
-        model_spec: ModelQuantizationSpec,
+        policy: ModelQuantizationPolicy,
     ) -> dict[str, Any]:
-        del inference_config
+        """Return blockwise FP8 settings for vLLM checkpoint loading."""
+
+        del inference_config, policy
         return get_serialized_fp8_quantization_config(
             self.weight_block_size,
-            model_spec.ignored_layers(hf_config),
+            get_qwen35_fp8_ignored_layers(hf_config),
         )

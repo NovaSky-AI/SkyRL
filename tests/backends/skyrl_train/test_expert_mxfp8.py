@@ -6,10 +6,8 @@ import pytest
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     apply_expert_mxfp8_rollout_config,
 )
-from skyrl.backends.skyrl_train.workers.megatron.expert_mxfp8 import (
-    expert_mxfp8_recipe_dict,
-    is_routed_expert_linear,
-)
+from skyrl.backends.skyrl_train.quantization import Mxfp8Strategy, get_model_quantization_policy
+from skyrl.backends.skyrl_train.quantization.megatron import build_megatron_quantization_recipe
 from skyrl.train.config import SkyRLTrainConfig
 
 
@@ -22,27 +20,28 @@ def _enabled_config() -> SkyRLTrainConfig:
     )
 
 
+def _recipe(*, persistent: bool = False) -> dict:
+    policy = get_model_quantization_policy("qwen3_moe", Mxfp8Strategy.quantized_categories)
+    return build_megatron_quantization_recipe(policy, format_name="mxfp8", persistent=persistent)
+
+
 def test_expert_recipe_targets_only_routed_experts():
-    recipe = expert_mxfp8_recipe_dict()
+    recipe = _recipe()
     fc1_pattern = recipe["matchers"]["routed_fc1"]["pattern"]
     fc2_pattern = recipe["matchers"]["routed_fc2"]["pattern"]
     assert fnmatch("decoder.layers.0.mlp.experts.linear_fc1", fc1_pattern)
     assert fnmatch("decoder.layers.0.mlp.experts.linear_fc2", fc2_pattern)
     assert not fnmatch("decoder.layers.0.mlp.shared_experts.linear_fc1", fc1_pattern)
     assert not fnmatch("decoder.layers.0.mlp.shared_experts.linear_fc2", fc2_pattern)
-    assert is_routed_expert_linear("decoder.layers.0.mlp.experts.linear_fc1")
-    assert is_routed_expert_linear("decoder.layers.0.mlp.experts.linear_fc2.base_layer")
-    assert not is_routed_expert_linear("decoder.layers.0.mlp.shared_experts.linear_fc1")
-    assert not is_routed_expert_linear("decoder.layers.0.self_attention.linear_qkv")
 
 
 def test_persistent_expert_recipe_enables_fp8_params_only_for_routed_experts():
-    default_recipe = expert_mxfp8_recipe_dict()
-    persistent_recipe = expert_mxfp8_recipe_dict(persistent=True)
+    default_recipe = _recipe()
+    persistent_recipe = _recipe(persistent=True)
 
     for phase in ("training_recipe", "evaluation_recipe"):
-        assert "fp8_param" not in default_recipe["configs"]["expert_mxfp8"][phase]
-        assert persistent_recipe["configs"]["expert_mxfp8"][phase]["fp8_param"] is True
+        assert "fp8_param" not in default_recipe["configs"]["quantized"][phase]
+        assert persistent_recipe["configs"]["quantized"][phase]["fp8_param"] is True
         assert "fp8_param" not in persistent_recipe["configs"]["high_precision"][phase]
 
 

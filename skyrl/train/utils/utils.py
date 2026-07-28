@@ -21,7 +21,7 @@ from ray.util.placement_group import (
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
-from skyrl.backends.skyrl_train.weight_sync.serialization import (
+from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_WEIGHT_STRATEGIES,
 )
 from skyrl.env_vars import (
