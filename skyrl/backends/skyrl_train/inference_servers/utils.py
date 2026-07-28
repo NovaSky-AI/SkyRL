@@ -134,6 +134,11 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         if lora_cfg.max_cpu_loras is not None:
             args.max_cpu_loras = lora_cfg.max_cpu_loras
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
+        if lora_cfg.implementation == "concurrent":
+            # Concurrent FSDP exports MoE adapters in PEFT's per-expert 2D
+            # layout. vLLM needs its universal MoE wrapper to pack that layout
+            # for models whose native inference weights are fused/3D.
+            args.enable_mixed_moe_lora_format = True
 
         if not cfg.trainer.placement.colocate_all:
             lora_path = cfg.trainer.policy.model.lora.lora_sync_path

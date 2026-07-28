@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from cloudpathlib import AnyPath
@@ -296,3 +297,30 @@ def test_find_single_requests_barrier_is_per_model(scheduling_engine):
         assert list(singles.keys()) == ["2", "5"]
         assert singles["2"][0] == "model_a"
         assert singles["5"][0] == "model_b"
+
+
+def test_split_batchable_optim_steps_selects_only_first_eligible_request_per_model(scheduling_engine):
+    engine = scheduling_engine
+    engine.backend = SimpleNamespace(supports_batched_optim_steps=lambda: True)
+    adam = {
+        "adam_params": {
+            "learning_rate": 1e-3,
+            "beta1": 0.9,
+            "beta2": 0.95,
+            "eps": 1e-8,
+            "weight_decay": 0.0,
+        }
+    }
+    requests = {
+        "1": ("a", types.RequestType.OPTIM_STEP, adam),
+        "2": ("b", types.RequestType.SAVE_WEIGHTS, {"path": "checkpoint"}),
+        "3": ("b", types.RequestType.OPTIM_STEP, adam),
+        "4": ("a", types.RequestType.OPTIM_STEP, adam),
+        "5": ("c", types.RequestType.OPTIM_STEP, adam),
+    }
+
+    batch, remaining = engine.split_batchable_optim_steps(requests)
+
+    assert list(batch) == ["1", "5"]
+    assert list(remaining) == ["2", "3", "4"]
+    assert isinstance(batch["1"][1], types.OptimStepInput)

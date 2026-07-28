@@ -162,6 +162,7 @@ class BaseBatchIterator:
             num_actions=batch.metadata["response_length"],  # int
             rollout_logprobs=batch.get("rollout_logprobs"),
             rollout_expert_indices=batch.get("rollout_expert_indices"),
+            adapter_indices=batch.get("adapter_indices"),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},
