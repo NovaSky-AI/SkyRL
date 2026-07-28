@@ -1,23 +1,23 @@
 set -x
 
-# Colocated DAPO training+generation for Qwen3-1.7B-Base on DAPO training data with Megatron.
+# Colocated DAPO training+generation for Qwen3-4B-Base on DAPO training data with Megatron.
 # bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 # bash examples/train/megatron/run_megatron_dapo_qwen3_4b.sh
 
-MODEL_NAME="Qwen/Qwen3-1.7B-Base"
+MODEL_NAME="Qwen/Qwen3-4B-Base"
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 NUM_NODES=1
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=8
-INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
+NUM_INFERENCE_ENGINES=4
+INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=2
 LOGGER="wandb"  # change to "console" to print to stdout
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
 # use token mean loss reduction
-LOSS_REDUCTION="prompt_mean"
+LOSS_REDUCTION="token_mean"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
 # apply soft overlong punishment with custom trainer impl in main_dapo.py
@@ -42,8 +42,8 @@ ENFORCE_EAGER=true # original DAPO recipe used enforce eager due to instability 
 LR=1e-6
 
 # megatron config
-MEGATRON_TP=1
-MEGATRON_PP=1
+MEGATRON_TP=4
+MEGATRON_PP=2
 MEGATRON_CP=1
 MEGATRON_EP=1
 MEGATRON_ETP=null
@@ -51,8 +51,6 @@ MEGATRON_ETP=null
 # TIS parameters
 TIS_IMP_RATIO_CAP=2.0
 TIS_TYPE=token
-
-MAX_TOKENS_PER_MICROBATCH=8000
 
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -95,8 +93,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=8 \
-  trainer.micro_train_batch_size_per_gpu=4 \
-  trainer.max_tokens_per_microbatch=$MAX_TOKENS_PER_MICROBATCH \
+  trainer.micro_train_batch_size_per_gpu=8 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
@@ -113,11 +110,11 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="max_tokens_per_microbatch_dapo" \
-  trainer.run_name="dapo_qwen3_1.7b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_max_tokens_per_microbatch_8000_fix_metrics" \
-  trainer.export_path="/mnt/nvme/exports/dapo_qwen3_1.7b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_max_tokens_per_microbatch_8000_fix_metrics" \
+  trainer.project_name="dapo_aime" \
+  trainer.run_name="dapo_qwen3_4b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
+  trainer.export_path="$HOME/exports/dapo_qwen3_4b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
   trainer.hf_save_interval=25 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="/mnt/nvme/ckpts/dapo_qwen3_1.7b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_max_tokens_per_microbatch_8000_fix_metrics" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_4b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}" \
   $@
