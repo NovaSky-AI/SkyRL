@@ -1179,7 +1179,7 @@ def apply_loss_reduction_to_advantages_minibatch(
     # path, where the API contract is that per-token losses are summed and
     # clients pre-normalize advantages themselves.
     if loss_reduction == "token_sum":
-        normalized_advantages = advantages
+        return advantages
 
     # Option 1: token mean
     elif loss_reduction == "token_mean":
