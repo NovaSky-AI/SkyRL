@@ -517,8 +517,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # already reflects this epoch's trained steps. The range below is just an upper bound.
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
-                    with Timer("step", self.all_timings) as step_timer:
-                        self._mark_step_start(epoch, step_timer.start_time)
+                    with Timer("step", self.all_timings):
+                        self._mark_step_start(epoch, time.time())
                         self._loop_gauges.set(
                             "skyrl_gen_buffer_qsize",
                             generation_output_group_buffer.qsize(),
