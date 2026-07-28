@@ -308,7 +308,7 @@ class MegatronStrategy(DistributedStrategy):
         if async_save:
             # The queue holds one in-flight write; the prior checkpoint dir must be
             # fully written before this save reuses it.
-            ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
+            self._finalize_async_calls()
 
         with io.local_work_dir(ckpt_dir) as work_dir:
             async_save_request = dist_checkpointing.save(
@@ -341,12 +341,20 @@ class MegatronStrategy(DistributedStrategy):
             ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
 
+    @staticmethod
+    def _finalize_async_calls() -> None:
+        # Finalization may run in a helper thread, whose current CUDA device defaults to 0.
+        local_rank = os.environ.get("LOCAL_RANK")
+        if local_rank is not None and torch.cuda.is_available():
+            torch.cuda.set_device(int(local_rank))
+        ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
+
     def finalize_pending_saves(self) -> None:
         """Block until any in-flight async checkpoint write completes.
 
         No-op when ``async_dist_ckpt_save`` is off or nothing is pending.
         """
-        ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
+        self._finalize_async_calls()
 
     def _get_rank_path(self, ckpt_dir):
         tp_rank = mpu.get_tensor_model_parallel_rank()
