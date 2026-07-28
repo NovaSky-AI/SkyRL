@@ -149,10 +149,10 @@ def _apply_tinker_loss_reduction(
     """
     if loss_reduction == "token_sum":
         return advantages
-    if loss_reduction == "prompt_mean":
+    if loss_reduction in ("prompt_mean", "token_mean_legacy"):
         raise ValueError(
-            "`prompt_mean` loss reduction is not supported on the Tinker-serving path: "
-            "prompt groupings are not visible to the trainer. Use `token_mean`, "
+            f"`{loss_reduction}` loss reduction is not supported on the Tinker-serving path: "
+            "it is incompatible with dynamic client-side batch sizes. Use `token_mean`, "
             "`sequence_mean`, or `seq_mean_token_sum_norm`."
         )
     return apply_loss_reduction_to_advantages_minibatch(
