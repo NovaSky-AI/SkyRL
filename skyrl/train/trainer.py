@@ -167,10 +167,8 @@ class RayPPOTrainer:
         )
 
     def _mark_step_start(self, epoch: int, start_time: float) -> None:
-        """Publish the step/epoch join gauges at step start, so a mid-step scrape reads the
-        in-progress step. The gauge names match what ``Tracking.log`` publishes for the trainer/*
-        metrics, so the start-timed value here and the commit-time publish are one series. Callers
-        pass the step's own start time."""
+        """Publish the step/epoch/start-time gauges so a mid-step scrape reads the in-progress step.
+        Names match what ``Tracking.log`` emits for trainer/* metrics so the two publishes stay one series."""
         self.tracker.log_gauge("skyrl_trainer_global_step", self.global_step, "Step the loop is working on.")
         self.tracker.log_gauge("skyrl_trainer_epoch", epoch, "Current epoch, zero-indexed.")
         self.tracker.log_gauge("skyrl_step_start_unixtime", start_time, "Wall-clock start of the current step.")
@@ -344,8 +342,6 @@ class RayPPOTrainer:
                     if not step_started:
                         self._fire("on_step_start")
                         step_started = True
-                        # time.time() rather than a step Timer: dynamic sampling re-enters
-                        # Timer("step") several times per logical step, so there is no single one.
                         self._mark_step_start(epoch, time.time())
                         # Open the train-rollout metrics window once per logical
                         # step; paused so only the generation spans count toward the

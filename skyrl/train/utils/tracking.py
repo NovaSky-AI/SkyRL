@@ -31,7 +31,10 @@ from omegaconf import DictConfig, OmegaConf
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 from skyrl.train.utils.metrics import ScalarGauges
 
-_PROMETHEUS_NAME_RE = re.compile(r"[^a-zA-Z0-9_]")
+
+def _prometheus_name(key: str) -> str:
+    """Metric key to a skyrl_-prefixed Prometheus gauge name, non-alphanumerics folded to underscore."""
+    return "skyrl_" + re.sub(r"[^a-zA-Z0-9_]", "_", key)
 
 
 # TODO(tgriggs): Test all backends.
@@ -91,7 +94,7 @@ class Tracking:
         for key, value in data.items():
             if isinstance(value, bool) or not isinstance(value, numbers.Real):
                 continue
-            self._prometheus.set(f"skyrl_{_PROMETHEUS_NAME_RE.sub('_', key)}", value)
+            self._prometheus.set(_prometheus_name(key), value)
 
     def log_gauge(self, name: str, value: float, description: Optional[str] = None) -> None:
         """Set a Prometheus gauge directly, on the same gauges ``log`` publishes metrics to.
