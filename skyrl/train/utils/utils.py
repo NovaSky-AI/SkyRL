@@ -22,9 +22,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
 from skyrl.backends.skyrl_train.weight_sync.serialization import (
-    get_serialized_weight_sync_mode,
-    serialized_weight_modes,
-    strategy_uses_block_scale_runtime_contract,
+    SERIALIZED_WEIGHT_STRATEGIES,
 )
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
@@ -540,8 +538,8 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     """
     ie_cfg = cfg.generator.inference_engine
 
-    serialized_mode = get_serialized_weight_sync_mode(ie_cfg)
-    supported_serialized_modes = serialized_weight_modes()
+    serialized_mode = ie_cfg.resolved_serialized_weight_sync_mode
+    supported_serialized_modes = tuple(SERIALIZED_WEIGHT_STRATEGIES)
     if serialized_mode not in (None, *supported_serialized_modes):
         raise ValueError(
             f"Unsupported serialized_weight_sync_mode={serialized_mode!r}; "
@@ -841,8 +839,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
 
     # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32;
     # Blackwell launchers explicitly select power-of-two scales.
-    serialized_mode = get_serialized_weight_sync_mode(cfg.generator.inference_engine)
-    serialized_fp8 = strategy_uses_block_scale_runtime_contract(serialized_mode)
+    serialized_mode = cfg.generator.inference_engine.resolved_serialized_weight_sync_mode
+    strategy_cls = SERIALIZED_WEIGHT_STRATEGIES.get(serialized_mode)
+    serialized_fp8 = strategy_cls is not None and strategy_cls.uses_block_scale_runtime_contract
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     policy_megatron_config = getattr(cfg.trainer.policy, "megatron_config", None)
     ref_megatron_config = getattr(cfg.trainer.ref, "megatron_config", None)

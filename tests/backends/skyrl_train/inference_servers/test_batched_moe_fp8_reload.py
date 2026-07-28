@@ -3,11 +3,22 @@ from types import SimpleNamespace
 import torch
 
 from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
+    _decode_serialized_name,
     _load_batched_moe_fp8_tensor,
 )
 from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
 )
+
+
+def test_decode_serialized_name_supports_legacy_and_qualified_names():
+    checkpoint_name = "model.layers.0.mlp.experts.gate_proj.weight"
+    assert _decode_serialized_name(f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{checkpoint_name}") == (None, checkpoint_name)
+    assert _decode_serialized_name(f"__skyrl_serialized__:serialized_mxfp8:{checkpoint_name}") == (
+        "serialized_mxfp8",
+        checkpoint_name,
+    )
+    assert _decode_serialized_name(checkpoint_name) is None
 
 
 def test_batched_moe_tensor_uses_one_full_expert_loader_call():

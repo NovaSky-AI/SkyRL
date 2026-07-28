@@ -15,6 +15,7 @@ from .serialization import (
     QWEN35_QUANTIZATION_SPEC,
     SERIALIZED_BLOCKWISE_FP8,
     SERIALIZED_MXFP8,
+    SERIALIZED_WEIGHT_STRATEGIES,
     BlockwiseFp8Strategy,
     Mxfp8Strategy,
     batched_blockwise_cast_to_fp8,
@@ -31,7 +32,6 @@ from .serialization import (
     power_2_scales_to_e8m0,
     resolve_model_quantization_spec,
     scale_name_for_weight,
-    should_use_serialized_weights,
     use_amax_epsilon_default,
     use_power_2_scales_default,
 )
@@ -119,7 +119,7 @@ def serialized_fp8_config_for_mode(mode: str, *, model_type: str | None = None) 
 
 
 def should_use_serialized_fp8(mode: str | None) -> bool:
-    return should_use_serialized_weights(mode)
+    return mode in SERIALIZED_WEIGHT_STRATEGIES
 
 
 def is_quantizable_weight(name: str, tensor: torch.Tensor, *, expert_only: bool = False) -> bool:

@@ -55,7 +55,6 @@ from skyrl.backends.skyrl_train.weight_sync.serialization import (
     get_hf_model_type,
     get_model_quantization_spec,
     get_serialized_weight_strategy,
-    get_serialized_weight_sync_mode,
     iter_serialized_weight_tensors,
 )
 from skyrl.backends.skyrl_train.weight_sync.serialization.bridge_export import get_serialized_conversion_tasks
@@ -1522,7 +1521,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             enable_bucketing=True,
             bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
-            serialized_weight_sync_mode=get_serialized_weight_sync_mode(inference_engine_cfg),
+            serialized_weight_sync_mode=inference_engine_cfg.resolved_serialized_weight_sync_mode,
             model_type=get_hf_model_type(self.strategy.hf_config),
         )
 

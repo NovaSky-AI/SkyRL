@@ -24,6 +24,7 @@ Usage:
         skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap
 """
 
+from functools import cache
 from typing import Any
 
 import torch
@@ -33,11 +34,49 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
 )
 from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
 from skyrl.backends.skyrl_train.weight_sync.serialization import (
-    parse_serialized_wire_name,
-    resolve_serialized_receiver_target,
+    LEGACY_BATCHED_MOE_PREFIX,
+    MODEL_QUANTIZATION_SPECS,
+    SERIALIZED_WEIGHT_PREFIX,
+    SERIALIZED_WEIGHT_STRATEGIES,
+    get_serialized_weight_strategy,
 )
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
+
+
+def _decode_serialized_name(name: str) -> tuple[str | None, str] | None:
+    if name.startswith(LEGACY_BATCHED_MOE_PREFIX):
+        return None, name.removeprefix(LEGACY_BATCHED_MOE_PREFIX)
+    if not name.startswith(SERIALIZED_WEIGHT_PREFIX):
+        return None
+    payload = name.removeprefix(SERIALIZED_WEIGHT_PREFIX)
+    mode, separator, checkpoint_name = payload.partition(":")
+    if not separator or not mode or not checkpoint_name:
+        raise ValueError(f"Invalid serialized weight name {name!r}")
+    return mode, checkpoint_name
+
+
+@cache
+def _get_receiver_strategy(mode: str):
+    return get_serialized_weight_strategy(mode)
+
+
+def _resolve_serialized_receiver_target(mode: str | None, checkpoint_name: str) -> tuple[str, str] | None:
+    modes = (mode,) if mode is not None else tuple(SERIALIZED_WEIGHT_STRATEGIES)
+    matches = {
+        target
+        for candidate_mode in modes
+        if (
+            target := _get_receiver_strategy(candidate_mode).receiver_target(
+                checkpoint_name,
+                MODEL_QUANTIZATION_SPECS,
+            )
+        )
+        is not None
+    }
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous serialized weight receiver target for {checkpoint_name!r}")
+    return next(iter(matches), None)
 
 
 def _map_hf_weight_name(model: torch.nn.Module, name: str) -> str:
@@ -55,25 +94,22 @@ def _load_serialized_moe_tensor(
     model: torch.nn.Module,
     params_dict: dict[str, torch.nn.Parameter],
     wire_name: str,
+    decoded_name: tuple[str | None, str],
     loaded_weight: torch.Tensor,
 ) -> bool:
     """Load one serialized expert tensor through FusedMoE's loader.
 
-    Returns ``False`` for ordinary checkpoint tensors. Marked tensors are
-    required to resolve successfully so a protocol mismatch cannot silently
-    leave stale rollout weights behind.
+    Marked tensors must resolve successfully so a protocol mismatch cannot
+    silently leave stale rollout weights behind.
     """
-    parsed_name = parse_serialized_wire_name(wire_name)
-    if parsed_name is None:
-        return False
     if loaded_weight.ndim != 3:
         raise ValueError(
             f"Batched MoE wire tensor must be 3D, got name={wire_name!r}, shape={tuple(loaded_weight.shape)}"
         )
 
-    mode, checkpoint_name = parsed_name
+    mode, checkpoint_name = decoded_name
     mapped_name = _map_hf_weight_name(model, checkpoint_name)
-    receiver_target = resolve_serialized_receiver_target(mode, mapped_name)
+    receiver_target = _resolve_serialized_receiver_target(mode, mapped_name)
     if receiver_target is None:
         raise ValueError(f"Unsupported batched MoE wire tensor name {wire_name!r}")
     target_name, shard_id = receiver_target
@@ -130,7 +166,10 @@ def _load_batched_moe_fp8_tensor(
 ) -> bool:
     """Compatibility wrapper for serialized MoE tensors."""
 
-    return _load_serialized_moe_tensor(model, params_dict, wire_name, loaded_weight)
+    decoded_name = _decode_serialized_name(wire_name)
+    if decoded_name is None:
+        return False
+    return _load_serialized_moe_tensor(model, params_dict, wire_name, decoded_name, loaded_weight)
 
 
 def _load_checkpoint_weights(model: torch.nn.Module, weights: list[tuple[str, torch.Tensor]]) -> Any:
@@ -138,10 +177,11 @@ def _load_checkpoint_weights(model: torch.nn.Module, weights: list[tuple[str, to
     params_dict: dict[str, torch.nn.Parameter] | None = None
     ordinary_weights: list[tuple[str, torch.Tensor]] = []
     for name, weight in weights:
-        if parse_serialized_wire_name(name) is not None:
+        decoded_name = _decode_serialized_name(name)
+        if decoded_name is not None:
             if params_dict is None:
                 params_dict = dict(model.named_parameters())
-            _load_serialized_moe_tensor(model, params_dict, name, weight)
+            _load_serialized_moe_tensor(model, params_dict, name, decoded_name, weight)
         else:
             ordinary_weights.append((name, weight))
     if ordinary_weights:

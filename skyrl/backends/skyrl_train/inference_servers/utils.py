@@ -15,7 +15,6 @@ from skyrl.backends.skyrl_train.weight_sync.serialization import (
     SERIALIZED_MXFP8,
     get_hf_model_type,
     get_serialized_weight_strategy,
-    get_serialized_weight_sync_mode,
     resolve_model_quantization_spec,
 )
 from skyrl.train.config import (
@@ -63,7 +62,7 @@ def _apply_serialized_weight_sync_defaults(
 ) -> None:
     """Configure vLLM for serialized checkpoint weight reloads."""
 
-    mode = get_serialized_weight_sync_mode(ie_cfg)
+    mode = ie_cfg.resolved_serialized_weight_sync_mode
     if mode is None:
         return
     strategy = get_serialized_weight_strategy(mode)
@@ -122,7 +121,7 @@ def apply_expert_mxfp8_rollout_config(args: Namespace, cfg: SkyRLTrainConfig, en
     expert_mxfp8 = cfg.trainer.policy.model.expert_mxfp8
     if not expert_mxfp8.enabled or not expert_mxfp8.rollout:
         return
-    if get_serialized_weight_sync_mode(cfg.generator.inference_engine) == SERIALIZED_MXFP8:
+    if cfg.generator.inference_engine.resolved_serialized_weight_sync_mode == SERIALIZED_MXFP8:
         return
     if cfg.generator.inference_engine.model_dtype not in ("bfloat16", "float16"):
         raise ValueError("Expert MXFP8 rollout requires model_dtype=bfloat16 or float16")

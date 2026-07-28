@@ -761,6 +761,17 @@ class InferenceEngineConfig(BaseConfig):
     """Optional serialized rollout weight strategy."""
     fp8_weight_sync_mode: Optional[str] = None
     """Deprecated alias for ``serialized_weight_sync_mode``."""
+
+    @property
+    def resolved_serialized_weight_sync_mode(self) -> Optional[str]:
+        if self.serialized_weight_sync_mode is not None and self.fp8_weight_sync_mode is not None:
+            raise ValueError("Set only one of serialized_weight_sync_mode and fp8_weight_sync_mode")
+        return (
+            self.serialized_weight_sync_mode
+            if self.serialized_weight_sync_mode is not None
+            else self.fp8_weight_sync_mode
+        )
+
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"
