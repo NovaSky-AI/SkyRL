@@ -453,6 +453,26 @@ class PolicyLossType(StrEnum):
     SAPO = "sapo"
     CROSS_ENTROPY = "cross_entropy"
     IMPORTANCE_SAMPLING = "importance_sampling"
+    DPPO = "dppo"
+
+
+# Losses that optimize against rollout logprobs, so the "old" logprobs forward pass can be
+# skipped when nothing else needs them (see `RayPPOTrainer._skip_policy_forward`).
+LOSSES_WITHOUT_OLD_LOGPROBS = frozenset({PolicyLossType.ROLLOUT_IS, PolicyLossType.DPPO})
+
+LOSSES_WITH_OLD_LOGPROBS = frozenset(
+    {
+        PolicyLossType.REGULAR,
+        PolicyLossType.DUAL_CLIP,
+        PolicyLossType.GSPO,
+        PolicyLossType.CISPO,
+        PolicyLossType.CLIP_COV,
+        PolicyLossType.KL_COV,
+        PolicyLossType.SAPO,
+        PolicyLossType.CROSS_ENTROPY,
+        PolicyLossType.IMPORTANCE_SAMPLING,
+    }
+)
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -479,11 +499,13 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
             "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
             "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
+            "cispo": [PolicyLossType.CISPO, compute_policy_loss_cispo],
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
             "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
             "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
+            "dppo": [PolicyLossType.DPPO, dppo_policy_loss],
             "rollout_is": [PolicyLossType.ROLLOUT_IS, rollout_is_policy_loss],
         }
 
@@ -723,16 +745,72 @@ def compute_policy_loss_cispo(
     update. This means the model can still learn from samples whose importance sampling
     ratio is clipped in CISPO, as opposed to PPO where these samples have zero
     gradient and are essentially ignored.
+
+    The behavior policy the IS ratio is anchored on is selected by ``config.cispo.cispo_anchor``:
+
+    * ``"old"`` (default, original CISPO): ``ratio = pi_theta / pi_old``, where ``pi_old`` is the
+      recomputed log-probs of the current policy at experience-prep. Under a single gradient step
+      this ratio is ~1, so the clamp only bites across multiple gradient passes over a frozen batch.
+    * ``"rollout"``: ``ratio = pi_theta / pi_rollout``, anchored on the sampler/behavior policy. This
+      makes the clamped objective engage under fully-async training, where the sampler lags the
+      trainer by up to ``max_staleness_steps`` so the ratio genuinely differs from 1 even at a single
+      gradient pass. Here the rollout-anchored ratio *is* the off-policy correction, so stacking TIS
+      (``off_policy_correction.tis_ratio_type``) would double-count it and is rejected.
+
+    The ``"rollout"`` anchor is the clamped (CISPO) counterpart of the hard-zero ``rollout_is`` loss:
+    both anchor on ``pi_rollout``, but CISPO caps out-of-range tokens rather than zeroing them, so
+    every token keeps a (bounded) gradient.
+
+    Logs ``clip_ratio`` (cap-hit fraction) plus ``cispo/ratio_{mean,clamped_mean,max,min}`` so the
+    actual gradient multiplier ``r = pi_theta / pi_behavior`` is observable, not just how often the
+    cap fires (which is near-zero with a wide ``eps_clip_high``).
     """
-    ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+    anchor = config.cispo.cispo_anchor
+    if anchor == "rollout":
+        assert rollout_logprobs is not None, "rollout_logprobs are required for cispo with cispo_anchor='rollout'"
+        if config.off_policy_correction.tis_ratio_type is not None:
+            raise ValueError(
+                "cispo_anchor='rollout' is already rollout-anchored and performs the off-policy "
+                f"correction; TIS (tis_ratio_type={config.off_policy_correction.tis_ratio_type!r}) "
+                "would double-count it. Set off_policy_correction.tis_ratio_type=None."
+            )
+        behavior_log_probs = rollout_logprobs
+    else:
+        behavior_log_probs = old_log_probs
+
+    ratio = safe_exp_delta(log_probs - behavior_log_probs, clip=20.0, out_dtype=log_probs.dtype)
     clamped_ratio = torch.clamp(ratio, 1 - config.cispo.cispo_eps_clip_low, 1 + config.cispo.cispo_eps_clip_high)
     loss = -advantages * clamped_ratio.detach() * log_probs
 
     is_clipped = (ratio < 1 - config.cispo.cispo_eps_clip_low) | (ratio > 1 + config.cispo.cispo_eps_clip_high)
     clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
 
+    # IS-ratio diagnostics. clip_ratio above is only the cap-HIT fraction; these expose the actual
+    # gradient multiplier r = pi_theta / pi_behavior. Under cispo_anchor="rollout", r drifts from 1
+    # via the vLLM-vs-train numerical gap + async staleness even at a single gradient pass, so mean(r)
+    # and the raw-vs-clamped gap quantify how much the off-policy correction (and the cap) actually
+    # move the gradient -- not just how often the cap fires. For max/min we select only the active
+    # (unmasked) ratios: `ratio` is strictly positive (safe_exp_delta), so multiplying by loss_mask
+    # would zero masked tokens and force min to 0.0 whenever any token is masked. masked_mean excludes
+    # them for the means.
+    cispo_ratio_mean = masked_mean(ratio, loss_mask).mean().detach().item()
+    cispo_ratio_clamped_mean = masked_mean(clamped_ratio, loss_mask).mean().detach().item()
+    if loss_mask is not None and loss_mask.any():
+        active_ratio = ratio[loss_mask.bool()]
+        cispo_ratio_max = active_ratio.max().detach().item()
+        cispo_ratio_min = active_ratio.min().detach().item()
+    else:
+        cispo_ratio_max = ratio.max().detach().item()
+        cispo_ratio_min = ratio.min().detach().item()
+
     # apply off policy correction
-    loss_metrics = {"clip_ratio": clip_ratio}
+    loss_metrics = {
+        "clip_ratio": clip_ratio,
+        "cispo/ratio_mean": cispo_ratio_mean,
+        "cispo/ratio_clamped_mean": cispo_ratio_clamped_mean,
+        "cispo/ratio_max": cispo_ratio_max,
+        "cispo/ratio_min": cispo_ratio_min,
+    }
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )
@@ -775,6 +853,78 @@ def rollout_is_policy_loss(
     clip_ratio = masked_mean((~in_range).float(), loss_mask).mean().detach().item()
 
     loss_metrics: dict[str, float] = {"clip_ratio": clip_ratio}
+    loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    loss = reduce_loss(loss, loss_mask)
+    return loss, loss_metrics
+
+
+@register_policy_loss(PolicyLossType.DPPO)
+def dppo_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: AlgorithmConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """
+    Divergence Proximal Policy Optimization (DPPO) policy loss.
+
+    Replaces PPO's ratio-based clipping with a divergence-based binary mask.
+    Supports Binary-TV and Binary-KL variants.
+    The paper also proposes Top-K TV/KL variants (Equations 15-16), but in
+    Section G.2 the authors find Top-K masking provides no significant benefit
+    over the simpler binary approximation, so we only implement binary here.
+
+    See: https://arxiv.org/abs/2602.04879
+    Reference impl: https://github.com/sail-sg/Stable-RL/blob/main/verl/trainer/ppo/core_algos.py#L1241
+    """
+    # Use rollout logprobs as behavior policy for both ratio and mask
+    # See Section 5.2 of paper
+    mu_log_probs = rollout_logprobs if rollout_logprobs is not None else old_log_probs
+    ratio = safe_exp_delta(log_probs - mu_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+
+    dppo_type = config.dppo.dppo_type
+    delta_low = config.dppo.delta_low
+    delta_high = config.dppo.delta_high
+
+    # Compute DPPO mask
+    with torch.no_grad():
+        current_probs = torch.exp(log_probs)
+        mu_probs = torch.exp(mu_log_probs)
+        prob_diff = current_probs - mu_probs  # Use actual probabilities
+
+        if dppo_type == "binary_tv":
+            # Binary Total Variation (Equation 13)
+            mask = torch.ones_like(advantages)
+            mask[(advantages > 0) & (prob_diff > delta_high)] = 0.0
+            mask[(advantages < 0) & (-prob_diff > delta_low)] = 0.0
+
+        elif dppo_type == "binary_kl":
+            # Binary KL (Equation 14)
+            eps = 1e-8
+            binary_kl = mu_probs * (mu_log_probs - log_probs) + (1 - mu_probs) * torch.log(
+                (1 - mu_probs + eps) / (1 - current_probs + eps)
+            )
+
+            mask = torch.ones_like(advantages)
+            mask[(advantages > 0) & (prob_diff > 0) & (binary_kl > delta_high)] = 0.0
+            mask[(advantages < 0) & (prob_diff < 0) & (binary_kl > delta_low)] = 0.0
+
+        else:
+            raise ValueError(f"Unknown DPPO type: {dppo_type}. Must be 'binary_tv' or 'binary_kl'.")
+
+    # Surrogate loss with divergence-based mask
+    loss = -(ratio * advantages * mask)
+
+    clip_ratio = masked_mean((mask == 0).float(), loss_mask).mean().detach().item()
+    loss_metrics = {"clip_ratio": clip_ratio}
+
+    # Apply off-policy correction
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )

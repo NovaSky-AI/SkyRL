@@ -299,16 +299,31 @@ class MegatronStrategy(DistributedStrategy):
             save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
         )
 
+        async_save = self.megatron_config.async_dist_ckpt_save
+        if async_save and io.is_cloud_path(ckpt_dir):
+            # local_work_dir uploads on context exit, which would race the still-running
+            # background write. Async is only safe writing in-place to a local/shared FS.
+            self.print(f"async_dist_ckpt_save unsupported for cloud path {ckpt_dir}; saving synchronously")
+            async_save = False
+        if async_save:
+            # The queue holds one in-flight write; the prior checkpoint dir must be
+            # fully written before this save reuses it.
+            self._finalize_async_calls()
+
         with io.local_work_dir(ckpt_dir) as work_dir:
-            # TODO(tgriggs): Support configurable async saves.
             async_save_request = dist_checkpointing.save(
                 sharded_state_dict=sharded_state_dict,
                 checkpoint_dir=work_dir,
                 sharded_strategy=save_strategy,
-                async_sharded_save=False,
+                async_sharded_save=async_save,
+                async_strategy=self.megatron_config.async_dist_ckpt_strategy,
                 validate_access_integrity=True,
             )
-            assert async_save_request is None, "Async save is not yet supported for Megatron"
+            if async_save:
+                # Shards are staged to host; the disk write runs in the background.
+                ckpt_base.async_calls.schedule_async_request(async_save_request)
+            else:
+                assert async_save_request is None, "save() must not return a request when sync"
 
             # Only global rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
@@ -319,9 +334,27 @@ class MegatronStrategy(DistributedStrategy):
             self._save_lora_adapters(unwrapped_model, ckpt_dir)
 
         dist.barrier()
-        ckpt_base.async_calls.close()
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+        if not async_save:
+            # Async path keeps the pending request alive in the queue until its finalize;
+            # tearing it down here would orphan that write.
+            ckpt_base.async_calls.close()
+            ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
+
+    @staticmethod
+    def _finalize_async_calls() -> None:
+        # Finalization may run in a helper thread, whose current CUDA device defaults to 0.
+        local_rank = os.environ.get("LOCAL_RANK")
+        if local_rank is not None and torch.cuda.is_available():
+            torch.cuda.set_device(int(local_rank))
+        ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
+
+    def finalize_pending_saves(self) -> None:
+        """Block until any in-flight async checkpoint write completes.
+
+        No-op when ``async_dist_ckpt_save`` is off or nothing is pending.
+        """
+        self._finalize_async_calls()
 
     def _get_rank_path(self, ckpt_dir):
         tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -364,6 +397,9 @@ class MegatronStrategy(DistributedStrategy):
     ):
         if not ckpt_dir or not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+
+        # A reload must observe a fully-written checkpoint.
+        self.finalize_pending_saves()
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
@@ -518,7 +554,22 @@ class MegatronStrategy(DistributedStrategy):
                 raise ValueError(f"Unexpected keys in LoRA adapter state dict: {unexpected}")
             self.print(f"Loaded {len(state_dict['model_state_dict'])} LoRA adapters from {adapter_path}.")
 
-    def save_hf_model(self, bridge, model: MegatronModelWrapper, output_dir: str, tokenizer=None, **kwargs) -> None:
+    def save_hf_model(
+        self,
+        bridge,
+        model: MegatronModelWrapper,
+        output_dir: str,
+        tokenizer=None,
+        *,
+        distributed_save: bool = False,
+        save_every_n_ranks: int = 1,
+        **kwargs,
+    ) -> None:
+        if distributed_save and io.is_cloud_path(output_dir):
+            raise ValueError(
+                f"distributed_save=True is incompatible with cloud paths (got {output_dir}). "
+                "Please use a shared filesystem path for distributed_save."
+            )
         # Create checkpoint directory if it doesn't exist.
         if self.is_rank_0():
             io.makedirs(output_dir, exist_ok=True)
@@ -526,11 +577,33 @@ class MegatronStrategy(DistributedStrategy):
 
         # All ranks call into bridge.
         with io.local_work_dir(output_dir) as work_dir:
-            bridge.save_hf_weights(model.actor_module, work_dir)
+            # strict=False is required for partial exports (e.g. language_model_only
+            # on a Qwen3.5 VL checkpoint, whose shards co-mingle vision and text
+            # weights): the bridge writes a shard only once all its keys are yielded,
+            # so strict=True silently writes zero weights. No-op for complete exports.
+            #
+            # distributed_save fans the shard writes across ranks (one saver per
+            # save_every_n_ranks) instead of serializing them on rank 0 -- the same
+            # standard HF sharded layout, just written in parallel.
+            bridge.save_hf_weights(
+                model.actor_module,
+                work_dir,
+                strict=False,
+                distributed_save=distributed_save,
+                save_every_n_ranks=save_every_n_ranks,
+            )
             self.print(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
+                # Preserve any custom modeling artifacts (e.g. modeling_*.py,
+                # special_tokens_map.json, auto_map-referenced files) that
+                # trust_remote_code models depend on. save_hf_configs below
+                # overwrites config.json/tokenizer files with the strategy's
+                # current view, but save_artifacts is required to copy the
+                # custom Python modules and other artifacts that
+                # save_pretrained() alone does not emit.
+                bridge.hf_pretrained.save_artifacts(work_dir)
                 self.save_hf_configs(self.hf_config, work_dir, tokenizer)
                 self.print(f"Successfully saved HF config and tokenizer to {output_dir}")
 

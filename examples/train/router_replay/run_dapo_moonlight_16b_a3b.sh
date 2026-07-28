@@ -43,7 +43,7 @@ TRAIN_BATCH_SIZE=128
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true # cuda graphs can cause some instability
+ENFORCE_EAGER=true # original DAPO recipe used enforce eager due to instability with vLLM then. TODO: reproduce DAPO with enforce eager `False`
 LR=1e-6
 
 # megatron config
@@ -112,7 +112,6 @@ SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron -m examples.tra
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=false \
   generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \

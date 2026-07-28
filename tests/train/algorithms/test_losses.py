@@ -15,6 +15,7 @@ from skyrl.train.config import (
     AlgorithmConfig,
     CISPOConfig,
     ClipCovConfig,
+    DPPOConfig,
     KLCovConfig,
     OffPolicyCorrectionConfig,
     SAPOConfig,
@@ -133,6 +134,147 @@ def test_policy_loss_cispo():
     torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-3, atol=1e-8)
     # close to hand calculated value
     assert actual_loss.item() == pytest.approx(-2.9930, abs=1e-4)
+
+
+def test_policy_loss_cispo_rollout_anchor():
+    """CISPO with cispo_anchor='rollout' anchors the IS ratio on the rollout log-probs."""
+
+    device = "cpu"
+
+    advantages = torch.tensor([[1.0, -1.0, -4.0]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]], device=device)
+    log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)
+    # Distinct rollout log-probs so the rollout-anchored ratio differs from the old-anchored one.
+    rollout_logprobs = torch.tensor([[-1.30685, -1.5, -1.0]], device=device)
+
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_eps_clip_low=0.2, cispo_eps_clip_high=0.2, cispo_anchor="rollout"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    loss_fn = PolicyLossRegistry.get("cispo")
+
+    # ratio is anchored on rollout_logprobs (NOT old_log_probs)
+    ratio = torch.exp(log_probs - rollout_logprobs)
+    expected_loss = (-ratio.clamp(1 - 0.2, 1 + 0.2) * advantages * log_probs).sum()
+
+    actual_loss, metrics = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        rollout_logprobs=rollout_logprobs,
+    )
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-3, atol=1e-8)
+
+    # IS-ratio diagnostics are logged and reflect the rollout-anchored ratio
+    for k in ("clip_ratio", "cispo/ratio_mean", "cispo/ratio_clamped_mean", "cispo/ratio_max", "cispo/ratio_min"):
+        assert k in metrics, f"missing metric {k}"
+    assert metrics["cispo/ratio_mean"] == pytest.approx(ratio.mean().item(), rel=1e-3)
+    expected_clamped = ratio.clamp(1 - 0.2, 1 + 0.2)
+    assert metrics["cispo/ratio_clamped_mean"] == pytest.approx(expected_clamped.mean().item(), rel=1e-3)
+    assert metrics["cispo/ratio_max"] == pytest.approx(ratio.max().item(), rel=1e-3)
+
+    # rollout anchor genuinely differs from the default old anchor on the same inputs
+    old_config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_eps_clip_low=0.2, cispo_eps_clip_high=0.2, cispo_anchor="old"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    old_loss, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=old_config,
+        rollout_logprobs=rollout_logprobs,
+    )
+    assert not torch.allclose(actual_loss, old_loss)
+
+
+def test_policy_loss_cispo_ratio_min_max_ignore_masked_tokens():
+    """cispo/ratio_{min,max} must be computed over active tokens only.
+
+    Regression test: `ratio` is strictly positive (safe_exp_delta), so computing the min over
+    `ratio * loss_mask` would zero the masked positions and report cispo/ratio_min == 0.0 whenever
+    any token is masked, instead of the true minimum over the unmasked ratios.
+    """
+    device = "cpu"
+
+    advantages = torch.tensor([[1.0, -1.0, -4.0]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]], device=device)
+    log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)
+    # Mask out the middle token, whose ratio (== 1.0) is neither the min nor the max of the row.
+    loss_mask = torch.tensor([[1.0, 0.0, 1.0]], device=device)
+
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_eps_clip_low=0.2, cispo_eps_clip_high=0.2, cispo_anchor="old"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    loss_fn = PolicyLossRegistry.get("cispo")
+
+    ratio = torch.exp(log_probs - old_log_probs)
+    active_ratio = ratio[loss_mask.bool()]
+
+    _, metrics = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        loss_mask=loss_mask,
+    )
+
+    # min/max reflect only the unmasked ratios -- not 0.0 from the zeroed masked positions.
+    assert metrics["cispo/ratio_min"] > 0.0
+    assert metrics["cispo/ratio_min"] == pytest.approx(active_ratio.min().item(), rel=1e-3)
+    assert metrics["cispo/ratio_max"] == pytest.approx(active_ratio.max().item(), rel=1e-3)
+
+
+def test_policy_loss_cispo_rollout_anchor_requires_rollout_logprobs():
+    """cispo_anchor='rollout' must be given rollout_logprobs."""
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_anchor="rollout"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    loss_fn = PolicyLossRegistry.get("cispo")
+    with pytest.raises(AssertionError):
+        loss_fn(
+            log_probs=torch.tensor([[-1.0]]),
+            old_log_probs=torch.tensor([[-1.0]]),
+            advantages=torch.tensor([[1.0]]),
+            config=config,
+            rollout_logprobs=None,
+        )
+
+
+def test_policy_loss_cispo_rollout_anchor_rejects_tis():
+    """cispo_anchor='rollout' refuses to stack TIS (would double-count the off-policy gap)."""
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_anchor="rollout"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=OffPolicyCorrectionConfig(tis_ratio_type="token"),
+    )
+    loss_fn = PolicyLossRegistry.get("cispo")
+    with pytest.raises(ValueError, match="double-count"):
+        loss_fn(
+            log_probs=torch.tensor([[-1.0]]),
+            old_log_probs=torch.tensor([[-1.0]]),
+            advantages=torch.tensor([[1.0]]),
+            config=config,
+            rollout_logprobs=torch.tensor([[-1.2]]),
+        )
+
+
+def test_cispo_anchor_validation():
+    """CISPOConfig rejects an invalid anchor."""
+    with pytest.raises(ValueError, match="cispo_anchor"):
+        CISPOConfig(cispo_anchor="bogus")
 
 
 def test_gspo_importance_sampling_levels():
@@ -456,3 +598,137 @@ def test_sapo_policy_loss_basic():
 
     # SAPO should always report clip_ratio = 0.0
     assert loss_metrics["clip_ratio"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "name, dppo_type, delta_low, delta_high, old_lp, new_lp, advs, rollout_lp, expect_mask, expect_clip_gt_zero",
+    [
+        (
+            "tv_pos_adv_masked",
+            "binary_tv",
+            0.2,
+            0.2,
+            [[-1.0, -1.0, -1.0]],
+            [[-0.3, -2.0, -0.9]],
+            [[1.0, -1.0, 1.0]],
+            None,
+            [[0.0, 0.0, 1.0]],
+            True,
+        ),
+        (
+            "tv_wrong_direction_not_masked",
+            "binary_tv",
+            0.2,
+            0.2,
+            [[-1.0, -1.0]],
+            [[-2.0, -0.3]],
+            [[1.0, -1.0]],
+            None,
+            [[1.0, 1.0]],
+            False,
+        ),
+        (
+            "tv_uses_rollout_logprobs",
+            "binary_tv",
+            0.2,
+            0.2,
+            [[-1.0, -1.0]],
+            [[-0.3, -0.95]],
+            [[1.0, 1.0]],
+            [[-0.35, -1.0]],
+            None,
+            None,
+        ),
+        (
+            "kl_masked",
+            "binary_kl",
+            0.05,
+            0.05,
+            [[-1.0, -1.0]],
+            [[-0.1, -0.95]],
+            [[1.0, 1.0]],
+            None,
+            None,
+            True,
+        ),
+        (
+            "kl_no_masking_within_delta",
+            "binary_kl",
+            0.5,
+            0.5,
+            [[-1.0, -1.0]],
+            [[-1.01, -0.99]],
+            [[1.0, -1.0]],
+            None,
+            [[1.0, 1.0]],
+            False,
+        ),
+    ],
+)
+def test_dppo_policy_loss(
+    name,
+    dppo_type,
+    delta_low,
+    delta_high,
+    old_lp,
+    new_lp,
+    advs,
+    rollout_lp,
+    expect_mask,
+    expect_clip_gt_zero,
+):
+    device = "cpu"
+    old_log_probs = torch.tensor(old_lp, device=device)
+    log_probs = torch.tensor(new_lp, device=device)
+    advantages = torch.tensor(advs, device=device)
+    rollout_logprobs = torch.tensor(rollout_lp, device=device) if rollout_lp is not None else None
+
+    config = AlgorithmConfig(
+        policy_loss_type="dppo",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        dppo=DPPOConfig(dppo_type=dppo_type, delta_low=delta_low, delta_high=delta_high),
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+
+    loss_fn = PolicyLossRegistry.get("dppo")
+
+    if name == "tv_uses_rollout_logprobs":
+        loss_with, m1 = loss_fn(
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            advantages=advantages,
+            config=config,
+            rollout_logprobs=rollout_logprobs,
+        )
+        loss_without, m2 = loss_fn(
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            advantages=advantages,
+            config=config,
+            rollout_logprobs=None,
+        )
+        assert not torch.allclose(
+            loss_with, loss_without
+        ), "rollout_logprobs should change the mask and therefore the loss"
+        return
+
+    loss, metrics = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        rollout_logprobs=rollout_logprobs,
+    )
+
+    if expect_mask is not None:
+        expected_mask = torch.tensor(expect_mask, device=device)
+        ratio = torch.exp(log_probs - old_log_probs)
+        # reduce_loss sums over (loss * loss_mask); loss_mask is None here so it is a plain sum.
+        expected_loss = -(ratio * advantages * expected_mask).sum()
+        torch.testing.assert_close(loss, expected_loss, rtol=1e-4, atol=1e-6)
+
+    if expect_clip_gt_zero is True:
+        assert metrics["clip_ratio"] > 0.0, f"{name}: expected some masking"
+    elif expect_clip_gt_zero is False:
+        assert metrics["clip_ratio"] == pytest.approx(0.0, abs=1e-6), f"{name}: expected no masking"

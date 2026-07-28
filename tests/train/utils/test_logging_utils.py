@@ -4,12 +4,12 @@ uv run --isolated --extra dev pytest tests/train/utils/test_logging_utils.py
 
 import pytest
 
-from skyrl.train.utils.logging_utils import (
+from skyrl.train.utils.trajectory_logging import (
     BASE_PROMPT_COLOR,
     NEGATIVE_RESPONSE_COLOR,
     POSITIVE_RESPONSE_COLOR,
     _color_block_format_and_kwargs,
-    log_example,
+    pretty_print_example,
 )
 
 
@@ -56,13 +56,13 @@ def test_color_block_format_and_kwargs_multi_line():
         ([0.1, 0.2], POSITIVE_RESPONSE_COLOR),
     ],
 )
-def test_log_example_uses_expected_colors_and_reward_string(reward, expected_color):
+def test_pretty_print_example_uses_expected_colors_and_reward_string(reward, expected_color):
     logger = StubLogger()
 
     prompt = [{"role": "user", "content": "line1\nline2"}]
     response = "out1\nout2"
 
-    log_example(logger, prompt=prompt, response=response, reward=reward)
+    pretty_print_example(logger, prompt=prompt, response=response, reward=reward)
 
     # Basic structure checks
     assert logger.last_message.startswith("Example:\n  Input: ")
@@ -84,7 +84,7 @@ def test_log_example_uses_expected_colors_and_reward_string(reward, expected_col
     if reward is None:
         assert reward_str == "N/A"
     else:
-        # log_example normalizes rewards to a single float
+        # pretty_print_example normalizes rewards to a single float
         if isinstance(reward, list):
             expected_val = float(sum(reward))
         else:
@@ -98,20 +98,20 @@ def test_log_example_uses_expected_colors_and_reward_string(reward, expected_col
     assert f"</{expected_color}>" in logger.last_message
 
 
-def test_log_example_handles_exceptions_gracefully(monkeypatch, capsys):
-    """Force an exception inside log_example and ensure the fallback path prints."""
+def test_pretty_print_example_handles_exceptions_gracefully(monkeypatch, capsys):
+    """Force an exception inside pretty_print_example and ensure the fallback path prints."""
 
     def broken_color_block(*args, **kwargs):
         raise RuntimeError("boom")
 
     # Patch the helper to raise
     monkeypatch.setattr(
-        "skyrl.train.utils.logging_utils._color_block_format_and_kwargs",
+        "skyrl.train.utils.trajectory_logging._color_block_format_and_kwargs",
         broken_color_block,
     )
 
     logger = StubLogger()
-    log_example(logger, prompt=[{"role": "user", "content": "p"}], response="r", reward=None)
+    pretty_print_example(logger, prompt=[{"role": "user", "content": "p"}], response="r", reward=None)
 
     # And the plain-text fallback should be printed to stdout
     captured = capsys.readouterr()

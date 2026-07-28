@@ -18,7 +18,7 @@ single-turn and multi-turn rollouts, and how token-in-token-out (TI/TO) is enfor
 the environment of the rollouts. If you would like to use other environments, you can write your
 own Generator by extending `GeneratorInterface`.
 
-A `SkyRLGymGenerator` uses an `InferenceEngineClient` like an LLM endpoint to generate response,
+A `SkyRLGymGenerator` uses an `RemoteInferenceClient` like an LLM endpoint to generate response,
 ultimately returning `GeneratorOutput` (including `response_ids` and `loss_masks`) to
 the training loop for updating the model.
 

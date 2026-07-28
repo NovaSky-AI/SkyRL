@@ -74,7 +74,6 @@ uv run --isolated --env-file .env --extra skyrl-train -m skyrl_agent.integration
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=true \
   environment.env_class=null \
   generator.n_samples_per_prompt=8 \

@@ -20,6 +20,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     PauseMode,
     RemoteInferenceClient,
 )
+from skyrl.backends.skyrl_train.inference_servers.setup import (
+    build_new_inference_client,
+)
+from skyrl.train.config import SkyRLTrainConfig
 
 
 def create_mock_vllm_server(server_id: int) -> FastAPI:
@@ -32,10 +36,21 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app.state.last_render_model = None
     # Per-server LoRA registry: lora_name -> lora_path
     app.state.lora_registry = {}
+    # Session ids received via /finish_session, in arrival order.
+    app.state.finished_sessions = []
 
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.post("/finish_session")
+    async def finish_session(session_id: str = Query(...)):
+        app.state.finished_sessions.append(session_id)
+        return {"status": "ok", "session_id": session_id}
+
+    @app.get("/test/finished")
+    async def get_finished():
+        return {"finished": list(app.state.finished_sessions)}
 
     @app.get("/test/last_generate_features")
     async def get_last_generate_features():
@@ -268,6 +283,32 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     return app
 
 
+@pytest.mark.asyncio
+async def test_build_new_inference_client_uses_served_model_name_for_chat_requests(mock_servers):
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = "Qwen/Qwen2.5-1.5B-Instruct"
+    cfg.generator.inference_engine.served_model_name = "served-alias"
+    cfg.generator.inference_engine.external_proxy_url = mock_servers["proxy_url"]
+    cfg.generator.inference_engine.external_server_urls = mock_servers["server_urls"]
+
+    client, server_setup = build_new_inference_client(cfg, tokenizer=None)
+
+    try:
+        assert server_setup.proxy_url == mock_servers["proxy_url"]
+        assert server_setup.server_urls == mock_servers["server_urls"]
+
+        await client.chat_completion(
+            {
+                "json": {"messages": [{"role": "user", "content": "hi"}]},
+                "headers": {},
+            }
+        )
+        captured = await _get_last_models(mock_servers["server_urls"])
+        assert captured[0]["chat"] == "served-alias"
+    finally:
+        await client.teardown()
+
+
 def start_server(port: int, server_id: int) -> uvicorn.Server:
     """Start a mock server, return the server instance."""
     app = create_mock_vllm_server(server_id)
@@ -325,6 +366,36 @@ async def client(mock_servers):
     )
     yield client
     await client.teardown()
+
+
+def _start_finish_session_error_server(port: int) -> uvicorn.Server:
+    """Start a mock router whose /finish_session always returns HTTP 500."""
+    app = FastAPI()
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
+
+    @app.post("/finish_session")
+    async def finish_session(session_id: str = Query(...)):
+        return JSONResponse(status_code=500, content={"error": "boom"})
+
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    threading.Thread(target=lambda: asyncio.run(server.serve()), daemon=True).start()
+    return server
+
+
+@pytest.fixture(scope="module")
+def error_router():
+    """A router URL whose /finish_session always errors with HTTP 500."""
+    port = get_open_port()
+    server = _start_finish_session_error_server(port)
+    url = f"http://127.0.0.1:{port}"
+    assert wait_ready(url), "error router failed to start"
+    yield url
+    server.should_exit = True
+    time.sleep(0.2)
 
 
 class TestRemoteInferenceClientInit:
@@ -1243,5 +1314,58 @@ class TestExplicitModelRequired:
             }
             with pytest.raises(ValueError, match="LoRA is enabled"):
                 await client.sample(request_payload)
+        finally:
+            await client.teardown()
+
+
+class TestFinishSession:
+    """Tests for ``RemoteInferenceClient.finish_session`` (router notification).
+
+    ``finish_session`` runs on cleanup paths (trajectory completion, error, or
+    cancellation), so it must POST the session id to the router and never raise.
+    """
+
+    @pytest.mark.asyncio
+    async def test_posts_session_id(self, client, mock_servers):
+        """The session id is POSTed to the router's /finish_session endpoint."""
+        await client.finish_session("traj-finish-1")
+        await client.finish_session("traj-finish-2")
+
+        finished = httpx.get(f"{mock_servers['proxy_url']}/test/finished", timeout=2.0).json()["finished"]
+        assert "traj-finish-1" in finished
+        assert "traj-finish-2" in finished
+
+    @pytest.mark.asyncio
+    async def test_empty_session_id_is_noop(self, client, mock_servers):
+        """Empty or None session ids are not sent to the router."""
+        before = httpx.get(f"{mock_servers['proxy_url']}/test/finished", timeout=2.0).json()["finished"]
+        await client.finish_session("")
+        await client.finish_session(None)
+        after = httpx.get(f"{mock_servers['proxy_url']}/test/finished", timeout=2.0).json()["finished"]
+        assert before == after
+
+    @pytest.mark.asyncio
+    async def test_swallows_server_errors(self, error_router, mock_servers):
+        """A non-2xx router response does not raise (cleanup must not fail)."""
+        client = RemoteInferenceClient(
+            proxy_url=error_router,
+            server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
+        )
+        try:
+            await client.finish_session("traj-error")
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_swallows_connection_errors(self, mock_servers):
+        """An unreachable router does not raise."""
+        client = RemoteInferenceClient(
+            proxy_url=f"http://127.0.0.1:{get_open_port()}",
+            server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
+        )
+        try:
+            await client.finish_session("traj-unreachable")
         finally:
             await client.teardown()

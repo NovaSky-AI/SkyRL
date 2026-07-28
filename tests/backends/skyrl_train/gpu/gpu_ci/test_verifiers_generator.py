@@ -2,13 +2,11 @@
 uv run --isolated --extra dev --extra fsdp --with verifiers pytest tests/backends/skyrl_train/gpu/gpu_ci/test_verifiers_generator.py
 """
 
-import socket
-
 import pytest
 import ray
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import GeneratorConfig, SamplingParams
@@ -23,23 +21,13 @@ from tests.backends.skyrl_train.gpu.utils import (
 pytestmark = [pytest.mark.integrations, pytest.mark.skip]
 
 
-def _get_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture(scope="module")
 def verifiers_runtime():
     model = "Qwen/Qwen2.5-1.5B-Instruct"
-    http_port = _get_free_port()
 
     cfg = get_test_actor_config()
     cfg.trainer.policy.model.path = model
     cfg.generator.max_input_length = 2048
-    cfg.generator.inference_engine.enable_http_endpoint = True
-    cfg.generator.inference_engine.http_endpoint_host = "127.0.0.1"
-    cfg.generator.inference_engine.http_endpoint_port = http_port
     cfg.generator.sampling_params.max_generate_length = 256
 
     # Reuse shared initializer for local engines and client
@@ -47,7 +35,6 @@ def verifiers_runtime():
         cfg=cfg,
         model=model,
         use_local=True,
-        async_engine=True,
         tp_size=1,
         colocate_all=False,
         backend="vllm",
@@ -58,7 +45,7 @@ def verifiers_runtime():
     tokenizer = AutoTokenizer.from_pretrained(model)
 
     try:
-        yield {"client": engines.client, "tokenizer": tokenizer, "http_port": http_port, "model": model}
+        yield {"client": engines.client, "tokenizer": tokenizer, "model": model}
     finally:
         engines.close()
         ray.shutdown()
@@ -69,8 +56,6 @@ async def _run_verifiers_end_to_end(
     existing_client,
     model: str = "Qwen/Qwen2.5-1.5B-Instruct",
     num_prompts: int = 2,
-    http_host: str = "127.0.0.1",
-    http_port: int | None = None,
     max_input_length: int = 2048,
     max_generate_length: int = 256,
     sampling_overrides: dict | None = None,
@@ -79,24 +64,19 @@ async def _run_verifiers_end_to_end(
 ):
     client = existing_client
     tokenizer = existing_tokenizer
-    if http_port is None:
-        http_port = _get_free_port()
 
     await client.wake_up()
 
     generator_cfg = GeneratorConfig(
         sampling_params=SamplingParams(max_generate_length=max_generate_length, logprobs=None),
         max_input_length=max_input_length,
-        backend="vllm",
-        enable_http_endpoint=True,
-        http_endpoint_host=http_host,
-        http_endpoint_port=http_port,
     )
 
     from integrations.verifiers.verifiers_generator import VerifiersGenerator
 
     generator = VerifiersGenerator(
         generator_cfg=generator_cfg,
+        inference_engine_client=client,
         tokenizer=tokenizer,
         model_name=model,
     )
@@ -149,8 +129,6 @@ async def test_verifiers_e2e_wordle_http(verifiers_runtime):
         num_prompts=2,
         max_input_length=2048,
         max_generate_length=256,
-        http_host="127.0.0.1",
-        http_port=rt["http_port"],
         existing_tokenizer=rt["tokenizer"],
     )
 
@@ -192,8 +170,6 @@ async def test_verifiers_e2e_sampling_toggles(verifiers_runtime):
             "repetition_penalty": 1.05,
             "min_tokens": 1,
         },
-        http_host="127.0.0.1",
-        http_port=rt["http_port"],
         existing_tokenizer=rt["tokenizer"],
     )
 
@@ -216,8 +192,6 @@ async def test_verifiers_length_constraints(verifiers_runtime):
         max_input_length=max_input_length,
         max_generate_length=max_generate_length,
         prompt_text=long_prompt,
-        http_host="127.0.0.1",
-        http_port=rt["http_port"],
         existing_tokenizer=rt["tokenizer"],
     )
 

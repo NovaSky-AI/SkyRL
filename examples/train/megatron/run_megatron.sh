@@ -17,7 +17,7 @@ MEGATRON_TP=2
 MEGATRON_PP=2
 MEGATRON_CP=1
 
-# torch profiler config
+# torch.profiler for policy training steps.
 ENABLE_TORCH_PROFILER=false
 RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
@@ -33,9 +33,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
-  trainer.policy.megatron_config.torch_profiler_config.enable=$ENABLE_TORCH_PROFILER \
-  trainer.policy.megatron_config.torch_profiler_config.ranks=$RANKS_TO_PROFILE \
-  trainer.policy.megatron_config.torch_profiler_config.save_path=$SAVE_PATH \
+  trainer.policy.torch_profiler_config.enable=$ENABLE_TORCH_PROFILER \
+  trainer.policy.torch_profiler_config.ranks=$RANKS_TO_PROFILE \
+  trainer.policy.torch_profiler_config.save_path=$SAVE_PATH \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
@@ -60,7 +60,6 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \

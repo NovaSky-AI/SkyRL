@@ -47,7 +47,6 @@ uv run --isolated --extra fsdp --with openreward \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.gpu_memory_utilization=0.5 \
-  generator.inference_engine.async_engine=true \
   trainer.epochs=3 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=16 \

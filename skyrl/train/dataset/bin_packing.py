@@ -21,6 +21,7 @@ The structure is based on NemoRL's sequence packing implementation
 from __future__ import annotations
 
 import enum
+import heapq
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
@@ -29,6 +30,7 @@ class PackingStrategy(enum.Enum):
     """Supported sequence packing algorithms."""
 
     FIRST_FIT_DECREASING = "first_fit_decreasing"
+    BALANCED = "balanced"
 
 
 class SeqPacker(ABC):
@@ -159,8 +161,59 @@ class FirstFitDecreasing(SeqPacker):
         return bins
 
 
+class Balanced(SeqPacker):
+    """Balanced (least-loaded) bin-packing.
+
+    Sort sequences by length descending, then place each sequence into the
+    currently least-loaded bin whenever it fits, otherwise open a new bin.
+    Unlike :class:`FirstFitDecreasing` (which minimizes the bin count by
+    greedily filling the first bin that fits), this strategy spreads tokens
+    evenly so the per-bin token totals stay roughly balanced. That balance
+    keeps per-micro-batch compute even, which reduces straggling across
+    micro-batches. O(n log n) for the sort plus O(n log m) for the
+    heap-based placement.
+
+    ``bin_capacity`` is a *soft* cap here: a sequence longer than the capacity
+    is placed alone in its own over-capacity bin rather than raising (it can
+    never fit alongside anything else). This differs from
+    :class:`FirstFitDecreasing`, which rejects oversized sequences.
+    """
+
+    def _pack_implementation(self, sequence_lengths: List[int]) -> List[List[int]]:
+        # No _validate_sequence_lengths() call: capacity is a soft cap (see
+        # class docstring) so oversized sequences fall through to their own bin.
+        # Sort by length only (stable), so equal-length sequences keep their
+        # original relative order.
+        indexed = [(length, i) for i, length in enumerate(sequence_lengths)]
+        indexed.sort(key=lambda x: x[0], reverse=True)
+
+        bins: List[List[int]] = []
+        # Min-heap of (current_total_tokens, bin_idx); the root is always the
+        # least-loaded bin.
+        bin_tokens_heap: List[Tuple[int, int]] = []
+
+        for length, idx in indexed:
+            placed = False
+            # Only the least-loaded bin needs checking: if the emptiest bin
+            # cannot fit the sequence, no fuller bin can either.
+            if bin_tokens_heap:
+                bin_tokens, bin_idx = bin_tokens_heap[0]
+                new_bin_tokens = bin_tokens + length
+                if new_bin_tokens <= self.bin_capacity:
+                    bins[bin_idx].append(idx)
+                    heapq.heapreplace(bin_tokens_heap, (new_bin_tokens, bin_idx))
+                    placed = True
+
+            if not placed:
+                bins.append([idx])
+                heapq.heappush(bin_tokens_heap, (length, len(bins) - 1))
+
+        return bins
+
+
 _PACKERS = {
     PackingStrategy.FIRST_FIT_DECREASING: FirstFitDecreasing,
+    PackingStrategy.BALANCED: Balanced,
 }
 
 

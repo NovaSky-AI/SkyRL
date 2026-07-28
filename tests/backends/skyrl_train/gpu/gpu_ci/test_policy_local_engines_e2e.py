@@ -7,7 +7,7 @@ import pytest
 import ray
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import SkyRLTrainConfig
@@ -33,7 +33,6 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
     cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = 2
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.run_engines_locally = True
     # NOTE: We reduce the gpu memory used by vLLM because of the colocated tests
@@ -114,7 +113,6 @@ async def test_policy_local_engines_e2e(
         model=model,
         cfg=cfg,
         use_local=True,
-        async_engine=cfg.generator.inference_engine.async_engine,
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         sleep_level=2,  # since we explicitly sync weights

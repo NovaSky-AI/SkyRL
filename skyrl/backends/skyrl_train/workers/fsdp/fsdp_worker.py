@@ -7,11 +7,6 @@ import torch
 import torch.distributed
 from transformers import AutoConfig
 
-from skyrl.train.utils.trainer_utils import (
-    get_rope_scaling_config,
-    get_rope_theta_config,
-)
-
 try:
     # for torch 2.5+
     from torch.distributed.tensor import DTensor
@@ -29,6 +24,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
+from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
@@ -57,7 +53,7 @@ class FSDPWeightExtractor(WeightExtractor):
 
     Args:
         model: FSDP model to extract weights from
-        group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
+        group_by_module: If True, group parameters by module (e.g., for fused QKV loaders)
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
         weight_prefix: Prefix to prepend to all weight names (e.g., ``"language_model."``
             when syncing a CausalLM backbone to a vLLM instance which always uses the namespace of the
@@ -172,8 +168,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             use_torch_compile=self.cfg.policy.use_torch_compile,
-            rope_scaling=get_rope_scaling_config(self.cfg),
-            rope_theta=get_rope_theta_config(self.cfg),
             model_config_kwargs=self.cfg.policy.model_config_kwargs,
             meta_init=use_meta,
             language_model_only=self.cfg.policy.language_model_only,
@@ -198,12 +192,19 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 self.optimizer is not None and self.scheduler is not None
             ), "FSDP preparation should create optimizer and scheduler"
 
+        # Enable expandable_segments after init so model weights stay in IPC-compatible
+        # standard CUDA memory; only subsequent activations use expandable segments.
+        self._set_expandable_segments(True)
+
+        # Created only on profiled ranks.
+        self.profiler = build_profiler_from_policy_cfg(self.cfg)
+
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
         # Initialize weight extractor
-        # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
+        # TODO(haochen): Module grouping for fused-weight loaders is only enabled for CUDA IPC.
         # transfer strategy, we can enable it for other strategies as well.
         from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
 
@@ -272,9 +273,15 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
-        if use_prefix_cache and torch.distributed.get_rank() == 0:
+
+        # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
+        if (
+            use_prefix_cache
+            and torch.distributed.get_rank() == 0
+            and (not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync)
+        ):
             # clear prefix cache
-            cache_reset_task = inference_engine_client.reset_prefix_cache()
+            cache_reset_task = inference_engine_client.reset_prefix_cache(reset_running_requests=True)
 
         torch.cuda.empty_cache()
 
@@ -294,13 +301,17 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
             )
         else:
-            # Extract and send weights using the sender created at init time
-            weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
-            weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
-            await self._weight_transfer_sender.send_chunks(
-                weight_iterator,
-                weight_metadata=weight_metadata,
-            )
+            # Extract and send weights using the sender created at init time.
+            # Disable expandable_segments around the send: under colocate_all the
+            # CUDA-IPC path calls cudaIpcGetMemHandle, which is incompatible with the
+            # VMM addresses expandable segments uses.
+            with self._expandable_segments_disabled_for_sync():
+                weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
+                weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+                await self._weight_transfer_sender.send_chunks(
+                    weight_iterator,
+                    weight_metadata=weight_metadata,
+                )
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -316,12 +327,18 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         data: TrainingInputBatch,
         loss_fn=None,
         loss_fn_config=None,
+        return_per_token_outputs: bool = True,
     ) -> WorkerOutput:
         """Run forward pass on data in inference mode.
 
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
         """
-        output = super().forward(data, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
+        output = super().forward(
+            data,
+            loss_fn=loss_fn,
+            loss_fn_config=loss_fn_config,
+            return_per_token_outputs=return_per_token_outputs,
+        )
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         return output
 
@@ -375,6 +392,8 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         )
         assert self.optimizer is not None
 
+        self._set_expandable_segments(True)
+
     def _set_pad_token_id(self, pad_token_id):
         self.model.config.pad_token_id = pad_token_id
 
@@ -414,8 +433,6 @@ class FSDPRefWorkerBase(RefWorkerBase):
             bf16=self.cfg.bf16,
             sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
-            rope_scaling=get_rope_scaling_config(self.cfg),
-            rope_theta=get_rope_theta_config(self.cfg),
             model_config_kwargs=self.cfg.ref.model_config_kwargs,
             meta_init=use_meta,
             language_model_only=self.cfg.ref.language_model_only,
@@ -425,6 +442,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
 
         self.model = strategy.prepare(wrapped_model)
         self.model.eval()
+
+        self._set_expandable_segments(True)
 
     def forward(
         self,

@@ -39,11 +39,7 @@ def example_dummy_config():
         n_samples_per_prompt=1,
         batched=False,
         max_turns=1,
-        inference_engine=InferenceEngineConfig(
-            enable_http_endpoint=False,
-            http_endpoint_host="127.0.0.1",
-            http_endpoint_port=8000,
-        ),
+        inference_engine=InferenceEngineConfig(),
     )
     cfg = SkyRLTrainConfig(trainer=trainer_cfg, generator=generator_cfg)
 

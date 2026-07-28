@@ -37,6 +37,8 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 | `/save_weights` | POST | Save full training checkpoint (weights + optimizer) |
 | `/save_weights_for_sampler` | POST | Sync weights to inference engines |
 | `/load_weights` | POST | Load a previously saved checkpoint |
+| `/training_runs/{unique_id}/checkpoints/weights/{checkpoint_id}` | DELETE | Delete a saved training checkpoint archive from disk |
+| `/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}` | DELETE | Delete a saved sampler checkpoint archive from disk |
 | `/retrieve_future` | POST | Long-poll for async result (300s timeout) |
 | `/healthz` | GET | Liveness check |
 
@@ -52,6 +54,12 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 - **Persistent**: `save_weights_for_sampler(name="...")` -- syncs to inference engines AND writes HF checkpoint to disk. Expensive.
 - **Ephemeral**: `save_weights_and_get_sampling_client(name="...")` -- syncs to inference engines only, skips disk write. Triggered when `sampling_session_seq_id` is present in the request.
 - In RL loops, always prefer ephemeral mode; reserve persistent saves for periodic checkpoints.
+- Delete persistent checkpoints after they are no longer needed. The delete endpoint requires an explicit checkpoint type, since a training and a sampler checkpoint can share an id:
+  - `DELETE /training_runs/{unique_id}/checkpoints/weights/{checkpoint_id}` (training checkpoint)
+  - `DELETE /training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}` (sampler checkpoint)
+  - or `DELETE /training_runs/{unique_id}/checkpoints/{checkpoint_id}?checkpoint_type=training|sampler`
+
+  A bare `.../checkpoints/{checkpoint_id}` with no type prefix and no `checkpoint_type` query param is rejected with a `400`. This removes the saved archive from `checkpoints_base`; it does not unload the live model.
 
 ## Testing
 

@@ -9,7 +9,7 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 import pytest
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -33,7 +33,6 @@ def get_test_config() -> SkyRLTrainConfig:
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.generator.inference_engine.tensor_parallel_size = 1
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.run_engines_locally = True
     cfg.trainer.remove_microbatch_padding = False
@@ -73,7 +72,6 @@ async def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocat
         cfg=cfg,
         model=MODEL,
         use_local=True,
-        async_engine=cfg.generator.inference_engine.async_engine,
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         sleep_level=2,  # Full sleep since we explicitly sync weights

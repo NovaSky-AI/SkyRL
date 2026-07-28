@@ -150,3 +150,64 @@ def test_token_level_rewards():
 
     # Verify token-level rewards are unchanged
     assert result["rewards"] == per_token_rewards
+
+
+def test_postprocess_metrics_over_superset():
+    """Reward metrics are computed over metrics_generator_output (a superset), while the per-token /
+    conversion applies only to the training generator_output. This backs the fully-async
+    sample_full_batch path including dropped groups in reward metrics for comparability."""
+    config = create_config(1)
+    trainer = RayPPOTrainer(
+        cfg=config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+
+    # Trained (kept) output: a single trajectory with reward 1.0.
+    train_go: GeneratorOutput = {
+        "prompt_token_ids": [[1]],
+        "response_ids": [[3, 4]],
+        "rewards": [1.0],
+        "loss_masks": [[1, 1]],
+        "stop_reasons": ["stop"],
+        "rollout_metrics": None,
+    }
+    # Metrics (union) output: the kept trajectory (1.0) plus two dropped ones (0.0, 0.0).
+    metrics_go: GeneratorOutput = {
+        "prompt_token_ids": [[1], [1], [1]],
+        "response_ids": [[3, 4], [5], [6]],
+        "rewards": [1.0, 0.0, 0.0],
+        "loss_masks": [[1, 1], [1], [1]],
+        "stop_reasons": ["stop", "stop", "stop"],
+        "rollout_metrics": None,
+    }
+
+    trainer.all_metrics = {}
+    result, _ = trainer.postprocess_generator_output(
+        train_go, ["u1"], metrics_generator_output=metrics_go, metrics_uids=["u1", "u2", "u3"]
+    )
+
+    # Conversion applies to the training output only (one trajectory -> per-token rewards).
+    assert result["rewards"] == [[0.0, 1.0]]
+    # Reward metrics are over the union of 3 trajectories / 3 uids.
+    assert abs(trainer.all_metrics["reward/avg_raw_reward"] - (1.0 / 3)) < 1e-9
+    assert abs(trainer.all_metrics["reward/avg_pass_at_1"] - (1.0 / 3)) < 1e-9
+
+    # Sanity: without the superset, metrics reflect only the trained output.
+    trainer.all_metrics = {}
+    trainer.postprocess_generator_output(
+        {
+            "prompt_token_ids": [[1]],
+            "response_ids": [[3, 4]],
+            "rewards": [1.0],
+            "loss_masks": [[1, 1]],
+            "stop_reasons": ["stop"],
+            "rollout_metrics": None,
+        },
+        ["u1"],
+    )
+    assert trainer.all_metrics["reward/avg_raw_reward"] == 1.0

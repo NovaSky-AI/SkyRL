@@ -21,7 +21,7 @@ import traceback
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
@@ -37,26 +37,21 @@ class Tracking:
         self,
         project_name,
         experiment_name,
-        backends: Union[str, List[str]] = "console",
+        backend: str = "console",
         config: Optional[Union[SkyRLTrainConfig, DictConfig]] = None,
+        tags: Optional[List[str]] = None,
     ):
-        if isinstance(backends, str):
-            backends = [backends]
-        for backend in backends:
-            assert backend in self.supported_backends, f"{backend} is not supported"
+        assert backend in self.supported_backends, f"{backend} is not supported"
+        self.backend = backend
 
-        self.logger = {}
-
-        if "wandb" in backends:
+        if backend == "wandb":
             import wandb
 
-            wandb.init(project=project_name, name=experiment_name, config=get_config_as_dict(config))
-            self.logger["wandb"] = wandb
-
-        if "mlflow" in backends:
-            self.logger["mlflow"] = _MlflowLoggingAdapter(project_name, experiment_name, config)
-
-        if "swanlab" in backends:
+            wandb.init(project=project_name, name=experiment_name, config=get_config_as_dict(config), tags=tags)
+            self.logger: Any = wandb
+        elif backend == "mlflow":
+            self.logger = _MlflowLoggingAdapter(project_name, experiment_name, config)
+        elif backend == "swanlab":
             import os
 
             import swanlab
@@ -73,44 +68,41 @@ class Tracking:
                 logdir=SWANLAB_LOG_DIR,
                 mode=SWANLAB_MODE,
             )
-            self.logger["swanlab"] = swanlab
-
-        if "tensorboard" in backends:
-            self.logger["tensorboard"] = _TensorboardAdapter()
-
-        if "console" in backends:
-            self.console_logger = ConsoleLogger()
-            self.logger["console"] = self.console_logger
+            self.logger = swanlab
+        elif backend == "tensorboard":
+            self.logger = _TensorboardAdapter()
+        else:  # "console"
+            self.logger = ConsoleLogger()
 
         self._exception_logged = False
 
     def log(self, data, step, commit=False):
-        for logger_name, logger_instance in self.logger.items():
-            if logger_name == "wandb":
-                logger_instance.log(data=data, step=step, commit=commit)
-            else:
-                logger_instance.log(data=data, step=step)
+        if self.backend == "wandb":
+            self.logger.log(data=data, step=step, commit=commit)
+        else:
+            self.logger.log(data=data, step=step)
 
     def finish(self):
-        for logger_name, logger_instance in self.logger.items():
-            # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
-            # This is because wandb often errors out with a BrokenPipeError when closing.
-            # https://github.com/wandb/wandb/issues/6449
-            try:
-                if logger_name == "wandb":
-                    logger_instance.finish(exit_code=0)
-                elif logger_name != "console":
-                    logger_instance.finish()
-            except Exception as e:
-                logger.warning(f"Attempted to finish tracking with logger {logger_name} but got error {e}")
+        if self.backend == "console":
+            return
+        # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
+        # This is because wandb often errors out with a BrokenPipeError when closing.
+        # https://github.com/wandb/wandb/issues/6449
+        try:
+            if self.backend == "wandb":
+                self.logger.finish(exit_code=0)
+            else:
+                self.logger.finish()
+        except Exception as e:
+            logger.warning(f"Attempted to finish tracking with backend {self.backend} but got error {e}")
 
     def log_exception(self, e: BaseException, step: int = 0) -> None:
-        """Log the active exception's traceback to all configured backends.
+        """Log the active exception's traceback to the configured backend.
 
         Always prints the traceback on the driver via loguru (so it lands in
-        Ray driver logs instead of being swallowed). If wandb is configured,
-        also logs a row to an `error/tracebacks` wandb.Table and calls
-        `finish()` to flush the async upload before the process re-raises.
+        Ray driver logs instead of being swallowed). If the wandb backend is
+        active, also logs a row to an `error/tracebacks` wandb.Table and calls
+        `finish()` to flush the async upload before the caller re-raises.
 
         Ray-wrapped worker errors (e.g. OOMs raised inside actors) include
         both local and remote frames in `traceback.format_exc()`.
@@ -123,7 +115,7 @@ class Tracking:
         self._exception_logged = True
         tb_str = traceback.format_exc()[-10000:]
         logger.error(f"Training failed at step {step} with {type(e).__name__}:\n{tb_str}")
-        if "wandb" in self.logger:
+        if self.backend == "wandb":
             try:
                 import wandb
 
@@ -132,7 +124,7 @@ class Tracking:
                 # Note: omit `step=` here. Per-step logs use commit=True, so
                 # re-logging at the same step would be dropped. The step value
                 # is also embedded in the table row itself.
-                self.logger["wandb"].log({"error/tracebacks": error_table})
+                self.logger.log({"error/tracebacks": error_table})
                 # Tables upload asynchronously. Finish the run so the upload
                 # completes before the caller re-raises and the process dies.
                 try:
@@ -141,6 +133,44 @@ class Tracking:
                     logger.warning(f"tracker.finish() raised after logging exception: {finish_exc}")
             except Exception as log_exc:
                 logger.warning(f"Failed to log exception traceback to wandb: {log_exc}")
+
+    def log_samples_to_table(
+        self,
+        key: str,
+        columns: List[str],
+        samples: List[Tuple[Any, ...]],
+        step: int,
+    ) -> None:
+        """Append rows to an accumulating wandb table at ``key``.
+
+        Each call extends the existing table at ``key`` (or creates one on
+        first call) with ``samples`` and logs the new table to wandb at the
+        given ``step``. ``columns`` defines the table schema and must stay
+        consistent across calls for the same ``key``; each row in ``samples``
+        must have ``len(columns)`` values in the matching order.
+
+        No-op for non-wandb backends -- only the wandb backend supports
+        ``wandb.Table``.
+        """
+        if self.backend != "wandb":
+            return
+        import wandb
+
+        # Cache one table per key so different callers (e.g. eval vs train
+        # trajectory loggers, error traceback table) don't trample each other.
+        if not hasattr(self, "_sample_tables"):
+            self._sample_tables: Dict[str, Any] = {}
+        if key not in self._sample_tables:
+            self._sample_tables[key] = wandb.Table(columns=columns)
+        # Workaround for https://github.com/wandb/wandb/issues/2981#issuecomment-1997445737
+        # Shallow-copy the previous table's rows: wandb.Table holds `data` by reference, so the
+        # subsequent add_data() calls would otherwise mutate the row list of the already-logged
+        # table (a data race with wandb's async upload of the prior step).
+        new_table = wandb.Table(columns=columns, data=list(self._sample_tables[key].data))
+        for row in samples:
+            new_table.add_data(*row)
+        self.logger.log({key: new_table}, step=step)
+        self._sample_tables[key] = new_table
 
     def __del__(self):
         try:
@@ -260,87 +290,3 @@ def _flatten_dict(raw: Dict[str, Any], *, sep: str) -> Dict[str, Any]:
     ans = pd.json_normalize(raw, sep=sep).to_dict(orient="records")[0]
     assert isinstance(ans, dict)
     return ans
-
-
-@dataclasses.dataclass
-class ValidationGenerationsLogger:
-    def log(self, loggers, samples, step):
-        if "wandb" in loggers:
-            self.log_generations_to_wandb(samples, step)
-        if "swanlab" in loggers:
-            self.log_generations_to_swanlab(samples, step)
-        if "mlflow" in loggers:
-            self.log_generations_to_mlflow(samples, step)
-
-    def log_generations_to_wandb(self, samples, step):
-        """Log samples to wandb as a table"""
-        import wandb
-
-        # Create column names for all samples
-        columns = ["step"] + sum(
-            [[f"input_{i + 1}", f"output_{i + 1}", f"score_{i + 1}"] for i in range(len(samples))], []
-        )
-
-        if not hasattr(self, "validation_table"):
-            # Initialize the table on first call
-            self.validation_table = wandb.Table(columns=columns)
-
-        # Create a new table with same columns and existing data
-        # Workaround for https://github.com/wandb/wandb/issues/2981#issuecomment-1997445737
-        new_table = wandb.Table(columns=columns, data=self.validation_table.data)
-
-        # Add new row with all data
-        row_data = []
-        row_data.append(step)
-        for sample in samples:
-            row_data.extend(sample)
-
-        new_table.add_data(*row_data)
-
-        # Update reference and log
-        wandb.log({"val/generations": new_table}, step=step)
-        self.validation_table = new_table
-
-    def log_generations_to_swanlab(self, samples, step):
-        """Log samples to swanlab as text"""
-        import swanlab
-
-        swanlab_text_list = []
-        for i, sample in enumerate(samples):
-            row_text = f"""
-            input: {sample[0]}
-            
-            ---
-            
-            output: {sample[1]}
-            
-            ---
-            
-            score: {sample[2]}
-            """
-            swanlab_text_list.append(swanlab.Text(row_text, caption=f"sample {i + 1}"))
-
-        # Log to swanlab
-        swanlab.log({"val/generations": swanlab_text_list}, step=step)
-
-    def log_generations_to_mlflow(self, samples, step):
-        """Log validation generation to mlflow as artifacts"""
-        # https://mlflow.org/docs/latest/api_reference/python_api/mlflow.html?highlight=log_artifact#mlflow.log_artifact
-
-        import json
-        import tempfile
-
-        import mlflow
-
-        try:
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                validation_gen_step_file = Path(tmp_dir, f"val_step{step}.json")
-                row_data = []
-                for sample in samples:
-                    data = {"input": sample[0], "output": sample[1], "score": sample[2]}
-                    row_data.append(data)
-                with open(validation_gen_step_file, "w") as file:
-                    json.dump(row_data, file)
-                mlflow.log_artifact(validation_gen_step_file)
-        except Exception as e:
-            logger.warning(f"save validation generation file to mlflow failed with error {e}")

@@ -14,30 +14,27 @@ from typing import (
     Callable,
     Dict,
     Iterable,
-    Iterator,
     List,
     Optional,
     Tuple,
 )
 
 if TYPE_CHECKING:
+    from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+        RemoteInferenceClient,
+    )
     from skyrl.train.config import InferenceEngineConfig
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
-    InferenceEngineClient,
-)
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
-    WeightTransferReceiver,
     WeightTransferSender,
     WeightTransferStrategy,
 )
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.train.utils.utils import get_physical_gpu_id, str_to_torch_dtype
+from skyrl.train.utils.utils import str_to_torch_dtype
 
 # IPC handle type: (rebuild_func, args) returned by reduce_tensor
 IpcHandle = Tuple[Callable[..., torch.Tensor], Tuple[Any, ...]]
@@ -48,11 +45,6 @@ class CudaIpcInitInfo(WeightSyncInitInfo):
     """Initialization info for CUDA IPC-based weight transfer."""
 
     model_dtype_str: str
-
-    @staticmethod
-    def strategy_type() -> type:
-        """Return the strategy class for this init info type."""
-        return CudaIpcTransferStrategy
 
     def for_servers(self, world_size_per_server: int, num_servers: int, dp_size: int = 1) -> List["CudaIpcInitInfo"]:
         """IPC init is a no-op, so return identical copies for each server."""
@@ -141,7 +133,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
     def __init__(
         self,
         init_info: CudaIpcInitInfo,
-        inference_client: InferenceEngineClient,
+        inference_client: "RemoteInferenceClient",
     ) -> None:
         """Initialize the CUDA IPC sender.
 
@@ -165,10 +157,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
                 directly to avoid ordering mismatches). Kept for interface
                 compatibility with the base class.
         """
-        if _SKYRL_USE_NEW_INFERENCE:
-            await self._send_chunks_vllm_native(chunks, weight_metadata)
-        else:
-            await self._send_chunks_legacy(chunks)
+        await self._send_chunks_vllm_native(chunks, weight_metadata)
 
     async def _send_chunks_vllm_native(
         self,
@@ -267,116 +256,8 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             await self._inference_client.finish_weight_update()
         torch.distributed.barrier()
 
-    async def _send_chunks_legacy(self, chunks: Iterable[WeightChunk]) -> None:
-        """Per-chunk CUDA IPC with packed tensors (legacy path)."""
-        rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
-        device = torch.cuda.current_device()
-        dtype = str_to_torch_dtype(self._init_info.model_dtype_str)
-
-        for chunk in chunks:
-            names = []
-            dtypes = []
-            shapes = []
-            sizes = []
-
-            total_numel = sum(t.numel() for t in chunk.tensors)
-            packed_tensor = torch.empty(
-                total_numel,
-                device=device,
-                dtype=dtype,
-                requires_grad=False,
-            )
-
-            offset = 0
-            for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
-                size = tensor.numel()
-                packed_tensor[offset : offset + size].copy_(tensor.detach().reshape(-1))
-                offset += size
-                names.append(name)
-                dtypes.append(self._init_info.model_dtype_str)
-                shapes.append(shape)
-                sizes.append(size)
-
-            ipc_handle: IpcHandle = reduce_tensor(packed_tensor)
-            ipc_handle_dict: Dict[str, IpcHandle] = {get_physical_gpu_id(): ipc_handle}
-            ipc_handle_list: List[Optional[Dict[str, IpcHandle]]] = [None] * world_size
-            torch.distributed.all_gather_object(ipc_handle_list, ipc_handle_dict)
-
-            ipc_handles: Dict[str, IpcHandle] = {}
-            if rank == 0:
-                for d in ipc_handle_list:
-                    if d is not None:
-                        ipc_handles.update(d)
-
-            torch.distributed.barrier()
-            torch.cuda.synchronize()
-
-            if rank == 0:
-                request = CudaIpcWeightUpdateRequest(
-                    names=names,
-                    dtypes=dtypes,
-                    shapes=shapes,
-                    sizes=sizes,
-                    ipc_handles=ipc_handles,
-                )
-                await self._inference_client.update_named_weights(request)
-
-            torch.cuda.ipc_collect()
-            torch.distributed.barrier()
-            torch.cuda.synchronize()
-
     def teardown(self) -> None:
         """No-op for CUDA IPC sender (no custom process group to clean up)."""
-        pass
-
-
-class CudaIpcWeightTransferReceiver(WeightTransferReceiver):
-    """Receives weights via CUDA IPC handles.
-
-    Opens IPC handles to access tensors shared from training workers.
-    """
-
-    def __init__(self, model_dtype: torch.dtype) -> None:
-        """Initialize the CUDA IPC receiver.
-
-        Args:
-            model_dtype: Expected dtype for received tensors.
-        """
-        self._model_dtype = model_dtype
-
-    def receive_weights(self, request: CudaIpcWeightUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
-        """Receive weights via CUDA IPC handles.
-
-        Args:
-            request: CUDA IPC weight update request with names, dtypes, shapes, sizes, and IPC handles.
-
-        Yields:
-            Tuples of (parameter_name, tensor) for each weight.
-        """
-        assert len(set(request.dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
-        assert (
-            str_to_torch_dtype(request.dtypes[0]) == self._model_dtype
-        ), f"mismatch dtype: src {request.dtypes[0]}, dst {self._model_dtype}"
-        assert len(request.sizes) == len(request), "sizes must be provided for packed weight update"
-        assert all(isinstance(size, int) for size in request.sizes), "sizes should be a list of integers"
-
-        device_id = torch.cuda.current_device()
-        physical_gpu_id = get_physical_gpu_id()
-
-        handle = request.ipc_handles[physical_gpu_id]
-        func, args = handle
-        list_args = list(args)
-        list_args[6] = device_id
-        packed_tensor = func(*list_args)
-
-        offset = 0
-        for name, shape, size in zip(request.names, request.shapes, request.sizes):
-            yield name, packed_tensor[offset : offset + size].view(*shape)
-            offset += size
-
-    def teardown(self) -> None:
-        """No-op for CUDA IPC receiver (no custom process group to clean up)."""
         pass
 
 
@@ -396,13 +277,13 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
         """Create init info with all config-derived args."""
         return CudaIpcInitInfo(
             model_dtype_str=ie_cfg.model_dtype,
-            override_existing_receiver=ie_cfg.override_existing_update_group == "enable",
+            override_existing_receiver=not ie_cfg.run_engines_locally,
         )
 
     @staticmethod
     def create_sender(
         init_info: CudaIpcInitInfo,
-        inference_client: InferenceEngineClient,
+        inference_client: "RemoteInferenceClient",
     ) -> CudaIpcWeightTransferSender:
         """Create a CUDA IPC sender.
 
@@ -419,16 +300,13 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
         )
 
     @staticmethod
-    def create_receiver(init_info: CudaIpcInitInfo) -> CudaIpcWeightTransferReceiver:
-        """Create a CUDA IPC receiver.
+    def get_vllm_transfer_engine() -> type:
+        """Return the vLLM weight-transfer engine class for this strategy (CUDA IPC).
 
-        Args:
-            init_info: CudaIpcInitInfo from the sender.
-
-        Returns:
-            A configured CudaIpcWeightTransferReceiver instance.
+        Reference for the receive side: the inference servers drive this engine
+        natively. Currently unused on the sender side (we route through the
+        SkyRL ``/collective_rpc`` wrap), kept as the canonical mapping.
         """
-        from skyrl.train.utils.utils import str_to_torch_dtype
+        from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine
 
-        model_dtype = str_to_torch_dtype(init_info.model_dtype_str)
-        return CudaIpcWeightTransferReceiver(model_dtype=model_dtype)
+        return IPCWeightTransferEngine

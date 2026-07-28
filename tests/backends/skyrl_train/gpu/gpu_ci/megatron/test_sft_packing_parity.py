@@ -20,6 +20,10 @@ import ray
 import torch
 
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packed_seq_align_size,
+    is_fp8_enabled,
+)
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
     MegatronPolicyWorkerBase,
@@ -256,7 +260,8 @@ def _make_sft_cfg(use_sequence_packing: bool, cp: int, gpus: int) -> SFTConfig:
         max_tokens_per_microbatch=MAX_LENGTH if use_sequence_packing else None,
         seed=SEED,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
-        dataset_name="allenai/tulu-3-sft-mixture",
+        train_datasets=["allenai/tulu-3-sft-mixture"],
+        train_dataset_splits=["train[:100]"],
         placement=SFTPlacementConfig(num_nodes=1, num_gpus_per_node=gpus),
         megatron_config=MegatronConfig(
             tensor_model_parallel_size=1,
@@ -479,7 +484,12 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
             # Recompute flat_bins + align_size deterministically (same FFD call).
             flat_bins = _recompute_flat_bins(trainer, examples)
             tp = 1
-            align_size = tp * cp * 2 if cp > 1 else tp
+            transformer_config_kwargs = sft_cfg.megatron_config.transformer_config_kwargs or {}
+            align_size = get_packed_seq_align_size(
+                tp,
+                cp,
+                fp8_enabled=is_fp8_enabled(transformer_config_kwargs.get("fp8")),
+            )
             collated.metadata["align_size"] = align_size
         else:
             collated = collate_sft_batch(examples, tokenizer)

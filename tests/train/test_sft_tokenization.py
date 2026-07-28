@@ -8,7 +8,7 @@ import json
 
 import pytest
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from skyrl.train.config.sft_config import SFTConfig, TrainOnWhat
 from skyrl.train.generators.utils import get_generation_prompt_ids
@@ -26,6 +26,14 @@ def tokenizer():
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     return tok
+
+
+@pytest.fixture(scope="module")
+def vlm_processor():
+    proc = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct")
+    if proc.tokenizer.pad_token is None:
+        proc.tokenizer.pad_token = proc.tokenizer.eos_token
+    return proc
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +126,39 @@ def test_chat_truncation(tokenizer):
     # If the prompt alone fills the budget, result is None -- also acceptable
 
 
+# NOTE: This test requires torchvision and thus torch - we use the vllm marker so that the test is run with the appropriate extras
+@pytest.mark.vllm
+def test_chat_vlm(vlm_processor):
+    """A user+image+assistant conversation tokenizes with vision tokens."""
+    example = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hi"},
+                    {
+                        "type": "image",
+                        "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    },
+                ],
+            },
+            {"role": "assistant", "content": "Hello!"},
+        ]
+    }
+    result = tokenize_chat_example(example, vlm_processor.tokenizer, processor=vlm_processor)
+
+    assert result is not None
+    ids = result["input_ids"]
+    assert isinstance(ids, list)
+    assert all(isinstance(t, int) for t in ids)
+
+    assert vlm_processor.tokenizer.convert_tokens_to_ids("<|vision_start|>") in ids
+    assert vlm_processor.tokenizer.convert_tokens_to_ids("<|image_pad|>") in ids
+    assert vlm_processor.tokenizer.convert_tokens_to_ids("<|vision_end|>") in ids
+    assert "pixel_values" in result
+    assert "image_grid_thw" in result
+
+
 # ---------------------------------------------------------------------------
 # tokenize_sft_example
 # ---------------------------------------------------------------------------
@@ -168,18 +209,24 @@ def test_alpaca_truncated_response(tokenizer):
 # ---------------------------------------------------------------------------
 
 
-def _make_example(input_ids, num_actions):
+def _make_example(input_ids, num_actions, image_grid=None):
     """Helper to create a tokenized example dict for collation tests.
 
     Mirrors ``_tokenize_chat_last_assistant``: loss_mask is num_actions long,
-    all 1s (train on every response token).
+    all 1s (train on every response token). When ``image_grid`` is given, attach
+    matching ``image_grid_thw`` / ``pixel_values`` tensors.
     """
-    return {
+    example = {
         "input_ids": input_ids,
         "attention_mask": [1] * len(input_ids),
         "num_actions": num_actions,
         "loss_mask": [1] * num_actions,
     }
+    if image_grid:
+        example["image_grid_thw"] = torch.tensor(image_grid)
+        patches = sum(int(thw.prod()) for thw in example["image_grid_thw"])
+        example["pixel_values"] = torch.ones(patches, patches * 3)
+    return example
 
 
 def test_collate_shapes(tokenizer):
@@ -260,6 +307,21 @@ def test_collate_metadata(tokenizer):
     assert batch.metadata["response_length"] == 3
 
 
+@pytest.mark.vllm
+def test_collate_vlm(vlm_processor):
+    """Examples with vision tensors collate into the expected TensorList shapes."""
+    examples = [
+        _make_example([1, 2, 3, 4, 5], 2, image_grid=[[1, 3, 3]]),
+        _make_example(list(range(7)), 3, image_grid=[[1, 2, 2]]),
+    ]
+    batch = collate_sft_batch(examples, vlm_processor.tokenizer)
+
+    assert (batch["image_grid_thw"][0] == torch.tensor([[1, 3, 3]])).all().item()
+    assert (batch["image_grid_thw"][1] == torch.tensor([[1, 2, 2]])).all().item()
+    assert batch["pixel_values"][0].shape == (9, 27)
+    assert batch["pixel_values"][1].shape == (4, 12)
+
+
 # ---------------------------------------------------------------------------
 # tokenize_sft_example uses chat template (Fix 2 verification)
 # ---------------------------------------------------------------------------
@@ -321,11 +383,8 @@ def test_loss_norm_sums_to_expected(tokenizer):
     """After collate_batch normalization, loss_mask encodes the correct
     per-non-pad-token scaling factor.
 
-    For a batch with ``total_nonpad`` non-pad loss tokens:
-      loss_mask.sum() == batch_size / micro_batch_size
-
-    This ensures that reduce_loss (sum over micro-batch) combined with
-    microbatch_weight (mbs/pgb) produces a mean-per-non-pad-token loss.
+    For a batch with ``total_nonpad`` non-pad loss tokens, non-zero mask
+    entries are ``1 / total_nonpad`` and ``loss_mask.sum() == 1``.
     """
     from skyrl.train.dataset.collators import DefaultCollator
 
@@ -349,12 +408,10 @@ def test_loss_norm_sums_to_expected(tokenizer):
     batch = collator(examples, batch_size=cfg.batch_size)
 
     total_nonpad = 2 + 4 + 1 + 3  # = 10
-    expected_scaling = cfg.batch_size / (cfg.micro_train_batch_size_per_gpu * total_nonpad)
+    expected_scaling = 1 / total_nonpad
 
     # Each non-pad position should have value = expected_scaling
-    # Total sum = total_nonpad * expected_scaling = batch_size / micro_batch_size
-    expected_sum = cfg.batch_size / cfg.micro_train_batch_size_per_gpu
-    assert abs(batch["loss_mask"].sum().item() - expected_sum) < 1e-5
+    assert abs(batch["loss_mask"].sum().item() - 1.0) < 1e-5
 
     # Verify individual non-zero values equal expected_scaling
     nonzero_vals = batch["loss_mask"][batch["loss_mask"] > 0]
@@ -362,9 +419,7 @@ def test_loss_norm_sums_to_expected(tokenizer):
 
 
 def test_loss_norm_all_nonpad(tokenizer):
-    """When all tokens are non-pad, loss_mask values equal
-    batch_size / (micro_batch_size * batch_size * num_actions)
-    = 1 / (micro_batch_size * num_actions)."""
+    """When all tokens are non-pad, loss_mask values equal ``1 / total_nonpad``."""
     from skyrl.train.dataset.collators import DefaultCollator
 
     cfg = SFTConfig(batch_size=2, micro_train_batch_size_per_gpu=1)
@@ -379,15 +434,13 @@ def test_loss_norm_all_nonpad(tokenizer):
     batch = collator(examples, batch_size=cfg.batch_size)
 
     total_nonpad = 4  # 2 + 2
-    expected_scaling = cfg.batch_size / (cfg.micro_train_batch_size_per_gpu * total_nonpad)
-    # = 2 / (1 * 4) = 0.5
+    expected_scaling = 1 / total_nonpad
 
     # All loss_mask values should be either 0 or expected_scaling
     nonzero_vals = batch["loss_mask"][batch["loss_mask"] > 0]
     assert torch.allclose(nonzero_vals, torch.tensor(expected_scaling, dtype=torch.float32))
 
-    # Sum should be batch_size / micro_batch_size = 2
-    assert abs(batch["loss_mask"].sum().item() - 2.0) < 1e-5
+    assert abs(batch["loss_mask"].sum().item() - 1.0) < 1e-5
 
 
 # ---------------------------------------------------------------------------
@@ -815,6 +868,8 @@ def _build_trainer(tokenizer, sft_cfg):
     trainer = object.__new__(SFTTrainer)
     trainer.sft_cfg = sft_cfg
     trainer.tokenizer = tokenizer
+    trainer.is_vlm = False
+    trainer.processor = None
     return trainer
 
 

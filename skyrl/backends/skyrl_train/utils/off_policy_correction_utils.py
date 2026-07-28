@@ -6,6 +6,21 @@ from omegaconf import DictConfig
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean, safe_exp_delta
 
 
+def off_policy_correction_enabled(off_policy_correction: DictConfig) -> bool:
+    """Whether any off-policy correction (TIS, sequence/outlier/token masking) is active."""
+    apply_tis = off_policy_correction.tis_ratio_type is not None
+    apply_sequence_mask = off_policy_correction.sequence_mask_metric is not None
+    apply_outlier_token_mask = (
+        off_policy_correction.outlier_token_is_threshold_low is not None
+        or off_policy_correction.outlier_token_is_threshold_high is not None
+    )
+    apply_token_mask = (
+        off_policy_correction.token_mask_is_threshold_low is not None
+        and off_policy_correction.token_mask_is_threshold_high is not None
+    )
+    return apply_tis or apply_sequence_mask or apply_outlier_token_mask or apply_token_mask
+
+
 def compute_tis_ratio(
     old_log_probs: torch.Tensor,
     rollout_logprobs: torch.Tensor,
@@ -286,7 +301,7 @@ def compute_off_policy_correction(
     )
 
     # Early return if no correction needed
-    if not apply_tis and not apply_sequence_mask and not apply_token_mask and not apply_outlier_token_mask:
+    if not off_policy_correction_enabled(off_policy_correction):
         return None, {}, loss_mask
 
     is_ratio = safe_exp_delta(old_log_probs - rollout_logprobs, clip=20.0, out_dtype=old_log_probs.dtype)

@@ -234,7 +234,6 @@ esac
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-export _SKYRL_USE_NEW_INFERENCE=1
 export SKYRL_INFERENCE_ROUTER_PORT="${SKYRL_INFERENCE_ROUTER_PORT:-8080}"
 # main_thunder_agent.py reads THUNDER_AGENT_ROUTER_PORT for the embedded router.
 export THUNDER_AGENT_ROUTER_PORT="${THUNDER_AGENT_ROUTER_PORT:-$SKYRL_INFERENCE_ROUTER_PORT}"
@@ -281,6 +280,7 @@ fi
   trainer.ckpt_path="$CKPTS_DIR" \
   trainer.log_path="$LOG_DIR" \
   trainer.strategy=fsdp2 \
+  trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.algorithm.off_policy_correction.tis_ratio_type="$TIS_TYPE" \
   trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high="$TIS_IMP_RATIO_CAP" \
@@ -289,8 +289,10 @@ fi
   trainer.algorithm.use_kl_loss="$USE_KL_LOSS" \
   trainer.algorithm.kl_loss_coef="$KL_LOSS_COEF" \
   trainer.algorithm.max_seq_len="$TRAIN_MAX_SEQ_LEN" \
+  trainer.fully_async.enabled=true \
   trainer.fully_async.max_staleness_steps="$FULL_MAX_STALENESS_STEPS" \
   trainer.fully_async.num_parallel_generation_workers="$NUM_PARALLEL_GENERATION_WORKERS" \
+  trainer.fully_async.clear_kv_cache_on_weight_sync=false \
   trainer.placement.colocate_all=false \
   trainer.placement.colocate_policy_ref=true \
   trainer.placement.policy_num_nodes="$TRAIN_NUM_NODES" \
@@ -319,10 +321,8 @@ fi
   generator.inference_engine.num_engines="$ROLLOUT_ENGINES" \
   generator.inference_engine.tensor_parallel_size="$ROLLOUT_TP_SIZE" \
   generator.inference_engine.run_engines_locally=false \
-  generator.inference_engine.remote_urls="$ROLLOUT_SERVER_URLS" \
   generator.inference_engine.external_server_urls="$ROLLOUT_SERVER_URLS" \
   generator.inference_engine.backend=vllm \
-  generator.inference_engine.async_engine=true \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.enforce_eager="$ROLLOUT_ENFORCE_EAGER" \

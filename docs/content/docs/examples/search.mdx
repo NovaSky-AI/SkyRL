@@ -90,8 +90,6 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
     generator.sampling_params.max_generate_length=500 \
 
     # - Generator multi-turn: async rollouts, batching, sampling settings
-    # we need to make sure to set async_engine=true for async rollouts
-    generator.inference_engine.async_engine=true \
     # we need to make sure to set batched=false for async rollouts
     generator.batched=false \
     generator.n_samples_per_prompt=5 \

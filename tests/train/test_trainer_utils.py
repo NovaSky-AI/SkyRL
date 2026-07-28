@@ -13,6 +13,7 @@ from unittest.mock import Mock, mock_open, patch
 import pytest
 import ray
 
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.utils.trainer_utils import (
     build_dataloader,
@@ -688,6 +689,38 @@ def test_zero_variance_filter_singletons_kept():
     assert kept_indices == [0, 1, 2]
 
 
+def test_zero_variance_filter_tolerance():
+    """Near-equal float rewards are treated as zero-variance when within tol."""
+    rewards = [0.6667, 0.66670001, 1.0, 0.0]
+    uids = ["a", "a", "b", "b"]
+
+    # Exact (tol=0.0): uid "a" has a tiny spread > 0 -> kept.
+    assert zero_variance_filter(rewards, uids, tol=0.0) == [0, 1, 2, 3]
+    # With tol=1e-6, uid "a" collapses to zero-variance and is dropped; uid "b" still varies.
+    assert zero_variance_filter(rewards, uids, tol=1e-6) == [2, 3]
+
+
+def test_zero_variance_filter_ignores_masked_trajectories():
+    """Trajectories masked upstream are excluded from the within-group variance check."""
+    # Group "a": two live trajectories both reward 1.0, plus two masked (reward 0.0).
+    # Naively this looks like spread (1,1,0,0) -> variance, but the masked ones should be ignored,
+    # so the group is detected as zero-variance and dropped.
+    rewards = [1.0, 1.0, 0.0, 0.0]
+    uids = ["a", "a", "a", "a"]
+    loss_masks = [[1, 1], [1, 1], [0, 0], [0, 0]]
+
+    assert zero_variance_filter(rewards, uids, loss_masks=loss_masks) == []
+
+
+def test_zero_variance_filter_single_live_trajectory_kept():
+    """A group with only one live trajectory (others masked) is kept as a singleton."""
+    rewards = [1.0, 0.0]
+    uids = ["a", "a"]
+    loss_masks = [[1, 1], [0, 0]]
+
+    assert zero_variance_filter(rewards, uids, loss_masks=loss_masks) == [0, 1]
+
+
 def test_validate_generator_output_valid_case():
     """Test validate_generator_output with valid case."""
     input_batch = GeneratorInput(
@@ -895,6 +928,36 @@ def test_build_dataloader_seeding(dummy_config):
     assert (
         first_batch1 != first_batch3
     ), f"Different seeds should produce different first batches, but both gave {first_batch1}"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_num_workers", "expected_persistent", "expected_start_method"),
+    [
+        pytest.param(["data.dataloader.num_workers=0"], 0, False, None, id="workerless"),
+        pytest.param(
+            ["data.dataloader.num_workers=2", "data.dataloader.persistent_workers=true"],
+            2,
+            True,
+            "spawn",
+            id="persistent-spawn-workers",
+        ),
+    ],
+)
+def test_build_dataloader_worker_config(
+    overrides: list[str],
+    expected_num_workers: int,
+    expected_persistent: bool,
+    expected_start_method: str | None,
+) -> None:
+    """build_dataloader passes num_workers/persistent_workers through and derives the spawn context."""
+    config = SkyRLTrainConfig.from_cli_overrides(["trainer.train_batch_size=2", *overrides])
+    dataloader = build_dataloader(config, MultiItemDataset(size=8), is_train=True)
+    assert dataloader.num_workers == expected_num_workers
+    assert dataloader.persistent_workers == expected_persistent
+    start_method = (
+        None if dataloader.multiprocessing_context is None else dataloader.multiprocessing_context.get_start_method()
+    )
+    assert start_method == expected_start_method
 
 
 def test_validate_generator_output_invalid_rewards():

@@ -40,7 +40,7 @@ TRAIN_BATCH_SIZE=128
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
-ENFORCE_EAGER=true # cuda graphs can cause some instability
+ENFORCE_EAGER=true # original DAPO recipe used enforce eager due to instability with vLLM then. TODO: reproduce DAPO with enforce eager `False`
 LR=1e-6
 
 # megatron config
@@ -61,11 +61,14 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 
 # Qwen3.5 flags
-REMOVE_MICROBATCH_PADDING=false # sample packing is not yet supported for GDN layers in megatron - see: https://github.com/NVIDIA/Megatron-LM/pull/2644
+LANGUAGE_MODEL_ONLY=True # qwen3-vl in megatron has a separate sequence packing path - if using language_model_only, use the native GPTModel + GDN thd packing path
 ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton"}' # see https://github.com/vllm-project/vllm/issues/36921#issuecomment-4109702738
 DISTRIBUTED_EXECUTOR_BACKEND="mp"
-export _SKYRL_USE_NEW_INFERENCE=0
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
+
+# On Blackwell, use the following env vars:
+# export VLLM_USE_FLASHINFER_MOE_FP16=0   # force triton moe backend since flashinfer trtllm bf16 MoE kernel requires expert intermediate_size to be a multiple of 128
+# export FLA_TILELANG=0   # force triton gdn backend since fla's default TileLang GDN backend aborts in the packed backward. leave unset on hopper, since Triton GDN backward is broken there: https://github.com/fla-org/flash-linear-attention/issues/640#issuecomment-4236520788
 
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -85,6 +88,8 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \
+  trainer.policy.language_model_only=$LANGUAGE_MODEL_ONLY \
+  generator.inference_engine.language_model_only=$LANGUAGE_MODEL_ONLY \
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \
   generator.inference_engine.distributed_executor_backend="mp" \
@@ -104,7 +109,6 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
   trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
   trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
-  trainer.remove_microbatch_padding=$REMOVE_MICROBATCH_PADDING \
   trainer.epochs=20 \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
@@ -126,7 +130,6 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=false \
   generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \

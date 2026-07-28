@@ -1,0 +1,80 @@
+---
+title: "Training with Quantized Rollouts"
+---
+
+<Callout type="info">
+Quantized rollouts are supported with the `fsdp` and `megatron` backends.
+</Callout>
+
+In this example, we walk through how to train a model with quantized (FP8) rollouts using SkyRL. Quantizing the rollout weights speeds up generation for large models while keeping the trainer in full precision.
+
+## Overview
+
+During RL training, rollouts (generation) are typically the throughput bottleneck. Running the inference engine with quantized weights (e.g. FP8) can significantly speed up generation for larger models. SkyRL supports this directly through vLLM — there is no separate patched engine or extra to install.
+
+There are two pieces to make quantized rollouts work well:
+
+1. **Quantized generation** — we ask vLLM to load and serve the policy weights in a quantized format. This is a pass-through option to the vLLM engine, so no SkyRL-specific integration is required.
+2. **Off-policy correction** — quantizing the rollout weights widens the gap between the rollout (inference) distribution and the training distribution. We correct for this mismatch with [Truncated Importance Sampling (TIS)](../algorithms/off_policy_correction), which applies an importance-sampling correction to the policy loss.
+
+### How does it work?
+
+We sample generations from the inference engine with quantized weights. We then compute advantages and the policy loss, applying the TIS correction factor to account for the difference between the rollout and training probability distributions. On each weight update, weights are synced to the inference engine layer by layer in half precision (bfloat16); vLLM then quantizes them to the target format before serving.
+
+## Enabling quantized generation
+
+Quantization is enabled by passing it through to the vLLM engine via `engine_init_kwargs`:
+
+```bash
+generator.inference_engine.engine_init_kwargs.quantization=fp8
+```
+
+This uses vLLM's [online dynamic FP8 quantization](https://docs.vllm.ai/en/latest/features/quantization/fp8.html), so no calibration data or pre-quantized checkpoint is required.
+
+## Enabling off-policy correction (TIS)
+
+To apply TIS, we need the inference engine to return the rollout logprobs for the generated tokens, and we configure the correction on the policy loss:
+
+```bash
+# return rollout logprobs for the generated tokens (required for TIS)
+generator.sampling_params.logprobs=0 \
+# apply sequence-level TIS with an importance-ratio clip
+trainer.algorithm.off_policy_correction.tis_ratio_type=sequence \
+trainer.algorithm.off_policy_correction.sequence_tis_ratio_clip_high=4.0
+```
+
+TIS can be applied at the `token` or `sequence` level. See the [Off-Policy Correction guide](../algorithms/off_policy_correction) for a full discussion of the available corrections and recommended settings.
+
+## Example
+
+We provide a complete example that trains `Qwen2.5-Coder-7B-Instruct` on the SkyRL-SQL dataset with FP8 rollouts and a full-precision trainer at `examples/train/text_to_sql/run_skyrl_sql_fp8.sh`.
+
+The key parameters are:
+
+```bash title="examples/train/text_to_sql/run_skyrl_sql_fp8.sh"
+# TIS parameters
+TIS_IMP_RATIO_CAP=4.0
+TIS_TYPE=sequence
+# returns rollout logprobs for the generated tokens; required for TIS
+LOGPROBS=0
+
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
+    trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
+    trainer.algorithm.off_policy_correction.sequence_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
+    generator.sampling_params.logprobs=$LOGPROBS \
+    generator.inference_engine.backend=vllm \
+    generator.inference_engine.engine_init_kwargs.quantization=fp8 \
+    ...
+```
+
+To run it (from the SkyRL root directory):
+
+```bash
+hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
+export WANDB_API_KEY=<your_key_here>
+bash examples/train/text_to_sql/run_skyrl_sql_fp8.sh
+```
+
+<Callout type="warn">
+Quantized rollouts are most beneficial for larger models, where generation dominates step time. For smaller models the overhead of quantizing weights during each weight sync can outweigh the generation speedup. We recommend benchmarking on your own model and hardware.
+</Callout>

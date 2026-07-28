@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 from transformers import PreTrainedTokenizerBase
 
-from skyrl.backends.skyrl_train.inference_engines.base import (
+from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
 )
@@ -75,7 +75,7 @@ class OpenRouterInferenceClient(RemoteInferenceClient):
             api_key=api_key or "",
         )
 
-    async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+    async def generate(self, input_batch: InferenceEngineInput, model: Optional[str] = None) -> InferenceEngineOutput:
         """Send batched chat-completions requests to OpenRouter.
 
         Decodes prompt_token_ids back to text, builds chat messages, POSTs to

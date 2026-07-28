@@ -53,7 +53,6 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=false \
   environment.env_class=text2sql \
   generator.use_conversation_multi_turn=true \

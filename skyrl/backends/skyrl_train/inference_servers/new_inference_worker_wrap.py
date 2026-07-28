@@ -5,13 +5,11 @@ This module provides NewInferenceWorkerWrap, a vLLM worker extension that
 enables chunked weight updates from training to inference using the
 start/update/finish lifecycle:
 
-    start_weight_update   ->  one or more update_weights_ipc  ->  finish_weight_update
+    skyrl_start_weight_update   ->  one or more update_weights_ipc  ->  skyrl_finish_weight_update
 
 This separates the layerwise reload initialization/finalization from individual
 chunk transfers, allowing weights to be sent in bounded-memory chunks rather
 than all at once.
-
-Used only with the new inference path (_SKYRL_USE_NEW_INFERENCE=1).
 
 TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, vLLM will
 natively support start_weight_update / update_weights / finish_weight_update
@@ -28,44 +26,22 @@ Usage:
 
 import torch
 
-# Workaround for a vLLM layerwise-reload corruption affecting NemotronH/Mamba.
-# MambaMixer2 registers `conv_weights` as a non-persistent buffer that is a
-# view of `self.conv1d.weight.data` (shared storage). vLLM's reload code path
-# (model_executor/model_loader/reload/layerwise.py) materializes the buffer
-# into a fresh uninitialized GPU tensor and then runs
-# `kernel_conv_weights.data.copy_(fresh)` in `_copy_and_restore_kernel_tensors`.
-# Because the kernel buffer shares storage with `conv1d.weight.data`, this
-# writes garbage (NaN-bit-pattern bytes in bf16) into the conv1d weight,
-# corrupting all 23 Mamba layers after every weight sync.
-#
-# Adding "conv_weights" to vLLM's SKIP_TENSORS makes capture/restore/materialize
-# skip the buffer entirely, so the view stays intact and conv1d.weight is
-# preserved. Must be applied before `record_metadata_for_reloading` runs at
-# model construction; this module is imported by vLLM via
-# --worker-extension-cls before model init, so the import-time patch is
-# correctly ordered.
-# Remove this pending https://github.com/vllm-project/vllm/pull/42481 which should
-# be included in vLLM 0.21.0
-try:
-    from vllm.model_executor.model_loader.reload.meta import (
-        SKIP_TENSORS as _VLLM_SKIP_TENSORS,
-    )
-
-    _VLLM_SKIP_TENSORS.add("conv_weights")
-except ImportError:
-    pass
+from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
+    LayerwiseReloadWorkerMixin,
+    _empty_cuda_cache_rocm,
+)
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
 
-class NewInferenceWorkerWrap:
+class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
     """
     vLLM worker extension for chunked weight sync (new inference path).
 
     Provides a three-phase weight update protocol via collective_rpc:
-        1. start_weight_update: Prepare model for receiving weights
+        1. skyrl_start_weight_update: Prepare model for receiving weights
         2. update_weights_ipc: Receive and load one chunk of weights
-        3. finish_weight_update: Finalize the model after all chunks
+        3. skyrl_finish_weight_update: Finalize the model after all chunks
 
     Attributes accessed from the host GPUWorker (via mixin inheritance):
         self.weight_transfer_engine
@@ -73,40 +49,6 @@ class NewInferenceWorkerWrap:
         self.model_config
         self.device
     """
-
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        """
-        Prepare the model for a new weight update.
-
-        For checkpoint-format weights, initializes the layerwise reload
-        machinery which moves layers to meta device and wraps weight loaders
-        to defer processing until all weights for each layer are loaded.
-
-        Must be called before any update_weights_ipc calls.
-
-        Args:
-            is_checkpoint_format: True if incoming weights are in checkpoint
-                format (need layerwise processing). False if weights are
-                already in kernel format (direct copy).
-        """
-        if getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError(
-                "start_weight_update called while a weight update is "
-                "already active. Call finish_weight_update first."
-            )
-
-        if is_checkpoint_format:
-            from vllm.config import set_current_vllm_config
-            from vllm.model_executor.model_loader.reload import (
-                initialize_layerwise_reload,
-            )
-
-            model = self.model_runner.model
-            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-                initialize_layerwise_reload(model)
-
-        self._skyrl_is_checkpoint_format = is_checkpoint_format
-        self._skyrl_weight_update_active = True
 
     def update_weights_ipc(self, update_info: dict) -> None:
         """
@@ -127,7 +69,7 @@ class NewInferenceWorkerWrap:
                 - ipc_handles_pickled: b64(pickle({gpu_uuid: (func, args)}))
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_ipc.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_ipc.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -169,6 +111,14 @@ class NewInferenceWorkerWrap:
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             if self._skyrl_is_checkpoint_format:
                 model.load_weights(weights=weights)
+                # vLLM's load only updates the main model; the spec-decode (MTP/Eagle)
+                # drafter is a separate module and must be reloaded from the same
+                # checkpoint-format weights (see spec_decode_utils).
+                from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+                    _reload_spec_decode_drafter,
+                )
+
+                _reload_spec_decode_drafter(self.model_runner, weights)
             else:
                 for name, weight in weights:
                     param = model.get_parameter(name)
@@ -198,7 +148,7 @@ class NewInferenceWorkerWrap:
         https://github.com/vllm-project/vllm/pull/42577
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_nccl.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_nccl.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -207,37 +157,76 @@ class NewInferenceWorkerWrap:
 
         from vllm.config import set_current_vllm_config
 
+        from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+            _reload_spec_decode_drafter,
+        )
+
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
         model = self.model_runner.model
+
+        def _load_weights(weights):
+            weights = list(weights)
+            loaded = model.load_weights(weights=weights)
+            _reload_spec_decode_drafter(self.model_runner, weights)
+            return loaded
 
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             self.weight_transfer_engine.receive_weights(
                 typed_update_info,
-                load_weights=model.load_weights,
+                load_weights=_load_weights,
             )
 
         torch.accelerator.synchronize()
+        _empty_cuda_cache_rocm()
 
-    def finish_weight_update(self) -> None:
+    # Suspend / resume for non-colocated weight sync.
+    #
+    # Drive the per-worker CuMemAllocator directly instead of GPUWorker.sleep/
+    # wake_up (only reachable via EngineCore.sleep, which force-clears the prefix
+    # cache and preempts running requests at level >= 1). Touching the allocator
+    # alone lets the caller hold a KEEP pause across the sync and resume frozen
+    # requests with their KV restored to the same virtual addresses -- no abort,
+    # no prefill recompute. Mirrors GPUWorker.sleep/wake_up; re-verify on vLLM bumps.
+
+    def skyrl_sleep_for_weight_sync(self, offload_kv: bool = True) -> None:
+        """Free GPU memory for weight sync by sleeping the allocator.
+
+        Weights are discarded rather than backed up since the broadcast overwrites
+        every parameter on wake. ``offload_kv`` controls whether the KV cache is
+        offloaded to CPU (preserved for frozen in-flight requests) or discarded. Model
+        buffers live in the weights pool but are not sent by the broadcast (e.g.
+        non-persistent rotary ``inv_freq``), so save them here and restore on wake --
+        as GPUWorker.sleep(level=2) does.
         """
-        Finalize the current weight update.
+        from vllm.device_allocator import get_mem_allocator_instance
 
-        For checkpoint-format weights, runs layerwise postprocessing
-        (quantization repacking, attention weight processing, etc.).
-        Must be called after all update_weights_ipc calls are done.
+        model = self.model_runner.model
+        self._skyrl_saved_buffers = {name: buf.cpu().clone() for name, buf in model.named_buffers()}
+        get_mem_allocator_instance().sleep(offload_tags=("kv_cache",) if offload_kv else ())
+
+    def skyrl_wake_for_weight_sync(self, tags: list) -> None:
+        """Wake the given allocator tags, restoring CPU-backed contents.
+
+        Call ``["weights"]`` before the broadcast and ``["kv_cache"]`` after. Does
+        not resume the scheduler; the caller does that via ``/resume``.
         """
-        if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
+        from vllm.device_allocator import get_mem_allocator_instance
 
-        if self._skyrl_is_checkpoint_format:
-            from vllm.config import set_current_vllm_config
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-            )
+        # Return the broadcast's reserved-but-unallocated blocks to CUDA so cumem can
+        # remap the KV pool at its fixed virtual addresses.
+        torch.cuda.empty_cache()
 
+        get_mem_allocator_instance().wake_up(tags)
+        # Restore model buffers (not covered by the broadcast) once weights remap.
+        saved = getattr(self, "_skyrl_saved_buffers", None)
+        if saved and (tags is None or "weights" in tags):
             model = self.model_runner.model
-            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-                finalize_layerwise_reload(model, self.model_config)
-
-        self._skyrl_weight_update_active = False
-        self._skyrl_is_checkpoint_format = True
+            for name, buf in model.named_buffers():
+                if name in saved:
+                    buf.data.copy_(saved[name].data)
+            self._skyrl_saved_buffers = {}
+        # Re-init fp8 KV scales after the KV pool remaps (no-op without fp8 KV cache).
+        if tags is None or "kv_cache" in tags:
+            post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
+            if post_wake is not None:
+                post_wake()

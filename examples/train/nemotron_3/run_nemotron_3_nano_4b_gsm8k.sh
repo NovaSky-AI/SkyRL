@@ -28,7 +28,6 @@ MEGATRON_CP=1
 NUM_INFERENCE_ENGINES=8
 INFERENCE_TP=1
 
-export _SKYRL_USE_NEW_INFERENCE=0
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -66,7 +65,6 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=true \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \

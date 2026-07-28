@@ -13,7 +13,7 @@ import pytest
 from transformers import AutoTokenizer
 
 import skyrl
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInput
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
@@ -30,7 +30,6 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainC
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-    cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = num_inference_engines
     cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
     cfg.generator.inference_engine.run_engines_locally = True
@@ -56,7 +55,6 @@ async def test_custom_chat_template(ray_init_fixture, use_custom_template: bool)
         model=MODEL_QWEN3,
         sleep_level=1,
         engine_init_kwargs={"chat_template": TEMPLATE_PATH} if use_custom_template else None,
-        use_new_inference_servers=True,
     ) as engines:
         client = engines.client
 
