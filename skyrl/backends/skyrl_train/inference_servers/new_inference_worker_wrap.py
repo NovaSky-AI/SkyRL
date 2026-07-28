@@ -76,8 +76,7 @@ def _load_serialized_moe_tensor(
     receiver_target = resolve_serialized_receiver_target(mode, mapped_name)
     if receiver_target is None:
         raise ValueError(f"Unsupported batched MoE wire tensor name {wire_name!r}")
-    target_name = receiver_target.parameter_name
-    shard_id = receiver_target.shard_id
+    target_name, shard_id = receiver_target
     if target_name not in params_dict:
         raise ValueError(f"Batched MoE target parameter {target_name!r} was not found for wire tensor {wire_name!r}")
 

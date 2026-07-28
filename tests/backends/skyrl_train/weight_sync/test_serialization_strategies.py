@@ -101,8 +101,7 @@ def test_strategy_receiver_targets_match_existing_fused_moe_parameters(
 ):
     target = resolve_serialized_receiver_target(None, checkpoint_name)
     assert target is not None
-    assert target.parameter_name == parameter_name
-    assert target.shard_id == shard_id
+    assert target == (parameter_name, shard_id)
 
 
 def test_serialized_wire_parser_preserves_legacy_names_and_supports_qualified_modes():

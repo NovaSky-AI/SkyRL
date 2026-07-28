@@ -12,10 +12,7 @@ import torch
 
 from .base import (
     ModelQuantizationSpec,
-    QuantizationTarget,
-    ReceiverTensorRole,
     SerializedWeightStrategy,
-    WeightKind,
 )
 
 SERIALIZED_BLOCKWISE_FP8 = "serialized_blockwise"
@@ -175,10 +172,10 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
     expert_only: bool = False
 
     mode: ClassVar[str] = SERIALIZED_BLOCKWISE_FP8
-    receiver_tensor_roles: ClassVar[tuple[ReceiverTensorRole, ...]] = (
-        ReceiverTensorRole(".weight", ""),
-        ReceiverTensorRole(".weight_scale_inv", "_scale_inv"),
-    )
+    receiver_suffixes: ClassVar[dict[str, str]] = {
+        ".weight": "",
+        ".weight_scale_inv": "_scale_inv",
+    }
     supported_model_types: ClassVar[frozenset[str]] = frozenset(
         {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
     )
@@ -193,10 +190,9 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
         if not isfinite(self.amax_epsilon) or self.amax_epsilon < 0:
             raise ValueError(f"amax_epsilon must be finite and non-negative, got {self.amax_epsilon}")
 
-    def supports(self, target: QuantizationTarget) -> bool:
-        if target.kind is WeightKind.ROUTED_EXPERT:
-            return True
-        return target.kind is WeightKind.LINEAR and not self.expert_only
+    def supports(self, name: str, tensor: torch.Tensor, *, routed_expert: bool) -> bool:
+        del name, tensor
+        return routed_expert or not self.expert_only
 
     def validate_model_type(self, model_type: str, model_path: str | None = None) -> None:
         if not self.supports_model_type(model_type):
@@ -205,23 +201,29 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
                 f"model_path={model_path!r}"
             )
 
-    def serialize(self, target: QuantizationTarget) -> Iterator[tuple[str, torch.Tensor]]:
-        if target.batched_experts:
+    def serialize(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        *,
+        batched_experts: bool,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        if batched_experts:
             q_weight, scale = batched_blockwise_cast_to_fp8(
-                target.tensor,
+                tensor,
                 self.weight_block_size,
                 self.power_2_scale,
                 self.amax_epsilon,
             )
         else:
             q_weight, scale = blockwise_cast_to_fp8(
-                target.tensor,
+                tensor,
                 self.weight_block_size,
                 self.power_2_scale,
                 self.amax_epsilon,
             )
-        yield target.checkpoint_name, q_weight
-        yield scale_name_for_weight(target.checkpoint_name), scale
+        yield name, q_weight
+        yield scale_name_for_weight(name), scale
 
     def vllm_quantization_config(
         self,

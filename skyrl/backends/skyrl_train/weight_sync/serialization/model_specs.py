@@ -6,9 +6,9 @@ from typing import Any
 
 from .base import (
     ExpertExportLayout,
+    ExpertWeightMapping,
     ModelQuantizationSpec,
     MoeExpertSpec,
-    MoeProjection,
 )
 
 _QWEN35_QUANTIZABLE_WEIGHT_SUFFIXES = (
@@ -37,15 +37,15 @@ _ROUTED_EXPERT_SPECS = (
     MoeExpertSpec(
         source_suffix=".gate_up_proj",
         split_dim=1,
-        projections=(
-            MoeProjection(
-                hf_name="gate_proj",
-                vllm_param=".experts.w13_weight",
+        output_weights=(
+            ExpertWeightMapping(
+                checkpoint_component="gate_proj",
+                runtime_parameter_suffix=".experts.w13_weight",
                 shard_id="w1",
             ),
-            MoeProjection(
-                hf_name="up_proj",
-                vllm_param=".experts.w13_weight",
+            ExpertWeightMapping(
+                checkpoint_component="up_proj",
+                runtime_parameter_suffix=".experts.w13_weight",
                 shard_id="w3",
             ),
         ),
@@ -53,10 +53,10 @@ _ROUTED_EXPERT_SPECS = (
     MoeExpertSpec(
         source_suffix=".down_proj",
         split_dim=1,
-        projections=(
-            MoeProjection(
-                hf_name="down_proj",
-                vllm_param=".experts.w2_weight",
+        output_weights=(
+            ExpertWeightMapping(
+                checkpoint_component="down_proj",
+                runtime_parameter_suffix=".experts.w2_weight",
                 shard_id="w2",
             ),
         ),

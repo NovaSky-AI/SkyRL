@@ -8,7 +8,6 @@ from typing import Any
 from .base import (
     LEGACY_BATCHED_MOE_PREFIX,
     SERIALIZED_WEIGHT_PREFIX,
-    ReceiverTarget,
     SerializedWeightStrategy,
 )
 from .model_specs import MODEL_QUANTIZATION_SPECS
@@ -65,7 +64,7 @@ def parse_serialized_wire_name(wire_name: str) -> tuple[str | None, str] | None:
     return mode, checkpoint_name
 
 
-def resolve_serialized_receiver_target(mode: str | None, checkpoint_name: str) -> ReceiverTarget | None:
+def resolve_serialized_receiver_target(mode: str | None, checkpoint_name: str) -> tuple[str, str] | None:
     modes = (mode,) if mode is not None else serialized_weight_modes()
     matches = {
         target

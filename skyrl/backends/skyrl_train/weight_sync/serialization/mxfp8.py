@@ -9,10 +9,7 @@ import torch
 
 from .base import (
     ModelQuantizationSpec,
-    QuantizationTarget,
-    ReceiverTensorRole,
     SerializedWeightStrategy,
-    WeightKind,
 )
 from .blockwise_fp8 import batched_blockwise_cast_to_fp8, blockwise_cast_to_fp8
 
@@ -87,33 +84,38 @@ class Mxfp8Strategy(SerializedWeightStrategy):
     expert_only: bool = True
 
     mode: ClassVar[str] = SERIALIZED_MXFP8
-    receiver_tensor_roles: ClassVar[tuple[ReceiverTensorRole, ...]] = (
-        ReceiverTensorRole(".weight", ""),
-        ReceiverTensorRole(".weight_scale", "_scale"),
-    )
+    receiver_suffixes: ClassVar[dict[str, str]] = {
+        ".weight": "",
+        ".weight_scale": "_scale",
+    }
     supported_model_types: ClassVar[frozenset[str]] = frozenset({"qwen3_moe", "qwen3_5_moe", "qwen3_5_moe_text"})
     reject_unknown_routed_experts: ClassVar[bool] = True
     required_model_dtype: ClassVar[str | None] = "bfloat16"
     vllm_quantization: ClassVar[str] = "modelopt_mxfp8"
     use_legacy_wire_prefix: ClassVar[bool] = True
 
-    def supports(self, target: QuantizationTarget) -> bool:
-        if target.kind is WeightKind.ROUTED_EXPERT:
-            return True
-        return target.kind is WeightKind.LINEAR and not self.expert_only
+    def supports(self, name: str, tensor: torch.Tensor, *, routed_expert: bool) -> bool:
+        del name, tensor
+        return routed_expert or not self.expert_only
 
     def validate_model_type(self, model_type: str, model_path: str | None = None) -> None:
         if not self.supports_model_type(model_type):
             supported = ", ".join(sorted(self.supported_model_types))
             raise ValueError(f"Serialized MXFP8 does not support model_type={model_type!r}; supported: {supported}")
 
-    def serialize(self, target: QuantizationTarget) -> Iterator[tuple[str, torch.Tensor]]:
-        if target.batched_experts:
-            q_weight, scale = batched_mxfp8_cast_to_fp8(target.tensor)
+    def serialize(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        *,
+        batched_experts: bool,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        if batched_experts:
+            q_weight, scale = batched_mxfp8_cast_to_fp8(tensor)
         else:
-            q_weight, scale = mxfp8_cast_to_fp8(target.tensor)
-        yield target.checkpoint_name, q_weight
-        yield mxfp8_scale_name_for_weight(target.checkpoint_name), scale
+            q_weight, scale = mxfp8_cast_to_fp8(tensor)
+        yield name, q_weight
+        yield mxfp8_scale_name_for_weight(name), scale
 
     def vllm_quantization_config(
         self,

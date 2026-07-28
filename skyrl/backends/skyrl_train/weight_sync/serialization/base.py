@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -14,21 +14,15 @@ LEGACY_BATCHED_MOE_PREFIX = "__skyrl_batched_moe_fp8__:"
 SERIALIZED_WEIGHT_PREFIX = "__skyrl_serialized__:"
 
 
-class WeightKind(str, Enum):
-    ROUTED_EXPERT = "routed_expert"
-    LINEAR = "linear"
-    PASSTHROUGH = "passthrough"
-
-
 class ExpertExportLayout(str, Enum):
     CHECKPOINT = "checkpoint"
     PACKED = "packed"
 
 
 @dataclass(frozen=True)
-class MoeProjection:
-    hf_name: str
-    vllm_param: str
+class ExpertWeightMapping:
+    checkpoint_component: str
+    runtime_parameter_suffix: str
     shard_id: str
 
 
@@ -36,28 +30,7 @@ class MoeProjection:
 class MoeExpertSpec:
     source_suffix: str
     split_dim: int
-    projections: tuple[MoeProjection, ...]
-
-
-@dataclass(frozen=True)
-class QuantizationTarget:
-    checkpoint_name: str
-    tensor: torch.Tensor
-    kind: WeightKind
-    projection: MoeProjection | None = None
-    batched_experts: bool = False
-
-
-@dataclass(frozen=True)
-class ReceiverTensorRole:
-    checkpoint_suffix: str
-    parameter_suffix: str
-
-
-@dataclass(frozen=True)
-class ReceiverTarget:
-    parameter_name: str
-    shard_id: str
+    output_weights: tuple[ExpertWeightMapping, ...]
 
 
 @dataclass(frozen=True)
@@ -87,7 +60,11 @@ class ModelQuantizationSpec:
                 return spec
         return None
 
-    def normalize_moe_targets(self, name: str, tensor: torch.Tensor) -> tuple[QuantizationTarget, ...] | None:
+    def normalize_moe_targets(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+    ) -> tuple[tuple[str, torch.Tensor], ...] | None:
         if ".mlp.experts" not in name:
             return None
         spec = self.moe_expert_spec(name)
@@ -97,32 +74,26 @@ class ModelQuantizationSpec:
             raise ValueError(f"Batched MoE expert tensor must be 3D, got shape={tuple(tensor.shape)}")
 
         base = name[: -len(spec.source_suffix)]
-        if len(spec.projections) == 1:
+        if len(spec.output_weights) == 1:
             tensors = (tensor,)
         else:
             split_dim = spec.split_dim
             split_size = tensor.shape[split_dim]
-            if split_size % len(spec.projections) != 0:
+            if split_size % len(spec.output_weights) != 0:
                 raise ValueError(
                     f"Batched MoE gate_up_proj output dimension must be even, got shape={tuple(tensor.shape)}"
                 )
-            tensors = tensor.chunk(len(spec.projections), dim=split_dim)
+            tensors = tensor.chunk(len(spec.output_weights), dim=split_dim)
 
         return tuple(
-            QuantizationTarget(
-                checkpoint_name=f"{base}.{projection.hf_name}.weight",
-                tensor=projection_tensor,
-                kind=WeightKind.ROUTED_EXPERT,
-                projection=projection,
-                batched_experts=True,
-            )
-            for projection, projection_tensor in zip(spec.projections, tensors)
+            (f"{base}.{mapping.checkpoint_component}.weight", output_tensor)
+            for mapping, output_tensor in zip(spec.output_weights, tensors)
         )
 
 
 class SerializedWeightStrategy(ABC):
     mode: str
-    receiver_tensor_roles: tuple[ReceiverTensorRole, ...]
+    receiver_suffixes: Mapping[str, str]
     supported_model_types: frozenset[str]
     reject_unknown_routed_experts: bool = False
     use_legacy_wire_prefix: bool = False
@@ -139,11 +110,17 @@ class SerializedWeightStrategy(ABC):
             raise ValueError(f"{self.mode} does not support model_type={model_type!r}")
 
     @abstractmethod
-    def supports(self, target: QuantizationTarget) -> bool:
+    def supports(self, name: str, tensor: torch.Tensor, *, routed_expert: bool) -> bool:
         """Return whether this strategy quantizes a normalized target."""
 
     @abstractmethod
-    def serialize(self, target: QuantizationTarget) -> Iterator[tuple[str, torch.Tensor]]:
+    def serialize(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        *,
+        batched_experts: bool,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
         """Serialize one supported target."""
 
     @abstractmethod
@@ -164,17 +141,19 @@ class SerializedWeightStrategy(ABC):
         self,
         checkpoint_name: str,
         model_specs: Sequence[ModelQuantizationSpec],
-    ) -> ReceiverTarget | None:
+    ) -> tuple[str, str] | None:
         for model_spec in model_specs:
             for expert_spec in model_spec.moe_expert_specs:
-                for projection in expert_spec.projections:
-                    for role in self.receiver_tensor_roles:
-                        suffix = f".experts.{projection.hf_name}{role.checkpoint_suffix}"
+                for mapping in expert_spec.output_weights:
+                    for checkpoint_suffix, parameter_suffix in self.receiver_suffixes.items():
+                        suffix = f".experts.{mapping.checkpoint_component}{checkpoint_suffix}"
                         if checkpoint_name.endswith(suffix):
                             parameter_name = (
-                                checkpoint_name[: -len(suffix)] + projection.vllm_param + role.parameter_suffix
+                                checkpoint_name[: -len(suffix)]
+                                + mapping.runtime_parameter_suffix
+                                + parameter_suffix
                             )
-                            return ReceiverTarget(parameter_name, projection.shard_id)
+                            return parameter_name, mapping.shard_id
         return None
 
 
@@ -189,11 +168,15 @@ def iter_serialized_weight_tensors(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     targets = model_spec.normalize_moe_targets(name, tensor)
     if targets is not None:
-        for target in targets:
-            if not strategy.supports(target):
-                yield target.checkpoint_name, target.tensor.to(dtype=target_dtype)
+        for target_name, target_tensor in targets:
+            if not strategy.supports(target_name, target_tensor, routed_expert=True):
+                yield target_name, target_tensor.to(dtype=target_dtype)
                 continue
-            for output_name, output_tensor in strategy.serialize(target):
+            for output_name, output_tensor in strategy.serialize(
+                target_name,
+                target_tensor,
+                batched_experts=True,
+            ):
                 yield strategy.wire_name(output_name), output_tensor
         return
 
@@ -201,9 +184,7 @@ def iter_serialized_weight_tensors(
     if reject_unknown_experts and ".mlp.experts." in name and tensor.ndim >= 2:
         raise ValueError(f"Unsupported routed-expert export tensor for model_type={model_type!r}: {name}")
 
-    kind = WeightKind.LINEAR if model_spec.should_quantize(name, tensor.shape) else WeightKind.PASSTHROUGH
-    target = QuantizationTarget(checkpoint_name=name, tensor=tensor, kind=kind)
-    if kind is WeightKind.LINEAR and strategy.supports(target):
-        yield from strategy.serialize(target)
+    if model_spec.should_quantize(name, tensor.shape) and strategy.supports(name, tensor, routed_expert=False):
+        yield from strategy.serialize(name, tensor, batched_experts=False)
         return
     yield name, tensor.to(dtype=target_dtype)
