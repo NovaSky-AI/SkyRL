@@ -92,7 +92,6 @@ class Mxfp8Strategy(SerializedWeightStrategy):
     reject_unknown_routed_experts: ClassVar[bool] = True
     required_model_dtype: ClassVar[str | None] = "bfloat16"
     vllm_quantization: ClassVar[str] = "modelopt_mxfp8"
-    use_legacy_wire_prefix: ClassVar[bool] = True
 
     def supports(self, name: str, tensor: torch.Tensor, *, routed_expert: bool) -> bool:
         del name, tensor

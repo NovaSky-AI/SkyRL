@@ -1,7 +1,6 @@
 """Serialized weight quantization strategies."""
 
 from .base import (
-    LEGACY_BATCHED_MOE_PREFIX,
     SERIALIZED_WEIGHT_PREFIX,
     ExpertExportLayout,
     ExpertWeightMapping,
@@ -53,7 +52,6 @@ from .registry import (
 __all__ = [
     "BLOCKWISE_128X128",
     "EXPERT_ONLY_MXFP8_IGNORED_MODULES",
-    "LEGACY_BATCHED_MOE_PREFIX",
     "MODEL_QUANTIZATION_SPECS",
     "MXFP8_1X32",
     "QWEN3_QUANTIZATION_SPEC",

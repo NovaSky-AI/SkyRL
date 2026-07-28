@@ -2,9 +2,9 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.weight_sync.serialization import (
-    LEGACY_BATCHED_MOE_PREFIX,
     SERIALIZED_BLOCKWISE_FP8,
     SERIALIZED_MXFP8,
+    SERIALIZED_WEIGHT_PREFIX,
     SERIALIZED_WEIGHT_STRATEGIES,
     get_model_quantization_spec,
     get_serialized_weight_strategy,
@@ -48,7 +48,9 @@ def test_qwen3_spec_and_mxfp8_strategy_emit_batched_wire_tensors():
         )
     )
 
-    weight_name = f"{LEGACY_BATCHED_MOE_PREFIX}model.layers.0.mlp.experts.down_proj.weight"
+    weight_name = (
+        f"{SERIALIZED_WEIGHT_PREFIX}{SERIALIZED_MXFP8}:model.layers.0.mlp.experts.down_proj.weight"
+    )
     assert emitted[weight_name].dtype == torch.float8_e4m3fn
     assert emitted[f"{weight_name}_scale"].dtype == torch.uint8
 

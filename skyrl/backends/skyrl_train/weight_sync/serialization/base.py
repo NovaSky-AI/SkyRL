@@ -10,7 +10,6 @@ from typing import Any
 
 import torch
 
-LEGACY_BATCHED_MOE_PREFIX = "__skyrl_batched_moe_fp8__:"
 SERIALIZED_WEIGHT_PREFIX = "__skyrl_serialized__:"
 
 
@@ -96,7 +95,6 @@ class SerializedWeightStrategy(ABC):
     receiver_suffixes: Mapping[str, str]
     supported_model_types: frozenset[str]
     reject_unknown_routed_experts: bool = False
-    use_legacy_wire_prefix: bool = False
     uses_block_scale_runtime_contract: bool = False
     required_model_dtype: str | None = None
     vllm_quantization: str
@@ -133,8 +131,6 @@ class SerializedWeightStrategy(ABC):
         """Return vLLM's quantization configuration."""
 
     def wire_name(self, checkpoint_name: str) -> str:
-        if self.use_legacy_wire_prefix:
-            return f"{LEGACY_BATCHED_MOE_PREFIX}{checkpoint_name}"
         return f"{SERIALIZED_WEIGHT_PREFIX}{self.mode}:{checkpoint_name}"
 
     def receiver_target(

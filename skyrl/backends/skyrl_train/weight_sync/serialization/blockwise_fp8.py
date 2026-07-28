@@ -181,7 +181,6 @@ class BlockwiseFp8Strategy(SerializedWeightStrategy):
     )
     uses_block_scale_runtime_contract: ClassVar[bool] = True
     vllm_quantization: ClassVar[str] = "fp8"
-    use_legacy_wire_prefix: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "weight_block_size", normalize_block_size(self.weight_block_size))

@@ -10,7 +10,6 @@ import torch
 
 from .serialization import (
     BLOCKWISE_128X128,
-    LEGACY_BATCHED_MOE_PREFIX,
     MXFP8_1X32,
     QWEN35_QUANTIZATION_SPEC,
     SERIALIZED_BLOCKWISE_FP8,
@@ -38,7 +37,6 @@ from .serialization import (
 from .serialization.blockwise_fp8 import normalize_block_size
 from .serialization.mxfp8 import EXPERT_ONLY_MXFP8_IGNORED_MODULES
 
-SKYRL_BATCHED_MOE_FP8_PREFIX = LEGACY_BATCHED_MOE_PREFIX
 _EXPERT_ONLY_MXFP8_IGNORED_MODULES = EXPERT_ONLY_MXFP8_IGNORED_MODULES
 _power_2_scales_to_e8m0 = power_2_scales_to_e8m0
 _normalize_block_size = normalize_block_size
@@ -201,7 +199,6 @@ __all__ = [
     "MXFP8_1X32",
     "SERIALIZED_BLOCKWISE_FP8",
     "SERIALIZED_MXFP8",
-    "SKYRL_BATCHED_MOE_FP8_PREFIX",
     "MoeArchitectureSpec",
     "SerializedFp8Config",
     "batched_blockwise_cast_to_fp8",

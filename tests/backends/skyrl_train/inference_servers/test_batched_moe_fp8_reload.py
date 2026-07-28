@@ -6,14 +6,15 @@ from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap impo
     _decode_serialized_name,
     _load_batched_moe_fp8_tensor,
 )
-from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
-    SKYRL_BATCHED_MOE_FP8_PREFIX,
+from skyrl.backends.skyrl_train.weight_sync.serialization import (
+    SERIALIZED_BLOCKWISE_FP8,
+    SERIALIZED_MXFP8,
+    SERIALIZED_WEIGHT_PREFIX,
 )
 
 
-def test_decode_serialized_name_supports_legacy_and_qualified_names():
+def test_decode_serialized_name():
     checkpoint_name = "model.layers.0.mlp.experts.gate_proj.weight"
-    assert _decode_serialized_name(f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{checkpoint_name}") == (None, checkpoint_name)
     assert _decode_serialized_name(f"__skyrl_serialized__:serialized_mxfp8:{checkpoint_name}") == (
         "serialized_mxfp8",
         checkpoint_name,
@@ -33,7 +34,9 @@ def test_batched_moe_tensor_uses_one_full_expert_loader_call():
     param.weight_loader = weight_loader
     target_name = "model.layers.0.mlp.experts.w13_weight"
     loaded_weight = torch.randn(3, 4, 4)
-    wire_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}model.layers.0.mlp.experts.gate_proj.weight"
+    wire_name = (
+        f"{SERIALIZED_WEIGHT_PREFIX}{SERIALIZED_MXFP8}:model.layers.0.mlp.experts.gate_proj.weight"
+    )
 
     loaded = _load_batched_moe_fp8_tensor(
         SimpleNamespace(),
@@ -64,7 +67,10 @@ def test_batched_moe_scale_maps_to_fused_scale_parameter():
         apply_list=lambda names: [names[0].replace("model.language_model.", "language_model.model.", 1)]
     )
     model = SimpleNamespace(hf_to_vllm_mapper=mapper)
-    wire_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}model.language_model.layers.2.mlp.experts.up_proj.weight_scale_inv"
+    wire_name = (
+        f"{SERIALIZED_WEIGHT_PREFIX}{SERIALIZED_BLOCKWISE_FP8}:"
+        "model.language_model.layers.2.mlp.experts.up_proj.weight_scale_inv"
+    )
 
     assert _load_batched_moe_fp8_tensor(model, {target_name: param}, wire_name, loaded_weight)
     assert calls == [(target_name, "w3", (2, 3, 3))]
@@ -82,7 +88,10 @@ def test_batched_moe_mxfp8_scale_maps_to_modelopt_scale_parameter():
     param.weight_loader = weight_loader
     target_name = "model.layers.2.mlp.experts.w2_weight_scale"
     loaded_weight = torch.zeros(2, 3, 3, dtype=torch.uint8)
-    wire_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}model.layers.2.mlp.experts.down_proj.weight_scale"
+    wire_name = (
+        f"{SERIALIZED_WEIGHT_PREFIX}{SERIALIZED_MXFP8}:"
+        "model.layers.2.mlp.experts.down_proj.weight_scale"
+    )
 
     assert _load_batched_moe_fp8_tensor(SimpleNamespace(), {target_name: param}, wire_name, loaded_weight)
     assert calls == [(target_name, "w2", torch.uint8)]

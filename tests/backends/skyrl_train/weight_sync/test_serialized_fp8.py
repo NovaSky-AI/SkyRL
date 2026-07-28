@@ -3,10 +3,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.weight_sync.serialization import (
+    SERIALIZED_BLOCKWISE_FP8,
+    SERIALIZED_WEIGHT_PREFIX,
+)
 from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
     MXFP8_1X32,
     SERIALIZED_MXFP8,
-    SKYRL_BATCHED_MOE_FP8_PREFIX,
     SerializedFp8Config,
     batched_blockwise_cast_to_fp8,
     batched_moe_expert_spec,
@@ -22,6 +25,10 @@ from skyrl.backends.skyrl_train.weight_sync.serialized_fp8 import (
     mxfp8_cast_to_fp8,
     serialized_fp8_config_for_mode,
 )
+
+
+def _wire_prefix(mode: str) -> str:
+    return f"{SERIALIZED_WEIGHT_PREFIX}{mode}:"
 
 
 def test_blockwise_cast_to_fp8_emits_weight_and_fp32_scale():
@@ -288,9 +295,9 @@ def test_batched_moe_experts_remain_fused_with_pow2_scales():
     by_name = dict(emitted)
     assert len(emitted) == 4
     for projection_idx, proj in enumerate(("gate_proj", "up_proj")):
-        weight_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.{proj}.weight"
+        weight_name = f"{_wire_prefix(SERIALIZED_BLOCKWISE_FP8)}{base}.{proj}.weight"
         w = by_name[weight_name]
-        s = by_name[f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.{proj}.weight_scale_inv"]
+        s = by_name[f"{_wire_prefix(SERIALIZED_BLOCKWISE_FP8)}{base}.{proj}.weight_scale_inv"]
         assert w.dtype == torch.float8_e4m3fn and tuple(w.shape) == (num_experts, moe_inter, hidden)
         assert s.dtype == torch.float32 and tuple(s.shape) == (num_experts, 1, 2)
         log2 = torch.log2(s)
@@ -307,10 +314,10 @@ def test_batched_moe_experts_remain_fused_with_pow2_scales():
 
     down = torch.randn(num_experts, hidden, moe_inter, dtype=torch.bfloat16)
     emitted_d = dict(iter_serialized_fp8_tensors(f"{base}.down_proj", down, torch.bfloat16, config))
-    down_weight_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.down_proj.weight"
+    down_weight_name = f"{_wire_prefix(SERIALIZED_BLOCKWISE_FP8)}{base}.down_proj.weight"
     assert set(emitted_d) == {
         down_weight_name,
-        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.down_proj.weight_scale_inv",
+        f"{_wire_prefix(SERIALIZED_BLOCKWISE_FP8)}{base}.down_proj.weight_scale_inv",
     }
     assert emitted_d[down_weight_name].shape == down.shape
 
@@ -322,10 +329,10 @@ def test_batched_qwen35_moe_experts_serialize_as_mxfp8():
 
     emitted = dict(iter_serialized_fp8_tensors(f"{base}.gate_up_proj", gate_up, torch.bfloat16, config))
 
-    gate_name = f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight"
+    gate_name = f"{_wire_prefix(SERIALIZED_MXFP8)}{base}.gate_proj.weight"
     assert emitted[gate_name].dtype == torch.float8_e4m3fn
-    assert emitted[f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight_scale"].dtype == torch.uint8
-    assert emitted[f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight_scale"].shape == (3, 128, 2)
+    assert emitted[f"{_wire_prefix(SERIALIZED_MXFP8)}{base}.gate_proj.weight_scale"].dtype == torch.uint8
+    assert emitted[f"{_wire_prefix(SERIALIZED_MXFP8)}{base}.gate_proj.weight_scale"].shape == (3, 128, 2)
 
 
 def test_qwen3_packed_expert_weights_serialize_as_mxfp8_only():
@@ -347,10 +354,10 @@ def test_qwen3_packed_expert_weights_serialize_as_mxfp8_only():
     )
 
     assert set(expert_tensors) == {
-        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight",
-        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.gate_proj.weight_scale",
-        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.up_proj.weight",
-        f"{SKYRL_BATCHED_MOE_FP8_PREFIX}{base}.up_proj.weight_scale",
+        f"{_wire_prefix(SERIALIZED_MXFP8)}{base}.gate_proj.weight",
+        f"{_wire_prefix(SERIALIZED_MXFP8)}{base}.gate_proj.weight_scale",
+        f"{_wire_prefix(SERIALIZED_MXFP8)}{base}.up_proj.weight",
+        f"{_wire_prefix(SERIALIZED_MXFP8)}{base}.up_proj.weight_scale",
     }
     assert [(name, tensor.dtype) for name, tensor in attention_tensors] == [
         ("model.layers.2.self_attn.q_proj.weight", torch.bfloat16)
