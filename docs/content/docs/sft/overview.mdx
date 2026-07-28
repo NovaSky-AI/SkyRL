@@ -109,7 +109,7 @@ spawned worker pool.
 
 ## Pretokenized datasets
 
-If your data pipeline tokenizes **offline** , point the trainer at the pretokenized store to skip online
+If your data pipeline tokenizes **offline**, point the trainer at the pretokenized store to skip online
 tokenization entirely. Pretokenized rows are normalized to the same internal
 format as online-tokenized data, so collators, sequence packing, samplers, and
 checkpoint/resume all work unchanged. Ingestion is implemented in
@@ -252,5 +252,3 @@ for the full set.
   and per-dataset evaluation.
 - [Using Custom Samplers](./custom_sampler) -- plug in your own stateful,
   checkpointable sampler (e.g. curriculum learning).
-- [Training Callbacks](./callbacks) -- hook into training events for custom
-  logging or callback-driven checkpointing/eval.

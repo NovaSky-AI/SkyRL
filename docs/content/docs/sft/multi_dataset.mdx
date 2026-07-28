@@ -73,7 +73,7 @@ loss is logged under `eval/{name}/loss`:
 bash examples/train/sft/run_sft_megatron.sh \
     eval_datasets="['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
     eval_dataset_splits="['train[-500:]','train[200:700]']" \
-    eval_dataset_names="[tulu3,alpaca]" \
+    eval_dataset_names="['tulu3','alpaca']" \
     eval_interval=5
 ```
 

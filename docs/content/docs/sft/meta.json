@@ -3,7 +3,6 @@
   "pages": [
     "overview",
     "multi_dataset",
-    "custom_sampler",
-    "callbacks"
+    "custom_sampler"
   ]
 }
