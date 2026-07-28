@@ -580,6 +580,34 @@ class TinkerEngine:
 
         return self.backend.optim_step(model_id, request_data)
 
+    def process_optim_steps(
+        self,
+        requests: dict[str, tuple[str, types.OptimStepInput]],
+    ) -> dict[str, types.OptimStepOutput | types.ErrorResponse]:
+        return self.backend.optim_steps(requests)
+
+    def split_batchable_optim_steps(
+        self,
+        requests: dict[str, tuple[str, types.RequestType, dict]],
+    ) -> tuple[
+        dict[str, tuple[str, types.OptimStepInput]],
+        dict[str, tuple[str, types.RequestType, dict]],
+    ]:
+        """Select at most one first-eligible optimizer request per model."""
+        if not self.backend.supports_batched_optim_steps():
+            return {}, requests
+
+        batch: dict[str, tuple[str, types.OptimStepInput]] = {}
+        remaining: dict[str, tuple[str, types.RequestType, dict]] = {}
+        models_with_earlier_request: set[str] = set()
+        for request_id, (model_id, request_type, request_data) in requests.items():
+            if request_type == types.RequestType.OPTIM_STEP and model_id not in models_with_earlier_request:
+                batch[request_id] = (model_id, types.OptimStepInput.model_validate(request_data))
+            else:
+                remaining[request_id] = (model_id, request_type, request_data)
+            models_with_earlier_request.add(model_id)
+        return batch, remaining
+
     def process_forward_backward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
         """Run forward and backward pass on a batch of requests."""
         prepared = prepare_model_pass_batch(requests)
@@ -766,12 +794,15 @@ class TinkerEngine:
                 # Get other pending requests (non forward_backward and non sampling)
                 other_requests = self.find_single_requests(session)
 
+            optim_step_requests, other_requests = self.split_batchable_optim_steps(other_requests)
+
             # Process batches outside of session context
             self.process_batch_requests(forward_backward_requests, self.process_forward_backward, "forward_backward")
             self.process_batch_requests(forward_requests, self.process_forward, "forward")
             self.process_batch_requests(sample_requests, self.process_sample, "sample")
+            self.process_batch_requests(optim_step_requests, self.process_optim_steps, "optim_step")
 
-            # Process other request types individually (in the future we can also batch independent optim_steps)
+            # Process request types that still require strict serialization.
             self.process_single_requests(other_requests)
 
             # Periodically cleanup stale sessions (disabled if either config is negative)

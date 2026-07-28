@@ -16,6 +16,7 @@ except ImportError:
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+    fsdp2_clip_grad_norm_,
     should_use_meta_init,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -32,6 +33,13 @@ from skyrl.backends.skyrl_train.weight_sync import (
 )
 from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import (
     yield_module_grouped_chunks,
+)
+from skyrl.backends.skyrl_train.workers.fsdp.adapter_store import (
+    FSDPAdapterStore,
+    FSDPLoraSignature,
+)
+from skyrl.backends.skyrl_train.workers.fsdp.multi_lora import (
+    validate_concurrent_lora_model_support,
 )
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
     HFModelWrapper,
@@ -147,12 +155,21 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.strategy = strategy
 
         self._is_lora = self.cfg.policy.model.lora.rank > 0
+        self._is_concurrent_lora = self.cfg.policy.model.lora.implementation == "concurrent"
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         is_multimodal = hasattr(model_config, "vision_config") and model_config.vision_config is not None
+        if self._is_concurrent_lora:
+            validate_concurrent_lora_model_support(
+                is_multimodal=is_multimodal,
+                language_model_only=self.cfg.policy.language_model_only,
+                sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
+                remove_microbatch_padding=self.cfg.remove_microbatch_padding,
+            )
         self._is_multimodal_lm_only = self.cfg.policy.language_model_only and is_multimodal
         use_meta = should_use_meta_init(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=not model_config.tie_word_embeddings,
+            mesh=self.strategy.device_mesh,
         )
 
         wrapped_model = HFModelWrapper(
@@ -165,6 +182,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             lora_init_method=self.cfg.policy.model.lora.init_method,
             target_modules=self.cfg.policy.model.lora.target_modules,
             exclude_modules=self.cfg.policy.model.lora.exclude_modules,
+            concurrent_lora=self._is_concurrent_lora,
+            max_lora_adapters=self.cfg.policy.model.lora.max_lora_adapters,
             sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             use_torch_compile=self.cfg.policy.use_torch_compile,
@@ -191,6 +210,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             assert (
                 self.optimizer is not None and self.scheduler is not None
             ), "FSDP preparation should create optimizer and scheduler"
+        self.adapter_store = (
+            FSDPAdapterStore()
+            if self._is_lora and not self._is_concurrent_lora and self.optimizer is not None
+            else None
+        )
+        self._multi_lora_default_optimizer_hparams = (
+            self._current_optimizer_hparams() if self._is_concurrent_lora and self.optimizer is not None else {}
+        )
 
         # Enable expandable_segments after init so model weights stay in IPC-compatible
         # standard CUDA memory; only subsequent activations use expandable segments.
@@ -198,6 +225,206 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         # Created only on profiled ranks.
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
+
+    def prime_optimizer_state(self) -> None:
+        if self.adapter_store is None or self.optimizer is None:
+            raise RuntimeError("FSDP adapter store is only available for trainable LoRA policies")
+        self.adapter_store.prime_optimizer_state(self.model, self.optimizer)
+
+    def register_pristine_adapter(self) -> None:
+        if self.adapter_store is None or self.optimizer is None:
+            raise RuntimeError("FSDP adapter store is only available for trainable LoRA policies")
+        signature = FSDPLoraSignature.from_lora_config(self.cfg.policy.model.lora)
+        self.adapter_store.register_pristine(self.model, self.optimizer, signature)
+
+    @property
+    def _multi_lora_manager(self):
+        manager = getattr(self.model, "multi_lora_manager", None)
+        if manager is None:
+            raise RuntimeError("Concurrent LoRA manager is not initialized")
+        return manager
+
+    def _current_optimizer_hparams(self) -> dict[str, object]:
+        if self.optimizer is None:
+            raise RuntimeError("Optimizer is not initialized")
+        param_group = self.optimizer.param_groups[0]
+        beta1, beta2 = param_group["betas"]
+        return {
+            "learning_rate": float(param_group["lr"]),
+            "beta1": float(beta1),
+            "beta2": float(beta2),
+            "eps": float(param_group["eps"]),
+            "weight_decay": float(param_group["weight_decay"]),
+        }
+
+    def register_adapter(self, model_id: str, seed: int = 0) -> int:
+        if self._is_concurrent_lora:
+            return self._multi_lora_manager.register(
+                model_id,
+                seed=seed,
+                optimizer_hparams=self._multi_lora_default_optimizer_hparams,
+            )
+        if self.adapter_store is None or self.optimizer is None:
+            raise RuntimeError("FSDP adapter store is only available for trainable LoRA policies")
+        signature = FSDPLoraSignature.from_lora_config(self.cfg.policy.model.lora)
+        self.adapter_store.create(model_id, self.model, self.optimizer, signature)
+        return 0
+
+    def delete_adapter(self, model_id: str) -> None:
+        if self._is_concurrent_lora:
+            slot_index = self._multi_lora_manager.slot_for(model_id)
+            if self.optimizer is not None:
+                for parameter in self._multi_lora_manager.parameters_for_slot(slot_index):
+                    self.optimizer.state.pop(parameter, None)
+            self._multi_lora_manager.delete(model_id)
+            return
+        if self.adapter_store is None:
+            raise RuntimeError("FSDP adapter store is only available for trainable LoRA policies")
+        self.adapter_store.delete(model_id)
+
+    def swap_to_adapter(self, model_id: str) -> None:
+        if self._is_concurrent_lora:
+            self._multi_lora_manager.slot_for(model_id)
+            return
+        if self.adapter_store is None or self.optimizer is None:
+            return
+        self.adapter_store.swap_to(model_id, self.model, self.optimizer)
+
+    def adapter_store_state(self) -> dict:
+        if self._is_concurrent_lora:
+            return self._multi_lora_manager.state()
+        if self.adapter_store is None:
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "current_id": self.adapter_store.current_id,
+            "registered": self.adapter_store.registered_ids(),
+            "num_adapters": self.adapter_store.num_adapters(),
+        }
+
+    def optim_step(self, model_id: Optional[str] = None) -> float:
+        if not self._is_concurrent_lora:
+            return super().optim_step()
+        if model_id is None:
+            raise ValueError("Concurrent FSDP LoRA optim_step requires model_id")
+        return self.optim_steps({model_id: self._multi_lora_manager.optimizer_hparams_for(model_id)})[model_id]
+
+    def optim_steps(self, optimizer_hparams: dict[str, dict[str, float]]) -> dict[str, Optional[float]]:
+        """Step independent adapter slots with one AdamW kernel traversal."""
+        if not self._is_concurrent_lora:
+            raise ValueError("Batched optimizer steps require concurrent FSDP LoRA")
+        if self.optimizer is None:
+            raise RuntimeError("Optimizer is not initialized")
+        if not optimizer_hparams:
+            return {}
+
+        manager = self._multi_lora_manager
+        for model_id, hparams in optimizer_hparams.items():
+            manager.set_optimizer_hparams(model_id, hparams)
+
+        grad_norms: dict[str, Optional[torch.Tensor]] = {}
+        finite_model_ids = []
+        for model_id in optimizer_hparams:
+            slot_index = manager.slot_for(model_id)
+            parameters = manager.parameters_for_slot(slot_index)
+            grad_norm = None
+            if self.strategy.max_norm > 0:
+                grad_norm = fsdp2_clip_grad_norm_(parameters, max_norm=self.strategy.max_norm)
+            grad_norms[model_id] = grad_norm
+            if grad_norm is None or torch.isfinite(grad_norm):
+                finite_model_ids.append(model_id)
+            else:
+                manager.clear_slot_gradients(slot_index)
+
+        if finite_model_ids:
+            with manager.select_optimizer_slots(self.optimizer, finite_model_ids):
+                self.optimizer.step()
+            for model_id in finite_model_ids:
+                manager.clear_slot_gradients(manager.slot_for(model_id))
+            if self.scheduler is not None:
+                for _ in finite_model_ids:
+                    self.scheduler.step()
+
+        return {
+            model_id: None if grad_norm is None else grad_norm.detach().cpu().item()
+            for model_id, grad_norm in grad_norms.items()
+        }
+
+    def set_optimizer_hparams(
+        self,
+        model_id: str,
+        learning_rate: float,
+        beta1: float,
+        beta2: float,
+        eps: float,
+        weight_decay: float,
+    ) -> None:
+        if self.optimizer is None:
+            raise RuntimeError("Optimizer is not initialized")
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
+            param_group["betas"] = (beta1, beta2)
+            param_group["eps"] = eps
+            param_group["weight_decay"] = weight_decay
+        if self._is_concurrent_lora:
+            self._multi_lora_manager.set_optimizer_hparams(model_id, self._current_optimizer_hparams())
+
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None, model_id: Optional[str] = None):
+        if not self._is_concurrent_lora:
+            return super().save_checkpoint(ckpt_dir, tokenizer=tokenizer)
+        if model_id is None:
+            raise ValueError("Concurrent FSDP LoRA save_checkpoint requires model_id")
+        if self.optimizer is None:
+            raise RuntimeError("Optimizer is not initialized")
+
+        state = self._multi_lora_manager.training_state(model_id, self.optimizer)
+        if torch.distributed.get_rank() == 0:
+            os.makedirs(ckpt_dir, exist_ok=True)
+            torch.save(state, os.path.join(ckpt_dir, "adapter_training_state.pt"))
+        torch.distributed.barrier()
+
+    def load_checkpoint(
+        self,
+        ckpt_dir: str,
+        load_optimizer_states: bool = True,
+        load_lr_scheduler_states: bool = True,
+        model_id: Optional[str] = None,
+    ):
+        if not self._is_concurrent_lora:
+            return super().load_checkpoint(
+                ckpt_dir,
+                load_optimizer_states=load_optimizer_states,
+                load_lr_scheduler_states=load_lr_scheduler_states,
+            )
+        if model_id is None:
+            raise ValueError("Concurrent FSDP LoRA load_checkpoint requires model_id")
+        if self.optimizer is None:
+            raise RuntimeError("Optimizer is not initialized")
+
+        checkpoint_path = os.path.join(ckpt_dir, "adapter_training_state.pt")
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Adapter checkpoint not found: {checkpoint_path}")
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if not load_optimizer_states:
+            state = dict(state)
+            state["optimizer_state"] = {}
+        self._multi_lora_manager.load_training_state(model_id, state, self.optimizer)
+
+        optimizer_hparams = self._multi_lora_manager.optimizer_hparams_for(model_id)
+        if optimizer_hparams:
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = optimizer_hparams["learning_rate"]
+                param_group["betas"] = (
+                    optimizer_hparams["beta1"],
+                    optimizer_hparams["beta2"],
+                )
+                param_group["eps"] = optimizer_hparams["eps"]
+                param_group["weight_decay"] = optimizer_hparams["weight_decay"]
+        torch.distributed.barrier()
+        return {
+            "adapter_model_id": model_id,
+            "source_model_id": state.get("source_model_id"),
+        }
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
@@ -232,25 +459,55 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         from safetensors.torch import save_file
 
-        from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
-            collect_lora_params,
-        )
+        if self._is_concurrent_lora:
+            slot_index = self._multi_lora_manager.slot_for(lora_name)
+            lora_params = self._multi_lora_manager.adapter_state_dict(slot_index)
+            targets = self.cfg.policy.model.lora.target_modules
+            peft_config = {
+                "base_model_name_or_path": self.cfg.policy.model.path,
+                "bias": "none",
+                "inference_mode": True,
+                "lora_alpha": self._multi_lora_manager.alpha,
+                "lora_dropout": self.cfg.policy.model.lora.dropout,
+                "peft_type": "LORA",
+                "r": self._multi_lora_manager.rank,
+                "target_modules": targets if isinstance(targets, list) else targets,
+                "task_type": "CAUSAL_LM",
+            }
+        else:
+            from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+                collect_lora_params,
+            )
 
-        lora_params = collect_lora_params(module=self.model.model)
+            lora_params = collect_lora_params(module=self.model.model)
+            peft_config = None
 
-        if torch.distributed.get_rank() == 0:
+        rank = torch.distributed.get_rank()
+        if rank == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
-            peft_config = asdict(peft_model.peft_config.get("default", {}))
-            peft_config["task_type"] = peft_config["task_type"].value
-            peft_config["peft_type"] = peft_config["peft_type"].value
-            peft_config["target_modules"] = list(peft_config["target_modules"])
+            if peft_config is None:
+                peft_config = asdict(peft_model.peft_config.get("default", {}))
+                peft_config["task_type"] = peft_config["task_type"].value
+                peft_config["peft_type"] = peft_config["peft_type"].value
+                peft_config["target_modules"] = list(peft_config["target_modules"])
 
             # Save LoRA parameters and config
             save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))
-            with io.open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+            with io.open(
+                os.path.join(lora_sync_path, "adapter_config.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
+        # Preserve rank alignment after collective adapter extraction and file
+        # publication, but do not include the potentially slow inference load
+        # in this barrier. Large MoE adapters can exceed the process-group
+        # timeout while vLLM materializes tens of thousands of tensors.
+        torch.distributed.barrier()
+
+        if rank == 0:
             # Send LoRA disk loading request to inference engine.
             from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
                 RemoteInferenceClient,
@@ -262,7 +519,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 lora_request = LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)
                 await inference_engine_client.update_named_weights(lora_request)
 
-        torch.distributed.barrier()
+        # The dispatcher's ray.get over all policy actors is the completion
+        # fence after rank 0 starts the disk-to-inference load.
 
     async def broadcast_to_inference_engines(
         self,
@@ -289,7 +547,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         peft_model = getattr(self.model.model, "_fsdp_wrapped_module", self.model.model)
 
         if self._is_lora:
-            assert hasattr(peft_model, "peft_config"), "LoRA model should have peft_config"
+            if not self._is_concurrent_lora:
+                assert hasattr(peft_model, "peft_config"), "LoRA model should have peft_config"
 
             # Multi-tenant: per-adapter subdir + per-adapter vLLM name.
             # Single-tenant (model_id=None) keeps the legacy shared path +
@@ -316,7 +575,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         if cache_reset_task is not None:
             await cache_reset_task
         torch.cuda.empty_cache()
-        torch.distributed.barrier()
+        if not self._is_lora:
+            torch.distributed.barrier()
 
     def _set_pad_token_id(self, pad_token_id):
         # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model.model -> AutoModelForCausalLM
@@ -359,7 +619,8 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         use_meta = should_use_meta_init(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=not model_config.tie_word_embeddings,
+            mesh=self.strategy.device_mesh,
         )
 
         critic = get_llm_for_sequence_regression(
@@ -424,7 +685,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         use_meta = should_use_meta_init(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=not model_config.tie_word_embeddings,
+            mesh=self.strategy.device_mesh,
         )
 
         wrapped_model = HFModelWrapper(

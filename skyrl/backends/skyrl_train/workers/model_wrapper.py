@@ -31,6 +31,7 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
 )
+from skyrl.backends.skyrl_train.workers.fsdp.multi_lora import inject_multi_lora
 
 
 class HFModelWrapper(nn.Module):
@@ -69,6 +70,8 @@ class HFModelWrapper(nn.Module):
         lora_init_method="kaiming",
         target_modules=None,
         exclude_modules=None,
+        concurrent_lora=False,
+        max_lora_adapters=1,
         device_map=None,
         temperature=1.0,
         use_liger_kernel=False,
@@ -87,6 +90,7 @@ class HFModelWrapper(nn.Module):
         self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.remove_microbatch_padding = remove_microbatch_padding
         self.is_vlm = False
+        self.multi_lora_manager = None
         if remove_microbatch_padding:
             assert (
                 self.attn_implementation == "flash_attention_2"
@@ -183,7 +187,21 @@ class HFModelWrapper(nn.Module):
                     patch_GptOssAttention()
 
             # LoRA
-            if lora_rank > 0:
+            if lora_rank > 0 and concurrent_lora:
+                if lora_init_method != "kaiming":
+                    raise ValueError("Concurrent FSDP LoRA currently supports init_method='kaiming' only")
+                self.model.enable_input_require_grads()
+
+                self.multi_lora_manager = inject_multi_lora(
+                    self.model,
+                    max_adapters=max_lora_adapters,
+                    rank=lora_rank,
+                    alpha=lora_alpha,
+                    dropout=lora_dropout,
+                    target_modules=target_modules,
+                    exclude_modules=exclude_modules,
+                )
+            elif lora_rank > 0:
                 # https://github.com/huggingface/peft/issues/137
                 self.model.enable_input_require_grads()
                 lora_config = LoraConfig(
@@ -250,8 +268,11 @@ class HFModelWrapper(nn.Module):
         pixel_values: Optional[TensorList] = None,
         image_grid_thw: Optional[TensorList] = None,
         mm_token_type_ids: Optional[torch.Tensor] = None,
+        adapter_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Returns action log probs"""
+        if self.multi_lora_manager is not None:
+            self.multi_lora_manager.set_adapter_indices(adapter_indices)
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
         if self.is_vlm:
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.

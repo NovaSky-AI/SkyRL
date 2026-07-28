@@ -70,6 +70,7 @@ class Experience:
     rollout_expert_indices: Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]]
     num_actions: int
     info: Optional[dict]
+    adapter_indices: Optional[Integer[torch.Tensor, "batch"]] = None  # noqa: F821
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
     metadata: Optional[Dict[str, Any]] = None
     pixel_values: Optional[TensorList] = None
@@ -101,6 +102,8 @@ class Experience:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
         if self.rollout_expert_indices is not None:
             self.rollout_expert_indices = to(self.rollout_expert_indices, device)
+        if self.adapter_indices is not None:
+            self.adapter_indices = to(self.adapter_indices, device)
         if self.pixel_values is not None:
             self.pixel_values = self.pixel_values.to(device)
         if self.image_grid_thw is not None:
@@ -130,6 +133,8 @@ class Experience:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
         if self.rollout_expert_indices is not None:
             self.rollout_expert_indices = self.rollout_expert_indices.pin_memory()
+        if self.adapter_indices is not None:
+            self.adapter_indices = self.adapter_indices.pin_memory()
         return self
 
 
