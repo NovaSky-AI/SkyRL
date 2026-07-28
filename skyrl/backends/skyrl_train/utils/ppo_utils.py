@@ -1163,7 +1163,7 @@ def apply_loss_reduction_to_advantages_minibatch(
             For step-wise training, minibatch_size can be variable.
         loss_mask: Mask of shape (minibatch_size, seq_len) indicating valid loss tokens.
         loss_reduction: One of "token_mean", "token_mean_legacy", "sequence_mean",
-            "seq_mean_token_sum_norm", "prompt_mean".
+            "seq_mean_token_sum_norm", "prompt_mean", "token_sum".
         micro_batch_size: Number of sequences per micro-batch
         max_seq_len: Maximum sequence length.
         prompt_boundaries: Mini-batch-relative (start, end) slices grouping the sequences of
@@ -1175,8 +1175,14 @@ def apply_loss_reduction_to_advantages_minibatch(
     batch_size = advantages.shape[0]
     normalized_advantages = torch.zeros_like(advantages)
 
+    # Option 0: raw token sum (identity). The default on the Tinker-serving
+    # path, where the API contract is that per-token losses are summed and
+    # clients pre-normalize advantages themselves.
+    if loss_reduction == "token_sum":
+        normalized_advantages = advantages
+
     # Option 1: token mean
-    if loss_reduction == "token_mean":
+    elif loss_reduction == "token_mean":
         normalized_advantages = advantages / loss_mask.sum().clamp(min=1)
 
     # Option 1b: legacy token-mean that normalizes per-microbatch then averages across microbatches.

@@ -614,6 +614,21 @@ def test_registry_reset_after_ray_shutdown():
 class TestApplyLossReductionToAdvantagesMinibatch:
     """Tests for apply_loss_reduction_to_advantages_minibatch."""
 
+    def test_token_sum_is_identity(self):
+        """Token sum: raw sum with no normalization (Tinker-serving default)."""
+        advantages = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        loss_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0]])
+        scaled = apply_loss_reduction_to_advantages_minibatch(
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_reduction="token_sum",
+            micro_batch_size=1,
+            max_seq_len=2,
+        )
+        assert torch.equal(scaled, advantages)
+        loss = reduce_loss(scaled, loss_mask)
+        assert torch.allclose(loss, torch.tensor(6.0))
+
     def test_token_mean(self):
         advantages = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
         loss_mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])

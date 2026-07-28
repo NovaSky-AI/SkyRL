@@ -26,6 +26,9 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    apply_loss_reduction_to_advantages_minibatch,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -91,7 +94,23 @@ def _build_skyrl_train_config(
         "megatron",
     ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
     user_overrides["trainer.strategy"] = overrides.strategy
+    # The Tinker-serving path has historically *summed* per-token losses with
+    # no reduction: SkyRL-Train applies `loss_reduction` to advantages in its
+    # native RL loop (trainer.py), which the Tinker API bypasses. Default to
+    # the explicit no-op so existing behavior is preserved; an explicit
+    # `trainer.algorithm.loss_reduction` in --backend-config is honored when
+    # the batch is built (see `_to_training_batch`).
+    user_overrides.setdefault("trainer.algorithm.loss_reduction", "token_sum")
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
+
+    if cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm" and cfg.trainer.algorithm.max_seq_len is None:
+        # Mirror `validate_cfg`; the Tinker-serving path never calls it.
+        raise ValueError(
+            "`trainer.algorithm.max_seq_len` must be set explicitly when "
+            "`trainer.algorithm.loss_reduction='seq_mean_token_sum_norm'`. "
+            "Choose the total sequence-length normalization constant for your setup; "
+            "this often matches the model context window / vLLM `max_model_len` when appropriate."
+        )
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
     cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
@@ -109,6 +128,40 @@ def _build_skyrl_train_config(
 
     logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
     return cfg
+
+
+def _apply_tinker_loss_reduction(
+    advantages: torch.Tensor,
+    loss_mask: torch.Tensor,
+    loss_reduction: str,
+    micro_batch_size: int,
+    max_seq_len: int | None,
+) -> torch.Tensor:
+    """Scale Tinker-client advantages per ``trainer.algorithm.loss_reduction``.
+
+    The Tinker API contract is that the trainer *sums* per-token losses, so
+    clients pre-normalize advantages (see ``examples/tinker/ppo/ppo_client.py``).
+    SkyRL-Train expresses that normalization as ``loss_reduction`` and applies
+    it to advantages in its native RL loop — which the Tinker-serving path
+    bypasses. Honor the same config key here so setting
+    ``trainer.algorithm.loss_reduction`` via ``--backend-config`` takes effect
+    for Tinker clients too. ``token_sum`` (the serving default) is the identity.
+    """
+    if loss_reduction == "token_sum":
+        return advantages
+    if loss_reduction == "prompt_mean":
+        raise ValueError(
+            "`prompt_mean` loss reduction is not supported on the Tinker-serving path: "
+            "prompt groupings are not visible to the trainer. Use `token_mean`, "
+            "`sequence_mean`, or `seq_mean_token_sum_norm`."
+        )
+    return apply_loss_reduction_to_advantages_minibatch(
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_reduction=loss_reduction,
+        micro_batch_size=micro_batch_size,
+        max_seq_len=max_seq_len,
+    )
 
 
 class SkyRLTrainBackend(AbstractBackend):
@@ -663,7 +716,20 @@ class SkyRLTrainBackend(AbstractBackend):
             # configured (rollout logprobs are its intended input).
             batch_dict["rollout_logprobs"] = action_log_probs_tensor
         if has_advantages:
-            batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
+            advantages_tensor = torch.tensor(advantages_list, dtype=torch.float32)
+            if role != "critic":
+                # Honor trainer.algorithm.loss_reduction on the Tinker-serving
+                # path; "token_sum" (the default) leaves advantages untouched.
+                # Applied before `_pad_batch`, whose zero-masked pad rows would
+                # not change the normalization but are cheaper to exclude.
+                advantages_tensor = _apply_tinker_loss_reduction(
+                    advantages_tensor,
+                    loss_mask_tensor,
+                    loss_reduction=self._cfg.trainer.algorithm.loss_reduction,
+                    micro_batch_size=self._cfg.trainer.micro_train_batch_size_per_gpu,
+                    max_seq_len=self._cfg.trainer.algorithm.max_seq_len,
+                )
+            batch_dict["advantages"] = advantages_tensor
         if role == "critic":
             if has_values != has_returns:
                 raise ValueError("Critic batches must provide both values and returns, or neither")
