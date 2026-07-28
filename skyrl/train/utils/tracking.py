@@ -16,7 +16,6 @@
 # limitations under the License.
 
 import dataclasses
-import numbers
 import pprint
 import re
 import traceback
@@ -92,7 +91,7 @@ class Tracking:
             self.logger.log(data=data, step=step)
         # Mirror each numeric value to a Prometheus gauge, one per key.
         for key, value in data.items():
-            if isinstance(value, numbers.Real):
+            if isinstance(value, (int, float)):
                 self._prometheus.set(_prometheus_name(key), value)
 
     def log_gauge(self, name: str, value: float, description: Optional[str] = None) -> None:
