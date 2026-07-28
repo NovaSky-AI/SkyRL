@@ -142,7 +142,7 @@ class RayPPOTrainer:
 
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
-        # global_step and epoch reach Prometheus through the Tracking.log mirror; these are the rest.
+        # Step start/end timestamps. global_step and epoch already reach Prometheus via the Tracking.log mirror.
         self._step_gauges = ScalarGauges()
 
         # trajectory logger is installed after construction if needed
