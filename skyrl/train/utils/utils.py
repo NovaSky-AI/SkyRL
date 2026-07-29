@@ -205,6 +205,15 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
+        # Megatron's fused top-k returns before compute_topk consults router_replay
+        # (moe_utils.topk_routing_with_score_function), so the replayed experts are
+        # silently discarded while R3 still pays its full cost. Refuse the pair rather
+        # than train against routing that does not match the rollout.
+        if config.megatron_config.moe_enable_routing_replay:
+            assert not config.megatron_config.transformer_config_kwargs.get("moe_router_fusion"), (
+                f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
+                "moe_router_fusion=True -- the fused router bypasses replay. Set moe_router_fusion=False."
+            )
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert (
