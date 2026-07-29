@@ -170,8 +170,8 @@ class RayPPOTrainer:
             cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
         )
 
-    def _mark_step_start(self, start_time: float) -> None:
-        self._step_gauges.set("skyrl_step_start_unixtime", start_time, "Wall-clock start of the current step.")
+    def _mark_step_start(self) -> None:
+        self._step_gauges.set("skyrl_step_start_unixtime", time.time(), "Wall-clock start of the current step.")
 
     def _mark_step_end(self) -> None:
         self._step_gauges.set("skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step.")
@@ -341,7 +341,7 @@ class RayPPOTrainer:
                     if not step_started:
                         self._fire("on_step_start")
                         step_started = True
-                        self._mark_step_start(time.time())
+                        self._mark_step_start()
                         # Open the train-rollout metrics window once per logical
                         # step; paused so only the generation spans count toward the
                         # throughput denominator (dynamic sampling may generate more
