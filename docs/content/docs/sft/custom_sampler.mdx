@@ -123,11 +123,7 @@ difficulty-ordered stages via the injected `lengths`.
 
 ## Config reference
 
-| Parameter | Description |
-|-----------|-------------|
-| `sampler` | `random` (default), `sequential`, or `custom` |
-| `sampler_class_path` | Dotted import path (`module.path.ClassName`) to a custom stateful sampler; required when `sampler=custom` |
-| `sampler_kwargs` | Keyword args forwarded to the custom sampler constructor |
-| `dataloader_num_workers` | Worker processes for the `StatefulDataLoader` (`0` = main process) |
-| `dataloader_persistent_workers` | Keep dataloader workers alive across epochs (needs `dataloader_num_workers > 0`) |
-| `seed` | Seed for shuffling / deterministic sampler plans |
+See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft#configuration)
+for the full documentation of the sampler and dataloader fields: `sampler`,
+`sampler_class_path`, `sampler_kwargs`, `dataloader_num_workers`,
+`dataloader_persistent_workers`, and `seed`.

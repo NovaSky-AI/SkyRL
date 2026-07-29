@@ -90,14 +90,8 @@ is now `eval/{name}/loss`, even with a single eval dataset.
 
 ## Config reference
 
-| Parameter | Description |
-|-----------|-------------|
-| `train_datasets` | List of dataset names/paths to train on |
-| `train_dataset_splits` | Split/slice per training dataset (same length as `train_datasets`) |
-| `train_dataset_weights` | Per-source per-batch sampling ratios, independent of dataset size (`sampler=random` only). Defaults to equal mixing |
-| `eval_datasets` | List of eval dataset names (`None` disables eval) |
-| `eval_dataset_splits` | Split per eval dataset (same length as `eval_datasets`) |
-| `eval_dataset_names` | Optional shorthand names for logging (`eval/{name}/loss`); must be unique |
-| `eval_interval` | Run eval every N training steps (`0` disables periodic eval) |
-| `eval_before_train` | Run a baseline eval pass before training (logged at step 0) |
-| `messages_key` / `tools_key` / `system_key` | Column names shared across all datasets |
+See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft#configuration)
+for the full documentation of the dataset and evaluation fields:
+`train_datasets`, `train_dataset_splits`, `train_dataset_weights`,
+`eval_datasets`, `eval_dataset_splits`, `eval_dataset_names`, `eval_interval`,
+`eval_before_train`, and `messages_key` / `tools_key` / `system_key`.
