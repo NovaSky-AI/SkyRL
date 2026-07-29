@@ -5,7 +5,7 @@ set -x
 # using checkpoint-delta weight sync through S3.
 
 # Run:
-# bash examples/train/delta_weight_sync/disagg/run_gsm8k_qwen1p5b_s3.sh
+# bash examples/train/delta_weight_sync/disagg/serve_qwen1p5b_s3.sh
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${MODEL:=Qwen/Qwen2.5-1.5B-Instruct}"
