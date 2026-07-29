@@ -218,33 +218,8 @@ and
 
 ## Key configuration
 
-The table below lists the most common knobs; see
-[`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft#configuration) for
-the full set.
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `strategy` | `megatron` | Backend: `megatron` or `fsdp` |
-| `model.path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path |
-| `model.lora.rank` | `0` | LoRA rank (`0` = full fine-tuning) |
-| `placement.num_nodes` / `placement.num_gpus_per_node` | `1` / `4` | GPUs allocated to the run |
-| `optimizer_config.lr` | `1e-6` | Peak learning rate |
-| `train_datasets` | `[yahma/alpaca-cleaned]` | Datasets to train on (mixed per `train_dataset_weights`) |
-| `train_dataset_splits` | `[train[:100]]` | Split/slice per training dataset |
-| `pretokenized_dataset_paths` | `None` | Local paths to pretokenized stores; skips tokenization, exclusive with `train_datasets` |
-| `eval_datasets` | `None` | Eval datasets (`None` disables eval) |
-| `max_length` | `None` | Max sequence length (no truncation if unset) |
-| `num_steps` / `num_epochs` | `None` / `1` | Training length (mutually exclusive) |
-| `batch_size` | `4` | Global batch size |
-| `micro_train_batch_size_per_gpu` | `2` | Micro-batch size per GPU |
-| `train_on_what` | `last_assistant_message` | Which tokens to compute loss on |
-| `sampler` | `random` | `random`, `sequential`, or `custom` |
-| `remove_microbatch_padding` | `true` | Pack sequences per micro-batch (needs flash attention) |
-| `use_sequence_packing` | `false` | Controller-level FFD bin-packing (Megatron only) |
-| `ckpt_path` / `ckpt_interval` | `""` / `0` | Checkpoint dir and cadence |
-| `resume_from` | `""` | `""`, `"latest"`, or a `global_step_N` path |
-| `logger` | `console` | `console` or `wandb` |
-| `seed` | `42` | Seed for shuffling / reproducibility |
+See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft#configuration)
+for the full set of knobs with defaults and descriptions.
 
 ## Next steps
 
