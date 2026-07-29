@@ -96,8 +96,7 @@ class WeightTransferStrategy(ABC):
             inference_world_size: Total number of inference workers (from
                 ``client.get_world_size()``). Required by strategies that use it
                 (broadcast); strategies that don't (CUDA IPC) ignore it.
-            base_model_path: Policy model path. Required by disk-delta sync so
-                trainer and receiver resolve the same checkpoint baseline.
+            base_model_path: Policy model path.
 
         Returns:
             WeightSyncInitInfo containing all args needed for sender/receiver creation.

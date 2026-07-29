@@ -586,6 +586,9 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             "offload_kv_for_weight_sync does not support LoRA weight sync "
             "(the in-place LoRA adapter swap path does not go through the sleep/wake broadcast)."
         )
+        assert (
+            ie_cfg.weight_sync_backend != "delta"
+        ), "Offloading KV cache during weight sync is not supported for delta weight sync"
 
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
