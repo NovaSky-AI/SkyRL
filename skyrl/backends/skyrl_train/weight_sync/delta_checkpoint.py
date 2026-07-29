@@ -733,12 +733,16 @@ class LocalCheckpointStore:
                 path = locations[resolved_name].path
                 if path not in mmaps:
                     fh = path.open("r+b")
-                    mm = mmap.mmap(fh.fileno(), 0)
                     try:
-                        mm.madvise(mmap.MADV_WILLNEED)
-                    except (AttributeError, OSError, ValueError):
-                        pass
-                    mmaps[path] = (fh, mm)
+                        mm = mmap.mmap(fh.fileno(), 0)
+                        try:
+                            mm.madvise(mmap.MADV_WILLNEED)
+                        except (AttributeError, OSError, ValueError):
+                            pass
+                        mmaps[path] = (fh, mm)
+                    except Exception:
+                        fh.close()
+                        raise
 
             def apply_one(item: tuple[DeltaTensorRecord, str, bytes]) -> None:
                 record, resolved_name, compressed = item
