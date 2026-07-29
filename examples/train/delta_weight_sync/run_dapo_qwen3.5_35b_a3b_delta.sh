@@ -81,7 +81,6 @@ DISTRIBUTED_EXECUTOR_BACKEND="mp"
 : "${CLOUD_EXTRA:=gcp}"
 
 SKYRL_DUMP_INFRA_LOG_TO_STDOUT="${SKYRL_DUMP_INFRA_LOG_TO_STDOUT:-1}" \
-RAY_DEDUP_LOGS="$RAY_DEDUP_LOGS" \
 uv run --isolated --extra megatron --extra "$CLOUD_EXTRA" -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \

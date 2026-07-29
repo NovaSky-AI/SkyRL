@@ -26,7 +26,7 @@ set -x
 # s3:// needs `s5cmd`, which the `aws` extra installs into the run's venv.
 : "${CLOUD_EXTRA:=aws}"
 
-SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1 \
+SKYRL_DUMP_INFRA_LOG_TO_STDOUT="${SKYRL_DUMP_INFRA_LOG_TO_STDOUT:-1}" \
 uv run --isolated --extra fsdp --extra "$CLOUD_EXTRA" -m skyrl.train.entrypoints.serve \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
