@@ -38,6 +38,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+TINY_MOE_MODEL_NAME = "eatang/qwen3-moe-tiny-random"
 
 
 def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
@@ -192,6 +193,89 @@ async def test_megatron_policy_weight_sync(
             outputs = await run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
 
             print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.megatron
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() not in ((10, 0), (10, 3)),
+    reason="Expert MXFP8 requires SM100 or SM103",
+)
+async def test_expert_mxfp8_training_and_weight_sync(ray_init_fixture):
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            f"trainer.policy.model.path={TINY_MOE_MODEL_NAME}",
+            "trainer.policy.model.expert_mxfp8.enabled=true",
+            "trainer.policy.model.expert_mxfp8.persistent=true",
+            "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true",
+            "trainer.placement.policy_num_gpus_per_node=1",
+            "generator.inference_engine.fp8_weight_sync_mode=serialized_mxfp8",
+            "generator.inference_engine.num_engines=1",
+            "generator.inference_engine.tensor_parallel_size=1",
+            "trainer.micro_forward_batch_size_per_gpu=1",
+            "trainer.micro_train_batch_size_per_gpu=1",
+        ]
+    )
+
+    try:
+        async with InferenceEngineState.create(
+            cfg=cfg,
+            model=TINY_MOE_MODEL_NAME,
+            use_local=True,
+            backend="vllm",
+            sleep_level=2,
+        ) as engines:
+            client, pg = engines.client, engines.pg
+            await client.sleep()
+            policy = init_worker_with_type(
+                "policy",
+                shared_pg=pg,
+                colocate_all=True,
+                num_gpus_per_node=1,
+                cfg=cfg,
+            )
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through",
+                    "init_weight_sync_state",
+                    client,
+                    cfg.generator.inference_engine,
+                )
+            )
+
+            batch = get_test_training_batch()
+            batch.metadata["global_step"] = 0
+            ray.get(policy.async_run_ray_method("mesh", "forward_backward", batch))
+            ray.get(policy.async_run_ray_method("pass_through", "optim_step"))
+
+            await client.wake_up(tags=["weights"])
+            for _ in range(2):
+                ray.get(
+                    policy.async_run_ray_method(
+                        "pass_through",
+                        "broadcast_to_inference_engines",
+                        client,
+                        cfg.generator.inference_engine,
+                    )
+                )
+            policy.offload_to_cpu()
+            await client.wake_up(tags=["kv_cache"])
+
+            tokenizer = AutoTokenizer.from_pretrained(TINY_MOE_MODEL_NAME, trust_remote_code=True)
+            sampling_params = get_sampling_params_for_backend(
+                cfg.generator.inference_engine.backend,
+                cfg.generator.sampling_params,
+            )
+            outputs = await run_inference(
+                client,
+                get_test_prompts(TINY_MOE_MODEL_NAME),
+                sampling_params,
+                tokenizer=tokenizer,
+            )
+            assert outputs["responses"]
     finally:
         ray.shutdown()
 
