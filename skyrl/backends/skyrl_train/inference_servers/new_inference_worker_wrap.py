@@ -30,11 +30,12 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
     _empty_cuda_cache_rocm,
 )
-from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
-    register_delta_weight_transfer_engine,
-)
 
 try:
+    from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
+        register_delta_weight_transfer_engine,
+    )
+
     register_delta_weight_transfer_engine()
 except ModuleNotFoundError:
     pass

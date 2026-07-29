@@ -300,6 +300,9 @@ class FileLock:
         except BlockingIOError:
             os.close(fd)
             return False
+        except Exception:
+            os.close(fd)
+            raise
         self._fd = fd
         return True
 
