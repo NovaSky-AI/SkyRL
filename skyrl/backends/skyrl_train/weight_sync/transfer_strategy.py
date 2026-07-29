@@ -38,6 +38,7 @@ class WeightTransferSender(ABC):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        derive_metadata_from_chunks: bool = False,
     ) -> None:
         """Send chunks using this transfer strategy.
 
@@ -47,8 +48,7 @@ class WeightTransferSender(ABC):
         Args:
             chunks: Iterable of WeightChunk objects to send.
             weight_metadata: Optional pre-computed metadata (names, dtype_names, shapes).
-                When provided, allows the sender to avoid materializing all chunks
-                to collect metadata upfront.
+            derive_metadata_from_chunks: Derive metadata from each transferred chunk.
         """
         ...
 

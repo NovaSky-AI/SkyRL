@@ -20,6 +20,11 @@ from ray.util.placement_group import (
 )
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
+from skyrl.backends.skyrl_train.quantization import (
+    SERIALIZED_WEIGHT_STRATEGIES,
+    get_serialized_weight_strategy,
+)
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_LD_LIBRARY_PATH_EXPORT,
@@ -197,6 +202,18 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
+
+    policy_cfg = cfg.trainer.policy
+    policy_fp8_param = is_fp8_enabled(policy_cfg.megatron_config.transformer_config_kwargs.get("fp8_param"))
+    if (
+        policy_fp8_param
+        and not policy_cfg.inference_only_init
+        and not policy_cfg.megatron_config.ddp_config.fp8_param_gather
+    ):
+        raise ValueError(
+            "Persistent policy fp8_param training requires "
+            "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true"
+        )
 
     if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
         assert (
@@ -531,6 +548,23 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     """
     ie_cfg = cfg.generator.inference_engine
 
+    serialized_mode = ie_cfg.resolved_serialized_weight_sync_mode
+    supported_serialized_modes = tuple(SERIALIZED_WEIGHT_STRATEGIES)
+    if serialized_mode not in (None, *supported_serialized_modes):
+        raise ValueError(
+            f"Unsupported serialized_weight_sync_mode={serialized_mode!r}; "
+            f"expected one of {supported_serialized_modes!r} or None"
+        )
+    if serialized_mode in supported_serialized_modes:
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError(f"{serialized_mode} weight sync requires trainer.strategy='megatron'")
+        lora_cfg = cfg.trainer.policy.model.lora
+        if lora_cfg.rank > 0 and not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
+            raise ValueError(
+                f"{serialized_mode} weight sync requires full-weight updates; "
+                "Megatron LoRA with merge_lora=false syncs adapters only"
+            )
+
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
         assert (
@@ -622,8 +656,7 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
 
     if not cfg.generator.inference_engine.run_engines_locally and not (has_external_proxy or has_external_servers):
         raise ValueError(
-            "generator.inference_engine.run_engines_locally=false requires "
-            "external_proxy_url or external_server_urls."
+            "generator.inference_engine.run_engines_locally=false requires external_proxy_url or external_server_urls."
         )
 
 
@@ -824,6 +857,52 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             f"Exporting `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` to ray runtime env: {health_timeout}"
         )
         env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
+
+    serialized_mode = cfg.generator.inference_engine.resolved_serialized_weight_sync_mode
+    strategy_env = get_serialized_weight_strategy(serialized_mode).build_runtime_env() if serialized_mode else {}
+    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    policy_megatron_config = getattr(cfg.trainer.policy, "megatron_config", None)
+    ref_megatron_config = getattr(cfg.trainer.ref, "megatron_config", None)
+    policy_transformer_kwargs = getattr(policy_megatron_config, "transformer_config_kwargs", None) or {}
+    ref_transformer_kwargs = getattr(ref_megatron_config, "transformer_config_kwargs", None) or {}
+    policy_fp8_param = is_fp8_enabled(policy_transformer_kwargs.get("fp8_param"))
+    ref_fp8_param = use_ref_model and is_fp8_enabled(ref_transformer_kwargs.get("fp8_param"))
+    fp8_compute = is_fp8_enabled(policy_transformer_kwargs.get("fp8")) or (
+        use_ref_model and is_fp8_enabled(ref_transformer_kwargs.get("fp8"))
+    )
+    fp8_contract_enabled = fp8_compute or policy_fp8_param or ref_fp8_param
+
+    fp8_env_defaults: dict[str, str] = {}
+    configured_scale_mode = strategy_env.get(
+        "NVTE_FP8_BLOCK_SCALING_FP32_SCALES",
+        os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES"),
+    )
+    if fp8_contract_enabled or configured_scale_mode is not None:
+        scale_mode = configured_scale_mode or "1"
+        if scale_mode not in {"0", "1"}:
+            raise ValueError("NVTE_FP8_BLOCK_SCALING_FP32_SCALES must be '0' (power-of-2) or '1' (FP32 scales).")
+
+        if scale_mode == "0" and (policy_fp8_param or ref_fp8_param):
+            raise ValueError(
+                "Persistent fp8_param requires FP32 block scales. Blackwell only supports "
+                "power-of-2 block scales, so use fp8_param=false on Blackwell."
+            )
+
+        if fp8_contract_enabled:
+            fp8_env_defaults["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = scale_mode
+    runtime_env = fp8_env_defaults | strategy_env
+    for var_name in (
+        "NVTE_FP8_BLOCK_SCALING_FP32_SCALES",
+        "NVTE_FP8_BLOCK_AMAX_EPSILON",
+        "VLLM_USE_DEEP_GEMM_E8M0",
+    ):
+        if var_name not in runtime_env and (value := os.environ.get(var_name)):
+            runtime_env[var_name] = value
+
+    for var_name, value in runtime_env.items():
+        if value:
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            env_vars[var_name] = value
 
     return env_vars
 
@@ -1038,7 +1117,7 @@ def str_to_torch_dtype(dtype: str) -> torch.dtype:
 
 
 def format_gib(mem_bytes: int) -> str:
-    return f"{mem_bytes / (1024 ** 3):.2f} GiB"
+    return f"{mem_bytes / (1024**3):.2f} GiB"
 
 
 def print_mem(tag: str, mem: dict):

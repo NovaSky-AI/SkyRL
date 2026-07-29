@@ -142,3 +142,47 @@ class TestPreprocessPackedSeqsShortSequencesCP:
                 assert result_ids.shape[1] % 16 == 0
                 assert packed_params.max_seqlen_q % (16 * cp_size) == 0
                 assert packed_params.qkv_format == "thd"
+
+    def test_remove_left_padding_tp1_aligns_only_for_fp8(self):
+        """TP1 applies 16-token alignment only when FP8 is enabled."""
+        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+            remove_left_padding,
+        )
+
+        input_ids = torch.arange(7000).unsqueeze(0)
+        attention_mask = torch.zeros((1, 7000), dtype=torch.bool)
+        attention_mask[0, :6541] = True
+        position_ids = torch.arange(7000).unsqueeze(0)
+
+        with patch("skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu") as mock_mpu:
+            mock_mpu.get_tensor_model_parallel_world_size.return_value = 1
+            mock_mpu.get_context_parallel_world_size.return_value = 1
+
+            bf16_ids, bf16_mask, _ = remove_left_padding(input_ids, attention_mask, position_ids, fp8_enabled=False)
+            fp8_ids, fp8_mask, _ = remove_left_padding(input_ids, attention_mask, position_ids, fp8_enabled=True)
+
+        assert bf16_ids.shape == (1, 6541)
+        assert int(bf16_mask.sum().item()) == 6541
+        assert fp8_ids.shape == (1, 6544)
+        assert int(fp8_mask.sum().item()) == 6541
+
+    def test_remove_left_padding_tp_gt_1_fp8_uses_local_128_alignment(self):
+        """TP2 rounds 8,552 tokens to the 8,704-token global alignment."""
+        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+            remove_left_padding,
+        )
+
+        input_ids = torch.arange(9000).unsqueeze(0)
+        attention_mask = torch.zeros((1, 9000), dtype=torch.bool)
+        attention_mask[0, :8552] = True
+        position_ids = torch.arange(9000).unsqueeze(0)
+
+        with patch("skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu") as mock_mpu:
+            mock_mpu.get_tensor_model_parallel_world_size.return_value = 2
+            mock_mpu.get_context_parallel_world_size.return_value = 1
+
+            fp8_ids, fp8_mask, _ = remove_left_padding(input_ids, attention_mask, position_ids, fp8_enabled=True)
+
+        assert fp8_ids.shape == (1, 8704)
+        assert int(fp8_mask.sum().item()) == 8552
+        assert fp8_ids.shape[1] % (128 * 2) == 0
