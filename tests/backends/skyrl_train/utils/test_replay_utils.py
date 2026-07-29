@@ -6,9 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    build_token_metadata_layout,
+)
 from skyrl.backends.skyrl_train.utils import replay_utils
-from skyrl.utils.routed_experts import make_replay_padding_indices
-from skyrl.utils.token_metadata import build_token_metadata_layout
+from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
 
 
 @pytest.fixture

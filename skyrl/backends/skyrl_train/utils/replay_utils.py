@@ -7,10 +7,41 @@ from typing import List
 
 import torch
 
-from skyrl.utils.token_metadata import (
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     TokenMetadataLayout,
     align_token_metadata,
 )
+
+
+def _replay_padding_row(
+    topk: int,
+    *,
+    dtype: torch.dtype,
+    device: torch.device | str | int | None = None,
+) -> torch.Tensor:
+    """Return one dummy route of ``topk`` distinct experts.
+
+    Synthetic padding tokens still have to satisfy Megatron's dropless
+    ``tokens * topk`` dispatcher invariant, so they route to distinct experts
+    rather than repeating one. ``router_padding_mask`` excludes these rows from
+    expert-bias accounting.
+    """
+    if topk < 1:
+        raise ValueError(f"Replay route padding requires a positive topk dimension, got {topk}")
+    return torch.arange(topk, dtype=dtype, device=device)
+
+
+def make_replay_padding_indices(
+    shape: tuple[int, ...],
+    *,
+    dtype: torch.dtype,
+    device: torch.device | str | int | None = None,
+) -> torch.Tensor:
+    """Return dummy routes with ``topk`` distinct experts in every row."""
+    if not shape:
+        raise ValueError(f"Replay route padding requires a positive topk dimension, got {shape}")
+    padding_row = _replay_padding_row(shape[-1], dtype=dtype, device=device)
+    return padding_row.expand(shape).clone()
 
 
 def patch_topk_router_layer_number():
@@ -177,7 +208,7 @@ def setup_per_microbatch_replay_forward(
     if (metadata_layout.padded_sequence_lengths is not None) != remove_microbatch_padding:
         raise ValueError("Shared token metadata layout does not match the model packing mode")
     aligned_router_padding_mask = align_token_metadata(router_padding_mask.to(torch.bool), metadata_layout, True)
-    route_padding = torch.arange(
+    route_padding = _replay_padding_row(
         rollout_expert_indices.shape[-1],
         dtype=rollout_expert_indices.dtype,
         device=rollout_expert_indices.device,

@@ -44,6 +44,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
+from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
@@ -73,7 +74,6 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
-from skyrl.utils.routed_experts import make_replay_padding_indices
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
@@ -627,8 +627,6 @@ class MegatronWorker:
         Returns:
             CPU tensor of shape ``[batch_size, response_length]`` in original sample order.
         """
-        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
-
         self._drop_pixel_values_on_non_first_pp_stage(data)
 
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
@@ -709,7 +707,6 @@ class MegatronWorker:
             output = TrainingOutputBatch({"output": log_probs})
             output.metadata = data.metadata
 
-        clear_router_replay()
         return output["output"]
 
     def _reorder_megatron_forward_output(
@@ -1017,8 +1014,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         ``loss_fn_outputs`` on the loss path for callers that read only
         ``metrics``; it has no effect on the inference path.
         """
-        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
-
         if loss_fn is None:
             # Megatron inference forward path: emit per-sample logprobs. Token-based
             # micro-batching (when `max_tokens_per_microbatch > 0`) is handled inside
@@ -1108,7 +1103,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)
 
-        clear_router_replay()
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
     def forward_backward(
@@ -1137,8 +1131,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
             ``metrics`` (all-reduced across DP).
         """
-        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
-
         self.model.train()
         for chunk in self.actor_module:
             # if use distributed optimizer, zero grad buffer will be handled by optimizer
@@ -1310,8 +1302,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if moe_metrics:
                 for k, v in moe_metrics.items():
                     status[k] = v
-
-        clear_router_replay()
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 

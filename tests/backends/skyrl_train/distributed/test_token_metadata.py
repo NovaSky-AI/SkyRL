@@ -4,7 +4,7 @@ import types
 import pytest
 import torch
 
-from skyrl.utils import token_metadata
+from skyrl.backends.skyrl_train.distributed.megatron import token_metadata
 
 
 @pytest.fixture

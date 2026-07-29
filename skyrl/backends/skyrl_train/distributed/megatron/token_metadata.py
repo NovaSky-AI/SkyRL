@@ -9,6 +9,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_unpacked_seq_align_size,
 )
 
+# Megatron is imported lazily inside functions so that non-Megatron backends can
+# import this module for its layout dataclass and padding transforms.
+
 
 def _new_metadata_tensor(
     source: torch.Tensor,

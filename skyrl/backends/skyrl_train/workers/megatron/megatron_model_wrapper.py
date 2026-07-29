@@ -29,6 +29,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy_packed_sequences,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    build_token_metadata_layout,
+)
 from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits
 from skyrl.backends.skyrl_train.mtp.hidden_capture import maybe_capture_mtp_hidden
 from skyrl.backends.skyrl_train.mtp.soft_ce import (
@@ -53,7 +56,6 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
 )
 from skyrl.train.config import TrainerConfig
-from skyrl.utils.token_metadata import build_token_metadata_layout
 
 
 def _build_packed_targets(

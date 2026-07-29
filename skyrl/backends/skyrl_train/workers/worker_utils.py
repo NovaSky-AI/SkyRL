@@ -6,10 +6,10 @@ import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import TensorBatch, TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
-from skyrl.utils.routed_experts import make_replay_padding_indices
 
 # Metrics that end in `_loss` but are plain per-token MEANS, not pre-scaled minibatch sums.
 # The `sum_loss_metrics` convention sums every `_loss` key because the *policy* losses are

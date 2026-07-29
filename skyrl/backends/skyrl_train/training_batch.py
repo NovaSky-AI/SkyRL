@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from jaxtyping import Bool, Float, Integer
 
-from skyrl.utils.routed_experts import make_replay_padding_indices
+from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
 
 DictType = TypeVar("DictType")
 
