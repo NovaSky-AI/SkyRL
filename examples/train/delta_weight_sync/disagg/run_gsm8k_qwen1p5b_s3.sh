@@ -5,6 +5,10 @@ set -x
 # using checkpoint-delta weight sync through S3.
 # Ensure that you populate the `EXTERNAL_PROXY_URL` and `EXTERNAL_SERVER_URLS`
 
+# Run:
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# export WANDB_API_KEY=<your_key_here>
+# bash examples/train/delta_weight_sync/disagg/run_gsm8k_qwen1p5b_s3.sh
 
 : "${EXTERNAL_PROXY_URL:?Set EXTERNAL_PROXY_URL to the proxy url launched with the serve entrypoint}"
 : "${EXTERNAL_SERVER_URLS:?Set EXTERNAL_SERVER_URLS to the server urls of the individual servers}"

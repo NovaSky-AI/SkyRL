@@ -4,6 +4,9 @@ set -x
 # Serve script for disaggregated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K
 # using checkpoint-delta weight sync through S3.
 
+# Run:
+# bash examples/train/delta_weight_sync/disagg/run_gsm8k_qwen1p5b_s3.sh
+
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${MODEL:=Qwen/Qwen2.5-1.5B-Instruct}"
 : "${TRAINER_NUM_GPUS:=4}"
