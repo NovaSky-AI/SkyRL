@@ -20,6 +20,7 @@ from typing import Any
 import ray
 
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config.config import DeltaWeightSyncConfig
 from skyrl.train.utils.utils import initialize_ray, validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.delta_weight_sync_utils import (
     init_policy_worker_for_delta,
@@ -81,13 +82,14 @@ def build_cfg(args: argparse.Namespace) -> SkyRLTrainConfig:
     ie_cfg.gpu_memory_utilization = args.gpu_memory_utilization
     ie_cfg.language_model_only = args.language_model_only
     ie_cfg.engine_init_kwargs = _json_dict(args.engine_init_kwargs)
-    ie_cfg.delta_weight_sync.sync_dir = args.sync_dir
-    ie_cfg.delta_weight_sync.local_checkpoint_dir = args.local_checkpoint_dir
-    ie_cfg.delta_weight_sync.max_file_size_in_gb = args.max_file_size_in_gb
-    ie_cfg.delta_weight_sync.publish_num_workers = args.publish_num_workers
-    ie_cfg.delta_weight_sync.checkpoint_load_format = args.checkpoint_load_format
-    ie_cfg.delta_weight_sync.multi_thread_safetensors_max_workers = args.multi_thread_safetensors_max_workers
-
+    ie_cfg.delta_weight_sync = DeltaWeightSyncConfig(
+        sync_dir=args.sync_dir,
+        local_checkpoint_dir=args.local_checkpoint_dir,
+        max_file_size_in_gb=args.max_file_size_in_gb,
+        publish_num_workers=args.publish_num_workers,
+        checkpoint_load_format=args.checkpoint_load_format,
+        multi_thread_safetensors_max_workers=args.multi_thread_safetensors_max_workers,
+    )
     validate_cfg(cfg)
     return cfg
 
