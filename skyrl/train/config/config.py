@@ -7,6 +7,7 @@ can be constructed from a Hydra DictConfig via SkyRLTrainConfig.from_dict_config
 
 import copy
 import dataclasses
+import json
 import os
 import typing
 from abc import ABC
@@ -1123,6 +1124,39 @@ def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
         raise ValueError(f"Invalid fields {invalid_keys} for {datacls.__name__}. Valid fields are {valid_fields}.")
 
 
+def overrides_dict_to_dotlist(args: Dict[str, Any]) -> List[str]:
+    """Serialize a dict of config overrides into an OmegaConf dotlist.
+
+    ``OmegaConf.from_cli`` re-parses the right-hand side of each ``key=value``
+    entry using YAML scalar rules, so values are serialized as JSON: JSON is a
+    subset of YAML, so ``None`` becomes ``null``, bools become ``true``/``false``,
+    and strings are quoted, which suppresses YAML scalar interpretation of values
+    like ``"null"``, ``"true"``, ``"1e5"``, ``"[a]"``, ``"a: b"`` and ``""``.
+
+    ``ensure_ascii=False`` keeps non-ASCII characters literal. With the default
+    ``\\uXXXX`` escaping, characters outside the basic multilingual plane are
+    emitted as a surrogate pair, and OmegaConf decodes each half into a separate
+    lone surrogate that later fails to UTF-8 encode.
+
+    Values JSON cannot represent are serialized with ``str()``.
+
+    Args:
+        args: Mapping of dot-notation config keys to override values.
+
+    Returns:
+        A list of ``key=value`` strings suitable for ``OmegaConf.from_cli``.
+    """
+    dotlist = []
+    for key, value in args.items():
+        try:
+            serialized = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            # TypeError: unsupported type. ValueError: circular reference.
+            serialized = str(value)
+        dotlist.append(f"{key}={serialized}")
+    return dotlist
+
+
 def _has_nested_key(cfg: Any, path: str) -> bool:
     node = cfg
     for key in path.split("."):
@@ -1283,6 +1317,8 @@ class SkyRLTrainConfig(BaseConfig):
                   mapping dot-notation keys to values.
                   Example list: ['trainer.policy.model.path=Qwen/Qwen2.5-1.5B-Instruct', 'trainer.seed=123']
                   Example dict: {'trainer.policy.model.path': 'Qwen/Qwen2.5-1.5B-Instruct', 'trainer.seed': 123}
+                  Dict values are serialized as JSON, so ``None``, bools, strings,
+                  lists and nested dicts keep their types.
 
         Returns:
             A fully constructed SkyRLTrainConfig with CLI overrides applied.
@@ -1291,11 +1327,7 @@ class SkyRLTrainConfig(BaseConfig):
             ValueError: If an argument uses the unsupported '+' prefix.
         """
         if isinstance(args, dict):
-            # OmegaConf's CLI parser only treats "null" as None; Python's
-            # None stringifies to "None" which is parsed as the literal
-            # string. Map None -> "null" so JSON-style overrides survive
-            # the round-trip through OmegaConf.from_cli below.
-            args = [f"{k}=null" if v is None else f"{k}={v}" for k, v in args.items()]
+            args = overrides_dict_to_dotlist(args)
 
         # Check for unsupported '+' prefix
         for arg in args:
