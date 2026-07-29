@@ -1,24 +1,23 @@
 """Tests for prefix cache reset behaviour in `PolicyWorker.broadcast_to_inference_engines`
 
-when ``WeightTransferSender.handles_prefix_cache_reset`` is ``True``,
+When ``WeightTransferSender.handles_prefix_cache_reset`` is ``True``,
 the sender will resets the cache itself as part of its own pause/update sequence
 (``DeltaWeightTransferSender`` does this inside ``_apply_receiver_update``), and the worker must skip
 this.
 
-uv run --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_prefix_cache_reset.py
+uv run --extra dev --extra fsdp -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_prefix_cache_reset.py -m "not megatron"
+uv run --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_prefix_cache_reset.py -m "megatron"
 """
 
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Type
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
-from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-    MegatronPolicyWorkerBase,
-)
+from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
 
 
 # TODO (sumanthrh): Ideally we avoid all this mocking with an easier way to construct dummy policy workers
@@ -58,9 +57,28 @@ def _ie_cfg():
     return SimpleNamespace(enable_prefix_caching=True, model_dtype="bfloat16")
 
 
+def get_worker_cls(strategy: str) -> Type[PolicyWorkerBase]:
+    if strategy == "fsdp":
+        from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+            FSDPPolicyWorkerBase,
+        )
+
+        return FSDPPolicyWorkerBase
+    elif strategy == "megatron":
+        from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+            MegatronPolicyWorkerBase,
+        )
+
+        return MegatronPolicyWorkerBase
+    else:
+        raise ValueError(f"Invalid worker cls: {strategy}")
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("worker_cls", [FSDPPolicyWorkerBase, MegatronPolicyWorkerBase])
-async def test_worker_skips_prefix_cache_reset_when_sender_handles_it(worker_cls, monkeypatch):
+@pytest.mark.parametrize("strategy", ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)])
+async def test_worker_skips_prefix_cache_reset_when_sender_handles_it(strategy, monkeypatch):
+    worker_cls = get_worker_cls(strategy)
+
     _patch_collectives(monkeypatch)
     worker = _make_worker(worker_cls, handles_prefix_cache_reset=True)
     client = AsyncMock()
@@ -75,8 +93,10 @@ async def test_worker_skips_prefix_cache_reset_when_sender_handles_it(worker_cls
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("worker_cls", [FSDPPolicyWorkerBase, MegatronPolicyWorkerBase])
-async def test_worker_resets_prefix_cache_when_sender_does_not(worker_cls, monkeypatch):
+@pytest.mark.parametrize("strategy", ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)])
+async def test_worker_resets_prefix_cache_when_sender_does_not(strategy, monkeypatch):
+    worker_cls = get_worker_cls(strategy)
+
     _patch_collectives(monkeypatch)
     worker = _make_worker(worker_cls, handles_prefix_cache_reset=False)
     client = AsyncMock()
@@ -88,8 +108,10 @@ async def test_worker_resets_prefix_cache_when_sender_does_not(worker_cls, monke
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("worker_cls", [FSDPPolicyWorkerBase, MegatronPolicyWorkerBase])
-async def test_no_reset_when_prefix_caching_disabled(worker_cls, monkeypatch):
+@pytest.mark.parametrize("strategy", ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)])
+async def test_no_reset_when_prefix_caching_disabled(strategy, monkeypatch):
+    worker_cls = get_worker_cls(strategy)
+
     _patch_collectives(monkeypatch)
     worker = _make_worker(worker_cls, handles_prefix_cache_reset=False)
     client = AsyncMock()

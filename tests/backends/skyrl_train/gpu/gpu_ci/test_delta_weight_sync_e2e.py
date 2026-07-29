@@ -1,4 +1,6 @@
 """
+Weight sync tests for delta weight syncing with simulated updates
+
 Run with:
 uv run --isolated --extra dev --extra fsdp pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/test_delta_weight_sync_e2e.py -m "not megatron"
 uv run --isolated --extra dev --extra megatron pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/test_delta_weight_sync_e2e.py -m megatron
