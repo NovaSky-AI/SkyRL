@@ -80,7 +80,7 @@ For `s3://` paths, S3 credentials must be available on the trainer and inference
 
 We also show an example of disaggregated RL where the training and inference workers can be run on separate clusters and sync via S3.
 
-### Spin up inference servers
+### Inference cluster: Spin up inference servers
 
 Utilize the `serve` entrypoint to spin up standalone inference servers:
 
@@ -100,7 +100,15 @@ Note down the proxy and server urls from the logs:
 (VLLMServerActor pid=3400100) 
 ```
 
-### Run training
+### Training Cluster: Data Preparation
+
+On the training cluster, prepare GSM8K data first:
+
+```bash
+uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir "$HOME/data/gsm8k"
+```
+
+### Training Cluster: Run training
 
 Using the proxy and server urls, launch disaggregated training in the training cluster:
 
