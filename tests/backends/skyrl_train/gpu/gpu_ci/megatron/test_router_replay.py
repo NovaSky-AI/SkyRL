@@ -64,6 +64,7 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.remove_microbatch_padding = True
     cfg.generator.inference_engine.distributed_executor_backend = "mp"
+    # turn on optimizer offload for Moonlight 16B on 4xH100
     cfg.trainer.policy.megatron_config.optimizer_config_kwargs = {
         "overlap_cpu_optimizer_d2h_h2d": True,
         "use_precision_aware_optimizer": True,

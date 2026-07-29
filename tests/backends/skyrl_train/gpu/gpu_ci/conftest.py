@@ -1,6 +1,5 @@
 import contextlib
 import os
-import sysconfig
 from functools import lru_cache
 
 import pytest
@@ -15,33 +14,6 @@ from skyrl.train.utils.utils import peer_access_supported
 def log_once(msg):
     logger.info(msg)
     return None
-
-
-def _pip_cudnn_env_vars():
-    """Pin cuDNN to the `nvidia-cudnn-cu12` wheel that TE and torch were built against.
-
-    `transformer_engine` prefers a system CUDA toolkit over pip wheels when it
-    dlopens cuDNN: `_load_cuda_library_from_system` checks `$CUDNN_PATH`, then
-    `$CUDA_HOME`, then `/usr/local/cuda`, and only falls back to site-packages if
-    none of those have a `libcudnn.so*`. On a host with a system toolkit shipping
-    an older cuDNN, TE therefore runs against that one instead of the wheel it
-    was compiled against, and MLA-shaped fused attention (head_dim_qk=192 !=
-    head_dim_v=128) finds no cuDNN engine at all on sm100.
-
-    `CUDNN_PATH` redirects TE's dlopen; `LD_LIBRARY_PATH` is also required
-    because `libcudnn.so.9` is only a shim that loads its sublibraries
-    (`libcudnn_graph.so.9`, `libcudnn_engines_*.so.9`) through the normal loader
-    search path -- those are what `cudnnGetVersion()` actually reports.
-    """
-    cudnn_lib = os.path.join(sysconfig.get_path("purelib"), "nvidia", "cudnn", "lib")
-    if not os.path.isdir(cudnn_lib):
-        return {}
-
-    existing = os.environ.get("LD_LIBRARY_PATH")
-    return {
-        "CUDNN_PATH": os.path.dirname(cudnn_lib),
-        "LD_LIBRARY_PATH": f"{cudnn_lib}:{existing}" if existing else cudnn_lib,
-    }
 
 
 def _build_ray_env_vars():
@@ -67,8 +39,6 @@ def _build_ray_env_vars():
     # Mirrors prepare_runtime_environment for the nccl weight-sync backend.
     # Without this, NCCL 2.28's cuMem-based commAlloc SEGV's on this driver.
     env_vars["NCCL_CUMEM_ENABLE"] = "0"
-
-    env_vars.update(_pip_cudnn_env_vars())
 
     if SKYRL_PYTHONPATH_EXPORT:
         pythonpath = os.environ.get("PYTHONPATH")
