@@ -40,4 +40,5 @@ next-env.d.ts
 # auto-generated API reference pages (built by generate-api-docs.py)
 /content/docs/api-ref/skyrl/*.mdx
 /content/docs/api-ref/skyrl/skyrl-train/*.mdx
+/content/docs/api-ref/skyrl/sft/*.mdx
 /content/docs/api-ref/skyrl-gym/*.mdx
