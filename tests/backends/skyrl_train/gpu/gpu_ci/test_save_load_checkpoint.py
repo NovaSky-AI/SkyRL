@@ -118,6 +118,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
         cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_offload_fraction"] = 1
     if async_save:
         cfg.trainer.policy.megatron_config.async_dist_ckpt_save = True
+        # CI runners restrict ptrace, so the checkpoint writer cannot import the rank's CUDA
+        # handles and the run would hang. Prestage on the rank instead.
+        cfg.trainer.policy.megatron_config.async_save_prestage_to_cpu = True
 
     checkpoint_dir = None
     try:

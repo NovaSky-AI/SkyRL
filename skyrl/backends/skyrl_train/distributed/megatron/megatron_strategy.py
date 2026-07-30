@@ -54,20 +54,20 @@ def _stage_async_request_to_host(async_request):
     spawned worker and calls ``preload_fn`` *there*, so the still-on-GPU shards
     cross the process boundary via CUDA IPC.
 
-    That breaks under ``expandable_segments:True`` -- which SkyRL turns on for
+    That can break under ``expandable_segments:True`` -- which SkyRL turns on for
     training workers (see ``Worker._set_expandable_segments``). Expandable
     segments are ``cuMemCreate``-backed, and their shareable handle is a POSIX
     file descriptor rather than a copyable ``cudaIpcMemHandle_t``, so the
     importing process has to pull the fd out of the producer with
     ``pidfd_getfd``. That syscall requires ptrace-attach permission.
     The checkpoint worker is a child of the training rank,
-    so it dies with ``pidfd_getfd: Operation not permitted`` on some machines
-    and the training rank then hangs forever on the preload barrier.
+    so it can error out with ``pidfd_getfd: Operation not permitted`` on machines
+    with restricted ptrace permissions and the training rank
+    then hangs forever on the preload barrier.
 
     Staging here avoids CUDA IPC altogether: only CPU tensors get pickled to the
-    worker. It is not a throughput regression -- ``schedule_async_call`` already
-    blocks on the preload queue until the worker finishes the D2H copy, so the
-    copy was always synchronous from the training rank's point of view. Reference:
+    worker, and those cross by fd-passing over a unix socket, which needs no ptrace
+    permission. Reference:
     https://github.com/NVIDIA/Megatron-LM/blob/b78cfd5279be41ced082d344e9380a09a146c458/megatron/core/dist_checkpointing/strategies/async_utils.py#L578-L584
 
     Takes and returns an ``AsyncRequest``; both the ``mcore`` and ``nvrx`` request types
@@ -359,9 +359,11 @@ class MegatronStrategy(DistributedStrategy):
             )
             if async_save:
                 # Shards are staged to host; the disk write runs in the background.
-                # Stage before scheduling so no GPU tensor is handed to the worker
-                # process -- see `_stage_async_request_to_host`.
-                ckpt_base.async_calls.schedule_async_request(_stage_async_request_to_host(async_save_request))
+                if self.megatron_config.async_save_prestage_to_cpu:
+                    # Keeps GPU tensors from crossing the process boundary, which the writer
+                    # cannot always do -- see `_stage_async_request_to_host`.
+                    async_save_request = _stage_async_request_to_host(async_save_request)
+                ckpt_base.async_calls.schedule_async_request(async_save_request)
             else:
                 assert async_save_request is None, "save() must not return a request when sync"
 

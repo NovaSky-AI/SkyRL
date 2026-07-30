@@ -403,6 +403,21 @@ class MegatronConfig(BaseConfig):
     async_dist_ckpt_strategy: str = "mcore"
     """Backend for the async write. ``mcore`` needs no extra deps; megatron-core's own
     default ``nvrx`` requires nvidia-resiliency-ext. Only used when async saves are on."""
+    async_save_prestage_to_cpu: bool = False
+    """Copy shards to host memory on the training rank before handing them to the async
+    checkpoint writer, instead of letting the writer pull them over CUDA IPC.
+
+    Enable this when using async save on machines with restricted ptrace permissions. 
+    megatron-core hands the writer the *GPU* tensors and copies them in the writer process;
+    with ``expandable_segments:True`` those handles are file descriptors that the writer 
+    imports via ``pidfd_getfd``, which needs ptrace-attach permission on the rank. 
+    Where that is refused (e.g. ``kernel.yama.ptrace_scope=1``, as on some CI runners) 
+    the writer dies with ``pidfd_getfd: Operation not permitted`` and every rank then 
+    hangs on the preload barrier.
+
+    Off by default: prestaging shrinks the rank's blocking
+    window but delays the background write (per-tensor shared-memory handoff cost).
+    See ``_stage_async_request_to_host``."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict
