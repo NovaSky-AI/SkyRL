@@ -121,9 +121,12 @@ bash examples/train/sft/run_sft_megatron.sh \
 Here the curriculum sampler treats the concatenated datasets as its
 difficulty-ordered stages via the injected `lengths`.
 
-## Config reference
+## API reference
 
-See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft#configuration)
+See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft/sft_config)
 for the full documentation of the sampler and dataloader fields: `sampler`,
 `sampler_class_path`, `sampler_kwargs`, `dataloader_num_workers`,
 `dataloader_persistent_workers`, and `seed`.
+
+
+For native SFT samplers in SkyRL, see [`SFT Samplers` in the API reference](/docs/api-ref/skyrl/sft/sft_samplers)

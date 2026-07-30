@@ -123,7 +123,7 @@ def build_global_maps(loader, pages):
     for page in pages:
         if "sections" not in page:
             raise ValueError(
-                f"Page doesn't have 'sections' key, got keys: {page.keys()}, Path: {page.get('path', "N/A")}"
+                f"Page doesn't have 'sections' key, got keys: {page.keys()}, Path: {page.get('path', 'N/A')}"
             )
         for section in page["sections"]:
             for obj_path in section["objects"]:
