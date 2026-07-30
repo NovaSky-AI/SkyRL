@@ -44,6 +44,8 @@ import pyarrow.compute as pc
 from datasets import Dataset, concatenate_datasets, load_dataset
 from loguru import logger
 
+from skyrl.train.dataset.sft_dataset import SFTDataset
+
 # Keys consumed (and re-emitted in normalized form) by the lazy row transform.
 # ``num_actions`` and ``labels`` are consumed-but-dropped: ``num_actions`` is
 # always re-inferred from ``loss_mask``, and HF-style ``labels`` are not a
@@ -310,7 +312,7 @@ class _NormalizeTransform:
         return out
 
 
-class PretokenizedDataset:
+class PretokenizedDataset(SFTDataset):
     """Map-style view over a validated, memory-mapped pretokenized store.
 
     Wraps an arrow-backed :class:`datasets.Dataset` (with the lazy
@@ -326,9 +328,13 @@ class PretokenizedDataset:
 
     def __init__(self, dataset: Dataset, sequence_lengths: np.ndarray):
         self._dataset = dataset
-        self.sequence_lengths = sequence_lengths
+        self._sequence_lengths = sequence_lengths
+
+    @property
+    def sequence_lengths(self) -> np.ndarray:
         """Post-truncation token count per row, computed from arrow offsets at
         load time (no row materialization); used for dataset statistics."""
+        return self._sequence_lengths
 
     def __len__(self) -> int:
         return len(self._dataset)
