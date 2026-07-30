@@ -45,6 +45,7 @@ from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
+    maybe_repo_r_rescale,
 )
 from skyrl.backends.skyrl_train.utils.replay_utils import (
     router_replay_schedule,
@@ -664,6 +665,8 @@ class MegatronModelWrapper:
 
             action_log_probs = token_logprobs[:, -num_actions:]
 
+            # potentially rescale advantages for adaptive entropy control using REPO-R
+            advantages = maybe_repo_r_rescale(advantages, action_log_probs, loss_config)
             # policy loss should be calculated based on the selected token logprobs
             policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,

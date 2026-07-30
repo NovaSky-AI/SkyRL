@@ -586,6 +586,80 @@ def ppo_policy_loss(
     return loss, loss_metrics
 
 
+def repo_r_rescale_advantages(
+    advantages: torch.Tensor,
+    log_probs: torch.Tensor,
+    zeta: float,
+) -> torch.Tensor:
+    """Entropy-aware REPO-R advantage rescaling (REPO paper, Appendix D.2;
+    https://arxiv.org/pdf/2603.11682).
+
+    This is a standalone advantage transform applied *before* the configured policy loss, so it
+    composes with any ``policy_loss_type`` (regular, dual_clip, gspo, rollout_is, ...).
+
+    Uses the latest policy's log-probabilities with a stop-grad as a practical stand-in
+    for the centered log-prob ``L(s, a)``. Positive advantages are scaled by
+    ``(1 - zeta * logp)`` and negative advantages by ``(1 + zeta * logp)``, each clamped to
+    preserve its original sign. For ``zeta > 0`` this boosts rare correct actions and
+    attenuates common ones, and softens penalties on rare incorrect actions.
+    """
+    # Stop-grad, clamp -inf (masked/padded or extremely rare tokens) to a finite floor, and
+    # match `advantages`' dtype so the `torch.where` below never hits a dtype mismatch.
+    logp = log_probs.detach().clamp(min=-20.0).to(advantages.dtype)
+    pos = (advantages * (1.0 - zeta * logp)).clamp_min(0.0)
+    neg = (advantages * (1.0 + zeta * logp)).clamp_max(0.0)
+    return torch.where(advantages > 0, pos, torch.where(advantages < 0, neg, advantages))
+
+
+def repo_r_update_zeta(
+    zeta: float,
+    current_entropy: float,
+    target_entropy: float,
+    zeta_min: float,
+    zeta_max: float,
+) -> float:
+    """Adaptive REPO-R controller (REPO paper, Appendix D.2;
+    https://arxiv.org/pdf/2603.11682), run once per iteration.
+
+    Halves/doubles ``|zeta|`` (flipping its sign at the ``zeta_min`` boundary) to drive the
+    measured policy entropy toward ``target_entropy``.
+    """
+    if current_entropy > target_entropy:
+        if zeta >= 0:
+            zeta /= 2.0
+            if zeta < zeta_min:
+                zeta = -zeta_min  # flip the sign if needed
+        else:
+            zeta = max(-zeta_max, zeta * 2)
+    elif current_entropy < target_entropy:
+        if zeta >= 0:
+            # Doubling 0.0 stays 0.0, so bootstrap from zeta_min when growing from zero.
+            zeta = min(zeta_max, zeta * 2) if zeta > 0.0 else zeta_min
+        else:
+            zeta /= 2
+            if zeta > -zeta_min:
+                zeta = zeta_min  # flip the sign
+    return zeta
+
+
+def maybe_repo_r_rescale(
+    advantages: torch.Tensor,
+    log_probs: torch.Tensor,
+    config: AlgorithmConfig,
+) -> torch.Tensor:
+    """Apply REPO-R advantage rescaling when ``config.repo.enabled``, else return advantages as-is.
+
+    Call this right before the configured policy loss so REPO-R composes with any
+    ``policy_loss_type``. The coefficient ``config.repo.zeta`` is updated once per iteration by
+    the adaptive controller in the trainer and delivered via the loss-config override channel
+    (see ``RayPPOTrainer._execute_training_step``); the current value is reported once as
+    ``policy/repo_r_zeta`` (see ``train_critic_and_policy``).
+    """
+    if not config.repo.enabled:
+        return advantages
+    return repo_r_rescale_advantages(advantages, log_probs, config.repo.zeta)
+
+
 @register_policy_loss(PolicyLossType.SAPO)
 def sapo_policy_loss(
     log_probs: torch.Tensor,
