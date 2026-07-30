@@ -1297,16 +1297,7 @@ class SFTTrainer:
             eval_sets.append((name, eval_tokenized))
         return eval_sets
 
-    @staticmethod
-    def _sequence_lengths(tokenized) -> Optional[list[int]]:
-        """Sequence lengths without materializing rows, when the dataset can
-        provide them (every :class:`SFTDataset` can). Returns ``None`` when
-        only row iteration can produce them (plain lists, e.g. eval sets)."""
-        if isinstance(tokenized, SFTDataset):
-            return [int(v) for v in tokenized.sequence_lengths]
-        return None
-
-    def _log_dataset_stats(self, tokenized: list) -> None:
+    def _log_dataset_stats(self, tokenized: SFTDataset) -> None:
         """Log tokenized sequence length statistics over the training set.
 
         Reports count, mean, median (q50), q25, q75, min, max of the tokenized
@@ -1316,11 +1307,9 @@ class SFTTrainer:
             logger.warning("No tokenized examples to compute stats over")
             return
 
-        # Memory-mapped datasets expose lengths from arrow offsets; falling
-        # back to row iteration would materialize the whole store once.
-        lengths = self._sequence_lengths(tokenized)
-        if lengths is None:
-            lengths = [len(ex["input_ids"]) for ex in tokenized]
+        # Every SFTDataset provides lengths without materializing rows
+        # (pretokenized stores derive them from arrow offsets at load time).
+        lengths = [int(v) for v in tokenized.sequence_lengths]
         n = len(lengths)
         sorted_lengths = sorted(lengths)
 
