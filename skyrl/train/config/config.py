@@ -1189,8 +1189,8 @@ class InferenceEngineConfig(BaseConfig):
     For HuggingFace config overrides such as RoPE scaling, use
     ``engine_init_kwargs.hf_overrides.rope_parameters`` and set the matching trainer-side override
     with ``trainer.policy.model_config_kwargs.rope_parameters`` (FSDP) or
-        ``trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters`` (Megatron). The two
-        must agree, and are validated against each other."""
+    ``trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters`` (Megatron). The two
+    must agree, and are validated against each other."""
     speculative_config: Optional[Dict[str, Any]] = None
     """Speculative-decoding config passed through to vLLM for MTP drafter decoding. 
     (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train mtp). ``None`` disables it."""
