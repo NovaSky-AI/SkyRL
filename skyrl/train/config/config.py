@@ -223,7 +223,7 @@ class FSDPConfig(BaseConfig):
     https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html
     Enabling this replaces SkyRL's manual colocation offload (and makes
     ``optimizer_config.offload_after_step`` inert) rather than stacking with it; see
-    https://docs.skyrl.ai/docs/configuration/placement for the difference."""
+    https://docs.skyrl.ai/docs/tutorials/placement for the difference."""
     reshard_after_forward: Union[bool, int] = True
     """FSDP2 only.
     Accepts True, False, or an int between 1 and ``fsdp_size``. See
@@ -579,7 +579,7 @@ class PlacementConfig(BaseConfig):
     """GPU placement and colocation for the policy, critic, ref, and inference engines.
 
     See the model placement and colocation guide for an in-depth walkthrough of how the
-    options here interact: https://docs.skyrl.ai/docs/configuration/placement
+    options here interact: https://docs.skyrl.ai/docs/tutorials/placement
     """
 
     colocate_all: bool = True
@@ -1102,7 +1102,7 @@ class InferenceEngineConfig(BaseConfig):
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
     When ``False``, point SkyRL at an external HTTP/vLLM deployment via ``external_proxy_url`` and/or
-    ``external_server_urls``. See https://docs.skyrl.ai/docs/configuration/placement"""
+    ``external_server_urls``. See https://docs.skyrl.ai/docs/tutorials/placement"""
     num_engines: int = 1
     """Number of inference engines to launch when ``run_engines_locally=True``."""
     backend: str = "vllm"

@@ -12,7 +12,6 @@
     "platforms",
     "recipes",
     "algorithms",
-    "configuration",
     "checkpointing-logging",
     "troubleshooting",
     "skyagent",

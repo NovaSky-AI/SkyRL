@@ -18,6 +18,11 @@ const config = {
         destination: '/docs/api-ref/skyrl/config',
         permanent: true,
       },
+      {
+        source: '/docs/configuration/placement',
+        destination: '/docs/tutorials/placement',
+        permanent: true,
+      },
     ];
   },
 };
