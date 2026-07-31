@@ -87,16 +87,7 @@ Colocation offloading is SkyRL's own mechanism: in certain colocation settings S
 state itself, but only *after* the training step / log probability computation. The optimizer step
 and model forward pass still run against sharded parameters resident on GPU.
 
-<Callout type="warn">
-The two are **alternatives, not additive**. The FSDP strategy sets its manual-offload path to
-`not cpu_offload`, so turning on `cpu_offload` *replaces* SkyRL's colocation offload rather than
-stacking with it — and `optimizer_config.offload_after_step` becomes inert as well, since FSDP2 then
-handles offload natively.
-</Callout>
-
-So enabling colocation does not imply `cpu_offload`, and `cpu_offload` is not what SkyRL does between
-phases under colocation. When policy and reference must share GPUs and their combined shards are
-tight on memory, `cpu_offload=true` hands offload to FSDP2 instead.
+So enabling colocation does not imply `cpu_offload`, and `cpu_offload` is not what SkyRL does between phases under colocation. 
 
 ## Hardware Configuration
 
