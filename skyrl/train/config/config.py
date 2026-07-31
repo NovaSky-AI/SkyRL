@@ -91,8 +91,10 @@ class DataConfig(BaseConfig):
 # added prefix SkyRL to avoid conflict with peft.LoraConfig
 @dataclass
 class SkyRLLoraConfig(BaseConfig):
-    """LoRA (Low-Rank Adaptation) configuration for parameter-efficient fine-tuning, which
-    trains a small number of additional low-rank matrices instead of the full model weights."""
+    """LoRA configuration for parameter-efficient fine-tuning.
+
+    Trains a small number of additional low-rank matrices instead of the full model weights.
+    """
 
     rank: int = 0
     """Rank of the low-rank decomposition.
@@ -106,7 +108,8 @@ class SkyRLLoraConfig(BaseConfig):
     Must be accessible to all workers in distributed setups."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
-    ``"all-linear"`` targets every linear layer; a list of specific module names can be given instead."""
+    ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module list
+    on Megatron. A list of specific module names can be given instead."""
     exclude_modules: Optional[str] = None
     """Modules to exclude from LoRA."""
     init_method: str = "kaiming"
@@ -193,8 +196,10 @@ class OptimizerConfig(BaseConfig):
     """Gradient clipping. The total L2 norm of the model gradients is scaled to this value."""
     offload_after_step: bool = True
     """Offload optimizer state to CPU after each full training step.
-    Only applicable when ``colocate_all=True``, where the default of True is recommended. Without colocation it can be
-    preferable to leave optimizer state on GPU, avoiding both the offload cost and the extra CPU memory usage."""
+    Applies under colocation (``colocate_all``, or ``colocate_policy_ref`` for policy/ref), and is
+    inert when ``fsdp_config.cpu_offload=True`` since FSDP2 then offloads natively. Without
+    colocation it can be preferable to leave optimizer state on GPU, avoiding both the offload cost
+    and the extra CPU memory usage."""
     num_warmup_steps: int = 0
     """Number of mini-batch steps to warmup the optimizer."""
     scheduler: str = "constant_with_warmup"
@@ -213,14 +218,12 @@ class MixedPrecisionConfig(BaseConfig):
 class FSDPConfig(BaseConfig):
     cpu_offload: bool = False
     """Offload params and optimizer state to CPU during the forward pass.
-    Corresponds to FSDP2's ``offload_policy``: https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html
 
-        NOTE: this is *not* the same as the worker-state offloading SkyRL does under colocation.
-        ``cpu_offload`` keeps parameters and optimizer state in CPU memory and copies parameters to
-        GPU for each forward pass. SkyRL's colocation offload instead happens only *after* the
-        training step / log-probability computation, so the optimizer step and forward pass still
-        run against sharded parameters resident on GPU. See
-        https://docs.skyrl.ai/docs/configuration/placement for details."""
+    Corresponds to FSDP2's ``offload_policy``:
+    https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html
+    Enabling this replaces SkyRL's manual colocation offload (and makes
+    ``optimizer_config.offload_after_step`` inert) rather than stacking with it; see
+    https://docs.skyrl.ai/docs/configuration/placement for the difference."""
     reshard_after_forward: Union[bool, int] = True
     """FSDP2 only.
     Accepts True, False, or an int between 1 and ``fsdp_size``. See
@@ -255,9 +258,12 @@ TORCH_PROFILER_EXPORT_TYPES = ("chrome_trace", "stacks")
 
 @dataclass
 class TorchProfilerConfig(BaseConfig):
-    """``torch.profiler`` config for policy training steps, for FSDP and Megatron in both RL and
-    SFT. Writes one Kineto/HTA-friendly ``*.pt.trace.json`` per active window and profiled rank
-    (https://github.com/facebookresearch/HolisticTraceAnalysis).
+    """``torch.profiler`` config for policy training steps.
+
+    Applies to FSDP and Megatron in both RL and SFT. With the default ``export_type="chrome_trace"``,
+    writes one Kineto/HTA-friendly ``*.pt.trace.json`` per active window and profiled rank
+    (https://github.com/facebookresearch/HolisticTraceAnalysis); with ``export_type="stacks"`` it
+    instead writes a per-rank ``rank{N}_stacks.txt`` that later windows overwrite.
 
     Scope: policy workers only. Active windows capture policy-worker operations between profiler
     steps — in RL that includes policy log-prob forwards and policy training; in SFT it includes
@@ -382,16 +388,12 @@ class TorchProfilerConfig(BaseConfig):
 @dataclass
 class MegatronHFExportConfig(BaseConfig):
     distributed_save: bool = False
-    """Fan the Megatron->HF safetensors export across ranks instead of writing the whole checkpoint from rank 0.
-    The on-disk result is the standard HF sharded format either way; this only parallelizes the write, which is decisive
-    for multi-hundred-GB checkpoints whose serial rank-0 write stalls every rank. Only affects HF exports from
-    ``hf_save_interval`` or explicit ``save_hf_model`` calls.
+    """Fan the Megatron->HF safetensors export across ranks instead of writing it all from rank 0.
 
-        WARNING: for sharded multi-node exports, point ``trainer.export_path`` at a shared
-        filesystem path visible to every Megatron rank. Node-local paths and cloud paths can split
-        shards across per-rank local work directories, and Megatron-Bridge builds
-        ``model.safetensors.index.json`` from the shard files visible to rank 0 — so the index
-        comes out incomplete if rank 0 cannot see every shard the other ranks wrote."""
+    The on-disk result is the standard HF sharded format either way; this only parallelizes the
+    write. Only affects HF exports from ``hf_save_interval`` or explicit ``save_hf_model`` calls.
+    Sharded multi-node exports require ``trainer.export_path`` to be a shared filesystem path
+    visible to every rank; see https://docs.skyrl.ai/docs/checkpointing-logging/checkpointing."""
     save_every_n_ranks: int = 1
     """In distributed save, only ranks 0, N, 2N, ... write shards (e.g. 8 = one writer per 8-GPU node).
     Must be at least 1. Ignored when ``distributed_save`` is False."""
@@ -409,7 +411,7 @@ class MegatronLoraConfig(BaseConfig):
     """``"lora"`` or ``"canonical_lora"``.
     See https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html"""
     merge_lora: bool = True
-    """Merge LoRA weights into the base weights during weight sync and export."""
+    """Merge LoRA weights into the base weights during weight sync."""
 
 
 DEFAULT_MEGATRON_OPTIMIZER_KWARGS = {
@@ -481,19 +483,14 @@ class MegatronConfig(BaseConfig):
     optimizer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_MEGATRON_OPTIMIZER_KWARGS)
     )
-    """Pass-through kwargs for Megatron's ``OptimizerConfig``:
+    """Pass-through kwargs for Megatron's ``OptimizerConfig``.
+
     https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/optimizer/optimizer_config.py
     Any keys overlapping with what SkyRL resolves from ``optimizer_config`` are overridden by the
-    values here.
-
-    ``*_dtype`` keys accept case-insensitive strings, coerced by
-    ``distributed.megatron.optimizer_dtype``: ``fp32`` (``float32``, ``float``), ``fp16``
-    (``float16``, ``half``), ``bf16`` (``bfloat16``), and ``fp8`` (``float8``, ``uint8``). ``fp8``
-    maps to ``torch.uint8``, matching TransformerEngine optimizer-state storage. Per-field checks:
-    ``main_params_dtype`` (master weights) allows ``fp32``/``fp16``; ``exp_avg_dtype`` and
-    ``exp_avg_sq_dtype`` allow ``fp32``/``fp16``/``bf16``/``fp8``.
-
-    WARNING: ``use_precision_aware_optimizer=True`` can cause checkpointing to fail
+    values here. ``*_dtype`` keys accept case-insensitive dtype names, coerced by
+    ``distributed.megatron.optimizer_dtype``; see
+    https://docs.skyrl.ai/docs/examples/megatron for the accepted names and per-field checks.
+    ``use_precision_aware_optimizer=True`` can cause checkpointing to fail
     (https://github.com/nvidia/megatron-lm/issues/1820); leaving it ``False`` is recommended."""
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
@@ -506,7 +503,9 @@ class MegatronConfig(BaseConfig):
     """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
     This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer."""
     model_config_kwargs: dict = field(default_factory=dict)
-    """Pass-through kwargs for the HuggingFace model config (e.g. overriding vocab size)."""
+    """HF-config overrides read from the nested ``model_config`` key only.
+    Used for bridge and RoPE resolution. Not a general HF-config override -- use
+    ``transformer_config_kwargs`` instead."""
     dist_ckpt_optim_fully_reshardable: bool = False
     """When True, use the "fully-reshardable" format for the distributed-optimizer checkpoint.
     When False (default), use the "dp-reshardable" format, which is more efficient but only
@@ -640,7 +639,11 @@ class PolicyConfig(BaseConfig):
 
 @dataclass
 class CriticConfig(BaseConfig):
-    """Critic model configuration. Supports the same options as the policy model, including LoRA."""
+    """Critic model configuration.
+
+    Supports a subset of the policy options (model/LoRA, optimizer, FSDP, sequence parallelism).
+    FSDP only -- a critic is rejected under ``trainer.strategy="megatron"``.
+    """
 
     model: ModelConfig = field(default_factory=ModelConfig)
     optimizer_config: OptimizerConfig = field(default_factory=lambda: OptimizerConfig(lr=5e-6))
@@ -864,12 +867,13 @@ class AlgorithmConfig(BaseConfig):
     - ``"rollout_is"``: the agentic loss from section 4.1.2 of the GLM-5 tech report
       (https://arxiv.org/pdf/2602.15763). Uses rollout logprobs and Icepop-style clipping with an
       additional stop gradient for masked tokens.
+    - ``"cross_entropy"`` and ``"importance_sampling"``: also registered; see ``PolicyLossRegistry``.
     - ``"dppo"``: DPPO, from Rethinking the Trust Region in LLM Reinforcement Learning
       (https://arxiv.org/pdf/2602.04879). Uses rollout logprobs and absolute probability
       divergences rather than probability ratios, improving on PPO clipping behavior.
     """
     loss_reduction: str = "token_mean"
-    """Type of loss reduction to use:
+    """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
 
     - ``"token_mean"``: average loss over all valid tokens in the batch, as in DAPO
       (https://dapo-sia.github.io/).
@@ -882,6 +886,7 @@ class AlgorithmConfig(BaseConfig):
       ``generator.n_samples_per_prompt`` responses sampled for a prompt), then averaged over
       prompts. Unlike ``"token_mean"``, every prompt contributes equally regardless of how many
       tokens its responses contain.
+    - ``"token_mean_legacy"``: also accepted, retaining the previous ``"token_mean"`` behavior.
     """
     grpo_norm_by_std: bool = True
     """Normalize advantages by the standard deviation in GRPO.
@@ -927,9 +932,7 @@ class AlgorithmConfig(BaseConfig):
     max_seq_len: Optional[int] = None
     """Sequence-length normalization constant used for ``seq_mean_token_sum_norm`` loss reduction.
     Must be set explicitly for that reduction mode; otherwise can remain ``None``. This often
-    matches the model context window / vLLM ``max_model_len`` when that is the intended budget.
-    If unset elsewhere, it is derived as
-    ``generator.max_input_length + generator.sampling_params.max_generate_length``."""
+    matches the model context window / vLLM ``max_model_len`` when that is the intended budget."""
 
 
 # ---------------------------------------------------------------------------
@@ -964,16 +967,18 @@ class FullyAsyncConfig(BaseConfig):
 
     # --- Trainer simulation (no real trainer components) ---
     simulate_training: bool = False
-    """If True, run fully-async generation with a SIMULATED trainer (see ``FullyAsyncTrainerSim``): no policy/critic/ref models are instantiated and no weight broadcast happens.
-    Each step consumes a mini-batch from the generation buffer, sleeps for ``simulate_training_step_seconds``, then
-    issues pause/resume generation (as a real weight sync would) but skips ``broadcast_to_inference_engines``. Used to
-    benchmark the generation/inference side (e.g. router load-balancing policies) on large models without paying for
-    trainer GPUs — typically pointed at already-served endpoints via ``external_proxy_url`` / ``external_server_urls``.
-    The generation-side dynamics (staleness control, rate limiting, pause/resume) remain faithful.
+    """If True, run fully-async generation with a SIMULATED trainer (see ``FullyAsyncTrainerSim``).
 
-        Because no models are built, this requires ``trainer.eval_interval``, ``trainer.ckpt_interval``,
-        and ``trainer.hf_save_interval`` to all be ``<= 0``, ``trainer.update_ref_every_epoch=False``,
-        and resumption to be disabled. See ``examples/train/fully_async/main_fully_async_sim.py``."""
+    No policy/critic/ref models are instantiated and no weight broadcast happens. Each step consumes
+    a mini-batch from the generation buffer, sleeps for ``simulate_training_step_seconds``, then
+    issues pause/resume generation (as a real weight sync would) but skips
+    ``broadcast_to_inference_engines``. The generation-side dynamics (staleness control, rate
+    limiting, pause/resume) remain faithful.
+
+    Because no models are built, this requires ``trainer.eval_interval``, ``trainer.ckpt_interval``,
+    and ``trainer.hf_save_interval`` to all be ``<= 0``, ``trainer.update_ref_every_epoch=False``,
+    and resumption to be disabled. See
+    https://docs.skyrl.ai/docs/tutorials/fully_async for usage."""
     simulate_training_step_seconds: float = 30.0
     """Wall-clock seconds the simulated dummy training step sleeps (stands in for fwd/bwd/optim)."""
     simulate_weight_sync_seconds: float = 0.0
@@ -993,7 +998,8 @@ class SamplingParams(BaseConfig):
     max_generate_length: int = 1024
     """Maximum length of the generated response."""
     repetition_penalty: float = 1.0
-    """Repetition penalty. ``1.0`` applies no penalty."""
+    """Repetition penalty. ``1.0`` applies no penalty.
+    Not forwarded by the typed sampling-params path -- pass it via ``additional_kwargs``."""
     temperature: float = 1.0
     """Sampling temperature.
     Automatically propagated to ``trainer.algorithm.temperature`` during config initialization."""
@@ -1005,7 +1011,8 @@ class SamplingParams(BaseConfig):
     """Top-k sampling parameter. ``-1`` disables it."""
     logprobs: Optional[int] = 1
     """Number of logprobs to return from the inference engine.
-    ``0`` returns only the chosen token's logprob."""
+    Must be ``None``, ``0``, or ``1``; both ``0`` and ``1`` return only the chosen token's
+    logprob, and larger values are rejected."""
     stop: Optional[List[str]] = None
     """Optional list of stop strings for generation."""
     additional_kwargs: Optional[Dict[str, Any]] = None
@@ -1019,8 +1026,9 @@ class ChatTemplateConfig(BaseConfig):
     source: str = "name"
     """``"name"`` to select a built-in template, or ``"file"`` to load one from disk."""
     name_or_path: Optional[str] = None
-    """When ``source="name"``, one of the supported templates in ``skyrl/train/generators/utils.py`` (e.g. ``"qwen3_with_thinking"``).
-    When ``source="file"``, the path to a Jinja2 template file."""
+    """Selects the template, interpreted according to ``source``.
+    When ``source="name"``, one of the supported templates in ``skyrl/train/generators/utils.py``
+    (e.g. ``"qwen3_with_thinking"``). When ``source="file"``, the path to a Jinja2 template file."""
 
 
 # ---------------------------------------------------------------------------
@@ -1089,8 +1097,8 @@ class InferenceEngineConfig(BaseConfig):
 
     model_dtype: str = "bfloat16"
     """Should match the dtype used by the inference engine.
-    Also used during weight transfer: the policy model weights are cast to this dtype before being sent to the inference
-    engine."""
+    Also used during full-weight sync, where policy weights are cast to this dtype before being sent
+    to the inference engine. The LoRA-adapter sync path exports fp32 instead."""
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
     When ``False``, point SkyRL at an external HTTP/vLLM deployment via ``external_proxy_url`` and/or
@@ -1113,18 +1121,23 @@ class InferenceEngineConfig(BaseConfig):
     """Pipeline parallel size for the inference engine. Currently only supported for vLLM."""
     expert_parallel_size: int = 1
     """Expert parallel size for the inference engine.
-    Currently only supported for vLLM, and must equal ``data_parallel_size * tensor_parallel_size``."""
+    Currently only supported for vLLM. When set > 1, must equal
+    ``data_parallel_size * tensor_parallel_size``."""
     data_parallel_size: int = 1
     """Data parallel size for the inference engine. Currently only supported for vLLM."""
     vllm_v1_disable_multiproc: bool = True
-    """Sets ``VLLM_ENABLE_V1_MULTIPROCESSING=0``, which makes vLLM scheduling deterministic.
+    """Currently inert.
+    ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` is set unconditionally whenever ``VLLM_USE_V1`` is absent
+    from the environment, which makes vLLM scheduling deterministic.
     Useful for reproducibility."""
     enable_prefix_caching: bool = True
     """Enable vLLM prefix caching.
     Can be left at the default in most cases. With remote inference servers, this must match the setting the remote
     servers were initialized with."""
     enable_chunked_prefill: bool = True
-    """Enable vLLM chunked prefill. Can be left at the default in most cases."""
+    """Enable vLLM chunked prefill.
+    Currently not plumbed through to the engine; set ``engine_init_kwargs.enable_chunked_prefill``
+    to change it."""
     enable_return_routed_experts: bool = False
     """Return per-layer expert routing indices, for rollout router replay (R3) when training an MoE model.
     Used together with ``trainer.policy.megatron_config.moe_enable_routing_replay``."""
@@ -1169,12 +1182,12 @@ class InferenceEngineConfig(BaseConfig):
     multimodal models (e.g. Qwen3.5) skip vision encoder initialization."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine.
-    Names must match the engine's args; an error is raised for duplicate kwargs or kwargs that clash with an existing
-    config field (e.g. ``tensor_parallel_size``).
+    Names must match the engine's args. Applied last, so they silently override config-derived
+    engine args (e.g. ``tensor_parallel_size``).
 
-        For HuggingFace config overrides such as RoPE scaling, use
-        ``engine_init_kwargs.hf_overrides.rope_parameters`` and set the matching trainer-side override
-        with ``trainer.policy.model_config_kwargs.rope_parameters`` (FSDP) or
+    For HuggingFace config overrides such as RoPE scaling, use
+    ``engine_init_kwargs.hf_overrides.rope_parameters`` and set the matching trainer-side override
+    with ``trainer.policy.model_config_kwargs.rope_parameters`` (FSDP) or
         ``trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters`` (Megatron). The two
         must agree, and are validated against each other."""
     speculative_config: Optional[Dict[str, Any]] = None
@@ -1184,8 +1197,9 @@ class InferenceEngineConfig(BaseConfig):
     """Data-plane URL (load-balanced router) for the new inference layer.
     Generation requests are sent here."""
     external_server_urls: Optional[List[str]] = None
-    """Control-plane URLs (direct backend access) for the new inference layer, used to fan out pause/resume, sleep/wake, and weight sync.
-    If ``external_proxy_url`` is omitted, SkyRL starts an internal router over these servers."""
+    """Control-plane URLs (direct backend access) for the new inference layer.
+    Used to fan out pause/resume, sleep/wake, and weight sync. If ``external_proxy_url`` is omitted,
+    SkyRL starts an internal router over these servers."""
     enable_pd: bool = False
     """Enable prefill-decode disaggregation. Requires ``num_prefill > 0`` and ``num_engines >= 2``."""
     num_prefill: int = 0
@@ -1222,7 +1236,7 @@ class GeneratorConfig(BaseConfig):
     """Custom chat template configuration, if needed."""
     chat_template_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Kwargs passed to ``tokenizer.apply_chat_template``.
-    Only applicable for non-batched generation (``batched=False``)."""
+    Requires non-batched generation: a non-empty value with ``batched=True`` raises."""
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
     """Sampling parameters used during the trajectory generation phase."""
     use_conversation_multi_turn: bool = True
@@ -1239,8 +1253,8 @@ class GeneratorConfig(BaseConfig):
     """Number of samples to generate per prompt during evaluation."""
     zero_reward_on_non_stop: bool = False
     """Set reward to 0 when ``stop_reason`` is not ``"stop"`` (i.e., generation was truncated or aborted).
-    Useful with format rewards: when the model did not finish its response, we typically do not want to reward it for
-    format compliance. Applies to all environments."""
+    Useful with format rewards, where an unfinished response should not earn format credit.
+    Applies to all environments."""
     use_cache_salt: bool = True
     """Salt vLLM's prefix cache with the policy version so cache blocks are only shared across trajectories that started
     with the same policy weight version. The salt is keyed on the engine's weight version, captured at the start of each
@@ -1315,23 +1329,16 @@ class MTPConfig(BaseConfig):
 class TrainerConfig(BaseConfig):
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     use_expandable_segments: bool = True
-    """Enable PyTorch's CUDA ``expandable_segments`` allocator on the training workers to reduce GPU memory fragmentation across the offload/backload and forward/backward cycles.
-    See ``InferenceEngineConfig.use_expandable_segments`` for the independent inference-engine knob (the trainer and the
-    engine are separate processes with separate allocators).
+    """Enable PyTorch's CUDA ``expandable_segments`` allocator on the training workers.
 
-        Why this defaults on: PyTorch's default CUDA allocator can fragment the address space over a
-        long run, so a worker may have plenty of free VRAM yet still fail a single large *contiguous*
-        allocation — surfacing as a hard ``Aborted``/SIGABRT rather than a catchable OOM. This happens
-        whenever allocation sizes vary over time (e.g. forward/backward passes with variable sequence
-        lengths or dynamic microbatch token counts). ``colocate_all=True`` is the worst case: the
-        trainer repeatedly offloads to CPU and backloads to GPU while the inference engine sleeps and
-        wakes in the same address space, and large reallocations (like Megatron's ``reload_from_cpu``
-        resizing a param buffer) fragment memory badly enough to crash a run with tens of GiB free.
-        Without colocation the models stay resident and the benefit is smaller (it only mitigates
-        forward/backward activation fragmentation), but the flag still applies with effectively no
-        downside. It is automatically turned OFF around CUDA-IPC weight sync, since IPC handles are
-        incompatible with the VMM addresses expandable segments uses; under ``colocate_all=False``
-        weight sync uses NCCL broadcast instead, so it simply stays on continuously."""
+    Reduces GPU memory fragmentation across the offload/backload and forward/backward cycles.
+    Automatically turned off around CUDA-IPC weight sync, since IPC handles are incompatible with the
+    VMM addresses expandable segments uses; under ``colocate_all=False`` weight sync uses NCCL
+    broadcast instead, so it stays on continuously.
+    ``InferenceEngineConfig.use_expandable_segments`` is the independent inference-engine knob (the
+    trainer and the engine are separate processes with separate allocators). See
+    https://docs.skyrl.ai/docs/troubleshooting/troubleshooting for the fragmentation symptoms this
+    addresses."""
     sequence_parallel_backend: str = "ulysses"
     strategy: str = "fsdp"
     """Training backend: either ``"fsdp"`` or ``"megatron"``.
@@ -1353,9 +1360,10 @@ class TrainerConfig(BaseConfig):
     resume_path: Optional[str] = None
     """Checkpoint directory to resume from. Only used when ``resume_mode="from_path"``."""
     log_path: str = "/tmp/skyrl-logs"
-    """Path for infrastructure log files. vLLM engine startup, model loading, and worker initialization logs are written to ``{log_path}/infra-YYMMDD_HHMMSS.log``.
-    For multi-node training, use a shared filesystem path to consolidate logs into a single file. See
-    https://docs.skyrl.ai/docs/checkpointing-logging/logging"""
+    """Path for infrastructure log files.
+    vLLM engine startup, model loading, and worker initialization logs are written to
+    ``{log_path}/infra-YYMMDD_HHMMSS.log``. For multi-node training, use a shared filesystem path to
+    consolidate logs into a single file. See https://docs.skyrl.ai/docs/checkpointing-logging/logging"""
     ckpt_path: str = field(default_factory=lambda: os.path.expanduser("~/ckpts/"))
     """Directory for resumable training checkpoints (model state, optimizer state, etc.).
     Accepts a local directory path or a cloud storage path (S3, GCS)."""
@@ -1381,15 +1389,15 @@ class TrainerConfig(BaseConfig):
     train_batch_size: int = 1024
     """Batch size of prompts used for each dataloader step.
 
-    See ``utils/utils.py::validate_batch_sizes`` for train, mini, and micro batch size constraints
-    — a good place to start if you are having trouble finding valid values for
+    See ``utils/utils.py::validate_batch_sizes`` for the constraints relating this to
     ``policy_mini_batch_size``, ``micro_train_batch_size_per_gpu``, and
     ``micro_forward_batch_size_per_gpu``."""
     policy_mini_batch_size: int = 256
     """Mini batch size for the RL training step; each mini batch is one optimizer step.
     For example, with ``train_batch_size=4`` and ``policy_mini_batch_size=2`` there are 2 optimizer steps (model
-    updates) per training batch. This is the *global* mini batch size — the per-worker mini batch is
-    ``policy_mini_batch_size / number of DP ranks``."""
+    updates) per training batch. This is the *global* mini batch size, counted in prompts — the
+    per-worker mini batch is
+    ``policy_mini_batch_size * generator.n_samples_per_prompt / number of DP ranks``."""
     critic_mini_batch_size: int = 256
     """Like ``policy_mini_batch_size``, but for the critic model.
     The critic generally tolerates off-policy updates better than the policy, so setting this lower than
@@ -1398,8 +1406,8 @@ class TrainerConfig(BaseConfig):
     """Micro batch size during the training step, common to both policy and critic.
     Each mini batch is split into micro batches of this size, and gradients are accumulated over them."""
     micro_forward_batch_size_per_gpu: int = 1
-    """Micro batch size during the forward pass (log probability or value computation), common to both policy and critic.
-    Each mini batch is split into micro batches of this size."""
+    """Micro batch size during the forward pass, i.e. log probability or value computation.
+    Common to both policy and critic. Each mini batch is split into micro batches of this size."""
     max_tokens_per_microbatch: int = -1
     """Maximum number of tokens per microbatch for both forward and training steps. When > 0, microbatches 
     are formed by bin-packing samples based on their token counts (from attention_mask) instead of using a 
@@ -1429,7 +1437,9 @@ class TrainerConfig(BaseConfig):
     eval_interval: int = 5
     """Evaluate against the validation dataset every N steps. ``-1`` to disable evaluation."""
     max_prompt_length: int = 512
-    """Maximum prompt length during training. Longer prompts are truncated."""
+    """Maximum prompt length during training.
+    Prompts longer than this are filtered out of the train/eval datasets at load time, not
+    truncated."""
     flash_attn: bool = True
     disable_fast_tokenizer: bool = False
     project_name: str = "skyrl"
@@ -1437,7 +1447,7 @@ class TrainerConfig(BaseConfig):
     run_name: str = "test_run"
     """Run name in WandB and MLflow."""
     logger: str = "wandb"
-    """Logger to use: ``"wandb"``, ``"mlflow"``, or ``"console"`` (which logs metrics to the console).
+    """Logger to use: ``"wandb"``, ``"mlflow"``, ``"swanlab"``, ``"tensorboard"``, or ``"console"``.
     See https://docs.skyrl.ai/docs/checkpointing-logging/logging"""
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
@@ -1445,7 +1455,8 @@ class TrainerConfig(BaseConfig):
     """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
     """Dump each training data batch to a file for debugging.
-    The batch at global step N is written to ``{export_path}/dumped_data/global_step_{N}_training_input``."""
+    The batch at global step N is written to
+    ``{export_path}/dumped_data/global_step_{N}_training_input.pkl``."""
     dump_eval_results: bool = True
     """Dump full evaluation results to a file.
     Results at global step N are written to ``{export_path}/dumped_evals/global_step_{N}_evals``, with both per-dataset
@@ -1671,11 +1682,9 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
 class SkyRLTrainConfig(BaseConfig):
     """Root configuration object for SkyRL training with the ``fsdp`` and ``megatron`` backends.
 
-    These dataclasses are the single source of truth for configuration: the field defaults here are
-    the defaults SkyRL runs with, and every field is overridable from the CLI in
-    ``key.path=value`` form (see ``from_cli_overrides``). The structure mirrors the YAML
-    configuration 1:1, so ``trainer.policy.model.path=...`` on the command line addresses
-    ``SkyRLTrainConfig.trainer.policy.model.path`` here.
+    Every field is overridable from the CLI in ``key.path=value`` form (see
+    ``from_cli_overrides``): ``trainer.policy.model.path=...`` sets
+    ``SkyRLTrainConfig.trainer.policy.model.path``.
     """
 
     data: DataConfig = field(default_factory=DataConfig)

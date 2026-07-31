@@ -13,8 +13,7 @@ const config = {
         permanent: true,
       },
       {
-        // The standalone configuration overview page was removed; the generated
-        // API reference for the config dataclasses is now the single source of truth.
+        // Retired page; redirect to the generated config reference.
         source: '/docs/configuration/config',
         destination: '/docs/api-ref/skyrl/config',
         permanent: true,

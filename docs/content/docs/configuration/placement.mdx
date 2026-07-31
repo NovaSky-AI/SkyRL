@@ -83,14 +83,20 @@ These are two different mechanisms, and it is easy to conflate them.
 [offload policy](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html): parameter
 and optimizer state live in CPU memory, and parameters are copied to GPU for each model forward pass.
 
-Colocation offloading is separate and independent. In certain colocation settings SkyRL offloads
-worker state itself — but this happens only *after* the training step / log probability computation.
-The optimizer step and model forward pass still run as usual against sharded parameters resident on
-GPU.
+Colocation offloading is SkyRL's own mechanism: in certain colocation settings SkyRL offloads worker
+state itself, but only *after* the training step / log probability computation. The optimizer step
+and model forward pass still run against sharded parameters resident on GPU.
 
-So enabling colocation does not imply `cpu_offload`, and enabling `cpu_offload` is not what SkyRL
-does between phases under colocation. When policy and reference must share GPUs and their combined
-shards are tight on memory, `cpu_offload=true` is an additional lever on top of colocation.
+<Callout type="warn">
+The two are **alternatives, not additive**. The FSDP strategy sets its manual-offload path to
+`not cpu_offload`, so turning on `cpu_offload` *replaces* SkyRL's colocation offload rather than
+stacking with it — and `optimizer_config.offload_after_step` becomes inert as well, since FSDP2 then
+handles offload natively.
+</Callout>
+
+So enabling colocation does not imply `cpu_offload`, and `cpu_offload` is not what SkyRL does between
+phases under colocation. When policy and reference must share GPUs and their combined shards are
+tight on memory, `cpu_offload=true` hands offload to FSDP2 instead.
 
 ## Hardware Configuration
 
