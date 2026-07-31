@@ -52,7 +52,10 @@ jobs:
       - name: Post CI digest to Slack
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CI_ALERTS_WEBHOOK_URL }}
+          # Bot token for a Slack app with the `chat:write` scope. The app must
+          # be invited to the channel: /invite @<app name>
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: '#skyrl-ci-alerts'
           LOOKBACK_HOURS: ${{ inputs.lookback_hours || '25' }}
           DRY_RUN: ${{ inputs.dry_run }}
           SELF_WORKFLOW_FILE: ci_slack_digest.yaml
@@ -78,7 +81,7 @@ jobs:
             SkyRL-Train-GPU-Megatron
             Tinker-SkyRL-Train-Backend-GPU
         run: |
-          if [ -z "${SLACK_WEBHOOK_URL}" ]; then
-            echo "::warning::SLACK_CI_ALERTS_WEBHOOK_URL is not set — rendering the digest without posting."
+          if [ -z "${SLACK_BOT_TOKEN}" ]; then
+            echo "::warning::SLACK_BOT_TOKEN is not set — rendering the digest without posting."
           fi
           uv run --isolated --no-project --python 3.12 .github/scripts/ci_slack_digest.py

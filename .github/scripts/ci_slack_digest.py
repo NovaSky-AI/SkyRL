@@ -29,6 +29,13 @@ Lives under `.github/scripts/` rather than `ci/` on purpose: `ci/**` is in the
 `paths:` filter of almost every GPU workflow, so editing this file there would
 trigger the whole Anyscale GPU suite.
 
+Posts through `chat.postMessage` with a bot token (`SLACK_BOT_TOKEN` +
+`SLACK_CHANNEL`) rather than an incoming webhook. Slack's original webhooks are
+legacy custom integrations that they have deprecated; the app-scoped
+replacement is supported, but it is opaque to misconfiguration, whereas
+`chat.postMessage` names the problem (`not_in_channel`, `invalid_auth`) -- which
+matters for a job that runs unattended once a day.
+
 Stdlib only, so it runs anywhere without an install step.
 """
 
@@ -433,30 +440,63 @@ def unmonitored_workflows(monitored: set[str], self_path: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def post_to_slack(webhook: str, blocks: list[dict], fallback: str) -> None:
-    payload = json.dumps({"text": fallback, "blocks": blocks}).encode()
+POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+
+
+def message_payload(channel: str, fallback: str, blocks: list[dict] | None = None) -> dict:
+    """Body for `chat.postMessage`.
+
+    `text` is the notification/fallback string shown in the sidebar and in push
+    notifications; `blocks` is the rendered message. Link unfurling is off
+    because the digest is mostly GitHub links and Slack would otherwise expand
+    each one into a preview card several times the height of the digest itself.
+    """
+    payload: dict = {
+        "channel": channel,
+        "text": fallback,
+        "unfurl_links": False,
+        "unfurl_media": False,
+    }
+    if blocks:
+        payload["blocks"] = blocks
+    return payload
+
+
+def post_to_slack(token: str, channel: str, fallback: str, blocks: list[dict] | None = None) -> None:
+    """Post via `chat.postMessage`.
+
+    Uses a bot token rather than an incoming webhook: webhooks come in a legacy
+    custom-integration flavour that Slack has deprecated, and even the
+    app-scoped kind cannot be introspected, so a misconfigured one fails with an
+    opaque `invalid_payload`. `chat.postMessage` returns a named error
+    (`channel_not_found`, `not_in_channel`, `invalid_auth`) that says what to fix.
+    """
     req = urllib.request.Request(
-        webhook,
-        data=payload,
-        headers={"Content-Type": "application/json"},
+        POST_MESSAGE_URL,
+        data=json.dumps(message_payload(channel, fallback, blocks)).encode(),
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {token}",
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode().strip()
-    if body != "ok":
-        raise RuntimeError(f"Slack webhook returned {body!r}")
+        body = json.load(resp)
+    if not body.get("ok"):
+        error = body.get("error", "unknown_error")
+        hint = {
+            "not_in_channel": "invite the bot to the channel: /invite @<app name>",
+            "channel_not_found": "check SLACK_CHANNEL, and that the bot can see a private channel",
+            "invalid_auth": "check SLACK_BOT_TOKEN (needs the chat:write scope)",
+            "missing_scope": "add the chat:write scope and reinstall the app",
+        }.get(error)
+        raise RuntimeError(f"chat.postMessage failed: {error}" + (f" -- {hint}" if hint else ""))
 
 
-def post_plain(webhook: str, text: str) -> None:
+def post_plain(token: str, channel: str, text: str) -> None:
     """Best-effort plain-text post, used to report digest failures."""
     try:
-        req = urllib.request.Request(
-            webhook,
-            data=json.dumps({"text": text}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=30).read()
+        post_to_slack(token, channel, text)
     except Exception as exc:  # pragma: no cover - notification of a notification
         print(f"could not report failure to Slack: {exc}", file=sys.stderr)
 
@@ -531,8 +571,10 @@ def main() -> int:
         return 2
 
     repo = os.environ.get("GITHUB_REPOSITORY") or "NovaSky-AI/SkyRL"
-    webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-    dry_run = env_flag("DRY_RUN", not webhook)
+    slack_token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+    channel = os.environ.get("SLACK_CHANNEL", "").strip()
+    can_post = bool(slack_token and channel)
+    dry_run = env_flag("DRY_RUN", not can_post)
     post_when_green = env_flag("POST_WHEN_ALL_GREEN", True)
     lookback = float(os.environ.get("LOOKBACK_HOURS") or 25)
     self_path = os.environ.get("SELF_WORKFLOW_FILE", "ci_slack_digest.yaml")
@@ -552,8 +594,8 @@ def main() -> int:
     except (urllib.error.URLError, urllib.error.HTTPError, KeyError, ValueError) as exc:
         message = f":warning: SkyRL CI digest could not read the GitHub API: `{exc}`"
         print(message, file=sys.stderr)
-        if webhook and not dry_run:
-            post_plain(webhook, message)
+        if can_post and not dry_run:
+            post_plain(slack_token, channel, message)
         return 1
 
     blocks, headline = build_blocks(reports, repo, now, window_start, unmonitored_workflows(set(names), self_path))
@@ -570,13 +612,13 @@ def main() -> int:
             f"window_runs={report.window_runs})"
         )
 
-    if dry_run or not webhook:
+    if dry_run or not can_post:
         print("\n--- payload (dry run) ---")
-        print(json.dumps({"text": headline, "blocks": blocks}, indent=2))
+        print(json.dumps(message_payload(channel or "#unset", headline, blocks), indent=2))
         return 0
 
-    post_to_slack(webhook, blocks, headline)
-    print(f"posted: {headline}")
+    post_to_slack(slack_token, channel, headline, blocks)
+    print(f"posted to {channel}: {headline}")
     return 0
 
 

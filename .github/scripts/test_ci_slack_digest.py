@@ -266,6 +266,40 @@ def test_mrkdwn_control_characters_are_escaped():
     assert "a&lt;b &amp; c&gt;d" in body
 
 
+def test_payload_disables_unfurling():
+    """The digest is almost entirely GitHub links; previews would bury it."""
+    payload = digest.message_payload("#skyrl-ci-alerts", "headline", [{"type": "divider"}])
+    assert payload["unfurl_links"] is False
+    assert payload["unfurl_media"] is False
+    assert payload["channel"] == "#skyrl-ci-alerts"
+    assert payload["text"] == "headline"
+    assert payload["blocks"] == [{"type": "divider"}]
+
+
+def test_payload_omits_blocks_when_plain_text():
+    assert "blocks" not in digest.message_payload("#c", "just text")
+
+
+def test_post_failure_names_the_slack_error(monkeypatch):
+    """An unattended daily job needs the reason in the log, not just a 200."""
+
+    class FakeResponse:
+        def read(self):
+            return b'{"ok": false, "error": "not_in_channel"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(digest.urllib.request, "urlopen", lambda *a, **k: FakeResponse())
+    with pytest.raises(RuntimeError) as caught:
+        digest.post_to_slack("xoxb-token", "#c", "headline", [])
+    assert "not_in_channel" in str(caught.value)
+    assert "/invite" in str(caught.value)
+
+
 def test_scheduled_run_title_is_not_echoed():
     """GitHub sets display_title to the workflow name for scheduled runs."""
     report = report_for([raw_run("failure", hours_ago=1, display_title="Some-Workflow")])
