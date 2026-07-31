@@ -132,6 +132,7 @@
           description: ""
           objects:
             - skyrl.train.config.config.DataConfig
+            - skyrl.train.config.config.DataLoaderConfig
             - skyrl.train.config.config.ModelConfig
             - skyrl.train.config.config.SkyRLLoraConfig
         - heading: Training
@@ -149,6 +150,7 @@
             - skyrl.train.config.config.MegatronConfig
             - skyrl.train.config.config.MegatronDDPConfig
             - skyrl.train.config.config.MegatronLoraConfig
+            - skyrl.train.config.config.MegatronHFExportConfig
             - skyrl.train.config.config.TorchProfilerConfig
         - heading: Placement
           description: ""
@@ -170,6 +172,7 @@
             - skyrl.train.config.config.ClipCovConfig
             - skyrl.train.config.config.KLCovConfig
             - skyrl.train.config.config.CISPOConfig
+            - skyrl.train.config.config.DPPOConfig
             - skyrl.train.config.config.OffPolicyCorrectionConfig
             - skyrl.train.config.config.FullyAsyncConfig
         - heading: Inference & Generation
@@ -178,6 +181,7 @@
             - skyrl.train.config.config.SamplingParams
             - skyrl.train.config.config.ChatTemplateConfig
             - skyrl.train.config.config.InferenceEngineConfig
+            - skyrl.train.config.config.DeltaWeightSyncConfig
             - skyrl.train.config.config.GeneratorConfig
         - heading: Environment
           description: ""
