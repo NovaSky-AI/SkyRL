@@ -55,6 +55,8 @@ jobs:
           # Bot token for a Slack app with the `chat:write` scope. The app must
           # be invited to the channel: /invite @<app name>
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          # A channel ID (C…) is more robust than a name — Slack recommends it,
+          # and it survives a channel rename. Swap it in once the channel exists.
           SLACK_CHANNEL: '#skyrl-ci-alerts'
           LOOKBACK_HOURS: ${{ inputs.lookback_hours || '25' }}
           DRY_RUN: ${{ inputs.dry_run }}
