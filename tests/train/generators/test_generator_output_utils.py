@@ -12,6 +12,7 @@ from skyrl.train.generators.utils import (
     compute_turn_token_counts,
     concatenate_generator_outputs,
     get_metrics_from_generator_output,
+    get_rollout_metrics,
     merge_stepwise_output,
 )
 from skyrl.train.utils.utils import validate_cfg
@@ -32,6 +33,7 @@ def test_generator_output_concatenation():
         # optional but present in the signature
         "trajectory_ids",
         "trajectory_generation_times",
+        "trajectory_time_splits",
         "is_last_step",
         "env_metrics",
         "pixel_values",
@@ -91,6 +93,73 @@ def test_generator_output_concatenation():
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():
         np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
+
+
+def test_time_split_rollout_metrics():
+    metrics = get_rollout_metrics(
+        responses=[[1, 2]] * 4,
+        rewards=[1.0] * 4,
+        trajectory_completion_times=[10.0, 20.0, 30.0, 40.0],
+        trajectory_time_splits={"llm": [4.0, 8.0, 12.0, 16.0], "env": [5.0, 10.0, 15.0, 20.0]},
+    )
+    assert metrics["generate/trajectory_time_llm_mean"] == 10.0
+    assert metrics["generate/trajectory_time_llm_p90"] == pytest.approx(np.percentile([4.0, 8.0, 12.0, 16.0], 90))
+    assert metrics["generate/trajectory_time_llm_max"] == 16.0
+    assert metrics["generate/trajectory_time_env_mean"] == 12.5
+    # "other" is the exact per-trajectory remainder, here [1.0, 2.0, 3.0, 4.0].
+    assert metrics["generate/trajectory_time_other_mean"] == pytest.approx(2.5)
+    assert metrics["generate/trajectory_time_other_max"] == pytest.approx(4.0)
+
+
+def test_time_splits_concatenation():
+    def make_output(times, splits) -> GeneratorOutput:
+        return {
+            "prompt_token_ids": [[1]] * len(times),
+            "response_ids": [[1, 2]] * len(times),
+            "rewards": [1.0] * len(times),
+            "loss_masks": [[1, 1]] * len(times),
+            "stop_reasons": ["stop"] * len(times),
+            "rollout_logprobs": None,
+            "trajectory_generation_times": times,
+            "trajectory_time_splits": splits,
+        }
+
+    out1 = make_output([10.0, 20.0], {"llm": [4.0, 8.0], "env": [5.0, 10.0]})
+    out2 = make_output([30.0, 40.0], {"llm": [12.0, 16.0], "env": [15.0, 20.0]})
+    concatenated = concatenate_generator_outputs([out1, out2])
+
+    assert concatenated["trajectory_time_splits"] == {"llm": [4.0, 8.0, 12.0, 16.0], "env": [5.0, 10.0, 15.0, 20.0]}
+    # Aggregates are recomputed over the combined sample, not combined from per-group aggregates.
+    concat_metrics = concatenated["rollout_metrics"]
+    assert concat_metrics["generate/trajectory_time_llm_p90"] == pytest.approx(
+        np.percentile([4.0, 8.0, 12.0, 16.0], 90)
+    )
+    assert concat_metrics["generate/trajectory_time_other_mean"] == pytest.approx(2.5)
+
+
+def test_time_splits_concatenation_partial_is_none():
+    """A batch that recorded no splits drops the whole time-split aggregate to None."""
+
+    def make_output(times, splits) -> GeneratorOutput:
+        return {
+            "prompt_token_ids": [[1]] * len(times),
+            "response_ids": [[1, 2]] * len(times),
+            "rewards": [1.0] * len(times),
+            "loss_masks": [[1, 1]] * len(times),
+            "stop_reasons": ["stop"] * len(times),
+            "rollout_logprobs": None,
+            "trajectory_generation_times": times,
+            "trajectory_time_splits": splits,
+        }
+
+    recorded = make_output([10.0, 20.0], {"llm": [4.0, 8.0], "env": [5.0, 10.0]})
+    missing = make_output([30.0, 40.0], None)
+    # Both orders: the None batch must not depend on being first or last.
+    for outputs in ([recorded, missing], [missing, recorded]):
+        concatenated = concatenate_generator_outputs(outputs)
+        assert concatenated["trajectory_time_splits"] is None
+        # generation_times has its own None-ness, so it still concatenates fully.
+        assert sorted(concatenated["trajectory_generation_times"]) == [10.0, 20.0, 30.0, 40.0]
 
 
 def test_get_metrics_from_generator_output():

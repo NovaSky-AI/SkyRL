@@ -40,6 +40,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     LOSSES_WITHOUT_OLD_LOGPROBS,
     AdaptiveKLController,
     FixedKLController,
+    PolicyLossType,
     apply_loss_reduction_to_advantages_minibatch,
     compute_approx_kl,
     get_kl_controller,
@@ -55,6 +56,7 @@ from skyrl.train.dataset.preprocess import (
     compute_prompt_boundaries,
     compute_prompt_mini_batch_boundaries,
     convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
 )
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
 from skyrl.train.generators.base import (
@@ -581,6 +583,13 @@ class RayPPOTrainer:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
+
+        # Drain any in-flight async checkpoint write before teardown. Unconditional:
+        # a save may have happened outside the periodic path. No-op when nothing is pending.
+        self.dispatch.finalize_pending_saves("policy")
+        if self.has_critic:
+            self.dispatch.finalize_pending_saves("critic")
+
         if self._vllm_metrics_scraper is not None:
             await self._vllm_metrics_scraper.aclose()
 
@@ -898,6 +907,12 @@ class RayPPOTrainer:
             rollout_expert_indices,
             max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
         )
+        router_padding_mask = None
+        if rollout_expert_indices is not None:
+            router_padding_mask = make_router_padding_mask(
+                attention_masks_tensor,
+                [len(indices) for indices in rollout_expert_indices],
+            )
 
         # sanity check for off_policy_correction
         off_policy_correction = self.cfg.trainer.algorithm.off_policy_correction
@@ -919,6 +934,7 @@ class RayPPOTrainer:
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
+                "router_padding_mask": router_padding_mask,
                 "pixel_values": pixel_values,
                 "image_grid_thw": image_grid_thw,
             },
@@ -1268,10 +1284,22 @@ class RayPPOTrainer:
         Safe only when the loss optimizes against rollout logprobs and nothing else reads the
         old logprobs: rollout logprobs are present (these losses fall back to old logprobs
         without them), the KL reward penalty is off, and off-policy correction is disabled.
+
+        `cispo` is anchor-dependent: with `cispo.cispo_anchor="rollout"` it optimizes against the
+        rollout logprobs (like `rollout_is`) and never reads the old logprobs, so the forward can
+        be skipped; with the default `"old"` anchor it needs them and must not be skipped. The check
+        is anchor-aware here rather than a static membership in LOSSES_WITHOUT_OLD_LOGPROBS, which is
+        keyed by policy_loss_type and cannot distinguish the two CISPO anchors.
         """
         algorithm = self.cfg.trainer.algorithm
+        if algorithm.policy_loss_type == PolicyLossType.CISPO:
+            # CISPO reads old logprobs only with the default "old" anchor; "rollout" optimizes against
+            # the rollout logprobs (like rollout_is) and never touches them.
+            loss_without_old_logprobs = algorithm.cispo.cispo_anchor == "rollout"
+        else:
+            loss_without_old_logprobs = algorithm.policy_loss_type in LOSSES_WITHOUT_OLD_LOGPROBS
         return (
-            algorithm.policy_loss_type in LOSSES_WITHOUT_OLD_LOGPROBS
+            loss_without_old_logprobs
             and training_input.get("rollout_logprobs", None) is not None
             and not algorithm.use_kl_in_reward
             and not off_policy_correction_enabled(algorithm.off_policy_correction)
@@ -1300,6 +1328,8 @@ class RayPPOTrainer:
         fwd_keys = ["sequences", "attention_mask"]
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")
+        if training_input.get("router_padding_mask") is not None:
+            fwd_keys.append("router_padding_mask")
         if training_input.get("pixel_values") is not None:
             fwd_keys.append("pixel_values")
         if training_input.get("image_grid_thw") is not None:

@@ -22,6 +22,8 @@ dependencies = [
     "peft==0.18.1",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
+    "zstandard>=0.23.0",
+    "xxhash>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +51,7 @@ ray = [
 
 aws = [
     "cloudpathlib[s3]",
+    "s5cmd>=0.3.3; sys_platform == 'linux'",
 ]
 
 gcp = [
@@ -91,6 +94,8 @@ skyrl-train = [
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "polars",
     "s3fs",
+    "s5cmd>=0.3.3; sys_platform == 'linux'",
+    "gcsfs",
     "fastapi",
     "uvicorn",
     "vllm-router; sys_platform == 'linux'",
@@ -249,6 +254,7 @@ transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "buil
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
@@ -381,4 +387,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["skyrl", "skyrl_gym"]
-

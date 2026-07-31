@@ -1,0 +1,229 @@
+---
+title: "SFT Trainer Overview"
+---
+
+SkyRL ships a native **supervised fine-tuning (SFT)** trainer, `SFTTrainer`, that
+reuses the same distributed backends (FSDP and Megatron), checkpointing, and
+logging as the RL trainer -- but without any inference engine, reference model,
+or reward machinery.
+
+<Callout type="info">
+The SFT trainer is invoked as a module: `python -m skyrl.train.main_sft`.
+Configuration is defined in
+[`skyrl/train/config/sft_config.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/sft_config.py)
+and the implementation lives in
+[`skyrl/train/sft_trainer.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/sft_trainer.py).
+Runnable example scripts are under
+[`examples/train/sft`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/sft).
+</Callout>
+
+## Quickstart
+
+The SFT trainer supports two backends via the `strategy` flag: `fsdp` and
+`megatron`. Both share the same config surface; only the parallelism knobs
+differ.
+
+### FSDP (single GPU)
+
+```bash
+bash examples/train/sft/run_sft_fsdp.sh
+```
+
+Trains `Qwen/Qwen2.5-0.5B-Instruct` on 1 GPU with FSDP (max length 512, batch
+size 4, 10 steps).
+
+### Megatron (multi-GPU with TP/PP)
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh
+```
+
+Trains on 4 GPUs with the Megatron backend. Scale to larger models by
+increasing the parallelism degrees, e.g.
+`megatron_config.tensor_model_parallel_size=2 megatron_config.pipeline_model_parallel_size=2`.
+
+### GPU placement
+
+The number of GPUs a run uses is controlled by `placement.num_nodes` and
+`placement.num_gpus_per_node` (defaults: 1 node with 4 GPUs). For Megatron, the
+total world size (`num_nodes * num_gpus_per_node`) must be divisible by
+`tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size`;
+the remaining GPUs form the data-parallel dimension.
+
+On FSDP, the flat `sequence_parallel_size` key additionally enables
+Ulysses-style sequence parallelism for long sequences. It is FSDP-only and must
+stay `1` on Megatron -- not to be confused with
+`megatron_config.sequence_parallel_size`, which is Megatron's own TP-coupled
+sequence parallelism.
+
+All example scripts forward extra positional arguments as config overrides:
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh num_steps=20 batch_size=8
+```
+
+Invoking the entrypoint directly:
+
+```bash
+uv run --isolated --extra fsdp python -m skyrl.train.main_sft \
+    strategy=fsdp \
+    model.path=Qwen/Qwen2.5-0.5B-Instruct \
+    train_datasets="['yahma/alpaca-cleaned']" \
+    train_dataset_splits="['train[:100]']" \
+    max_length=512 \
+    num_steps=10 \
+    batch_size=4
+```
+
+## Data formats
+
+`SFTTrainer` tokenizes datasets loaded through HuggingFace `datasets`. Two input
+formats are supported:
+
+- **Chat / `messages`** -- each row carries a `messages` list of
+  `{"role", "content"}` turns (column name configurable via `messages_key`).
+  Datasets may optionally provide per-row tool schemas (`tools_key`) and a
+  system prompt (`system_key`).
+- **Alpaca** -- rows with `instruction` / `input` / `output` columns.
+
+Raw pre-tokenized data and plain-text continuation formats are not supported.
+Tokenized datasets are cached under `cache_dir` (override with `force_recache`
+or `disable_cache`); for multi-node runs point `cache_dir` at a shared/NFS path.
+
+Online tokenization uses a local, spawn-based multiprocessing pool on the node
+running the SFT entrypoint; it is not distributed across the Ray cluster.
+`num_workers` controls this preprocessing pool (`8` by default, `0` for
+single-process tokenization). This is separate from
+`dataloader_num_workers`, which controls workers that load already-tokenized
+examples during training and defaults to `0`. VLM tokenization always runs
+single-process because its processor cannot be passed safely through the
+spawned worker pool.
+
+### What to train on
+
+`train_on_what` controls which tokens contribute to the loss:
+
+- `last_assistant_message` (default) -- loss only on the final assistant reply.
+- `all_assistant_messages` -- loss on every assistant message in the
+  conversation.
+
+## Pretokenized datasets
+
+If your data pipeline tokenizes **offline**, point the trainer at the pretokenized store to skip online
+tokenization entirely. Pretokenized rows are normalized to the same internal
+format as online-tokenized data, so collators, sequence packing, samplers, and
+checkpoint/resume all work unchanged. Ingestion is implemented in
+[`skyrl/train/dataset/pretokenized.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/dataset/pretokenized.py).
+
+Pass local paths to `pretokenized_dataset_paths` (and, optionally,
+`eval_pretokenized_dataset_paths`):
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    "pretokenized_dataset_paths=['$HOME/data/tokenized-train']" \
+    "eval_pretokenized_dataset_paths=['$HOME/data/tokenized-eval']"  # optional
+```
+
+Each entry is a local path to a file or directory (a directory may hold multiple
+shards) in one of these auto-detected formats: **Parquet**, **JSON-lines**, **raw
+Arrow IPC**, or a HuggingFace **`Dataset.save_to_disk`** directory. Like
+`train_datasets`, multiple stores are concatenated and mixed per
+`train_dataset_weights`; multiple eval stores are evaluated separately under
+`eval/{name}/`, with names from `eval_dataset_names` (defaulting to each path's
+basename).
+
+Each row must contain:
+
+- **`input_ids`** -- unpadded token ids for the full sequence (SkyRL pads at
+  collation time).
+- **`loss_mask`** -- a full-sequence 0/1 mask, same length as `input_ids`, with
+  `1` on the tokens to compute loss on. This single form covers both
+  instruction-following (1s on the response) and multi-turn data (1s on every
+  assistant turn). The number of action tokens is inferred from the first
+  nonzero entry.
+- for VLM data: `pixel_values` and `image_grid_thw` (Qwen-style image tensors,
+  stored as nested lists).
+
+```python
+# Instruction-following: 3 prompt tokens, loss on the 2 response tokens.
+{"input_ids": [5091, 374, 220, 8949, 13], "loss_mask": [0, 0, 0, 1, 1]}
+
+# Multi-turn: loss on every assistant turn; 0s on the user turn between them.
+{"input_ids": [5091, 374, 8949, 220, 748], "loss_mask": [0, 1, 1, 0, 1]}
+```
+
+`max_length` truncation still applies (rows whose loss window is fully truncated
+are dropped; over-length VLM rows are always dropped rather than truncated). A
+`num_actions` column, window-form masks, and HuggingFace-style `labels` are
+rejected -- provide the full-sequence `loss_mask` instead.
+
+<Callout type="warn">
+`pretokenized_dataset_paths` cannot be combined with `train_datasets` /
+`train_dataset_splits` (nor `eval_pretokenized_dataset_paths` with
+`eval_datasets`) -- a run either tokenizes online or ingests pretokenized
+stores, and mixing them raises an explicit error. Only local paths are supported
+today (cloud S3/GCS ingestion is a follow-up). Token ids cannot be verified at
+train time, so the offline pipeline **must apply the same chat template as the
+trained model**.
+</Callout>
+
+## Sequence packing
+
+By default `remove_microbatch_padding=true` packs multiple sequences per
+micro-batch (requires flash attention). The Megatron backend additionally
+supports **controller-level FFD bin-packing** across the global mini-batch with
+`use_sequence_packing=true`:
+
+```bash
+bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
+    use_sequence_packing=true \
+    max_tokens_per_microbatch=4096
+```
+
+When enabled, the trainer bin-packs the mini-batch into bins of capacity
+`max_length` (padding the bin count to a multiple of the data-parallel size);
+each bin becomes one row of the dispatched batch and one worker micro-batch.
+`use_sequence_packing` requires `remove_microbatch_padding=true` and
+`max_length` to be set, and `max_tokens_per_microbatch` (if given) must be
+`>= max_length`.
+
+## Checkpointing, resume, and HF export
+
+- `ckpt_path` / `ckpt_interval` -- write a distributed checkpoint every N steps
+  (`0` = only at the end). Sampler/dataloader position is saved into the
+  checkpoint so `resume_from` continues from the exact next example.
+- `resume_from` -- `""` (fresh), `"latest"`, or a path to a `global_step_N` dir.
+- `max_ckpts_to_keep` -- `-1` keeps all, `N` keeps only the last N.
+- `hf_save_interval` / `export_path` -- periodically export HuggingFace-format
+  weights (defaults to `{ckpt_path}/hf_exports`).
+
+## Evaluation
+
+Pass `eval_datasets` (plus `eval_dataset_splits`) to compute eval loss during
+training. `eval_interval` runs periodic eval, and `eval_before_train=true` logs
+a baseline at step 0. Metrics are logged per dataset under `eval/{name}/loss`.
+See [Mixing Multiple Datasets](./multi_dataset) for details.
+
+## Vision-language SFT
+
+VLM SFT is supported on the Megatron backend. Because 3D RoPE ties image tokens
+to sequence positions, it enforces `remove_microbatch_padding=false`,
+`megatron_config.sequence_parallel_size=1`,
+`megatron_config.context_parallel_size=1`, and
+`train_on_what=last_assistant_message`. Every sample in a VLM batch must carry
+image(s) in the chat `messages` format. See
+[`run_sft_megatron_vlm.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/sft/run_sft_megatron_vlm.sh)
+and
+[`prepare_cauldron_vlm.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/sft/prepare_cauldron_vlm.py).
+
+## Key configuration
+
+See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft/sft_config)
+for the full set of knobs with defaults and descriptions.
+
+## Next steps
+
+- [Mixing Multiple Datasets](./multi_dataset) -- weighted multi-source training
+  and per-dataset evaluation.
+- [Using Custom Samplers](./custom_sampler) -- plug in your own stateful,
+  checkpointable sampler (e.g. curriculum learning).

@@ -23,6 +23,7 @@ from skyrl.train.config import (
     SkyRLTrainConfig,
     TorchProfilerConfig,
 )
+from skyrl.train.config.config import overrides_dict_to_dotlist
 
 # ---------------------------------------------------------------------------
 # TrainOnWhat enum
@@ -84,6 +85,8 @@ class SFTConfig(BaseConfig):
                   mapping dot-notation keys to values.
                   Example list: ['strategy=megatron', 'model.path=Qwen/Qwen3-0.6B']
                   Example dict: {'strategy': 'megatron', 'model.path': 'Qwen/Qwen3-0.6B'}
+                  Dict values are serialized as JSON, so ``None``, bools, strings,
+                  lists and nested dicts keep their types.
 
         Returns:
             A fully constructed SFTConfig with CLI overrides applied.
@@ -92,7 +95,7 @@ class SFTConfig(BaseConfig):
             ValueError: If both ``num_epochs`` and ``num_steps`` are explicitly provided.
         """
         if isinstance(args, dict):
-            args = [f"{k}={v}" for k, v in args.items()]
+            args = overrides_dict_to_dotlist(args)
 
         overrides = OmegaConf.from_cli(args)
         # Check for mutual exclusion before constructing the full config
@@ -243,6 +246,11 @@ class SFTConfig(BaseConfig):
     # ---- Data loading ----
     num_workers: int = 8
     """Number of worker processes for parallel tokenization during dataset loading. Set to 0 for single-threaded."""
+    async_batch_collation: bool = True
+    """Overlap the next stateful-dataloader batch with the current GPU step.
+
+    Checkpoint state remains pinned after the current batch. Set to False for
+    serial data loading."""
 
     # ---- Dataloader / sampler ----
     dataloader_num_workers: int = 0

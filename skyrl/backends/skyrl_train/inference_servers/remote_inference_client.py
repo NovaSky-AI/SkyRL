@@ -1062,6 +1062,32 @@ class RemoteInferenceClient(InferenceEngineInterface):
         params = {"tags": tags} if tags else {}
         return await self._call_all_servers("/wake_up", params=params)
 
+    async def sleep_for_weight_sync(self, offload_kv: bool = True) -> Dict[str, Any]:
+        """Free GPU memory for weight sync while keeping in-flight requests frozen.
+
+        Sleeps the allocator via ``/collective_rpc`` without touching the scheduler
+        (unlike :meth:`sleep`, which preempts running requests and clears the prefix
+        cache). ``offload_kv`` offloads the KV cache to CPU so frozen requests resume
+        from it; set False to discard it (e.g. when the sync will reset it anyway).
+        Pair with :meth:`wake_for_weight_sync`; the caller must KEEP-pause before and
+        ``resume`` after.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": offload_kv}},
+        )
+
+    async def wake_for_weight_sync(self, tags: List[str]) -> Dict[str, Any]:
+        """Restore allocator pools by tag (see :meth:`sleep_for_weight_sync`).
+
+        Wake ``["weights"]`` before the broadcast and ``["kv_cache"]`` after. Does
+        not resume generation -- call :meth:`resume_generation` once KV is back.
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {"method": "skyrl_wake_for_weight_sync", "kwargs": {"tags": tags}},
+        )
+
     async def reset_prefix_cache(
         self,
         reset_running_requests: bool = False,
@@ -1129,6 +1155,23 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "/update_weights",
             {"update_info": update_info},
         )
+
+    async def fetch_weights(
+        self,
+        target_version: int,
+        sync_dir: Optional[str] = None,
+        uri: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fetch/apply a published checkpoint delta on every inference worker before
+        pausing generation for reload.
+        """
+        kwargs: Dict[str, Any] = {"target_version": target_version}
+        if sync_dir is not None:
+            kwargs["sync_dir"] = sync_dir
+        if uri is not None:
+            kwargs["uri"] = uri
+        return await self._call_all_servers("/fetch_weights", kwargs)
 
     # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
     # these three methods from /collective_rpc to the native vLLM endpoints

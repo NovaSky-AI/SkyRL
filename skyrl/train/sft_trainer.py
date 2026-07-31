@@ -28,6 +28,7 @@ import tempfile
 from dataclasses import asdict
 from typing import Any, Optional
 
+import numpy as np
 import ray
 import torch
 from datasets import Dataset, load_dataset
@@ -58,6 +59,7 @@ from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.async_batch_collator import AsyncBatchCollator
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
@@ -706,10 +708,12 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     """
     max_len = max(len(ex["input_ids"]) for ex in examples)
     max_num_actions = max(ex["num_actions"] for ex in examples)
+    num_examples = len(examples)
 
-    sequences = []
-    attention_masks = []
-    loss_masks = []
+    # Fill NumPy buffers by slice, then convert once.
+    sequences_np = np.full((num_examples, max_len), tokenizer.pad_token_id, dtype=np.int64)
+    attention_mask_np = np.zeros((num_examples, max_len), dtype=np.int64)
+    loss_mask_np = np.zeros((num_examples, max_num_actions), dtype=np.int64)
 
     # VLM image tensors travel as a TensorList (one variable-shape tensor per
     # sample). Mixed text+image batches are not supported; every sample in a VLM
@@ -725,14 +729,14 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     pixel_values = []
     image_grid_thw = []
 
-    for ex in examples:
+    for i, ex in enumerate(examples):
+        # Left-pad sequences; right-align response loss masks.
         pad_len = max_len - len(ex["input_ids"])
-        # Left-pad sequences (SkyRL convention)
-        sequences.append([tokenizer.pad_token_id] * pad_len + ex["input_ids"])
-        attention_masks.append([0] * pad_len + ex["attention_mask"])
+        sequences_np[i, pad_len:] = ex["input_ids"]
+        attention_mask_np[i, pad_len:] = ex["attention_mask"]
 
         action_pad = max_num_actions - ex["num_actions"]
-        loss_masks.append([0] * action_pad + ex["loss_mask"])
+        loss_mask_np[i, action_pad:] = ex["loss_mask"]
 
         if batch_has_images:
             pixel_values.append(torch.as_tensor(ex["pixel_values"]))
@@ -740,9 +744,9 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
 
     batch = TrainingInputBatch(
         {
-            "sequences": torch.tensor(sequences, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
-            "loss_mask": torch.tensor(loss_masks, dtype=torch.long),
+            "sequences": torch.from_numpy(sequences_np),
+            "attention_mask": torch.from_numpy(attention_mask_np),
+            "loss_mask": torch.from_numpy(loss_mask_np),
             "pixel_values": TensorList(pixel_values) if batch_has_images else None,
             "image_grid_thw": TensorList(image_grid_thw) if batch_has_images else None,
         }
@@ -824,6 +828,7 @@ class SFTTrainer:
         # when eval is disabled. Names are unique (enforced in config validation)
         # and namespace the eval metrics as ``eval/{name}/...``.
         self.eval_dataloaders: list[tuple[str, StatefulDataLoader]] | None = None
+        self._checkpoint_dataloader_state: dict | None = None
         self.global_step = 0
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
@@ -1660,11 +1665,12 @@ class SFTTrainer:
             # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
             # Padded rows have loss_mask=0 so they are excluded here.
             nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
+            # Eval consumes metrics only; skip per-token loss_fn_outputs.
             output = self.dispatch.forward(
                 "policy",
                 batch,
                 loss_fn="cross_entropy",
-                loss_fn_config=None,
+                return_per_token_outputs=False,
             )
             batch_loss = float(output.metrics.get("loss", float("nan")))
             total_loss_weighted += batch_loss * nonpad_tokens
@@ -1685,7 +1691,13 @@ class SFTTrainer:
         """
         timings: dict[str, float] = {}
         with Timer("forward_backward", timings):
-            output = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+            # SFT consumes metrics only; skip per-token loss_fn_outputs.
+            output = self.dispatch.forward_backward(
+                "policy",
+                batch,
+                loss_fn="cross_entropy",
+                return_per_token_outputs=False,
+            )
         with Timer("optim_step", timings):
             grad_norm = self.dispatch.optim_step("policy")
 
@@ -1962,6 +1974,16 @@ class SFTTrainer:
         # their state across the (conceptual) epoch boundaries.
         data_iter = iter(self.train_dataloader)
 
+        collate_ahead_enabled = self.sft_cfg.async_batch_collation
+        async_collator: Optional[AsyncBatchCollator] = (
+            AsyncBatchCollator(lambda _step: next(data_iter, None), thread_name_prefix="sft-batch-collate")
+            if collate_ahead_enabled
+            else None
+        )
+        logger.info(
+            f"SFT async batch collation (double-buffering): {'ENABLED' if collate_ahead_enabled else 'disabled'}"
+        )
+
         if self._torch_profiler_enabled:
             self.dispatch.start_profile("policy")
         try:
@@ -1970,10 +1992,14 @@ class SFTTrainer:
 
                 with Timer("step", all_timings):
 
-                    # Fetch the next batch; on epoch exhaustion, close the epoch and
-                    # restart the iterator (reshuffles the random/sequential samplers).
+                    # With async enabled, this is usually just the wait for an
+                    # already-running collate. ``None`` marks epoch exhaustion.
                     with Timer("data_loading", all_timings):
-                        batch = next(data_iter, None)
+                        if async_collator is not None and async_collator.pending_step() == self.global_step:
+                            batch = async_collator.get(self.global_step)
+                            self._checkpoint_dataloader_state = None
+                        else:
+                            batch = next(data_iter, None)
                     if batch is None:
                         self._fire("on_epoch_end")
                         current_epoch += 1
@@ -1982,6 +2008,13 @@ class SFTTrainer:
                         data_iter = iter(self.train_dataloader)
                         with Timer("data_loading", all_timings):
                             batch = next(data_iter)
+
+                    if async_collator is not None and self.global_step < num_steps:
+                        # Advancing the iterator in the worker moves the live
+                        # dataloader state one batch ahead. Preserve the state after
+                        # the current batch so checkpoints still resume exactly.
+                        self._checkpoint_dataloader_state = self.train_dataloader.state_dict()
+                        async_collator.submit(self.global_step + 1)
 
                     self._fire("on_step_start", batch=batch)
 
@@ -2077,6 +2110,13 @@ class SFTTrainer:
 
                 self.global_step += 1
         finally:
+            # Always tear down the async collation thread (drains any in-flight
+            # batch and joins the worker) so neither the background thread
+            # nor the dataset reference is leaked, even on exception. No-op
+            # when async collation is disabled.
+            if async_collator is not None:
+                async_collator.shutdown()
+            self._checkpoint_dataloader_state = None
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
         self.global_step = min(self.global_step, num_steps)
@@ -2104,6 +2144,10 @@ class SFTTrainer:
                 self.global_step = final_step
                 logger.info(f"Saving final HF model at step {final_step}")
                 self.save_hf_model()
+
+        # Drain any in-flight async checkpoint write before teardown. Unconditional:
+        # a save may have happened outside the periodic path. No-op when nothing is pending.
+        self.dispatch.finalize_pending_saves("policy")
 
         # Final eval pass (skip if the last step already ran eval).
         # NOTE: The last in-loop tracker.log(..., commit=True) at step=num_steps
@@ -2151,7 +2195,12 @@ class SFTTrainer:
             dataloader_save_path = os.path.join(global_step_folder, "data.pt")
             try:
                 with io.open_file(dataloader_save_path, "wb") as f:
-                    torch.save(self.train_dataloader.state_dict(), f)
+                    dataloader_state = (
+                        self._checkpoint_dataloader_state
+                        if self._checkpoint_dataloader_state is not None
+                        else self.train_dataloader.state_dict()
+                    )
+                    torch.save(dataloader_state, f)
                 logger.info(f"Saved dataloader state to {dataloader_save_path}")
             except Exception as e:
                 logger.warning(f"Failed to save dataloader state: {e}")
