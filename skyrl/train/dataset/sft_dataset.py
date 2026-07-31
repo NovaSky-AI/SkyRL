@@ -11,6 +11,7 @@ rows.
 """
 
 import abc
+import bisect
 from typing import Iterable, Sequence
 
 import torch.utils.data
@@ -30,6 +31,13 @@ class SFTDataset(torch.utils.data.Dataset, abc.ABC):
         """Tokenized length of every example (after truncation/dropping)."""
         raise NotImplementedError
 
+    def __getitems__(self, indices: list) -> list:
+        """Batched fetch (the entry point torch's fetcher prefers). Row-wise
+        by default; subclasses override when a batch-at-once call amortizes
+        real work (one arrow gather + one transform invocation for the mmap
+        dataset; and e.g. one coalesced ranged read for network-backed ones)."""
+        return [self[i] for i in indices]
+
 
 class TextDataset(SFTDataset):
     """In-memory dataset of tokenized examples (the tokenize-on-load path).
@@ -47,9 +55,6 @@ class TextDataset(SFTDataset):
 
     def __getitem__(self, idx):
         return self._examples[idx]
-
-    def __getitems__(self, indices: list) -> list:
-        return [self._examples[i] for i in indices]
 
     @property
     def sequence_lengths(self) -> list[int]:
@@ -70,6 +75,31 @@ class ConcatSFTDataset(SFTDataset, torch.utils.data.ConcatDataset):
     def dataset_lengths(self) -> list[int]:
         """Size of each source, in order (configures weighted mixing)."""
         return [len(dataset) for dataset in self.datasets]
+
+    def __getitems__(self, indices: list) -> list:
+        """Batched fetch across sources, preserving the requested order.
+
+        Torch's fetcher only checks the *top-level* dataset for
+        ``__getitems__``, so without this a concat degrades every source to
+        row-wise ``__getitem__`` -- a minor overhead for in-memory/mmap
+        sources, but defeating for sources whose batched path amortizes real
+        work (e.g. fetch-over-network stores). Indices are grouped per source
+        and served through each source's batched entry point.
+        """
+        by_source: dict[int, list[tuple[int, int]]] = {}
+        for pos, index in enumerate(indices):
+            index = int(index)
+            if index < 0:
+                index += len(self)
+            source = bisect.bisect_right(self.cumulative_sizes, index)
+            local = index - (self.cumulative_sizes[source - 1] if source > 0 else 0)
+            by_source.setdefault(source, []).append((pos, local))
+        rows: list = [None] * len(indices)
+        for source, items in by_source.items():
+            fetched = self.datasets[source].__getitems__([local for _, local in items])
+            for (pos, _), row in zip(items, fetched):
+                rows[pos] = row
+        return rows
 
     @property
     def sequence_lengths(self) -> list[int]:
