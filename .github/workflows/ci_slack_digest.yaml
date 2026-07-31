@@ -1,0 +1,84 @@
+name: CI-Slack-Digest
+
+# Posts one message a day to #skyrl-ci-alerts summarising `main` CI health:
+# which workflows are red right now, and which went green again since the last
+# digest. See .github/scripts/ci_slack_digest.py for the classification rules.
+
+on:
+  schedule:
+    # 14:00 UTC — after the nightly E2E workflows (08:05–08:30 UTC start, up to
+    # ~3.3h runtime) have finished, so their results land in the same digest.
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    inputs:
+      lookback_hours:
+        description: 'Window for recovery detection (hours)'
+        required: false
+        default: '25'
+      dry_run:
+        description: 'Render the payload in the job log without posting to Slack'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  actions: read    # to read workflow run history
+  contents: read
+
+concurrency:
+  group: ci-slack-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    # Never run from forks that sync this workflow file.
+    if: github.repository == 'NovaSky-AI/SkyRL'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Cheap (<1s) and guards the part that would otherwise fail silently: a
+      # broken classifier turns this job red instead of mis-reporting CI health.
+      - name: Test the digest classifier
+        run: |
+          uv run --isolated --no-project --python 3.12 --with pytest \
+            pytest .github/scripts/test_ci_slack_digest.py -q
+      - name: Post CI digest to Slack
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CI_ALERTS_WEBHOOK_URL }}
+          LOOKBACK_HOURS: ${{ inputs.lookback_hours || '25' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          SELF_WORKFLOW_FILE: ci_slack_digest.yaml
+          # Post even on a fully green day, so a silent channel always means
+          # "the digest is broken" rather than "maybe everything is fine".
+          POST_WHEN_ALL_GREEN: 'true'
+          # Every workflow that runs on main. Keep in sync with
+          # .github/workflows/*.yaml — the digest footer flags any workflow file
+          # whose name is missing from this list.
+          MONITORED_WORKFLOWS: |
+            H100-GPU-CI
+            Megatron-Model-GPU-CI
+            SkyRL-CPU
+            SkyRL-GPU
+            SkyRL-GPU-E2E-CI
+            SkyRL-GPU-E2E-CI-Fully-Async
+            SkyRL-GPU-E2E-CI-Megatron
+            SkyRL-GPU-E2E-CI-SFT
+            SkyRL-GPU-E2E-CI-Tinker
+            SkyRL-GPU-E2E-CI-Tinker-Fully-Async
+            SkyRL-Train-CPU
+            SkyRL-Train-GPU
+            SkyRL-Train-GPU-Megatron
+            Tinker-SkyRL-Train-Backend-GPU
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL}" ]; then
+            echo "::warning::SLACK_CI_ALERTS_WEBHOOK_URL is not set — rendering the digest without posting."
+          fi
+          uv run --isolated --no-project --python 3.12 .github/scripts/ci_slack_digest.py
