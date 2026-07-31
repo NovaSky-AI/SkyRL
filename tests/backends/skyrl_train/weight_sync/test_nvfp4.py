@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import skyrl.backends.skyrl_train.quantization.nvfp4 as nvfp4_module
 from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_WEIGHT_PREFIX,
     get_quantized_model_layout,
@@ -12,8 +13,6 @@ from skyrl.backends.skyrl_train.quantization.nvfp4 import (
     NVFP4_4OVER6_FP8_MAX,
     NVFP4_BLOCK_SIZE,
     Nvfp4ExpertStrategy,
-    batched_nvfp4_cast_to_fp4,
-    nvfp4_cast_to_fp4,
 )
 from skyrl.backends.skyrl_train.quantization.vllm_nvfp4 import (
     _materialize_expanded_parameter,
@@ -44,6 +43,49 @@ def _dequantize(
     )
 
 
+def _reference_nvfp4_four_over_six_scales(weight: torch.Tensor):
+    from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+
+    weight_fp32 = weight.float()
+    reduce_dims = (-2, -1) if weight.ndim == 3 else None
+    global_scale = (
+        weight_fp32.abs().amax(dim=reduce_dims, keepdim=weight.ndim == 3) / (6.0 * NVFP4_4OVER6_FP8_MAX)
+    ).clamp_min(torch.finfo(torch.float32).tiny)
+    blocks = weight_fp32.view(*weight.shape[:-1], -1, NVFP4_BLOCK_SIZE)
+    block_amax = blocks.abs().amax(dim=-1)
+
+    def candidate(multiplier: float):
+        block_scale = (block_amax * multiplier / (6.0 * global_scale)).clamp(
+            min=2**-9,
+            max=torch.finfo(torch.float8_e4m3fn).max,
+        )
+        block_scale = block_scale.to(torch.float8_e4m3fn)
+        dequant_scale = block_scale.float() * global_scale
+        q_values = NVFP4QTensor._cast_fp4(blocks / dequant_scale.unsqueeze(-1))
+        fp4_values = NVFP4QTensor.get_e2m1_values(weight.device)[q_values.long()].float()
+        error = ((blocks - fp4_values * dequant_scale.unsqueeze(-1)) ** 2).sum(dim=-1)
+        return block_scale, error
+
+    scale_m6, error_m6 = candidate(1.0)
+    scale_m4, error_m4 = candidate(1.5)
+    block_scale = torch.where(error_m4 < error_m6, scale_m4.float(), scale_m6.float())
+    return block_scale.to(torch.float8_e4m3fn), global_scale
+
+
+def _reference_nvfp4_cast(weight: torch.Tensor):
+    from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+
+    block_scale, global_scale = _reference_nvfp4_four_over_six_scales(weight)
+    quantized, block_scale, global_scale = NVFP4QTensor.quantize(
+        weight.contiguous(),
+        NVFP4_BLOCK_SIZE,
+        weights_scaling_factor=block_scale,
+        weights_scaling_factor_2=global_scale,
+    )
+    global_scale = global_scale.reshape(weight.shape[0]) if weight.ndim == 3 else global_scale.reshape(())
+    return quantized._quantized_data.contiguous(), block_scale.contiguous(), global_scale.contiguous()
+
+
 def test_nvfp4_four_over_six_selects_no_worse_mse_than_m6():
     from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
@@ -55,7 +97,7 @@ def test_nvfp4_four_over_six_selects_no_worse_mse_than_m6():
         NVFP4_BLOCK_SIZE,
         weights_scaling_factor_2=global_scale,
     )
-    q_weight, block_scale, selected_global_scale = nvfp4_cast_to_fp4(weight, four_over_six=True)
+    q_weight, block_scale, selected_global_scale = _reference_nvfp4_cast(weight)
 
     m6_dequant = _dequantize(m6._quantized_data, m6_scale, global_scale, weight.shape)
     selected_dequant = _dequantize(q_weight, block_scale, selected_global_scale, weight.shape)
@@ -72,7 +114,7 @@ def test_batched_nvfp4_four_over_six_uses_per_expert_global_scales():
     weight[1].mul_(4)
     weight[2].mul_(0.25)
 
-    packed, block_scale, global_scale = batched_nvfp4_cast_to_fp4(weight, four_over_six=True)
+    packed, block_scale, global_scale = _reference_nvfp4_cast(weight)
 
     expected_global_scale = weight.abs().amax(dim=(-2, -1)).float() / (6.0 * NVFP4_4OVER6_FP8_MAX)
     assert packed.shape == (3, 16, 32)
@@ -117,10 +159,30 @@ def test_nvfp4_humans_recipe_runtime_env():
     assert env["TRTLLM_DISABLE_FP4_QUANT_FAST_MATH"] == "1"
 
 
-def test_nvfp4_gate_and_up_weights_share_global_scales():
+def test_nvfp4_gate_and_up_weights_share_global_scales(monkeypatch):
     torch.manual_seed(2)
     gate_up = torch.randn(3, 32, 64, dtype=torch.bfloat16)
     gate_up[:, :16].mul_(4)
+
+    def fake_quantize_pair(gate, up, **_kwargs):
+        global_scale = torch.maximum(
+            gate.float().abs().amax(dim=(-2, -1)),
+            up.float().abs().amax(dim=(-2, -1)),
+        )
+
+        def payload(weight):
+            return (
+                torch.zeros((*weight.shape[:-1], weight.shape[-1] // 2), dtype=torch.uint8),
+                torch.ones(
+                    (*weight.shape[:-1], weight.shape[-1] // NVFP4_BLOCK_SIZE),
+                    dtype=torch.float8_e4m3fn,
+                ),
+                global_scale.clone(),
+            )
+
+        return payload(gate), payload(up)
+
+    monkeypatch.setattr(nvfp4_module, "_quantize_nvfp4_pair", fake_quantize_pair)
     strategy = Nvfp4ExpertStrategy(four_over_six_scope="weights", row_scaled_activation=True)
 
     emitted = dict(

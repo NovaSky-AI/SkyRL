@@ -129,7 +129,6 @@ class ExpertNvfp4Config(BaseConfig):
     disable_stochastic_rounding: bool = False
     disable_2d_quantization: bool = False
     high_precision_last_layers: int = 0
-    expert_batch_size: int = 8
 
 
 @dataclass
@@ -1169,8 +1168,6 @@ class TrainerConfig(BaseConfig):
                 and not self.policy.megatron_config.lora_config.merge_lora
             ):
                 raise ValueError("Expert NVFP4 rollout does not support unmerged LoRA")
-            if expert_nvfp4.expert_batch_size <= 0:
-                raise ValueError("expert_nvfp4.expert_batch_size must be positive")
             if expert_nvfp4.high_precision_last_layers < 0:
                 raise ValueError("expert_nvfp4.high_precision_last_layers must be non-negative")
 

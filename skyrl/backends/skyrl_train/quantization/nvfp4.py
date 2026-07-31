@@ -13,7 +13,6 @@ from .base import QuantizationStrategy, QuantizedModelLayout, WeightCategory
 
 SERIALIZED_NVFP4 = "serialized_nvfp4"
 NVFP4_BLOCK_SIZE = 16
-NVFP4_GLOBAL_SCALE_DENOMINATOR = 6.0 * 448.0
 NVFP4_4OVER6_FP8_MAX = 256.0
 NVFP4_TE_ROW_ALIGNMENT = 16
 Nvfp4FourOverSixScope = Literal["none", "weights", "activations", "all"]
@@ -104,45 +103,6 @@ def nvfp4_scale_names_for_weight(name: str) -> tuple[str, str]:
     return f"{prefix}.weight_scale", f"{prefix}.weight_scale_2"
 
 
-def _nvfp4_four_over_six_scales(
-    weight: torch.Tensor,
-    nvfp4_qtensor,
-    *,
-    batched_experts: bool,
-    global_scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Select the lower-MSE M=6 or M=4 scale for every 16-value block."""
-
-    weight_fp32 = weight.float()
-    if global_scale is None:
-        if batched_experts:
-            global_amax = weight_fp32.abs().amax(dim=(-2, -1), keepdim=True)
-        else:
-            global_amax = weight_fp32.abs().amax()
-        global_scale = (global_amax / (6.0 * NVFP4_4OVER6_FP8_MAX)).clamp_min(
-            torch.finfo(torch.float32).tiny
-        )
-
-    blocks = weight_fp32.view(*weight.shape[:-1], -1, NVFP4_BLOCK_SIZE)
-    block_amax = blocks.abs().amax(dim=-1)
-
-    def candidate(multiplier: float) -> tuple[torch.Tensor, torch.Tensor]:
-        block_scale = (
-            block_amax * multiplier / (6.0 * global_scale)
-        ).clamp(min=2**-9, max=torch.finfo(torch.float8_e4m3fn).max)
-        block_scale = block_scale.to(torch.float8_e4m3fn)
-        dequant_scale = block_scale.float() * global_scale
-        q_values = nvfp4_qtensor._cast_fp4(blocks / dequant_scale.unsqueeze(-1))
-        fp4_values = nvfp4_qtensor.get_e2m1_values(weight.device)[q_values.long()].float()
-        error = ((blocks - fp4_values * dequant_scale.unsqueeze(-1)) ** 2).sum(dim=-1)
-        return block_scale, error
-
-    scale_m6, error_m6 = candidate(1.0)
-    scale_m4, error_m4 = candidate(1.5)
-    selected_scale = torch.where(error_m4 < error_m6, scale_m4.float(), scale_m6.float())
-    return selected_scale.to(torch.float8_e4m3fn), global_scale
-
-
 def _nvfp4_global_decode_scale(global_amax: torch.Tensor, e4m3_max: int) -> torch.Tensor:
     """Match Transformer Engine's NVFP4 global decode-scale contract."""
 
@@ -165,7 +125,7 @@ def _pad_nvfp4_rows(weight: torch.Tensor) -> torch.Tensor:
     return torch.cat((weight, padding), dim=0)
 
 
-def _nvfp4_te_quantize_2d(
+def _quantize_nvfp4_matrix(
     weight: torch.Tensor,
     *,
     four_over_six: bool,
@@ -204,7 +164,7 @@ def _nvfp4_te_quantize_2d(
     )
 
 
-def _nvfp4_te_quantize(
+def _quantize_nvfp4_weight(
     weight: torch.Tensor,
     *,
     four_over_six: bool,
@@ -214,7 +174,7 @@ def _nvfp4_te_quantize(
     """Quantize a 2D weight or independent 3D expert matrices with TE."""
 
     if weight.ndim == 2:
-        return _nvfp4_te_quantize_2d(
+        return _quantize_nvfp4_matrix(
             weight,
             four_over_six=four_over_six,
             e4m3_max=e4m3_max,
@@ -223,7 +183,7 @@ def _nvfp4_te_quantize(
     if weight.ndim != 3:
         raise ValueError(f"NVFP4 expects a 2D or 3D tensor, got shape={tuple(weight.shape)}")
     outputs = [
-        _nvfp4_te_quantize_2d(
+        _quantize_nvfp4_matrix(
             expert,
             four_over_six=four_over_six,
             e4m3_max=e4m3_max,
@@ -235,7 +195,7 @@ def _nvfp4_te_quantize(
     return torch.stack(packed), torch.stack(block_scale), torch.stack(global_scale)
 
 
-def _nvfp4_te_quantize_pair(
+def _quantize_nvfp4_pair(
     first: torch.Tensor,
     second: torch.Tensor,
     *,
@@ -255,7 +215,7 @@ def _nvfp4_te_quantize_pair(
         )
     if first.ndim == 2:
         first_rows = first.shape[0]
-        packed, block_scale, global_scale = _nvfp4_te_quantize_2d(
+        packed, block_scale, global_scale = _quantize_nvfp4_matrix(
             torch.cat((first, second), dim=0),
             four_over_six=four_over_six,
             e4m3_max=e4m3_max,
@@ -268,7 +228,7 @@ def _nvfp4_te_quantize_pair(
     if first.ndim != 3:
         raise ValueError(f"NVFP4 gate/up pair expects 2D or 3D weights, got ndim={first.ndim}")
     pairs = [
-        _nvfp4_te_quantize_pair(
+        _quantize_nvfp4_pair(
             gate,
             up,
             four_over_six=four_over_six,
@@ -284,138 +244,6 @@ def _nvfp4_te_quantize_pair(
         return torch.stack(packed), torch.stack(block_scale), torch.stack(global_scale)
 
     return stack(first_outputs), stack(second_outputs)
-
-
-def _nvfp4_cast(
-    weight: torch.Tensor,
-    *,
-    batched_experts: bool,
-    four_over_six: bool,
-    global_scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize a weight to packed E2M1 data with E4M3 and FP32 scales."""
-
-    expected_ndim = 3 if batched_experts else 2
-    if weight.ndim != expected_ndim:
-        raise ValueError(
-            f"NVFP4 expects a {expected_ndim}D tensor when batched_experts={batched_experts}, "
-            f"got shape={tuple(weight.shape)}"
-        )
-    if weight.shape[-1] % NVFP4_BLOCK_SIZE != 0:
-        raise ValueError(
-            f"NVFP4 requires the last dimension to be divisible by {NVFP4_BLOCK_SIZE}, "
-            f"got shape={tuple(weight.shape)}"
-        )
-
-    try:
-        from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
-    except ImportError as exc:
-        raise RuntimeError("Serialized NVFP4 requires nvidia-modelopt") from exc
-
-    weight = weight.detach().contiguous()
-    block_scale = None
-    if four_over_six:
-        block_scale, global_scale = _nvfp4_four_over_six_scales(
-            weight,
-            NVFP4QTensor,
-            batched_experts=batched_experts,
-            global_scale=global_scale,
-        )
-    elif global_scale is None and batched_experts:
-        global_scale = (
-            weight.abs().amax(dim=(-2, -1), keepdim=True).float() / NVFP4_GLOBAL_SCALE_DENOMINATOR
-        )
-    elif global_scale is None:
-        global_scale = None
-
-    quantized, block_scale, global_scale = NVFP4QTensor.quantize(
-        weight,
-        NVFP4_BLOCK_SIZE,
-        weights_scaling_factor=block_scale,
-        weights_scaling_factor_2=global_scale,
-    )
-    packed_weight = quantized._quantized_data
-    if batched_experts:
-        global_scale = global_scale.reshape(weight.shape[0])
-    else:
-        global_scale = global_scale.reshape(())
-    return packed_weight.contiguous(), block_scale.contiguous(), global_scale.contiguous()
-
-
-def nvfp4_cast_to_fp4(
-    weight: torch.Tensor,
-    *,
-    four_over_six: bool = False,
-    e4m3_max: int = int(NVFP4_4OVER6_FP8_MAX),
-    error_mode: Literal["MAE", "MSE"] = "MSE",
-    global_scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize a 2D weight to serialized NVFP4 tensors."""
-
-    if weight.is_cuda and global_scale is None:
-        return _nvfp4_te_quantize(
-            weight,
-            four_over_six=four_over_six,
-            e4m3_max=e4m3_max if four_over_six else 448,
-            error_mode=error_mode,
-        )
-    return _nvfp4_cast(
-        weight,
-        batched_experts=False,
-        four_over_six=four_over_six,
-        global_scale=global_scale,
-    )
-
-
-def batched_nvfp4_cast_to_fp4(
-    weight: torch.Tensor,
-    *,
-    four_over_six: bool = False,
-    e4m3_max: int = int(NVFP4_4OVER6_FP8_MAX),
-    error_mode: Literal["MAE", "MSE"] = "MSE",
-    expert_batch_size: int = 8,
-    global_scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize a 3D expert weight to serialized NVFP4 tensors."""
-
-    if weight.ndim != 3:
-        raise ValueError(f"Batched NVFP4 expects a 3D tensor, got shape={tuple(weight.shape)}")
-    if isinstance(expert_batch_size, bool) or not isinstance(expert_batch_size, int) or expert_batch_size <= 0:
-        raise ValueError(f"expert_batch_size must be a positive integer, got {expert_batch_size!r}")
-    if weight.shape[-1] % NVFP4_BLOCK_SIZE != 0:
-        raise ValueError(
-            f"NVFP4 requires the last dimension to be divisible by {NVFP4_BLOCK_SIZE}, "
-            f"got shape={tuple(weight.shape)}"
-        )
-    if weight.is_cuda and global_scale is None:
-        return _nvfp4_te_quantize(
-            weight,
-            four_over_six=four_over_six,
-            e4m3_max=e4m3_max if four_over_six else 448,
-            error_mode=error_mode,
-        )
-
-    num_experts, rows, cols = weight.shape
-    packed_weight = torch.empty((num_experts, rows, cols // 2), dtype=torch.uint8, device=weight.device)
-    block_scale = torch.empty(
-        (num_experts, rows, cols // NVFP4_BLOCK_SIZE),
-        dtype=torch.float8_e4m3fn,
-        device=weight.device,
-    )
-    output_global_scale = torch.empty(num_experts, dtype=torch.float32, device=weight.device)
-
-    for start in range(0, num_experts, expert_batch_size):
-        end = min(start + expert_batch_size, num_experts)
-        q_chunk, block_chunk, global_chunk = _nvfp4_cast(
-            weight[start:end],
-            batched_experts=True,
-            four_over_six=four_over_six,
-            global_scale=None if global_scale is None else global_scale[start:end],
-        )
-        packed_weight[start:end].copy_(q_chunk)
-        block_scale[start:end].copy_(block_chunk)
-        output_global_scale[start:end].copy_(global_chunk)
-    return packed_weight, block_scale, output_global_scale
 
 
 @dataclass(frozen=True)
@@ -434,7 +262,6 @@ class Nvfp4ExpertStrategy(QuantizationStrategy):
     disable_fp4_quant_fast_math: bool = False
     high_precision_last_layers: int = 0
     num_layers: int | None = None
-    expert_batch_size: int = 8
 
     mode: ClassVar[str] = SERIALIZED_NVFP4
     quantized_categories: ClassVar[frozenset[WeightCategory]] = frozenset(
@@ -470,7 +297,6 @@ class Nvfp4ExpertStrategy(QuantizationStrategy):
             disable_fp4_quant_fast_math=config.disable_fp4_quant_fast_math,
             high_precision_last_layers=config.high_precision_last_layers,
             num_layers=num_layers,
-            expert_batch_size=config.expert_batch_size,
         )
 
     def _is_high_precision_layer(self, name: str) -> bool:
@@ -582,34 +408,20 @@ class Nvfp4ExpertStrategy(QuantizationStrategy):
             return {}
         if gate_tensor.ndim != up_tensor.ndim:
             raise ValueError("Fused gate and up weights must have matching dimensions")
-        if gate_tensor.is_cuda:
-            four_over_six = self.four_over_six_scope in {"weights", "all"}
-            e4m3_max = (
-                int(NVFP4_4OVER6_FP8_MAX)
-                if self.four_over_six_e4m3_use_256_scope in {"weights", "all"}
-                else 448
-            )
-            gate_output, up_output = _nvfp4_te_quantize_pair(
-                gate_tensor,
-                up_tensor,
-                four_over_six=four_over_six,
-                e4m3_max=e4m3_max,
-                error_mode=self.four_over_six_error_mode,
-            )
-            return {gate_name: gate_output, up_name: up_output}
-        reduce_dims = (-2, -1) if gate_tensor.ndim == 3 else None
-        keepdim = gate_tensor.ndim == 3
-        gate_amax = gate_tensor.float().abs().amax(dim=reduce_dims, keepdim=keepdim)
-        up_amax = up_tensor.float().abs().amax(dim=reduce_dims, keepdim=keepdim)
-        denominator = (
-            6.0 * NVFP4_4OVER6_FP8_MAX
-            if self.four_over_six_scope in {"weights", "all"}
-            else NVFP4_GLOBAL_SCALE_DENOMINATOR
+        four_over_six = self.four_over_six_scope in {"weights", "all"}
+        e4m3_max = (
+            int(NVFP4_4OVER6_FP8_MAX)
+            if self.four_over_six_e4m3_use_256_scope in {"weights", "all"}
+            else 448
         )
-        global_scale = (torch.maximum(gate_amax, up_amax) / denominator).clamp_min(
-            torch.finfo(torch.float32).tiny
+        gate_output, up_output = _quantize_nvfp4_pair(
+            gate_tensor,
+            up_tensor,
+            four_over_six=four_over_six,
+            e4m3_max=e4m3_max,
+            error_mode=self.four_over_six_error_mode,
         )
-        return {gate_name: global_scale, up_name: global_scale}
+        return {gate_name: gate_output, up_name: up_output}
 
     def serialize_weight(
         self,
@@ -621,6 +433,7 @@ class Nvfp4ExpertStrategy(QuantizationStrategy):
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """Yield a packed NVFP4 weight and its two scale tensors."""
 
+        del batched_experts
         quantize_weights_with_four_over_six = self.four_over_six_scope in {"weights", "all"}
         e4m3_max = (
             int(NVFP4_4OVER6_FP8_MAX)
@@ -629,22 +442,12 @@ class Nvfp4ExpertStrategy(QuantizationStrategy):
         )
         if isinstance(context, tuple) and len(context) == 3:
             q_weight, block_scale, global_scale = context
-        elif batched_experts:
-            q_weight, block_scale, global_scale = batched_nvfp4_cast_to_fp4(
-                tensor,
-                four_over_six=quantize_weights_with_four_over_six,
-                e4m3_max=e4m3_max,
-                error_mode=self.four_over_six_error_mode,
-                expert_batch_size=self.expert_batch_size,
-                global_scale=context,
-            )
         else:
-            q_weight, block_scale, global_scale = nvfp4_cast_to_fp4(
+            q_weight, block_scale, global_scale = _quantize_nvfp4_weight(
                 tensor,
                 four_over_six=quantize_weights_with_four_over_six,
-                e4m3_max=e4m3_max,
+                e4m3_max=e4m3_max if quantize_weights_with_four_over_six else 448,
                 error_mode=self.four_over_six_error_mode,
-                global_scale=context,
             )
         block_scale_name, global_scale_name = nvfp4_scale_names_for_weight(name)
         yield name, q_weight
