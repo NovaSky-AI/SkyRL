@@ -1,0 +1,37 @@
+# Slack app manifest for the CI digest bot (see .github/workflows/ci_slack_digest.yaml).
+#
+# Create the app from this file instead of clicking through the scope picker:
+#   https://api.slack.com/apps → Create New App → From an app manifest
+#   → pick the workspace → paste this YAML → Create → Install to Workspace
+#
+# Then invite it to the channel (`/invite @SkyRL CI`) and put the resulting
+# `xoxb-…` bot token in the `SLACK_BOT_TOKEN` repo secret.
+#
+# Checked in so the app's configuration is reviewable and reproducible rather
+# than living only in whoever set it up first.
+#
+# Scope note: `chat:write` alone can only post to channels the bot has joined,
+# which is why the invite step exists. Adding `chat:write.public` would let it
+# post to any *public* channel without joining — that removes the invite step at
+# the cost of workspace-wide public posting rights. `chat:write` is the tighter
+# choice for a single dedicated channel, and the digest script reports
+# `not_in_channel` with the fix if the invite is ever missed.
+
+display_information:
+  name: SkyRL CI
+  description: Daily digest of SkyRL CI health on main
+
+features:
+  bot_user:
+    display_name: SkyRL CI
+    always_online: false
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
