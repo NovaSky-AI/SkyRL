@@ -39,7 +39,12 @@ from skyrl.backends.skyrl_train.quantization import (
     get_serialized_weight_strategy,
 )
 from skyrl.backends.skyrl_train.quantization.vllm import resolve_vllm_receiver_target
+from skyrl.backends.skyrl_train.quantization.vllm_nvfp4 import (
+    install_vllm_nvfp4_per_token_patch,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
+
+install_vllm_nvfp4_per_token_patch()
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
@@ -92,13 +97,15 @@ def _load_serialized_moe_tensor(
     Marked tensors must resolve successfully so a protocol mismatch cannot
     silently leave stale rollout weights behind.
     """
-    if loaded_weight.ndim != 3:
+    mode, checkpoint_name = decoded_name
+    is_per_expert_global_scale = checkpoint_name.endswith((".weight_scale_2", ".input_scale"))
+    expected_ndim = 1 if is_per_expert_global_scale else 3
+    if loaded_weight.ndim != expected_ndim:
         raise ValueError(
-            f"Batched serialized MoE tensor must be 3D, got name={serialized_name!r}, "
+            f"Batched serialized MoE tensor must be {expected_ndim}D, got name={serialized_name!r}, "
             f"shape={tuple(loaded_weight.shape)}"
         )
 
-    mode, checkpoint_name = decoded_name
     mapped_name = _map_hf_weight_name(model, checkpoint_name)
     strategy, layout = _get_receiver_context(mode, model_type)
     receiver_target = resolve_vllm_receiver_target(strategy, layout, mapped_name)
@@ -117,6 +124,26 @@ def _load_serialized_moe_tensor(
         # Layerwise reload wraps the loader with functools.wraps, which copies
         # this marker from FusedMoE.weight_loader onto the wrapper.
         raise ValueError(f"Parameter {target_name!r} does not expose a FusedMoE weight loader")
+
+    if is_per_expert_global_scale:
+        loaded_any = False
+        for expert_id, expert_scale in enumerate(loaded_weight.unbind(0)):
+            loaded_any = (
+                bool(
+                    weight_loader(
+                        param,
+                        expert_scale.reshape(()),
+                        target_name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
+                )
+                or loaded_any
+            )
+        if not loaded_any:
+            raise ValueError(f"No local expert accepted serialized MoE tensor {serialized_name!r}")
+        return True
 
     if param.shape[0] == loaded_weight.shape[0]:
         success = weight_loader(

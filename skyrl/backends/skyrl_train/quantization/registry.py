@@ -7,12 +7,14 @@ from typing import Literal, TypeAlias
 from .base import QuantizationStrategy
 from .blockwise_fp8 import SERIALIZED_BLOCKWISE_FP8, BlockwiseFp8LinearStrategy
 from .mxfp8 import SERIALIZED_MXFP8, Mxfp8ExpertStrategy
+from .nvfp4 import SERIALIZED_NVFP4, Nvfp4ExpertStrategy
 
-SerializedWeightMode: TypeAlias = Literal["serialized_blockwise", "serialized_mxfp8"]
+SerializedWeightMode: TypeAlias = Literal["serialized_blockwise", "serialized_mxfp8", "serialized_nvfp4"]
 
 SERIALIZED_WEIGHT_STRATEGIES: dict[SerializedWeightMode, type[QuantizationStrategy]] = {
     SERIALIZED_BLOCKWISE_FP8: BlockwiseFp8LinearStrategy,
     SERIALIZED_MXFP8: Mxfp8ExpertStrategy,
+    SERIALIZED_NVFP4: Nvfp4ExpertStrategy,
 }
 
 

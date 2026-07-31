@@ -41,7 +41,9 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
 )
 from skyrl.backends.skyrl_train.quantization import (
+    SERIALIZED_NVFP4,
     ExpertExportLayout,
+    QuantizationStrategy,
     get_hf_model_type,
     get_quantized_model_layout,
     get_serialized_weight_strategy,
@@ -69,7 +71,7 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     iter_opts,
 )
 from skyrl.backends.skyrl_train.workers.megatron.fp8_param import (
-    initialize_fp8_param_optimizer_masters,
+    initialize_quantized_param_optimizer_masters,
     is_fp8_param_enabled,
 )
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
@@ -127,6 +129,7 @@ class MegatronWeightExtractor(WeightExtractor):
         training_dtype: torch.dtype = torch.bfloat16,
         fp8_weight_sync_mode: Optional[str] = None,
         serialized_weight_sync_mode: Optional[str] = None,
+        serialized_weight_strategy: Optional[QuantizationStrategy] = None,
         model_type: Optional[str] = None,
     ):
         self.bridge = bridge
@@ -134,14 +137,18 @@ class MegatronWeightExtractor(WeightExtractor):
         self.enable_bucketing = enable_bucketing
         self.bucket_size_threshold_GB = bucket_size_threshold_GB
         self.training_dtype = training_dtype
-        if fp8_weight_sync_mode is not None and serialized_weight_sync_mode is not None:
-            raise ValueError("Set only one of serialized_weight_sync_mode and fp8_weight_sync_mode")
-        self.serialized_weight_sync_mode = serialized_weight_sync_mode or fp8_weight_sync_mode
-        self.serialized_weight_strategy = (
-            get_serialized_weight_strategy(self.serialized_weight_sync_mode)
-            if self.serialized_weight_sync_mode is not None
-            else None
+        configured_modes = sum(
+            value is not None
+            for value in (fp8_weight_sync_mode, serialized_weight_sync_mode, serialized_weight_strategy)
         )
+        if configured_modes > 1:
+            raise ValueError(
+                "Set only one of serialized_weight_strategy, serialized_weight_sync_mode, and fp8_weight_sync_mode"
+            )
+        self.serialized_weight_sync_mode = serialized_weight_sync_mode or fp8_weight_sync_mode
+        self.serialized_weight_strategy = serialized_weight_strategy
+        if self.serialized_weight_strategy is None and self.serialized_weight_sync_mode is not None:
+            self.serialized_weight_strategy = get_serialized_weight_strategy(self.serialized_weight_sync_mode)
         self.model_type = model_type
         if self.serialized_weight_strategy is not None:
             if model_type is None:
@@ -464,8 +471,8 @@ class MegatronWorker:
         enable_mtp=False,
         language_model_only=False,
         bridge_weights_path=None,
-        expert_mxfp8=False,
-        expert_mxfp8_persistent=False,
+        quantization_strategy: Optional[QuantizationStrategy] = None,
+        quantization_persistent=False,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -507,7 +514,7 @@ class MegatronWorker:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
                 transformer_config_kwargs[key] = None
 
-        fp8_param_enabled = is_fp8_param_enabled(transformer_config_kwargs) or expert_mxfp8_persistent
+        quantized_param_enabled = is_fp8_param_enabled(transformer_config_kwargs) or quantization_persistent
         bridge_source = bridge_weights_path or model_path
         if bridge_weights_path:
             logger.info(
@@ -525,10 +532,10 @@ class MegatronWorker:
                 "(native GDN thd packing path; vision tower dropped)"
             )
 
-        # Defer persistent-FP8 checkpoint import until the bridge can expose
+        # Defer persistent low-precision checkpoint import until the bridge can expose
         # unquantized converted shards for optimizer-master initialization.
-        provider = bridge.to_megatron_provider(load_weights=not fp8_param_enabled)
-        if fp8_param_enabled:
+        provider = bridge.to_megatron_provider(load_weights=not quantized_param_enabled)
+        if quantized_param_enabled:
             provider.perform_initialization = False
 
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
@@ -579,18 +586,16 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
-        if expert_mxfp8:
-            from skyrl.backends.skyrl_train.quantization import Mxfp8ExpertStrategy
+        if quantization_strategy is not None:
             from skyrl.backends.skyrl_train.quantization.megatron import (
                 configure_megatron_quantization,
             )
 
-            quantization_strategy = Mxfp8ExpertStrategy()
             quantization_strategy.validate_model_type(get_hf_model_type(hf_config))
             configure_megatron_quantization(
                 provider,
                 quantization_strategy,
-                persistent=expert_mxfp8_persistent,
+                persistent=quantization_persistent,
             )
 
         # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
@@ -636,8 +641,8 @@ class MegatronWorker:
         # the bridge weights path only under fake-INT4 QAT (INT4 model.path, BF16
         # bridge weights); used so saved LoRA adapters reference the INT4 base.
         self._logical_model_path = model_path
-        self._deferred_fp8_param_weight_load = fp8_param_enabled
-        self._fp8_param_unquantized_state_dict = None
+        self._deferred_quantized_param_weight_load = quantized_param_enabled
+        self._quantized_param_unquantized_state_dict = None
 
         # strategy.hf_config is the on-disk source-of-truth used by
         # save_hf_configs and must NOT carry runtime overrides like
@@ -646,9 +651,9 @@ class MegatronWorker:
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
-    def _load_deferred_fp8_param_weights(self, *, retain_unquantized_state: bool = False) -> None:
-        """Load deferred FP8 weights and optionally retain exact master tensors."""
-        if not self._deferred_fp8_param_weight_load:
+    def _load_deferred_quantized_param_weights(self, *, retain_unquantized_state: bool = False) -> None:
+        """Load deferred quantized weights and optionally retain exact master tensors."""
+        if not self._deferred_quantized_param_weight_load:
             return
 
         original_export_dtype = self.bridge.export_weight_dtype
@@ -662,21 +667,21 @@ class MegatronWorker:
             if retain_unquantized_state and not state_dict:
                 raise RuntimeError(
                     "Megatron-Bridge did not capture unquantized checkpoint shards "
-                    "for persistent FP8 optimizer initialization."
+                    "for persistent quantized optimizer initialization."
                 )
-            self._fp8_param_unquantized_state_dict = state_dict if retain_unquantized_state else None
+            self._quantized_param_unquantized_state_dict = state_dict if retain_unquantized_state else None
         finally:
             self.bridge.export_weight_dtype = original_export_dtype
 
-    def _release_fp8_param_unquantized_state(self) -> None:
+    def _release_quantized_param_unquantized_state(self) -> None:
         """Release temporary checkpoint shards after deferred weight import."""
-        if not self._deferred_fp8_param_weight_load:
+        if not self._deferred_quantized_param_weight_load:
             return
-        self._fp8_param_unquantized_state_dict = None
+        self._quantized_param_unquantized_state_dict = None
         if self.bridge is not None:
             # Clear both owners; either reference keeps the unquantized shard in HBM.
             self.bridge.unquantized_state_dict = None
-        self._deferred_fp8_param_weight_load = False
+        self._deferred_quantized_param_weight_load = False
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -1030,10 +1035,27 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # served checkpoint is INT4) redirect the trainer's BF16 master weights.
         bridge_weights_path = self._maybe_setup_fake_int4_qat()
         expert_mxfp8 = self.cfg.policy.model.expert_mxfp8
+        expert_nvfp4 = self.cfg.policy.model.expert_nvfp4
+        quantization_strategy = None
+        quantization_persistent = False
         if expert_mxfp8.enabled and expert_mxfp8.training:
-            from skyrl.backends.skyrl_train.quantization import validate_mxfp8_hardware
+            from skyrl.backends.skyrl_train.quantization import (
+                Mxfp8ExpertStrategy,
+                validate_mxfp8_hardware,
+            )
 
             validate_mxfp8_hardware()
+            quantization_strategy = Mxfp8ExpertStrategy()
+            quantization_persistent = expert_mxfp8.persistent
+        elif expert_nvfp4.enabled and expert_nvfp4.training:
+            from skyrl.backends.skyrl_train.quantization import (
+                Nvfp4ExpertStrategy,
+                validate_nvfp4_hardware,
+            )
+
+            validate_nvfp4_hardware()
+            quantization_strategy = Nvfp4ExpertStrategy.from_config(expert_nvfp4)
+            quantization_persistent = expert_nvfp4.persistent
 
         # initialize the bridge and provider objects
         self.init_configs(
@@ -1046,8 +1068,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             language_model_only=self.cfg.policy.language_model_only,
             bridge_weights_path=bridge_weights_path,
             enable_mtp=self.cfg.mtp.enabled,
-            expert_mxfp8=expert_mxfp8.enabled and expert_mxfp8.training,
-            expert_mxfp8_persistent=expert_mxfp8.enabled and expert_mxfp8.training and expert_mxfp8.persistent,
+            quantization_strategy=quantization_strategy,
+            quantization_persistent=quantization_persistent,
         )
 
         if self.enable_router_replay:
@@ -1080,7 +1102,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             snapshot_download(model_path)  # will be no-op if already downloaded
         torch.distributed.barrier()
 
-        self._load_deferred_fp8_param_weights(retain_unquantized_state=not self.cfg.policy.inference_only_init)
+        self._load_deferred_quantized_param_weights(retain_unquantized_state=not self.cfg.policy.inference_only_init)
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
@@ -1099,17 +1121,25 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
             self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
-            fp8_param_masters = initialize_fp8_param_optimizer_masters(
-                self.optimizer,
-                fp8_param=is_fp8_param_enabled(self.cfg.policy.megatron_config.transformer_config_kwargs)
-                or (expert_mxfp8.enabled and expert_mxfp8.training and expert_mxfp8.persistent),
-                fp8_param_gather=self.cfg.policy.megatron_config.ddp_config.fp8_param_gather,
-                state_dict=self._fp8_param_unquantized_state_dict,
+            fp8_param = is_fp8_param_enabled(self.cfg.policy.megatron_config.transformer_config_kwargs) or (
+                expert_mxfp8.enabled and expert_mxfp8.training and expert_mxfp8.persistent
             )
-            if fp8_param_masters:
+            fp4_param = expert_nvfp4.enabled and expert_nvfp4.training and expert_nvfp4.persistent
+            quantized_param_masters = initialize_quantized_param_optimizer_masters(
+                self.optimizer,
+                quantized_param=fp8_param or fp4_param,
+                param_gather=(
+                    self.cfg.policy.megatron_config.ddp_config.fp4_param_gather
+                    if fp4_param
+                    else self.cfg.policy.megatron_config.ddp_config.fp8_param_gather
+                ),
+                format_name="FP4" if fp4_param else "FP8",
+                state_dict=self._quantized_param_unquantized_state_dict,
+            )
+            if quantized_param_masters:
                 logger.info(
-                    "Initialized {} persistent-FP8 optimizer master shard group(s) from exact checkpoint shards.",
-                    fp8_param_masters,
+                    "Initialized {} persistent quantized optimizer master shard group(s) from exact checkpoint shards.",
+                    quantized_param_masters,
                 )
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(
@@ -1129,7 +1159,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     f"({n_local} head main params on rank {self._rank}; 0 is normal under DP sharding)"
                 )
 
-        self._release_fp8_param_unquantized_state()
+        self._release_quantized_param_unquantized_state()
 
         # create worker model
         self.model = MegatronModelWrapper(
@@ -1516,13 +1546,24 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
         # Initialize weight extractor with bucketing enabled for all strategies
+        serialized_mode = inference_engine_cfg.resolved_serialized_weight_sync_mode
+        serialized_strategy = None
+        if serialized_mode == SERIALIZED_NVFP4:
+            from skyrl.backends.skyrl_train.quantization import Nvfp4ExpertStrategy
+
+            serialized_strategy = Nvfp4ExpertStrategy.from_config(
+                self.cfg.policy.model.expert_nvfp4,
+                num_layers=self.provider.num_layers,
+            )
+            serialized_mode = None
         self.weight_extractor = MegatronWeightExtractor(
             bridge=self.bridge,
             actor_module=self.actor_module,
             enable_bucketing=True,
             bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
-            serialized_weight_sync_mode=inference_engine_cfg.resolved_serialized_weight_sync_mode,
+            serialized_weight_sync_mode=serialized_mode,
+            serialized_weight_strategy=serialized_strategy,
             model_type=get_hf_model_type(self.strategy.hf_config),
         )
 
@@ -1809,8 +1850,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             snapshot_download(model_path)  # will be no-op if already downloaded
         torch.distributed.barrier()
 
-        self._load_deferred_fp8_param_weights()
-        self._release_fp8_param_unquantized_state()
+        self._load_deferred_quantized_param_weights()
+        self._release_quantized_param_unquantized_state()
 
         # load weights
         if self._rank == 0:

@@ -176,9 +176,11 @@ class Mxfp8ExpertStrategy(QuantizationStrategy):
         tensor: torch.Tensor,
         *,
         batched_experts: bool,
+        context: Any = None,
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """Yield an MXFP8 weight and its E8M0 scale tensor."""
 
+        del context
         if batched_experts:
             q_weight, scale = batched_mxfp8_cast_to_fp8(tensor)
         else:

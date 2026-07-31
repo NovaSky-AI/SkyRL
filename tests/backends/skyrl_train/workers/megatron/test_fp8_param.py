@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.workers.megatron.fp8_param import (
-    initialize_fp8_param_optimizer_masters,
+    initialize_quantized_param_optimizer_masters,
     is_fp8_param_enabled,
 )
 
@@ -88,10 +88,11 @@ def test_fp8_param_master_initialization_reloads_each_chained_optimizer():
     second = _FakeOptimizer()
     chained = type("FakeChainedOptimizer", (), {"chained_optimizers": [first, second]})()
 
-    initialized = initialize_fp8_param_optimizer_masters(
+    initialized = initialize_quantized_param_optimizer_masters(
         chained,
-        fp8_param=True,
-        fp8_param_gather=True,
+        quantized_param=True,
+        param_gather=True,
+        format_name="FP8",
         state_dict={"model": {}},
     )
 
@@ -103,10 +104,11 @@ def test_fp8_param_master_initialization_reloads_each_chained_optimizer():
 def test_fp8_param_cpu_offload_uses_exact_checkpoint_state_for_all_masters():
     optimizer = _FakeHybridMegatronOptimizer()
 
-    initialized = initialize_fp8_param_optimizer_masters(
+    initialized = initialize_quantized_param_optimizer_masters(
         optimizer,
-        fp8_param=True,
-        fp8_param_gather=True,
+        quantized_param=True,
+        param_gather=True,
+        format_name="FP8",
         state_dict=optimizer.exact_state_dict,
     )
 
@@ -121,10 +123,11 @@ def test_fp8_param_master_initialization_passes_exact_state_to_normal_optimizer(
     optimizer = _FakeOptimizer()
     state_dict = {"model": {"weight": torch.tensor([1.0])}}
 
-    initialized = initialize_fp8_param_optimizer_masters(
+    initialized = initialize_quantized_param_optimizer_masters(
         optimizer,
-        fp8_param=True,
-        fp8_param_gather=True,
+        quantized_param=True,
+        param_gather=True,
+        format_name="FP8",
         state_dict=state_dict,
     )
 
@@ -132,14 +135,15 @@ def test_fp8_param_master_initialization_passes_exact_state_to_normal_optimizer(
     assert optimizer.state_dict is state_dict
 
 
-def test_fp8_param_master_initialization_requires_fp8_param_gather():
+def test_quantized_param_master_initialization_requires_param_gather():
     optimizer = _FakeOptimizer()
 
-    with pytest.raises(ValueError, match="fp8_param_gather=true"):
-        initialize_fp8_param_optimizer_masters(
+    with pytest.raises(ValueError, match="require parameter gathering"):
+        initialize_quantized_param_optimizer_masters(
             optimizer,
-            fp8_param=True,
-            fp8_param_gather=False,
+            quantized_param=True,
+            param_gather=False,
+            format_name="FP8",
         )
 
     assert optimizer.calls == 0
@@ -149,10 +153,11 @@ def test_fp8_param_master_initialization_requires_exact_checkpoint_state():
     optimizer = _FakeOptimizer()
 
     with pytest.raises(ValueError, match="exact unquantized checkpoint state"):
-        initialize_fp8_param_optimizer_masters(
+        initialize_quantized_param_optimizer_masters(
             optimizer,
-            fp8_param=True,
-            fp8_param_gather=True,
+            quantized_param=True,
+            param_gather=True,
+            format_name="FP8",
         )
 
     assert optimizer.calls == 0
@@ -161,10 +166,11 @@ def test_fp8_param_master_initialization_requires_exact_checkpoint_state():
 def test_non_persistent_fp8_does_not_touch_optimizer_masters():
     optimizer = _FakeOptimizer()
 
-    initialized = initialize_fp8_param_optimizer_masters(
+    initialized = initialize_quantized_param_optimizer_masters(
         optimizer,
-        fp8_param=False,
-        fp8_param_gather=False,
+        quantized_param=False,
+        param_gather=False,
+        format_name="FP8",
     )
 
     assert initialized == 0

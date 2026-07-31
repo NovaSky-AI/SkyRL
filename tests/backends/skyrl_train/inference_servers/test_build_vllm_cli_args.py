@@ -6,9 +6,11 @@ import pytest
 
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     _apply_serialized_fp8_weight_sync_defaults,
+    _apply_serialized_weight_sync_defaults,
     build_vllm_cli_args,
     resolve_policy_model_name,
 )
+from skyrl.backends.skyrl_train.quantization import Nvfp4ExpertStrategy
 from skyrl.train.config import SkyRLTrainConfig
 
 
@@ -75,6 +77,51 @@ def test_serialized_mxfp8_weight_sync_configures_modelopt_experts(monkeypatch):
     }
 
 
+def test_serialized_nvfp4_weight_sync_configures_modelopt_experts(monkeypatch):
+    import transformers
+
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen3_moe"),
+    )
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.serialized_weight_sync_mode = "serialized_nvfp4"
+    engine_kwargs = {}
+
+    _apply_serialized_fp8_weight_sync_defaults(ie_cfg, engine_kwargs, model_path="qwen3-moe-test")
+
+    assert engine_kwargs["quantization"] == "modelopt_fp4"
+    assert engine_kwargs["load_format"] == "dummy"
+    assert engine_kwargs["hf_overrides"]["quantization_config"]["quant_algo"] == "W4A16_NVFP4"
+    assert engine_kwargs["hf_overrides"]["quantization_config"]["group_size"] == 16
+
+
+def test_serialized_nvfp4_per_token_activations_use_w4a4(monkeypatch):
+    import transformers
+
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen3_moe"),
+    )
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.serialized_weight_sync_mode = "serialized_nvfp4"
+    engine_kwargs = {}
+
+    _apply_serialized_weight_sync_defaults(
+        ie_cfg,
+        engine_kwargs,
+        model_path="qwen3-moe-test",
+        strategy=Nvfp4ExpertStrategy(row_scaled_activation=True),
+    )
+
+    assert engine_kwargs["hf_overrides"]["quantization_config"]["quant_algo"] == "NVFP4"
+    assert engine_kwargs["moe_backend"] == "flashinfer_trtllm"
+
+
 def test_serialized_mxfp8_requires_bfloat16():
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
@@ -104,7 +151,7 @@ def test_serialized_fp8_weight_sync_rejects_conflicting_vllm_settings(engine_kwa
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.fp8_weight_sync_mode = "serialized_blockwise"
 
-    with pytest.raises(ValueError, match="serialized FP8 weight sync"):
+    with pytest.raises(ValueError, match="serialized weight sync"):
         _apply_serialized_fp8_weight_sync_defaults(
             cfg.generator.inference_engine,
             engine_kwargs,

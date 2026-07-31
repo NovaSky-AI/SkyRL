@@ -1,4 +1,4 @@
-"""Initialize optimizer state for persistent Transformer Engine FP8 parameters."""
+"""Initialize optimizer state for persistent Transformer Engine parameters."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -30,14 +30,14 @@ def _copy_model_shards_to_main_params(
     get_range = getattr(megatron_optimizer, "_get_model_param_range_map", None)
     if model_groups is None or main_groups is None or not callable(get_range):
         raise TypeError(
-            "Persistent FP8 parameter training with CPU optimizer offload requires "
+            "Persistent quantized parameter training with CPU optimizer offload requires "
             "Megatron DistributedOptimizer shard metadata."
         )
 
     build_state_dict_map = getattr(megatron_optimizer, "_build_model_param_to_state_dict_param_map", None)
     if not callable(build_state_dict_map):
         raise TypeError(
-            "Persistent FP8 parameter training requires Megatron's "
+            "Persistent quantized parameter training requires Megatron's "
             "_build_model_param_to_state_dict_param_map() to reload exact checkpoint masters."
         )
     state_dict_params = build_state_dict_map(state_dict)
@@ -56,7 +56,7 @@ def _copy_model_shards_to_main_params(
                 param_range = get_range(model_param)["param"]
                 if param_range.size != main_param.numel():
                     raise RuntimeError(
-                        "Persistent FP8 master-shard range does not match its FP32 master tensor: "
+                    "Persistent quantized master-shard range does not match its FP32 master tensor: "
                         f"{param_range.size=} {main_param.numel()=}."
                     )
 
@@ -97,28 +97,30 @@ def _uses_hybrid_device_optimizer(megatron_optimizer: Any) -> bool:
     return hasattr(optimizer, "cpu_copys_map_gpu_param") and hasattr(optimizer, "param_to_fp32_param")
 
 
-def initialize_fp8_param_optimizer_masters(
+def initialize_quantized_param_optimizer_masters(
     optimizer: Any,
     *,
-    fp8_param: bool,
-    fp8_param_gather: bool,
+    quantized_param: bool,
+    param_gather: bool,
+    format_name: str,
     state_dict: Mapping[str, Any] | None = None,
 ) -> int:
     """Initialize optimizer masters from unquantized checkpoint shards.
 
-    Persistent FP8 parameters cannot seed exact FP32 masters. For CPU offload,
+    Persistent low-precision parameters cannot seed exact FP32 masters. For CPU offload,
     refresh both distributed shards and HybridDeviceOptimizer's secondary copies.
     """
-    if not fp8_param:
+    if not quantized_param:
         return 0
-    if not fp8_param_gather:
+    if not param_gather:
         raise ValueError(
-            "Persistent FP8 parameters require ddp_config.fp8_param_gather=true "
-            "so updated FP32 master weights are requantized into FP8 compute weights."
+            f"Persistent {format_name} parameters require parameter gathering so updated "
+            "FP32 master weights are requantized into compute weights."
         )
     if state_dict is None:
         raise ValueError(
-            "Persistent FP8 optimizer masters require Megatron-Bridge's exact unquantized checkpoint state."
+            f"Persistent {format_name} optimizer masters require Megatron-Bridge's "
+            "exact unquantized checkpoint state."
         )
 
     optimizers = getattr(optimizer, "chained_optimizers", None)
@@ -132,7 +134,7 @@ def initialize_fp8_param_optimizer_masters(
                 copied = _copy_model_shards_to_main_params(megatron_optimizer, state_dict)
                 if copied == 0:
                     raise RuntimeError(
-                        "Persistent FP8 parameter training did not find any model shards "
+                        "Persistent quantized parameter training did not find any model shards "
                         "to seed into CPU-offloaded optimizer masters."
                     )
                 _sync_hybrid_device_optimizer_masters(megatron_optimizer.optimizer)
@@ -140,7 +142,7 @@ def initialize_fp8_param_optimizer_masters(
                 reload_main_params = getattr(megatron_optimizer, "_copy_model_params_to_main_params", None)
                 if not callable(reload_main_params):
                     raise TypeError(
-                        "Persistent FP8 parameter training requires a Megatron optimizer "
+                        "Persistent quantized parameter training requires a Megatron optimizer "
                         "with _copy_model_params_to_main_params()."
                     )
                 reload_main_params(state_dict=state_dict)

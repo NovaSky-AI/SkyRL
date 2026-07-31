@@ -27,6 +27,11 @@ def resolve_vllm_receiver_target(
             for checkpoint_suffix, parameter_suffix in strategy.receiver_suffixes.items():
                 suffix = f".experts.{weight.checkpoint_component}{checkpoint_suffix}"
                 if checkpoint_name.endswith(suffix):
-                    parameter_name = checkpoint_name[: -len(suffix)] + runtime_parameter_suffix + parameter_suffix
+                    target_suffix = (
+                        runtime_parameter_suffix.removesuffix("_weight") + parameter_suffix
+                        if checkpoint_suffix == ".input_scale"
+                        else runtime_parameter_suffix + parameter_suffix
+                    )
+                    parameter_name = checkpoint_name[: -len(suffix)] + target_suffix
                     return parameter_name, shard_id
     return None

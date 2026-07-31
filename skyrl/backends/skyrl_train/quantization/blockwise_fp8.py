@@ -263,9 +263,11 @@ class BlockwiseFp8LinearStrategy(QuantizationStrategy):
         tensor: torch.Tensor,
         *,
         batched_experts: bool,
+        context: Any = None,
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """Yield a quantized weight and its inverse-scale tensor."""
 
+        del context
         if batched_experts:
             q_weight, scale = batched_blockwise_cast_to_fp8(
                 tensor,

@@ -23,6 +23,7 @@ VAL_FILE = f"{DATA_DIR}/aime-2024-cleaned.parquet"
 PROFILE_ROOT = "/root/profiles"  # profiler
 PROFILE_COMMIT_INTERVAL_S = 120  # profiler
 GPU = os.environ.get("MODAL_GPU", "B200:8")
+SMOKE_GPU = os.environ.get("MODAL_SMOKE_GPU", "B200:1")
 
 
 def _repo_root() -> pathlib.Path:
@@ -39,16 +40,30 @@ hf_volume = modal.Volume.from_name("skyrl-hf-cache", create_if_missing=True)
 data_volume = modal.Volume.from_name("skyrl-expert-mxfp8-data", create_if_missing=True)
 profile_volume = modal.Volume.from_name("skyrl-expert-mxfp8-profiles", create_if_missing=True)  # profiler
 
-image = (
+common_image = (
     modal.Image.from_registry("nvidia/cuda:12.9.1-devel-ubuntu22.04", add_python="3.12")
-    .apt_install("git", "curl", "build-essential", "ca-certificates", "libnuma1", "numactl")
+    .apt_install(
+        "git",
+        "curl",
+        "build-essential",
+        "ca-certificates",
+        "cmake",
+        "ninja-build",
+        "libcudnn9-dev-cuda-12",
+        "libnuma1",
+        "numactl",
+    )
     .pip_install("huggingface-hub")
     .run_commands("curl -LsSf https://astral.sh/uv/install.sh | sh")
     .env(
         {
+            "CC": "gcc",
+            "CXX": "g++",
+            "CUDA_HOME": "/usr/local/cuda",
             "PATH": "/root/.local/bin:/usr/local/cuda/bin:${PATH}",
             "HF_HOME": HF_HOME,
             "HF_XET_HIGH_PERFORMANCE": "1",
+            "NCCL_CUMEM_ENABLE": "0",
             "NVTE_FLASH_ATTN": "0",
             "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S": "1800",
             "SKYRL_DUMP_INFRA_LOG_TO_STDOUT": "1",
@@ -62,21 +77,86 @@ image = (
         str(repo_root),
         REMOTE_REPO,
         copy=True,
-        ignore=[".venv", ".git", "**/__pycache__"],
+        ignore=[".venv", ".git", ".ruff_cache", ".pytest_cache", "**/__pycache__"],
     )
     .workdir(REMOTE_REPO)
-    .run_commands("uv sync --extra megatron", gpu="any")
+)
+
+image = common_image.run_commands("uv sync --extra megatron", gpu="any").run_commands(f"rm -rf {HF_HOME}")
+nvfp4_image = (
+    common_image.run_commands("uv sync --extra megatron-nvfp4", gpu="any")
+    .run_commands("uv pip install --python /root/SkyRL/.venv/bin/python pytest pytest-asyncio")
     .run_commands(f"rm -rf {HF_HOME}")
 )
 
 app = modal.App(APP_NAME)
 
 
+@app.function(image=nvfp4_image, gpu=SMOKE_GPU, timeout=30 * 60)
+def validate_nvfp4_runtime() -> dict[str, str]:
+    import json
+    import subprocess
+
+    output = subprocess.check_output(
+        [
+            "uv",
+            "run",
+            "--frozen",
+            "--no-sync",
+            "--extra",
+            "megatron-nvfp4",
+            "python",
+            "-c",
+            (
+                "import json, flashinfer, transformer_engine; "
+                "from transformer_engine.common.recipe import NVFP4BlockScaling; "
+                "print(json.dumps({'transformer_engine': transformer_engine.__version__, "
+                "'flashinfer': flashinfer.__version__, "
+                "'recipe_fields': ','.join(sorted(NVFP4BlockScaling.__dataclass_fields__))}))"
+            ),
+        ],
+        cwd=REMOTE_REPO,
+        text=True,
+    )
+    return json.loads(output)
+
+
+@app.function(
+    image=nvfp4_image,
+    gpu=SMOKE_GPU,
+    volumes={HF_HOME: hf_volume},
+    timeout=2 * 60 * 60,
+)
+def validate_nvfp4_gpu() -> None:
+    import subprocess
+
+    subprocess.run(
+        [
+            "uv",
+            "run",
+            "--frozen",
+            "--no-sync",
+            "--extra",
+            "megatron-nvfp4",
+            "python",
+            "-m",
+            "pytest",
+            "-v",
+            "-s",
+            "tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_worker.py"
+            "::test_expert_nvfp4_training_and_weight_sync",
+        ],
+        cwd=REMOTE_REPO,
+        check=True,
+    )
+
+
 def _run(mode: str, steps: int, max_prompt_length: int, max_generate_length: int) -> None:
     import subprocess
     import time
 
-    enabled = str(mode == "mxfp8").lower()
+    mxfp8_enabled = str(mode == "mxfp8").lower()
+    nvfp4_enabled = str(mode == "nvfp4").lower()
     run_name = f"qwen3-30b-a3b-dapo-{mode}"
     command = [
         "uv",
@@ -84,14 +164,15 @@ def _run(mode: str, steps: int, max_prompt_length: int, max_generate_length: int
         "--frozen",
         "--no-sync",
         "--extra",
-        "megatron",
+        "megatron-nvfp4" if mode == "nvfp4" else "megatron",
         "-m",
         "examples.train.algorithms.dapo.main_dapo",
         f"data.train_data=['{TRAIN_FILE}']",
         f"data.val_data=['{VAL_FILE}']",
         "trainer.strategy=megatron",
         f"trainer.policy.model.path={MODEL}",
-        f"trainer.policy.model.expert_mxfp8.enabled={enabled}",
+        f"trainer.policy.model.expert_mxfp8.enabled={mxfp8_enabled}",
+        f"trainer.policy.model.expert_nvfp4.enabled={nvfp4_enabled}",
         "trainer.placement.colocate_all=true",
         "trainer.placement.policy_num_nodes=1",
         "trainer.placement.policy_num_gpus_per_node=8",
@@ -156,6 +237,26 @@ def _run(mode: str, steps: int, max_prompt_length: int, max_generate_length: int
                 "trainer.policy.megatron_config.optimizer_config_kwargs.fp8_recipe=mxfp8",
                 "trainer.policy.megatron_config.optimizer_config_kwargs.reuse_grad_buf_for_mxfp8_param_ag=true",
                 "generator.inference_engine.serialized_weight_sync_mode=serialized_mxfp8",
+            ]
+        )
+    elif mode == "nvfp4":
+        command.extend(
+            [
+                # Humans& W4A4 RL stability recipe.
+                "trainer.policy.model.expert_nvfp4.training=true",
+                "trainer.policy.model.expert_nvfp4.persistent=false",
+                "trainer.policy.model.expert_nvfp4.backward_override=dequantized",
+                "trainer.policy.model.expert_nvfp4.row_scaled_activation=true",
+                "trainer.policy.model.expert_nvfp4.disable_rht=true",
+                "trainer.policy.model.expert_nvfp4.disable_stochastic_rounding=true",
+                "trainer.policy.model.expert_nvfp4.disable_2d_quantization=true",
+                "trainer.policy.model.expert_nvfp4.four_over_six_scope=all",
+                "trainer.policy.model.expert_nvfp4.four_over_six_e4m3_use_256_scope=all",
+                "trainer.policy.model.expert_nvfp4.four_over_six_error_mode=MSE",
+                "trainer.policy.model.expert_nvfp4.four_over_six_error_use_fast_math=true",
+                "trainer.policy.model.expert_nvfp4.disable_fp4_quant_fast_math=true",
+                "trainer.policy.model.expert_nvfp4.high_precision_last_layers=8",
+                "generator.inference_engine.serialized_weight_sync_mode=serialized_nvfp4",
             ]
         )
     started = time.perf_counter()
@@ -237,6 +338,24 @@ def benchmark(mode: str, steps: int, max_prompt_length: int, max_generate_length
         profile_volume.commit()  # profiler
 
 
+@app.function(
+    image=nvfp4_image,
+    gpu=GPU,
+    secrets=[modal.Secret.from_name("wandb-secret")],
+    volumes={
+        HF_HOME: hf_volume,
+        "/root/data": data_volume,
+        PROFILE_ROOT: profile_volume,
+    },
+    timeout=24 * 60 * 60,
+)
+def benchmark_nvfp4(steps: int, max_prompt_length: int, max_generate_length: int) -> None:
+    try:
+        _run("nvfp4", steps, max_prompt_length, max_generate_length)
+    finally:
+        profile_volume.commit()
+
+
 @app.local_entrypoint()
 def main(
     mode: str = "both",
@@ -244,11 +363,14 @@ def main(
     max_prompt_length: int = 2048,
     max_generate_length: int = 4096,
 ) -> None:
-    if mode not in {"bf16", "mxfp8", "both"}:
-        raise ValueError("mode must be bf16, mxfp8, or both")
+    if mode not in {"bf16", "mxfp8", "nvfp4", "both"}:
+        raise ValueError("mode must be bf16, mxfp8, nvfp4, or both")
     if max_prompt_length <= 0 or max_generate_length <= 0:
         raise ValueError("max_prompt_length and max_generate_length must be positive")
     prepare_assets.remote()
     modes = ("bf16", "mxfp8") if mode == "both" else (mode,)
     for selected in modes:
-        benchmark.remote(selected, steps, max_prompt_length, max_generate_length)
+        if selected == "nvfp4":
+            benchmark_nvfp4.remote(steps, max_prompt_length, max_generate_length)
+        else:
+            benchmark.remote(selected, steps, max_prompt_length, max_generate_length)

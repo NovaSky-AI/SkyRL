@@ -22,7 +22,9 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
 from skyrl.backends.skyrl_train.quantization import (
+    SERIALIZED_NVFP4,
     SERIALIZED_WEIGHT_STRATEGIES,
+    Nvfp4ExpertStrategy,
     get_serialized_weight_strategy,
 )
 from skyrl.env_vars import (
@@ -555,6 +557,11 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 f"{serialized_mode} weight sync requires full-weight updates; "
                 "Megatron LoRA with merge_lora=false syncs adapters only"
             )
+    expert_nvfp4 = cfg.trainer.policy.model.expert_nvfp4
+    if expert_nvfp4.enabled and expert_nvfp4.rollout and serialized_mode != SERIALIZED_NVFP4:
+        raise ValueError("Expert NVFP4 rollout requires serialized_weight_sync_mode='serialized_nvfp4'")
+    if serialized_mode == SERIALIZED_NVFP4 and (not expert_nvfp4.enabled or not expert_nvfp4.rollout):
+        raise ValueError("serialized_nvfp4 weight sync requires expert_nvfp4 rollout")
 
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
@@ -839,7 +846,24 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
 
     serialized_mode = cfg.generator.inference_engine.resolved_serialized_weight_sync_mode
-    strategy_env = get_serialized_weight_strategy(serialized_mode).build_runtime_env() if serialized_mode else {}
+    expert_nvfp4 = cfg.trainer.policy.model.expert_nvfp4
+    nvfp4_strategy = Nvfp4ExpertStrategy.from_config(expert_nvfp4) if expert_nvfp4.enabled else None
+    active_quantization_strategies = []
+    if serialized_mode:
+        active_quantization_strategies.append(
+            nvfp4_strategy
+            if serialized_mode == SERIALIZED_NVFP4 and nvfp4_strategy is not None
+            else get_serialized_weight_strategy(serialized_mode)
+        )
+    if expert_nvfp4.enabled and expert_nvfp4.training and nvfp4_strategy not in active_quantization_strategies:
+        active_quantization_strategies.append(nvfp4_strategy)
+
+    strategy_env: dict[str, str] = {}
+    for strategy in active_quantization_strategies:
+        for name, value in strategy.build_runtime_env().items():
+            if name in strategy_env and strategy_env[name] != value:
+                raise ValueError(f"Conflicting quantization runtime values for {name}")
+            strategy_env[name] = value
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     policy_megatron_config = getattr(cfg.trainer.policy, "megatron_config", None)
     ref_megatron_config = getattr(cfg.trainer.ref, "megatron_config", None)

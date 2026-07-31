@@ -191,6 +191,22 @@ def test_serialized_fp8_runtime_defaults_to_fp32_scales(monkeypatch):
     assert env_vars["VLLM_USE_DEEP_GEMM_E8M0"] == "0"
 
 
+def test_nvfp4_training_runtime_uses_strategy_environment(monkeypatch):
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = example_dummy_config()
+    cfg.trainer.policy.model.expert_nvfp4.enabled = True
+    cfg.trainer.policy.model.expert_nvfp4.rollout = False
+    cfg.trainer.policy.model.expert_nvfp4.backward_override = "dequantized"
+    cfg.trainer.policy.model.expert_nvfp4.row_scaled_activation = True
+    cfg.trainer.policy.model.expert_nvfp4.four_over_six_scope = "all"
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert env_vars["NVTE_BACKWARD_OVERRIDE"] == "dequantized"
+    assert env_vars["NVTE_NVFP4_ROW_SCALED_ACTIVATION"] == "1"
+    assert env_vars["NVTE_NVFP4_4OVER6"] == "all"
+
+
 @pytest.mark.parametrize("mode", ["serialized_blockwise", "serialized_mxfp8"])
 def test_serialized_fp8_weight_sync_requires_megatron(mode):
     cfg = _make_validated_test_config()
@@ -579,6 +595,70 @@ def test_expert_mxfp8_cli_overrides():
     assert cfg.trainer.policy.megatron_config.ddp_config.reuse_grad_buf_for_mxfp8_param_ag is True
     assert cfg.trainer.policy.megatron_config.optimizer_config_kwargs["fp8_recipe"] == "mxfp8"
     assert cfg.trainer.policy.megatron_config.optimizer_config_kwargs["reuse_grad_buf_for_mxfp8_param_ag"] is True
+
+
+def test_expert_nvfp4_cli_overrides():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.model.expert_nvfp4.enabled=true",
+            "trainer.policy.model.expert_nvfp4.training=true",
+            "trainer.policy.model.expert_nvfp4.persistent=false",
+            "trainer.policy.model.expert_nvfp4.backward_override=dequantized",
+            "trainer.policy.model.expert_nvfp4.row_scaled_activation=true",
+            "trainer.policy.model.expert_nvfp4.disable_rht=true",
+            "trainer.policy.model.expert_nvfp4.disable_stochastic_rounding=true",
+            "trainer.policy.model.expert_nvfp4.disable_2d_quantization=true",
+            "trainer.policy.model.expert_nvfp4.four_over_six_scope=all",
+            "trainer.policy.model.expert_nvfp4.four_over_six_e4m3_use_256_scope=all",
+            "trainer.policy.model.expert_nvfp4.four_over_six_error_mode=MSE",
+            "trainer.policy.model.expert_nvfp4.four_over_six_error_use_fast_math=true",
+            "trainer.policy.model.expert_nvfp4.disable_fp4_quant_fast_math=true",
+            "trainer.policy.model.expert_nvfp4.high_precision_last_layers=8",
+            "generator.inference_engine.serialized_weight_sync_mode=serialized_nvfp4",
+        ]
+    )
+
+    nvfp4 = cfg.trainer.policy.model.expert_nvfp4
+    assert nvfp4.enabled is True
+    assert nvfp4.training is True
+    assert nvfp4.rollout is True
+    assert nvfp4.persistent is False
+    assert nvfp4.backward_override == "dequantized"
+    assert nvfp4.row_scaled_activation is True
+    assert nvfp4.disable_rht is True
+    assert nvfp4.disable_stochastic_rounding is True
+    assert nvfp4.disable_2d_quantization is True
+    assert nvfp4.four_over_six_scope == "all"
+    assert nvfp4.four_over_six_e4m3_use_256_scope == "all"
+    assert nvfp4.four_over_six_error_mode == "MSE"
+    assert nvfp4.four_over_six_error_use_fast_math is True
+    assert nvfp4.disable_fp4_quant_fast_math is True
+    assert nvfp4.high_precision_last_layers == 8
+    assert cfg.trainer.policy.megatron_config.ddp_config.fp4_param_gather is False
+
+
+def test_persistent_expert_nvfp4_requires_fp4_param_gather():
+    with pytest.raises(ValueError, match="fp4_param_gather=true"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.expert_nvfp4.enabled=true",
+                "trainer.policy.model.expert_nvfp4.persistent=true",
+                "generator.inference_engine.serialized_weight_sync_mode=serialized_nvfp4",
+            ]
+        )
+
+
+def test_expert_quantization_modes_are_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.expert_mxfp8.enabled=true",
+                "trainer.policy.model.expert_nvfp4.enabled=true",
+            ]
+        )
 
 
 def test_persistent_expert_mxfp8_requires_training():

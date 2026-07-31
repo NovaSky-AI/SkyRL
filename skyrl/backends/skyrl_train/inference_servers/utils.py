@@ -12,6 +12,9 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_MXFP8,
+    SERIALIZED_NVFP4,
+    Nvfp4ExpertStrategy,
+    QuantizationStrategy,
     get_hf_model_type,
     get_quantized_model_layout,
     get_serialized_weight_strategy,
@@ -49,7 +52,7 @@ def _load_serialized_quantization_context(strategy, model_path: Optional[str]):
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
     if key in mapping and mapping[key] != expected:
         raise ValueError(
-            f"{context}.{key} must be {expected!r} when serialized FP8 weight sync is enabled, got {mapping[key]!r}"
+            f"{context}.{key} must be {expected!r} when serialized weight sync is enabled, got {mapping[key]!r}"
         )
     mapping[key] = copy.deepcopy(expected)
 
@@ -58,30 +61,33 @@ def _apply_serialized_weight_sync_defaults(
     ie_cfg: InferenceEngineConfig,
     engine_kwargs: Dict[str, Any],
     model_path: Optional[str] = None,
+    strategy: Optional[QuantizationStrategy] = None,
 ) -> None:
     """Configure vLLM for serialized checkpoint weight reloads."""
 
     mode = ie_cfg.resolved_serialized_weight_sync_mode
     if mode is None:
         return
-    strategy = get_serialized_weight_strategy(mode)
+    strategy = strategy or get_serialized_weight_strategy(mode)
     if strategy.required_model_dtype is not None and ie_cfg.model_dtype != strategy.required_model_dtype:
         raise ValueError(f"{mode} weight sync requires model_dtype={strategy.required_model_dtype!r}")
 
     _set_or_validate(engine_kwargs, "quantization", strategy.vllm_quantization, context="engine_init_kwargs")
     _set_or_validate(engine_kwargs, "load_format", strategy.vllm_load_format, context="engine_init_kwargs")
+    if isinstance(strategy, Nvfp4ExpertStrategy) and strategy.row_scaled_activation:
+        _set_or_validate(engine_kwargs, "moe_backend", "flashinfer_trtllm", context="engine_init_kwargs")
 
     hf_overrides_value = engine_kwargs.get("hf_overrides")
     hf_overrides = {} if hf_overrides_value is None else copy.deepcopy(hf_overrides_value)
     if not isinstance(hf_overrides, dict):
-        raise ValueError("engine_init_kwargs.hf_overrides must be a dict when serialized FP8 weight sync is enabled")
+        raise ValueError("engine_init_kwargs.hf_overrides must be a dict when serialized weight sync is enabled")
 
     qcfg_value = hf_overrides.get("quantization_config")
     qcfg = {} if qcfg_value is None else copy.deepcopy(qcfg_value)
     if not isinstance(qcfg, dict):
         raise ValueError(
             "engine_init_kwargs.hf_overrides.quantization_config must be a dict "
-            "when serialized FP8 weight sync is enabled"
+            "when serialized weight sync is enabled"
         )
 
     hf_config, layout = _load_serialized_quantization_context(strategy, model_path)
@@ -264,10 +270,14 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    serialized_strategy = None
+    if ie_cfg.resolved_serialized_weight_sync_mode == SERIALIZED_NVFP4:
+        serialized_strategy = Nvfp4ExpertStrategy.from_config(cfg.trainer.policy.model.expert_nvfp4)
     _apply_serialized_weight_sync_defaults(
         ie_cfg,
         engine_kwargs,
         cfg.trainer.policy.model.path,
+        serialized_strategy,
     )
     apply_expert_mxfp8_rollout_config(args, cfg, engine_kwargs)
     for key, value in engine_kwargs.items():

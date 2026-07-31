@@ -4,6 +4,7 @@ import torch
 from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_BLOCKWISE_FP8,
     SERIALIZED_MXFP8,
+    SERIALIZED_NVFP4,
     SERIALIZED_WEIGHT_PREFIX,
     SERIALIZED_WEIGHT_STRATEGIES,
     get_quantized_model_layout,
@@ -13,9 +14,14 @@ from skyrl.backends.skyrl_train.quantization import (
 
 
 def test_builtin_serialized_weight_strategies_are_registered():
-    assert tuple(SERIALIZED_WEIGHT_STRATEGIES) == (SERIALIZED_BLOCKWISE_FP8, SERIALIZED_MXFP8)
+    assert tuple(SERIALIZED_WEIGHT_STRATEGIES) == (
+        SERIALIZED_BLOCKWISE_FP8,
+        SERIALIZED_MXFP8,
+        SERIALIZED_NVFP4,
+    )
     assert get_serialized_weight_strategy(SERIALIZED_BLOCKWISE_FP8).mode == SERIALIZED_BLOCKWISE_FP8
     assert get_serialized_weight_strategy(SERIALIZED_MXFP8).mode == SERIALIZED_MXFP8
+    assert get_serialized_weight_strategy(SERIALIZED_NVFP4).mode == SERIALIZED_NVFP4
 
 
 def test_serialized_weight_strategy_rejects_unknown_mode():

@@ -3,6 +3,8 @@ Run with:
 uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_worker.py
 """
 
+from pathlib import Path
+
 import pytest
 import ray
 import torch
@@ -15,6 +17,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
+from skyrl.backends.skyrl_train.quantization import Nvfp4ExpertStrategy
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl.train.config import (
@@ -39,6 +42,34 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 TINY_MOE_MODEL_NAME = "eatang/qwen3-moe-tiny-random"
+
+
+def create_nvfp4_tiny_model() -> str:
+    """Create a local MoE fixture with native TRT-LLM NVFP4 dimensions."""
+
+    output_path = Path("/tmp/qwen3-moe-nvfp4-tiny-random")
+    if output_path.exists():
+        return str(output_path)
+
+    config = AutoConfig.from_pretrained(TINY_MOE_MODEL_NAME, trust_remote_code=True)
+    config.hidden_size = 256
+    config.intermediate_size = 512
+    config.moe_intermediate_size = 256
+    config.num_attention_heads = 8
+    config.num_key_value_heads = 2
+    tokenizer = AutoTokenizer.from_pretrained(TINY_MOE_MODEL_NAME, trust_remote_code=True)
+    tokenizer.save_pretrained(output_path)
+    model = AutoModelForCausalLM.from_config(
+        config,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+    )
+    torch.manual_seed(42)
+    with torch.no_grad():
+        for param in model.parameters():
+            torch.nn.init.normal_(param, mean=0.0, std=0.02)
+    model.save_pretrained(output_path)
+    return str(output_path)
 
 
 def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
@@ -272,6 +303,110 @@ async def test_expert_mxfp8_training_and_weight_sync(ray_init_fixture):
             outputs = await run_inference(
                 client,
                 get_test_prompts(TINY_MOE_MODEL_NAME),
+                sampling_params,
+                tokenizer=tokenizer,
+            )
+            assert outputs["responses"]
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.megatron
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() not in ((10, 0), (10, 3)),
+    reason="Expert NVFP4 requires SM100 or SM103",
+)
+async def test_expert_nvfp4_training_and_weight_sync():
+    model_name = create_nvfp4_tiny_model()
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            f"trainer.policy.model.path={model_name}",
+            "trainer.policy.model.expert_nvfp4.enabled=true",
+            "trainer.policy.model.expert_nvfp4.persistent=false",
+            "trainer.policy.model.expert_nvfp4.backward_override=dequantized",
+            "trainer.policy.model.expert_nvfp4.row_scaled_activation=true",
+            "trainer.policy.model.expert_nvfp4.disable_rht=true",
+            "trainer.policy.model.expert_nvfp4.disable_stochastic_rounding=true",
+            "trainer.policy.model.expert_nvfp4.disable_2d_quantization=true",
+            "trainer.policy.model.expert_nvfp4.four_over_six_scope=all",
+            "trainer.policy.model.expert_nvfp4.four_over_six_e4m3_use_256_scope=all",
+            "trainer.policy.model.expert_nvfp4.four_over_six_error_mode=MSE",
+            "trainer.policy.model.expert_nvfp4.four_over_six_error_use_fast_math=true",
+            "trainer.policy.model.expert_nvfp4.disable_fp4_quant_fast_math=true",
+            "trainer.placement.policy_num_gpus_per_node=1",
+            "generator.inference_engine.serialized_weight_sync_mode=serialized_nvfp4",
+            "generator.inference_engine.num_engines=1",
+            "generator.inference_engine.tensor_parallel_size=1",
+            "generator.inference_engine.enforce_eager=true",
+            "generator.inference_engine.max_num_batched_tokens=512",
+            "generator.inference_engine.max_num_seqs=16",
+            "trainer.max_prompt_length=64",
+            "generator.sampling_params.max_generate_length=16",
+            "trainer.micro_forward_batch_size_per_gpu=1",
+            "trainer.micro_train_batch_size_per_gpu=1",
+        ]
+    )
+    strategy_env = Nvfp4ExpertStrategy.from_config(cfg.trainer.policy.model.expert_nvfp4).build_runtime_env()
+    ray.shutdown()
+    ray_init_for_tests(strategy_env)
+
+    try:
+        async with InferenceEngineState.create(
+            cfg=cfg,
+            model=model_name,
+            use_local=True,
+            backend="vllm",
+            sleep_level=2,
+        ) as engines:
+            client, pg = engines.client, engines.pg
+            await client.sleep()
+            policy = init_worker_with_type(
+                "policy",
+                shared_pg=pg,
+                colocate_all=True,
+                num_gpus_per_node=1,
+                cfg=cfg,
+            )
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through",
+                    "init_weight_sync_state",
+                    client,
+                    cfg.generator.inference_engine,
+                )
+            )
+
+            batch = get_test_training_batch()
+            batch.metadata["global_step"] = 0
+            output = ray.get(policy.async_run_ray_method("mesh", "forward_backward", batch))
+            assert output
+            grad_norm = ray.get(policy.async_run_ray_method("pass_through", "optim_step"))
+            assert grad_norm is not None
+            assert torch.isfinite(torch.as_tensor(grad_norm))
+
+            await client.wake_up(tags=["weights"])
+            for _ in range(2):
+                ray.get(
+                    policy.async_run_ray_method(
+                        "pass_through",
+                        "broadcast_to_inference_engines",
+                        client,
+                        cfg.generator.inference_engine,
+                    )
+                )
+            policy.offload_to_cpu()
+            await client.wake_up(tags=["kv_cache"])
+
+            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+            sampling_params = get_sampling_params_for_backend(
+                cfg.generator.inference_engine.backend,
+                cfg.generator.sampling_params,
+            )
+            outputs = await run_inference(
+                client,
+                [[{"role": "user", "content": "What is 1 + 1?"}]],
                 sampling_params,
                 tokenizer=tokenizer,
             )

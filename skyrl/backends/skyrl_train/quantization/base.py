@@ -153,6 +153,15 @@ class QuantizationStrategy(ABC):
 
         return {}
 
+    def prepare_serialization(
+        self,
+        weights: Sequence[tuple[str, torch.Tensor]],
+    ) -> Mapping[str, Any]:
+        """Build optional shared context for a group of exported weights."""
+
+        del weights
+        return {}
+
     @abstractmethod
     def serialize_weight(
         self,
@@ -160,6 +169,7 @@ class QuantizationStrategy(ABC):
         tensor: torch.Tensor,
         *,
         batched_experts: bool,
+        context: Any = None,
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """Yield encoded weight and companion tensors."""
 
@@ -189,13 +199,16 @@ def iter_serialized_weight_tensors(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Classify and serialize one Megatron-Bridge export tensor."""
 
-    for output_name, output_tensor in layout.split_exported_weight(name, tensor):
+    output_weights = layout.split_exported_weight(name, tensor)
+    serialization_context = strategy.prepare_serialization(output_weights)
+    for output_name, output_tensor in output_weights:
         category = layout.weight_category(output_name, output_tensor.shape)
         if strategy.should_quantize(category, output_name, output_tensor.shape):
             for serialized_name, serialized_tensor in strategy.serialize_weight(
                 output_name,
                 output_tensor,
                 batched_experts=output_tensor.ndim == 3,
+                context=serialization_context.get(output_name),
             ):
                 yield (
                     strategy.encode_serialized_name(serialized_name)
@@ -212,4 +225,11 @@ def iter_serialized_weight_tensors(
             and category is None
         ):
             raise ValueError(f"Unsupported routed-expert export tensor for model_type={model_type!r}: {output_name}")
+        if output_tensor.ndim == 3 and category in {
+            "routed_expert_gate",
+            "routed_expert_up",
+            "routed_expert_down",
+        }:
+            yield strategy.encode_serialized_name(output_name), output_tensor.to(dtype=target_dtype)
+            continue
         yield output_name, output_tensor.to(dtype=target_dtype)

@@ -116,9 +116,9 @@ fsdp = [
     "causal-conv1d; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -147,14 +147,36 @@ megatron = [
     # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
     "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     # megatron-bridge requires Python 3.12+; pin megatron-core to the same
     # constraint so both packages are consistently available (or absent).
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "nvidia-modelopt; sys_platform == 'linux'",
+]
+
+megatron-nvfp4 = [
+    "skyrl[skyrl-train]",
+    "transformer-engine[pytorch]==2.17.0; sys_platform == 'linux'",
+    "transformer-engine-torch==2.17.0; sys_platform == 'linux'",
+    "transformer-engine-cu12==2.17.0; sys_platform == 'linux'",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "flash-linear-attention; sys_platform == 'linux'",
+    "causal-conv1d; sys_platform == 'linux'",
+    "mamba-ssm>=2.3.0; sys_platform == 'linux'",
+    "vllm==0.23.0; sys_platform == 'linux'",
+    "vllm-router; sys_platform == 'linux'",
+    "nixl; sys_platform == 'linux'",
+    "torch==2.11.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision; sys_platform == 'linux'",
+    "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
+    "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
@@ -207,10 +229,12 @@ conflicts = [
     [
         { extra = "jax" },
         { extra = "megatron" },
+        { extra = "megatron-nvfp4" },
         { extra = "fsdp" },
     ],
     [
         { extra = "megatron" },
+        { extra = "megatron-nvfp4" },
         { extra = "gpu" },
         { extra = "tpu" },
         { extra = "miniswe" },
@@ -226,7 +250,6 @@ no-build-isolation-package = [
 # unpinned dependencies.
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
-    "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
@@ -234,20 +257,28 @@ override-dependencies = [
     # `nixl` hard-depends on both nixl-cu12 and nixl-cu13; drop the cu13 variant
     # so it doesn't pull the CUDA-13 stack and bump torch off the cu12 pin.
     "nixl-cu13; sys_platform == 'never'",
-    # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our exact 0.6.12 pin (the version vLLM 0.23.0 requires). Override it to our version.
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # Megatron-Bridge pins flashinfer-python==0.6.8.post1. Use the first stable
+    # release containing the TE-compatible NVFP4 4over6 contract.
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
-transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
+transformer-engine-torch = [
+    {requirement = "torch", match-runtime = true},
+    "build_tools",
+    "ninja",
+    "packaging",
+    "setuptools>=61.0",
+    "wheel",
+]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+transformer-engine-torch = { NVTE_PYTORCH_FORCE_BUILD = "TRUE", NVTE_WITH_NCCL_EP = "0", NVTE_BUILD_DEBUG = "0", MAX_JOBS = "4" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -301,7 +332,9 @@ flash-attn = { url = "https://github.com/erictang000/flash-attention/releases/do
 causal-conv1d = { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 mamba-ssm = { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 # transformer-engine-torch 2.11.0 built against torch 2.11 (cu128 / cp312).
-transformer-engine-torch = { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+transformer-engine-torch = [
+    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", extra = "megatron", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" },
+]
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
 # Linux uses the cu128 index (torch 2.11 wheels are published there).
 torch = [

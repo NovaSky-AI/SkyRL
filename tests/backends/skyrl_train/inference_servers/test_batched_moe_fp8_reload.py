@@ -9,6 +9,7 @@ from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap impo
 from skyrl.backends.skyrl_train.quantization import (
     SERIALIZED_BLOCKWISE_FP8,
     SERIALIZED_MXFP8,
+    SERIALIZED_NVFP4,
     SERIALIZED_WEIGHT_PREFIX,
 )
 
@@ -103,3 +104,52 @@ def test_batched_moe_mxfp8_scale_maps_to_modelopt_scale_parameter():
 
     assert _load(SimpleNamespace(), {target_name: param}, serialized_name, loaded_weight)
     assert calls == [(target_name, "w2", torch.uint8)]
+
+
+def test_batched_moe_nvfp4_global_scale_maps_to_modelopt_parameter():
+    calls = []
+
+    def weight_loader(param, loaded_weight, weight_name, *, shard_id, expert_id, return_success):
+        calls.append((weight_name, shard_id, expert_id, tuple(loaded_weight.shape), loaded_weight.dtype))
+        return True
+
+    weight_loader.supports_moe_loading = True
+    param = torch.nn.Parameter(torch.empty(3, 2, dtype=torch.float32), requires_grad=False)
+    param.weight_loader = weight_loader
+    target_name = "model.layers.2.mlp.experts.w13_weight_scale_2"
+    loaded_weight = torch.ones(3, dtype=torch.float32)
+    serialized_name = (
+        f"{SERIALIZED_WEIGHT_PREFIX}{SERIALIZED_NVFP4}:"
+        "model.layers.2.mlp.experts.gate_proj.weight_scale_2"
+    )
+
+    assert _load(SimpleNamespace(), {target_name: param}, serialized_name, loaded_weight)
+    assert calls == [
+        (target_name, "w1", 0, (), torch.float32),
+        (target_name, "w1", 1, (), torch.float32),
+        (target_name, "w1", 2, (), torch.float32),
+    ]
+
+
+def test_batched_moe_nvfp4_input_scale_maps_to_modelopt_parameter():
+    calls = []
+
+    def weight_loader(param, loaded_weight, weight_name, *, shard_id, expert_id, return_success):
+        calls.append((weight_name, shard_id, expert_id, loaded_weight.item()))
+        return True
+
+    weight_loader.supports_moe_loading = True
+    param = torch.nn.Parameter(torch.empty(2, dtype=torch.float32), requires_grad=False)
+    param.weight_loader = weight_loader
+    target_name = "model.layers.2.mlp.experts.w2_input_scale"
+    loaded_weight = torch.ones(2, dtype=torch.float32)
+    serialized_name = (
+        f"{SERIALIZED_WEIGHT_PREFIX}{SERIALIZED_NVFP4}:"
+        "model.layers.2.mlp.experts.down_proj.input_scale"
+    )
+
+    assert _load(SimpleNamespace(), {target_name: param}, serialized_name, loaded_weight)
+    assert calls == [
+        (target_name, "w2", 0, 1.0),
+        (target_name, "w2", 1, 1.0),
+    ]

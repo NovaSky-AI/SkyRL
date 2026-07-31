@@ -12,7 +12,7 @@ import typing
 from abc import ABC
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Annotated, Any, Dict, List, Optional, Type, TypeVar, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Type, TypeVar, Union
 
 import yaml
 from omegaconf import DictConfig, OmegaConf
@@ -111,6 +111,28 @@ class ExpertMxfp8Config(BaseConfig):
 
 
 @dataclass
+class ExpertNvfp4Config(BaseConfig):
+    """NVFP4 compute for routed MoE experts."""
+
+    enabled: bool = False
+    training: bool = True
+    rollout: bool = True
+    persistent: bool = False
+    backward_override: Optional[Literal["high_precision", "dequantized"]] = None
+    row_scaled_activation: bool = False
+    four_over_six_scope: Literal["none", "weights", "activations", "all"] = "none"
+    four_over_six_e4m3_use_256_scope: Literal["none", "weights", "activations", "all"] = "all"
+    four_over_six_error_mode: Literal["MAE", "MSE"] = "MSE"
+    four_over_six_error_use_fast_math: bool = False
+    disable_fp4_quant_fast_math: bool = False
+    disable_rht: bool = False
+    disable_stochastic_rounding: bool = False
+    disable_2d_quantization: bool = False
+    high_precision_last_layers: int = 0
+    expert_batch_size: int = 8
+
+
+@dataclass
 class FakeInt4QatConfig(BaseConfig):
     """Fake-INT4 quantization-aware training for MoE experts (Megatron only).
 
@@ -149,6 +171,7 @@ class ModelConfig(BaseConfig):
     path: Optional[str] = None
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
     expert_mxfp8: ExpertMxfp8Config = field(default_factory=ExpertMxfp8Config)
+    expert_nvfp4: ExpertNvfp4Config = field(default_factory=ExpertNvfp4Config)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
 
     def __post_init__(self) -> None:
@@ -208,6 +231,7 @@ class MegatronDDPConfig(BaseConfig):
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
     fp8_param_gather: bool = False
+    fp4_param_gather: bool = False
     reuse_grad_buf_for_mxfp8_param_ag: bool = False
     average_in_collective: bool = True
 
@@ -1070,6 +1094,9 @@ class TrainerConfig(BaseConfig):
             )
 
         expert_mxfp8 = self.policy.model.expert_mxfp8
+        expert_nvfp4 = self.policy.model.expert_nvfp4
+        if expert_mxfp8.enabled and expert_nvfp4.enabled:
+            raise ValueError("Expert MXFP8 and expert NVFP4 are mutually exclusive")
         if expert_mxfp8.enabled:
             if self.strategy != "megatron":
                 raise ValueError("Expert MXFP8 is only supported with trainer.strategy=megatron")
@@ -1108,6 +1135,44 @@ class TrainerConfig(BaseConfig):
                 and not self.policy.megatron_config.lora_config.merge_lora
             ):
                 raise ValueError("Expert MXFP8 rollout does not support unmerged LoRA")
+
+        if expert_nvfp4.enabled:
+            if self.strategy != "megatron":
+                raise ValueError("Expert NVFP4 is only supported with trainer.strategy=megatron")
+            if not expert_nvfp4.training and not expert_nvfp4.rollout:
+                raise ValueError("Expert NVFP4 must enable training, rollout, or both")
+            if expert_nvfp4.persistent:
+                if not expert_nvfp4.training:
+                    raise ValueError("Persistent expert NVFP4 requires expert_nvfp4.training=true")
+                if not self.policy.megatron_config.ddp_config.fp4_param_gather:
+                    raise ValueError(
+                        "Persistent expert NVFP4 requires policy.megatron_config.ddp_config.fp4_param_gather=true"
+                    )
+            if self.policy.model.fake_int4_qat.enabled:
+                raise ValueError("Expert NVFP4 and fake INT4 QAT are mutually exclusive")
+            if expert_nvfp4.training:
+                if not self.policy.megatron_config.moe_grouped_gemm:
+                    raise ValueError("Expert NVFP4 training requires moe_grouped_gemm=true")
+                if self.policy.megatron_config.moe_router_dtype != "fp32":
+                    raise ValueError("Expert NVFP4 training requires moe_router_dtype=fp32")
+                transformer_overrides = self.policy.megatron_config.transformer_config_kwargs
+                if transformer_overrides.get("moe_grouped_gemm") is False:
+                    raise ValueError("Expert NVFP4 training requires moe_grouped_gemm=true")
+                if transformer_overrides.get("moe_router_dtype", "fp32") != "fp32":
+                    raise ValueError("Expert NVFP4 training requires moe_router_dtype=fp32")
+                conflicts = {"fp4", "fp8", "quant_recipe"} & transformer_overrides.keys()
+                if conflicts:
+                    raise ValueError(f"Expert NVFP4 conflicts with transformer_config_kwargs: {sorted(conflicts)}")
+            if (
+                expert_nvfp4.rollout
+                and self.policy.model.lora.rank > 0
+                and not self.policy.megatron_config.lora_config.merge_lora
+            ):
+                raise ValueError("Expert NVFP4 rollout does not support unmerged LoRA")
+            if expert_nvfp4.expert_batch_size <= 0:
+                raise ValueError("expert_nvfp4.expert_batch_size must be positive")
+            if expert_nvfp4.high_precision_last_layers < 0:
+                raise ValueError("expert_nvfp4.high_precision_last_layers must be non-negative")
 
         if self.logprobs_chunk_size is not None and (
             not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0
