@@ -18,6 +18,8 @@ uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
 
 Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/api-ref/skyrl/config) can be overridden this way (see [`SkyRLTrainConfig` in `skyrl/train/config/config.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py) for all available keys and defaults). The most commonly used options are listed below.
 
+JSON types are preserved exactly, so use JSON literals rather than strings: `null` for an unset field, `true`/`false` for booleans, and `4` rather than `"4"` for numbers.
+
 ### GPU and Parallelism
 
 | Key | Default | Description |

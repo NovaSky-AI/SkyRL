@@ -299,7 +299,7 @@ class TensorBatch(dict, Generic[DictType]):
         self._check_consistency()
         return self
 
-    def repeat(self, repeats: int):
+    def repeat(self, repeats: int) -> "TensorBatch[DictType]":
         """Repeat entries in the data batch a specified number of times.
 
         This is similar to `torch.repeat` (and `numpy.tile`). `metadata` is not repeated.
@@ -323,7 +323,7 @@ class TensorBatch(dict, Generic[DictType]):
         new_batch.metadata = self.metadata
         return new_batch
 
-    def repeat_interleave(self, repeats: int):
+    def repeat_interleave(self, repeats: int) -> "TensorBatch[DictType]":
         """Repeat entries in the data batch a specified number of times.
 
         This is similar to `torch.repeat_interleave` (and `numpy.repeat`). `metadata` is not repeated.

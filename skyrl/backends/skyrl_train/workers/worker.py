@@ -322,7 +322,7 @@ class Worker(DistributedTorchRayActor):
         """Return the model module(s) to be offloaded/backloaded. Megatron offloads `self.actor_module`. FSDP workers use `self.model` directly."""
         return self.model
 
-    def offload_to_cpu(self, offload_optimizer=True, offload_model=True):
+    def offload_to_cpu(self, offload_optimizer: bool = True, offload_model: bool = True):
         """Offload all worker state to CPU.
 
         After this function runs, only temporary reserved memory and torch's pre-loaded cuda kernels (~ GB) will remain.
@@ -339,7 +339,7 @@ class Worker(DistributedTorchRayActor):
             offload_model=offload_model,
         )
 
-    def backload_to_gpu(self, backload_optimizer=True, backload_model=True):
+    def backload_to_gpu(self, backload_optimizer: bool = True, backload_model: bool = True):
         """Backload worker state to GPU.
 
         Args:
@@ -714,12 +714,14 @@ class PPORayActorGroup:
             raise RuntimeError("Cannot determine data-parallel size before actor group initialization.")
         return self._last_dp_size
 
-    def offload_to_cpu(self, nonblocking=False, offload_optimizer=True, offload_model=True):
+    def offload_to_cpu(self, nonblocking: bool = False, offload_optimizer: bool = True, offload_model: bool = True):
         """Offload all worker state to CPU.
 
         Args:
             nonblocking: Whether this operation is synchronous or asynchronous.
-            If `nonblocking=True`, then the function returns a list of object refs.
+                If `nonblocking=True`, then the function returns a list of object refs.
+            offload_optimizer: Whether to offload optimizer state.
+            offload_model: Whether to offload model parameters.
         """
         refs = [
             actor.offload_to_cpu.remote(offload_optimizer=offload_optimizer, offload_model=offload_model)
@@ -729,12 +731,14 @@ class PPORayActorGroup:
             return refs
         return ray.get(refs)
 
-    def backload_to_gpu(self, nonblocking=False, backload_optimizer=True, backload_model=True):
+    def backload_to_gpu(self, nonblocking: bool = False, backload_optimizer: bool = True, backload_model: bool = True):
         """Backload worker state to GPU
 
         Args:
             nonblocking: Whether this operation is synchronous or asynchronous.
-            If `nonblocking=True`, then the function returns a list of ObjectRefs.
+                If `nonblocking=True`, then the function returns a list of ObjectRefs.
+            backload_optimizer: Whether to backload optimizer state.
+            backload_model: Whether to backload model parameters.
         """
         refs = [
             actor.backload_to_gpu.remote(backload_optimizer=backload_optimizer, backload_model=backload_model)
@@ -744,7 +748,7 @@ class PPORayActorGroup:
             return refs
         return ray.get(refs)
 
-    def async_run_ray_method(self, dispatch_type: str, method_name: str, *args, **kwargs) -> List[ObjectRef]:
+    def async_run_ray_method(self, dispatch_type: str, method_name: str, *args: Any, **kwargs: Any) -> List[ObjectRef]:
         """Run a method on all actors using specified dispatch type asynchronously.
 
         Args:
