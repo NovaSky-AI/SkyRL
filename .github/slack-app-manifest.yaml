@@ -2,7 +2,11 @@
 #
 # Create the app from this file instead of clicking through the scope picker:
 #   https://api.slack.com/apps → Create New App → From an app manifest
-#   → pick the workspace → paste this YAML → Create → Install to Workspace
+#   → pick the skyrl.slack.com workspace → paste this YAML → Create
+#   → Install to Workspace
+#
+# The app must be installed in the SAME workspace as the target channel
+# (skyrl.slack.com), since a bot token is scoped to its workspace.
 #
 # Then invite it to the channel (`/invite @SkyRL CI`) and put the resulting
 # `xoxb-…` bot token in the `SLACK_BOT_TOKEN` repo secret.

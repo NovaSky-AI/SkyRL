@@ -23,7 +23,7 @@
 
 ## Slack Alerts (`#skyrl-ci-alerts`)
 
-`CI-Slack-Digest` (`.github/workflows/ci_slack_digest.yaml`) posts one message a day at 14:00 UTC summarising `main` CI health: workflows that are red right now, and workflows that went green again since the last digest. Logic lives in `.github/scripts/ci_slack_digest.py`.
+`CI-Slack-Digest` (`.github/workflows/ci_slack_digest.yaml`) posts one message a day at 14:00 UTC to `#skyrl-ci-alerts` in the **`skyrl.slack.com`** workspace, summarising `main` CI health: workflows that are red right now, and workflows that went green again since the last digest. Logic lives in `.github/scripts/ci_slack_digest.py`.
 
 - **Slack app**: create it from the checked-in manifest at `.github/slack-app-manifest.yaml` (api.slack.com/apps → Create New App → From an app manifest), so the config is reproducible rather than hand-clicked.
 - **Secret**: `SLACK_BOT_TOKEN` — a bot token (`xoxb-…`) for that app, which must be invited to the channel (`/invite @<app name>`). The destination is the non-secret `SLACK_CHANNEL` env in the workflow — a channel ID (`C…`) is preferable to a `#name`, since Slack recommends IDs and they survive a rename. Without the token the job still runs and renders the digest into the step log instead of posting.
