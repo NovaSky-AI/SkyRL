@@ -3,6 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
+import re
 from typing import Optional, Union
 
 import numpy as np
@@ -31,6 +32,24 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
 )
+
+
+def _language_model_only_lora_exclusions(model: nn.Module, exclude_modules):
+    prefixes = [
+        name for name, _ in model.named_modules() if name == "language_model" or name.endswith(".language_model")
+    ]
+    if not prefixes:
+        return exclude_modules
+
+    prefix = min(prefixes, key=len)
+    outside_language_model = rf"^(?!{re.escape(prefix)}(?:\.|$)).*$"
+    if exclude_modules is None:
+        return outside_language_model
+    if isinstance(exclude_modules, str):
+        return rf"(?:{outside_language_model})|(?:{exclude_modules})"
+
+    excluded_names = "|".join(rf"(?:.*\.)?{re.escape(name)}" for name in exclude_modules)
+    return rf"(?:{outside_language_model})|(?:{excluded_names})"
 
 
 class HFModelWrapper(nn.Module):
@@ -191,6 +210,8 @@ class HFModelWrapper(nn.Module):
             if lora_rank > 0:
                 # https://github.com/huggingface/peft/issues/137
                 self.model.enable_input_require_grads()
+                if language_model_only:
+                    exclude_modules = _language_model_only_lora_exclusions(self.model, exclude_modules)
                 lora_config = LoraConfig(
                     task_type=TaskType.CAUSAL_LM,
                     r=lora_rank,
