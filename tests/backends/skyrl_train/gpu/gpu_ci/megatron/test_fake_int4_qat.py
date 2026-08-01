@@ -21,8 +21,10 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
 )
-from skyrl.backends.skyrl_train.workers.megatron import fake_int4_qat as fq_mod
 from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import MegatronWorker
+from skyrl.backends.skyrl_train.workers.megatron.quantization import (
+    fake_int4_qat as fq_mod,
+)
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
@@ -47,7 +49,7 @@ def test_te_grouped_linear_still_exposes_get_weight_tensors():
 
     assert hasattr(TEGroupedLinear, "_get_weight_tensors"), (
         "TEGroupedLinear._get_weight_tensors is gone: the fake-INT4 QAT monkeypatch "
-        "(skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat) no longer has an attach point. "
+        "(skyrl.backends.skyrl_train.workers.megatron.quantization.fake_int4_qat) no longer has an attach point. "
         "Find where the new TE version fetches weights in GroupedLinear.forward and re-target the patch."
     )
     fwd_src = inspect.getsource(te_grouped_linear.GroupedLinear.forward)
@@ -113,7 +115,7 @@ def _run_hook_effect_canary():
     )
     from megatron.core.transformer import TransformerConfig
 
-    from skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat import (
+    from skyrl.backends.skyrl_train.workers.megatron.quantization.fake_int4_qat import (
         fake_int4_quantize_ste,
         install_fake_int4_qat,
     )

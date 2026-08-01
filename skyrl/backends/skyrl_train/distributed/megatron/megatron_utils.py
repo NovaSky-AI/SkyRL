@@ -401,6 +401,7 @@ def preprocess_packed_seqs(
     pre_process: bool = True,
     sub_seq_lengths: Optional[list[list[int]]] = None,
     fp8_enabled: bool = False,
+    fp8_recipe: Optional[str] = None,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences.
@@ -413,12 +414,11 @@ def preprocess_packed_seqs(
       per row. This is the historical SkyRL behavior used by the RL path
       and the existing SFT path without mini-batch packing.
     - ``sub_seq_lengths is not None``: each row may contain multiple
-      sub-sequences concatenated end-to-end. ``sub_seq_lengths[r]`` lists
-      the per-sub-sequence valid token counts for row ``r``. Tokens
-      ``input_ids[r, :sum(sub_seq_lengths[r])]`` are assumed to be the
-      concatenated sub-sequences in order; any trailing tokens in the row
-      are pad. ``cu_seqlens`` enumerates every sub-sequence across every
-      row.
+      sub-sequences. ``sub_seq_lengths[r]`` lists their valid token counts.
+      Each sub-sequence begins at the next ``align_size`` boundary, so internal
+      alignment padding may separate adjacent sub-sequences; any remaining
+      trailing tokens are pad. ``cu_seqlens`` enumerates every sub-sequence
+      across every row.
 
     CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0
     gets first and last chunks, GPU1 gets second and second last chunks,
@@ -428,7 +428,7 @@ def preprocess_packed_seqs(
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
-    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
+    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
 
     batch_size = input_ids.shape[0]
 
@@ -570,6 +570,7 @@ def remove_left_padding(
     position_ids: torch.Tensor,
     pre_process: bool = True,
     fp8_enabled: bool = False,
+    fp8_recipe: Optional[str] = None,
 ):
     """
     Remove left padding from input_ids, attention_mask and position_ids
@@ -583,7 +584,9 @@ def remove_left_padding(
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
-    align_size = get_unpacked_seq_align_size(mpu.get_tensor_model_parallel_world_size(), fp8_enabled=fp8_enabled)
+    align_size = get_unpacked_seq_align_size(
+        mpu.get_tensor_model_parallel_world_size(), fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe
+    )
     pad_size = (align_size - seq_len % align_size) % align_size
     seq_len = seq_len + pad_size
     shape[1] = seq_len

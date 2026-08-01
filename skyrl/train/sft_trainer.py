@@ -878,6 +878,7 @@ class SFTTrainer:
                 batch_size=self.sft_cfg.batch_size,
                 micro_train_batch_size_per_gpu=self.sft_cfg.micro_train_batch_size_per_gpu,
                 fp8_enabled=is_fp8_enabled(transformer_config_kwargs.get("fp8")),
+                fp8_recipe=transformer_config_kwargs.get("fp8_recipe"),
             )
         return DefaultCollator(
             tokenizer=tokenizer,
