@@ -134,6 +134,18 @@ class SkyRLLoraConfig(BaseConfig):
 
 
 @dataclass
+class BitsAndBytes4BitConfig(BaseConfig):
+    """bitsandbytes 4-bit base-weight quantization for FSDP QLoRA."""
+
+    enabled: bool = False
+    """Load base weights in 4-bit. Policy training requires LoRA when enabled."""
+    quant_type: Literal["fp4", "nf4"] = "nf4"
+    """4-bit data type. NF4 is recommended for normally distributed pretrained weights."""
+    use_double_quant: bool = True
+    """Quantize first-stage quantization constants to save more memory."""
+
+
+@dataclass
 class FakeInt4QatConfig(BaseConfig):
     """Fake-INT4 quantization-aware training for MoE experts (Megatron only).
 
@@ -172,6 +184,7 @@ class ModelConfig(BaseConfig):
     path: Optional[str] = None
     """HuggingFace model path (or local directory) for this model."""
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
+    bitsandbytes_4bit: BitsAndBytes4BitConfig = field(default_factory=BitsAndBytes4BitConfig)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
 
     def __post_init__(self) -> None:
@@ -1531,6 +1544,15 @@ class TrainerConfig(BaseConfig):
                 "`trainer.policy.model.fake_int4_qat.enabled=True` currently requires "
                 "`trainer.policy.megatron_config.lora_config.merge_lora=False` so weight "
                 "sync preserves the inference engine's INT4 base weights."
+            )
+
+        if self.policy.model.bitsandbytes_4bit.enabled:
+            assert (
+                self.strategy == "fsdp"
+            ), "`trainer.policy.model.bitsandbytes_4bit.enabled=True` is only supported with `trainer.strategy=fsdp`."
+            assert self.policy.model.lora.rank > 0, (
+                "`trainer.policy.model.bitsandbytes_4bit.enabled=True` requires "
+                "`trainer.policy.model.lora.rank > 0` for QLoRA."
             )
 
         if self.logprobs_chunk_size is not None and (
