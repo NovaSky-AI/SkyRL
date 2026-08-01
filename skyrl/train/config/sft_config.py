@@ -140,6 +140,8 @@ class SFTConfig(BaseConfig):
     model_config_kwargs: dict = field(default_factory=dict)
     """Pass-through kwargs for the HuggingFace model config (FSDP backends).
     For Megatron, use ``megatron_config.transformer_config_kwargs`` instead."""
+    flash_attn: bool = True
+    """Use FlashAttention 2 for FSDP models. Disable for models with unsupported head dimensions."""
     use_torch_compile: bool = False
     """Apply torch.compile to logits calculation."""
     record_memory: bool = False
@@ -558,6 +560,11 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             raise ValueError(f"num_epochs must be > 0, got {cfg.num_epochs}")
     if not cfg.model.path:
         raise ValueError("model.path must be set")
+    if cfg.model.bitsandbytes_4bit.enabled:
+        if cfg.strategy != "fsdp":
+            raise ValueError("model.bitsandbytes_4bit.enabled=True is only supported with strategy='fsdp'.")
+        if cfg.model.lora.rank <= 0:
+            raise ValueError("model.bitsandbytes_4bit.enabled=True requires model.lora.rank > 0 for QLoRA.")
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
     if cfg.max_training_steps is not None and cfg.max_training_steps <= 0:
@@ -656,6 +663,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     cfg.trainer.policy.sequence_parallel_size = sft_cfg.sequence_parallel_size
     cfg.trainer.policy.model_config_kwargs = sft_cfg.model_config_kwargs
     cfg.trainer.policy.use_torch_compile = sft_cfg.use_torch_compile
+    cfg.trainer.flash_attn = sft_cfg.flash_attn
     cfg.trainer.policy.record_memory = sft_cfg.record_memory
     cfg.trainer.policy.torch_profiler_config = sft_cfg.torch_profiler_config
 

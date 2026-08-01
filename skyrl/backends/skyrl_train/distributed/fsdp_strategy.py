@@ -92,6 +92,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # LoRA related configs
         self.is_lora = self.model_config.lora.rank > 0 if self.model_config is not None else False
+        self.is_4bit = self.model_config.bitsandbytes_4bit.enabled if self.model_config is not None else False
 
         self.time_steps = defaultdict(int)
 
@@ -221,6 +222,16 @@ class FSDPStrategy(DistributedStrategy):
             "reshard_after_forward": self.fsdp_config.reshard_after_forward,
         }
         module = model.model if is_wrapped else model
+
+        if self.is_4bit and self.world_size == 1:
+            return module
+
+        # Params4bit cannot be moved through the meta device. Each rank already
+        # loaded the same quantized checkpoint, so shard it in place instead.
+        if self.is_4bit:
+            apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
+            return module
+
         full_state = module.state_dict()
 
         # Move the entire module to meta before apply_fsdp2 so the sharded

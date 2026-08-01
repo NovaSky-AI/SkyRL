@@ -44,6 +44,8 @@ class HFModelWrapper(nn.Module):
         use_flash_attention_2 (bool, optional): Whether to utilize Flash Attention 2.0 for improved performance. Defaults to False.
         bf16 (bool, optional): Enable bfloat16 precision for model computations. Defaults to True.
         load_in_4bit (bool, optional): Load the model in 4-bit precision. Defaults to False.
+        bnb_4bit_quant_type (str, optional): bitsandbytes 4-bit data type. Defaults to "nf4".
+        bnb_4bit_use_double_quant (bool, optional): Enable nested quantization. Defaults to True.
         lora_rank (int, optional): Rank for LoRA adaptation. Defaults to 0.
         lora_alpha (int, optional): Alpha parameter for LoRA. Defaults to 16.
         lora_dropout (float, optional): Dropout rate for LoRA layers. Defaults to 0.
@@ -62,6 +64,8 @@ class HFModelWrapper(nn.Module):
         use_flash_attention_2=False,
         bf16=True,
         load_in_4bit=False,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
         # TODO(shu): combine all LoRA specific configs into one place?
         lora_rank=0,
         lora_alpha=16,
@@ -97,9 +101,10 @@ class HFModelWrapper(nn.Module):
                 assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
                 nf4_config = BitsAndBytesConfig(
                     load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type=bnb_4bit_quant_type,
+                    bnb_4bit_use_double_quant=bnb_4bit_use_double_quant,
                     bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_quant_storage=torch.bfloat16,
                 )
             else:
                 nf4_config = None
