@@ -864,6 +864,12 @@ class MegatronModelWrapper:
                     entropy_for_loss = entropy
                     entropy_sum, entropy_nnz = compute_masked_sum_and_count(entropy_BS, loss_mask)
 
+            # The packed helpers return detached tensors while compute_masked_sum_and_count
+            # returns Python floats; reduce_metrics silently drops non-(int, float) values,
+            # so normalize to floats before emitting the raw sum/count metrics.
+            entropy_sum = float(entropy_sum)
+            entropy_nnz = float(entropy_nnz)
+
             if loss_config.use_entropy_loss:
                 entropy_loss_term = entropy_for_loss * loss_config.entropy_loss_coef
             else:
