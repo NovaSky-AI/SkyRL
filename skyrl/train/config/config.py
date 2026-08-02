@@ -1534,13 +1534,16 @@ class TrainerConfig(BaseConfig):
             )
 
         if self.policy.model.bitsandbytes_4bit.enabled:
-            assert (
-                self.strategy == "fsdp"
-            ), "`trainer.policy.model.bitsandbytes_4bit.enabled=True` is only supported with `trainer.strategy=fsdp`."
-            assert self.policy.model.lora.rank > 0, (
-                "`trainer.policy.model.bitsandbytes_4bit.enabled=True` requires "
-                "`trainer.policy.model.lora.rank > 0` for QLoRA."
-            )
+            if self.strategy != "fsdp":
+                raise ValueError(
+                    "`trainer.policy.model.bitsandbytes_4bit.enabled=True` is only supported with "
+                    "`trainer.strategy=fsdp`."
+                )
+            if self.policy.model.lora.rank <= 0:
+                raise ValueError(
+                    "`trainer.policy.model.bitsandbytes_4bit.enabled=True` requires "
+                    "`trainer.policy.model.lora.rank > 0` for QLoRA."
+                )
 
         if self.logprobs_chunk_size is not None and (
             not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0
