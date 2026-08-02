@@ -43,7 +43,7 @@ def _language_model_only_lora_exclusions(model: nn.Module, exclude_modules):
 
     prefix = min(prefixes, key=len)
     outside_language_model = rf"^(?!{re.escape(prefix)}(?:\.|$)).*$"
-    if exclude_modules is None:
+    if not exclude_modules:
         return outside_language_model
     if isinstance(exclude_modules, str):
         return rf"(?:{outside_language_model})|(?:{exclude_modules})"
