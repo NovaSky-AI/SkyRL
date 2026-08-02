@@ -53,6 +53,9 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
+    LOSS_MASK_NNZ_KEY,
+    POLICY_ENTROPY_SUM_KEY,
+    compute_masked_sum_and_count,
     compute_minibatch_rollout_logprob_diff_metrics,
 )
 from skyrl.train.config import TrainerConfig
@@ -809,19 +812,21 @@ class MegatronModelWrapper:
             # RL path: add optional KL/entropy terms
             with torch.set_grad_enabled(loss_config.use_entropy_loss):
                 if fused_lm_head and packed_seq_params is not None and packed_targets is not None:
-                    entropy, entropy_for_loss = from_parallel_hidden_to_entropy_packed_sequences(
-                        logits,  # decoder hidden states [1, T, H]
-                        lm_head_weight,
-                        packed_seq_params.cu_seqlens_q_padded,
-                        sequences.shape[1],
-                        num_actions,
-                        data["attention_mask"],
-                        loss_mask,
-                        mpu.get_context_parallel_group(),
-                        tp_group=tp_grp,
-                        sub_seq_lengths=data.get("sub_seq_lengths_list"),
-                        chunk_size=self.cfg.logprobs_chunk_size,
-                        temperature=temperature,
+                    entropy, entropy_for_loss, entropy_sum, entropy_nnz = (
+                        from_parallel_hidden_to_entropy_packed_sequences(
+                            logits,  # decoder hidden states [1, T, H]
+                            lm_head_weight,
+                            packed_seq_params.cu_seqlens_q_padded,
+                            sequences.shape[1],
+                            num_actions,
+                            data["attention_mask"],
+                            loss_mask,
+                            mpu.get_context_parallel_group(),
+                            tp_group=tp_grp,
+                            sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                            chunk_size=self.cfg.logprobs_chunk_size,
+                            temperature=temperature,
+                        )
                     )
                 elif fused_lm_head:
                     action_hidden = logits[:, -num_actions - 1 : -1, :]
@@ -834,8 +839,9 @@ class MegatronModelWrapper:
                     )
                     entropy = masked_mean(entropy_BS, loss_mask)
                     entropy_for_loss = entropy
+                    entropy_sum, entropy_nnz = compute_masked_sum_and_count(entropy_BS, loss_mask)
                 elif packed_seq_params is not None and packed_targets is not None:
-                    entropy, entropy_for_loss = vocab_parallel_entropy_packed_sequences(
+                    entropy, entropy_for_loss, entropy_sum, entropy_nnz = vocab_parallel_entropy_packed_sequences(
                         logits,
                         packed_seq_params.cu_seqlens_q_padded,
                         sequences.shape[1],
@@ -856,6 +862,7 @@ class MegatronModelWrapper:
                     )
                     entropy = masked_mean(entropy_BS, loss_mask)
                     entropy_for_loss = entropy
+                    entropy_sum, entropy_nnz = compute_masked_sum_and_count(entropy_BS, loss_mask)
 
             if loss_config.use_entropy_loss:
                 entropy_loss_term = entropy_for_loss * loss_config.entropy_loss_coef
@@ -929,7 +936,8 @@ class MegatronModelWrapper:
             metrics = {
                 "final_loss": unscaled_loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
-                "policy_entropy": entropy.detach().item(),
+                POLICY_ENTROPY_SUM_KEY: entropy_sum,
+                LOSS_MASK_NNZ_KEY: entropy_nnz,
                 "policy_kl": kl_loss.detach().item(),
                 "loss_fn_outputs": loss_fn_outputs,
             }
