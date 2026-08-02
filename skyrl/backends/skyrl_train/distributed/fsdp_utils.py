@@ -225,14 +225,16 @@ def apply_fsdp2(model, fsdp_kwargs, config: Union[FSDPConfig, DictConfig]):
 
     modules = []
     wrapped_module_names = []
+    embeddings = []
+    tie_word_embeddings = getattr(getattr(model, "config", None), "tie_word_embeddings", False)
     for name, module in model.named_modules():
         if module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap:
             modules.append(module)
             wrapped_module_names.append(name)
+        elif isinstance(module, nn.Embedding) and not tie_word_embeddings:
+            embeddings.append((name, module))
 
-    for name, module in model.named_modules():
-        if not isinstance(module, nn.Embedding) or model.config.tie_word_embeddings:
-            continue
+    for name, module in embeddings:
         if any(name.startswith(f"{parent_name}.") for parent_name in wrapped_module_names if parent_name):
             continue
         modules.append(module)
