@@ -3,20 +3,21 @@ Main entrypoint for training on Harbor tasks.
 """
 
 import sys
-
-import ray
-import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict
 
+import ray
+import yaml
+
+from skyrl.train.config import GeneratorConfig, SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import BasePPOExp
-from skyrl.train.config import SkyRLTrainConfig, GeneratorConfig, get_config_as_yaml_str
 from skyrl.train.utils import validate_cfg
-from skyrl.train.utils.utils import initialize_ray
 from skyrl.train.utils.rate_limiter import RateLimiterConfig
-from ..harbor_generator import HarborGenerator
+from skyrl.train.utils.utils import initialize_ray
+
 from ..dataset import HarborTaskDataset
+from ..harbor_generator import HarborGenerator
 
 # NOTE (sumanthrh): We use a YAML to store the defaults for the Harbor trial configuration
 # TODO: Convert to a dataclass
@@ -38,6 +39,7 @@ class HarborGeneratorConfig(GeneratorConfig):
     """GeneratorConfig with Harbor-specific rate limiting."""
 
     rate_limit: RateLimiterConfig = field(default_factory=RateLimiterConfig)
+    tito_validate_rollout_details: bool = True
 
 
 @dataclass

@@ -44,7 +44,11 @@ agent:
     # Whether to enable context summarization when approaching token limits
     enable_summarize: false
 
-    # Collect per-turn rollout details (required for step-wise training)
+    # Preserve reasoning content in later chat turns so TITO can reuse exact
+    # sampled assistant token IDs without re-rendering them.
+    interleaved_thinking: true
+
+    # Collect Harbor's per-turn token data for optional TITO parity validation.
     collect_rollout_details: true
 
     # The only sampling param that directly gets passed to Terminus

@@ -15,17 +15,26 @@ from tqdm import tqdm
 from harbor.models.agent.rollout_detail import RolloutDetail
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
-from skyrl.backends.skyrl_train.inference_servers.base import ConversationType, InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_servers.base import (
+    ConversationType,
+    InferenceEngineInterface,
+)
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
     GeneratorOutput,
     TrajectoryID,
 )
-from skyrl.train.generators.utils import get_rollout_metrics
+from skyrl.train.generators.tito import (
+    Trace,
+    TraceOutcome,
+    build_trace_generator_output,
+)
+from skyrl.train.generators.tito.proxy import TITOProxy
+from skyrl.train.generators.tito.renderer import PrimeRendererAdapter
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
-litellm.suppress_debug_info = True  # Suppress the "Provider List" output
+setattr(litellm, "suppress_debug_info", True)  # Suppress the "Provider List" output
 litellm.set_verbose = False
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
@@ -38,181 +47,20 @@ MAX_NUM_RETRIES_PER_TRIAL = 2
 class HarborTrajectoryOutput:
     """One trajectory's raw output from Harbor.
 
-    Holds the entire ``rollout_details`` from ``agent_result``. Per-step interpretation
-    (loss-mask / reward broadcast / overlong filtering) is done downstream in
-    `build_step_wise_generator_output`.
+    The TITO trace is authoritative for training output. Harbor rollout details
+    are retained only for optional call-by-call parity validation.
     """
 
     trajectory_id: TrajectoryID
-    # Entire rollout_details list as returned by harbor's agent_result. None for failed trajectories
-    # (agent_timeout / error) that we will mask in `build_step_wise_generator_output`.
     rollout_details: Optional[List[RolloutDetail]] = None
+    trace: Optional[Trace] = None
     reward: float = 0.0
     num_turns: int = 0
-    # One of: "complete", "context_length", "agent_timeout", "error". Used by
-    # `build_step_wise_generator_output` to decide whether to skip the entire prompt group.
+    # One of: "complete", "context_length", "agent_timeout", "error".
     stop_reason: str = "complete"
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: left as None if
     # timing was not recorded.
     e2e_time: Optional[float] = None
-
-
-def build_step_wise_generator_output(
-    trajectory_outputs: List[HarborTrajectoryOutput], overlong_filtering: bool
-) -> GeneratorOutput:
-    """Flatten per-trajectory rollout details into one entry per LLM turn.
-
-    Steps for one trajectory are emitted contiguously and the last step has
-    ``is_last_step=True``. Failures (timeout / unknown error / empty rollout
-    details) are batched per ``instance_id``: if any rollout for prompt P
-    failed, all rollouts for P are replaced with single zeroed-out
-    placeholder steps.
-    """
-    # 1. Identify failed instances. If any rollout for prompt P failed, mask all rollouts for P (conservative).
-    timeout_instance_ids = set()
-    error_instance_ids = set()
-    all_instance_ids = set()
-    num_timeout_trajectories = 0
-    num_error_trajectories = 0
-    for traj in trajectory_outputs:
-        instance_id = traj.trajectory_id.instance_id
-        all_instance_ids.add(instance_id)
-        if traj.stop_reason == "agent_timeout":
-            num_timeout_trajectories += 1
-            timeout_instance_ids.add(instance_id)
-        elif traj.stop_reason == "error" or traj.rollout_details is None:
-            num_error_trajectories += 1
-            error_instance_ids.add(instance_id)
-    masked_instance_ids = timeout_instance_ids | error_instance_ids
-
-    # 2. Walk trajectories and emit one entry of GeneratorOutput per step.
-    prompt_token_ids: List[List[int]] = []
-    response_ids: List[List[int]] = []
-    rewards: List[float] = []
-    loss_masks: List[List[int]] = []
-    stop_reasons: List[str] = []
-    is_last_step_list: List[bool] = []
-    out_trajectory_ids: List[TrajectoryID] = []
-    rollout_logprobs_list: List[List[float]] = []
-
-    successful_trajectories: List[HarborTrajectoryOutput] = []
-    response_ids_for_metrics: List[List[int]] = []
-    rewards_for_metrics: List[float] = []
-    # One generation time per successful trajectory; used for completion-time metrics (avoids the
-    # duplicate per-step entries below inflating the stats).
-    trajectory_generation_times_per_prompt: List[Optional[float]] = []
-    # One generation time per emitted step, aligned 1:1 with the flattened per-step arrays above.
-    # Per trajectory we replicate its trajectory-level e2e_time across all of its steps.
-    out_trajectory_generation_times: List[Optional[float]] = []
-    for traj in trajectory_outputs:
-        tid = traj.trajectory_id
-
-        # 2.1. For failed trajectories, set loss mask to [0] and stop reason to "error".
-        if tid.instance_id in masked_instance_ids:
-            prompt_token_ids.append([0])
-            response_ids.append([0])
-            rewards.append(0.0)
-            loss_masks.append([0])
-            stop_reasons.append("error")
-            is_last_step_list.append(True)
-            out_trajectory_ids.append(tid)
-            rollout_logprobs_list.append([0.0])
-            out_trajectory_generation_times.append(traj.e2e_time)
-            continue
-
-        # 2.2. For successful trajectories, emit one entry per step.
-        successful_trajectories.append(traj)
-
-        # 2.3. Check rollout_details expected format.
-        # Expect no summarization; rollout_details is a single linear chat segment from the main agent.
-        # TODO(Charlie): Support summarization.
-        assert len(traj.rollout_details) == 1, f"Expected exactly one rollout segment, got {len(traj.rollout_details)}."
-        rollout_detail = traj.rollout_details[0]
-        prompt_token_ids_per_turn = rollout_detail["prompt_token_ids"]
-        completion_token_ids_per_turn = rollout_detail["completion_token_ids"]
-        logprobs_per_turn = rollout_detail["logprobs"]
-        n_turns = len(completion_token_ids_per_turn)
-        assert len(prompt_token_ids_per_turn) == n_turns and len(logprobs_per_turn) == n_turns, (
-            f"Malformed rollout_details (prompts={len(prompt_token_ids_per_turn)}, completions={n_turns}, "
-            f"logprobs={len(logprobs_per_turn)})."
-        )
-
-        # 2.4. Emit one entry per step, following SkyRL's step-wise convention.
-        for t in range(n_turns):
-            comp_ids = completion_token_ids_per_turn[t]
-            p_ids = prompt_token_ids_per_turn[t]
-            lp = logprobs_per_turn[t]
-            assert len(lp) == len(comp_ids), "logprobs and completion token ids must have the same length."
-
-            # Record actual reward in last turn, and zeros for all other turns.
-            is_last = t == n_turns - 1
-            reward = traj.reward if is_last else 0.0
-
-            # Loss mask.
-            step_loss_mask = [1] * len(comp_ids)
-            step_stop_reason = "complete"
-            if traj.stop_reason == "context_length":
-                step_stop_reason = "context_length"
-                if overlong_filtering:
-                    step_loss_mask = [0] * len(comp_ids)
-
-            prompt_token_ids.append(p_ids)
-            response_ids.append(comp_ids)
-            rewards.append(reward)
-            loss_masks.append(step_loss_mask)
-            stop_reasons.append(step_stop_reason)
-            is_last_step_list.append(is_last)
-            out_trajectory_ids.append(tid)
-            rollout_logprobs_list.append(lp)
-            # For trajectory completion per turn we just use the trajectory-level e2e time.
-            out_trajectory_generation_times.append(traj.e2e_time)
-
-        # 2.5. For trajectory-level metrics, record the last turn's prompt IDs and response IDs which
-        # contains the entire trajectory.
-        response_ids_for_metrics.append(prompt_token_ids_per_turn[-1] + completion_token_ids_per_turn[-1])
-        rewards_for_metrics.append(traj.reward)
-        trajectory_generation_times_per_prompt.append(traj.e2e_time)
-
-    # 3. Aggregate trajectory-level metrics for logging.
-    # ``e2e_time`` is optional; if any trajectory did not record it, we omit the completion-time
-    # fields entirely rather than emit a partially-populated list.
-    # NOTE: metrics use the per-prompt times (not the per-step duplicates) to avoid skewing the stats.
-    if any(t is None for t in trajectory_generation_times_per_prompt):
-        trajectory_generation_times_per_prompt = None
-    if any(t is None for t in out_trajectory_generation_times):
-        out_trajectory_generation_times = None
-    if successful_trajectories:
-        rollout_metrics = get_rollout_metrics(
-            response_ids_for_metrics,
-            rewards_for_metrics,
-            trajectory_completion_times=trajectory_generation_times_per_prompt,
-        )
-        rollout_metrics["generate/trajectories_context_length_exceeded"] = sum(
-            1 for t in successful_trajectories if t.stop_reason == "context_length"
-        )
-        rollout_metrics["generate/avg_num_turns"] = sum(t.num_turns for t in successful_trajectories) / len(
-            successful_trajectories
-        )
-    else:
-        rollout_metrics = {}
-
-    rollout_metrics["generate/num_timeout_trajectories"] = num_timeout_trajectories
-    rollout_metrics["generate/num_error_trajectories"] = num_error_trajectories
-    rollout_metrics["generate/num_masked_instances"] = len(masked_instance_ids)
-
-    return GeneratorOutput(
-        prompt_token_ids=prompt_token_ids,
-        response_ids=response_ids,
-        rewards=rewards,
-        loss_masks=loss_masks,
-        stop_reasons=stop_reasons,
-        rollout_metrics=rollout_metrics,
-        rollout_logprobs=rollout_logprobs_list,
-        trajectory_ids=out_trajectory_ids,
-        is_last_step=is_last_step_list,
-        # Per-step times, aligned 1:1 with the flattened per-step arrays above.
-        trajectory_generation_times=out_trajectory_generation_times,
-    )
 
 
 class HarborGenerator(GeneratorInterface):
@@ -240,16 +88,8 @@ class HarborGenerator(GeneratorInterface):
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-
-        if not getattr(generator_cfg, "step_wise_trajectories", False):
-            raise ValueError(
-                "HarborGenerator only supports step-wise training. " "Set generator.step_wise_trajectories=true."
-            )
-        if not getattr(generator_cfg, "merge_stepwise_output", False):
-            logger.warning(
-                "merge_stepwise_output=true is not set; will not merge step-wise outputs. This "
-                "may result in much slower training."
-            )
+        self.renderer = PrimeRendererAdapter(tokenizer)
+        self._validate_rollout_details = getattr(generator_cfg, "tito_validate_rollout_details", True)
 
         self._harbor_trial_config_template = deepcopy(harbor_cfg)
 
@@ -266,11 +106,16 @@ class HarborGenerator(GeneratorInterface):
         ] = f"hosted_vllm/{ie_cfg.served_model_name}"
         self._harbor_trial_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
-        # Step-wise needs per-turn token IDs and logprobs from vLLM via Harbor.
+        # Keep Harbor's own token bookkeeping as a parity oracle during rollout.
         agent_kwargs = self._harbor_trial_config_template["agent"]["kwargs"]
-        if not agent_kwargs.get("collect_rollout_details", False):
-            logger.warning("step_wise_trajectories=true requires collect_rollout_details=true; enabling automatically.")
+        if self._validate_rollout_details and not agent_kwargs.get("collect_rollout_details", False):
+            logger.warning("TITO parity validation requires collect_rollout_details=true; enabling automatically.")
             agent_kwargs["collect_rollout_details"] = True
+        if not agent_kwargs.get("interleaved_thinking", False):
+            logger.warning(
+                "TITO requires interleaved_thinking=true to preserve assistant history; enabling automatically."
+            )
+            agent_kwargs["interleaved_thinking"] = True
 
         # Can support summarization in future.
         if agent_kwargs.get("enable_summarize", False):
@@ -317,7 +162,7 @@ class HarborGenerator(GeneratorInterface):
         # Captured once so every trajectory shares the policy version at the start of the batch.
         cache_salt = self._compute_cache_salt()
 
-        all_outputs: List[HarborTrajectoryOutput] = [None] * len(prompts)  # type: ignore[list-item]
+        all_outputs: List[Optional[HarborTrajectoryOutput]] = [None] * len(prompts)
         progress = tqdm(
             disable=disable_tqdm,  # disable for fully async training
             total=len(prompts),
@@ -326,24 +171,49 @@ class HarborGenerator(GeneratorInterface):
             mininterval=5,
         )
 
+        proxy = TITOProxy(self.inference_engine_client, self.renderer)
+
         async def _worker(idx, prompt, trajectory_id):
-            result = await self._harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id, cache_salt=cache_salt)
+            result = await self._harbor_agent_loop(
+                proxy=proxy,
+                prompt=prompt,
+                trajectory_id=trajectory_id,
+                cache_salt=cache_salt,
+            )
             all_outputs[idx] = result
             progress.update(1)
 
         try:
-            async with asyncio.TaskGroup() as tg:
-                for idx, (prompt, trajectory_id) in enumerate(zip(prompts, trajectory_ids)):
-                    tg.create_task(_worker(idx, prompt, trajectory_id))
+            async with proxy.serving():
+                async with asyncio.TaskGroup() as tg:
+                    for idx, (prompt, trajectory_id) in enumerate(zip(prompts, trajectory_ids)):
+                        tg.create_task(_worker(idx, prompt, trajectory_id))
         finally:
             progress.close()
 
-        return build_step_wise_generator_output(
-            all_outputs, overlong_filtering=self.generator_cfg.apply_overlong_filtering
+        if any(output is None for output in all_outputs):
+            raise RuntimeError("Harbor generation completed without producing every trajectory output")
+        completed_outputs = [output for output in all_outputs if output is not None]
+        outcomes = [
+            TraceOutcome(
+                trace=output.trace if output.trace is not None else self._empty_trace(),
+                trajectory_id=output.trajectory_id,
+                reward=output.reward,
+                stop_reason=output.stop_reason,
+                generation_time=output.e2e_time,
+                num_turns=output.num_turns,
+            )
+            for output in completed_outputs
+        ]
+        return build_trace_generator_output(
+            outcomes,
+            overlong_filtering=self.generator_cfg.apply_overlong_filtering,
+            step_wise=self.generator_cfg.step_wise_trajectories,
         )
 
     async def _harbor_agent_loop(
         self,
+        proxy: TITOProxy,
         prompt: ConversationType,
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str] = None,
@@ -356,6 +226,7 @@ class HarborGenerator(GeneratorInterface):
         results = None
         rollout_details = None
         num_turns = None
+        successful_trace = None
         successful = False
         is_context_length_error = False
         is_agent_timeout_error = False
@@ -366,6 +237,7 @@ class HarborGenerator(GeneratorInterface):
             # Each attempt is a distinct router session; track it so it can be
             # released on completion/error/cancellation.
             session_id = uuid4().hex
+            trace = Trace()
             try:
                 # Create a fresh Trial each attempt so agent state is clean on retry.
                 config = deepcopy(self._harbor_trial_config_template)
@@ -379,11 +251,18 @@ class HarborGenerator(GeneratorInterface):
                     if not isinstance(extra_body, dict):
                         raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs.extra_body must be a mapping")
                     extra_body["cache_salt"] = cache_salt
-                trial_config = TrialConfig.model_validate(config)
-                trial = await Trial.create(trial_config)
+                async with proxy.register(
+                    trace,
+                    router_session_id=session_id,
+                    cache_salt=cache_salt,
+                    model=self._served_model_name,
+                ) as handle:
+                    config["agent"]["kwargs"]["api_base"] = f"{handle.base_url}/v1"
+                    trial_config = TrialConfig.model_validate(config)
+                    trial = await Trial.create(trial_config)
 
-                async with self._rate_limiter:
-                    results = await trial.run()
+                    async with self._rate_limiter:
+                        results = await trial.run()
 
                 # Parse exception type
                 exc_type = results.exception_info.exception_type if results.exception_info else None
@@ -404,27 +283,36 @@ class HarborGenerator(GeneratorInterface):
                     logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
                     continue
                 else:
-                    reward = float(results.verifier_result.rewards["reward"])
+                    verifier_result = results.verifier_result
+                    if verifier_result is None:
+                        raise RuntimeError("Harbor verifier result disappeared after validation")
+                    verifier_rewards = verifier_result.rewards
+                    if verifier_rewards is None or "reward" not in verifier_rewards:
+                        raise RuntimeError("Harbor verifier result is missing reward")
+                    reward = float(verifier_rewards["reward"])
 
                 # Extract rollout details and check for success
-                rollout_details = results.agent_result.rollout_details
-                num_turns = results.agent_result.metadata["n_episodes"]
+                agent_result = results.agent_result
+                if agent_result is None:
+                    raise RuntimeError("Harbor result is missing agent_result")
+                rollout_details = agent_result.rollout_details
+                metadata = agent_result.metadata
+                if metadata is None or "n_episodes" not in metadata:
+                    raise RuntimeError("Harbor agent result is missing n_episodes metadata")
+                num_turns = int(metadata["n_episodes"])
 
-                if (
-                    rollout_details
-                    and len(rollout_details) >= 1
-                    and len(rollout_details[0].get("completion_token_ids", [])) > 0
-                ):
+                if trace.committed_turns():
+                    if getattr(self, "_validate_rollout_details", True):
+                        self._validate_trace_parity(trace, rollout_details)
+                    successful_trace = trace
                     successful = True
                     logger.debug(f"{prefix} successful: reward={reward}.")
                     break
                 else:
-                    logger.warning(f"{prefix} failed: empty/missing rollout_details. Results: {results}")
+                    logger.warning(f"{prefix} failed: proxy trace contains no committed turns. Results: {results}")
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
-            finally:
-                await self.inference_engine_client.finish_session(session_id)
 
         if not successful:
             stop_reason = "agent_timeout" if is_agent_timeout_error else "error"
@@ -435,15 +323,53 @@ class HarborGenerator(GeneratorInterface):
             return HarborTrajectoryOutput(
                 trajectory_id=trajectory_id,
                 rollout_details=None,
+                trace=self._empty_trace(),
                 stop_reason=stop_reason,
                 e2e_time=time.monotonic() - agent_loop_start_time,
             )
         else:
+            if reward is None or num_turns is None or successful_trace is None:
+                raise RuntimeError("Successful Harbor trajectory is missing required TITO output")
             return HarborTrajectoryOutput(
                 trajectory_id=trajectory_id,
                 rollout_details=rollout_details,
+                trace=successful_trace,
                 reward=reward,
                 num_turns=num_turns,
                 stop_reason="context_length" if is_context_length_error else "complete",
                 e2e_time=time.monotonic() - agent_loop_start_time,
             )
+
+    @staticmethod
+    def _empty_trace() -> Trace:
+        trace = Trace()
+        trace.seal()
+        return trace
+
+    @staticmethod
+    def _validate_trace_parity(trace: Trace, rollout_details: Optional[List[RolloutDetail]]) -> None:
+        """Require exact per-call parity while Harbor rollout details are enabled."""
+        if not rollout_details:
+            raise ValueError("Harbor did not return rollout details for TITO parity validation")
+        if len(rollout_details) != 1:
+            raise ValueError(f"Expected one Harbor rollout segment, got {len(rollout_details)}")
+
+        detail = rollout_details[0]
+        prompt_ids = detail.get("prompt_token_ids", [])
+        completion_ids = detail.get("completion_token_ids", [])
+        logprobs = detail.get("logprobs", [])
+        turns = trace.committed_turns()
+        if not (len(prompt_ids) == len(completion_ids) == len(logprobs) == len(turns)):
+            raise ValueError(
+                "Harbor rollout detail lengths do not match committed TITO turns: "
+                f"prompts={len(prompt_ids)}, completions={len(completion_ids)}, "
+                f"logprobs={len(logprobs)}, turns={len(turns)}"
+            )
+
+        for index, turn in enumerate(turns):
+            if list(turn.prompt_token_ids) != prompt_ids[index]:
+                raise ValueError(f"TITO prompt IDs differ from Harbor rollout details at turn {index}")
+            if list(turn.completion_ids) != completion_ids[index]:
+                raise ValueError(f"TITO completion IDs differ from Harbor rollout details at turn {index}")
+            if list(turn.completion_logprobs) != logprobs[index]:
+                raise ValueError(f"TITO completion logprobs differ from Harbor rollout details at turn {index}")
