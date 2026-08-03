@@ -79,6 +79,49 @@ class LogitsProcessorMixin(ABC):
         target_logits = jnp.take_along_axis(logits, target_ids[..., None], axis=-1)
         return (target_logits - log_sum_exp).squeeze(-1)
 
+    def compute_topk_logprobs(
+        self,
+        hidden_states: jax.Array,
+        target_ids_topk: jax.Array,
+        adapter_indices: jax.Array | None = None,
+    ) -> jax.Array:
+        """Compute logprobs for K target tokens per position.
+
+        Used for soft top-K distillation (e.g. SDFT/OPSD forward-KL), where each
+        position has a distribution over K teacher tokens rather than a single
+        hard target.
+
+        Args:
+            hidden_states: Hidden states [B, T, H].
+            target_ids_topk: Target token IDs [B, T, K].
+            adapter_indices: Adapter indices for LoRA on lm_head.
+
+        Returns:
+            Log probabilities for the K target tokens [B, T, K].
+
+        Note: unlike :meth:`compute_logprobs`, this does not use the chunked
+        lm_head path (``loss_chunk_size``); it materializes the full logits once.
+        For the default config (``loss_chunk_size == 0``) this matches the
+        standard path exactly.
+        """
+        logits = self.compute_logits(hidden_states, adapter_indices)
+        return self.logits_to_topk_logprobs(logits, target_ids_topk)
+
+    @staticmethod
+    def logits_to_topk_logprobs(logits: jax.Array, target_ids_topk: jax.Array) -> jax.Array:
+        """Convert logits to logprobs for K targets per position.
+
+        Args:
+            logits: Logits [B, T, V].
+            target_ids_topk: Target token IDs [B, T, K].
+
+        Returns:
+            Log probabilities for the K target tokens [B, T, K].
+        """
+        log_sum_exp = jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+        target_logits = jnp.take_along_axis(logits, target_ids_topk, axis=-1)
+        return target_logits - log_sum_exp
+
     def _compute_chunked_logprobs(
         self,
         hidden_states: jax.Array,

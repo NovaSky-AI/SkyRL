@@ -39,7 +39,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
 from skyrl.backends.renderer import render_model_input
-from skyrl.backends.utils import pad, pad_batch, pad_to_fsdp
+from skyrl.backends.utils import pad, pad_batch, pad_batch_topk, pad_to_fsdp
 from skyrl.tinker import types
 from skyrl.tinker.loss_fns import LOSS_FUNCTIONS, LossFnConfig
 from skyrl.tinker.types import LOSS_TYPES
@@ -472,10 +472,148 @@ class JaxBackendImpl(AbstractBackend):
             new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
             return new_accumulated_grads, per_token_losses, target_logprobs
 
+        # Soft top-K distillation variants (e.g. SDFT / OPSD forward-KL CE).
+        # Identical loss machinery, but each position carries K candidate target
+        # tokens and a teacher weight per candidate. The per-position target
+        # logprob is the teacher-weighted sum over the K student logprobs:
+        #   target_logprobs[b,t] = sum_k weights[b,t,k] * logp_student(target_ids[b,t,k])
+        # loss_mask is the completion indicator (weights sum > 0 at that position),
+        # so downstream (loss switch + normalization + accumulation) is unchanged.
+        def _model_forward_topk(
+            graphdef: nnx.GraphDef,
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+            target_ids: jax.Array,  # [B, T, K]
+            target_weights: jax.Array,  # [B, T, K]
+        ) -> jax.Array:
+            model = nnx.merge(graphdef, lora_params, non_lora_params)
+            output = model(
+                input_ids,
+                attention_mask=attention_mask,
+                adapter_indices=adapter_indices,
+                is_training=True,
+            )
+            topk_logprobs = model.compute_topk_logprobs(output.last_hidden_state, target_ids, adapter_indices)
+            return (target_weights * topk_logprobs).sum(axis=-1)  # [B, T]
+
+        def loss_for_lora_topk(
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+            target_ids: jax.Array,
+            target_weights: jax.Array,
+            loss_mask: jax.Array,
+            loss_fn_types: jax.Array,
+            sampling_logprobs: jax.Array,
+            advantages: jax.Array,
+            loss_fn_config: LossFnConfig,
+        ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+            target_logprobs = _model_forward_topk(
+                self.graphdef,
+                lora_params,
+                non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                target_weights,
+            )
+
+            def compute_loss_per_example(
+                loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages, loss_fn_config
+            ):
+                return jax.lax.switch(
+                    loss_fn_type,
+                    LOSS_FUNCTIONS,
+                    target_logprobs,
+                    loss_mask,
+                    sampling_logprobs,
+                    advantages,
+                    loss_fn_config,
+                )
+
+            per_token_losses = jax.vmap(compute_loss_per_example)(
+                loss_fn_types, target_logprobs, loss_mask, sampling_logprobs, advantages, loss_fn_config
+            )
+            per_seq_loss = per_token_losses.sum(axis=-1) / jnp.maximum(loss_mask.sum(axis=-1), 1e-9)
+            return per_seq_loss.sum(), (target_logprobs, per_token_losses)
+
+        loss_and_grad_fn_topk = jax.value_and_grad(loss_for_lora_topk, argnums=0, has_aux=True)
+
+        def forward_only_topk(
+            accumulated_grads,
+            lora_params,
+            non_lora_params,
+            input_ids,
+            attention_mask,
+            adapter_indices,
+            target_ids,
+            target_weights,
+            loss_mask,
+            loss_fn_types,
+            sampling_logprobs,
+            advantages,
+            loss_fn_config,
+        ):
+            _, (target_logprobs, per_token_losses) = loss_for_lora_topk(
+                lora_params,
+                non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                target_weights,
+                loss_mask,
+                loss_fn_types,
+                sampling_logprobs,
+                advantages,
+                loss_fn_config,
+            )
+            return accumulated_grads, per_token_losses, target_logprobs
+
+        def forward_backward_and_accumulate_topk(
+            accumulated_grads,
+            lora_params,
+            non_lora_params,
+            input_ids,
+            attention_mask,
+            adapter_indices,
+            target_ids,
+            target_weights,
+            loss_mask,
+            loss_fn_types,
+            sampling_logprobs,
+            advantages,
+            loss_fn_config,
+        ):
+            (_, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn_topk(
+                lora_params,
+                non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                target_weights,
+                loss_mask,
+                loss_fn_types,
+                sampling_logprobs,
+                advantages,
+                loss_fn_config,
+            )
+            new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
+            return new_accumulated_grads, per_token_losses, target_logprobs
+
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
             self._forward_backward_and_accumulate = forward_backward_and_accumulate
             self._forward = forward_only
+            self._forward_backward_and_accumulate_topk = forward_backward_and_accumulate_topk
+            self._forward_topk = forward_only_topk
 
         else:
             # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
@@ -525,6 +663,36 @@ class JaxBackendImpl(AbstractBackend):
                 forward_only,
                 in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings)
                 + input_shardings
+                + (loss_fn_config_shardings,),
+                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
+            )
+
+            # Soft top-K variants: target_ids and target_weights are 3D [B, T, K],
+            # sharded along the batch (fsdp) axis.
+            batch_sharded_3d = jax.NamedSharding(self.mesh, jax.P("fsdp", None, None))
+            input_shardings_topk = (
+                batch_sharded_2d,  # input_ids
+                batch_sharded_2d,  # attention_mask
+                batch_sharded_1d,  # adapter_indices
+                batch_sharded_3d,  # target_ids [B, T, K]
+                batch_sharded_3d,  # target_weights [B, T, K]
+                batch_sharded_2d,  # loss_mask
+                batch_sharded_1d,  # loss_fn_types
+                batch_sharded_2d,  # sampling_logprobs
+                batch_sharded_2d,  # advantages
+            )
+            self._forward_backward_and_accumulate_topk = jax.jit(
+                forward_backward_and_accumulate_topk,
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings)
+                + input_shardings_topk
+                + (loss_fn_config_shardings,),
+                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
+                donate_argnames=("accumulated_grads",),
+            )
+            self._forward_topk = jax.jit(
+                forward_only_topk,
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings)
+                + input_shardings_topk
                 + (loss_fn_config_shardings,),
                 out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
             )
@@ -654,18 +822,32 @@ class JaxBackendImpl(AbstractBackend):
 
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
+        topk = prepared_batch.target_topk
+        is_topk = topk > 1
 
         input_ids = pad_batch(all_input_ids, max_len, np.int32)
-        target_ids = pad_batch(all_targets, max_len, np.int32)
         adapter_indices = np.array(all_adapter_indices, dtype=np.int32)
         loss_fn_types = np.array(all_loss_fn_types, dtype=np.int32)
         loss_fn_config = self._build_loss_fn_config(all_loss_fn_configs)
 
         # Create attention mask (1 for real tokens, 0 for padding)
         attention_mask = pad_batch([[1] * len(seq) for seq in all_input_ids], max_len, np.int32)
-        loss_mask = pad_batch(all_token_weights, max_len, np.float32)
         sampling_logprobs = pad_batch(all_sampling_logprobs, max_len, np.float32)
         advantages = pad_batch(all_advantages, max_len, np.float32)
+
+        if is_topk:
+            # Soft top-K distillation: targets/weights are (num_tokens, K) per example.
+            seq_lens_in = [len(seq) for seq in all_input_ids]
+            target_ids = pad_batch_topk(all_targets, seq_lens_in, max_len, topk, np.int32)  # [B, max_len, K]
+            target_weights = pad_batch_topk(
+                all_token_weights, seq_lens_in, max_len, topk, np.float32
+            )  # [B, max_len, K]
+            # Completion indicator: positions that carry any teacher weight.
+            loss_mask = (target_weights.sum(axis=-1) > 0).astype(np.float32)  # [B, max_len]
+        else:
+            target_ids = pad_batch(all_targets, max_len, np.int32)
+            target_weights = None
+            loss_mask = pad_batch(all_token_weights, max_len, np.float32)
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
@@ -679,58 +861,65 @@ class JaxBackendImpl(AbstractBackend):
         # Sharding specs for batch inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
         sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+        sharding_3d = jax.NamedSharding(self.mesh, jax.P("fsdp", None, None))
         fsdp_size = self.mesh.shape["fsdp"]
+
+        def _shard(arr, sharding):
+            return jax.device_put(pad_to_fsdp(arr[mb_start:mb_end], fsdp_size), sharding)
 
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
 
-                # Pad and shard the micro-batch inputs
-                (
-                    mb_input_ids,
-                    mb_attention_mask,
-                    mb_target_ids,
-                    mb_loss_mask,
-                    mb_sampling_logprobs,
-                    mb_advantages,
-                    mb_adapter_indices,
-                    mb_loss_fn_types,
-                    mb_clip_low_threshold,
-                    mb_clip_high_threshold,
-                ) = jax.device_put(
-                    (
-                        pad_to_fsdp(input_ids[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(attention_mask[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(target_ids[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(loss_mask[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(sampling_logprobs[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(advantages[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(adapter_indices[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(loss_fn_types[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(loss_fn_config.clip_low_threshold[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(loss_fn_config.clip_high_threshold[mb_start:mb_end], fsdp_size),
-                    ),
-                    (sharding_2d,) * 6 + (sharding_1d,) * 4,
-                )
+                # Pad and shard the micro-batch inputs (shared across both paths)
+                mb_input_ids = _shard(input_ids, sharding_2d)
+                mb_attention_mask = _shard(attention_mask, sharding_2d)
+                mb_loss_mask = _shard(loss_mask, sharding_2d)
+                mb_sampling_logprobs = _shard(sampling_logprobs, sharding_2d)
+                mb_advantages = _shard(advantages, sharding_2d)
+                mb_adapter_indices = _shard(adapter_indices, sharding_1d)
+                mb_loss_fn_types = _shard(loss_fn_types, sharding_1d)
                 mb_loss_fn_config = LossFnConfig(
-                    clip_low_threshold=mb_clip_low_threshold,
-                    clip_high_threshold=mb_clip_high_threshold,
+                    clip_low_threshold=_shard(loss_fn_config.clip_low_threshold, sharding_1d),
+                    clip_high_threshold=_shard(loss_fn_config.clip_high_threshold, sharding_1d),
                 )
 
-                self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
-                    self.accumulated_grads,
-                    self.lora_params,
-                    self.non_lora_params,
-                    mb_input_ids,
-                    mb_attention_mask,
-                    mb_adapter_indices,
-                    mb_target_ids,
-                    mb_loss_mask,
-                    mb_loss_fn_types,
-                    mb_sampling_logprobs,
-                    mb_advantages,
-                    mb_loss_fn_config,
-                )
+                if is_topk:
+                    # target_ids/target_weights are 3D [B, T, K]; loss_mask is the
+                    # completion indicator. Uses the soft top-K model pass fn.
+                    mb_target_ids = _shard(target_ids, sharding_3d)
+                    mb_target_weights = _shard(target_weights, sharding_3d)
+                    self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
+                        self.accumulated_grads,
+                        self.lora_params,
+                        self.non_lora_params,
+                        mb_input_ids,
+                        mb_attention_mask,
+                        mb_adapter_indices,
+                        mb_target_ids,
+                        mb_target_weights,
+                        mb_loss_mask,
+                        mb_loss_fn_types,
+                        mb_sampling_logprobs,
+                        mb_advantages,
+                        mb_loss_fn_config,
+                    )
+                else:
+                    mb_target_ids = _shard(target_ids, sharding_2d)
+                    self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
+                        self.accumulated_grads,
+                        self.lora_params,
+                        self.non_lora_params,
+                        mb_input_ids,
+                        mb_attention_mask,
+                        mb_adapter_indices,
+                        mb_target_ids,
+                        mb_loss_mask,
+                        mb_loss_fn_types,
+                        mb_sampling_logprobs,
+                        mb_advantages,
+                        mb_loss_fn_config,
+                    )
                 # Slice back to original size (remove FSDP padding)
                 token_losses_device.append(per_token_losses[: mb_end - mb_start])
                 logprobs_device.append(target_logprobs[: mb_end - mb_start])
@@ -789,14 +978,20 @@ class JaxBackendImpl(AbstractBackend):
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Run forward and backward pass on a batch."""
-        return self._model_pass(prepared_batch, self._forward_backward_and_accumulate)
+        fn = (
+            self._forward_backward_and_accumulate_topk
+            if prepared_batch.target_topk > 1
+            else self._forward_backward_and_accumulate
+        )
+        return self._model_pass(prepared_batch, fn)
 
     def forward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Run forward-only pass on a batch (no gradient computation)."""
-        return self._model_pass(prepared_batch, self._forward)
+        fn = self._forward_topk if prepared_batch.target_topk > 1 else self._forward
+        return self._model_pass(prepared_batch, fn)
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Apply an optimizer step using accumulated gradients."""
@@ -851,6 +1046,7 @@ class JaxBackendImpl(AbstractBackend):
         all_sampling_params = prepared_batch.all_sampling_params
         request_batch_slices = prepared_batch.request_batch_slices
         needs_prompt_logprobs = prepared_batch.needs_prompt_logprobs
+        max_topk_prompt_logprobs = prepared_batch.max_topk_prompt_logprobs
 
         # Load sampler weights and get adapter indices
         all_adapter_indices = self.load_sampler_weights(prepared_batch)
@@ -862,6 +1058,7 @@ class JaxBackendImpl(AbstractBackend):
         # Collect generated sequences and prompt logprobs across batches
         all_sequences: list[types.GeneratedSequence] = []
         all_prompt_logprobs: list[list[float]] = []
+        all_topk_prompt_logprobs: list = []
 
         # Sharding specs for sampling inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
@@ -896,6 +1093,7 @@ class JaxBackendImpl(AbstractBackend):
                         sampling_params=sampling_params,
                         adapter_indices=adapter_indices,
                         prompt_logprobs=needs_prompt_logprobs,
+                        topk_prompt=max_topk_prompt_logprobs,
                         tokenizer=self.tokenizer,
                     )
                 # Only take the actual results, not the padded ones
@@ -910,14 +1108,23 @@ class JaxBackendImpl(AbstractBackend):
                 )
                 if needs_prompt_logprobs and result.prompt_logprobs:
                     all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
+                if max_topk_prompt_logprobs > 0 and result.topk_prompt_logprobs:
+                    all_topk_prompt_logprobs.extend(result.topk_prompt_logprobs[:batch_size])
 
-        for request_id, _, start_idx, end_idx, prompt_logprobs_requested in request_batch_slices:
+        for request_id, _, start_idx, end_idx, prompt_logprobs_requested, topk_requested in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
             # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
             prompt_logprobs = (
                 all_prompt_logprobs[start_idx] if prompt_logprobs_requested and all_prompt_logprobs else None
             )
-            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
+            topk_prompt_logprobs = (
+                all_topk_prompt_logprobs[start_idx] if topk_requested > 0 and all_topk_prompt_logprobs else None
+            )
+            results[request_id] = types.SampleOutput(
+                sequences=sequences,
+                prompt_logprobs=prompt_logprobs,
+                topk_prompt_logprobs=topk_prompt_logprobs,
+            )
 
         return results
 

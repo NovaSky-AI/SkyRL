@@ -43,6 +43,32 @@ def pad_batch(sequences: list[list], max_length: int, dtype) -> np.ndarray:
     return padded
 
 
+def pad_batch_topk(flat_sequences: list[list], lengths: list[int], max_length: int, topk: int, dtype) -> np.ndarray:
+    """Pad row-major-flattened (n_i, K) sequences to (batch, max_length, K).
+
+    Used for soft top-K distillation targets/weights, which arrive as
+    row-major-flattened 2D tensors. ``flat_sequences[i]`` has length
+    ``lengths[i] * topk``.
+
+    Args:
+        flat_sequences: Per-example flat (row-major) data of length n_i * topk.
+        lengths: Per-example number of tokens n_i.
+        max_length: Target sequence length to pad to.
+        topk: Number of candidate tokens per position (K).
+        dtype: NumPy dtype for the output array.
+
+    Returns:
+        A NumPy array of shape (batch_size, max_length, topk).
+    """
+    batch_size = len(flat_sequences)
+    padded = np.zeros((batch_size, max_length, topk), dtype=dtype)
+    for i, (flat, n) in enumerate(zip(flat_sequences, lengths)):
+        assert n <= max_length, f"Sequence length {n} exceeds max_length {max_length}"
+        assert len(flat) == n * topk, f"Expected {n * topk} values for (n={n}, K={topk}), got {len(flat)}"
+        padded[i, :n, :] = np.asarray(flat, dtype=dtype).reshape(n, topk)
+    return padded
+
+
 def pad_to_fsdp(arr: np.ndarray, fsdp_size: int) -> np.ndarray:
     """Pad array's first dimension to be divisible by FSDP size."""
     batch_size = arr.shape[0]
