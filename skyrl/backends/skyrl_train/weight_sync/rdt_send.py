@@ -391,31 +391,23 @@ class MegatronStackedWeightSource(WeightSource):
         """Materialize one layer's full expert stacks (fc1 [E,2F,H], fc2 [E,H,F])
         on EVERY rank, with LoRA already merged when the model is wrapped.
 
-        Sliced path (default, ``SKYRL_RDT_SLICED_GATHER=1``): the owner stage
-        merges LoRA into its LOCAL expert shards (zero adapter collectives),
-        PP-broadcasts only the local shards (1/ep_size of the stack — the old
-        full-stack broadcast pushed ep_size identical copies of the same bytes
-        across the PP link, ~38 GB/layer aggregate at 235B tp4/pp2/ep8), and
-        then EVERY stage runs the intra-stage EP all_gather to reconstruct the
-        full stacks. Correct because PP peers share (tp, dp) coordinates, so
-        the pp-peer of expert-rank k IS expert-rank k of the owner stage —
-        verified at runtime by a one-time self-check against the broadcast
-        path (raises on mismatch; writes /tmp/rdt_profile/pp_gather_check.txt).
+        The owner stage merges LoRA into its LOCAL expert shards (zero adapter
+        collectives), PP-broadcasts only the local shards (1/ep_size of the
+        stack — broadcasting the assembled stack instead would push ep_size
+        identical copies of the same bytes across the PP link, ~38 GB/layer
+        aggregate at 235B tp4/pp2/ep8), and then EVERY stage runs the
+        intra-stage EP all_gather to reconstruct the full stacks.
 
-        Legacy path (``SKYRL_RDT_SLICED_GATHER=0``): owner-stage EP gather +
-        full-stack PP broadcast + full-stack LoRA merge on all ranks.
+        This is correct because PP peers share (tp, dp) coordinates, so the
+        pp-peer of expert-rank k IS expert-rank k of the owner stage — a
+        topology property, so it is verified at runtime by a one-time
+        self-check against the assemble-then-broadcast reference
+        (raises on mismatch; writes /tmp/rdt_profile/pp_gather_check.txt).
         """
         from megatron.core import parallel_state
 
         pp_group = parallel_state.get_pipeline_model_parallel_group()
         pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
-
-        if os.environ.get("SKYRL_RDT_SLICED_GATHER", "1") == "0":
-            fc1_stack, fc2_stack = self._gather_layer_stacks_broadcast(d)
-            if d.get("adapter_ctx") is not None:
-                mb, tasks_by_base = d["adapter_ctx"]
-                self._merge_lora_into_stacks(layer, fc1_stack, fc2_stack, mb, tasks_by_base)
-            return fc1_stack, fc2_stack
 
         if not self._pp_gather_checked and len(pp_ranks) > 1:
             self._pp_gather_checked = True
@@ -474,9 +466,14 @@ class MegatronStackedWeightSource(WeightSource):
         return fc1_stack, fc2_stack
 
     def _gather_layer_stacks_broadcast(self, d: dict) -> tuple:
-        """Legacy gather: owner-stage EP all_gather + FULL-stack PP broadcast.
-        Kept as the ``SKYRL_RDT_SLICED_GATHER=0`` fallback and as the reference
-        for the sliced path's one-time self-check."""
+        """Reference gather: owner-stage EP all_gather + FULL-stack PP broadcast.
+
+        Not used in the sync path — the sliced gather in ``_gather_layer_stacks``
+        replaced it (same stacks, 1/ep_size of the PP traffic, no adapter
+        collectives). Kept solely as the independent reference the sliced
+        path's one-time self-check compares against, so a topology where
+        pp-peer(ep-rank k) != ep-rank k is caught rather than silently
+        producing wrong weights."""
         from megatron.core import parallel_state
 
         pp_group = parallel_state.get_pipeline_model_parallel_group()
@@ -546,7 +543,9 @@ class MegatronStackedWeightSource(WeightSource):
         if not ok:
             raise RuntimeError(
                 "[stacked-source] sliced PP gather self-check FAILED: pp-peer/ep-rank "
-                "mapping does not hold on this topology; rerun with SKYRL_RDT_SLICED_GATHER=0"
+                "mapping does not hold on this topology; run with "
+                "SKYRL_RDT_STACKED_EXPERTS=0 to fall back to the bridge's "
+                "per-expert export (much slower) and report this topology"
             )
 
     def _merge_lora_into_local_shards(
@@ -572,7 +571,7 @@ class MegatronStackedWeightSource(WeightSource):
             if A is None or B is None:
                 raise RuntimeError(
                     f"[stacked-source] layer {layer} {proj}: owner stage is missing local "
-                    "adapter weights; cannot local-merge (set SKYRL_RDT_SLICED_GATHER=0)"
+                    "adapter weights; cannot local-merge (set SKYRL_RDT_STACKED_EXPERTS=0)"
                 )
             # 3D = per-LOCAL-expert [n_local, ...]; 2D = shared across this
             # rank's local experts (share_expert_adapters) -> expand.
@@ -594,42 +593,6 @@ class MegatronStackedWeightSource(WeightSource):
 
         mb = self._bridge._model_bridge
         return mb, mb.build_adapter_conversion_tasks(unwrap_model(self._module))
-
-    @staticmethod
-    def _per_expert_adapter(w: torch.Tensor, gathered: Optional[list], E: int) -> torch.Tensor:
-        """Expand a materialized adapter weight to per-expert form [E, ...].
-        3D weights are per-LOCAL-expert (concat ep-rank-major == global order);
-        2D weights are shared across each rank's local experts (repeat)."""
-        parts = gathered if gathered is not None else [w]
-        if w.ndim > 2:
-            return torch.cat(list(parts), dim=0)
-        n_local = E // len(parts)
-        return torch.stack(list(parts)).repeat_interleave(n_local, dim=0)
-
-    def _merge_lora_into_stacks(
-        self, layer: int, fc1_stack: torch.Tensor, fc2_stack: torch.Tensor, mb: Any, tasks_by_base: dict
-    ) -> None:
-        """Apply merged = base + (alpha/dim) * B @ A per expert, batched per
-        projection (one bmm per layer/proj instead of the bridge's per-tensor
-        merges). Semantics mirror LoRAMerge.merge: fp32 accumulate, cast back.
-        Collective (materialize: PP bcast + ETP gather; EP all_gather): every
-        rank runs it for every MoE layer in the same order."""
-        for proj, stack in (("linear_fc1", fc1_stack), ("linear_fc2", fc2_stack)):
-            tasks = tasks_by_base.get(f"decoder.layers.{layer}.mlp.experts.{proj}")
-            if not tasks:
-                continue
-            aw = mb.materialize_adapter_weights(tasks)[0]
-            A = aw.linear_in_weight.weight
-            B = aw.linear_out_weight.weight
-            gA = mb._gather_expert_adapter_weight(A)
-            gB = mb._gather_expert_adapter_weight(B)
-            E = stack.shape[0]
-            A_all = self._per_expert_adapter(A, gA, E).to(stack.device)
-            B_all = self._per_expert_adapter(B, gB, E).to(stack.device)
-            delta = torch.bmm(B_all.float(), A_all.float()).mul_(aw.alpha / aw.dim)
-            merged = stack.float().add_(delta)
-            stack.copy_(merged.to(stack.dtype))
-            del A_all, B_all, delta, merged
 
     def _expert_names_for(self, layer: int, E: int) -> list:
         """Per-layer expert HF names in yield order (gate/up/down per expert),
