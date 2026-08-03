@@ -174,22 +174,6 @@ class _RDTProducerServer:
 
         self._pack_check = pack_check
 
-        # [RDT-EARLY-ACK] Rebuild worker: publish_group acks right after
-        # admission and hands the CUDA-IPC rebuild (driver opens + per-name
-        # views, ~36ms/group at 235B) to this thread. Keeps the rebuild OFF the
-        # trainer's publish-window drain path; consumers already block on
-        # _cache_cond until names appear, so serve correctness is unchanged.
-        # Disable with SKYRL_RDT_EARLY_ACK=0 (rebuild inline, pre-existing
-        # behavior) for A/B.
-        import os as _os
-        import queue as _queue
-
-        self._early_ack = _os.environ.get("SKYRL_RDT_EARLY_ACK", "1") == "1"
-        self._rebuild_q: "_queue.Queue" = _queue.Queue()
-        if self._early_ack:
-            self._rebuild_thread = threading.Thread(target=self._rebuild_worker, daemon=True)
-            self._rebuild_thread.start()
-
         # profiling counters
         self._timing_lock = threading.Lock()
         self._produce_calls = self._produce_specs = self._produce_bytes = 0
@@ -284,23 +268,6 @@ class _RDTProducerServer:
                 if self._gather_error is not None:
                     break
                 self._cache_cond.wait()
-            if self._early_ack:
-                # [RDT-EARLY-ACK] Claim the backpressure slot + name routing NOW
-                # (so accounting is exact), defer the rebuild to the worker, and
-                # ack immediately — the trainer's publish window drains without
-                # eating the IPC-open latency.
-                self._inflight_keys.append(group_key)
-                for n in views:
-                    self._name_to_key[n] = group_key
-                self._publish_time[group_key] = time.perf_counter()
-                freed = self._freed_pending
-                self._freed_pending = []
-        if self._early_ack:
-            self._rebuild_q.put((group_key, entries))
-            with self._timing_lock:
-                self._publish_calls += 1
-                self._publish_bp_wait_seconds += time.perf_counter() - _t_bp0
-            return freed
         _t_bp1 = time.perf_counter()
 
         rebuilt: dict[str, torch.Tensor] = {}
@@ -353,52 +320,6 @@ class _RDTProducerServer:
             self._publish_open_count += _opens
             self._publish_view_seconds += _view_s
         return freed
-
-    def _rebuild_worker(self) -> None:
-        """[RDT-EARLY-ACK] Drain deferred rebuilds in publish order. Runs the
-        exact inline rebuild (IPC storage opens + per-name as_strided views),
-        then publishes into the serve cache and wakes blocked produce calls.
-        Errors surface through _gather_error so waiters raise instead of hang."""
-        torch.cuda.set_device(self._device_index)  # fresh thread: bind the rank's GPU
-        while True:
-            item = self._rebuild_q.get()
-            if item is None:
-                return
-            group_key, (storages, views) = item
-            try:
-                _t_r0 = time.perf_counter()
-                bases: dict[int, torch.Tensor] = {}
-                for sid, reduce_args in storages.items():
-                    list_args = list(reduce_args)
-                    list_args[6] = self._device_index
-                    bases[sid] = rebuild_cuda_tensor(*list_args)
-                _open_s = time.perf_counter() - _t_r0
-                _t_v0 = time.perf_counter()
-                rebuilt: dict[str, torch.Tensor] = {}
-                for name, (sid, dtype_name, shape, stride, storage_offset) in views.items():
-                    typed = bases[sid].view(getattr(torch, dtype_name))
-                    rebuilt[name] = torch.as_strided(typed, shape, stride, storage_offset)
-                _view_s = time.perf_counter() - _t_v0
-                del bases
-                ev = None
-                if self._serve_stream is not None:
-                    ev = torch.cuda.Event()
-                    ev.record()
-                with self._cache_cond:
-                    self._cache.update(rebuilt)
-                    if ev is not None:
-                        for n in rebuilt:
-                            self._cache_event[n] = ev
-                    self._cache_cond.notify_all()
-                with self._timing_lock:
-                    self._publish_rebuild_seconds += time.perf_counter() - _t_r0
-                    self._publish_open_seconds += _open_s
-                    self._publish_open_count += len(storages)
-                    self._publish_view_seconds += _view_s
-            except BaseException as e:  # noqa: BLE001 - waiters must not hang
-                with self._cache_cond:
-                    self._gather_error = RuntimeError(f"[early-ack] rebuild failed for {group_key}: {e!r}")
-                    self._cache_cond.notify_all()
 
     def end_sync(self) -> list[tuple]:
         """Block until every published group has been freed by its consumers;

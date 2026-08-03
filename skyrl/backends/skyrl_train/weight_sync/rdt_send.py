@@ -31,6 +31,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, List, Optional
 
 import torch
@@ -173,58 +174,35 @@ class MegatronWeightSource(WeightSource):
             yield name, full
 
 
-def _install_shared_pp_spec_cache() -> None:
-    """Make Megatron-Bridge mapping PP-broadcast caches PROCESS-WIDE.
+@dataclass(frozen=True)
+class _ExpertLayer:
+    """One MoE layer's expert-stack plan, known on EVERY rank.
 
-    ``MegatronParamMapping.broadcast_from_pp_rank`` learns each tensor's
-    (shape, dtype, owner stage) via an ``all_gather_object`` over the PP group,
-    cached per MAPPING INSTANCE. The RDT source rebuilds conversion tasks (and
-    thus mappings) fresh every sync to keep live param references, so every
-    non-expert tensor and every non-expert LoRA adapter paid that cross-node
-    object-gather (~2-3 ms) EVERY sync (~2 s/sync at 235B). The cached spec is
-    a static property of the global param name (shapes/dtypes/stage ownership
-    never change across syncs; the actual WEIGHT broadcast still runs every
-    sync, so trained values always flow) — so share ONE cache dict across all
-    mapping instances, keyed as before by the global param name. Idempotent;
-    disable with ``SKYRL_RDT_SHARED_SPEC_CACHE=0``."""
-    # DEFAULT OFF (measured no benefit): the registry's mapping instances
-    # persist across syncs, so their per-instance spec caches already survive —
-    # the per-sync all_gather_object this was built to remove only ever ran
-    # once per process. Sharing also caused a real bug (degenerate "None"
-    # cache-key collision across adapters, fixed by namespacing). Kept only as
-    # an experiment flag.
-    if os.environ.get("SKYRL_RDT_SHARED_SPEC_CACHE", "0") == "0":
-        return
-    from megatron.bridge.models.conversion import param_mapping as _pm
+    Geometry is PP-exchanged (see ``_expert_geometry``) so a stage that does
+    not hold this layer still knows the shapes and can take part in the
+    collectives — every rank must issue every layer's gather in the same order.
+    ``fc1``/``fc2`` are this rank's local expert conversion tasks, sorted by
+    local expert index, and are empty on non-owning stages.
+    """
 
-    cls = _pm.MegatronParamMapping
-    if getattr(cls, "_skyrl_shared_spec_cache", False):
-        return
-    shared_spec: dict = {}
-    orig_init = cls.__init__
-    orig_bcast_t = cls.broadcast_from_pp_rank
+    layer: int
+    fc1: list
+    fc2: list
+    owned: bool
+    """This rank's PP stage holds this layer's expert weights."""
+    n_local: int
+    """Experts per EP rank."""
+    F: int
+    """MoE FFN hidden size (fc1 packs [gate; up] as 2F rows)."""
+    H: int
+    """Model hidden size."""
+    owner_pp_idx: int
+    ep_size: int
 
-    def _init(self, *a, **k):
-        orig_init(self, *a, **k)
-        # Only the TENSOR spec cache is shared: specs are static per param.
-        # Object broadcasts stay per-instance (unknown value lifetimes).
-        self._tensor_spec_output_cache = shared_spec
-
-    # Namespace cache keys by the mapping's (unique, stable) megatron param
-    # name: with per-instance caches a degenerate key was harmless (e.g.
-    # ``str(self.hf_param)`` is the string "None" for adapters whose HF name
-    # resolution returns None), but in a SHARED cache it collides across
-    # mappings and hands one tensor's spec (shape / tensor-parallel metadata)
-    # to another — observed as a skipped TP gather in the LoRA merge.
-    def _bcast_t(self, tensor, cache_key=None):
-        if cache_key is not None:
-            cache_key = f"{self.megatron_param}::{cache_key}"
-        return orig_bcast_t(self, tensor, cache_key=cache_key)
-
-    cls.__init__ = _init
-    cls.broadcast_from_pp_rank = _bcast_t
-    cls._skyrl_shared_spec_cache = True
-    logger.info("[rdt] shared PP spec cache installed on MegatronParamMapping")
+    @property
+    def E(self) -> int:
+        """Global expert count."""
+        return self.n_local * self.ep_size
 
 
 class MegatronStackedWeightSource(WeightSource):
@@ -271,11 +249,7 @@ class MegatronStackedWeightSource(WeightSource):
         self._module = weight_extractor.actor_module
         self._dtype = dtype
         self._meta: Optional[List[ParamMeta]] = None
-        # {global_layer: {"fc1": [tasks by local expert idx], "fc2": [...],
-        #                 "pp_rank": int, "n_local": int, "F": int, "H": int}}
-        self._expert_layers: Optional[dict] = None
         self._verified = False
-        _install_shared_pp_spec_cache()
         # One-time sliced-PP-gather topology self-check (see _gather_layer_stacks).
         self._pp_gather_checked = False
         # Per-layer expert HF name lists, built once (see _expert_names_for).
@@ -335,7 +309,7 @@ class MegatronStackedWeightSource(WeightSource):
         """Exchange per-layer expert geometry across the PP group so EVERY rank
         knows the full set of MoE layers, their shapes, and the owning PP stage —
         regardless of whether get_conversion_tasks lists remote-stage params.
-        Returns the merged {layer: {n_local,F,H,owner_pp_idx,ep_size,owned,...}}."""
+        Returns ``{layer: _ExpertLayer}``."""
         from megatron.core import parallel_state
 
         ep_size = torch.distributed.get_world_size(parallel_state.get_expert_model_parallel_group())
@@ -373,21 +347,22 @@ class MegatronStackedWeightSource(WeightSource):
         merged: dict = {}
         for layer, (n_local, F, H, owner_pp_idx) in merged_geo.items():
             d = layers.get(layer, {"fc1": [], "fc2": []})
-            owned = layer in local_geo
-            merged[layer] = {
-                **d,
-                "owned": owned,
-                "n_local": n_local,
-                "F": F,
-                "H": H,
-                "owner_pp_idx": owner_pp_idx,
-                "ep_size": ep_size,
-            }
+            merged[layer] = _ExpertLayer(
+                layer=layer,
+                fc1=d["fc1"],
+                fc2=d["fc2"],
+                owned=layer in local_geo,
+                n_local=n_local,
+                F=F,
+                H=H,
+                owner_pp_idx=owner_pp_idx,
+                ep_size=ep_size,
+            )
         return merged
 
     # ---------------- gather primitives ----------------
 
-    def _gather_layer_stacks(self, layer: int, d: dict) -> tuple:
+    def _gather_layer_stacks(self, lay: _ExpertLayer, adapter_ctx: Optional[tuple]) -> tuple:
         """Materialize one layer's full expert stacks (fc1 [E,2F,H], fc2 [E,H,F])
         on EVERY rank, with LoRA already merged when the model is wrapped.
 
@@ -403,69 +378,56 @@ class MegatronStackedWeightSource(WeightSource):
         topology property, so it is verified at runtime by a one-time
         self-check against the assemble-then-broadcast reference
         (raises on mismatch; writes /tmp/rdt_profile/pp_gather_check.txt).
+
+        Every collective is issued with ``async_op=True`` and waited before
+        return; for NCCL that wait only inserts a stream dependency (the host
+        does not block), which is why the CPU-side cost of this method is
+        ~0.08s/sync at 235B while the transfers themselves overlap later work.
+        Layers are gathered one at a time in the same deterministic order on
+        every rank — there is no cross-layer prefetch.
         """
-        from megatron.core import parallel_state
-
-        pp_group = parallel_state.get_pipeline_model_parallel_group()
-        pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
-
-        if not self._pp_gather_checked and len(pp_ranks) > 1:
-            self._pp_gather_checked = True
-            self._selfcheck_sliced_gather(d)
-
-        return self._finish_layer_gather(self._start_layer_gather(layer, d))
-
-    def _start_layer_gather(self, layer: int, d: dict) -> tuple:
-        """Issue one layer's shard broadcast + all-stage EP all_gather with
-        ``async_op=True``. ``Work.wait()`` on NCCL work objects only inserts a
-        stream dependency (no host block), so issuing layer L+1 here while
-        layer L's tensors are being exported overlaps the expert collectives
-        with the bridge's non-expert export. Single-thread issue in a
-        deterministic layer order on every rank — no cross-rank reordering.
-        The local shards must stay referenced until the gather completes, so
-        they ride in the returned state."""
         from megatron.core import parallel_state
 
         pp_group = parallel_state.get_pipeline_model_parallel_group()
         pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
         ep_group = parallel_state.get_expert_model_parallel_group()
         device = torch.cuda.current_device()
-        n_local, F, H = d["n_local"], d["F"], d["H"]
-        E = n_local * d["ep_size"]
+        n_local, F, H, E = lay.n_local, lay.F, lay.H, lay.E
+
+        if not self._pp_gather_checked and len(pp_ranks) > 1:
+            self._pp_gather_checked = True
+            self._selfcheck_sliced_gather(lay)
 
         fc1_local = torch.empty((n_local, 2 * F, H), dtype=self._dtype, device=device)
         fc2_local = torch.empty((n_local, H, F), dtype=self._dtype, device=device)
-        if d["owned"]:
-            fc1_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in d["fc1"]])
-            fc2_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in d["fc2"]])
-            if d.get("adapter_ctx") is not None:
-                _mb, tasks_by_base = d["adapter_ctx"]
-                self._merge_lora_into_local_shards(layer, fc1_local, fc2_local, tasks_by_base)
+        if lay.owned:
+            fc1_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in lay.fc1])
+            fc2_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in lay.fc2])
+            if adapter_ctx is not None:
+                _mb, tasks_by_base = adapter_ctx
+                self._merge_lora_into_local_shards(lay.layer, fc1_local, fc2_local, tasks_by_base)
         if len(pp_ranks) > 1:
-            src = pp_ranks[d["owner_pp_idx"]]
-            # wait() = stream dependency so the EP gather reads the broadcast
-            # result; host does not block.
+            src = pp_ranks[lay.owner_pp_idx]
             torch.distributed.broadcast(fc1_local, src=src, group=pp_group, async_op=True).wait()
             torch.distributed.broadcast(fc2_local, src=src, group=pp_group, async_op=True).wait()
 
         fc1_stack = torch.empty((E, 2 * F, H), dtype=self._dtype, device=device)
         fc2_stack = torch.empty((E, H, F), dtype=self._dtype, device=device)
-        w1 = torch.distributed.all_gather_into_tensor(
-            fc1_stack.view(d["ep_size"], -1), fc1_local.reshape(-1), group=ep_group, async_op=True
+        works = (
+            torch.distributed.all_gather_into_tensor(
+                fc1_stack.view(lay.ep_size, -1), fc1_local.reshape(-1), group=ep_group, async_op=True
+            ),
+            torch.distributed.all_gather_into_tensor(
+                fc2_stack.view(lay.ep_size, -1), fc2_local.reshape(-1), group=ep_group, async_op=True
+            ),
         )
-        w2 = torch.distributed.all_gather_into_tensor(
-            fc2_stack.view(d["ep_size"], -1), fc2_local.reshape(-1), group=ep_group, async_op=True
-        )
-        return (fc1_stack, fc2_stack, (w1, w2), (fc1_local, fc2_local))
-
-    @staticmethod
-    def _finish_layer_gather(st: tuple) -> tuple:
-        fc1_stack, fc2_stack, works, _locals = st
         for w in works:
-            w.wait()  # stream dependency into the current stream
+            w.wait()
+        # fc1_local / fc2_local stay referenced until here, so the gathers
+        # cannot read freed shards.
         return fc1_stack, fc2_stack
 
-    def _gather_layer_stacks_broadcast(self, d: dict) -> tuple:
+    def _gather_layer_stacks_broadcast(self, lay: _ExpertLayer) -> tuple:
         """Reference gather: owner-stage EP all_gather + FULL-stack PP broadcast.
 
         Not used in the sync path — the sliced gather in ``_gather_layer_stacks``
@@ -479,30 +441,29 @@ class MegatronStackedWeightSource(WeightSource):
         pp_group = parallel_state.get_pipeline_model_parallel_group()
         pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
         device = torch.cuda.current_device()
-        n_local, F, H = d["n_local"], d["F"], d["H"]
-        E = n_local * d["ep_size"]
+        F, H, E = lay.F, lay.H, lay.E
 
         fc1_stack = torch.empty((E, 2 * F, H), dtype=self._dtype, device=device)
         fc2_stack = torch.empty((E, H, F), dtype=self._dtype, device=device)
-        if d["owned"]:
+        if lay.owned:
             ep_group = parallel_state.get_expert_model_parallel_group()
-            fc1_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in d["fc1"]])
-            fc2_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in d["fc2"]])
+            fc1_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in lay.fc1])
+            fc2_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in lay.fc2])
             torch.distributed.all_gather_into_tensor(
-                fc1_stack.view(d["ep_size"], -1), fc1_local.reshape(-1), group=ep_group
+                fc1_stack.view(lay.ep_size, -1), fc1_local.reshape(-1), group=ep_group
             )
             torch.distributed.all_gather_into_tensor(
-                fc2_stack.view(d["ep_size"], -1), fc2_local.reshape(-1), group=ep_group
+                fc2_stack.view(lay.ep_size, -1), fc2_local.reshape(-1), group=ep_group
             )
             del fc1_local, fc2_local
 
         if len(pp_ranks) > 1:
-            src = pp_ranks[d["owner_pp_idx"]]
+            src = pp_ranks[lay.owner_pp_idx]
             torch.distributed.broadcast(fc1_stack, src=src, group=pp_group)
             torch.distributed.broadcast(fc2_stack, src=src, group=pp_group)
         return fc1_stack, fc2_stack
 
-    def _selfcheck_sliced_gather(self, d: dict) -> None:
+    def _selfcheck_sliced_gather(self, lay: _ExpertLayer) -> None:
         """One-time (first MoE layer, pp>1) runtime proof that the sliced
         shard-broadcast + all-stage EP gather reconstructs byte-identical
         stacks to the legacy full-stack broadcast — i.e. that pp-peer(ep-rank
@@ -515,23 +476,22 @@ class MegatronStackedWeightSource(WeightSource):
         pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
         ep_group = parallel_state.get_expert_model_parallel_group()
         device = torch.cuda.current_device()
-        n_local, F, H = d["n_local"], d["F"], d["H"]
-        E = n_local * d["ep_size"]
+        n_local, F, H, E = lay.n_local, lay.F, lay.H, lay.E
 
-        ref1, ref2 = self._gather_layer_stacks_broadcast(d)
+        ref1, ref2 = self._gather_layer_stacks_broadcast(lay)
 
         fc1_local = torch.empty((n_local, 2 * F, H), dtype=self._dtype, device=device)
         fc2_local = torch.empty((n_local, H, F), dtype=self._dtype, device=device)
-        if d["owned"]:
-            fc1_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in d["fc1"]])
-            fc2_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in d["fc2"]])
-        src = pp_ranks[d["owner_pp_idx"]]
+        if lay.owned:
+            fc1_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in lay.fc1])
+            fc2_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in lay.fc2])
+        src = pp_ranks[lay.owner_pp_idx]
         torch.distributed.broadcast(fc1_local, src=src, group=pp_group)
         torch.distributed.broadcast(fc2_local, src=src, group=pp_group)
         got1 = torch.empty((E, 2 * F, H), dtype=self._dtype, device=device)
         got2 = torch.empty((E, H, F), dtype=self._dtype, device=device)
-        torch.distributed.all_gather_into_tensor(got1.view(d["ep_size"], -1), fc1_local.reshape(-1), group=ep_group)
-        torch.distributed.all_gather_into_tensor(got2.view(d["ep_size"], -1), fc2_local.reshape(-1), group=ep_group)
+        torch.distributed.all_gather_into_tensor(got1.view(lay.ep_size, -1), fc1_local.reshape(-1), group=ep_group)
+        torch.distributed.all_gather_into_tensor(got2.view(lay.ep_size, -1), fc2_local.reshape(-1), group=ep_group)
         ok = bool(torch.equal(got1, ref1) and torch.equal(got2, ref2))
         try:
             os.makedirs("/tmp/rdt_profile", exist_ok=True)
@@ -608,7 +568,9 @@ class MegatronStackedWeightSource(WeightSource):
             self._expert_names[layer] = names
         return names
 
-    def _extend_layer_experts(self, layer: int, d: dict, names: list, tensors: list) -> None:
+    def _extend_layer_experts(
+        self, lay: _ExpertLayer, adapter_ctx: Optional[tuple], names: list, tensors: list
+    ) -> None:
         """Gather one layer's expert stacks and append per-expert entries.
 
         The per-expert tensors are views into the contiguous [E, 2F, H] /
@@ -618,26 +580,25 @@ class MegatronStackedWeightSource(WeightSource):
         creation: 3 dispatcher calls per layer instead of 3E ``__getitem__``
         + 3E no-op ``.contiguous()`` — the old path's main per-tensor cost."""
         _t0 = time.perf_counter()
-        fc1_stack, fc2_stack = self._gather_layer_stacks(layer, d)
+        fc1_stack, fc2_stack = self._gather_layer_stacks(lay, adapter_ctx)
         self._phase_add("expert_gather", time.perf_counter() - _t0)
         _t0 = time.perf_counter()
-        F = fc1_stack.shape[1] // 2
-        E = fc1_stack.shape[0]
+        F, E = lay.F, lay.E
         gates = fc1_stack[:, :F].unbind(0)
         ups = fc1_stack[:, F:].unbind(0)
         downs = fc2_stack.unbind(0)
-        names.extend(self._expert_names_for(layer, E))
+        names.extend(self._expert_names_for(lay.layer, E))
         for e in range(E):
             tensors.append(gates[e])
             tensors.append(ups[e])
             tensors.append(downs[e])
         self._phase_add("src_expert", time.perf_counter() - _t0)
 
-    def _yield_layer_experts(self, layer: int, d: dict) -> Iterator[tuple]:
+    def _yield_layer_experts(self, lay: _ExpertLayer, adapter_ctx: Optional[tuple]) -> Iterator[tuple]:
         """Per-(name, tensor) view of one layer's experts (verification path)."""
         names: list = []
         tensors: list = []
-        self._extend_layer_experts(layer, d, names, tensors)
+        self._extend_layer_experts(lay, adapter_ctx, names, tensors)
         return zip(names, tensors)
 
     @staticmethod
@@ -650,6 +611,41 @@ class MegatronStackedWeightSource(WeightSource):
             return None
 
     # ---------------- WeightSource interface ----------------
+
+    def _build_export_plan(self) -> tuple:
+        """Per-sync plan: ``(non_expert_tasks, {layer: _ExpertLayer}, adapter_ctx)``.
+
+        Runs once per walk, before any tensor is produced. Timed in its own
+        phase buckets because it is NOT per-yield work and would otherwise hide
+        in the gather loop's ``source_next`` residual (measured 0.74 s/sync at
+        235B — more than every per-tensor cost combined, of which
+        ``get_conversion_tasks`` alone is ~0.5 s).
+
+        Conversion tasks are rebuilt every sync on purpose: they hold live
+        parameter references, and the bridge builds fresh mapping objects with
+        clean PP-collective caches each call (the same reason
+        ``MegatronWeightExtractor`` rebuilds them per sync).
+        """
+        _t0 = time.perf_counter()
+        tasks = self._bridge.get_conversion_tasks(self._module)
+        self._phase_add("src_setup_tasks", time.perf_counter() - _t0)
+        _t0 = time.perf_counter()
+        non_expert, raw_layers = self._partition_tasks(tasks)
+        self._phase_add("src_setup_partition", time.perf_counter() - _t0)
+        _t0 = time.perf_counter()
+        layers = self._expert_geometry(raw_layers)
+        self._phase_add("src_setup_geometry", time.perf_counter() - _t0)
+        # LoRA-wrapped experts: raw to_wrap weights need the adapter delta
+        # merged in (the bridge would have merged during its per-tensor export).
+        # Task lists are global (identical on every rank), so this condition —
+        # and the collective build it gates — cannot desync ranks.
+        _t0 = time.perf_counter()
+        wrapped = any(".to_wrap." in t.global_param_name for lay in layers.values() for t in lay.fc1) or any(
+            ".to_wrap." in t.global_param_name for t in non_expert
+        )
+        adapter_ctx = self._adapter_tasks_by_base() if wrapped else None
+        self._phase_add("src_setup_adapter", time.perf_counter() - _t0)
+        return non_expert, layers, adapter_ctx
 
     def _iter_groups_impl(self, collect_meta: bool) -> Iterator[tuple]:
         """Single group-batched walk driving metadata(), __iter__ AND
@@ -664,33 +660,7 @@ class MegatronStackedWeightSource(WeightSource):
         self._phase_prefix = "meta_" if collect_meta else ""
         if torch.cuda.is_available():
             torch.cuda.set_device(torch.cuda.current_device())
-        # Per-sync setup, timed separately: it runs once per walk but is NOT
-        # per-yield work, so it would otherwise hide in the source_next
-        # residual (measured 0.74s/sync at 235B — bigger than every per-tensor
-        # cost combined).
-        # Fresh tasks each pass: mapping objects need clean PP-collective caches
-        # (same reason MegatronWeightExtractor rebuilds them per sync).
-        _t0 = time.perf_counter()
-        tasks = self._bridge.get_conversion_tasks(self._module)
-        self._phase_add("src_setup_tasks", time.perf_counter() - _t0)
-        _t0 = time.perf_counter()
-        non_expert, layers = self._partition_tasks(tasks)
-        self._phase_add("src_setup_partition", time.perf_counter() - _t0)
-        _t0 = time.perf_counter()
-        layers = self._expert_geometry(layers)
-        self._phase_add("src_setup_geometry", time.perf_counter() - _t0)
-        # LoRA-wrapped experts: raw to_wrap weights need the adapter delta
-        # merged in (the bridge would have merged during its per-tensor export).
-        # Task lists are global (identical on every rank), so this condition —
-        # and the lockstep build below — cannot desync ranks.
-        _t0 = time.perf_counter()
-        wrapped = any(".to_wrap." in t.global_param_name for d in layers.values() for t in d.get("fc1", [])) or any(
-            ".to_wrap." in t.global_param_name for t in non_expert
-        )
-        adapter_ctx = self._adapter_tasks_by_base() if wrapped else None
-        self._phase_add("src_setup_adapter", time.perf_counter() - _t0)
-        for d in layers.values():
-            d["adapter_ctx"] = adapter_ctx
+        non_expert, layers, adapter_ctx = self._build_export_plan()
         pending = dict(layers)  # layers whose experts are not yet emitted
 
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
@@ -717,7 +687,7 @@ class MegatronStackedWeightSource(WeightSource):
                 # Group boundary (pre -> layer 0, layer N -> N+1, last layer
                 # -> post): append the closing layer's experts, then flush.
                 if prev_layer is not None and prev_layer in pending:
-                    self._extend_layer_experts(prev_layer, pending.pop(prev_layer), names, tensors)
+                    self._extend_layer_experts(pending.pop(prev_layer), adapter_ctx, names, tensors)
                 yield names, tensors
                 names, tensors = [], []
             prev_layer = layer
@@ -733,14 +703,14 @@ class MegatronStackedWeightSource(WeightSource):
             names.append(name)
             tensors.append(tensor)
         if prev_layer is not None and prev_layer in pending:
-            self._extend_layer_experts(prev_layer, pending.pop(prev_layer), names, tensors)
+            self._extend_layer_experts(pending.pop(prev_layer), adapter_ctx, names, tensors)
         if names:
             yield names, tensors
         # Layers whose non-expert tensors were all emitted before a boundary was
         # seen (or post-block orderings): emit any stragglers in layer order.
         for layer in sorted(pending):
             names, tensors = [], []
-            self._extend_layer_experts(layer, pending.pop(layer), names, tensors)
+            self._extend_layer_experts(pending.pop(layer), adapter_ctx, names, tensors)
             yield names, tensors
 
     def _iter_impl(self, collect_meta: bool) -> Iterator[tuple]:
@@ -776,8 +746,6 @@ class MegatronStackedWeightSource(WeightSource):
         return self._iter_groups_impl(collect_meta=False)
 
     def __iter__(self) -> Iterator[tuple]:
-        if os.environ.get("SKYRL_RDT_PROBE_ITER") == "1":
-            raise RuntimeError("[stacked-source] PROBE: __iter__ executed (tripwire)")
         self._maybe_verify()
         return self._iter_impl(collect_meta=False)
 
@@ -791,20 +759,14 @@ class MegatronStackedWeightSource(WeightSource):
         if torch.distributed.get_world_size(parallel_state.get_pipeline_model_parallel_group()) > 1:
             logger.warning("[stacked-verify] skipped: bridge re-export comparison requires pp=1")
             return
-        tasks = self._bridge.get_conversion_tasks(self._module)
-        _, layers = self._partition_tasks(tasks)
+        _, layers, adapter_ctx = self._build_export_plan()
         if not layers:
             return
-        layers = self._expert_geometry(layers)
-        wrapped = any(".to_wrap." in t.global_param_name for d in layers.values() for t in d.get("fc1", []))
-        adapter_ctx = self._adapter_tasks_by_base() if wrapped else None
-        for d in layers.values():
-            d["adapter_ctx"] = adapter_ctx
         sample = sorted(layers)[:: max(1, (len(layers) - 1) // 2)][:3]  # first/mid/last
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         for layer in sample:
-            mine = dict(self._yield_layer_experts(layer, layers[layer]))
-            expert_tasks = layers[layer]["fc1"] + layers[layer]["fc2"]
+            mine = dict(self._yield_layer_experts(layers[layer], adapter_ctx))
+            expert_tasks = layers[layer].fc1 + layers[layer].fc2
             for name, tensor in self._bridge.export_hf_weights(
                 self._module, show_progress=False, conversion_tasks=expert_tasks
             ):
