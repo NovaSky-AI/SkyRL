@@ -78,7 +78,7 @@ agent:
 # Environment configuration
 # See: harbor.models.trial.config.EnvironmentConfig
 environment:
-  # Environment type. Options: daytona, docker, e2b, modal, runloop, gke
+  # Environment type. Options: daytona, docker, e2b, modal, runloop, gke, fystash (experimental)
   type: daytona
 
   # Resource overrides (optional)
