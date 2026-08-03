@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import DateTime, event
+from sqlalchemy import DateTime, Index, event
 from sqlalchemy.engine import url as sqlalchemy_url
 from sqlmodel import JSON, Field, SQLModel
 
@@ -28,6 +28,18 @@ def enable_sqlite_wal(engine) -> None:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
+
+
+def create_missing_indexes(engine) -> None:
+    """Create any declared index that does not exist yet.
+
+    ``SQLModel.metadata.create_all`` skips tables it already finds, so indexes
+    added after a database was first created are never built. Call this after
+    ``create_all`` so existing databases pick them up.
+    """
+    for table in SQLModel.metadata.tables.values():
+        for index in table.indexes:
+            index.create(bind=engine, checkfirst=True)
 
 
 def get_async_database_url(db_url: str) -> str:
@@ -89,13 +101,24 @@ class ModelDB(SQLModel, table=True):
 
 class FutureDB(SQLModel, table=True):
     __tablename__ = "futures"
+    __table_args__ = (
+        # Covering index for the engine's scheduling scan, which filters on
+        # status, reads in request_id order, and needs only these four columns.
+        # Because every column it reads is in the index, the scan never visits
+        # the table rows themselves -- important here, since those rows carry
+        # request_data payloads that run to hundreds of KB each.
+        #
+        # This also supersedes a plain index on status, status being its leading
+        # column, so no separate one is declared.
+        Index("ix_futures_pending_scan", "status", "request_id", "request_type", "model_id"),
+    )
 
     request_id: int | None = Field(default=None, primary_key=True, sa_column_kwargs={"autoincrement": True})
     request_type: types.RequestType
     model_id: str | None = Field(default=None, index=True)
     request_data: dict = Field(sa_type=JSON)  # this is of type types.{request_type}Input
     result_data: dict | None = Field(default=None, sa_type=JSON)  # this is of type types.{request_type}Output
-    status: RequestStatus = Field(default=RequestStatus.PENDING, index=True)
+    status: RequestStatus = Field(default=RequestStatus.PENDING)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
     completed_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
 
