@@ -8435,6 +8435,9 @@ gpu = [
 ]
 harbor = [
     { name = "harbor", extra = ["daytona", "modal"], marker = "python_full_version >= '3.12' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
+]
+harbor-tito = [
+    { name = "harbor", extra = ["daytona", "modal"], marker = "python_full_version >= '3.12' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "renderers" },
 ]
 jax = [
@@ -8612,6 +8615,7 @@ requires-dist = [
     { name = "func-timeout", marker = "extra == 'skyrl-train'" },
     { name = "griffe2md", marker = "extra == 'dev'" },
     { name = "harbor", extras = ["daytona", "modal"], marker = "python_full_version >= '3.12' and extra == 'harbor'", git = "https://github.com/laude-institute/harbor?rev=3de07a0e01f3368921766437fc7afece3ddec23d" },
+    { name = "harbor", extras = ["daytona", "modal"], marker = "python_full_version >= '3.12' and extra == 'harbor-tito'", git = "https://github.com/laude-institute/harbor?rev=3de07a0e01f3368921766437fc7afece3ddec23d" },
     { name = "hf-transfer" },
     { name = "hf-transfer", marker = "extra == 'skyrl-train'" },
     { name = "hydra-core", marker = "extra == 'skyrl-train'", specifier = "==1.3.2" },
@@ -8650,7 +8654,7 @@ requires-dist = [
     { name = "pytest-forked", marker = "extra == 'dev'" },
     { name = "ray", marker = "extra == 'skyrl-train'", specifier = "==2.56.0" },
     { name = "ray", extras = ["default"], marker = "extra == 'ray'", specifier = "==2.56.0" },
-    { name = "renderers", marker = "extra == 'harbor'", git = "https://github.com/PrimeIntellect-ai/renderers?rev=5fdf78c30e89a2b9694d17bfe1ea0bc1c299f028" },
+    { name = "renderers", marker = "extra == 'harbor-tito'", git = "https://github.com/PrimeIntellect-ai/renderers?rev=5fdf78c30e89a2b9694d17bfe1ea0bc1c299f028" },
     { name = "rich", specifier = ">=14.1.0" },
     { name = "s3fs", marker = "extra == 'skyrl-train'" },
     { name = "safetensors", specifier = ">=0.6.2" },
@@ -8695,7 +8699,7 @@ requires-dist = [
     { name = "vllm-router", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'skyrl-train'", url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl" },
     { name = "wandb", marker = "extra == 'skyrl-train'" },
 ]
-provides-extras = ["gpu", "tpu", "tinker", "ray", "aws", "gcp", "azure", "jax", "skyrl-train", "fsdp", "megatron", "miniswe", "harbor", "dev"]
+provides-extras = ["gpu", "tpu", "tinker", "ray", "aws", "gcp", "azure", "jax", "skyrl-train", "fsdp", "megatron", "miniswe", "harbor", "harbor-tito", "dev"]
 
 [[package]]
 name = "skyrl-gym"

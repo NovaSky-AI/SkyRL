@@ -1,0 +1,8 @@
+# Overrides applied on top of the baseline Harbor trial configuration.
+agent:
+  kwargs:
+    # Preserve reasoning in later chat turns so exact sampled IDs can be reused.
+    interleaved_thinking: true
+
+    # Retain Harbor's token bookkeeping as an optional parity oracle.
+    collect_rollout_details: true

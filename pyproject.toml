@@ -166,6 +166,9 @@ miniswe = [
 ]
 harbor = [
     "harbor[daytona,modal]; python_version >= '3.12'",
+]
+harbor-tito = [
+    "harbor[daytona,modal]; python_version >= '3.12'",
     "renderers @ git+https://github.com/PrimeIntellect-ai/renderers@5fdf78c30e89a2b9694d17bfe1ea0bc1c299f028",
 ]
 

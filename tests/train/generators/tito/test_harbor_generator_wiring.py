@@ -56,7 +56,9 @@ class _RateLimiter:
 @pytest.mark.asyncio
 async def test_harbor_attempt_uses_registered_proxy_endpoint(monkeypatch):
     pytest.importorskip("harbor")
-    from examples.train_integrations.harbor import harbor_generator as harbor_module
+    from examples.train_integrations.harbor_tito import (
+        harbor_generator as harbor_module,
+    )
 
     captured_config = None
 
@@ -106,7 +108,7 @@ async def test_harbor_attempt_uses_registered_proxy_endpoint(monkeypatch):
     )
 
     engine = _InferenceEngine()
-    generator = harbor_module.HarborGenerator.__new__(harbor_module.HarborGenerator)
+    generator = harbor_module.TITOHarborGenerator.__new__(harbor_module.TITOHarborGenerator)
     generator._harbor_trial_config_template = {
         "agent": {
             "kwargs": {
@@ -119,7 +121,7 @@ async def test_harbor_attempt_uses_registered_proxy_endpoint(monkeypatch):
     proxy = TITOProxy(engine, _Renderer())
 
     async with proxy.serving():
-        output = await generator._harbor_agent_loop(
+        output = await generator._tito_harbor_agent_loop(
             proxy=proxy,
             prompt=[{"role": "user", "content": "hello"}],
             trajectory_id=TrajectoryID("instance", 0),
