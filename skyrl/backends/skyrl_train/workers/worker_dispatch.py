@@ -582,11 +582,15 @@ class WorkerDispatch:
         registered on vLLM under that name. None preserves single-tenant
         behavior (the legacy ``SKYRL_LORA_ADAPTER_NAME`` path).
         """
+        # Pass None for the client: workers cached it at init_weight_sync_state.
+        # It carries the HF tokenizer (~10MB — 0.13s pickle driver-side, 0.34s
+        # unpickle on EVERY worker), so shipping it per sync costs ~0.5s of the
+        # sync wall even via ray.put (deref still deserializes per worker).
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
                 "broadcast_to_inference_engines",
-                inference_engine_client,
+                None,
                 self.cfg.generator.inference_engine,
                 model_id=model_id,
             )

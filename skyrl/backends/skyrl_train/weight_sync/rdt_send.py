@@ -30,6 +30,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from typing import TYPE_CHECKING, Any, Iterator, List, Optional
 
 import torch
@@ -277,12 +278,26 @@ class MegatronStackedWeightSource(WeightSource):
         _install_shared_pp_spec_cache()
         # One-time sliced-PP-gather topology self-check (see _gather_layer_stacks).
         self._pp_gather_checked = False
-        # Batched non-expert export state (learned on the first, unbatched pass).
-        self._nonexpert_layout: Optional[dict] = None
-        self._nonexpert_owner: Optional[dict] = None
-        self._nonexpert_checked = 0
-        self._seen_first_layer = False
-        self._cur_adapter_ctx: Optional[tuple] = None
+        # Per-layer expert HF name lists, built once (see _expert_names_for).
+        self._expert_names: dict = {}
+        # Cached PP-exchanged expert geometry (see _expert_geometry).
+        self._geo_cache: Optional[dict] = None
+        self._geo_sig: Optional[tuple] = None
+        # Per-sync source phase timing (expert_gather / ne_* buckets), drained
+        # into trainer.jsonl by RdtWeightSyncSender after each send.
+        self._phase: dict = {}
+        self._phase_prefix = ""
+
+    def _phase_add(self, key: str, dt: float) -> None:
+        # The metadata pass (trainer_init) runs the same walk as a real sync;
+        # prefixing keeps its cost out of the warm buckets (it otherwise lands
+        # in sync 0's record and makes ne_bridge look doubled).
+        key = self._phase_prefix + key
+        self._phase[key] = self._phase.get(key, 0.0) + dt
+
+    def pop_phase_timing(self) -> dict:
+        p, self._phase = self._phase, {}
+        return p
 
     # ---------------- task partitioning ----------------
 
@@ -334,14 +349,26 @@ class MegatronStackedWeightSource(WeightSource):
                 two_f, h = d["fc1"][0].param_weight.shape
                 local_geo[layer] = (len(d["fc1"]), two_f // 2, h, my_pp_idx)
 
-        if pp_size > 1:
+        # Expert geometry is a property of the model + parallel layout, so it
+        # cannot change between syncs — but the exchange is a PP
+        # all_gather_object on the sync critical path (0.15s mean / 0.32s max
+        # per sync at 235B). Cache it, keyed on this rank's local geometry so a
+        # layout change still forces a rebuild. Every rank's local geometry is
+        # stable, so all ranks take the same branch on every sync (a split
+        # decision would deadlock in the collective below).
+        sig = tuple(sorted(local_geo.items()))
+        if self._geo_cache is not None and self._geo_sig == sig:
+            merged_geo: dict = self._geo_cache
+        elif pp_size > 1:
             gathered: List[Optional[dict]] = [None] * pp_size
             torch.distributed.all_gather_object(gathered, local_geo, group=pp_group)
-            merged_geo: dict = {}
+            merged_geo = {}
             for g in gathered:
                 merged_geo.update(g or {})
+            self._geo_sig, self._geo_cache = sig, merged_geo
         else:
             merged_geo = local_geo
+            self._geo_sig, self._geo_cache = sig, merged_geo
 
         merged: dict = {}
         for layer, (n_local, F, H, owner_pp_idx) in merged_geo.items():
@@ -604,281 +631,51 @@ class MegatronStackedWeightSource(WeightSource):
             stack.copy_(merged.to(stack.dtype))
             del A_all, B_all, delta, merged
 
-    def _yield_layer_experts(self, layer: int, d: dict, pending: Optional[dict] = None) -> Iterator[tuple]:
+    def _expert_names_for(self, layer: int, E: int) -> list:
+        """Per-layer expert HF names in yield order (gate/up/down per expert),
+        built once and cached — otherwise ~36k f-strings per sync at 235B."""
+        names = self._expert_names.get(layer)
+        if names is None:
+            prefix = f"model.layers.{layer}.mlp.experts"
+            names = []
+            for e in range(E):
+                names.append(f"{prefix}.{e}.gate_proj.weight")
+                names.append(f"{prefix}.{e}.up_proj.weight")
+                names.append(f"{prefix}.{e}.down_proj.weight")
+            self._expert_names[layer] = names
+        return names
+
+    def _extend_layer_experts(self, layer: int, d: dict, names: list, tensors: list) -> None:
+        """Gather one layer's expert stacks and append per-expert entries.
+
+        The per-expert tensors are views into the contiguous [E, 2F, H] /
+        [E, H, F] stacks — each a contiguous slab (identical storage/offset/
+        stride to the old per-expert ``fc1_stack[e, :F].contiguous()``, which
+        was already a no-copy self-return). ``unbind`` batches the view
+        creation: 3 dispatcher calls per layer instead of 3E ``__getitem__``
+        + 3E no-op ``.contiguous()`` — the old path's main per-tensor cost."""
+        _t0 = time.perf_counter()
         fc1_stack, fc2_stack = self._gather_layer_stacks(layer, d)
+        self._phase_add("expert_gather", time.perf_counter() - _t0)
+        _t0 = time.perf_counter()
         F = fc1_stack.shape[1] // 2
         E = fc1_stack.shape[0]
-        prefix = f"model.layers.{layer}.mlp.experts"
+        gates = fc1_stack[:, :F].unbind(0)
+        ups = fc1_stack[:, F:].unbind(0)
+        downs = fc2_stack.unbind(0)
+        names.extend(self._expert_names_for(layer, E))
         for e in range(E):
-            yield f"{prefix}.{e}.gate_proj.weight", fc1_stack[e, :F].contiguous()
-            yield f"{prefix}.{e}.up_proj.weight", fc1_stack[e, F:].contiguous()
-            yield f"{prefix}.{e}.down_proj.weight", fc2_stack[e].contiguous()
-        del fc1_stack, fc2_stack
+            tensors.append(gates[e])
+            tensors.append(ups[e])
+            tensors.append(downs[e])
+        self._phase_add("src_expert", time.perf_counter() - _t0)
 
-    # ---------------- batched non-expert export ----------------
-
-    @staticmethod
-    @__import__("contextlib").contextmanager
-    def _suppress_pp_broadcast():
-        """Run bridge mapping code with PP broadcasts as identity (owner-stage
-        ranks compute HF tensors LOCALLY; the packed per-group broadcast below
-        is the only cross-stage traffic). Process-wide but the gather loop is
-        the only exporter in this process."""
-        from megatron.bridge.models.conversion import param_mapping as _pm
-
-        cls = _pm.MegatronParamMapping
-        orig_t = cls.broadcast_from_pp_rank
-        orig_o = cls.broadcast_obj_from_pp_rank
-        cls.broadcast_from_pp_rank = lambda self, tensor, cache_key=None: tensor
-        cls.broadcast_obj_from_pp_rank = lambda self, obj, cache_key=None: obj
-        try:
-            yield
-        finally:
-            cls.broadcast_from_pp_rank = orig_t
-            cls.broadcast_obj_from_pp_rank = orig_o
-
-    def _nonexpert_group_key(self, global_param_name: str) -> str:
-        if "layers." in global_param_name:
-            try:
-                return f"layer.{int(global_param_name.split('layers.')[1].split('.')[0])}"
-            except (IndexError, ValueError):
-                pass
-        return "pre" if not self._seen_first_layer else "post"
-
-    def _group_nonexpert_tasks(self, non_expert: list) -> list:
-        """Consecutive (group_key, [tasks]) runs in task (HF-canonical) order."""
-        groups: list = []
-        self._seen_first_layer = False
-        for t in non_expert:
-            gk = self._nonexpert_group_key(t.global_param_name)
-            if gk.startswith("layer."):
-                self._seen_first_layer = True
-            if groups and groups[-1][0] == gk:
-                groups[-1][1].append(t)
-            else:
-                groups.append((gk, [t]))
-        return groups
-
-    def _record_nonexpert_stream(self, stream, non_expert: list):
-        """First (unbatched) pass: pass tensors through while recording each
-        group's yield layout [(hf_name, shape)], then compute per-group
-        batchability + owner stage with ONE pp all_gather_object."""
-
-        layout: dict = {}
-        seen_layer = False
-        for name, tensor in stream:
-            lyr = self._layer_of_hf_name(name)
-            if lyr is not None:
-                seen_layer = True
-                gk = f"layer.{lyr}"
-            else:
-                gk = "post" if seen_layer else "pre"
-            layout.setdefault(gk, []).append((name, list(tensor.shape)))
-            yield name, tensor
-
-        from megatron.core import parallel_state
-
-        pp_group = parallel_state.get_pipeline_model_parallel_group()
-        groups = self._group_nonexpert_tasks(non_expert)
-        mine = {gk: all(t.param_weight is not None for t in tasks) for gk, tasks in groups}
-        gathered: list = [None] * torch.distributed.get_world_size(pp_group)
-        torch.distributed.all_gather_object(gathered, mine, group=pp_group)
-        owner: dict = {}
-        for gk, _tasks in groups:
-            owner[gk] = next((i for i, g in enumerate(gathered) if g and g.get(gk)), None)
-        self._nonexpert_layout = layout
-        self._nonexpert_owner = owner
-        n_batchable = sum(1 for gk in owner if owner[gk] is not None and gk in layout)
-        logger.info("[rdt] non-expert batching ready: %d/%d groups batchable", n_batchable, len(owner))
-
-    def _batched_nonexpert_stream(self, non_expert: list):
-        """Warm-sync non-expert export: the owner stage runs the bridge's
-        standard export (TP gathers + transforms + non-expert LoRA merge)
-        LOCALLY with PP broadcasts suppressed, packs each group's HF tensors
-        into ONE buffer, and a single PP broadcast per group replaces the
-        bridge's per-tensor broadcast + per-tensor spec object-gather.
-        Groups with split ownership (e.g. tied embeddings) or missing layout
-        fall back to the plain per-task export on every rank."""
-        import math
-
-        from megatron.core import parallel_state
-
-        pp_group = parallel_state.get_pipeline_model_parallel_group()
-        pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
-        my_pp_idx = torch.distributed.get_rank(pp_group)
-        device = torch.cuda.current_device()
-
-        for gk, tasks in self._group_nonexpert_tasks(non_expert):
-            layout = self._nonexpert_layout.get(gk)
-            owner = self._nonexpert_owner.get(gk)
-            if layout is None or owner is None:
-                # split/unknown ownership: plain export, all ranks lockstep
-                yield from self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=tasks)
-                continue
-            numels = [math.prod(shape) if shape else 1 for _n, shape in layout]
-            buf = torch.empty(sum(numels), dtype=self._dtype, device=device)
-            if my_pp_idx == owner:
-                with self._suppress_pp_broadcast():
-                    out = self._owner_export_group(tasks)
-                # merge_adapter_weights=False flips the persistent registry
-                # mappings into HF-PEFT "unmerged" naming from their SECOND
-                # export on: LoRA-wrapped bases come back as
-                # ``X.base_layer.weight`` instead of ``X.weight``. Our explicit
-                # merge already applied the adapters (keys unchanged), so fold
-                # the alias back onto the layout's merged names.
-                for alias in [n for n in out if ".base_layer.weight" in n]:
-                    canonical = alias.replace(".base_layer.weight", ".weight")
-                    if canonical not in out:
-                        out[canonical] = out.pop(alias)
-                missing = [n for n, _shape in layout if n not in out]
-                if missing:
-                    diag = {
-                        "group": gk,
-                        "missing": missing[:8],
-                        "n_missing": len(missing),
-                        "out_keys_sample": sorted(out)[:8],
-                        "my_pp_idx": my_pp_idx,
-                        "owner": owner,
-                        "task_pw_none": {t.global_param_name: (t.param_weight is None) for t in tasks},
-                        "export_trace": getattr(self, "_owner_export_trace", None),
-                    }
-                    try:
-                        os.makedirs("/tmp/rdt_profile", exist_ok=True)
-                        with open("/tmp/rdt_profile/nonexpert_fail.txt", "a") as f:
-                            f.write(repr(diag) + "\n")
-                    except OSError:
-                        pass
-                    raise RuntimeError(
-                        f"[stacked-source] batched non-expert export missed names for "
-                        f"{gk}: {missing[:4]}... (diagnostics in /tmp/rdt_profile/"
-                        "nonexpert_fail.txt; disable with SKYRL_RDT_BATCHED_NONEXPERT=0)"
-                    )
-                off = 0
-                for (name, shape), n_el in zip(layout, numels):
-                    buf[off : off + n_el].copy_(out[name].to(self._dtype).flatten())
-                    off += n_el
-                del out
-            torch.distributed.broadcast(buf, src=pp_ranks[owner], group=pp_group)
-            if self._nonexpert_checked < 2:
-                self._nonexpert_checked += 1
-                self._selfcheck_batched_nonexpert(gk, tasks, layout, numels, buf)
-            off = 0
-            for (name, shape), n_el in zip(layout, numels):
-                yield name, buf[off : off + n_el].view(shape)
-                off += n_el
-
-    def _owner_export_group(self, tasks: list) -> dict:
-        """Owner-stage, collective-free export of one group's tasks.
-
-        Per task (mirroring the bridge's standard-path loop):
-        ``export_hf_weights(conversion_tasks=[task], merge_adapter_weights=
-        False)`` — the internal adapter build runs a PP ``all_gather_object``
-        that would deadlock an owner-only call, so LoRA is merged explicitly
-        from the per-pass adapter ctx (built lockstep in ``_iter_impl``).
-        ``_merge_lora_adapter_weights`` merges into EVERY key of the dict it is
-        given, so it must see one task's converted dict at a time. Caller holds
-        the PP-broadcast suppression."""
-        mm = self._module if isinstance(self._module, list) else [self._module]
-        ctx = self._cur_adapter_ctx
-        mb, tasks_by_base = ctx if ctx is not None else (None, {})
-        matz_cache: dict = {}
-        out: dict = {}
-        self._owner_export_trace = []  # [(global_name, mapping_cls, module_none, pre_keys, post_keys, detected)]
-        tasks = [self._clone_task_fresh_mapping(t) for t in tasks]
-        for task in tasks:
-            tdict = {
-                n: t
-                for n, t in self._bridge.export_hf_weights(
-                    self._module,
-                    show_progress=False,
-                    conversion_tasks=[task],
-                    merge_adapter_weights=False,
-                )
-            }
-            _pre_keys = sorted(tdict)
-            if ctx is not None and ".to_wrap.weight" in task.global_param_name:
-                prefix = task.global_param_name.partition(".to_wrap.weight")[0]
-                atasks = tasks_by_base.get(prefix)
-                if atasks:
-                    aws = matz_cache.get(prefix)
-                    if aws is None:
-                        aws = mb.materialize_adapter_weights(atasks)
-                        matz_cache[prefix] = aws
-                    tdict = mb._merge_lora_adapter_weights(mm, tdict, aws)
-            self._owner_export_trace.append(
-                (
-                    task.global_param_name,
-                    type(task.mapping).__name__,
-                    task.megatron_module is None,
-                    _pre_keys,
-                    sorted(tdict),
-                    repr(getattr(task.mapping, "_detected_type", "n/a")),
-                    getattr(task.mapping, "_mapping", "n/a") is None,
-                )
-            )
-            out.update(tdict)
-        return out
-
-    @staticmethod
-    def _clone_task_fresh_mapping(task):
-        """Clone a conversion task with a FRESH, stateless copy of its mapping.
-
-        The registry's mapping instances are persistent, stateful (spec/obj
-        caches, AutoMapping's detected type, lazily rewritten HF names) and
-        collective-bearing. Driving them owner-only (suppressed) gives the two
-        pipeline stages different call histories on the SAME objects, which
-        desynced later all-rank exports three different ways (base_layer
-        renames, crossed object broadcasts, gloo timeouts). Owner-local exports
-        therefore run on throwaway clones; the persistent instances only ever
-        see all-rank lockstep calls."""
-        import copy
-        import dataclasses
-
-        m = copy.copy(task.mapping)
-        m._tensor_spec_output_cache = {}
-        m._broadcast_obj_cache = {}
-        if hasattr(m, "_mapping"):
-            m._mapping = None
-        if hasattr(m, "_detected_type"):
-            m._detected_type = None
-        try:
-            return dataclasses.replace(task, mapping=m)
-        except TypeError:
-            t2 = copy.copy(task)
-            object.__setattr__(t2, "mapping", m)
-            return t2
-
-    def _selfcheck_batched_nonexpert(self, gk, tasks, layout, numels, buf) -> None:
-        """One-time proof (first batched group) that the owner-computed packed
-        broadcast is byte-identical to the bridge's plain per-tensor export.
-        Collective on every rank; raises on mismatch."""
-        import os as _os
-
-        plain = {
-            n: t for n, t in self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=tasks)
-        }
-        ok = True
-        off = 0
-        for (name, shape), n_el in zip(layout, numels):
-            got = buf[off : off + n_el].view(shape)
-            ref_t = plain.get(name)
-            if ref_t is None:  # persistent-mapping rename (see alias fold above)
-                ref_t = plain[name.replace(".weight", ".base_layer.weight")]
-            ref = ref_t.to(dtype=self._dtype, device=got.device).reshape(shape)
-            if not torch.equal(got, ref):
-                ok = False
-            off += n_el
-        try:
-            _os.makedirs("/tmp/rdt_profile", exist_ok=True)
-            with open("/tmp/rdt_profile/pp_gather_check.txt", "a") as f:
-                f.write(f"pid={_os.getpid()} batched_nonexpert[{gk}]_matches_plain={ok}\n")
-        except OSError:
-            pass
-        if not ok:
-            raise RuntimeError(
-                f"[stacked-source] batched non-expert self-check FAILED for {gk}; "
-                "rerun with SKYRL_RDT_BATCHED_NONEXPERT=0"
-            )
+    def _yield_layer_experts(self, layer: int, d: dict) -> Iterator[tuple]:
+        """Per-(name, tensor) view of one layer's experts (verification path)."""
+        names: list = []
+        tensors: list = []
+        self._extend_layer_experts(layer, d, names, tensors)
+        return zip(names, tensors)
 
     @staticmethod
     def _layer_of_hf_name(name: str) -> Optional[int]:
@@ -891,62 +688,103 @@ class MegatronStackedWeightSource(WeightSource):
 
     # ---------------- WeightSource interface ----------------
 
-    def _iter_impl(self, collect_meta: bool) -> Iterator[tuple]:
-        """Single generator driving both metadata() and __iter__ so their
-        order agrees by construction. Interleaves stacked expert yields at the
-        layer boundaries of the bridge's (filtered) non-expert stream."""
+    def _iter_groups_impl(self, collect_meta: bool) -> Iterator[tuple]:
+        """Single group-batched walk driving metadata(), __iter__ AND
+        iter_groups() so their order agrees by construction. Yields
+        ``(names, tensors)`` parallel lists per layerwise group — pre /
+        model.layers.N / post, the same contiguous partition
+        ``layerwise_groups`` derives from metadata() — with each layer's
+        stacked expert views appended at its boundary. Batching by group
+        exists because the per-tensor handoff (~37k generator yields + per-name
+        gather-loop bookkeeping per sync at 235B) cost ~0.9s of pure Python on
+        the sync critical path."""
+        self._phase_prefix = "meta_" if collect_meta else ""
         if torch.cuda.is_available():
             torch.cuda.set_device(torch.cuda.current_device())
+        # Per-sync setup, timed separately: it runs once per walk but is NOT
+        # per-yield work, so it would otherwise hide in the source_next
+        # residual (measured 0.74s/sync at 235B — bigger than every per-tensor
+        # cost combined).
         # Fresh tasks each pass: mapping objects need clean PP-collective caches
         # (same reason MegatronWeightExtractor rebuilds them per sync).
+        _t0 = time.perf_counter()
         tasks = self._bridge.get_conversion_tasks(self._module)
+        self._phase_add("src_setup_tasks", time.perf_counter() - _t0)
+        _t0 = time.perf_counter()
         non_expert, layers = self._partition_tasks(tasks)
+        self._phase_add("src_setup_partition", time.perf_counter() - _t0)
+        _t0 = time.perf_counter()
         layers = self._expert_geometry(layers)
+        self._phase_add("src_setup_geometry", time.perf_counter() - _t0)
         # LoRA-wrapped experts: raw to_wrap weights need the adapter delta
         # merged in (the bridge would have merged during its per-tensor export).
-        wrapped = any(".to_wrap." in t.global_param_name for d in layers.values() for t in d.get("fc1", []))
+        # Task lists are global (identical on every rank), so this condition —
+        # and the lockstep build below — cannot desync ranks.
+        _t0 = time.perf_counter()
+        wrapped = any(".to_wrap." in t.global_param_name for d in layers.values() for t in d.get("fc1", [])) or any(
+            ".to_wrap." in t.global_param_name for t in non_expert
+        )
         adapter_ctx = self._adapter_tasks_by_base() if wrapped else None
-        # Also used by the batched non-expert export (built HERE, once per pass,
-        # on EVERY rank in lockstep — the bridge's internal
-        # build_adapter_conversion_tasks contains a PP all_gather_object, which
-        # an owner-only export call must never trigger).
-        self._cur_adapter_ctx = adapter_ctx
+        self._phase_add("src_setup_adapter", time.perf_counter() - _t0)
         for d in layers.values():
             d["adapter_ctx"] = adapter_ctx
         pending = dict(layers)  # layers whose experts are not yet emitted
 
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
-        from megatron.core import parallel_state as _ps
-
-        _pp_size = torch.distributed.get_world_size(_ps.get_pipeline_model_parallel_group())
-        # DEFAULT OFF: four distinct in-bridge state leaks (base_layer renames,
-        # crossed object broadcasts, gloo collective timeouts, un-gathered qkv
-        # reshape under cloned mappings) showed owner-only export cannot be
-        # bolted onto the bridge's stateful, collective-bearing mappings from
-        # outside. Measured upside when it worked: warm syncs 2.8-3.1s vs ~7s.
-        # The clean path to re-enable is an owner-local export mode INSIDE
-        # Megatron-Bridge (see multi_node_rdt.md X.10) — keep this as the
-        # prototype behind the flag.
-        _batch_ok = os.environ.get("SKYRL_RDT_BATCHED_NONEXPERT", "0") == "1" and _pp_size > 1 and not collect_meta
-        if _batch_ok and self._nonexpert_layout is not None:
-            _stream = self._batched_nonexpert_stream(non_expert)
-        else:
-            _stream = self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=non_expert)
-            if _batch_ok:
-                _stream = self._record_nonexpert_stream(_stream, non_expert)
+        target_dev = torch.device("cuda", device) if device is not None else None
+        _stream = self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=non_expert)
+        # Manual next() so time INSIDE the bridge export ("ne_bridge": TP/PP
+        # gathers, transforms, adapter merge — not our code) is split from our
+        # dtype/device conversion ("ne_convert"). CPU-side wall time: kernel
+        # launches are async, but the loop's pacing is CPU-bound, which is what
+        # these buckets attribute.
+        _it = iter(_stream)
+        names: list = []
+        tensors: list = []
         prev_layer: Optional[int] = None
-        for name, tensor in _stream:
+        while True:
+            _t0 = time.perf_counter()
+            item = next(_it, None)
+            self._phase_add("ne_bridge", time.perf_counter() - _t0)
+            if item is None:
+                break
+            name, tensor = item
             layer = self._layer_of_hf_name(name)
-            if prev_layer is not None and layer != prev_layer and prev_layer in pending:
-                yield from self._yield_layer_experts(prev_layer, pending.pop(prev_layer), pending)
+            if names and layer != prev_layer:
+                # Group boundary (pre -> layer 0, layer N -> N+1, last layer
+                # -> post): append the closing layer's experts, then flush.
+                if prev_layer is not None and prev_layer in pending:
+                    self._extend_layer_experts(prev_layer, pending.pop(prev_layer), names, tensors)
+                yield names, tensors
+                names, tensors = [], []
             prev_layer = layer
-            yield name, tensor.to(device=device, dtype=self._dtype).detach().contiguous()
+            _t0 = time.perf_counter()
+            # Warm steady state: bridge already yields target dtype on-device —
+            # skip the no-op .to()/.contiguous() dispatches.
+            if tensor.dtype != self._dtype or (target_dev is not None and tensor.device != target_dev):
+                tensor = tensor.to(device=target_dev, dtype=self._dtype)
+            tensor = tensor.detach()
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+            self._phase_add("ne_convert", time.perf_counter() - _t0)
+            names.append(name)
+            tensors.append(tensor)
         if prev_layer is not None and prev_layer in pending:
-            yield from self._yield_layer_experts(prev_layer, pending.pop(prev_layer), pending)
+            self._extend_layer_experts(prev_layer, pending.pop(prev_layer), names, tensors)
+        if names:
+            yield names, tensors
         # Layers whose non-expert tensors were all emitted before a boundary was
         # seen (or post-block orderings): emit any stragglers in layer order.
         for layer in sorted(pending):
-            yield from self._yield_layer_experts(layer, pending.pop(layer), pending)
+            names, tensors = [], []
+            self._extend_layer_experts(layer, pending.pop(layer), names, tensors)
+            yield names, tensors
+
+    def _iter_impl(self, collect_meta: bool) -> Iterator[tuple]:
+        """Flattened per-(name, tensor) view of the group walk — used by
+        metadata() and the fallback per-name __iter__."""
+        for names, tensors in self._iter_groups_impl(collect_meta):
+            yield from zip(names, tensors)
 
     def metadata(self) -> List[ParamMeta]:
         if self._meta is None:
@@ -957,9 +795,7 @@ class MegatronStackedWeightSource(WeightSource):
             self._meta = meta
         return self._meta
 
-    def __iter__(self) -> Iterator[tuple]:
-        if os.environ.get("SKYRL_RDT_PROBE_ITER") == "1":
-            raise RuntimeError("[stacked-source] PROBE: __iter__ executed (tripwire)")
+    def _maybe_verify(self) -> None:
         if not self._verified:
             armed = os.environ.get("SKYRL_RDT_VERIFY_STACKED") == "1"
             print(f"[stacked-source] iterate: verify={'ARMED' if armed else 'off'}", file=sys.stderr, flush=True)
@@ -967,6 +803,19 @@ class MegatronStackedWeightSource(WeightSource):
                 self._verify_against_bridge()
                 print("[stacked-verify] PASSED: all sampled layers match bridge export", file=sys.stderr, flush=True)
             self._verified = True
+
+    def iter_groups(self) -> Iterator[tuple]:
+        """Group-batched iteration for the gather loop: ``(names, tensors)``
+        parallel lists per layerwise group, one generator handoff per group
+        instead of per tensor. Optional WeightSource extension — the vendored
+        gather loop uses it when present and falls back to __iter__."""
+        self._maybe_verify()
+        return self._iter_groups_impl(collect_meta=False)
+
+    def __iter__(self) -> Iterator[tuple]:
+        if os.environ.get("SKYRL_RDT_PROBE_ITER") == "1":
+            raise RuntimeError("[stacked-source] PROBE: __iter__ executed (tripwire)")
+        self._maybe_verify()
         return self._iter_impl(collect_meta=False)
 
     # ---------------- one-time numeric verification ----------------
@@ -1157,6 +1006,9 @@ class RdtWeightSyncSender:
                 _prof["sync"] = self._engine.get_sync_timing()
             if hasattr(self._engine, "get_produce_timing"):
                 _prof["produce"] = await asyncio.to_thread(self._engine.get_produce_timing)
+            _src = getattr(self._engine, "source", None)
+            if _src is not None and hasattr(_src, "pop_phase_timing"):
+                _prof["src_phase"] = _src.pop_phase_timing()
             _os.makedirs("/tmp/rdt_profile", exist_ok=True)
             with open("/tmp/rdt_profile/trainer.jsonl", "a") as _f:
                 _f.write(_json.dumps(_prof) + "\n")

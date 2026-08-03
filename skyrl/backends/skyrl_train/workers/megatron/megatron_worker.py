@@ -1427,15 +1427,26 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         torch.distributed.barrier()
 
-    def rdt_source_bench(self, iters: int = 1):
-        """Time RDT WeightSource iteration, bucketed (debug/bench; no engine)."""
+    def rdt_source_bench(self, iters: int = 2):
+        """A/B the RDT weight sources (debug/bench; no engine, no consumers).
+
+        Times full iteration of BOTH the stacked-expert source and the plain
+        bridge source in one process, so the delta is exactly what the custom
+        stack-gather machinery buys over letting ``export_hf_weights`` do
+        everything. Reports CPU wall AND device-synchronized wall per iteration
+        (the stacked path issues its collectives async, so CPU-only time would
+        flatter it), plus each source's own phase buckets.
+
+        Measured this way (see multi_node_rdt.md X.17): 30B tp2/pp1/ep8 stacked
+        0.70s vs plain 3.90s; 235B tp4/pp2/ep8 stacked 4.75s vs plain 19.50s.
+
+        Driver: tests/backends/skyrl_train/gpu/source_bench.py.
+        """
+        import os as _os
         import time as _t
 
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
-            MegatronStackedWeightSource as M,
-        )
         from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
             make_weight_source,
         )
@@ -1447,39 +1458,35 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bucket_size_threshold_GB=1.0,
             training_dtype=torch.bfloat16,
         )
-        src = make_weight_source(extractor, torch.bfloat16)
-        out = {"source": type(src).__name__}
-        t0 = _t.time()
-        out["names"] = sum(1 for _ in iter(src))
-        out["iter0_s"] = round(_t.time() - t0, 2)
-        b = {"expert_gather": 0.0, "lora_merge": 0.0}
-        og, om = M._gather_layer_stacks, M._merge_lora_into_stacks
-
-        def g(x, d):
-            t = _t.time()
-            r = og(x, d)
-            torch.cuda.synchronize()
-            b["expert_gather"] += _t.time() - t
-            return r
-
-        def mm(x, *a):
-            t = _t.time()
-            r = om(x, *a)
-            torch.cuda.synchronize()
-            b["lora_merge"] += _t.time() - t
-            return r
-
-        M._gather_layer_stacks, M._merge_lora_into_stacks = g, mm
+        prev = _os.environ.get("SKYRL_RDT_STACKED_EXPERTS")
+        out: dict = {}
         try:
-            for _ in range(iters):
-                t0 = _t.time()
-                for _n, _tns in iter(src):
-                    del _tns
-                out["iter1_s"] = round(_t.time() - t0, 2)
+            for label, flag in (("stacked", "1"), ("plain", "0")):
+                _os.environ["SKYRL_RDT_STACKED_EXPERTS"] = flag
+                src = make_weight_source(extractor, torch.bfloat16)
+                r: dict = {"class": type(src).__name__}
+                if hasattr(src, "pop_phase_timing"):
+                    src.pop_phase_timing()  # discard construction-time buckets
+                n = 0
+                for i in range(iters):
+                    t0 = _t.perf_counter()
+                    n = 0
+                    for _name, _tns in iter(src):
+                        n += 1
+                        del _tns
+                    cpu = _t.perf_counter() - t0
+                    torch.cuda.synchronize()
+                    r[f"iter{i}"] = {"cpu_s": round(cpu, 2), "synced_s": round(_t.perf_counter() - t0, 2)}
+                    if hasattr(src, "pop_phase_timing"):
+                        r[f"iter{i}"]["phases"] = {k: round(v, 3) for k, v in src.pop_phase_timing().items()}
+                r["names"] = n
+                out[label] = r
+                del src
         finally:
-            M._gather_layer_stacks, M._merge_lora_into_stacks = og, om
-        out.update({k: round(v, 2) for k, v in b.items()})
-        out["bridge_nonexpert_s"] = round(out["iter1_s"] - b["expert_gather"] - b["lora_merge"], 2)
+            if prev is None:
+                _os.environ.pop("SKYRL_RDT_STACKED_EXPERTS", None)
+            else:
+                _os.environ["SKYRL_RDT_STACKED_EXPERTS"] = prev
         return out
 
     async def broadcast_to_inference_engines(
@@ -1488,6 +1495,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         inference_engine_cfg: "InferenceEngineConfig",
         model_id: Optional[str] = None,
     ):
+        if inference_engine_client is None:
+            inference_engine_client = self._weight_sync_inference_client
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
@@ -1533,7 +1542,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if cache_reset_task is not None:
             await cache_reset_task
-        torch.cuda.empty_cache()
+        # RDT non-colocated: skip the post-send empty_cache (measured 0.25-0.53s
+        # per rank at 235B). The publish buffers freed during the sync stay in
+        # this process's allocator cache and are reused by the next training
+        # step; scrubbing them back to CUDA only matters when a colocated
+        # inference engine needs the physical memory.
+        if getattr(self, "_rdt_sender", None) is None or self.cfg.placement.colocate_all:
+            torch.cuda.empty_cache()
         torch.distributed.barrier()
 
     def _set_pad_token_id(self, pad_token_id):

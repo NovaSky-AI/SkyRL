@@ -433,6 +433,12 @@ class Worker(DistributedTorchRayActor):
         )
 
         assert inference_engine_client is not None
+        # Cache the client so per-sync broadcast_to_inference_engines calls can
+        # pass None instead of re-shipping it: the client carries the HF
+        # tokenizer (~10MB, 0.13s pickle + 0.34s unpickle), which otherwise
+        # rides every sync's RPC fan-out. Workers only use its static parts
+        # (server URLs, cfg flags); the driver's live copy owns weight_version.
+        self._weight_sync_inference_client = inference_engine_client
 
         # Fetch the total inference world size from the servers.
         inference_world_size, _ = await inference_engine_client.get_world_size()

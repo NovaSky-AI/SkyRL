@@ -279,6 +279,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         inference_engine_cfg,
         model_id: Optional[str] = None,
     ):
+        if inference_engine_client is None:
+            inference_engine_client = self._weight_sync_inference_client
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
