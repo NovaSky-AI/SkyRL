@@ -327,8 +327,9 @@ class _NormalizeTransform:
         return out
 
 
-class PretokenizedDataset(SFTDataset):
-    """Map-style view over a validated, memory-mapped pretokenized store.
+class MemoryMappedDataset(SFTDataset):
+    """Map-style view over a validated, memory-mapped arrow store (a
+    pretokenized dataset or the trainer's tokenized-dataset cache).
 
     Wraps an arrow-backed :class:`datasets.Dataset` (with the lazy
     normalization transform applied when rows need normalizing; stores
@@ -382,7 +383,7 @@ class PretokenizedDataset(SFTDataset):
 def load_from_pretokenized(
     path: str,
     max_length: Optional[int] = None,
-) -> PretokenizedDataset:
+) -> MemoryMappedDataset:
     """Load a pretokenized SFT dataset from a local file or directory.
 
     The pretokenized counterpart of ``SFTTrainer._load_and_tokenize``: returns
@@ -401,7 +402,7 @@ def load_from_pretokenized(
             matching the online tokenization path.
 
     Returns:
-        A :class:`PretokenizedDataset` of normalized examples (``input_ids`` /
+        A :class:`MemoryMappedDataset` of normalized examples (``input_ids`` /
         ``attention_mask`` / ``num_actions`` / window ``loss_mask``, plus
         pass-through columns like ``pixel_values`` / ``image_grid_thw``) ready
         for the SFT collators.
@@ -454,4 +455,4 @@ def load_from_pretokenized(
 
     dataset.set_transform(_NormalizeTransform(max_length))
     logger.info(f"Prepared {num_kept} pretokenized examples (memory-mapped)")
-    return PretokenizedDataset(dataset, lengths)
+    return MemoryMappedDataset(dataset, lengths)

@@ -983,14 +983,14 @@ def test_load_and_tokenize_cache_backed_is_memory_mapped(tokenizer, tmp_path, mo
     SFTDataset served from the arrow cache (nothing materialized); with
     caching disabled it returns the in-memory list. Rows are identical."""
     from skyrl.train import sft_trainer as sft_mod
-    from skyrl.train.dataset.pretokenized import PretokenizedDataset
+    from skyrl.train.dataset.pretokenized import MemoryMappedDataset
 
     dataset = _make_inmem_dataset()
     monkeypatch.setattr(sft_mod, "load_dataset", lambda *a, **kw: dataset)
 
     cached_cfg = SFTConfig(num_workers=0, cache_dir=str(tmp_path), disable_cache=False)
     mmapped = _build_trainer(tokenizer, cached_cfg)._load_and_tokenize("dummy/ds", "train")
-    assert isinstance(mmapped, PretokenizedDataset)
+    assert isinstance(mmapped, MemoryMappedDataset)
     assert list(mmapped.sequence_lengths) == [len(ex["input_ids"]) for ex in mmapped]
 
     uncached_cfg = SFTConfig(num_workers=0, disable_cache=True)

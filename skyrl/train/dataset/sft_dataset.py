@@ -2,7 +2,7 @@
 
 ``SFTTrainer.load_dataset`` returns a :class:`SFTDataset` regardless of the
 ingestion path: :class:`TextDataset` for tokenize-on-load sources,
-:class:`~skyrl.train.dataset.pretokenized.PretokenizedDataset` for
+:class:`~skyrl.train.dataset.pretokenized.MemoryMappedDataset` for
 pretokenized stores, and :class:`ConcatSFTDataset` when multiple sources are
 configured. All are map-style (samplers, ``StatefulDataLoader`` prefetching
 and resume, and the collators are agnostic to which one they receive) and
@@ -45,7 +45,7 @@ class TextDataset(SFTDataset):
     Wraps the ``list[dict]`` produced by ``SFTTrainer._load_and_tokenize``
     when caching is disabled. With caching enabled (the default), the trainer
     instead serves the tokenized arrow cache memory-mapped through
-    ``PretokenizedDataset``, so this fully-materialized form is only resident
+    ``MemoryMappedDataset``, so this fully-materialized form is only resident
     for ``disable_cache=True`` runs.
     """
 

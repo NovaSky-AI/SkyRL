@@ -54,7 +54,7 @@ from skyrl.train.config.sft_config import (
     build_skyrl_config_for_sft,
 )
 from skyrl.train.dataset.pretokenized import (
-    PretokenizedDataset,
+    MemoryMappedDataset,
     load_from_pretokenized,
     sequence_lengths_from_arrow,
 )
@@ -239,7 +239,7 @@ def _get_cache_path(cache_dir: str, cache_key: str) -> str:
     return os.path.join(cache_dir, cache_key)
 
 
-def _load_from_cache(cache_path: str) -> Optional["PretokenizedDataset"]:
+def _load_from_cache(cache_path: str) -> Optional["MemoryMappedDataset"]:
     """Load tokenized dataset from cache as a memory-mapped dataset.
 
     Reads an arrow-backed HF ``Dataset`` directory written by
@@ -254,7 +254,7 @@ def _load_from_cache(cache_path: str) -> Optional["PretokenizedDataset"]:
         cache_path: Path to cached dataset directory.
 
     Returns:
-        A memory-mapped :class:`PretokenizedDataset`, or ``None`` if the
+        A memory-mapped :class:`MemoryMappedDataset`, or ``None`` if the
         cache directory does not exist or fails to load.
     """
     if not os.path.isdir(cache_path):
@@ -265,7 +265,7 @@ def _load_from_cache(cache_path: str) -> Optional["PretokenizedDataset"]:
         dataset = Dataset.load_from_disk(cache_path)
         lengths = sequence_lengths_from_arrow(dataset)
         logger.info(f"Loaded {len(dataset)} examples from cache (memory-mapped)")
-        return PretokenizedDataset(dataset, lengths)
+        return MemoryMappedDataset(dataset, lengths)
     except Exception as e:
         logger.warning(f"Failed to load cache from {cache_path}: {e}")
         return None
@@ -1061,7 +1061,7 @@ class SFTTrainer:
 
         Returns the tokenized examples (dicts with ``input_ids``,
         ``attention_mask``, ``num_actions``): a memory-mapped
-        :class:`PretokenizedDataset` served from the arrow cache when caching
+        :class:`MemoryMappedDataset` served from the arrow cache when caching
         is enabled (nothing materialized in memory), or a ``list`` when
         ``disable_cache=True``.
         """
