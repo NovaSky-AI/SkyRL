@@ -68,7 +68,11 @@ async def wait_all(iterable: Iterable[Coroutine], timeout: int = GENERAL_TIMEOUT
     if pending:
         for task in pending:
             task.cancel()
-        raise asyncio.TimeoutError()
+        pending_ids = [task.get_name() for task in pending]
+        raise asyncio.TimeoutError(
+            f"Timeout waiting for {len(pending)} pending task(s) out of {len(tasks)} total. "
+            f"Pending task IDs: {pending_ids}"
+        )
     results = []
     errors = []
     for task in tasks:
