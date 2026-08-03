@@ -31,7 +31,7 @@ from typing import Any, Optional
 import numpy as np
 import ray
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset, concatenate_datasets, load_dataset
 from loguru import logger
 from ray.util.placement_group import placement_group
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -90,6 +90,36 @@ from skyrl.utils.tok import (
 # ---------------------------------------------------------------------------
 
 
+# ArrowWriter flush granularity for streamed tokenization: rows are written
+# out every this-many examples, bounding peak memory during tokenization to
+# O(batch) instead of O(dataset).
+_TOKENIZE_WRITER_BATCH_ROWS = 1000
+
+
+def _write_tokenized_arrow(rows, shard_path: str) -> int:
+    """Stream tokenized rows into an arrow file in bounded batches.
+
+    Consumes an iterable of tokenized examples (``None`` entries -- rows the
+    tokenizers filtered out -- are skipped) and writes them with HF's
+    ``ArrowWriter``, which flushes every ``writer_batch_size`` examples, so
+    the full tokenized dataset is never resident in memory. Returns the
+    number of rows written; on 0 rows no arrow file is finalized (there is
+    no schema to write) and the caller must not read ``shard_path``.
+    """
+    from datasets.arrow_writer import ArrowWriter
+
+    written = 0
+    with ArrowWriter(path=shard_path, writer_batch_size=_TOKENIZE_WRITER_BATCH_ROWS) as writer:
+        for row in rows:
+            if row is None:
+                continue
+            writer.write(row)
+            written += 1
+        if written:
+            writer.finalize()
+    return written
+
+
 def _tokenize_chat_slice_worker(args):
     """Worker function for parallel chat-format tokenization with slice-based loading.
 
@@ -109,6 +139,7 @@ def _tokenize_chat_slice_worker(args):
         train_on_what_str,
         tools_key,
         system_key,
+        shard_path,
     ) = args
 
     # Worker loads tokenizer from cached path
@@ -126,10 +157,11 @@ def _tokenize_chat_slice_worker(args):
     dataset = load_dataset(dataset_name, split=dataset_split)
     dataset_slice = dataset.select(range(start_idx, end_idx))
 
-    # Tokenize and filter inline
-    results = []
-    for example in dataset_slice:
-        tokenized = tokenize_chat_example(
+    # Tokenize and stream to the worker's shard file: rows are flushed in
+    # bounded batches instead of accumulating in (and pickling back from)
+    # worker memory. Returns the number of rows written.
+    rows = (
+        tokenize_chat_example(
             example,
             tokenizer,
             max_length=max_length,
@@ -138,10 +170,9 @@ def _tokenize_chat_slice_worker(args):
             tools_key=tools_key,
             system_key=system_key,
         )
-        if tokenized is not None:
-            results.append(tokenized)
-
-    return results
+        for example in dataset_slice
+    )
+    return _write_tokenized_arrow(rows, shard_path)
 
 
 def _tokenize_alpaca_slice_worker(args):
@@ -152,7 +183,7 @@ def _tokenize_alpaca_slice_worker(args):
 
     Must be top-level for pickling with spawn.
     """
-    dataset_name, dataset_split, start_idx, end_idx, tokenizer_path, max_length = args
+    dataset_name, dataset_split, start_idx, end_idx, tokenizer_path, max_length, shard_path = args
 
     # Worker loads tokenizer from cached path
     tokenizer = AutoTokenizer.from_pretrained(
@@ -166,14 +197,9 @@ def _tokenize_alpaca_slice_worker(args):
     dataset = load_dataset(dataset_name, split=dataset_split)
     dataset_slice = dataset.select(range(start_idx, end_idx))
 
-    # Tokenize and filter inline
-    results = []
-    for example in dataset_slice:
-        tokenized = tokenize_sft_example(example, tokenizer, max_length)
-        if tokenized is not None:
-            results.append(tokenized)
-
-    return results
+    # Tokenize and stream to the worker's shard file (see the chat worker).
+    rows = (tokenize_sft_example(example, tokenizer, max_length) for example in dataset_slice)
+    return _write_tokenized_arrow(rows, shard_path)
 
 
 def _compute_cache_key(
@@ -271,19 +297,19 @@ def _load_from_cache(cache_path: str) -> Optional["MemoryMappedDataset"]:
         return None
 
 
-def _save_to_cache(cache_path: str, tokenized: list) -> None:
+def _save_to_cache(cache_path: str, tokenized) -> None:
     """Save tokenized dataset to cache.
 
-    Materializes the in-memory ``list[dict]`` as a HuggingFace ``Dataset``
-    and writes it via ``save_to_disk``. At 1M-row scale, the arrow-backed,
-    memory-mapped format reads and writes dramatically faster than pickle
-    while also being portable across Python versions. The write goes to a
-    sibling ``<cache_path>.tmp`` directory which is then atomically renamed
-    onto ``cache_path`` for NFS safety.
+    Accepts either an in-memory ``list[dict]`` (materialized as a HuggingFace
+    ``Dataset`` first) or an already arrow-backed ``Dataset`` (e.g. streamed
+    shards from tokenization), which ``save_to_disk`` writes through in
+    bounded batches without materializing rows. The write goes to a sibling
+    ``<cache_path>.tmp`` directory which is then atomically renamed onto
+    ``cache_path`` for NFS safety.
 
     Args:
         cache_path: Path to the cache directory to create.
-        tokenized: List of tokenized examples.
+        tokenized: List of tokenized examples, or an arrow-backed ``Dataset``.
     """
     try:
         import shutil
@@ -292,10 +318,9 @@ def _save_to_cache(cache_path: str, tokenized: list) -> None:
         os.makedirs(parent_dir, exist_ok=True)
 
         logger.info(f"Saving {len(tokenized)} examples to cache: {cache_path}")
-        # Build the HF Dataset from rows and write to a sibling temp dir.
-        # An atomic rename onto cache_path makes concurrent readers see only
-        # a fully-written cache (NFS-safe; matches the previous pickle path).
-        dataset = Dataset.from_list(tokenized)
+        # Write to a sibling temp dir; an atomic rename onto cache_path makes
+        # concurrent readers see only a fully-written cache (NFS-safe).
+        dataset = tokenized if isinstance(tokenized, Dataset) else Dataset.from_list(tokenized)
         temp_path = cache_path + ".tmp"
         # Clean up any stale temp dir from an interrupted prior run.
         if os.path.isdir(temp_path):
@@ -1062,8 +1087,15 @@ class SFTTrainer:
         Returns the tokenized examples (dicts with ``input_ids``,
         ``attention_mask``, ``num_actions``): a memory-mapped
         :class:`MemoryMappedDataset` served from the arrow cache when caching
-        is enabled (nothing materialized in memory), or a ``list`` when
-        ``disable_cache=True``.
+        is enabled, or a ``list`` when ``disable_cache=True``.
+
+        With caching enabled (text datasets), tokenization itself is also
+        memory-bounded: rows stream into arrow files in bounded batches
+        (per-worker shard files on the parallel path) instead of accumulating
+        in a list, so dataset size is limited by disk, not RAM. The
+        materializing fallbacks are ``disable_cache=True`` (no arrow file to
+        stream to) and VLM datasets (image tensors only round-trip through
+        ``Dataset.from_list``).
         """
         # Check cache first (unless disabled or force_recache)
         if not self.sft_cfg.disable_cache:
@@ -1112,7 +1144,7 @@ class SFTTrainer:
             if self.sft_cfg.messages_key in columns:
                 tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
                 system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
-                tokenized = [
+                rows = (
                     tokenize_chat_example(
                         ex,
                         self.tokenizer,
@@ -1124,34 +1156,52 @@ class SFTTrainer:
                         processor=self.processor,
                     )
                     for ex in dataset
-                ]
+                )
             elif "instruction" in columns and "output" in columns:
-                tokenized = [tokenize_sft_example(ex, self.tokenizer, self.sft_cfg.max_length) for ex in dataset]
+                rows = (tokenize_sft_example(ex, self.tokenizer, self.sft_cfg.max_length) for ex in dataset)
             else:
                 raise ValueError(
                     f"Unrecognized dataset format. Expected '{self.sft_cfg.messages_key}' column "
                     f"(chat format) or 'instruction'+'output' columns (Alpaca format). "
                     f"Found columns: {columns}"
                 )
-            tokenized = [ex for ex in tokenized if ex is not None]
-            logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
 
-            # With caching enabled, round-trip through the arrow cache so the
-            # returned dataset is memory-mapped rather than the in-memory list
-            # (the list stays resident only when caching is disabled).
-            if not self.sft_cfg.disable_cache:
-                _save_to_cache(cache_path, tokenized)
-                mmapped = _load_from_cache(cache_path)
-                if mmapped is not None:
-                    return mmapped
+            # Materializing fallbacks: with caching disabled there is no arrow
+            # file to stream to (and to serve from), and VLM rows carry image
+            # tensors that only round-trip through Dataset.from_list.
+            if self.sft_cfg.disable_cache or self.is_vlm:
+                tokenized = [ex for ex in rows if ex is not None]
+                logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
+                if not self.sft_cfg.disable_cache:
+                    _save_to_cache(cache_path, tokenized)
+                    mmapped = _load_from_cache(cache_path)
+                    if mmapped is not None:
+                        return mmapped
+                return tokenized
 
-            return tokenized
+            # Stream tokenize -> bounded arrow writes -> cache -> mmap: the
+            # tokenized dataset is never resident in memory, so dataset size
+            # is bounded by disk, not RAM.
+            with tempfile.TemporaryDirectory(prefix="skyrl_tokenize_") as tmp_dir:
+                shard_path = os.path.join(tmp_dir, "data.arrow")
+                written = _write_tokenized_arrow(rows, shard_path)
+                logger.info(f"Tokenized {written} examples (filtered from {len(dataset)}), streamed to arrow")
+                if written == 0:
+                    raise ValueError(f"Dataset '{dataset_name}' (split '{dataset_split}') tokenized to 0 examples.")
+                _save_to_cache(cache_path, Dataset.from_file(shard_path))
+            mmapped = _load_from_cache(cache_path)
+            if mmapped is None:
+                raise RuntimeError(f"Failed to reload tokenized dataset cache at {cache_path}")
+            return mmapped
 
         # Parallel tokenization path with slice-based loading
         logger.info(f"Tokenizing dataset with {num_workers} workers (slice-based loading)...")
 
-        # Cache tokenizer to temp dir for fast worker loading
+        # Cache tokenizer to temp dir for fast worker loading; workers stream
+        # their tokenized slices into per-worker arrow shards here rather than
+        # pickling rows back, so neither side holds a slice in memory.
         tokenizer_cache_dir = tempfile.mkdtemp(prefix="skyrl_tokenizer_")
+        shard_dir = tempfile.mkdtemp(prefix="skyrl_tokenize_shards_")
         try:
             self.tokenizer.save_pretrained(tokenizer_cache_dir)
 
@@ -1174,6 +1224,8 @@ class SFTTrainer:
                 if worker_start >= worker_end:
                     continue
 
+                shard_path = os.path.join(shard_dir, f"shard-{worker_idx:05d}.arrow")
+
                 # Prepare worker arguments based on format
                 if self.sft_cfg.messages_key in columns:
                     tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
@@ -1190,6 +1242,7 @@ class SFTTrainer:
                             self.sft_cfg.train_on_what.value,
                             tools_key,
                             system_key,
+                            shard_path,
                         )
                     )
                 elif "instruction" in columns and "output" in columns:
@@ -1201,6 +1254,7 @@ class SFTTrainer:
                             worker_end,
                             tokenizer_cache_dir,
                             self.sft_cfg.max_length,
+                            shard_path,
                         )
                     )
                 else:
@@ -1221,32 +1275,40 @@ class SFTTrainer:
             # Use spawn to avoid Ray fork issues
             ctx = mp.get_context("spawn")
 
-            # Process in parallel
+            # Process in parallel; each worker returns only its row count --
+            # the tokenized rows live in the shard files, not in pickled
+            # results.
             with ctx.Pool(processes=num_workers) as pool:
-                results = pool.map(worker_fn, worker_args)
+                shard_counts = pool.map(worker_fn, worker_args)
 
-            # Flatten results
-            tokenized = []
-            for chunk_results in results:
-                tokenized.extend(chunk_results)
+            written = sum(shard_counts)
+            logger.info(f"Tokenized {written} examples (filtered from {dataset_size}), streamed to arrow shards")
+            if written == 0:
+                raise ValueError(f"Dataset '{dataset_name}' (split '{dataset_split}') tokenized to 0 examples.")
 
-            logger.info(f"Tokenized {len(tokenized)} examples (filtered from {dataset_size})")
+            # Concatenate the memory-mapped shards (a view, nothing loaded).
+            # Empty shards were never finalized and cannot be opened.
+            shards = [Dataset.from_file(args[-1]) for args, count in zip(worker_args, shard_counts) if count > 0]
+            tokenized_ds = shards[0] if len(shards) == 1 else concatenate_datasets(shards)
 
-            # Same as the sequential path: serve the arrow cache memory-mapped
-            # when caching is enabled.
-            if not self.sft_cfg.disable_cache:
-                _save_to_cache(cache_path, tokenized)
-                mmapped = _load_from_cache(cache_path)
-                if mmapped is not None:
-                    return mmapped
+            if self.sft_cfg.disable_cache:
+                # No cache directory to serve the mmap from (the shard dir is
+                # deleted below), so keep the materialized-list behavior.
+                return tokenized_ds.to_list()
 
-            return tokenized
+            _save_to_cache(cache_path, tokenized_ds)
+            mmapped = _load_from_cache(cache_path)
+            if mmapped is None:
+                raise RuntimeError(f"Failed to reload tokenized dataset cache at {cache_path}")
+            return mmapped
 
         finally:
-            # Cleanup temp tokenizer cache
+            # Cleanup temp tokenizer cache and tokenized shards (already
+            # copied into the tokenized-dataset cache, or materialized).
             import shutil
 
             shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
+            shutil.rmtree(shard_dir, ignore_errors=True)
 
     def load_dataset(self) -> SFTDataset:
         """Load the training dataset(s): pretokenized stores or tokenize-on-load.

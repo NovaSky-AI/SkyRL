@@ -1003,3 +1003,32 @@ def test_load_and_tokenize_cache_backed_is_memory_mapped(tokenizer, tmp_path, mo
         assert a["attention_mask"] == b["attention_mask"]
         assert a["num_actions"] == b["num_actions"]
         assert a["loss_mask"] == b["loss_mask"]
+
+
+def test_streamed_tokenization_matches_materialized(tokenizer, tmp_path, monkeypatch):
+    """Streamed tokenize->arrow writes (cache path) produce the same rows as
+    the materializing path, including across ArrowWriter flush boundaries."""
+    from skyrl.train import sft_trainer as sft_mod
+    from skyrl.train.dataset.pretokenized import MemoryMappedDataset
+
+    dataset = _make_inmem_dataset()
+    monkeypatch.setattr(sft_mod, "load_dataset", lambda *a, **kw: dataset)
+    # Force a flush every 2 rows so the 6-row fixture spans multiple batches.
+    monkeypatch.setattr(sft_mod, "_TOKENIZE_WRITER_BATCH_ROWS", 2)
+
+    streamed = _build_trainer(
+        tokenizer, SFTConfig(num_workers=0, cache_dir=str(tmp_path), disable_cache=False)
+    )._load_and_tokenize("dummy/ds", "train")
+    assert isinstance(streamed, MemoryMappedDataset)
+
+    materialized = _build_trainer(tokenizer, SFTConfig(num_workers=0, disable_cache=True))._load_and_tokenize(
+        "dummy/ds", "train"
+    )
+    assert isinstance(materialized, list)
+
+    assert len(streamed) == len(materialized) == 6
+    for a, b in zip(streamed, materialized):
+        assert a["input_ids"] == b["input_ids"]
+        assert a["attention_mask"] == b["attention_mask"]
+        assert a["num_actions"] == b["num_actions"]
+        assert a["loss_mask"] == b["loss_mask"]
