@@ -239,3 +239,74 @@ def test_json_codec_round_trips_payloads(sync_engine):
     with Session(sync_engine) as session:
         stored = session.exec(select(FutureDB.request_data).where(FutureDB.request_id == request_id)).first()
     assert stored == payload
+
+
+@pytest.mark.asyncio
+async def test_complete_future_retries_transient_failures(async_engine, sync_engine, monkeypatch):
+    """A pool-checkout timeout must not orphan the request.
+
+    Nothing else can complete an EXTERNAL request, so a single transient failure
+    here would leave it pending forever.
+    """
+    from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+    from skyrl.tinker import futures
+
+    request_id = insert_pending(sync_engine)[0]
+    monkeypatch.setattr(futures, "_RESULT_WRITE_BACKOFF_SEC", 0.001)
+
+    real_exec = futures.AsyncSession.exec
+    calls = []
+
+    async def flaky_exec(self, statement, *args, **kwargs):
+        calls.append(statement)
+        if len(calls) <= 2:
+            raise SATimeoutError("QueuePool limit reached")
+        return await real_exec(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(futures.AsyncSession, "exec", flaky_exec)
+
+    assert await complete_future(async_engine, request_id, RequestStatus.COMPLETED, {"ok": 1}) is True
+    assert len(calls) == 3  # two failures, then success
+
+    monkeypatch.undo()
+    with Session(sync_engine) as session:
+        assert session.get(FutureDB, request_id).status == RequestStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_complete_future_raises_after_exhausting_retries(async_engine, sync_engine, monkeypatch):
+    """When retries run out the caller must find out, not fail silently."""
+    from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+    from skyrl.tinker import futures
+
+    request_id = insert_pending(sync_engine)[0]
+    monkeypatch.setattr(futures, "_RESULT_WRITE_BACKOFF_SEC", 0.001)
+
+    async def always_fails(self, statement, *args, **kwargs):
+        raise SATimeoutError("QueuePool limit reached")
+
+    monkeypatch.setattr(futures.AsyncSession, "exec", always_fails)
+
+    with pytest.raises(SATimeoutError):
+        await complete_future(async_engine, request_id, RequestStatus.COMPLETED, {"ok": 1})
+
+
+@pytest.mark.asyncio
+async def test_complete_future_does_not_retry_programming_errors(async_engine, sync_engine, monkeypatch):
+    """Only transient failures are retried; real bugs surface immediately."""
+    from skyrl.tinker import futures
+
+    request_id = insert_pending(sync_engine)[0]
+    calls = []
+
+    async def raises_value_error(self, statement, *args, **kwargs):
+        calls.append(statement)
+        raise ValueError("bad payload")
+
+    monkeypatch.setattr(futures.AsyncSession, "exec", raises_value_error)
+
+    with pytest.raises(ValueError):
+        await complete_future(async_engine, request_id, RequestStatus.COMPLETED, {"ok": 1})
+    assert len(calls) == 1

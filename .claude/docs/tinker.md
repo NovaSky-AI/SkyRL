@@ -58,6 +58,14 @@ Request payloads are large (a `forward_backward` with 4x512 tokens is ~76 KiB of
 2. **One shared poller for results.** `retrieve_future` awaits `FutureWaiter.wait`, which registers an asyncio future; a single background task resolves all of them with one `WHERE request_id IN (...)` query per tick. Polling per caller instead costs one query per in-flight request per tick. Results written by the API process itself (forwarded samples) call `FutureWaiter.notify` and skip the round trip entirely.
 3. **Payload columns use the fast JSON codec.** `json_engine_kwargs()` installs orjson when available (~7x faster encode, ~3x faster decode on numeric arrays) and falls back to the stdlib. Pass it to every `create_engine`/`create_async_engine` that touches these tables.
 
+### An EXTERNAL request has exactly one chance to complete
+
+When sampling is forwarded (`external_inference_url` set, or a non-colocated backend), `asample` writes an `EXTERNAL` future and hands off to a fire-and-forget `asyncio.create_task`. That task's result write is the **only** thing that can ever complete the request: the engine excludes `EXTERNAL` from scheduling (`_BATCHED_REQUEST_TYPES`) and nothing reaps pending rows. So a failure there does not fail one request -- it leaves it pending forever while the client polls until its own deadline, which surfaces as a hang rather than an error.
+
+Hence `complete_future` retries `SATimeoutError` and `OperationalError` (pool-checkout timeouts and `database is locked` are exactly what a burst of simultaneous completions produces), and both forwarding clients catch and log anything that still escapes. If you add another path that completes futures, preserve both properties.
+
+The pool is the thing to watch: the async engine takes SQLAlchemy's defaults, so it is **15 connections (5 + 10 overflow) with a 30s checkout timeout**. Any per-request DB polling scales checkouts with in-flight requests and starves unrelated endpoints -- a symptom that shows up first as `session_heartbeat` timing out client-side, long before sampling visibly breaks.
+
 Measure changes here with `skyrl/benchmarks/bench_tinker_db.py` (no GPU needed). It reports SQL statement and commit counts alongside timings, and tolerates an engine without `scan_pending_requests` so it can be run against an older checkout for comparison.
 
 Rejected deliberately: group-committing submissions. It measured only ~1.18x throughput once orjson removed the JSON encoding cost, and batching some endpoints while `save_weights`-style endpoints commit directly would reorder `request_id` allocation, which barrier scheduling depends on.

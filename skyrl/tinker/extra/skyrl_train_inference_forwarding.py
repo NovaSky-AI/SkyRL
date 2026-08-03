@@ -81,7 +81,18 @@ class SkyRLTrainInferenceForwardingClient:
             result_data = {"error": str(e), "status": "failed"}
             status = RequestStatus.FAILED
 
-        written = await complete_future(self.db_engine, request_id, status, result_data, self.future_waiter)
+        # This runs in a fire-and-forget task, so an escaping exception would be
+        # invisible until the task is garbage collected. Log it here instead:
+        # the request is now stuck pending, and that has to be diagnosable.
+        try:
+            written = await complete_future(self.db_engine, request_id, status, result_data, self.future_waiter)
+        except Exception:
+            logger.exception(
+                "Could not record the result of request %s; it will remain pending and block its client",
+                request_id,
+            )
+            return
+
         if not written:
             # Row was deleted between scheduling and completion (cancelled
             # request, stale-session GC). Nothing to write back.

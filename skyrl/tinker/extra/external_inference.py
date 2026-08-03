@@ -73,7 +73,17 @@ class ExternalInferenceClient:
             result_data = {"error": str(e), "status": "failed"}
             status = RequestStatus.FAILED
 
-        written = await complete_future(self.db_engine, request_id, status, result_data, self.future_waiter)
+        # Fire-and-forget task: an escaping exception would go unseen, so log it
+        # here. The request is now stuck pending and that has to be diagnosable.
+        try:
+            written = await complete_future(self.db_engine, request_id, status, result_data, self.future_waiter)
+        except Exception:
+            logger.exception(
+                "Could not record the result of request %s; it will remain pending and block its client",
+                request_id,
+            )
+            return
+
         if not written:
             logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
 

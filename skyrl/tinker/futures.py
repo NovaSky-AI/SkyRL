@@ -5,6 +5,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlmodel import select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -18,6 +20,12 @@ POLL_INTERVAL_SEC = 0.05
 
 # Chunk size for `IN (...)` lookups, kept under SQLite's bound-parameter cap.
 _MAX_IDS_PER_QUERY = 500
+
+# Retry schedule for a terminal result write. Sized to ride out a burst of
+# concurrent completions rather than to wait out a genuinely dead database:
+# roughly a minute in total, against a connection-pool checkout timeout of 30s.
+_RESULT_WRITE_ATTEMPTS = 6
+_RESULT_WRITE_BACKOFF_SEC = 0.5
 
 
 @dataclass(frozen=True)
@@ -41,14 +49,44 @@ async def complete_future(
     the row carries the request's full payload, which a completion write has no
     use for. When a ``waiter`` is given its waiters are resolved directly, so a
     result produced in this process does not wait to be rediscovered by polling.
+
+    Transient database failures are retried, because for an EXTERNAL request this
+    write is the only thing that can ever complete it: the engine skips that
+    request type and nothing reaps pending rows. Failing here therefore does not
+    fail one request, it leaves it pending forever while its client blocks until
+    its own deadline. Pool-checkout timeouts and `database is locked` are exactly
+    what a burst of simultaneous completions produces, so they must not be fatal.
+
+    Raises the last error if every attempt fails.
     """
-    async with AsyncSession(db_engine) as session:
-        result = await session.exec(
-            update(FutureDB)
-            .where(FutureDB.request_id == request_id)
-            .values(result_data=result_data, status=status, completed_at=datetime.now(timezone.utc))
-        )
-        await session.commit()
+    for attempt in range(_RESULT_WRITE_ATTEMPTS):
+        try:
+            async with AsyncSession(db_engine) as session:
+                result = await session.exec(
+                    update(FutureDB)
+                    .where(FutureDB.request_id == request_id)
+                    .values(result_data=result_data, status=status, completed_at=datetime.now(timezone.utc))
+                )
+                await session.commit()
+            break
+        except (SATimeoutError, OperationalError) as error:
+            if attempt == _RESULT_WRITE_ATTEMPTS - 1:
+                logger.error(
+                    "Giving up on the result write for request %s after %d attempts (%s). "
+                    "It stays pending, and its client will block until its own timeout.",
+                    request_id,
+                    _RESULT_WRITE_ATTEMPTS,
+                    type(error).__name__,
+                )
+                raise
+            delay = _RESULT_WRITE_BACKOFF_SEC * 2**attempt
+            logger.warning(
+                "Result write for request %s failed (%s); retrying in %.1fs",
+                request_id,
+                type(error).__name__,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
     if not result.rowcount:
         return False
