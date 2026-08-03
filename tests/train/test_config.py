@@ -154,6 +154,13 @@ def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value
         TrainerConfig(**{field_name: value})
 
 
+def test_ref_4bit_rejects_megatron():
+    with pytest.raises(ValueError, match="trainer.ref.model.bitsandbytes_4bit"):
+        SkyRLTrainConfig.from_cli_overrides(
+            ["trainer.strategy=megatron", "trainer.ref.model.bitsandbytes_4bit.enabled=true"]
+        )
+
+
 def test_cli_overrides_plus_prefix_rejected():
     with pytest.raises(ValueError, match="The '\\+' prefix"):
         SkyRLTrainConfig.from_cli_overrides(["+new_field=value"])
