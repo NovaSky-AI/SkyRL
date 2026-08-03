@@ -1032,3 +1032,52 @@ def test_streamed_tokenization_matches_materialized(tokenizer, tmp_path, monkeyp
         assert a["attention_mask"] == b["attention_mask"]
         assert a["num_actions"] == b["num_actions"]
         assert a["loss_mask"] == b["loss_mask"]
+
+
+def test_streamed_write_rejects_inconsistent_row_keys(tmp_path):
+    """Rows with differing key sets would silently lose columns to arrow
+    schema inference (first example wins); the writer raises instead."""
+    from skyrl.train.sft_trainer import _write_tokenized_arrow
+
+    rows = [
+        {"input_ids": [1, 2], "loss_mask": [0, 1]},
+        {"input_ids": [3, 4], "loss_mask": [0, 1], "pixel_values": [[0.1]], "image_grid_thw": [[1, 1, 1]]},
+    ]
+    with pytest.raises(ValueError, match="inconsistent keys"):
+        _write_tokenized_arrow(iter(rows), str(tmp_path / "bad.arrow"))
+
+
+# NOTE: requires torchvision (via the fsdp extras); routed like the other VLM tests.
+@pytest.mark.vllm
+def test_vlm_rows_stream_to_arrow(vlm_processor, tmp_path):
+    """VLM tokenize output (torch image tensors) round-trips through the
+    streaming ArrowWriter with full parity to the Dataset.from_list path."""
+    from datasets import Dataset
+
+    from skyrl.train.sft_trainer import _write_tokenized_arrow, tokenize_chat_example
+
+    img = (
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    examples = [
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": f"prompt {i}"}, {"type": "image", "image": img}],
+                },
+                {"role": "assistant", "content": "Hello!"},
+            ]
+        }
+        for i in range(3)
+    ]
+    rows = [tokenize_chat_example(ex, vlm_processor.tokenizer, processor=vlm_processor) for ex in examples]
+    assert all(r is not None and "pixel_values" in r for r in rows)
+
+    shard = str(tmp_path / "vlm.arrow")
+    assert _write_tokenized_arrow(iter(rows), shard) == 3
+    streamed = list(Dataset.from_file(shard))
+    baseline = list(Dataset.from_list(rows))
+    assert streamed == baseline
+    assert all(row["pixel_values"] is not None for row in streamed)

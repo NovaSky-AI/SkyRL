@@ -105,14 +105,32 @@ def _write_tokenized_arrow(rows, shard_path: str) -> int:
     the full tokenized dataset is never resident in memory. Returns the
     number of rows written; on 0 rows no arrow file is finalized (there is
     no schema to write) and the caller must not read ``shard_path``.
+
+    Rows must share one key set: arrow schemas are inferred from the first
+    example, and rows whose keys differ (e.g. a dataset mixing text-only and
+    multimodal conversations, where only image rows carry ``pixel_values``)
+    would have the extra columns *silently dropped* -- by this writer and by
+    ``Dataset.from_list`` alike. Raising here turns that data loss into an
+    explicit error.
     """
     from datasets.arrow_writer import ArrowWriter
 
     written = 0
+    row_keys: Optional[frozenset] = None
     with ArrowWriter(path=shard_path, writer_batch_size=_TOKENIZE_WRITER_BATCH_ROWS) as writer:
+        # Flushed batches release their row references, allowing prior tokenized rows to be reclaimed.
         for row in rows:
             if row is None:
                 continue
+            keys = frozenset(row.keys())
+            if row_keys is None:
+                row_keys = keys
+            elif keys != row_keys:
+                raise ValueError(
+                    f"Tokenized rows have inconsistent keys: row {written} has {sorted(keys)} "
+                    f"vs {sorted(row_keys)} before it. Datasets mixing text-only and multimodal "
+                    f"rows cannot be cached without losing the image columns."
+                )
             writer.write(row)
             written += 1
         if written:
@@ -1089,13 +1107,12 @@ class SFTTrainer:
         :class:`MemoryMappedDataset` served from the arrow cache when caching
         is enabled, or a ``list`` when ``disable_cache=True``.
 
-        With caching enabled (text datasets), tokenization itself is also
-        memory-bounded: rows stream into arrow files in bounded batches
-        (per-worker shard files on the parallel path) instead of accumulating
-        in a list, so dataset size is limited by disk, not RAM. The
-        materializing fallbacks are ``disable_cache=True`` (no arrow file to
-        stream to) and VLM datasets (image tensors only round-trip through
-        ``Dataset.from_list``).
+        With caching enabled, tokenization itself is also memory-bounded:
+        rows (including VLM image tensors) stream into arrow files in bounded
+        batches (per-worker shard files on the parallel path) instead of
+        accumulating in a list, so dataset size is limited by disk, not RAM.
+        The materializing fallback is ``disable_cache=True`` (no arrow file
+        to stream to).
         """
         # Check cache first (unless disabled or force_recache)
         if not self.sft_cfg.disable_cache:
@@ -1166,22 +1183,19 @@ class SFTTrainer:
                     f"Found columns: {columns}"
                 )
 
-            # Materializing fallbacks: with caching disabled there is no arrow
-            # file to stream to (and to serve from), and VLM rows carry image
-            # tensors that only round-trip through Dataset.from_list.
-            if self.sft_cfg.disable_cache or self.is_vlm:
+            # Materializing fallback: with caching disabled there is no arrow
+            # file to stream to (or serve from), so rows stay an in-memory list.
+            if self.sft_cfg.disable_cache:
                 tokenized = [ex for ex in rows if ex is not None]
                 logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
-                if not self.sft_cfg.disable_cache:
-                    _save_to_cache(cache_path, tokenized)
-                    mmapped = _load_from_cache(cache_path)
-                    if mmapped is not None:
-                        return mmapped
                 return tokenized
 
             # Stream tokenize -> bounded arrow writes -> cache -> mmap: the
             # tokenized dataset is never resident in memory, so dataset size
-            # is bounded by disk, not RAM.
+            # is bounded by disk, not RAM. VLM rows stream like text: the
+            # processor's image tensors round-trip through ArrowWriter with
+            # full parity to Dataset.from_list (validated against Qwen3-VL
+            # output; see test_vlm_rows_stream_to_arrow).
             with tempfile.TemporaryDirectory(prefix="skyrl_tokenize_") as tmp_dir:
                 shard_path = os.path.join(tmp_dir, "data.arrow")
                 written = _write_tokenized_arrow(rows, shard_path)
