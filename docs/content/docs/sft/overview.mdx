@@ -157,6 +157,15 @@ are dropped; over-length VLM rows are always dropped rather than truncated). A
 `num_actions` column, window-form masks, and HuggingFace-style `labels` are
 rejected -- provide the full-sequence `loss_mask` instead.
 
+Pretokenized stores are **memory-mapped, not loaded into RAM**: schema validation
+runs eagerly at load time (vectorized, so malformed stores still fail fast),
+while row normalization happens lazily at access time. Controller memory stays
+bounded by the OS page cache regardless of dataset size, and the store files
+must stay on disk for the duration of the run. Set `dataloader_num_workers>=2`
+so the per-batch normalization is prefetched off the training critical path
+(measured: ~11 ms/step exposed at `dataloader_num_workers=0` vs ~1 ms hidden
+with 2 workers, against multi-second train steps).
+
 <Callout type="warn">
 `pretokenized_dataset_paths` cannot be combined with `train_datasets` /
 `train_dataset_splits` (nor `eval_pretokenized_dataset_paths` with
