@@ -425,6 +425,12 @@ def test_sample_prompt_logprobs(service_client):
     prompt_tokens = tok.encode("Question: what is 2+2?\nAnswer:", add_special_tokens=True)
     prompt = tinker_types.ModelInput.from_ints(prompt_tokens)
     params = tinker_types.SamplingParams(max_tokens=8, temperature=0.0, seed=0)
+    # vLLM's completions endpoint rejects n > 1 under greedy decoding ("n must
+    # be 1 when using greedy sampling"), so the multi-sample case below has to
+    # sample at a temperature. Prompt logprobs come off the prompt forward pass
+    # and don't depend on how the continuation is drawn, so this costs the
+    # assertions nothing; the seed keeps the run reproducible.
+    multi_params = tinker_types.SamplingParams(max_tokens=8, temperature=1.0, seed=0)
 
     def _check_flat(prompt_logprobs):
         # One entry per prompt token, flat (not a list of lists); position 0
@@ -440,7 +446,9 @@ def test_sample_prompt_logprobs(service_client):
     # num_samples=3: all three samples share one prompt, and only the first
     # asks vLLM for prompt logprobs — that's also the one the result is read
     # back from, so an off-by-one there returns None for the whole field.
-    result = sampler.sample(prompt=prompt, sampling_params=params, num_samples=3, include_prompt_logprobs=True).result()
+    result = sampler.sample(
+        prompt=prompt, sampling_params=multi_params, num_samples=3, include_prompt_logprobs=True
+    ).result()
     assert len(result.sequences) == 3
     _check_flat(result.prompt_logprobs)
     assert result.topk_prompt_logprobs is None, "top-k was not requested"
