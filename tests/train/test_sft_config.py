@@ -254,6 +254,13 @@ class TestLoraConfigOverrides:
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         assert skyrl_cfg.trainer.policy.model.lora.target_modules == "all-linear"
 
+    def test_lora_target_module_list_propagates(self):
+        cfg = _sft_cfg_from_overrides(
+            ["model.path=test/my-model", "model.lora.rank=16", "model.lora.target_modules=[q_a_proj]"]
+        )
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.model.lora.target_modules == ["q_a_proj"]
+
     def test_lora_disabled_by_default(self):
         cfg = _sft_cfg_from_overrides([])
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
