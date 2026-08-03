@@ -296,3 +296,138 @@ def test_find_single_requests_barrier_is_per_model(scheduling_engine):
         assert list(singles.keys()) == ["2", "5"]
         assert singles["2"][0] == "model_a"
         assert singles["5"][0] == "model_b"
+
+
+def add_futures(engine, specs) -> list[int]:
+    """Insert pending futures from (request_type, model_id, request_data) specs."""
+    with Session(engine.db_engine) as session:
+        rows = [
+            FutureDB(
+                request_type=request_type,
+                model_id=model_id,
+                request_data=request_data,
+                status=RequestStatus.PENDING,
+            )
+            for request_type, model_id, request_data in specs
+        ]
+        for row in rows:
+            session.add(row)
+        session.commit()
+        return [row.request_id for row in rows]
+
+
+def test_scan_pending_requests_returns_metadata_in_arrival_order(scheduling_engine):
+    """The scheduling scan sees only pending rows, ordered by request_id."""
+    engine = scheduling_engine
+    request_ids = add_futures(
+        engine,
+        [
+            (types.RequestType.FORWARD_BACKWARD, "model_a", {}),
+            (types.RequestType.OPTIM_STEP, "model_a", {}),
+            (types.RequestType.FORWARD, "model_b", {}),
+        ],
+    )
+
+    with Session(engine.db_engine) as session:
+        # Retire the middle request so it must drop out of the scan.
+        engine._complete_futures({str(request_ids[1]): types.OptimStepOutput(metrics={})})
+        pending = engine.scan_pending_requests(session)
+
+    assert [request.request_id for request in pending] == [request_ids[0], request_ids[2]]
+    assert [request.request_type for request in pending] == [
+        types.RequestType.FORWARD_BACKWARD,
+        types.RequestType.FORWARD,
+    ]
+    assert [request.model_id for request in pending] == ["model_a", "model_b"]
+
+
+def forward_backward_payload() -> dict:
+    return types.ForwardBackwardInput(
+        data=[
+            types.Datum(
+                model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
+                loss_fn_inputs=types.LossFnInputs(
+                    target_tokens=types.TensorData(data=[1, 2, 3]),
+                    weights=types.TensorData(data=[1.0, 1.0, 1.0]),
+                    advantages=types.TensorData(data=[0.0, 0.0, 0.0]),
+                    logprobs=types.TensorData(data=[0.0, 0.0, 0.0]),
+                ),
+            )
+        ],
+        loss_fn="cross_entropy",
+    ).model_dump(mode="json")
+
+
+def test_find_batchable_model_passes_stops_at_barrier(scheduling_engine):
+    """Passes queued behind an optim_step must not be dispatched with earlier ones."""
+    engine = scheduling_engine
+    payload = forward_backward_payload()
+    request_ids = add_futures(
+        engine,
+        [
+            (types.RequestType.FORWARD_BACKWARD, "model_a", payload),
+            (types.RequestType.OPTIM_STEP, "model_a", {}),
+            (types.RequestType.FORWARD_BACKWARD, "model_a", payload),
+            # model_b has no barrier, so its pass batches even though it arrived last
+            (types.RequestType.FORWARD_BACKWARD, "model_b", payload),
+        ],
+    )
+
+    with Session(engine.db_engine) as session:
+        batchable = engine.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD)
+
+    assert set(batchable) == {str(request_ids[0]), str(request_ids[3])}
+    # Payloads are fetched for the dispatched requests and parsed into inputs
+    model_id, request_data = batchable[str(request_ids[0])]
+    assert model_id == "model_a"
+    assert isinstance(request_data, types.ForwardBackwardInput)
+    assert request_data.data[0].loss_fn_inputs.target_tokens.data == [1, 2, 3]
+
+
+def sample_payload(checkpoint_id: str) -> dict:
+    return types.SampleInput(
+        prompt=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2])]),
+        sampling_params=types.SamplingParams(temperature=1.0, max_tokens=4, seed=0),
+        num_samples=1,
+        checkpoint_id=checkpoint_id,
+        prompt_logprobs=False,
+    ).model_dump(mode="json")
+
+
+def test_find_batchable_sample_keeps_one_checkpoint_per_model(scheduling_engine):
+    """checkpoint_id is read out of the payload in the database, not by loading prompts."""
+    engine = scheduling_engine
+    engine.config = EngineConfig(base_model=BASE_MODEL, backend="fsdp")
+    request_ids = add_futures(
+        engine,
+        [
+            (types.RequestType.SAMPLE, "model_a", sample_payload("ckpt_1")),
+            (types.RequestType.SAMPLE, "model_a", sample_payload("ckpt_2")),
+            (types.RequestType.SAMPLE, "model_a", sample_payload("ckpt_1")),
+            # Base-model requests carry an empty checkpoint_id and always batch
+            (types.RequestType.SAMPLE, "", sample_payload("")),
+        ],
+    )
+
+    with Session(engine.db_engine) as session:
+        batchable = engine.find_batchable_sample(session)
+
+    # ckpt_2 is held back so the batch loads a single checkpoint for model_a
+    assert set(batchable) == {str(request_ids[0]), str(request_ids[2]), str(request_ids[3])}
+    assert isinstance(batchable[str(request_ids[0])][1], types.SampleInput)
+    assert batchable[str(request_ids[0])][1].checkpoint_id == "ckpt_1"
+
+
+def test_scheduling_handles_more_requests_than_one_query_can_bind(scheduling_engine):
+    """Payload lookups are chunked, so a backlog past the bound-parameter cap works."""
+    from skyrl.tinker.engine import _MAX_IDS_PER_QUERY
+
+    engine = scheduling_engine
+    count = _MAX_IDS_PER_QUERY + 25
+    payload = forward_backward_payload()
+    add_futures(engine, [(types.RequestType.FORWARD_BACKWARD, "model_a", payload)] * count)
+
+    with Session(engine.db_engine) as session:
+        batchable = engine.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD)
+
+    assert len(batchable) == count

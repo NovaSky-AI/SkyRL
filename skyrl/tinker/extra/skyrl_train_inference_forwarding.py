@@ -5,7 +5,6 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
-from datetime import datetime, timezone
 
 import httpx
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -13,16 +12,18 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from skyrl.backends.renderer import render_model_input
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
+from skyrl.tinker.db_models import EngineStateDB, RequestStatus
+from skyrl.tinker.futures import complete_future
 from skyrl.utils.log import logger
 
 
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    def __init__(self, engine_config: EngineConfig, db_engine, future_waiter=None):
         self.engine_config = engine_config
         self.db_engine = db_engine
+        self.future_waiter = future_waiter
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
@@ -80,17 +81,11 @@ class SkyRLTrainInferenceForwardingClient:
             result_data = {"error": str(e), "status": "failed"}
             status = RequestStatus.FAILED
 
-        async with AsyncSession(self.db_engine) as session:
-            future = await session.get(FutureDB, request_id)
-            if future is None:
-                # Row was deleted between scheduling and completion (cancelled
-                # request, stale-session GC). Nothing to write back.
-                logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
-                return
-            future.result_data = result_data
-            future.status = status
-            future.completed_at = datetime.now(timezone.utc)
-            await session.commit()
+        written = await complete_future(self.db_engine, request_id, status, result_data, self.future_waiter)
+        if not written:
+            # Row was deleted between scheduling and completion (cancelled
+            # request, stale-session GC). Nothing to write back.
+            logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
         # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.

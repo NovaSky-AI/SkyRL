@@ -8,7 +8,8 @@ SkyRL's implementation of the [Tinker API](https://tinker-docs.thinkingmachines.
 - **`skyrl/tinker/engine.py`** -- Background subprocess (`TinkerEngine`). Polls DB, batches compatible requests, dispatches to backend.
 - **`skyrl/tinker/types.py`** -- Internal Pydantic models (distinct from API request/response models in `api.py`). `LOSS_TYPES` dict defines valid loss functions.
 - **`skyrl/tinker/config.py`** -- `EngineConfig` Pydantic model. `add_model()` auto-generates argparse flags from Pydantic fields.
-- **`skyrl/tinker/db_models.py`** -- SQLModel tables: `FutureDB`, `ModelDB`, `CheckpointDB`, `SessionDB`, `SamplingSessionDB`.
+- **`skyrl/tinker/db_models.py`** -- SQLModel tables: `FutureDB`, `ModelDB`, `CheckpointDB`, `SessionDB`, `SamplingSessionDB`. Also owns SQLite pragmas (`enable_sqlite_wal`), the JSON codec for payload columns (`json_engine_kwargs`), and `create_missing_indexes`.
+- **`skyrl/tinker/futures.py`** -- `FutureWaiter` (one shared batched poller backing every `retrieve_future` call) and `complete_future` (terminal result write-back).
 - **`skyrl/tinker/loss_fns.py`** -- JAX loss function implementations (cross_entropy, importance_sampling, ppo, cispo). Only used by the JAX backend.
 - **`skyrl/tinker/extra/`** -- `ExternalInferenceClient` for offloading sampling to external vLLM.
 - **`skyrl-agent/skyrl_agent/integrations/tinker/`** -- Agent-side Tinker integration (separate package).
@@ -47,7 +48,19 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 - `forward_backward` and `forward` requests are batched using look-ahead scheduling -- the engine groups all pending ops before the next barrier (`optim_step` or `load_weights`).
 - `sample` requests are batched ensuring one checkpoint_id per model_id per batch.
 - `optim_step`, `create_model`, `save_weights`, `load_weights` are processed individually and act as barriers.
-- DB uses SQLite WAL mode with `synchronous=NORMAL` and 30s busy timeout by default. Default DB path is `/tmp/skyrl_tinker/tinker.db` (node-local). `prepare_sqlite_path` in `db_models.py` creates missing parent dirs and warns if the SQLite file is on a network filesystem, where locking/WAL are unreliable.
+- DB uses SQLite WAL mode with `synchronous=NORMAL`, a 64 MB page cache, and 30s busy timeout by default. Default DB path is `/tmp/skyrl_tinker/tinker.db` (node-local). `prepare_sqlite_path` in `db_models.py` creates missing parent dirs and warns if the SQLite file is on a network filesystem, where locking/WAL are unreliable.
+
+### Keeping the DB off the critical path
+
+Request payloads are large (a `forward_backward` with 4x512 tokens is ~76 KiB of JSON), so this layer is easy to make accidentally quadratic. Three rules hold it in place:
+
+1. **Scheduling never loads payloads.** `TinkerEngine.scan_pending_requests` reads only `(request_id, model_id, request_type)` through the `ix_futures_pending_scan` covering index; `find_batchable_*` / `find_single_requests` decide what runs from that metadata, then fetch `request_data` for the chosen requests only. The main loop scans once per iteration and passes the result to all four finders. Loading full rows instead means deserializing the whole backlog every poll -- including requests parked behind a barrier that cannot run yet, which is the multi-LoRA steady state.
+2. **One shared poller for results.** `retrieve_future` awaits `FutureWaiter.wait`, which registers an asyncio future; a single background task resolves all of them with one `WHERE request_id IN (...)` query per tick. Polling per caller instead costs one query per in-flight request per tick. Results written by the API process itself (forwarded samples) call `FutureWaiter.notify` and skip the round trip entirely.
+3. **Payload columns use the fast JSON codec.** `json_engine_kwargs()` installs orjson when available (~7x faster encode, ~3x faster decode on numeric arrays) and falls back to the stdlib. Pass it to every `create_engine`/`create_async_engine` that touches these tables.
+
+Measure changes here with `skyrl/benchmarks/bench_tinker_db.py` (no GPU needed). It reports SQL statement and commit counts alongside timings, and tolerates an engine without `scan_pending_requests` so it can be run against an older checkout for comparison.
+
+Rejected deliberately: group-committing submissions. It measured only ~1.18x throughput once orjson removed the JSON encoding cost, and batching some endpoints while `save_weights`-style endpoints commit directly would reorder `request_id` allocation, which barrier scheduling depends on.
 
 ## Weight Sync Modes
 

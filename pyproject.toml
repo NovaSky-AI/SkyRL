@@ -43,6 +43,10 @@ tinker = [
     "aiosqlite",
     "asyncpg",
     "psycopg2-binary",
+    # JSON codec for request/result payload columns; see json_engine_kwargs in
+    # db_models.py. There is a stdlib fallback, but the numeric arrays these
+    # tables carry encode several times faster with orjson.
+    "orjson",
 ]
 
 ray = [
