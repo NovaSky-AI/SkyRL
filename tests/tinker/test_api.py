@@ -447,8 +447,9 @@ def test_sample_prompt_logprobs(service_client):
 
     # topk needs a full per-position distribution, which the JAX generator does
     # not produce; the request must fail loudly instead of silently dropping it.
-    # The SkyRL-Train backend (megatron/fsdp) does support it -- see
-    # tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_new_inference_generation.py.
+    # The SkyRL-Train backend (megatron/fsdp) does support it -- the full
+    # contract runs end-to-end on megatron + vLLM in
+    # tests/tinker/skyrl_train/test_multi_lora_megatron.py::test_sample_prompt_logprobs.
     with pytest.raises(ValueError, match="topk_prompt_logprobs is not supported"):
         sampling_client.sample(
             prompt=prompt,
