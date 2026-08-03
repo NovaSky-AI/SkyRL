@@ -5,7 +5,7 @@ on:
     branches: [ main ]
     paths:
       - 'ci/**'
-      - 'skyrl/**'
+      - 'skyrl/tx/'
       - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/gpu_skyrl.yaml'

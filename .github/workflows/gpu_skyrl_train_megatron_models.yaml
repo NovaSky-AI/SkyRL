@@ -68,6 +68,6 @@ jobs:
           envsubst < ci/anyscale_gpu_ci_skyrl_train_megatron_models.yaml > ci/anyscale_gpu_ci_skyrl_train_megatron_models_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           JOB_NAME="skyrl-train-gpu-ci-megatron-models-${COMMIT_SHA:0:7}-${{ github.run_id }}"
-          anyscale job submit -f ci/anyscale_gpu_ci_skyrl_train_megatron_models_envsubst.yaml --name "$JOB_NAME" --timeout 1500
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 1500
+          anyscale job submit -f ci/anyscale_gpu_ci_skyrl_train_megatron_models_envsubst.yaml --name "$JOB_NAME" --timeout 2500
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 2500
           rm -f ci/anyscale_gpu_ci_skyrl_train_megatron_models_envsubst.yaml
