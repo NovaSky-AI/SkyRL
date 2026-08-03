@@ -107,11 +107,11 @@ class SkyRLLoraConfig(BaseConfig):
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
     Must be accessible to all workers in distributed setups."""
-    target_modules: str = "all-linear"
+    target_modules: Union[str, List[str]] = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module list
     on Megatron. A list of specific module names can be given instead."""
-    exclude_modules: Optional[str] = None
+    exclude_modules: Optional[Union[str, List[str]]] = None
     """Modules to exclude from LoRA."""
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
@@ -1544,6 +1544,9 @@ class TrainerConfig(BaseConfig):
                     "`trainer.policy.model.bitsandbytes_4bit.enabled=True` requires "
                     "`trainer.policy.model.lora.rank > 0` for QLoRA."
                 )
+
+        if self.ref.model.bitsandbytes_4bit.enabled and self.strategy != "fsdp":
+            raise ValueError("`trainer.ref.model.bitsandbytes_4bit` is only supported with FSDP.")
 
         if self.logprobs_chunk_size is not None and (
             not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0
