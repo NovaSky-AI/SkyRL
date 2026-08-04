@@ -167,6 +167,9 @@ def _get_local_router_layer_indices(model_config, global_num_layers: int, instan
     if local_num_layers == len(instances):
         layer_indices = list(range(local_layer_offset, local_layer_offset + local_num_layers))
     else:
+        # Dense-layer mismatch: map each MoE router to its global layer index.
+        # Prefer the patched layer_number; fall back to offset-based mapping
+        # (assumes dense layers precede MoE layers).
         layer_indices = []
         for local_router_index, router_instance in enumerate(instances):
             layer_number = getattr(router_instance, "layer_number", None)
