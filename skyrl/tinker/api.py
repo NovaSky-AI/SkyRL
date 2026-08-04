@@ -5,7 +5,6 @@ import re
 import shutil
 import signal
 import threading
-import time
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
@@ -24,7 +23,6 @@ from pydantic import (
     model_validator,
 )
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -46,6 +44,7 @@ from skyrl.tinker.extra import (
     ExternalInferenceClient,
     SkyRLTrainInferenceForwardingClient,
 )
+from skyrl.tinker.futures import FutureWaiter
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
 
@@ -57,6 +56,9 @@ API_SERVER_STARTUP_ARGS = ["-m", "skyrl.tinker.api"]
 
 # Timeout for graceful shutdown when engine crashes
 SHUTDOWN_TIMEOUT_SECONDS = 10
+
+# How long retrieve_future waits for a result before returning 408
+RETRIEVE_FUTURE_TIMEOUT_SECONDS = 300
 
 
 def _get_parent_uv_run_args(parent_cmd: list[str]) -> list[str]:
@@ -115,6 +117,9 @@ async def lifespan(app: FastAPI):
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+
+    app.state.future_waiter = FutureWaiter(app.state.db_engine)
+    await app.state.future_waiter.start()
 
     # Setup external inference client if configured.
     #
@@ -188,6 +193,8 @@ async def lifespan(app: FastAPI):
 
     shutting_down = True
     monitor_task.cancel()
+
+    await app.state.future_waiter.stop()
 
     # Close the forwarding client's persistent httpx connection pool if we
     # installed one. Cheap no-op when external_inference_client doesn't own
@@ -1160,47 +1167,21 @@ class RetrieveFutureRequest(BaseModel):
 @app.post("/api/v1/retrieve_future")
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
-    timeout = 300  # 5 minutes
-    deadline = time.perf_counter() + timeout
+    try:
+        result = await req.app.state.future_waiter.wait(int(request.request_id), RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Future not found")
 
-    # Start with 100ms, grow to 1s
-    poll = 0.1
-    max_poll = 1.0
+    if result is None:
+        raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
-    while time.perf_counter() < deadline:
-        try:
-            async with AsyncSession(req.app.state.db_engine) as session:
-                # First, only query the status to avoid deserializing JSON data
-                statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
-                result = await session.exec(statement)
-                status = result.first()
+    if result.status == RequestStatus.COMPLETED:
+        return result.result_data
 
-                if not status:
-                    raise HTTPException(status_code=404, detail="Future not found")
-
-                # Only fetch full record if status is terminal (completed or failed)
-                if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
-                    statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
-                    result = await session.exec(statement)
-                    future = result.first()
-
-                    if future.status == RequestStatus.COMPLETED:
-                        return future.result_data
-
-                    if future.status == RequestStatus.FAILED:
-                        # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                        if future.result_data and "error" in future.result_data:
-                            raise HTTPException(status_code=400, detail=future.result_data["error"])
-                        else:
-                            raise HTTPException(status_code=500, detail="Unknown error")
-        except SATimeoutError:
-            pass
-
-        # Exponential backoff
-        await asyncio.sleep(poll)
-        poll = min(poll * 1.5, max_poll)
-
-    raise HTTPException(status_code=408, detail="Timeout waiting for result")
+    # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+    if result.result_data and "error" in result.result_data:
+        raise HTTPException(status_code=400, detail=result.result_data["error"])
+    raise HTTPException(status_code=500, detail="Unknown error")
 
 
 @app.post("/api/v1/telemetry", response_model=TelemetryResponse)

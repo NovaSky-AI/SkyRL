@@ -1,0 +1,158 @@
+"""Tests for the shared future waiter and the completion write path."""
+
+import asyncio
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlmodel import Session, SQLModel, create_engine
+
+from skyrl.tinker import types
+from skyrl.tinker.db_models import (
+    FutureDB,
+    RequestStatus,
+    enable_sqlite_wal,
+    get_async_database_url,
+)
+from skyrl.tinker.futures import FutureWaiter
+
+
+@pytest.fixture()
+def db_url(tmp_path):
+    """A file-backed SQLite database with the schema created.
+
+    A file rather than :memory: so the sync and async engines below see the same
+    database.
+    """
+    url = f"sqlite:///{tmp_path / 'tinker.db'}"
+    sync_engine = create_engine(url)
+    enable_sqlite_wal(sync_engine)
+    SQLModel.metadata.create_all(sync_engine)
+    sync_engine.dispose()
+    return url
+
+
+@pytest.fixture()
+def sync_engine(db_url):
+    engine = create_engine(db_url)
+    enable_sqlite_wal(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest_asyncio.fixture()
+async def async_engine(db_url):
+    engine = create_async_engine(get_async_database_url(db_url))
+    enable_sqlite_wal(engine.sync_engine)
+    yield engine
+    await engine.dispose()
+
+
+def insert_pending(sync_engine, count: int = 1) -> list[int]:
+    """Insert ``count`` pending futures, returning their request_ids."""
+    with Session(sync_engine) as session:
+        rows = [
+            FutureDB(
+                request_type=types.RequestType.SAMPLE,
+                model_id="model_a",
+                request_data={"checkpoint_id": ""},
+                status=RequestStatus.PENDING,
+            )
+            for _ in range(count)
+        ]
+        for row in rows:
+            session.add(row)
+        session.commit()
+        return [row.request_id for row in rows]
+
+
+def mark_completed(sync_engine, request_id: int, result_data: dict, status=RequestStatus.COMPLETED) -> None:
+    with Session(sync_engine) as session:
+        row = session.get(FutureDB, request_id)
+        row.result_data = result_data
+        row.status = status
+        session.commit()
+
+
+@pytest_asyncio.fixture()
+async def waiter(async_engine):
+    # Poll fast so tests do not have to wait on the production interval.
+    instance = FutureWaiter(async_engine, poll_interval_sec=0.01)
+    await instance.start()
+    yield instance
+    await instance.stop()
+
+
+@pytest.mark.asyncio
+async def test_wait_returns_result_once_completed(waiter, sync_engine):
+    request_id = insert_pending(sync_engine)[0]
+
+    async def complete_soon():
+        await asyncio.sleep(0.05)
+        mark_completed(sync_engine, request_id, {"sequences": []})
+
+    asyncio.create_task(complete_soon())
+    result = await waiter.wait(request_id, timeout=5)
+
+    assert result is not None
+    assert result.status == RequestStatus.COMPLETED
+    assert result.result_data == {"sequences": []}
+
+
+@pytest.mark.asyncio
+async def test_wait_surfaces_failed_status(waiter, sync_engine):
+    request_id = insert_pending(sync_engine)[0]
+    mark_completed(sync_engine, request_id, {"error": "boom"}, status=RequestStatus.FAILED)
+
+    result = await waiter.wait(request_id, timeout=5)
+
+    assert result.status == RequestStatus.FAILED
+    assert result.result_data == {"error": "boom"}
+
+
+@pytest.mark.asyncio
+async def test_wait_raises_for_unknown_request(waiter):
+    with pytest.raises(KeyError):
+        await waiter.wait(123456, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_wait_returns_none_on_timeout(waiter, sync_engine):
+    request_id = insert_pending(sync_engine)[0]
+
+    assert await waiter.wait(request_id, timeout=0.05) is None
+
+
+@pytest.mark.asyncio
+async def test_many_waiters_share_one_query_per_poll(waiter, sync_engine):
+    """The whole point of the shared poller: load must not scale with waiters."""
+    request_ids = insert_pending(sync_engine, count=50)
+
+    statements = []
+    from sqlalchemy import event
+
+    @event.listens_for(waiter._db_engine.sync_engine, "before_cursor_execute")
+    def _count(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    tasks = [asyncio.create_task(waiter.wait(request_id, timeout=5)) for request_id in request_ids]
+    # Let several poll iterations run while every request is still pending.
+    await asyncio.sleep(0.1)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 50 waiters over several ticks would be hundreds of statements if each
+    # polled on its own; batched it is one per tick.
+    assert 0 < len(statements) < 50
+
+
+@pytest.mark.asyncio
+async def test_multiple_waiters_on_same_request_all_resolve(waiter, sync_engine):
+    request_id = insert_pending(sync_engine)[0]
+    mark_completed(sync_engine, request_id, {"ok": True})
+
+    results = await asyncio.gather(*(waiter.wait(request_id, timeout=5) for _ in range(3)))
+
+    assert all(result.result_data == {"ok": True} for result in results)
