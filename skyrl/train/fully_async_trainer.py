@@ -30,7 +30,10 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.backends.skyrl_train.utils.ppo_utils import LOSSES_WITH_OLD_LOGPROBS, PolicyLossType
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    LOSSES_WITH_OLD_LOGPROBS,
+    PolicyLossType,
+)
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
@@ -387,13 +390,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
-        # Fully-async training must optimize against ROLLOUT logprobs: the sampler lags the trainer
-        # by up to max_staleness_steps, and stale policies are not kept around to recompute "old"
-        # logprobs. `cispo` is anchor-dependent, so this is anchor-aware rather than a static
-        # membership in LOSSES_WITH_OLD_LOGPROBS (which is keyed by policy_loss_type and cannot
-        # distinguish the two CISPO anchors) -- mirrors RayPPOTrainer._skip_policy_forward. With
-        # cispo.cispo_anchor="rollout" the ratio anchors on pi_rollout (the clamped counterpart of
-        # rollout_is) and never reads the old logprobs, so it is safe under async.
+        # Ensure we're using a policy loss that doesn't depend on pi_old ~= pi_rollout
         loss_type = self.cfg.trainer.algorithm.policy_loss_type
         if loss_type == PolicyLossType.CISPO and self.cfg.trainer.algorithm.cispo.cispo_anchor == "rollout":
             optimizes_against_rollout = True
