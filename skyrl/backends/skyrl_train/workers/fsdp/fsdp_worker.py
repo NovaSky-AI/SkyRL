@@ -152,7 +152,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         is_multimodal = hasattr(model_config, "vision_config") and model_config.vision_config is not None
         self._is_multimodal_lm_only = self.cfg.policy.language_model_only and is_multimodal
         use_meta = should_use_meta_init(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=not model_config.tie_word_embeddings,
+            mesh=self.strategy.device_mesh,
         )
 
         wrapped_model = HFModelWrapper(
@@ -228,12 +229,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     ):
         """Collect LoRA parameters, save and call inference engine to load."""
         import json
-        from dataclasses import asdict
 
         from safetensors.torch import save_file
 
         from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
             collect_lora_params,
+            serialize_peft_config,
         )
 
         lora_params = collect_lora_params(module=self.model.model)
@@ -241,14 +242,15 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
-            peft_config = asdict(peft_model.peft_config.get("default", {}))
-            peft_config["task_type"] = peft_config["task_type"].value
-            peft_config["peft_type"] = peft_config["peft_type"].value
-            peft_config["target_modules"] = list(peft_config["target_modules"])
+            peft_config = serialize_peft_config(peft_model.peft_config["default"])
 
             # Save LoRA parameters and config
             save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))
-            with io.open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+            with io.open(
+                os.path.join(lora_sync_path, "adapter_config.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
             # Send LoRA disk loading request to inference engine.
@@ -361,7 +363,8 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         use_meta = should_use_meta_init(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=not model_config.tie_word_embeddings,
+            mesh=self.strategy.device_mesh,
         )
 
         critic = get_llm_for_sequence_regression(
@@ -426,7 +429,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         use_meta = should_use_meta_init(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=not model_config.tie_word_embeddings,
+            mesh=self.strategy.device_mesh,
         )
 
         wrapped_model = HFModelWrapper(
