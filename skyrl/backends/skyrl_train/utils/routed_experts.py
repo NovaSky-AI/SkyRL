@@ -32,4 +32,3 @@ def compact_routed_expert_indices(routed_experts: RoutedExpertIndices) -> Routed
     if not compact.flags.writeable:
         compact = compact.copy(order="C")
     return compact
-

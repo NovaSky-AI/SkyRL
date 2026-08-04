@@ -3,6 +3,7 @@ import sys
 import types
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -10,7 +11,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     build_token_metadata_layout,
 )
 from skyrl.backends.skyrl_train.utils import replay_utils
-from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
+from skyrl.backends.skyrl_train.utils.replay_utils import (
+    make_replay_padding_indices,
+    make_replay_padding_indices_np,
+)
 
 
 @pytest.fixture
@@ -64,6 +68,24 @@ def test_replay_padding_indices_are_unique(dtype):
 
     assert padding.shape == (2, 3, 4, 3)
     assert torch.equal(padding, torch.tensor([0, 1, 2], dtype=dtype).expand_as(padding))
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.int16, np.int32])
+def test_numpy_replay_padding_matches_torch(dtype):
+    torch_dtype = getattr(torch, np.dtype(dtype).name)
+    padding = make_replay_padding_indices_np((2, 3, 4, 3), dtype=np.dtype(dtype))
+
+    assert padding.dtype == dtype
+    assert torch.equal(
+        torch.from_numpy(padding),
+        make_replay_padding_indices((2, 3, 4, 3), dtype=torch_dtype),
+    )
+
+
+@pytest.mark.parametrize("shape", [(), (2, 3, 4, 0)])
+def test_numpy_replay_padding_rejects_missing_topk(shape):
+    with pytest.raises(ValueError, match="positive topk"):
+        make_replay_padding_indices_np(shape, dtype=np.dtype(np.uint8))
 
 
 def test_replay_has_no_dispatcher_specific_patch():

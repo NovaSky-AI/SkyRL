@@ -10,7 +10,6 @@ from argparse import Namespace
 from typing import List, Optional, Tuple
 
 import httpx
-import numpy as np
 import orjson
 import uvicorn
 import vllm.envs as envs
@@ -35,14 +34,12 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     find_and_reserve_port,
     get_node_ip,
 )
-from skyrl.backends.skyrl_train.inference_servers.logprobs_wire import (
+from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
     build_logprobs_content,
-)
-from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
-from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
     pack_routed_experts,
 )
+from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.env_vars import (
     SKYRL_HTTP_CONNECTION_LIMIT,
     SKYRL_VLLM_DP_PORT_OFFSET,
@@ -456,7 +453,7 @@ class VLLMServerActor(ServerActorProtocol):
 
             routed_experts = None
             if resp.routed_experts is not None:
-                routed_experts = pack_routed_experts(np.asarray(resp.routed_experts))
+                routed_experts = pack_routed_experts(resp.routed_experts)
 
             payload = {
                 "choices": [

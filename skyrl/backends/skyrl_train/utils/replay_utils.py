@@ -4,6 +4,7 @@ Utility functions for MoE Router Replay.
 
 from contextlib import contextmanager
 
+import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
@@ -41,6 +42,23 @@ def make_replay_padding_indices(
         raise ValueError(f"Replay route padding requires a positive topk dimension, got {shape}")
     padding_row = _replay_padding_row(shape[-1], dtype=dtype, device=device)
     return padding_row.expand(shape).clone()
+
+
+def make_replay_padding_indices_np(shape: tuple[int, ...], *, dtype: np.dtype) -> np.ndarray:
+    """NumPy sibling of :func:`make_replay_padding_indices`.
+
+    Preprocessing builds the padded route array in NumPy before handing it to
+    ``torch.from_numpy``, so it needs the same distinct-expert padding rows
+    without a round trip through torch.
+    """
+    if not shape:
+        raise ValueError(f"Replay route padding requires a positive topk dimension, got {shape}")
+    topk = shape[-1]
+    if topk < 1:
+        raise ValueError(f"Replay route padding requires a positive topk dimension, got {topk}")
+    padded = np.empty(shape, dtype=dtype)
+    padded[...] = np.arange(topk, dtype=dtype)
+    return padded
 
 
 def patch_topk_router_layer_number():

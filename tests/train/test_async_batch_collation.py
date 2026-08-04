@@ -13,6 +13,7 @@ import torch
 
 from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
 from skyrl.train.dataset.collators import DefaultCollator, PackedDataCollator
+from skyrl.train.dataset.sft_dataset import TextDataset
 from skyrl.train.sft_trainer import SFTTrainer
 from skyrl.train.utils.async_batch_collator import AsyncBatchCollator
 
@@ -140,7 +141,7 @@ def _run_pair(monkeypatch, collator_factory, n_examples, batch_size, num_steps):
         cfg.async_batch_collation = collate_ahead_on
         tokenized = copy.deepcopy(base)
         trainer = _make_trainer(cfg, collator_factory(cfg))
-        monkeypatch.setattr(trainer, "load_dataset", lambda: (tokenized, [len(tokenized)]))
+        monkeypatch.setattr(trainer, "load_dataset", lambda: TextDataset(tokenized))
         monkeypatch.setattr(trainer, "load_eval_datasets", lambda: None)
         return _capture_batches(trainer, monkeypatch)
 
@@ -203,7 +204,7 @@ def test_checkpoint_state_excludes_collated_ahead_batch(monkeypatch):
     cfg.ckpt_interval = 1
     data = _distinct_tokenized(6)
     trainer = _make_trainer(cfg, DefaultCollator(MagicMock(pad_token_id=0), micro_train_batch_size_per_gpu=1))
-    monkeypatch.setattr(trainer, "load_dataset", lambda: (copy.deepcopy(data), [len(data)]))
+    monkeypatch.setattr(trainer, "load_dataset", lambda: TextDataset(copy.deepcopy(data)))
     monkeypatch.setattr(trainer, "load_eval_datasets", lambda: None)
     monkeypatch.setattr(trainer, "load_checkpoint", lambda: 0)
 

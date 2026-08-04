@@ -47,6 +47,44 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
 _PP_SEED_OFFSET = 100
 
 
+def _stage_async_request_to_host(async_request):
+    """Run an async checkpoint request's GPU->host staging in *this* process.
+
+    Megatron's ``PersistentAsyncCaller`` pickles the whole ``AsyncRequest`` to a
+    spawned worker and calls ``preload_fn`` *there*, so the still-on-GPU shards
+    cross the process boundary via CUDA IPC.
+
+    That can break under ``expandable_segments:True`` -- which SkyRL turns on for
+    training workers (see ``Worker._set_expandable_segments``). Expandable
+    segments are ``cuMemCreate``-backed, and their shareable handle is a POSIX
+    file descriptor rather than a copyable ``cudaIpcMemHandle_t``, so the
+    importing process has to pull the fd out of the producer with
+    ``pidfd_getfd``. That syscall requires ptrace-attach permission.
+    The checkpoint worker is a child of the training rank,
+    so it can error out with ``pidfd_getfd: Operation not permitted`` on machines
+    with restricted ptrace permissions and the training rank
+    then hangs forever on the preload barrier.
+
+    Staging here avoids CUDA IPC altogether: only CPU tensors get pickled to the
+    worker, and those cross by fd-passing over a unix socket, which needs no ptrace
+    permission. Reference:
+    https://github.com/NVIDIA/Megatron-LM/blob/b78cfd5279be41ced082d344e9380a09a146c458/megatron/core/dist_checkpointing/strategies/async_utils.py#L578-L584
+
+    Takes and returns an ``AsyncRequest``; both the ``mcore`` and ``nvrx`` request types
+    are named tuples with the same ``async_fn_args``/``preload_fn`` fields. The attribute
+    access is deliberately unguarded so a future upstream change to that contract fails
+    loudly here rather than silently restoring the hang.
+    """
+    if async_request.preload_fn is None:
+        return async_request
+    args = list(async_request.async_fn_args)
+    # ``preload_fn`` stages ``async_fn_args[1]`` (the write buckets); Megatron
+    # asserts the same arity in ``AsyncRequest.execute_sync``.
+    assert len(args) == 3, f"expected 3 async_fn_args, got {len(args)}: {args!r}"
+    args[1] = async_request.preload_fn()
+    return async_request._replace(async_fn_args=tuple(args), preload_fn=None)
+
+
 def _patched_update_fp32_params_by_new_state(self):
     """Monkeypatch for megatron-core HybridDeviceOptimizer._update_fp32_params_by_new_state.
 
@@ -321,6 +359,10 @@ class MegatronStrategy(DistributedStrategy):
             )
             if async_save:
                 # Shards are staged to host; the disk write runs in the background.
+                if self.megatron_config.async_save_prestage_to_cpu:
+                    # Keeps GPU tensors from crossing the process boundary, which the writer
+                    # cannot always do -- see `_stage_async_request_to_host`.
+                    async_save_request = _stage_async_request_to_host(async_save_request)
                 ckpt_base.async_calls.schedule_async_request(async_save_request)
             else:
                 assert async_save_request is None, "save() must not return a request when sync"

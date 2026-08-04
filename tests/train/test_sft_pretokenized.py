@@ -396,9 +396,9 @@ def test_trainer_load_dataset_routes_to_pretokenized(tmp_path):
     trainer = SFTTrainer(cfg)
 
     # No tokenizer / workers needed: the pretokenized path never tokenizes.
-    tokenized, dataset_lengths = trainer.load_dataset()
+    tokenized = trainer.load_dataset()
     assert len(tokenized) == 2
-    assert dataset_lengths == [2]
+    assert list(tokenized.sequence_lengths) == [5, 3]
     eval_sets = trainer.load_eval_datasets()
     assert len(eval_sets) == 1
     eval_name, eval_tokenized = eval_sets[0]
@@ -422,12 +422,13 @@ def test_trainer_concatenates_multiple_pretokenized_stores(tmp_path):
     assert cfg.train_dataset_weights == [0.5, 0.5]
 
     trainer = SFTTrainer(cfg)
-    tokenized, dataset_lengths = trainer.load_dataset()
+    tokenized = trainer.load_dataset()
     assert len(tokenized) == 3
-    assert dataset_lengths == [2, 1]
+    assert tokenized.dataset_lengths == [2, 1]
+    assert list(tokenized.sequence_lengths) == [5, 3, 5]
 
     # Multiple sources -> DataMixingSampler configured from the store lengths.
-    sampler = trainer.build_train_sampler(tokenized, dataset_lengths)
+    sampler = trainer.build_train_sampler(tokenized)
     assert sampler is not None
     assert len(list(iter(sampler))) > 0
 
@@ -519,3 +520,25 @@ def test_validate_cfg_eval_interval_requires_some_eval_dataset():
     cfg = SFTConfig(eval_interval=10)
     with pytest.raises(ValueError, match="eval_interval"):
         validate_sft_cfg(cfg)
+
+
+def test_concat_dataset_batched_fetch_delegates_and_preserves_order(tmp_path):
+    from skyrl.train.dataset.sft_dataset import ConcatSFTDataset
+
+    path_a = str(tmp_path / "store_a.parquet")
+    path_b = str(tmp_path / "store_b.parquet")
+    Dataset.from_list(_rows()).to_parquet(path_a)
+    Dataset.from_list(_rows()[:1]).to_parquet(path_b)
+    concat = ConcatSFTDataset([load_from_pretokenized(path_a), load_from_pretokenized(path_b)])
+
+    calls = []
+    for source in concat.datasets:
+        original = source.__getitems__
+        source.__getitems__ = lambda idx, _orig=original: calls.append(len(idx)) or _orig(idx)
+
+    # Interleaved across the source boundary (global index 2 = store_b row 0),
+    # with a repeat; rows must come back in the requested order.
+    rows = concat.__getitems__([2, 0, 1, 0])
+    assert [r["input_ids"] for r in rows] == [[1, 2, 3, 4, 5], [1, 2, 3, 4, 5], [6, 7, 8], [1, 2, 3, 4, 5]]
+    # One batched call per touched source, not one call per row.
+    assert sorted(calls) == [1, 3]

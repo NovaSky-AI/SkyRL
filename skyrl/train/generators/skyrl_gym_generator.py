@@ -23,6 +23,7 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
     InferenceEngineInterface,
 )
+from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -36,7 +37,6 @@ from skyrl.train.generators.utils import (
     get_generation_prompt_ids,
     get_rollout_metrics,
 )
-from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
 

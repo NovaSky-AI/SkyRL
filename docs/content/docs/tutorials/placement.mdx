@@ -75,6 +75,20 @@ To give policy and reference their own GPUs
 also consider `trainer.policy.fsdp_config.cpu_offload=true`.
 </Callout>
 
+## CPU Offloading vs. Colocation Offloading
+
+These are two different mechanisms, and it is easy to conflate them.
+
+`trainer.policy.fsdp_config.cpu_offload` (and its critic/ref equivalents) is FSDP's own
+[offload policy](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html): parameter
+and optimizer state live in CPU memory, and parameters are copied to GPU for each model forward pass.
+
+Colocation offloading is SkyRL's own mechanism: in certain colocation settings SkyRL offloads worker
+state itself, but only *after* the training step / log probability computation. The optimizer step
+and model forward pass still run against sharded parameters resident on GPU.
+
+So enabling colocation does not imply `cpu_offload`, and `cpu_offload` is not what SkyRL does between phases under colocation. 
+
 ## Hardware Configuration
 
 Finally, the configuration for specifying node and GPU counts for each model (along with their default values) is as follows:

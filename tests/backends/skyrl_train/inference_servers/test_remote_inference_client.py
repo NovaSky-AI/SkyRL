@@ -16,13 +16,13 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
+from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
+    pack_routed_experts,
+)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
     PauseMode,
     RemoteInferenceClient,
-)
-from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
-    pack_routed_experts,
 )
 from skyrl.backends.skyrl_train.inference_servers.setup import (
     build_new_inference_client,

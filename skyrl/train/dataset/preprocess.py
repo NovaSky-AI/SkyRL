@@ -6,9 +6,8 @@ import torch
 from jaxtyping import Bool, Float, Integer
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
+from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices_np
 from skyrl.backends.skyrl_train.utils.routed_experts import (
-    ROUTED_EXPERT_DTYPES,
     RoutedExpertIndices,
     compact_routed_expert_indices,
 )
@@ -240,11 +239,6 @@ def convert_prompts_responses_to_batch_tensors(
                     f"rollout_expert_indices entries must be NumPy arrays, got {type(sample_indices).__name__} "
                     f"at sample {sample_index}"
                 )
-            if sample_indices.dtype not in ROUTED_EXPERT_DTYPES:
-                raise TypeError(
-                    f"Unsupported routed expert dtype {sample_indices.dtype} at sample {sample_index}; "
-                    "expected uint8, int16, or int32"
-                )
             canonical_indices.append(compact_routed_expert_indices(sample_indices))
 
         first_shape = canonical_indices[0].shape
@@ -255,8 +249,10 @@ def convert_prompts_responses_to_batch_tensors(
             raise ValueError("rollout_expert_indices must contain at least one expert per layer")
 
         batch_dtype = max((indices.dtype for indices in canonical_indices), key=lambda dtype: dtype.itemsize)
-        padded = np.empty((num_samples, max_total, num_layers, topk), dtype=batch_dtype)
-        padded[...] = np.arange(topk, dtype=batch_dtype)
+        padded = make_replay_padding_indices_np(
+            (num_samples, max_total, num_layers, topk),
+            dtype=batch_dtype,
+        )
         for sample_index, sample_indices in enumerate(canonical_indices):
             if sample_indices.ndim != 3 or sample_indices.shape[1:] != (num_layers, topk):
                 raise ValueError(

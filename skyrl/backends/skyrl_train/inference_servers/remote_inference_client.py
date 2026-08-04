@@ -73,7 +73,7 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
 )
-from skyrl.backends.skyrl_train.inference_servers.routed_experts_wire import (
+from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     decode_packed_routed_experts,
 )
 from skyrl.env_vars import (

@@ -157,18 +157,44 @@ def test_routed_expert_tensor_rejects_nested_lists(tokenizer):
 
 
 @pytest.mark.parametrize("dtype", [np.uint16, np.int64])
-def test_routed_expert_tensor_rejects_unsupported_dtypes(tokenizer, dtype):
+def test_routed_expert_tensor_narrows_wide_dtypes(tokenizer, dtype):
+    """Wide dtypes are compacted, not rejected.
+
+    The wire decoder already restricts routes to uint8/int16/int32, so this path
+    only sees a wide dtype from a hand-built generator -- narrowing it is more
+    useful than refusing it.
+    """
     routes = np.asarray([[[1, 2]], [[3, 4]]], dtype=dtype)
 
-    with pytest.raises(TypeError, match="Unsupported routed expert dtype"):
-        convert_prompts_responses_to_batch_tensors(
-            tokenizer,
-            prompts=[[10]],
-            responses=[[11]],
-            rewards=[[0.0]],
-            loss_masks=[[1]],
-            rollout_expert_indices=[routes],
-        )
+    *_, routed = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts=[[10]],
+        responses=[[11]],
+        rewards=[[0.0]],
+        loss_masks=[[1]],
+        rollout_expert_indices=[routes],
+    )
+
+    assert routed.dtype == torch.uint8
+    assert routed.tolist() == [[[[1, 2]], [[3, 4]]]]
+
+
+def test_routed_expert_tensor_retightens_after_truncation(tokenizer):
+    """A truncated array can fit a narrower dtype than the wire declared."""
+    # int16 on the wire because of the trailing 300, which truncation then drops.
+    routes = np.asarray([[[1, 2]], [[3, 4]], [[300, 5]]], dtype=np.int16)
+
+    *_, routed = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts=[[10]],
+        responses=[[11]],
+        rewards=[[0.0]],
+        loss_masks=[[1]],
+        rollout_expert_indices=[routes[:2]],
+    )
+
+    assert routed.dtype == torch.uint8
+    assert routed.tolist() == [[[[1, 2]], [[3, 4]]]]
 
 
 def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):
