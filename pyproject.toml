@@ -255,6 +255,7 @@ transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "buil
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+vllm = { MAX_JOBS = "16" }
 
 
 [[tool.uv.index]]
