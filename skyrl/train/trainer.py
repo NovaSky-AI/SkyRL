@@ -1,6 +1,7 @@
 import math
 import os
 import shutil
+import time
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -80,6 +81,7 @@ from skyrl.train.utils.callbacks import (
     TrainingCallback,
     TrainingControl,
 )
+from skyrl.train.utils.metrics import ScalarGauges
 from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
@@ -142,6 +144,9 @@ class RayPPOTrainer:
 
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
+        # Step start/end timestamps. global_step and epoch already reach Prometheus via the Tracking.log mirror.
+        self._step_gauges = ScalarGauges()
+
         # trajectory logger is installed after construction if needed
         self.trajectory_logger: TrajectoryLogger = None
 
@@ -166,6 +171,12 @@ class RayPPOTrainer:
         self._num_training_gpus = (
             cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
         )
+
+    def _mark_step_start(self) -> None:
+        self._step_gauges.set("skyrl_step_start_unixtime", time.time(), "Wall-clock start of the current step.")
+
+    def _mark_step_end(self) -> None:
+        self._step_gauges.set("skyrl_step_end_unixtime", time.time(), "Wall-clock end of the last committed step.")
 
     def add_callback(self, callback: TrainingCallback) -> None:
         """Register a callback. Events fired after this call reach the new callback."""
@@ -332,6 +343,7 @@ class RayPPOTrainer:
                     if not step_started:
                         self._fire("on_step_start")
                         step_started = True
+                        self._mark_step_start()
                         # Open the train-rollout metrics window once per logical
                         # step; paused so only the generation spans count toward the
                         # throughput denominator (dynamic sampling may generate more
@@ -536,6 +548,7 @@ class RayPPOTrainer:
                     self._fire("on_log", logs=log_payload)
 
                     self.tracker.log(log_payload, step=self.global_step, commit=True)
+                    self._mark_step_end()
                     self.all_metrics = {}
                     self.all_timings = {}
 
