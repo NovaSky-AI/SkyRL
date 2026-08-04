@@ -1,0 +1,132 @@
+---
+title: "Using Custom Samplers"
+---
+
+`SFTTrainer` feeds the training loop from a
+[`StatefulDataLoader`](https://pytorch.org/data/main/stateful_dataloader.html),
+and the sampler decides the order in which examples are visited. The sampling
+position is written into each checkpoint (`data.pt`), so a `resume_from` run
+continues from the exact next example of the in-progress epoch. This page covers
+the built-in samplers and how to plug in your own.
+
+## Built-in samplers
+
+Select a sampler with the `sampler` flag:
+
+- `sampler=random` (default) -- reshuffles every epoch using `seed`. The
+  in-progress epoch resumes bit-exactly; later epochs are re-shuffled into a
+  valid (but not byte-identical) order, matching the RL trainer. With multiple
+  `train_datasets` this switches to weighted per-source mixing (see
+  [Mixing Multiple Datasets](./multi_dataset)).
+- `sampler=sequential` -- iterates the dataset in order
+  ([`StatefulSequentialSampler`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/dataset/samplers.py)).
+- `sampler=custom` -- loads your own stateful sampler from `sampler_class_path`.
+
+`dataloader_num_workers` (and `dataloader_persistent_workers`) control the
+underlying dataloader worker processes; `0` loads in the main process.
+
+## Writing a custom sampler
+
+A custom sampler is a `torch.utils.data.Sampler` subclass that is
+**checkpointable**: beyond `__iter__` / `__len__`, it implements `state_dict` /
+`load_state_dict` so the trainer can save and restore its position.
+
+`SFTTrainer` instantiates it as `ClassName(tokenized, **sampler_kwargs)`, where
+`tokenized` is the (concatenated) training dataset:
+
+```python
+import torch
+
+
+class MySampler(torch.utils.data.Sampler[int]):
+    def __init__(self, data_source, num_samples=None, seed=0):
+        self.n = len(data_source)
+        self.num_samples = num_samples or self.n
+        self.position = 0
+        # ... build a deterministic index plan from `seed` ...
+
+    def __iter__(self):
+        while self.position < self.num_samples:
+            idx = self._plan[self.position]
+            self.position += 1
+            yield idx
+        self.position = 0  # reset for the next epoch
+
+    def __len__(self):
+        return self.num_samples
+
+    def state_dict(self):
+        return {"position": self.position}
+
+    def load_state_dict(self, state):
+        self.position = state["position"]
+```
+
+Wire it up with:
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    sampler=custom \
+    sampler_class_path=my_package.my_module.MySampler \
+    'sampler_kwargs={num_samples: 40, seed: 42}'
+```
+
+<Callout type="warn">
+`sampler_class_path` is imported **inside a Ray task**, which does not inherit
+the driver's `PYTHONPATH`. Use a dotted path that resolves from the worker's
+`sys.path` (which includes the repo root when you launch from it), e.g.
+`examples.train.sft.curriculum_sampler.CurriculumLearningSampler`, and run from
+the repo root. No `__init__.py` is needed thanks to namespace packages.
+</Callout>
+
+## Curriculum learning example
+
+[`curriculum_sampler.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/sft/curriculum_sampler.py)
+is a reference custom sampler (`CurriculumLearningSampler`) that walks through
+difficulty-ordered subsets, progressively unlocking harder data. Order the
+dataset easy→hard and give the per-stage `lengths`. Set
+`num_samples = num_steps * batch_size` so the whole schedule is covered in a
+single pass -- this keeps the curriculum state intact across epoch boundaries
+and makes resume bit-exact across the entire run.
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    sampler=custom \
+    sampler_class_path=examples.train.sft.curriculum_sampler.CurriculumLearningSampler \
+    'sampler_kwargs={lengths: [34, 33, 33], num_samples: 40, seed: 42}'
+```
+
+Here `lengths` must sum to the dataset size (100 for the script's `train[:100]`
+split), and `num_samples` should be `num_steps * batch_size` to cover the whole
+schedule.
+
+## Custom samplers over multiple datasets
+
+A custom sampler still controls the mixture however it likes (e.g. mixing
+weights that change as training progresses). With multiple `train_datasets`, the
+trainer injects the tokenized per-dataset `lengths` into `sampler_kwargs`
+(user-supplied `lengths` win), so the constructor must accept a `lengths`
+kwarg. Explicit `train_dataset_weights` are rejected outside `sampler=random` --
+pass your ratios through `sampler_kwargs` instead:
+
+```bash
+bash examples/train/sft/run_sft_megatron.sh \
+    train_datasets="['allenai/tulu-3-sft-mixture','yahma/alpaca-cleaned']" \
+    train_dataset_splits="['train[:80]','train[:20]']" \
+    sampler=custom \
+    sampler_class_path=examples.train.sft.curriculum_sampler.CurriculumLearningSampler \
+    'sampler_kwargs={num_samples: 40, seed: 42}'
+```
+
+Here the curriculum sampler treats the concatenated datasets as its
+difficulty-ordered stages via the injected `lengths`.
+
+## API reference
+
+See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft/sft_config)
+for the full documentation of the sampler and dataloader fields: `sampler`,
+`sampler_class_path`, `sampler_kwargs`, `dataloader_num_workers`,
+`dataloader_persistent_workers`, and `seed`.
+
+
+For native SFT samplers in SkyRL, see [`SFT Samplers` in the API reference](/docs/api-ref/skyrl/sft/sft_samplers)

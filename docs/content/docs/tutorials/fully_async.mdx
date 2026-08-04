@@ -99,6 +99,11 @@ For fully async specifically, the following are the main knobs to tune:
   per-epoch step count an **upper bound** rather than exact: when an epoch's prompts are exhausted mid mini-batch, the
   partial mini-batch is discarded (also marked consumed) and the epoch ends early. Defaults to `false` (zero-variance
   groups are loss-masked but still occupy a mini-batch slot).
+- `trainer.fully_async.clear_kv_cache_on_weight_sync`: Whether to clear the inference engine KV cache on each weight
+  sync. Defaults to `false` for fully async training, which reuses KV cache from stale policies during generation —
+  avoiding recomputation at the cost of using slightly stale KV cache. Set to `true` to match synchronous RL behavior.
+  Note that prefix-cache blocks are still isolated per policy version by `generator.use_cache_salt` (on by default), so
+  cache is reused within a weight version and not shared across versions.
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 
@@ -117,6 +122,29 @@ Other restrictions (will be validated by the trainer):
 - `trainer.train_batch_size`: Must be set to the same as `trainer.policy_mini_batch_size`.
 - `generator.batched`: Must be set to `false` to use non-batched vLLM engines.
 - `trainer.algorithm.dynamic_sampling.type`: Must be set to `"none"` to disable dynamic sampling (not supported yet).
+
+### Benchmarking generation with a simulated trainer
+
+To benchmark the generation/inference side alone — e.g. router load-balancing policies on a large
+model — the trainer step can be *simulated*, so no policy/critic/ref models are built and no weight
+broadcast happens. Each step consumes a mini-batch, sleeps for a fixed duration, then issues
+pause/resume generation exactly as a real weight sync would, but skips the broadcast. The
+generation-side dynamics (staleness control, capacity gating, rate limiting, pause/resume) remain
+faithful. This is typically pointed at already-served endpoints via
+`generator.inference_engine.external_proxy_url` / `external_server_urls` with
+`run_engines_locally=false`, so generation hits the live deployment directly.
+
+See [`examples/train/fully_async/main_fully_async_sim.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/fully_async/main_fully_async_sim.py).
+
+- `trainer.fully_async.simulate_training`: Enables the simulated trainer (`FullyAsyncTrainerSim`).
+- `trainer.fully_async.simulate_training_step_seconds`: Wall-clock seconds the simulated training
+  step sleeps, standing in for forward/backward/optimizer. Defaults to `30.0`.
+- `trainer.fully_async.simulate_weight_sync_seconds`: Wall-clock seconds generation stays paused to
+  stand in for the (skipped) weight broadcast. `0.0` means pause then immediately resume.
+
+Because no models are built, `simulate_training=true` requires `trainer.eval_interval`,
+`trainer.ckpt_interval`, and `trainer.hf_save_interval` to all be `<= 0`,
+`trainer.update_ref_every_epoch=false`, and resumption to be disabled.
 
 ## III. Design and Implementation of Fully Async Training in SkyRL
 

@@ -27,7 +27,7 @@ The `skyrl-train` package supports:
 - Training Backends: FSDP and [Megatron](https://docs.skyrl.ai/docs/examples/megatron)
 - Inference backends: vLLM, SGLang, and any custom OpenAI API compatible endpoint that exposes a method to perform weight sync
 - Ulysses sequence parallelism for long-context training
-- [Colocated or disaggregated](https://docs.skyrl.ai/docs/configuration/placement) training and generation (including on heterogeneous hardware)
+- [Colocated or disaggregated](https://docs.skyrl.ai/docs/tutorials/placement) training and generation (including on heterogeneous hardware)
 - Synchronous RL, [async one-off pipelining](https://docs.skyrl.ai/docs/tutorials/one_step_off_async), or [fully async RL with in-flight weight updates](https://docs.skyrl.ai/docs/tutorials/fully_async)
 - Simple batched rollouts or Asynchronous rollouts for multi-turn conversations
 - Weight sync via NCCL, gloo, or checkpoint-and-load

@@ -10,9 +10,10 @@ from argparse import Namespace
 from typing import List, Optional, Tuple
 
 import httpx
+import orjson
 import uvicorn
 import vllm.envs as envs
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from ray.util.placement_group import PlacementGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -32,6 +33,11 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     ServerInfo,
     find_and_reserve_port,
     get_node_ip,
+)
+from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
+    CLAMPED_LOGPROB,
+    build_logprobs_content,
+    pack_routed_experts,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.env_vars import (
@@ -330,9 +336,9 @@ class VLLMServerActor(ServerActorProtocol):
         entrypoint, so it takes the engine and CLI args explicitly rather than
         reading them off ``self``.
         """
-        # Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
-        # /update_weights, /get_world_size) registered by the RLHF router when
-        # VLLM_SERVER_DEV_MODE=1.
+        # Most weight-sync endpoints are registered by vLLM dev mode. SkyRL
+        # adds /fetch_weights because checkpoint-delta pulls and applies
+        # payloads before the paused /update_weights reload.
 
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
@@ -344,6 +350,22 @@ class VLLMServerActor(ServerActorProtocol):
             reset_running_requests = data.get("reset_running_requests", False)
             await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
             return {"status": "ok"}
+
+        @app.post("/fetch_weights")
+        async def _fetch_weights(request: Request):
+            """Fetch/apply checkpoint-delta payloads before the paused reload phase."""
+            body = await request.json()
+            target_version = body.get("target_version")
+            if target_version is None:
+                raise HTTPException(status_code=400, detail="'target_version' is required")
+
+            kwargs = {"target_version": int(target_version)}
+            if body.get("sync_dir") is not None:
+                kwargs["sync_dir"] = body["sync_dir"]
+            if body.get("uri") is not None:
+                kwargs["uri"] = body["uri"]
+            result = await engine.collective_rpc("fetch_weights", kwargs=kwargs)
+            return {"status": "ok", "result": result}
 
         @app.post("/skyrl/v1/load_lora_adapter")
         async def _skyrl_load_lora_adapter(request: Request):
@@ -421,23 +443,19 @@ class VLLMServerActor(ServerActorProtocol):
 
             logprobs = None
             if resp.logprobs is not None:
-                content = []
-                for tid, lp_dict in zip(token_ids_out, resp.logprobs):
-                    if lp_dict and tid in lp_dict:
-                        content.append({"logprob": lp_dict[tid].logprob})
-                    else:
-                        # -9999.0 is the default in vLLM's ChatCompletionLogProb
-                        content.append({"logprob": -9999.0})
+                content, num_clamped = build_logprobs_content(token_ids_out, resp.logprobs)
+                if num_clamped:
+                    logger.warning(
+                        f"request {request_id}: clamped {num_clamped}/{len(token_ids_out)} missing or "
+                        f"non-finite sampled logprobs to {CLAMPED_LOGPROB}"
+                    )
                 logprobs = {"content": content}
 
             routed_experts = None
             if resp.routed_experts is not None:
-                if hasattr(resp.routed_experts, "tolist"):
-                    routed_experts = resp.routed_experts.tolist()
-                else:
-                    routed_experts = resp.routed_experts
+                routed_experts = pack_routed_experts(resp.routed_experts)
 
-            return {
+            payload = {
                 "choices": [
                     {
                         "token_ids": token_ids_out,
@@ -447,6 +465,7 @@ class VLLMServerActor(ServerActorProtocol):
                     }
                 ]
             }
+            return Response(content=orjson.dumps(payload), media_type="application/json")
 
     async def shutdown(self) -> None:
         """Gracefully shutdown the server."""
@@ -552,9 +571,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     concerns (placement-group bundle indices, DP master rendezvous) do not apply
     here; pass standard vLLM flags to control parallelism and placement.
     """
-    # Match VLLMServerActor.__init__: enable vLLM dev-mode endpoints (sleep/wake,
-    # /init_weight_transfer_engine, /collective_rpc, /get_world_size), runtime
-    # LoRA load/unload, and CUDA-IPC weight transfer.
+    # Match VLLMServerActor.__init__: enable vLLM dev-mode endpoints
+    # (sleep/wake, /init_weight_transfer_engine, /collective_rpc,
+    # /get_world_size), SkyRL /fetch_weights, runtime LoRA load/unload, and
+    # CUDA-IPC weight transfer.
     os.environ["VLLM_SERVER_DEV_MODE"] = "1"
     os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"

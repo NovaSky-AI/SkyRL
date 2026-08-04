@@ -115,10 +115,6 @@ class SkyRLTrainBackend(AbstractBackend):
     """SkyRL-Train backend for supervised training."""
 
     def __init__(self, base_model: str, config: SkyRLTrainBackendOverrides):
-        logger.warning("=" * 80)
-        logger.warning("SkyRLTrainBackend is currently EXPERIMENTAL!")
-        logger.warning("=" * 80)
-
         if ray is None:
             raise ImportError(
                 "SkyRLTrainBackend requires `ray`. Install the appropriate extras (e.g. `--extra skyrl_train`)."
@@ -1227,6 +1223,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
             # Save checkpoint directory (includes optimizer state automatically)
             self._dispatch.save_checkpoint(model=role, ckpt_dir=ckpt_dir, tokenizer=self._tokenizer, model_id=model_id)
+
+            # Drain any in-flight async write so the tar can't capture a partial checkpoint.
+            self._dispatch.finalize_pending_saves(role)
 
             # Create tar archive
             self._create_tar_from_directory(ckpt_dir, output_path)
