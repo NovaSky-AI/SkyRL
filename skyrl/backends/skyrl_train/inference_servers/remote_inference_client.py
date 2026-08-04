@@ -73,10 +73,10 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
 )
-from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     decode_packed_routed_experts,
 )
+from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
     SKYRL_HTTP_CONNECTION_LIMIT,
