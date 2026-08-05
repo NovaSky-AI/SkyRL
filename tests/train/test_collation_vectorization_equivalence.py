@@ -154,7 +154,7 @@ def test_rl_preprocess_bit_identical(seed, with_logprobs):
     tokenizer.pad_token_id = 0
 
     seq, attn, action, rew, lm, lp, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer, prompts, responses, rewards, loss_masks, logprobs
+        tokenizer.pad_token_id, prompts, responses, rewards, loss_masks, logprobs
     )
     r_seq, r_attn, r_action, r_rew, r_lm, r_lp = _ref_convert_prompts_responses(
         prompts, responses, rewards, loss_masks, logprobs, pad_token_id=0
@@ -186,7 +186,7 @@ def test_rl_preprocess_accepts_tensor_rewards():
     loss_masks = [[1], [1, 0, 1]]
 
     _, _, _, rew, _, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer, prompts, responses, rewards, loss_masks
+        tokenizer.pad_token_id, prompts, responses, rewards, loss_masks
     )
     _, _, _, r_rew, _, _ = _ref_convert_prompts_responses(prompts, responses, rewards, loss_masks, None, pad_token_id=0)
     assert torch.equal(rew, r_rew)
@@ -204,7 +204,7 @@ def test_rl_preprocess_accepts_grad_tensor_rewards():
     loss_masks = [[1], [1, 0, 1]]
 
     _, _, _, rew, _, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer, prompts, responses, rewards, loss_masks
+        tokenizer.pad_token_id, prompts, responses, rewards, loss_masks
     )
 
     expected = torch.tensor([[0.0, 0.0, 1.0], [0.5, 0.6, 0.7]], dtype=torch.float32)
@@ -224,7 +224,7 @@ def test_rl_preprocess_accepts_cuda_tensor_rewards():
     loss_masks = [[1], [1, 0, 1]]
 
     _, _, _, rew, _, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer, prompts, responses, rewards, loss_masks
+        tokenizer.pad_token_id, prompts, responses, rewards, loss_masks
     )
 
     expected = torch.tensor([[0.0, 0.0, 1.0], [0.5, 0.6, 0.7]], dtype=torch.float32)

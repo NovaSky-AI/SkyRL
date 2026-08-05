@@ -86,7 +86,7 @@ def test_routed_expert_tensor_uses_unique_dummy_routes(tokenizer):
     ]
 
     *_, routed = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts=[[10], [20]],
         responses=[[11, 12], [21, 22]],
         rewards=[[0.0, 0.0], [0.0, 0.0]],
@@ -115,7 +115,7 @@ def test_routed_expert_tensor_promotes_mixed_batch_dtype(
     ]
 
     *_, routed = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts=[[10], [20]],
         responses=[[11], [21]],
         rewards=[[0.0], [0.0]],
@@ -132,7 +132,7 @@ def test_routed_expert_tensor_accepts_read_only_arrays(tokenizer):
     routes.flags.writeable = False
 
     *_, routed = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts=[[10]],
         responses=[[11]],
         rewards=[[0.0]],
@@ -147,7 +147,7 @@ def test_routed_expert_tensor_accepts_read_only_arrays(tokenizer):
 def test_routed_expert_tensor_rejects_nested_lists(tokenizer):
     with pytest.raises(TypeError, match="NumPy arrays"):
         convert_prompts_responses_to_batch_tensors(
-            tokenizer,
+            tokenizer.pad_token_id,
             prompts=[[10]],
             responses=[[11]],
             rewards=[[0.0]],
@@ -167,7 +167,7 @@ def test_routed_expert_tensor_narrows_wide_dtypes(tokenizer, dtype):
     routes = np.asarray([[[1, 2]], [[3, 4]]], dtype=dtype)
 
     *_, routed = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts=[[10]],
         responses=[[11]],
         rewards=[[0.0]],
@@ -185,7 +185,7 @@ def test_routed_expert_tensor_retightens_after_truncation(tokenizer):
     routes = np.asarray([[[1, 2]], [[3, 4]], [[300, 5]]], dtype=np.int16)
 
     *_, routed = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts=[[10]],
         responses=[[11]],
         rewards=[[0.0]],
@@ -217,7 +217,7 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):
 
     sequences, attention_mask, response_mask, ret_rewards, ret_loss_masks, ret_log_probs, _ = (
         convert_prompts_responses_to_batch_tensors(
-            tokenizer,
+            tokenizer.pad_token_id,
             prompts,
             outputs,
             rewards,
@@ -253,7 +253,7 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(tokenizer)
 
     sequences, attention_mask, response_mask, ret_rewards, ret_loss_masks, ret_log_probs, _ = (
         convert_prompts_responses_to_batch_tensors(
-            tokenizer,
+            tokenizer.pad_token_id,
             prompts,
             outputs,
             rewards,
@@ -290,7 +290,7 @@ def test_convert_prompts_responses_to_batch_tensors_empty_input(tokenizer):
 
     with pytest.raises(AssertionError):
         convert_prompts_responses_to_batch_tensors(
-            tokenizer,
+            tokenizer.pad_token_id,
             prompts,
             outputs,
             rewards,
@@ -309,7 +309,7 @@ def test_convert_prompts_responses_to_batch_tensors_mismatched_lengths(tokenizer
 
     with pytest.raises(AssertionError):
         convert_prompts_responses_to_batch_tensors(
-            tokenizer,
+            tokenizer.pad_token_id,
             prompts,
             outputs,
             rewards,
@@ -333,7 +333,7 @@ def test_unified_left_padding_layout(tokenizer):
     loss_masks = [[1] * 3, [1] * 2]
 
     seq, attn, action, rew, lm, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts,
         responses,
         rewards,
@@ -363,7 +363,7 @@ def test_right_aligned_response_data(tokenizer):
     responses_copy = [r[:] for r in responses]
 
     seq, attn, action, rew, lm, lp, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts,
         responses,
         rewards,
@@ -398,7 +398,7 @@ def test_max_seq_len_warns_but_does_not_truncate(tokenizer):
     loss_masks = [[1] * 10, [1] * 50]
 
     seq, _, action, _, _, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts,
         responses,
         rewards,
@@ -435,7 +435,7 @@ def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
     rei_1 = np.asarray([[[3, 4]] * num_layers for _ in range(6)], dtype=np.uint8)  # 6 tokens
 
     seq, attn, action, rew, lm, lp, rei_tensor = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts,
         responses,
         rewards,
@@ -472,7 +472,7 @@ def test_rollout_expert_indices_none_when_not_provided(tokenizer):
     loss_masks = [[1], [1]]
 
     *_, rei_tensor = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts,
         responses,
         rewards,
@@ -492,7 +492,7 @@ def test_stepwise_anti_correlation_no_inflation(tokenizer):
     loss_masks = [[1] * 90, [1] * 10]
 
     seq, attn, action, rew, lm, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer,
+        tokenizer.pad_token_id,
         prompts,
         responses,
         rewards,

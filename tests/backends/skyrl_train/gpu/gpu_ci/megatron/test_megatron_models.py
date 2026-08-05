@@ -146,7 +146,7 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
 
     sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _ = (
         convert_prompts_responses_to_batch_tensors(
-            tokenizer=tokenizer,
+            pad_token_id=tokenizer.pad_token_id,
             prompts=generator_output["prompt_token_ids"],
             responses=responses,
             rewards=rewards,
@@ -183,7 +183,7 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
 
 async def construct_training_input_from_generator_output(generator_output, tokenizer):
     return convert_prompts_responses_to_batch_tensors(
-        tokenizer=tokenizer,
+        pad_token_id=tokenizer.pad_token_id,
         prompts=generator_output["prompt_token_ids"],
         responses=generator_output["response_ids"],
         rewards=generator_output["rewards"],

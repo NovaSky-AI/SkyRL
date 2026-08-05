@@ -896,7 +896,7 @@ class RayPPOTrainer:
             rollout_logprobs_tensor,
             rollout_expert_indices_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
-            self.tokenizer,
+            self.tokenizer.pad_token_id,
             prompt_ids,
             response_ids,
             rewards,

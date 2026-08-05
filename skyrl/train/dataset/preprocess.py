@@ -4,7 +4,6 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 from jaxtyping import Bool, Float, Integer
-from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices_np
 from skyrl.backends.skyrl_train.utils.routed_experts import (
@@ -89,7 +88,7 @@ def _reward_to_numpy(custom_reward: Union[List[float], torch.Tensor]) -> np.ndar
 
 
 def convert_prompts_responses_to_batch_tensors(
-    tokenizer: AutoTokenizer,
+    pad_token_id: int,
     prompts: List[List[int]],
     responses: List[List[int]],
     rewards: List[Union[List[float], torch.Tensor]],
@@ -140,7 +139,7 @@ def convert_prompts_responses_to_batch_tensors(
     Assumes that the responses already contain an eos token at index -1.
 
     Args:
-        tokenizer: Model tokenizer
+        pad_token_id: Token id used to left-pad ``sequences``
         prompts: List of tokenized prompts
         responses: List of tokenized responses
         rewards: List of rewards for each response (lists or 1D tensors)
@@ -172,7 +171,6 @@ def convert_prompts_responses_to_batch_tensors(
             f"No truncation is performed; consider checking generator settings."
         )
 
-    pad_token_id = tokenizer.pad_token_id
     num_samples = len(prompts)
 
     # Fill NumPy buffers by slice, then convert once.
