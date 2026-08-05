@@ -39,6 +39,7 @@ from skyrl.tinker.db_models import (
     RequestStatus,
     SamplingSessionDB,
     SessionDB,
+    create_missing_indexes,
     enable_sqlite_wal,
     get_async_database_url,
 )
@@ -115,6 +116,7 @@ async def lifespan(app: FastAPI):
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(create_missing_indexes)
 
     # Setup external inference client if configured.
     #
