@@ -182,13 +182,30 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
             ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
-    assert cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt >= lcm_dp_size, (
-        f"train_batch_size * n_samples_per_prompt ({cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt}) "
-        f"should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
+    # Before generation, the prompt batch is truncated to a multiple of `prompt_stride` so that the
+    # resulting samples shard evenly across `lcm_dp_size` (see `RayPPOTrainer._remove_tail_data`).
+    # A `train_batch_size` below the stride truncates the batch to zero prompts.
+    prompt_stride = lcm_dp_size // math.gcd(lcm_dp_size, cfg.generator.n_samples_per_prompt)
+    dp_sizes_msg = (
         f"policy_dp_size={policy_dp_size}, "
         f"ref_dp_size={ref_dp_size if use_ref_model else 'None'}, "
-        f"lcm_dp_size={lcm_dp_size}"
+        f"lcm_dp_size={lcm_dp_size}, "
+        f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}"
     )
+    assert cfg.trainer.train_batch_size >= prompt_stride, (
+        f"train_batch_size ({cfg.trainer.train_batch_size}) should be larger than or equal to the prompt stride "
+        f"({prompt_stride}), which is the least common multiple of the data parallel sizes of the enabled models "
+        f"divided by its greatest common divisor with n_samples_per_prompt. Otherwise every prompt is dropped when "
+        f"truncating the batch to even data parallel shards. {dp_sizes_msg}. Set train_batch_size to a multiple of "
+        f"{prompt_stride}, or choose a placement where lcm_dp_size divides n_samples_per_prompt."
+    )
+    if cfg.trainer.train_batch_size % prompt_stride != 0:
+        logger.warning(
+            f"train_batch_size ({cfg.trainer.train_batch_size}) is not a multiple of the prompt stride "
+            f"({prompt_stride}), so {cfg.trainer.train_batch_size % prompt_stride} prompt(s) are dropped from every "
+            f"training batch to keep even data parallel shards. {dp_sizes_msg}. Set train_batch_size to a multiple of "
+            f"{prompt_stride} to use the full batch."
+        )
 
 
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
