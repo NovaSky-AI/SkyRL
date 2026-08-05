@@ -278,7 +278,7 @@ def make_experience_batch(items: List[BufferItem]) -> Experience:
 
 def remove_padding_in_sequences(items):
     for item in items:
-        seq, act_log_prob, base_act_log_prob, value, ret, adv, att_mask, act_mask = (
+        seq, act_log_prob, base_act_log_prob, value, ret, adv, att_mask, resp_mask = (
             item.sequences,
             item.action_log_probs,
             item.base_action_log_probs,
@@ -288,7 +288,7 @@ def remove_padding_in_sequences(items):
             item.attention_mask,
             item.response_mask,
         )
-        right_pad = (1 - act_mask.long()).sum()
+        right_pad = (1 - resp_mask.long()).sum()
         right_pad = None if right_pad == 0 else -right_pad
 
         # left_pad for seq and att_mask
@@ -310,7 +310,7 @@ def remove_padding_in_sequences(items):
             ret[:right_pad] if ret is not None else None,
             adv[:right_pad] if adv is not None else None,
             att_mask[left_pad:right_pad] if att_mask is not None else None,
-            act_mask[:right_pad] if act_mask is not None else None,
+            resp_mask[:right_pad] if resp_mask is not None else None,
         )
     return items
 
