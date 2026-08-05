@@ -2075,3 +2075,41 @@ async def test_agent_loop_closes_env_when_rollout_raises(
 
     mock_env.close.assert_called_once()
     mock_llm.finish_session.assert_awaited()
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_skip_failed_rollouts_step_wise(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """Under step-wise training the placeholder must be a one-step ``StepWiseOutput``."""
+    from skyrl.train.generators.base import TrajectoryID
+    from skyrl.train.generators.skyrl_gym_generator import StepWiseOutput
+
+    mock_make.return_value = mock_env
+    generator_cfg.step_wise_trajectories = True
+    generator = _skip_failed_rollouts_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    async def agent_loop(prompt, *args, **kwargs):
+        if prompt[0]["content"] == "first":
+            raise RuntimeError("network blip")
+        return StepWiseOutput(step_outputs=[_trajectory_output(reward=0.0), _trajectory_output(reward=1.0)])
+
+    generator.agent_loop = agent_loop
+
+    input_batch = _two_prompt_input(mock_env_cfg)
+    input_batch["trajectory_ids"] = [
+        TrajectoryID(instance_id="uid0", repetition_id=0),
+        TrajectoryID(instance_id="uid1", repetition_id=0),
+    ]
+
+    output = await generator.generate(input_batch)
+
+    # The failed trajectory contributes one step; the successful one contributes both of its steps.
+    assert output["stop_reasons"] == [ROLLOUT_ERROR_STOP_REASON, "stop", "stop"]
+    assert output["is_last_step"] == [True, False, True]
+    assert [t.instance_id for t in output["trajectory_ids"]] == ["uid0", "uid1", "uid1"]
+    assert output["loss_masks"][0] == [0]
+    assert output["rewards"] == [0.0, 0.0, 1.0]
+
+    validate_generator_output_for_trainer(2, output, step_wise=True)
