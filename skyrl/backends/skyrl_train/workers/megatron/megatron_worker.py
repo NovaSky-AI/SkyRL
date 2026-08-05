@@ -1489,6 +1489,121 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 _os.environ["SKYRL_RDT_STACKED_EXPERTS"] = prev
         return out
 
+    def rdt_pp_local_bench(self, iters: int = 2):
+        """A/B PP-local vs gather-to-all gather for the RDT weight source.
+
+        Runs the stacked source twice in one process — ``SKYRL_RDT_PP_LOCAL`` off
+        then on — with no engine and no consumers, so the delta is exactly what
+        not gathering across pipeline stages buys. Both legs are timed the same way
+        as ``rdt_source_bench`` (CPU wall and device-synchronized wall, since the
+        gathers are issued async).
+
+        It is also the correctness gate for the mode, before any engine is
+        involved: every NAME the PP-local leg produces must carry a byte-identical
+        tensor to the gather-to-all leg's. The comparison is per name, not per
+        group, because the two layouts legitimately partition differently — the
+        non-layer names form one leading group when every stage sees them and split
+        per stage when they do not — and a partition difference is not a weight
+        difference. Comparing full tensors would mean holding the model twice, so
+        each is reduced to a digest sensitive to content AND position — a byte sum,
+        a float64 sum, and 64 strided samples — which a permutation (a mis-ordered
+        expert stack, the plausible failure here) breaks.
+
+        Driver: tests/backends/skyrl_train/gpu/source_bench.py --pp-local.
+        """
+        import os as _os
+        import time as _t
+
+        import torch
+
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+            make_weight_source,
+        )
+
+        def _digest(t: torch.Tensor) -> tuple:
+            t = t.detach().contiguous()
+            step = max(1, t.numel() // 64)
+            return (
+                tuple(t.shape),
+                int(t.view(torch.uint8).sum(dtype=torch.int64).item()),
+                float(t.sum(dtype=torch.float64).item()),
+                tuple(round(v, 6) for v in t.flatten()[::step][:64].to(torch.float64).tolist()),
+            )
+
+        extractor = MegatronWeightExtractor(
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            enable_bucketing=True,
+            bucket_size_threshold_GB=1.0,
+            training_dtype=torch.bfloat16,
+        )
+        prev = _os.environ.get("SKYRL_RDT_PP_LOCAL")
+        out: dict = {}
+        digests: dict = {}
+        try:
+            for label, flag in (("gather_to_all", "0"), ("pp_local", "1")):
+                _os.environ["SKYRL_RDT_PP_LOCAL"] = flag
+                src = make_weight_source(extractor, torch.bfloat16)
+                r: dict = {"class": type(src).__name__}
+                if hasattr(src, "pop_phase_timing"):
+                    src.pop_phase_timing()  # discard construction-time buckets
+                meta = src.metadata()
+                r["meta_names"] = len(meta)
+                owned = src.owned_groups()
+                r["owned_groups"] = None if owned is None else len(owned)
+                r["pp_local_active"] = getattr(src, "_pp_local", False)
+                per_name: dict = {}
+                order: list = []
+                for i in range(iters):
+                    t0 = _t.perf_counter()
+                    ng = nn_ = 0
+                    for names, tensors in src.iter_groups():
+                        ng += 1
+                        nn_ += len(names)
+                        if i == 0:
+                            order.append(tuple(names))
+                            for nm, t in zip(names, tensors):
+                                per_name[nm] = _digest(t)
+                        del tensors
+                    cpu = _t.perf_counter() - t0
+                    torch.cuda.synchronize()
+                    r[f"iter{i}"] = {
+                        "cpu_s": round(cpu, 2),
+                        "synced_s": round(_t.perf_counter() - t0, 2),
+                        "groups": ng,
+                        "names": nn_,
+                    }
+                    if hasattr(src, "pop_phase_timing"):
+                        r[f"iter{i}"]["phases"] = {k: round(v, 3) for k, v in src.pop_phase_timing().items()}
+                digests[label] = per_name
+                # The gather loop walks owned_groups() ascending and holds the
+                # source to that order, so check it here rather than discovering it
+                # as a RuntimeError mid-sync.
+                if owned is not None:
+                    idx_of = src._group_index_of_name
+                    r["emitted_group_order"] = [idx_of.get(names[0]) for names in order]
+                    r["group_order_ok"] = r["emitted_group_order"] == list(owned)
+                out[label] = r
+                del src
+        finally:
+            if prev is None:
+                _os.environ.pop("SKYRL_RDT_PP_LOCAL", None)
+            else:
+                _os.environ["SKYRL_RDT_PP_LOCAL"] = prev
+
+        ref, got = digests["gather_to_all"], digests["pp_local"]
+        missing = [n for n in got if n not in ref]
+        mismatch = [n for n in got if n in ref and got[n] != ref[n]]
+        out["check"] = {
+            "pp_local_names": len(got),
+            "gather_to_all_names": len(ref),
+            "names_absent_from_reference": missing[:4],
+            "names_with_different_bytes": mismatch[:4],
+            "group_order_ok": out["pp_local"].get("group_order_ok"),
+            "ok": (not missing and not mismatch and bool(got) and out["pp_local"].get("group_order_ok") is not False),
+        }
+        return out
+
     async def broadcast_to_inference_engines(
         self,
         inference_engine_client: "InferenceEngineInterface",

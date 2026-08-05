@@ -27,6 +27,8 @@ all-gather via ``full_tensor()``) and ``MegatronWeightSource`` (Megatron
 """
 
 import asyncio
+import contextlib
+import cProfile
 import logging
 import os
 import sys
@@ -64,6 +66,141 @@ _DEFAULT_ARENA_PRESIZE_GB = 0.0
 _DEFAULT_PACK_CHECK = False
 # Max gathered-but-not-yet-freed groups the producer holds at once (backpressure).
 _DEFAULT_GATHER_LOOKAHEAD = 2
+
+
+def _pp_local_requested() -> bool:
+    """PP-local gather: each pipeline stage gathers and serves only its OWN layers
+    instead of every stage gathering the whole model (see
+    ``MegatronStackedWeightSource.owned_groups``). Off by default."""
+    return os.environ.get("SKYRL_RDT_PP_LOCAL") == "1"
+
+
+def _qkv_device_fix_enabled() -> bool:
+    """Keep the QKV split's index tensors on the weight's device (default on)."""
+    return os.environ.get("SKYRL_RDT_QKV_DEVICE_FIX", "1") == "1"
+
+
+@contextlib.contextmanager
+def _qkv_index_device_ctx():
+    """Build the QKV split's index tensors on the weight's device, not the host.
+
+    ``split_qkv_weights`` and friends extract Q/K/V from Megatron's interleaved
+    layout by indexing the (CUDA) packed weight with ``torch.arange`` index
+    tensors, which default to CPU. Indexing a CUDA tensor with CPU indices forces
+    a blocking H2D copy plus a stream sync per gather, so the host stalls for
+    however much GPU work happens to be queued — measured at ~0.65 s per sync per
+    rank of ``ne_bridge`` at 235B, and the producer is the sync's pacer, so it
+    lands in the wall roughly 1:1.
+
+    Rather than vendor the three functions (257 lines of interleave math that would
+    then have to track upstream, and whose divergence would silently produce the
+    WRONG Q/K/V split), this wraps them and defaults ``torch.arange``'s device to
+    the weight's for the duration of one call. No upstream logic is copied, so an
+    upstream change cannot desync us; and if upstream adopts the same fix, the
+    ``setdefault`` simply stops mattering. The window is one function call in a
+    single-threaded export, and the four ``arange`` calls inside each function are
+    exactly the index tensors this is for.
+
+    Fixed upstream in the Megatron-Bridge fork by adding ``device=qkv.device``;
+    this is the same change reached from outside, so the fork is not needed for it.
+    """
+    if not _qkv_device_fix_enabled():
+        yield
+        return
+
+    import functools
+
+    from megatron.bridge.models.conversion import param_mapping as _pm
+
+    try:
+        from megatron.bridge.models.conversion import peft_bridge as _peft
+    except ImportError:  # pragma: no cover - peft is optional
+        _peft = None
+
+    names = ("split_qkv_weights", "split_qkv_biases", "split_qkv_weights_scale")
+    targets = [m for m in (_pm, _peft) if m is not None]
+
+    def _wrap(orig):
+        @functools.wraps(orig)
+        def wrapped(config, qkv, *args, **kwargs):
+            dev = getattr(qkv, "device", None)
+            if dev is None or dev.type == "cpu":
+                return orig(config, qkv, *args, **kwargs)
+            real_arange = torch.arange
+
+            def _arange(*a, **kw):
+                kw.setdefault("device", dev)
+                return real_arange(*a, **kw)
+
+            torch.arange = _arange
+            try:
+                return orig(config, qkv, *args, **kwargs)
+            finally:
+                torch.arange = real_arange
+
+        return wrapped
+
+    saved = []
+    for mod in targets:
+        for name in names:
+            fn = getattr(mod, name, None)
+            if fn is not None and not getattr(fn, "_skyrl_qkv_wrapped", False):
+                new = _wrap(fn)
+                new._skyrl_qkv_wrapped = True
+                saved.append((mod, name, fn))
+                setattr(mod, name, new)
+    try:
+        yield
+    finally:
+        for mod, name, fn in saved:
+            setattr(mod, name, fn)
+
+
+@contextlib.contextmanager
+def _pp_local_export_ctx():
+    """Export each stage's own parameters, with no cross-stage communication.
+
+    ``megatron_to_hf`` normally starts by broadcasting the parameter from the
+    pipeline stage that holds it to every other stage, so every rank ends up with
+    every tensor. A stage that exports only its OWN tasks would then mismatch its
+    peers' collectives and hang. Inside this context the two PP primitives return
+    the local value instead: the owning stage gets its own tensor, every other
+    stage gets ``None``, which every ``megatron_to_hf`` already treats as "not
+    mine" and skips. TP and EP gathers are untouched — they run within a stage.
+
+    Patched on the CLASS rather than on the tasks' mapping instances, for two
+    reasons. Nothing in megatron-bridge overrides these two methods (they are
+    defined once on ``MegatronParamMapping``), so one wrap covers every mapping
+    including the ``_HFNameSuffixMapping`` wrapper, which reaches them through
+    ``__getattr__``. And ``AutoMapping`` builds its delegate lazily INSIDE
+    ``megatron_to_hf``, so an instance-level change — clearing ``pp_group`` to
+    reach the upstream ``pp_size == 1`` fast path, say — would miss the delegate
+    that actually performs the broadcast.
+
+    Works against the OFFICIAL megatron-bridge; no fork required.
+    """
+    from megatron.bridge.models.conversion.param_mapping import MegatronParamMapping
+
+    saved = (
+        MegatronParamMapping.broadcast_from_pp_rank,
+        MegatronParamMapping.broadcast_obj_from_pp_rank,
+    )
+
+    def _local_tensor(self, tensor, cache_key=None):
+        return tensor
+
+    def _local_obj(self, obj, cache_key=None):
+        return obj
+
+    MegatronParamMapping.broadcast_from_pp_rank = _local_tensor
+    MegatronParamMapping.broadcast_obj_from_pp_rank = _local_obj
+    try:
+        yield
+    finally:
+        (
+            MegatronParamMapping.broadcast_from_pp_rank,
+            MegatronParamMapping.broadcast_obj_from_pp_rank,
+        ) = saved
 
 
 class _FsdpWeightSource(WeightSource):
@@ -240,6 +377,12 @@ class MegatronStackedWeightSource(WeightSource):
     Set ``SKYRL_RDT_VERIFY_STACKED=1`` to numerically compare this source's
     expert tensors against the bridge's per-expert export for sampled layers on
     the first iteration (raises on mismatch; one-time cost of a few seconds).
+
+    With ``SKYRL_RDT_PP_LOCAL=1`` (and pp>1) the source stops gathering across
+    pipeline stages: each stage yields only its own layers and declares them
+    through ``owned_groups()``, so the RDT consumers route each layer's pull to a
+    stage that holds it. See ``owned_groups`` for how ownership is discovered and
+    when the mode falls back.
     """
 
     _EXPERT_PRED = ".experts.linear_fc"  # model_bridge.py uses the same predicate
@@ -257,6 +400,12 @@ class MegatronStackedWeightSource(WeightSource):
         # Cached PP-exchanged expert geometry (see _expert_geometry).
         self._geo_cache: Optional[dict] = None
         self._geo_sig: Optional[tuple] = None
+        # PP-local gather (SKYRL_RDT_PP_LOCAL=1, pp>1): this stage exports only
+        # its own parameters. Resolved from the metadata pass — see owned_groups.
+        self._pp_local = _pp_local_requested() and self._pp_geometry()[0] > 1
+        self._group_stages: List[set] = []  # group idx -> stages that produce it
+        self._owned_group_idx: List[int] = []
+        self._group_index_of_name: dict = {}
         # Per-sync source phase timing (expert_gather / ne_* buckets), drained
         # into trainer.jsonl by RdtWeightSyncSender after each send.
         self._phase: dict = {}
@@ -272,6 +421,106 @@ class MegatronStackedWeightSource(WeightSource):
     def pop_phase_timing(self) -> dict:
         p, self._phase = self._phase, {}
         return p
+
+    # ---------------- allocator probe ----------------
+    #
+    # Why: ~4.2s of ne_bridge is unaccounted for and is NOT collective latency
+    # (NCCL calls do not block the host). The surviving hypothesis is real
+    # cudaMalloc inside the sync. Weight sync runs with expandable_segments
+    # forced OFF (VMM memory makes CUDA-IPC export 5-10x slower), so every
+    # buffer the export allocates must come from a classic segment, and
+    # worker.py only calls empty_cache ONCE per process on the assumption that
+    # "later syncs re-use the classic blocks the first sync created". If the
+    # intervening training step (which runs with expandable_segments back ON)
+    # causes those blocks to be released, every sync re-creates them.
+    #
+    # segment.*.allocated is a cumulative count of cudaMalloc calls, so its
+    # per-sync delta is a direct count of new segments. memory_reserved() is a
+    # single cheap C call, so it can bracket the per-layer expert gathers
+    # without perturbing their timing.
+
+    _MEM_COUNTERS = (
+        ("segment.all.allocated", "mem_segs_created"),
+        ("segment.large_pool.allocated", "mem_segs_large"),
+        ("allocation.all.allocated", "mem_allocs"),
+        ("num_alloc_retries", "mem_retries"),
+        ("num_ooms", "mem_ooms"),
+    )
+
+    @staticmethod
+    def _mem_counters() -> dict:
+        if not torch.cuda.is_available():
+            return {}
+        stats = torch.cuda.memory_stats()
+        snap = {dst: float(stats.get(src, 0)) for src, dst in MegatronStackedWeightSource._MEM_COUNTERS}
+        snap["mem_reserved_gb"] = float(stats.get("reserved_bytes.all.current", 0)) / 2**30
+        return snap
+
+    @staticmethod
+    def _expandable_segment_counts() -> tuple:
+        """(expandable, classic) live segment counts, from the allocator itself.
+
+        Do NOT infer this from ``PYTORCH_CUDA_ALLOC_CONF``: worker.py toggles the
+        setting through ``torch._C._accelerator_setAllocatorSettings`` and never
+        touches the environment, so the env var says nothing about the live
+        state. ``memory_snapshot`` reports each segment's ``is_expandable``,
+        which is the only authoritative source. Called twice per sync, so its
+        cost (proportional to live block count) stays off the per-tensor path.
+        """
+        try:
+            segments = torch.cuda.memory_snapshot()
+        except Exception:  # noqa: BLE001 - diagnostics must never break a sync
+            return (-1.0, -1.0)
+        expandable = sum(1 for s in segments if s.get("is_expandable"))
+        return (float(expandable), float(len(segments) - expandable))
+
+    def _mem_probe_start(self) -> dict:
+        # Opt-in: the probe answered its question (allocation is NOT the ne_bridge
+        # cost) and its two memory_snapshot() calls add ~1s+/sync of wall.
+        if os.environ.get("SKYRL_RDT_MEM_PROBE") != "1":
+            return {}
+        snap = self._mem_counters()
+        if snap:
+            # Reserved bytes can only grow via new cudaMalloc segments UNLESS the
+            # growth expands existing VMM segments. Recording both counts is what
+            # distinguishes those two worlds, and the sync is supposed to run with
+            # expandable segments OFF (they make CUDA-IPC export 5-10x slower).
+            expandable, classic = self._expandable_segment_counts()
+            self._mem_seg_at_start = (expandable, classic)
+            self._phase_add("mem_seg_expandable_at_start", expandable)
+            self._phase_add("mem_seg_classic_at_start", classic)
+            self._phase_add("mem_reserved_gb_at_start", snap["mem_reserved_gb"])
+        return snap
+
+    def _mem_probe_end(self, start: dict) -> None:
+        if not start:
+            return
+        end = self._mem_counters()
+        expandable, classic = self._expandable_segment_counts()
+        exp0, cls0 = getattr(self, "_mem_seg_at_start", (expandable, classic))
+        self._phase_add("mem_seg_expandable_delta", expandable - exp0)
+        self._phase_add("mem_seg_classic_delta", classic - cls0)
+        for key, before in start.items():
+            if key == "mem_reserved_gb":
+                self._phase_add("mem_reserved_growth_gb", end[key] - before)
+            else:
+                self._phase_add(key, end[key] - before)
+
+    def _dump_bridge_profile(self, prof: cProfile.Profile) -> None:
+        """Persist this walk's accumulated ne_bridge cProfile.
+
+        One file per rank per walk under /tmp/rdt_profile (fetched off the
+        nodes by analyze_nebridge_prof.py); the ``meta_`` prefix marks the
+        trainer-init metadata pass so warm syncs aggregate separately.
+        """
+        try:
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else os.getpid()
+            walk = getattr(self, "_cprof_walk", 0)
+            self._cprof_walk = walk + 1
+            os.makedirs("/tmp/rdt_profile", exist_ok=True)
+            prof.dump_stats(f"/tmp/rdt_profile/nebridge_{self._phase_prefix}rank{rank:03d}_walk{walk:02d}.prof")
+        except Exception:  # noqa: BLE001 - diagnostics must never break a sync
+            logging.getLogger(__name__).exception("ne_bridge profile dump failed")
 
     # ---------------- task partitioning ----------------
 
@@ -305,11 +554,26 @@ class MegatronStackedWeightSource(WeightSource):
             d["fc2"].sort(key=lambda t: self._local_expert(t.global_param_name))
         return non_expert, layers
 
+    @staticmethod
+    def _pp_geometry() -> tuple:
+        """``(pp_size, pp_rank)`` for this rank, or ``(1, 0)`` without Megatron."""
+        try:
+            from megatron.core import parallel_state
+
+            pp_group = parallel_state.get_pipeline_model_parallel_group()
+        except Exception:  # noqa: BLE001 - no mpu (CPU tests, decentralized PGs)
+            return 1, 0
+        return torch.distributed.get_world_size(pp_group), torch.distributed.get_rank(pp_group)
+
     def _expert_geometry(self, layers: dict) -> dict:
         """Exchange per-layer expert geometry across the PP group so EVERY rank
         knows the full set of MoE layers, their shapes, and the owning PP stage —
         regardless of whether get_conversion_tasks lists remote-stage params.
-        Returns ``{layer: _ExpertLayer}``."""
+        Returns ``{layer: _ExpertLayer}``.
+
+        PP-local mode skips the exchange: a stage never gathers another stage's
+        layers, so foreign geometry is not just unnecessary, it must not appear in
+        the walk (the layers dict IS what the walk iterates)."""
         from megatron.core import parallel_state
 
         ep_size = torch.distributed.get_world_size(parallel_state.get_expert_model_parallel_group())
@@ -333,7 +597,7 @@ class MegatronStackedWeightSource(WeightSource):
         sig = tuple(sorted(local_geo.items()))
         if self._geo_cache is not None and self._geo_sig == sig:
             merged_geo: dict = self._geo_cache
-        elif pp_size > 1:
+        elif pp_size > 1 and not self._pp_local:
             gathered: List[Optional[dict]] = [None] * pp_size
             torch.distributed.all_gather_object(gathered, local_geo, group=pp_group)
             merged_geo = {}
@@ -364,7 +628,7 @@ class MegatronStackedWeightSource(WeightSource):
 
     def _gather_layer_stacks(self, lay: _ExpertLayer, adapter_ctx: Optional[tuple]) -> tuple:
         """Materialize one layer's full expert stacks (fc1 [E,2F,H], fc2 [E,H,F])
-        on EVERY rank, with LoRA already merged when the model is wrapped.
+        with LoRA already merged when the model is wrapped.
 
         The owner stage merges LoRA into its LOCAL expert shards (zero adapter
         collectives), PP-broadcasts only the local shards (1/ep_size of the
@@ -372,6 +636,12 @@ class MegatronStackedWeightSource(WeightSource):
         identical copies of the same bytes across the PP link, ~38 GB/layer
         aggregate at 235B tp4/pp2/ep8), and then EVERY stage runs the
         intra-stage EP all_gather to reconstruct the full stacks.
+
+        PP-local mode drops the broadcast entirely: only the owning stage walks
+        the layer, so the stacks are rebuilt from its own shards by the EP
+        all_gather alone (expert-parallel groups never span stages — they vary
+        only the ``ep`` axis of the rank layout). That also retires the topology
+        assumption below, which exists solely because of the broadcast.
 
         This is correct because PP peers share (tp, dp) coordinates, so the
         pp-peer of expert-rank k IS expert-rank k of the owner stage — a
@@ -394,7 +664,7 @@ class MegatronStackedWeightSource(WeightSource):
         device = torch.cuda.current_device()
         n_local, F, H, E = lay.n_local, lay.F, lay.H, lay.E
 
-        if not self._pp_gather_checked and len(pp_ranks) > 1:
+        if not self._pp_gather_checked and len(pp_ranks) > 1 and not self._pp_local:
             self._pp_gather_checked = True
             self._selfcheck_sliced_gather(lay)
 
@@ -406,7 +676,7 @@ class MegatronStackedWeightSource(WeightSource):
             if adapter_ctx is not None:
                 _mb, tasks_by_base = adapter_ctx
                 self._merge_lora_into_local_shards(lay.layer, fc1_local, fc2_local, tasks_by_base)
-        if len(pp_ranks) > 1:
+        if len(pp_ranks) > 1 and not self._pp_local:
             src = pp_ranks[lay.owner_pp_idx]
             torch.distributed.broadcast(fc1_local, src=src, group=pp_group, async_op=True).wait()
             torch.distributed.broadcast(fc2_local, src=src, group=pp_group, async_op=True).wait()
@@ -579,9 +849,16 @@ class MegatronStackedWeightSource(WeightSource):
         was already a no-copy self-return). ``unbind`` batches the view
         creation: 3 dispatcher calls per layer instead of 3E ``__getitem__``
         + 3E no-op ``.contiguous()`` — the old path's main per-tensor cost."""
+        # memory_reserved() is one cheap C call, unlike memory_stats(), so it can
+        # bracket every layer without perturbing the timing below. Growth here is
+        # segment creation attributable to OUR stacks (fc1 is 3.2GB at 235B), which
+        # is what separates our allocator cost from the bridge's.
+        _res0 = torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
         _t0 = time.perf_counter()
         fc1_stack, fc2_stack = self._gather_layer_stacks(lay, adapter_ctx)
         self._phase_add("expert_gather", time.perf_counter() - _t0)
+        if _res0:
+            self._phase_add("mem_expert_reserved_growth_gb", (torch.cuda.memory_reserved() - _res0) / 2**30)
         _t0 = time.perf_counter()
         F, E = lay.F, lay.E
         gates = fc1_stack[:, :F].unbind(0)
@@ -626,6 +903,18 @@ class MegatronStackedWeightSource(WeightSource):
         clean PP-collective caches each call (the same reason
         ``MegatronWeightExtractor`` rebuilds them per sync).
         """
+        # Which megatron-bridge is actually loaded, and how much export metadata it
+        # has cached. Rides the phase-timing jsonl because loguru does not forward
+        # from Megatron rank actors; a missing "mb_fork" key means the stock wheel.
+        try:
+            from megatron.bridge.models.conversion import batched_export as _be
+
+            self._phase_add("mb_fork", 1.0)
+            self._phase_add("mb_spec_entries", float(_be.shared_cache_stats()["spec_entries"]))
+            self._phase_add("mb_obj_entries", float(_be.shared_cache_stats()["obj_entries"]))
+        except ImportError:
+            pass
+
         _t0 = time.perf_counter()
         tasks = self._bridge.get_conversion_tasks(self._module)
         self._phase_add("src_setup_tasks", time.perf_counter() - _t0)
@@ -637,12 +926,13 @@ class MegatronStackedWeightSource(WeightSource):
         self._phase_add("src_setup_geometry", time.perf_counter() - _t0)
         # LoRA-wrapped experts: raw to_wrap weights need the adapter delta
         # merged in (the bridge would have merged during its per-tensor export).
-        # Task lists are global (identical on every rank), so this condition —
-        # and the collective build it gates — cannot desync ranks.
         _t0 = time.perf_counter()
-        wrapped = any(".to_wrap." in t.global_param_name for lay in layers.values() for t in lay.fc1) or any(
-            ".to_wrap." in t.global_param_name for t in non_expert
-        )
+        # Decided from the FULL task list, which get_conversion_tasks builds
+        # identically on every rank: build_adapter_conversion_tasks is collective
+        # (a cached PP all_gather_object), so a condition that could differ per
+        # stage would desync. In PP-local mode `layers` is this stage's only, so
+        # it must not take part in this decision.
+        wrapped = any(".to_wrap." in t.global_param_name for t in tasks)
         adapter_ctx = self._adapter_tasks_by_base() if wrapped else None
         self._phase_add("src_setup_adapter", time.perf_counter() - _t0)
         return non_expert, layers, adapter_ctx
@@ -660,58 +950,152 @@ class MegatronStackedWeightSource(WeightSource):
         self._phase_prefix = "meta_" if collect_meta else ""
         if torch.cuda.is_available():
             torch.cuda.set_device(torch.cuda.current_device())
+        _mem0 = self._mem_probe_start()
+        # Deterministic CPU attribution for the ne_bridge bucket: the profiler is
+        # enabled ONLY around next() into the bridge's export generator, so the
+        # dump decomposes exactly ne_bridge (at ~1.3-2x overhead on that bucket).
+        _prof = cProfile.Profile() if os.environ.get("SKYRL_RDT_CPROFILE") == "1" else None
+        _gen = self._walk_groups(probe=bool(_mem0), prof=_prof)
+        if self._pp_local and not collect_meta:
+            # The partition only exists once metadata() has assembled it, which is
+            # why the metadata pass itself is not reordered — it is reordered
+            # wholesale by layerwise_groups afterwards.
+            _gen = self._walk_in_group_order(_gen)
+        if os.environ.get("SKYRL_RDT_GPU_PROBE") == "1" and torch.cuda.is_available():
+            _gen = self._walk_with_gpu_events(_gen)
+        try:
+            yield from _gen
+        finally:
+            # The gather loop abandons this generator before StopIteration, so the
+            # whole-walk allocator delta has to close here or it never records.
+            self._mem_probe_end(_mem0)
+            if _prof is not None:
+                self._dump_bridge_profile(_prof)
+
+    def _walk_with_gpu_events(self, gen: Iterator[tuple]) -> Iterator[tuple]:
+        """GPU-timeline probe (``SKYRL_RDT_GPU_PROBE=1``).
+
+        Records a timing event on the current stream after each group's work is
+        enqueued. Every collective in the walk ``wait()``s into this stream, so
+        event k completes only once group k's gathers have actually FINISHED on
+        the GPU — which no host-side bucket can see (NCCL enqueues don't block).
+        ``gpu_walk_span_s`` (anchor -> last event on the GPU timeline) is then
+        directly comparable to ``gpu_host_span_s``: if it tracks the sync wall,
+        the pipeline is gather-bound; if it tracks the host span, the wall lives
+        in the publish/credit round-trip instead. ``gpu_groups_behind`` counts
+        groups whose GPU work was still unfinished when the NEXT group was
+        produced (host yields resume only after the previous group's publish
+        was admitted, so this flags the GPU lagging the pipeline itself).
+        """
+        events: list = []
+        anchor = torch.cuda.Event(enable_timing=True)
+        anchor.record()
+        t0 = time.perf_counter()
+        behind = 0
+        try:
+            for names, tensors in gen:
+                ev = torch.cuda.Event(enable_timing=True)
+                ev.record()
+                if events and not events[-1].query():
+                    behind += 1
+                events.append(ev)
+                yield names, tensors
+        finally:
+            host_span = time.perf_counter() - t0
+            if events:
+                _t = time.perf_counter()
+                torch.cuda.synchronize()
+                self._phase_add("gpu_drain_at_close_s", time.perf_counter() - _t)
+                spans = [events[i - 1].elapsed_time(events[i]) for i in range(1, len(events))]
+                self._phase_add("gpu_walk_span_s", anchor.elapsed_time(events[-1]) / 1000.0)
+                self._phase_add("gpu_host_span_s", host_span)
+                self._phase_add("gpu_groups_behind", float(behind))
+                if spans:
+                    self._phase_add("gpu_group_ms_max", max(spans))
+                    self._phase_add("gpu_group_ms_mean", sum(spans) / len(spans))
+
+    def _walk_groups(self, probe: bool, prof: Optional[cProfile.Profile] = None) -> Iterator[tuple]:
+        """The group-batched walk itself; see :meth:`_iter_groups_impl`.
+
+        PP-local mode narrows the walk to this stage: only locally-held
+        conversion tasks are exported, and the export is CONSUMED inside
+        ``_pp_local_export_ctx()`` (the bridge returns a generator, so its
+        collectives run while we iterate — entering the context only around the
+        call that builds it would do nothing). ``layers`` is already local-only,
+        since ``_expert_geometry`` skips the cross-stage exchange in this mode."""
         non_expert, layers, adapter_ctx = self._build_export_plan()
         pending = dict(layers)  # layers whose experts are not yet emitted
+        if self._pp_local:
+            non_expert = [t for t in non_expert if t.param_weight is not None]
+            self._phase_add("pp_local", 1.0)
+        self._phase_add("walk_ne_tasks", float(len(non_expert)))
+        self._phase_add("walk_expert_layers", float(len(layers)))
 
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
         target_dev = torch.device("cuda", device) if device is not None else None
+        _ctx = contextlib.ExitStack()
+        if self._pp_local:
+            _ctx.enter_context(_pp_local_export_ctx())
+        # Independent of PP-local, and the reason the megatron-bridge fork is no
+        # longer needed for performance either (see _qkv_index_device_ctx).
+        _ctx.enter_context(_qkv_index_device_ctx())
+        if _qkv_device_fix_enabled():
+            self._phase_add("qkv_device_fix", 1.0)
         _stream = self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=non_expert)
         # Manual next() so time INSIDE the bridge export ("ne_bridge": TP/PP
         # gathers, transforms, adapter merge — not our code) is split from our
         # dtype/device conversion ("ne_convert"). CPU-side wall time: kernel
         # launches are async, but the loop's pacing is CPU-bound, which is what
         # these buckets attribute.
-        _it = iter(_stream)
-        names: list = []
-        tensors: list = []
-        prev_layer: Optional[int] = None
-        while True:
-            _t0 = time.perf_counter()
-            item = next(_it, None)
-            self._phase_add("ne_bridge", time.perf_counter() - _t0)
-            if item is None:
-                break
-            name, tensor = item
-            layer = self._layer_of_hf_name(name)
-            if names and layer != prev_layer:
-                # Group boundary (pre -> layer 0, layer N -> N+1, last layer
-                # -> post): append the closing layer's experts, then flush.
-                if prev_layer is not None and prev_layer in pending:
-                    self._extend_layer_experts(pending.pop(prev_layer), adapter_ctx, names, tensors)
+        with _ctx:
+            _it = iter(_stream)
+            names: list = []
+            tensors: list = []
+            prev_layer: Optional[int] = None
+            while True:
+                _res0 = torch.cuda.memory_reserved() if probe else 0
+                _t0 = time.perf_counter()
+                if prof is not None:
+                    prof.enable()
+                item = next(_it, None)
+                if prof is not None:
+                    prof.disable()
+                self._phase_add("ne_bridge", time.perf_counter() - _t0)
+                if _res0:
+                    self._phase_add("mem_bridge_reserved_growth_gb", (torch.cuda.memory_reserved() - _res0) / 2**30)
+                if item is None:
+                    break
+                name, tensor = item
+                layer = self._layer_of_hf_name(name)
+                if names and layer != prev_layer:
+                    # Group boundary (pre -> layer 0, layer N -> N+1, last layer
+                    # -> post): append the closing layer's experts, then flush.
+                    if prev_layer is not None and prev_layer in pending:
+                        self._extend_layer_experts(pending.pop(prev_layer), adapter_ctx, names, tensors)
+                    yield names, tensors
+                    names, tensors = [], []
+                prev_layer = layer
+                _t0 = time.perf_counter()
+                # Warm steady state: bridge already yields target dtype on-device —
+                # skip the no-op .to()/.contiguous() dispatches.
+                if tensor.dtype != self._dtype or (target_dev is not None and tensor.device != target_dev):
+                    tensor = tensor.to(device=target_dev, dtype=self._dtype)
+                tensor = tensor.detach()
+                if not tensor.is_contiguous():
+                    tensor = tensor.contiguous()
+                self._phase_add("ne_convert", time.perf_counter() - _t0)
+                names.append(name)
+                tensors.append(tensor)
+            if prev_layer is not None and prev_layer in pending:
+                self._extend_layer_experts(pending.pop(prev_layer), adapter_ctx, names, tensors)
+            if names:
                 yield names, tensors
+            # Layers whose non-expert tensors were all emitted before a boundary
+            # was seen (or post-block orderings): emit stragglers in layer order.
+            for layer in sorted(pending):
                 names, tensors = [], []
-            prev_layer = layer
-            _t0 = time.perf_counter()
-            # Warm steady state: bridge already yields target dtype on-device —
-            # skip the no-op .to()/.contiguous() dispatches.
-            if tensor.dtype != self._dtype or (target_dev is not None and tensor.device != target_dev):
-                tensor = tensor.to(device=target_dev, dtype=self._dtype)
-            tensor = tensor.detach()
-            if not tensor.is_contiguous():
-                tensor = tensor.contiguous()
-            self._phase_add("ne_convert", time.perf_counter() - _t0)
-            names.append(name)
-            tensors.append(tensor)
-        if prev_layer is not None and prev_layer in pending:
-            self._extend_layer_experts(pending.pop(prev_layer), adapter_ctx, names, tensors)
-        if names:
-            yield names, tensors
-        # Layers whose non-expert tensors were all emitted before a boundary was
-        # seen (or post-block orderings): emit any stragglers in layer order.
-        for layer in sorted(pending):
-            names, tensors = [], []
-            self._extend_layer_experts(pending.pop(layer), adapter_ctx, names, tensors)
-            yield names, tensors
+                self._extend_layer_experts(pending.pop(layer), adapter_ctx, names, tensors)
+                yield names, tensors
 
     def _iter_impl(self, collect_meta: bool) -> Iterator[tuple]:
         """Flattened per-(name, tensor) view of the group walk — used by
@@ -725,8 +1109,119 @@ class MegatronStackedWeightSource(WeightSource):
             for name, tensor in self._iter_impl(collect_meta=True):
                 meta.append(ParamMeta(name, self._dtype, tuple(tensor.shape)))
                 del tensor
-            self._meta = meta
+            self._meta = self._assemble_pp_metadata(meta) if self._pp_local else meta
         return self._meta
+
+    def _assemble_pp_metadata(self, local: List[ParamMeta]) -> List[ParamMeta]:
+        """Whole-model metadata from the per-stage PP-local walks.
+
+        The RDT contract needs ``metadata()`` to describe the WHOLE model
+        identically on every rank — the trainer engine cross-checks a digest of
+        it, and the consumers' pull plans are built from the sender's copy alone —
+        but a PP-local walk only covers this stage. So the stages exchange what
+        each produced (one ``all_gather_object``, once, cached with the metadata)
+        and every rank rebuilds the same list, ordered group-major by
+        ``layerwise_groups`` rather than by stage, which is what the engine's
+        group-contiguity check requires.
+
+        The exchange doubles as the ownership probe: a PP-local export yields
+        exactly the names its stage holds, so this is ownership at HF-NAME
+        granularity — the only granularity that can tell whether one gather group
+        is produced by two stages (tied embeddings, MTP). ``owned_groups`` acts on
+        that.
+        """
+        _pp_size, my_pp = self._pp_geometry()
+        gathered = self._exchange_pp_names([(m.name, list(m.shape)) for m in local])
+
+        shapes: dict = {}
+        stages_of: dict = {}
+        for stage, entries in enumerate(gathered):
+            for name, shape in entries or []:
+                # A name two stages both produce (a tied weight) keeps the first
+                # shape and records both stages, so its group reads as shared.
+                shapes.setdefault(name, tuple(shape))
+                stages_of.setdefault(name, set()).add(stage)
+        groups = layerwise_groups(list(shapes))
+        self._group_stages = [set().union(*(stages_of[n] for n in g)) for g in groups]
+        self._owned_group_idx = [gi for gi, st in enumerate(self._group_stages) if my_pp in st]
+        self._group_index_of_name = {n: gi for gi, g in enumerate(groups) for n in g}
+        return [ParamMeta(n, self._dtype, shapes[n]) for g in groups for n in g]
+
+    def _walk_in_group_order(self, gen: Iterator[tuple]) -> Iterator[tuple]:
+        """Reorder a PP-local walk into the assembled partition's group order.
+
+        The bridge streams a stage's tasks in ITS order, which need not agree with
+        the partition: at 235B the last stage exports the output block before its
+        layers, while ``layerwise_groups`` places that block last. The gather loop
+        walks ``owned_groups()`` ascending and holds the source to it, so a group
+        that arrives early is held back until its turn.
+
+        Only the non-layer block is ever out of order, so at most a couple of
+        groups are ever held. Holding a LAYER group would pin its gathered stacks
+        (~4.6 GiB at 235B), so an unexpected permutation raises instead of
+        quietly inflating trainer memory."""
+        expect = list(self._owned_group_idx)
+        held: dict = {}
+        for names, tensors in gen:
+            gi = self._group_index_of_name.get(names[0])
+            if gi is None:
+                raise RuntimeError(
+                    f"PP-local walk yielded a group starting {names[0]!r}, which is "
+                    "not in the assembled partition; metadata() and the walk disagree."
+                )
+            held[gi] = (names, tensors)
+            while expect and expect[0] in held:
+                yield held.pop(expect.pop(0))
+            if len(held) > 2:
+                raise RuntimeError(
+                    f"PP-local walk is {len(held)} groups ahead of the partition order "
+                    f"(holding {sorted(held)}, next expected {expect[:1]}); holding "
+                    "gathered layer stacks would balloon trainer memory."
+                )
+        for gi in sorted(held):
+            yield held.pop(gi)
+
+    def _exchange_pp_names(self, mine: list) -> list:
+        """All-gather ``[(name, shape)]`` over the PP group; one entry per stage."""
+        from megatron.core import parallel_state
+
+        pp_size, _my_pp = self._pp_geometry()
+        if pp_size <= 1:
+            return [mine]
+        gathered: List[Optional[list]] = [None] * pp_size
+        torch.distributed.all_gather_object(gathered, mine, group=parallel_state.get_pipeline_model_parallel_group())
+        return gathered
+
+    def owned_groups(self) -> Optional[List[int]]:
+        """The gather groups this stage holds, or None to own everything.
+
+        None (gather-to-all) unless PP-local mode is on AND every group turns out
+        to be produced by exactly one stage. A group whose names come from two
+        stages cannot be served PP-locally: each owner would publish only its half
+        while the consumers' plan expects the whole group. Rather than truncate it,
+        the whole sync reverts to gather-to-all — the layouts that do this (tied
+        embeddings, MTP) are small models where the gather is not the bottleneck.
+        Splitting the export per group instead would need a Megatron-task -> HF-group
+        map the bridge does not expose.
+        """
+        if not self._pp_local:
+            return None
+        self.metadata()  # populates _group_stages / _owned_group_idx
+        shared = [gi for gi, st in enumerate(self._group_stages) if len(st) > 1]
+        if shared:
+            logger.warning(
+                "[stacked-source] PP-local gather disabled: gather groups %s are produced by "
+                "more than one pipeline stage (tied embeddings / MTP), which cannot be served "
+                "per-stage. Falling back to gather-to-all for the whole model.",
+                shared[:4],
+            )
+            self._pp_local = False
+            # The geometry cache holds this stage's layers only; a gather-to-all
+            # walk needs every layer, and the cache key (local geometry) would
+            # not change to force the rebuild.
+            self._geo_cache = self._geo_sig = None
+            return None
+        return list(self._owned_group_idx)
 
     def _maybe_verify(self) -> None:
         if not self._verified:

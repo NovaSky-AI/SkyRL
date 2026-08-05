@@ -190,8 +190,8 @@ class TestRdtReplicaConsumerMapping:
 
     def test_two_dense_engines_bind_distinct_producers(self):
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+            RdtRouter,
             assign_producer_indices,
-            count_consumers,
         )
 
         # 2 independent TP=1 engines (the 2x2 e2e): each engine's local index is 0,
@@ -202,8 +202,9 @@ class TestRdtReplicaConsumerMapping:
         # Each consumer binds its own producer; each producer serves exactly one.
         assert assign_producer_indices(num_producers, num_consumers, cids[0]) == [0]
         assert assign_producer_indices(num_producers, num_consumers, cids[1]) == [1]
-        assert count_consumers(num_producers, num_consumers, 0) == 1
-        assert count_consumers(num_producers, num_consumers, 1) == 1
+        router = RdtRouter(num_producers, num_consumers, None, num_groups=3)
+        assert router.free_target(0, 0) == 1
+        assert router.free_target(1, 0) == 1
 
     def test_single_replica_offset_is_zero(self):
         # num_replicas=1 (default / single deployment) => offset 0, id == local index.
@@ -214,6 +215,341 @@ class TestRdtReplicaConsumerMapping:
         num_consumers, num_replicas = 4, 2
         ids = [self._consumer_id(r, num_replicas, num_consumers, local) for r in range(2) for local in range(2)]
         assert sorted(ids) == [0, 1, 2, 3]
+
+
+class TestRdtRouter:
+    """Who serves and frees each gather group.
+
+    A wrong answer here is not a wrong number but a hang: a consumer pulling from
+    a producer that never gathered a group waits forever, and a published group
+    nobody frees stalls the producer's end_sync. So every case checks the
+    conservation law that makes the credit loop terminate — for each group, the
+    per-producer free targets sum to the consumer count."""
+
+    @staticmethod
+    def _conserved(router, num_groups):
+        return all(
+            sum(router.free_target(p, g) for p in router.owners(g)) == router.num_consumers for g in range(num_groups)
+        )
+
+    def test_identity_when_fleets_match(self):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
+
+        r = RdtRouter(8, 8, None, num_groups=6)
+        assert [r.bound_producers(c) for c in range(8)] == [[c] for c in range(8)]
+        assert all(r.producer_for(3, g) == 3 for g in range(6))
+        assert self._conserved(r, 6)
+
+    def test_gather_to_all_keeps_the_historical_binding(self):
+        """16 producers / 8 consumers: the same producers per consumer as the
+        pre-router block rule, but each group is pulled from ONE of them."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+            RdtRouter,
+            assign_producer_indices,
+        )
+
+        r = RdtRouter(16, 8, None, num_groups=95)
+        for c in range(8):
+            assert r.bound_producers(c) == assign_producer_indices(16, 8, c)
+        assert [r.producer_for(0, g) for g in range(4)] == [0, 1, 0, 1]
+        # No producer is left publishing groups nobody pulls from it.
+        assert {r.producer_for(c, g) for c in range(8) for g in range(95)} == set(range(16))
+        assert self._conserved(r, 95)
+
+    def test_fan_in_shares_one_producer(self):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
+
+        r = RdtRouter(2, 8, None, num_groups=5)
+        assert [r.bound_producers(c) for c in range(8)] == [[c // 4] for c in range(8)]
+        assert r.free_target(0, 0) == 4 and r.free_target(1, 0) == 4
+        assert self._conserved(r, 5)
+
+    def test_pipeline_stages_route_to_the_owning_stage(self):
+        """2 stages x 8 ranks (the 235B tp4/pp2/ep8 -> TP8 shape): groups 0-2 on
+        stage 0, 3-5 on stage 1. Each consumer must reach both stages, pulling
+        each group from its owner."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
+
+        owners = [list(range(8))] * 3 + [list(range(8, 16))] * 3
+        r = RdtRouter(16, 8, owners)
+        for c in range(8):
+            assert r.bound_producers(c) == [c, c + 8]
+            assert [r.producer_for(c, g) for g in range(6)] == [c] * 3 + [c + 8] * 3
+        assert r.owned_groups(0) == [0, 1, 2]
+        assert r.owned_groups(8) == [3, 4, 5]
+        # A rank owning a group serves exactly one consumer; non-owners serve none.
+        assert r.free_target(0, 0) == 1 and r.free_target(0, 3) == 0
+        assert self._conserved(r, 6)
+        r.validate()
+
+    def test_owner_without_a_consumer_gets_a_zero_target(self):
+        """Fewer consumers than a stage has ranks: some owners serve nothing and
+        must not publish (the trainer skips those groups)."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
+
+        r = RdtRouter(8, 2, [list(range(8))] * 4)
+        r.validate()
+        assert self._conserved(r, 4)
+        assert any(
+            r.free_target(p, g) == 0 for p in range(8) for g in range(4)
+        ), "expected some (producer, group) pairs to serve no consumer"
+
+    def test_validate_rejects_an_unowned_group(self):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
+
+        with pytest.raises(ValueError, match="no owner"):
+            RdtRouter(4, 2, [[0, 1], [], [2, 3]]).validate()
+
+    def test_validate_rejects_an_out_of_range_owner(self):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
+
+        with pytest.raises(ValueError, match="out of range"):
+            RdtRouter(2, 2, [[0, 5]]).validate()
+
+
+class TestPpLocalOwnership:
+    """``MegatronStackedWeightSource`` ownership detection (SKYRL_RDT_PP_LOCAL).
+
+    In PP-local mode a stage exports only its own parameters, so the source has
+    to (a) rebuild WHOLE-model metadata from what the stages exchange — the RDT
+    contract requires every rank to describe the whole model — and (b) notice when
+    one gather group is produced by two stages, which cannot be served per-stage.
+    Both are exercised against the assembly directly (the walk itself needs
+    Megatron + GPUs)."""
+
+    @staticmethod
+    def _source(pp_size, my_pp, gathered):
+        """A source in PP-local mode with the stages' exchange stubbed out.
+
+        ``metadata()`` is pre-populated the way the real one does it (the walk's
+        local result handed to ``_assemble_pp_metadata``), so the assembly and
+        ``owned_groups`` can be exercised without Megatron or a GPU."""
+        import torch
+
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+            MegatronStackedWeightSource,
+        )
+
+        src = MegatronStackedWeightSource.__new__(MegatronStackedWeightSource)
+        src._dtype = torch.bfloat16
+        src._pp_local = True
+        src._geo_cache = src._geo_sig = None
+        src._group_stages = []
+        src._owned_group_idx = []
+        src._pp_geometry = lambda: (pp_size, my_pp)  # type: ignore[method-assign]
+        src._exchange_pp_names = lambda mine: gathered  # type: ignore[method-assign]
+        src._meta = src._assemble_pp_metadata([])
+        return src
+
+    def test_metadata_is_the_whole_model_group_major_on_every_stage(self):
+        """Stage 1 walks only its own layer, but metadata() must come back as the
+        whole model in group-major order — identical on both stages, since the
+        engine cross-checks a digest of it and bakes the consumers' plan from one
+        rank's copy."""
+        stage0 = [("model.embed_tokens.weight", [8, 4]), ("model.layers.0.w", [4, 4])]
+        stage1 = [("model.layers.1.w", [4, 4]), ("model.norm.weight", [4])]
+        expected = [
+            "model.embed_tokens.weight",
+            "model.layers.0.w",
+            "model.layers.1.w",
+            "model.norm.weight",
+        ]
+        for my_pp in (0, 1):
+            meta = self._source(2, my_pp, [stage0, stage1]).metadata()
+            assert [m.name for m in meta] == expected
+            assert [tuple(m.shape) for m in meta] == [(8, 4), (4, 4), (4, 4), (4,)]
+        # ... and each stage claims exactly the groups it produced.
+        assert self._source(2, 0, [stage0, stage1]).owned_groups() == [0, 1]
+        assert self._source(2, 1, [stage0, stage1]).owned_groups() == [2, 3]
+
+    def test_metadata_is_group_contiguous_even_when_a_stage_holds_both_ends(self):
+        """The assembled order must satisfy the engine's group-contiguity check —
+        ``flat(layerwise_groups(names)) == names`` — for whatever the stages
+        produce, and must be the same list on every stage.
+
+        Here stage 0 holds the output block too (a tied-embedding layout), so it
+        yields two non-layer names before any layer exists. ``layerwise_groups``
+        splits pre/post by POSITION, so those land in one leading group rather
+        than a pre and a post block. That is still a valid partition — ownership
+        follows it, and both sides derive it from the same list — which is why the
+        invariant to hold is contiguity, not a canonical pre/layers/post shape."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+            layerwise_groups,
+        )
+
+        stage0 = [("model.embed_tokens.weight", [8, 4]), ("model.lm_head.weight", [8, 4])]
+        stage1 = [("model.layers.0.w", [4, 4])]
+        per_stage = []
+        for my_pp in (0, 1):
+            src = self._source(2, my_pp, [stage0, stage1])
+            names = [m.name for m in src.metadata()]
+            assert [n for g in layerwise_groups(names) for n in g] == names
+            per_stage.append(names)
+        assert per_stage[0] == per_stage[1]
+        # Stage 0 produced both names of the leading group; stage 1 the layer.
+        src = self._source(2, 1, [stage0, stage1])
+        assert src.owned_groups() == [1]
+        assert src._group_stages == [{0}, {1}]
+
+    def test_a_group_produced_by_two_stages_disables_pp_local(self):
+        """Tied embeddings / MTP put one group's names on two stages. Serving that
+        per-stage would publish half a group, so the source must fall back to
+        gather-to-all instead of silently truncating it."""
+        stage0 = [("model.embed_tokens.weight", [8, 4]), ("model.layers.0.w", [4, 4])]
+        # Stage 1 also produces a post-block name -> the post group spans stages.
+        stage1 = [("model.layers.1.w", [4, 4]), ("model.norm.weight", [4])]
+        stage0 = stage0 + [("model.lm_head.weight", [8, 4])]
+        src = self._source(2, 0, [stage0, stage1])
+        assert src.owned_groups() is None
+        assert src._pp_local is False
+        # The stale local-only expert geometry must not survive the fallback: a
+        # gather-to-all walk needs every layer, and its cache key would not change.
+        assert src._geo_cache is None and src._geo_sig is None
+        # Metadata is still the whole model, so the digest check still passes.
+        assert [m.name for m in src.metadata()] == [
+            "model.embed_tokens.weight",
+            "model.layers.0.w",
+            "model.layers.1.w",
+            "model.lm_head.weight",
+            "model.norm.weight",
+        ]
+
+    def test_a_tied_name_on_two_stages_is_not_duplicated(self):
+        """A weight both stages hold (Megatron keeps a copy of a tied embedding on
+        the last stage) must appear ONCE in metadata — a duplicate name would give
+        the consumers two plan entries for one tensor — and mark its group shared."""
+        tied = ("model.embed_tokens.weight", [8, 4])
+        src = self._source(2, 0, [[tied, ("model.layers.0.w", [4, 4])], [tied]])
+        assert [m.name for m in src.metadata()] == ["model.embed_tokens.weight", "model.layers.0.w"]
+        assert src._group_stages[0] == {0, 1}
+        assert src.owned_groups() is None
+
+    def test_walk_is_reordered_into_partition_order(self):
+        """The bridge streams a stage's tasks in ITS order, which need not match the
+        partition: at 235B the last stage exports the output block BEFORE its layers,
+        while layerwise_groups places that block last. The gather loop walks
+        owned_groups() ascending and raises on anything else, so the walk has to be
+        reordered — this is the bug the 235B bench caught (48+48 groups against a
+        95-group reference) before it could fail mid-sync."""
+        stage0 = [("model.embed_tokens.weight", [8, 4]), ("model.layers.0.w", [4, 4])]
+        stage1 = [("model.norm.weight", [4]), ("model.layers.1.w", [4, 4])]
+        src = self._source(2, 1, [stage0, stage1])
+        assert src.owned_groups() == [2, 3]  # layer 1, then post
+
+        # Stage 1's walk emits the post block first, as the real bridge does.
+        walk = iter([(["model.norm.weight"], ["N"]), (["model.layers.1.w"], ["L1"])])
+        assert list(src._walk_in_group_order(walk)) == [
+            (["model.layers.1.w"], ["L1"]),
+            (["model.norm.weight"], ["N"]),
+        ]
+
+    def test_walk_reorder_refuses_to_hold_layer_stacks(self):
+        """Deferring a group pins its gathered tensors (~4.6 GiB for a 235B layer),
+        so an unexpected permutation must raise rather than quietly inflate trainer
+        memory."""
+        gathered = [[(f"model.layers.{i}.w", [4, 4]) for i in range(5)], []]
+        src = self._source(2, 0, gathered)
+        assert src.owned_groups() == [0, 1, 2, 3, 4]
+        # Every group arrives in reverse: nothing can be released.
+        walk = iter([([f"model.layers.{i}.w"], [i]) for i in (4, 3, 2, 1, 0)])
+        with pytest.raises(RuntimeError, match="groups ahead of the partition order"):
+            list(src._walk_in_group_order(walk))
+
+    def test_walk_reorder_rejects_a_name_outside_the_partition(self):
+        stage0 = [("model.layers.0.w", [4, 4])]
+        src = self._source(1, 0, [stage0])
+        walk = iter([(["model.layers.9.w"], ["X"])])
+        with pytest.raises(RuntimeError, match="not in the assembled partition"):
+            list(src._walk_in_group_order(walk))
+
+    def test_pp_local_is_off_without_the_env_var(self, monkeypatch):
+        from skyrl.backends.skyrl_train.weight_sync import rdt_send
+
+        monkeypatch.delenv("SKYRL_RDT_PP_LOCAL", raising=False)
+        assert rdt_send._pp_local_requested() is False
+        monkeypatch.setenv("SKYRL_RDT_PP_LOCAL", "1")
+        assert rdt_send._pp_local_requested() is True
+
+
+class TestQkvIndexDeviceCtx:
+    """``_qkv_index_device_ctx`` keeps the QKV split's index tensors on the weight's
+    device instead of the host, which is worth ~0.65s/sync of ne_bridge at 235B (a
+    CPU index tensor against a CUDA weight forces an H2D copy + stream sync per
+    gather). It deliberately copies NO upstream logic — it only changes where
+    ``torch.arange`` allocates — so these cover the wrapping, the injection, and
+    the restore. A meta device stands in for CUDA so this needs no GPU."""
+
+    @staticmethod
+    def _fake_modules(monkeypatch):
+        """Stub split fns on the real modules, so the context wraps something we can
+        observe. Records the device each torch.arange call landed on."""
+        import torch
+        from megatron.bridge.models.conversion import param_mapping as pm
+
+        seen = []
+
+        def _split(config, qkv, *a, **kw):
+            seen.append(torch.arange(4).device.type)
+            return ("q", "k", "v")
+
+        for name in ("split_qkv_weights", "split_qkv_biases", "split_qkv_weights_scale"):
+            monkeypatch.setattr(pm, name, _split, raising=False)
+        return pm, seen
+
+    def test_index_tensors_follow_the_weight_device(self, monkeypatch):
+        import torch
+
+        pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
+        from skyrl.backends.skyrl_train.weight_sync import rdt_send
+
+        pm, seen = self._fake_modules(monkeypatch)
+        weight = torch.empty(2, 2, device="meta")
+        with rdt_send._qkv_index_device_ctx():
+            pm.split_qkv_weights(None, weight)
+        assert seen == ["meta"], "arange should have been redirected to the weight's device"
+
+    def test_cpu_weights_are_left_alone(self, monkeypatch):
+        """The redirect must not fire for a host weight — there is nothing to fix and
+        forcing a device would be a behaviour change."""
+        import torch
+
+        pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
+        from skyrl.backends.skyrl_train.weight_sync import rdt_send
+
+        pm, seen = self._fake_modules(monkeypatch)
+        with rdt_send._qkv_index_device_ctx():
+            pm.split_qkv_weights(None, torch.empty(2, 2))
+        assert seen == ["cpu"]
+
+    def test_originals_and_torch_arange_are_restored(self, monkeypatch):
+        """torch.arange is patched process-wide for the duration of ONE call, so a
+        leak would silently put every later index tensor on a device."""
+        import torch
+
+        pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
+        from skyrl.backends.skyrl_train.weight_sync import rdt_send
+
+        pm, _seen = self._fake_modules(monkeypatch)
+        before, real_arange = pm.split_qkv_weights, torch.arange
+        with rdt_send._qkv_index_device_ctx():
+            assert pm.split_qkv_weights is not before  # wrapped
+            pm.split_qkv_weights(None, torch.empty(2, 2, device="meta"))
+            assert torch.arange is real_arange, "arange must be restored after each call"
+        assert pm.split_qkv_weights is before
+        assert torch.arange is real_arange
+        assert torch.arange(3).device.type == "cpu"
+
+    def test_disabled_by_env(self, monkeypatch):
+        import torch
+
+        pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
+        from skyrl.backends.skyrl_train.weight_sync import rdt_send
+
+        monkeypatch.setenv("SKYRL_RDT_QKV_DEVICE_FIX", "0")
+        pm, seen = self._fake_modules(monkeypatch)
+        with rdt_send._qkv_index_device_ctx():
+            pm.split_qkv_weights(None, torch.empty(2, 2, device="meta"))
+        assert seen == ["cpu"], "with the fix off, arange must keep its default device"
 
 
 class TestShardedRdtVllmRegistration:

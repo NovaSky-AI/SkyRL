@@ -46,8 +46,8 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
 )
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
     ALLOWED_OPS,
+    RdtRouter,
     arena_alloc_bytes,
-    count_consumers,
     layerwise_groups,
 )
 
@@ -127,7 +127,7 @@ class _RDTProducerServer:
     def __init__(
         self,
         *,
-        free_target: int,
+        served_names: list[str] | None,
         num_rdt_buffers: int,
         arena_presize_gb: float,
         nosync: bool,
@@ -142,12 +142,17 @@ class _RDTProducerServer:
         self._cache_cond = threading.Condition()
         self._gather_error: BaseException | None = None
 
-        # [RDT-FREE-REFCOUNT] Each assigned consumer fires free_gather for every
-        # group; the group is actually freed (and reported back to the engine)
-        # only on the free_target-th call.
-        self._free_target = max(1, free_target)
+        # Names this producer publishes, so a misrouted pull fails loudly
+        # instead of blocking forever in the cache wait. None = serve anything.
+        self._served_names = set(served_names) if served_names is not None else None
+
+        # [RDT-FREE-REFCOUNT] Every consumer routed to this producer for a group
+        # fires free_gather for it; the group is actually freed (and reported back
+        # to the engine) only on the last one. The target is per GROUP, not
+        # per server: with producers owning disjoint parts of the model, how many
+        # consumers pull a group from here depends on who else owns it.
+        self._free_targets: dict[tuple, int] = {}
         self._free_counts: dict[tuple, int] = {}
-        self._free_lock = threading.Lock()
 
         # [RDT-BACKPRESSURE] Published-but-not-yet-freed group keys. publish_group
         # blocks while len(...) >= gather_lookahead; free_gather (the consumer
@@ -239,17 +244,17 @@ class _RDTProducerServer:
         """Reset per-sync free/backpressure state. The driver awaits the
         previous sync's finish (which drains every consumer's frees) before the
         next begins, so nothing is in flight here."""
-        with self._free_lock:
-            self._free_counts.clear()
         with self._cache_cond:
             self._gather_error = None
+            self._free_counts.clear()
+            self._free_targets.clear()
             self._inflight_keys.clear()
             self._name_to_key.clear()
             self._freed_pending.clear()
             self._publish_time.clear()
             self._serve_done.clear()
 
-    def publish_group(self, group_key: tuple, entries: tuple) -> list[tuple]:
+    def publish_group(self, group_key: tuple, entries: tuple, free_target: int) -> list[tuple]:
         """Rebuild one gather group's CUDA-IPC tensors and publish to the serve
         cache. Blocks while `gather_lookahead` groups are already in flight so
         trainer memory stays bounded (the consumer's `free_gather` drains it).
@@ -260,7 +265,14 @@ class _RDTProducerServer:
         the ``reduce_tensor`` args of a whole-storage uint8 view (ONE CUDA-IPC
         export per storage), ``views`` maps each served name to
         ``(sid, dtype_name, shape, stride, storage_offset)`` — rebuilt here as
-        ``as_strided`` views so the per-name cost is microseconds."""
+        ``as_strided`` views so the per-name cost is microseconds.
+
+        ``free_target`` is how many consumers are routed to this producer for
+        this group (>= 1; the engine skips publishing a group no consumer pulls
+        from it). Frees can arrive before the publish they belong to — a consumer
+        that pulls nothing of a group frees it as soon as its plan starts — so a
+        group whose frees have already all landed is released here rather than
+        waiting for a free that will never come."""
         _t_bp0 = time.perf_counter()
         storages, views = entries
         with self._cache_cond:
@@ -309,6 +321,9 @@ class _RDTProducerServer:
             for n in rebuilt:
                 self._name_to_key[n] = group_key
             self._publish_time[group_key] = time.perf_counter()
+            self._free_targets[group_key] = max(1, int(free_target))
+            if self._free_counts.get(group_key, 0) >= self._free_targets[group_key]:
+                self._release_group_locked(group_key)
             freed = self._freed_pending
             self._freed_pending = []
             self._cache_cond.notify_all()
@@ -342,37 +357,46 @@ class _RDTProducerServer:
 
     # ---------------- consumer-facing (called by name over Ray) ----------------
 
-    def free_gather(self, names: list[str]) -> None:
-        """Consumer back-edge: one consumer finished pulling this group. Ref-count
-        to `free_target`; on the last, drop the cache entries, release one
-        backpressure slot, and record the freed key for the engine."""
-        key = self._name_to_key.get(names[0]) if names else None
-        with self._free_lock:
-            count = self._free_counts.get(tuple(names), 0) + 1
-            self._free_counts[tuple(names)] = count
-            do_free = count >= self._free_target
-            if do_free:
-                del self._free_counts[tuple(names)]
-        if not do_free:
-            return
+    def _release_group_locked(self, key: tuple) -> None:
+        """Drop one group's cache entries, release its backpressure slot, and
+        record it for the engine. Caller holds ``_cache_cond``; shared by the last
+        ``free_gather`` and by ``publish_group`` completing an early-freed group."""
+        for name in key:
+            self._cache.pop(name, None)
+            self._cache_event.pop(name, None)
+            self._name_to_key.pop(name, None)
+        self._free_counts.pop(key, None)
+        self._free_targets.pop(key, None)
+        if key in self._inflight_keys:
+            self._inflight_keys.remove(key)
+            self._freed_pending.append(key)
         _now = time.perf_counter()
-        with self._cache_cond:
-            for name in names:
-                self._cache.pop(name, None)
-                self._cache_event.pop(name, None)
-                self._name_to_key.pop(name, None)
-            if key is not None and key in self._inflight_keys:
-                self._inflight_keys.remove(key)
-                self._freed_pending.append(key)
-            _sd = self._serve_done.pop(key, None) if key is not None else None
-            _pt = self._publish_time.pop(key, None) if key is not None else None
-            self._cache_cond.notify_all()
+        _sd = self._serve_done.pop(key, None)
+        _pt = self._publish_time.pop(key, None)
         with self._timing_lock:
             if _sd is not None:
                 self._free_lag_seconds += _now - _sd
                 self._free_lag_count += 1
             if _pt is not None:
                 self._publish_to_free_seconds += _now - _pt
+
+    def free_gather(self, names: list[str]) -> None:
+        """Consumer back-edge: one consumer finished pulling this group.
+
+        The group key IS ``tuple(names)``: the consumer sends the whole group's
+        name list, from the same partition the producer published under.
+        Ref-counts to the group's ``free_target``; on the last free, drops the
+        cache entries, releases one backpressure slot, and records the freed key
+        for the engine. A free that arrives before its publish is only counted —
+        ``publish_group`` completes it."""
+        key = tuple(names)
+        with self._cache_cond:
+            count = self._free_counts.get(key, 0) + 1
+            self._free_counts[key] = count
+            target = self._free_targets.get(key)
+            if target is not None and count >= target:
+                self._release_group_locked(key)
+            self._cache_cond.notify_all()
 
     def reserve_serve_arena(self, consumer_id: int, nbytes: int) -> None:
         """Pre-allocate + NIXL-register this consumer's serve ring before any
@@ -404,6 +428,14 @@ class _RDTProducerServer:
         """
         t_m0 = time.perf_counter()
         needed = sorted({n for n, _ in specs})
+        if self._served_names is not None:
+            unserved = [n for n in needed if n not in self._served_names]
+            if unserved:
+                # Without this the cache wait below would block forever: this
+                # producer never gathers these names, so they can never arrive.
+                raise RuntimeError(
+                    f"pull routed to the wrong producer: {unserved[:3]} ({len(unserved)} names) are not served here"
+                )
         t_w0 = time.perf_counter()
         with self._cache_cond:
             while not all(n in self._cache for n in needed):
@@ -546,7 +578,7 @@ class _RDTProducerServer:
                 publish_to_free_seconds=self._publish_to_free_seconds,
                 cfg_lookahead=self._lookahead,
                 cfg_nring=self._nring,
-                cfg_free_target=self._free_target,
+                cfg_served_names=-1 if self._served_names is None else len(self._served_names),
                 cfg_scoped_sync=self._scoped_sync,
                 cfg_nosync_env=os.environ.get("SKYRL_RDT_NOSYNC"),
                 cfg_extract_sync_patched=_extract_patched,
@@ -611,6 +643,11 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # Group-major metadata / partition, computed at trainer_init.
         self._meta: list[ParamMeta] = []
         self._groups: list[list[str]] = []
+        # Per-group routing, resolved at trainer_init from the source's ownership.
+        self._router: RdtRouter | None = None
+        self._group_owners: list[list[int]] = []
+        self._owned_idx: list[int] = []
+        self._free_targets: dict[int, int] = {}
         # Strong refs to gathered tensors we've shared into the server, keyed by
         # group key. CUDA-IPC exports must outlive the importer, so we hold them
         # until the server reports the group freed. See send_weights.
@@ -625,7 +662,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
 
         return ray.get(getattr(self._server, method).remote(*args))
 
-    def _publish_async(self, key, entries):
+    def _publish_async(self, key, entries, free_target: int):
         """Fire publish_group WITHOUT blocking (the gather loop overlaps the
         publish with the next group's gather) and return a handle that
         ``_drop_when_ready`` resolves. Ray actor handle in production; a plain
@@ -633,8 +670,8 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         method = self._server.publish_group
         remote = getattr(method, "remote", None)
         if remote is not None:
-            return remote(key, entries)
-        return method(key, entries)
+            return remote(key, entries, free_target)
+        return method(key, entries, free_target)
 
     def _drop_when_ready(self, ref) -> None:
         import ray
@@ -673,9 +710,9 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             )
 
         world, rank = engine._world_and_rank()
-        num_producers = world
-        free_target = count_consumers(num_producers, init_info.num_consumers, rank)
-        engine._spawn_server(free_target)
+        engine._build_router(world, rank)
+        served = [n for gi in engine._owned_idx if engine._free_targets[gi] > 0 for n in engine._groups[gi]]
+        engine._spawn_server(served)
 
         # Every rank's server must exist before the sender's init RPC (the worker
         # init calls reserve_serve_arena back on ALL producer servers). The
@@ -692,6 +729,80 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             return torch.distributed.get_world_size(), torch.distributed.get_rank()
         return 1, self._init_info.rank
 
+    def _build_router(self, world: int, rank: int) -> None:
+        """Resolve per-group ownership and this rank's publish plan.
+
+        A source may gather only part of the model — pipeline-parallel producers
+        gather within a stage rather than to all ranks — so ownership is
+        all-gathered here and shipped to the consumers in the worker init info.
+        Every rank must agree on who serves each group: a consumer pulling from
+        a producer that never gathered the group would block forever. Sources
+        without ``owned_groups`` own everything, keeping the gather-to-all
+        layout on its historical path.
+        """
+        assert self.source is not None  # guaranteed by trainer_init
+        num_groups = len(self._groups)
+        owned: list[int] | None = None
+        declared = self.source.owned_groups()
+        if declared is not None:
+            owned = sorted({int(g) for g in declared})
+            bad = [g for g in owned if not 0 <= g < num_groups]
+            if bad:
+                raise ValueError(f"WeightSource.owned_groups() out of range for {num_groups} groups: {bad}")
+            if not owned:
+                raise ValueError(
+                    "WeightSource.owned_groups() is empty; a rank with nothing to serve cannot take part in the gather"
+                )
+
+        # One collective carries both: the ownership lists and a digest of the
+        # metadata they index into. The digest check is what makes partial
+        # ownership safe — only the sender's metadata reaches the consumers, so a
+        # rank that described just its own share would leave the rest of the
+        # model silently un-transferred instead of failing.
+        digest = self._meta_digest()
+        per_rank = self._all_gather_owned(world, (digest, owned))
+        mismatched = [r for r, (d, _o) in enumerate(per_rank) if d != digest]
+        if mismatched:
+            raise ValueError(
+                f"WeightSource.metadata() disagrees across trainer ranks "
+                f"(rank {rank} digest {digest}, differing ranks {mismatched[:4]}). "
+                "Every rank must describe the WHOLE model, even when it owns only some groups."
+            )
+        owned_per_rank = [o for _d, o in per_rank]
+
+        group_owners: list[list[int]] | None = None
+        if any(o is not None for o in owned_per_rank):
+            group_owners = [[] for _ in range(num_groups)]
+            for r, rank_owned in enumerate(owned_per_rank):
+                for gi in range(num_groups) if rank_owned is None else rank_owned:
+                    group_owners[gi].append(r)
+
+        router = RdtRouter(world, self._init_info.num_consumers, group_owners, num_groups)
+        router.validate()
+        self._router = router
+        self._group_owners = group_owners or []
+        self._owned_idx = owned if owned is not None else list(range(num_groups))
+        self._free_targets = {gi: router.free_target(rank, gi) for gi in self._owned_idx}
+
+    def _meta_digest(self) -> str:
+        """Stable digest of this rank's metadata (name order + count)."""
+        import hashlib
+
+        h = hashlib.sha256()
+        h.update(f"{len(self._meta)}\n".encode())
+        for m in self._meta:
+            h.update(m.name.encode())
+            h.update(b"\n")
+        return h.hexdigest()[:16]
+
+    def _all_gather_owned(self, world: int, mine: tuple) -> list[tuple]:
+        """All-gather each rank's (metadata digest, owned groups)."""
+        if world <= 1 or not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return [mine]
+        gathered: list[Any] = [None] * world
+        torch.distributed.all_gather_object(gathered, mine)
+        return gathered
+
     def _all_gather_server_names(self, world: int, rank: int) -> list[str]:
         assert self._server_name is not None
         if world <= 1 or not (torch.distributed.is_available() and torch.distributed.is_initialized()):
@@ -700,7 +811,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         torch.distributed.all_gather_object(gathered, self._server_name)
         return [n for n in gathered if n is not None]
 
-    def _spawn_server(self, free_target: int) -> None:
+    def _spawn_server(self, served_names: list[str]) -> None:
         import ray
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
@@ -753,7 +864,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             runtime_env=runtime_env,
         )
         self._server = server_cls.remote(
-            free_target=free_target,
+            served_names=served_names,
             num_rdt_buffers=ii.num_rdt_buffers,
             arena_presize_gb=ii.arena_presize_gb,
             nosync=ii.nosync,
@@ -782,6 +893,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             dtype_names=dtype_names,
             shapes=shapes,
             group_lens=group_lens,
+            group_owners=self._group_owners,
             num_consumers=self._init_info.num_consumers,
             num_rdt_buffers=self._init_info.num_rdt_buffers,
             layerwise_split=self._init_info.layerwise_split,
@@ -841,6 +953,10 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # generator hop per GROUP instead of per tensor (~95 vs ~37k at 235B;
         # the per-tensor path cost ~0.9s/sync of pure Python). Falls back to
         # the per-name iterator for sources without it (FSDP, plain Megatron).
+        # The source yields only the groups this rank owns (all of them unless it
+        # declares ownership), in metadata order; the checks below hold it to
+        # that. Every owner of a group must reach it in the same order or their
+        # shared gather collective mismatches.
         _iter_groups = getattr(self.source, "iter_groups", None)
         git = _iter_groups() if _iter_groups is not None else None
         it = iter(self.source) if git is None else None
@@ -854,7 +970,8 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         pending_publish: list = []
 
         try:
-            for group in self._groups:
+            for gi in self._owned_idx:
+                group = self._groups[gi]
                 key = tuple(group)
                 _tn = time.perf_counter()
                 if git is not None:
@@ -878,6 +995,14 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
                         tensors.append(tensor)
                 _te = time.perf_counter()
                 _t_next += _te - _tn
+                free_target = self._free_targets.get(gi, 0)
+                if free_target <= 0:
+                    # Gathered (the group's collective spans every owner) but no
+                    # consumer pulls it from this rank. Publishing it would park a
+                    # group nobody frees, holding a backpressure slot until
+                    # end_sync waits forever.
+                    names, tensors = [], []
+                    continue
                 # [RDT-STORAGE-PUBLISH] Share each unique STORAGE once (one
                 # cudaIpc export instead of one per name) and describe every
                 # name as an as_strided view spec relative to its storage.
@@ -910,7 +1035,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
                 # server reports the group freed (IPC export must outlive import).
                 self._inflight[key] = refs
                 _tp = time.perf_counter()
-                pending_publish.append(self._publish_async(key, (storages, views)))
+                pending_publish.append(self._publish_async(key, (storages, views), free_target))
                 while len(pending_publish) >= _PUBLISH_WINDOW:
                     self._drop_when_ready(pending_publish.pop(0))
                 _t_pub += time.perf_counter() - _tp

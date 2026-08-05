@@ -6,6 +6,7 @@ uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl
 import pytest
 import ray
 import torch
+from ray.util.placement_group import placement_group, remove_placement_group
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
@@ -22,8 +23,11 @@ from skyrl.train.config import (
     SkyRLTrainConfig,
     TorchProfilerConfig,
 )
-from skyrl.train.utils.utils import get_ray_pg_ready_with_timeout, print_mem, validate_cfg
-from ray.util.placement_group import placement_group, remove_placement_group
+from skyrl.train.utils.utils import (
+    get_ray_pg_ready_with_timeout,
+    print_mem,
+    validate_cfg,
+)
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
@@ -154,10 +158,14 @@ def _reserve_all_but_one_gpu_node():
         pytest.param("nccl", True, 4, 2, 2, 1, None, False, id="nccl_colocate_all"),
         pytest.param("nccl", False, 2, 2, 1, 1, None, False, id="nccl_non_colocated"),
         pytest.param("nccl", True, 4, 2, 2, 1, None, True, id="nccl_colocate_all_lora"),
-        # sharded_rdt (NIXL pull): non-colocated only. PP=2 verifies the Megatron
-        # WeightSource property that makes RDT work — the bridge gathers the full
-        # model across pipeline stages so every producer rank streams whole-model
-        # tensors (the trainer engine's group-contiguity check catches any break).
+        # sharded_rdt (NIXL pull): non-colocated only. PP=2 exercises the default
+        # gather-to-all layout, where the bridge broadcasts across pipeline stages
+        # so every producer rank streams whole-model tensors (the trainer engine's
+        # group-contiguity check catches any break). PP-LOCAL gather is the other
+        # layout — each stage serves only its own layers — and is covered by the
+        # source_bench A/B and the 235B run, both of which reach the workers with
+        # SKYRL_RDT_PP_LOCAL=1 through prepare_runtime_environment; this harness
+        # builds its actors without a runtime_env, so the env var would not arrive.
         # The harness sets policy world = num_gpus_per_node = inference_tp, so
         # inference_tp must equal megatron_tp*megatron_pp (=4): 4 dedicated policy
         # GPUs + 4 inference GPUs = 8, genuinely non-colocated.
