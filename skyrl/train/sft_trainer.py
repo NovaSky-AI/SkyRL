@@ -1248,8 +1248,9 @@ class SFTTrainer:
         Returns:
             A single :class:`SFTDataset`. Multiple sources are concatenated in
             config order as a :class:`ConcatSFTDataset` (a map-style view, no
-            row materialization), whose ``dataset_lengths`` configures weighted
-            mixing in :meth:`build_train_sampler`.
+            row materialization) and sampled as their union -- or, when
+            ``train_dataset_weights`` is set, as a weighted mix configured
+            from its ``dataset_lengths`` in :meth:`build_train_sampler`.
         """
         sources: list[SFTDataset] = []
         if self.sft_cfg.pretokenized_dataset_paths:
@@ -1356,14 +1357,18 @@ class SFTTrainer:
     def build_train_sampler(self, tokenized) -> Optional[torch.utils.data.Sampler]:
         """Build the training sampler from ``sft_cfg.sampler``.
 
-        Returns ``None`` for the default ``"random"`` strategy over a single
-        dataset, signalling :meth:`build_train_dataloader` to use the
-        dataloader's built-in ``shuffle=True`` path (which is statefully
+        Returns ``None`` for the default ``"random"`` strategy unless weighted
+        mixing is requested, signalling :meth:`build_train_dataloader` to use
+        the dataloader's built-in ``shuffle=True`` path (which is statefully
         checkpointed by ``StatefulDataLoader``). Over a
-        :class:`ConcatSFTDataset` (multiple training datasets), ``"random"``
-        instead returns a :class:`DataMixingSampler` configured with its
-        ``dataset_lengths`` and ``train_dataset_weights``. For ``"sequential"``
-        and ``"custom"`` it returns an explicit stateful sampler.
+        :class:`ConcatSFTDataset` (multiple training datasets) this means
+        **union sampling**: one shuffle over the concatenation, without
+        replacement, so an epoch covers every sample of every dataset exactly
+        once and each dataset's share follows its size. Only when
+        ``train_dataset_weights`` is set does ``"random"`` return a
+        :class:`DataMixingSampler` (weighted per-source mixing, with
+        replacement). For ``"sequential"`` and ``"custom"`` it returns an
+        explicit stateful sampler.
 
         Custom samplers are imported from ``sft_cfg.sampler_class_path`` and
         instantiated as ``ClassName(tokenized, **sft_cfg.sampler_kwargs)``. With
@@ -1385,10 +1390,11 @@ class SFTTrainer:
         dataset_lengths = tokenized.dataset_lengths if multi_dataset else None
         sampler_type = self.sft_cfg.sampler
         if sampler_type == "random":
-            if not multi_dataset:
+            # No explicit weights -> union sampling: the built-in shuffle is a
+            # permutation of the (concatenated) dataset, so every sample of
+            # every source is seen exactly once per epoch.
+            if not multi_dataset or self.sft_cfg.train_dataset_weights is None:
                 return None
-            # Config normalization (validate_sft_cfg) fills equal weights for
-            # the random sampler on every construction path.
             return DataMixingSampler(
                 tokenized,
                 lengths=dataset_lengths,

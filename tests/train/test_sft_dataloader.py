@@ -234,11 +234,30 @@ class TestBuildTrainSampler:
         assert list(sampler) == list(other)
 
     def test_random_multi_dataset_builds_mixing_sampler(self):
-        # train_dataset_weights is filled by config normalization
-        # (validate_sft_cfg) on every construction path.
+        # Explicit weights select weighted mixing (with replacement).
         trainer = _make_trainer(sampler="random", train_dataset_weights=[0.5, 0.5])
         sampler = trainer.build_train_sampler(_concat_dataset(10, 10))
         assert isinstance(sampler, DataMixingSampler)
+
+    def test_random_multi_dataset_without_weights_returns_none(self):
+        # Unset weights select union sampling: the built-in shuffle path
+        # (sampler=None) permutes the concatenation without replacement.
+        trainer = _make_trainer(sampler="random")
+        assert trainer.sft_cfg.train_dataset_weights is None
+        assert trainer.build_train_sampler(_concat_dataset(10, 10)) is None
+
+    def test_union_sampling_epoch_covers_every_sample_once(self):
+        # Without weights, one epoch over two unequal sources yields every
+        # index of both exactly once (a permutation of the union).
+        trainer = _make_trainer(sampler="random", batch_size=4, seed=7)
+        dl = trainer.build_train_dataloader(_concat_dataset(12, 8))
+        epoch = _flatten(dl)
+        assert sorted(epoch) == list(range(20))
+        assert epoch != list(range(20))  # shuffled, not sequential
+        # And the next epoch is a fresh permutation with the same coverage.
+        second = _flatten(dl)
+        assert sorted(second) == list(range(20))
+        assert second != epoch
 
     def test_custom_multi_dataset_injects_lengths(self):
         trainer = _make_trainer(
