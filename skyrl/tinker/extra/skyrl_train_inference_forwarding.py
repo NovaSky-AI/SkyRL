@@ -96,19 +96,19 @@ class SkyRLTrainInferenceForwardingClient:
             await session.commit()
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        # A transient vLLM router<->worker breakdown surfaces as either httpx.RequestError
-        # (stale/dead cached proxy URL) or RuntimeError("...no proxy URL published...") (the
-        # router dropped its worker and hasn't republished yet). The engine/worker stays
-        # alive across these, so poll-retry with a re-read proxy URL instead of failing the
-        # whole run. Genuine vLLM 4xx/5xx responses still surface (not retried here).
+        # Retry missing/stale vLLM proxy discovery and transport failures; genuine
+        # vLLM response errors still surface immediately.
         timeout_sec = float(os.environ.get("SKYRL_PROXY_RETRY_TIMEOUT_SEC", "900"))
         backoff_sec = float(os.environ.get("SKYRL_PROXY_RETRY_BACKOFF_SEC", "5"))
         deadline = time.monotonic() + timeout_sec
         attempt = 0
+        last_tried_url = None
         while True:
             attempt += 1
             try:
-                proxy_url = await self._resolve_proxy_url(force_refresh=attempt > 1)
+                force_refresh = attempt > 1 and (last_tried_url is None or last_tried_url == self._cached_proxy_url)
+                proxy_url = await self._resolve_proxy_url(force_refresh=force_refresh)
+                last_tried_url = proxy_url
                 return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
             except httpx.RequestError as e:
                 last = f"{type(e).__name__}: {e}"

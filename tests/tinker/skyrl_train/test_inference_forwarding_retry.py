@@ -14,37 +14,27 @@ def forwarding_client() -> SkyRLTrainInferenceForwardingClient:
     return client
 
 
+@pytest.mark.parametrize("failure", ["missing_proxy", "network"])
 @pytest.mark.asyncio
-async def test_missing_proxy_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_transient_proxy_failure_is_retried(monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
     monkeypatch.setenv("SKYRL_PROXY_RETRY_TIMEOUT_SEC", "1")
     monkeypatch.setenv("SKYRL_PROXY_RETRY_BACKOFF_SEC", "0")
     client = forwarding_client()
-    client._resolve_proxy_url = AsyncMock(
-        side_effect=[RuntimeError("inference engine not ready: no proxy URL published"), "http://proxy"]
-    )
     expected = object()
-    client._forward = AsyncMock(return_value=expected)
+    if failure == "missing_proxy":
+        client._resolve_proxy_url = AsyncMock(
+            side_effect=[RuntimeError("inference engine not ready: no proxy URL published"), "http://proxy"]
+        )
+        client._forward = AsyncMock(return_value=expected)
+    else:
+        client._cached_proxy_url = "http://stale-proxy"
+        client._resolve_proxy_url = AsyncMock(side_effect=["http://stale-proxy", "http://fresh-proxy"])
+        client._forward = AsyncMock(side_effect=[httpx.ConnectError("connection lost"), expected])
 
     result = await client._forward_with_retry(object(), "model", base_model=None)
 
     assert result is expected
     assert client._resolve_proxy_url.await_count == 2
-    client._resolve_proxy_url.assert_awaited_with(force_refresh=True)
-
-
-@pytest.mark.asyncio
-async def test_proxy_network_error_refreshes_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SKYRL_PROXY_RETRY_TIMEOUT_SEC", "1")
-    monkeypatch.setenv("SKYRL_PROXY_RETRY_BACKOFF_SEC", "0")
-    client = forwarding_client()
-    client._cached_proxy_url = "http://stale-proxy"
-    client._resolve_proxy_url = AsyncMock(side_effect=["http://stale-proxy", "http://fresh-proxy"])
-    expected = object()
-    client._forward = AsyncMock(side_effect=[httpx.ConnectError("connection lost"), expected])
-
-    result = await client._forward_with_retry(object(), "model", base_model=None)
-
-    assert result is expected
     client._resolve_proxy_url.assert_awaited_with(force_refresh=True)
 
 
