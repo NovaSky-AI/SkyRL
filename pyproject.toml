@@ -100,7 +100,7 @@ skyrl-train = [
     "orjson>=3.11.9",
     "pybase64>=1.4.2",
     "uvicorn",
-    "vllm-router; sys_platform == 'linux'",
+    "vllm-router==0.1.15; sys_platform == 'linux'",
     "pybind11",
     "setuptools",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
@@ -113,7 +113,7 @@ skyrl-train = [
 fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.23.0; sys_platform == 'linux'",
-    "vllm-router; sys_platform == 'linux'",
+    "vllm-router==0.1.15; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
     # Its metadata hard-depends on `nixl-cu13` too; that variant is overridden
@@ -147,7 +147,7 @@ megatron = [
     "causal-conv1d; sys_platform == 'linux'",
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
     "vllm==0.23.0; sys_platform == 'linux'",
-    "vllm-router; sys_platform == 'linux'",
+    "vllm-router==0.1.15; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
     # Its metadata hard-depends on `nixl-cu13` too; that variant is overridden
@@ -324,14 +324,6 @@ harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f
 megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "91a15142a4b4442a8d46ab539d1b923bd08570d0", marker = "sys_platform == 'linux'"}
 # megatron-core main branch: https://github.com/NVIDIA/Megatron-LM/tree/main latest as of 6/8/26
 megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "71e418ea7d7b3a6c9a53238c543c3e0b43e11026", marker = "sys_platform == 'linux'"}
-# NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14
-# TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
-vllm-router = [
-    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
-]
-
-
 [tool.black]
 line-length = 120
 include = '\.pyi?$'
