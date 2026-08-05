@@ -296,3 +296,75 @@ def test_find_single_requests_barrier_is_per_model(scheduling_engine):
         assert list(singles.keys()) == ["2", "5"]
         assert singles["2"][0] == "model_a"
         assert singles["5"][0] == "model_b"
+
+
+class _StubBackend:
+    """Minimal backend exposing only max_sample_batch_size, for find_batchable_sample tests."""
+
+    def __init__(self, cap: int):
+        self._cap = cap
+
+    def max_sample_batch_size(self) -> int:
+        return self._cap
+
+
+def _sample_request_data():
+    """A valid base-model (checkpoint_id="") SampleInput payload for a pending SAMPLE row."""
+    return types.SampleInput(
+        base_model=BASE_MODEL,
+        prompt=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=4, seed=0),
+        num_samples=1,
+        checkpoint_id="",
+        prompt_logprobs=False,
+    ).model_dump(mode="json")
+
+
+def test_find_batchable_sample_applies_backend_cap(scheduling_engine):
+    """find_batchable_sample limits the batch to backend.max_sample_batch_size() when it is > 0.
+
+    The engine asks the backend for the cap via the AbstractBackend interface; it no longer
+    reads any backend-specific config. The scheduling_engine fixture intentionally leaves
+    engine.config unset, so a reintroduced self.config.backend branch would fail here.
+    """
+    engine = scheduling_engine
+    engine.backend = _StubBackend(cap=2)
+
+    with Session(engine.db_engine) as session:
+        for _ in range(3):
+            session.add(
+                FutureDB(
+                    request_type=types.RequestType.SAMPLE,
+                    model_id="model_a",
+                    request_data=_sample_request_data(),
+                    status=RequestStatus.PENDING,
+                )
+            )
+        session.commit()
+
+    with Session(engine.db_engine) as session:
+        batchable = engine.find_batchable_sample(session)
+        # 3 pending sample requests, cap=2 -> only the first 2 (by request_id) are batched.
+        assert list(batchable.keys()) == ["1", "2"]
+
+
+def test_find_batchable_sample_no_cap_when_zero(scheduling_engine):
+    """A backend reporting max_sample_batch_size() == 0 imposes no limit (default for fsdp/megatron)."""
+    engine = scheduling_engine
+    engine.backend = _StubBackend(cap=0)
+
+    with Session(engine.db_engine) as session:
+        for _ in range(3):
+            session.add(
+                FutureDB(
+                    request_type=types.RequestType.SAMPLE,
+                    model_id="model_a",
+                    request_data=_sample_request_data(),
+                    status=RequestStatus.PENDING,
+                )
+            )
+        session.commit()
+
+    with Session(engine.db_engine) as session:
+        batchable = engine.find_batchable_sample(session)
+        assert len(batchable) == 3
