@@ -159,7 +159,7 @@ class BaseBatchIterator:
             advantages=batch.get("advantages"),
             attention_mask=batch.get("attention_mask"),
             loss_mask=batch.get("loss_mask"),
-            action_mask=batch.get("response_mask"),
+            response_mask=batch.get("response_mask"),
             num_actions=batch.metadata["response_length"],  # int
             rollout_logprobs=batch.get("rollout_logprobs"),
             rollout_expert_indices=batch.get("rollout_expert_indices"),

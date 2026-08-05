@@ -98,7 +98,8 @@ def compute_approx_kl(
     Args:
         log_probs: Log probabilities of the new distribution.
         log_probs_base: Log probabilities of the base distribution.
-        action_mask: Mask for actions.
+        loss_mask: Optional mask over trainable response tokens.
+        kl_estimator_type: One of ``k1``, ``abs``, ``k2``, or ``k3``.
     """
     if kl_estimator_type == "k1":
         kld = log_probs - log_probs_base

@@ -888,7 +888,7 @@ class PolicyWorkerBase(Worker):
         num_actions = experience.num_actions
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
-        action_mask = experience.action_mask
+        response_mask = experience.response_mask
         rollout_action_logprobs = experience.rollout_logprobs
 
         # Determine which loss function to use
@@ -962,8 +962,8 @@ class PolicyWorkerBase(Worker):
                 # exactly once before iterating in Python — avoids ~3N GPU->CPU syncs.
                 batch_size = action_log_probs.shape[0]
                 seq_len = action_log_probs.shape[1]
-                if action_mask is not None:
-                    valid_lens_t = action_mask.sum(dim=-1).long()
+                if response_mask is not None:
+                    valid_lens_t = response_mask.sum(dim=-1).long()
                 elif loss_mask is not None:
                     valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
                 else:
@@ -1035,8 +1035,8 @@ class PolicyWorkerBase(Worker):
             batch_size = action_log_probs.shape[0]
             seq_len = action_log_probs.shape[1]
 
-            if action_mask is not None:
-                valid_lens = action_mask.sum(dim=1).int().tolist()
+            if response_mask is not None:
+                valid_lens = response_mask.sum(dim=1).int().tolist()
             elif loss_mask is not None:
                 valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
             else:
@@ -1175,7 +1175,7 @@ class PolicyWorkerBase(Worker):
         num_actions = experience.num_actions
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
-        action_mask = experience.action_mask
+        response_mask = experience.response_mask
         rollout_action_logprobs = experience.rollout_logprobs
 
         current_loss_fn = PolicyLossRegistry.get(loss_fn)
@@ -1220,8 +1220,8 @@ class PolicyWorkerBase(Worker):
                 # per micro-batch (item()/cpu()/tolist() inside the per-sample loop).
                 batch_size = action_log_probs.shape[0]
                 seq_len = action_log_probs.shape[1]
-                if action_mask is not None:
-                    valid_lens_t = action_mask.sum(dim=-1).long()
+                if response_mask is not None:
+                    valid_lens_t = response_mask.sum(dim=-1).long()
                 elif loss_mask is not None:
                     valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
                 else:

@@ -44,18 +44,18 @@ def _ref_convert_prompts_responses(prompts, responses, rewards, loss_masks, logp
 
     sequences = []
     attention_masks = []
-    action_masks = []
+    response_masks = []
     for i in range(len(prompts)):
         total_real = prompt_token_lens[i] + response_token_lens[i]
         pad_len = max_total - total_real
         sequences.append([pad_token_id] * pad_len + prompts[i] + responses[i])
         attention_masks.append([0] * pad_len + [1] * total_real)
         resp_pad = max_response - response_token_lens[i]
-        action_masks.append([0] * resp_pad + [1] * response_token_lens[i])
+        response_masks.append([0] * resp_pad + [1] * response_token_lens[i])
 
     sequences_t = torch.tensor(sequences)
     attention_mask_t = torch.tensor(attention_masks, dtype=torch.int64)
-    action_mask_t = torch.tensor(action_masks, dtype=torch.int64)
+    response_mask_t = torch.tensor(response_masks, dtype=torch.int64)
 
     ret_loss_masks = torch.zeros(len(prompts), max_response, dtype=torch.float)
     for i, lm in enumerate(loss_masks):
@@ -73,7 +73,7 @@ def _ref_convert_prompts_responses(prompts, responses, rewards, loss_masks, logp
             lp = torch.tensor(sample_logprobs, dtype=torch.float)
             logprobs_tensor[i, max_response - len(sample_logprobs) :] = lp
 
-    return sequences_t, attention_mask_t, action_mask_t, ret_rewards, ret_loss_masks, logprobs_tensor
+    return sequences_t, attention_mask_t, response_mask_t, ret_rewards, ret_loss_masks, logprobs_tensor
 
 
 def _ref_collate_sft_batch(examples, pad_token_id):

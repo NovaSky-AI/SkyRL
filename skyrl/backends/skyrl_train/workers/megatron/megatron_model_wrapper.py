@@ -572,7 +572,7 @@ class MegatronModelWrapper:
             advantages = data["advantages"]
             loss_mask = data["loss_mask"]
             rollout_action_logprobs = data["rollout_action_logprobs"]
-            action_mask = data.get("action_mask")
+            response_mask = data.get("response_mask")
             num_microbatches = data.get("num_microbatches")
             # Number of microbatches carrying real samples (excludes fully-padding
             # microbatches added by token-based batching). Used to normalize the
@@ -770,8 +770,8 @@ class MegatronModelWrapper:
                     # syncs per micro-batch (item()/cpu()/tolist() inside the loop).
                     batch_size = action_log_probs.shape[0]
                     seq_len = action_log_probs.shape[1]
-                    if action_mask is not None:
-                        valid_lens_t = action_mask.sum(dim=-1).long()
+                    if response_mask is not None:
+                        valid_lens_t = response_mask.sum(dim=-1).long()
                     elif loss_mask is not None:
                         valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
                     else:
@@ -910,8 +910,8 @@ class MegatronModelWrapper:
             batch_size = action_log_probs.shape[0]
             seq_len = action_log_probs.shape[1]
 
-            if action_mask is not None:
-                valid_lens = action_mask.sum(dim=1).int().tolist()
+            if response_mask is not None:
+                valid_lens = response_mask.sum(dim=1).int().tolist()
             elif loss_mask is not None:
                 valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
             else:

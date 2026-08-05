@@ -119,12 +119,12 @@ def convert_prompts_responses_to_batch_tensors(
     The padded sequence length is ``max(prompt_len_i + response_len_i)``.
     This way, the max padded sequence length is ``max_seq_len``.
 
-    This makes the response-level tensors (action_mask, rewards, loss_masks, logprobs):
+    This makes the response-level tensors (response_mask, rewards, loss_masks, logprobs):
     | prompt prompt respon respon |
     | prompt respon respon respon |
     | respon respon respon respon |
 
-    So the action_mask is:
+    So the response_mask is:
     | 0       0       1      1    |
     | 0       1       1      1    |
     | 1       1       1      1    |
@@ -152,7 +152,7 @@ def convert_prompts_responses_to_batch_tensors(
     Returns:
         sequences: ``(batch, max_total)`` where ``max_total = max(prompt_i + response_i)``.
         attention_mask: ``(batch, max_total)``
-        action_mask: ``(batch, max_response)`` — right-aligned response indicator.
+        response_mask: ``(batch, max_response)`` — right-aligned response indicator.
         rewards: ``(batch, max_response)`` — right-aligned.
         loss_masks: ``(batch, max_response)`` — right-aligned.
         logprobs: ``(batch, max_response)`` — right-aligned, or ``None``.
@@ -196,11 +196,11 @@ def convert_prompts_responses_to_batch_tensors(
     # Response tokens occupy the trailing response_len positions.
     col_resp = np.arange(max_response, dtype=np.int64)
     resp_pad = max_response - response_lens
-    action_mask_np = (col_resp[None, :] >= resp_pad[:, None]).astype(np.int64)
+    response_mask_np = (col_resp[None, :] >= resp_pad[:, None]).astype(np.int64)
 
     sequences = torch.from_numpy(sequences_np)
     attention_mask = torch.from_numpy(attention_mask_np)
-    action_mask = torch.from_numpy(action_mask_np)
+    response_mask = torch.from_numpy(response_mask_np)
 
     # Response-level tensors are right-aligned to match the model output.
     ret_loss_masks_np = np.zeros((num_samples, max_response), dtype=np.float32)
@@ -272,7 +272,7 @@ def convert_prompts_responses_to_batch_tensors(
     return (
         sequences,
         attention_mask,
-        action_mask,
+        response_mask,
         ret_rewards,
         ret_loss_masks,
         logprobs_tensor,

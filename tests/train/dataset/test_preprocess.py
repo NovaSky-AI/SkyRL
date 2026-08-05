@@ -215,7 +215,7 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):
     loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
     rewards = [torch.tensor([0, 1, 0]), torch.tensor([1, 0, 0, 0, 0])]
 
-    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, _ = (
+    sequences, attention_mask, response_mask, ret_rewards, ret_loss_masks, ret_log_probs, _ = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer,
             prompts,
@@ -228,7 +228,7 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):
     # max_total = max(3+3, 5+5) = 10, max_response = 5
     assert sequences.shape[0] == len(prompts)
     assert sequences.shape == (2, 10)
-    assert action_mask.shape == ret_loss_masks.shape
+    assert response_mask.shape == ret_loss_masks.shape
     # Response data is RIGHT-ALIGNED within (batch, max_response)
     # Sample 0: response len=3, so 2 leading zeros then 3 values
     assert torch.equal(ret_loss_masks[0], torch.tensor([0, 0, 1, 1, 0]))
@@ -251,7 +251,7 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(tokenizer)
     rewards = [torch.tensor([1.0, 0.5, 0.3]), torch.tensor([0.8])]
     loss_masks = [[1, 1, 1], [1]]
 
-    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, _ = (
+    sequences, attention_mask, response_mask, ret_rewards, ret_loss_masks, ret_log_probs, _ = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer,
             prompts,
@@ -268,7 +268,7 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(tokenizer)
     # Check shapes
     assert sequences.shape == (2, max_total)
     assert attention_mask.shape == sequences.shape
-    assert action_mask.shape == (2, max_response_len)
+    assert response_mask.shape == (2, max_response_len)
     assert ret_rewards.shape == (2, max_response_len)
     assert ret_loss_masks.shape == (2, max_response_len)
 

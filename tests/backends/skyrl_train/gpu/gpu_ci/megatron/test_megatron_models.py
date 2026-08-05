@@ -173,7 +173,6 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "action_mask": response_mask.to(dtype=torch.int64),
             }
         )
         training_input.metadata = {"response_length": num_actions}

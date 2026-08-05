@@ -129,7 +129,7 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
         advantages=0.6 * torch.ones((B, num_actions), device="cpu"),
         attention_mask=torch.ones((B, T), dtype=int, device="cpu"),
         loss_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
-        action_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
+        response_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
         num_actions=num_actions,
         info={},
     )

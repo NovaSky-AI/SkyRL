@@ -51,7 +51,7 @@ class Experience:
     returns: (B, A)
     advatanges: (B, A)
     attention_mask: (B, S)
-    action_mask: (B, A)
+    response_mask: (B, A)
     kl: (B, A)
 
     "A" is the number of actions/ response length.
@@ -65,7 +65,7 @@ class Experience:
     advantages: Optional[Float[torch.Tensor, "batch response_len"]]
     attention_mask: Optional[Integer[torch.LongTensor, "batch seq_len"]]
     loss_mask: Optional[Integer[torch.LongTensor, "batch response_len"]]
-    action_mask: Optional[Integer[torch.Tensor, "batch response_len"]]
+    response_mask: Optional[Integer[torch.Tensor, "batch response_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch response_len"]]
     rollout_expert_indices: Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]]
     num_actions: int
@@ -96,8 +96,8 @@ class Experience:
             self.attention_mask = to(self.attention_mask, device)
         if self.loss_mask is not None:
             self.loss_mask = to(self.loss_mask, device)
-        if self.action_mask is not None:
-            self.action_mask = to(self.action_mask, device)
+        if self.response_mask is not None:
+            self.response_mask = to(self.response_mask, device)
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
         if self.rollout_expert_indices is not None:
@@ -127,8 +127,8 @@ class Experience:
             self.attention_mask = self.attention_mask.pin_memory()
         if self.loss_mask is not None:
             self.loss_mask = self.loss_mask.pin_memory()
-        if self.action_mask is not None:
-            self.action_mask = self.action_mask.pin_memory()
+        if self.response_mask is not None:
+            self.response_mask = self.response_mask.pin_memory()
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
         if self.rollout_expert_indices is not None:
@@ -151,7 +151,7 @@ class BufferItem:
     advatanges: (1)
     attention_mask: (S)
     loss_mask: (A)
-    action_mask: (A)
+    response_mask: (A)
 
     "A" is the number of actions.
     """
@@ -164,7 +164,7 @@ class BufferItem:
     advantages: Optional[Float[torch.Tensor, "response_len"]]  # noqa: F821
     attention_mask: Optional[Integer[torch.LongTensor, "seq_len"]]  # noqa: F821
     loss_mask: Optional[Integer[torch.LongTensor, "response_len"]]  # noqa: F821
-    action_mask: Optional[Integer[torch.Tensor, "response_len"]]  # noqa: F821
+    response_mask: Optional[Integer[torch.Tensor, "response_len"]]  # noqa: F821
     num_actions: int
     info: Optional[dict]
 
@@ -192,7 +192,7 @@ def split_experience_batch(experience: Experience) -> List[BufferItem]:
         "advantages",
         "attention_mask",
         "loss_mask",
-        "action_mask",
+        "response_mask",
         "num_actions",
     )
     if len(experience.sequences.shape) == 1:
@@ -260,7 +260,7 @@ def make_experience_batch(items: List[BufferItem]) -> Experience:
         "advantages",
         "attention_mask",
         "loss_mask",
-        "action_mask",
+        "response_mask",
         "num_actions",
     )
     for key in keys:
@@ -286,7 +286,7 @@ def remove_padding_in_sequences(items):
             item.returns,
             item.advantages,
             item.attention_mask,
-            item.action_mask,
+            item.response_mask,
         )
         right_pad = (1 - act_mask.long()).sum()
         right_pad = None if right_pad == 0 else -right_pad
@@ -301,7 +301,7 @@ def remove_padding_in_sequences(items):
             item.returns,
             item.advantages,
             item.attention_mask,
-            item.action_mask,
+            item.response_mask,
         ) = (
             seq[left_pad:right_pad],
             act_log_prob[:right_pad],

@@ -129,7 +129,6 @@ def build_training_input_from_text_samples(
             "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
             "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
             "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "action_mask": response_mask.to(dtype=torch.int64),
         }
     )
     training_input.metadata = {"response_length": num_actions}
@@ -251,7 +250,6 @@ async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs):
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "action_mask": response_mask.to(dtype=torch.int64),
             }
         )
         training_input.metadata = {"response_length": num_actions}
@@ -386,7 +384,6 @@ def test_forward_backward(tp, pp, cp, ep, etp, extra_tf_kwargs):
                 "action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "base_action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "advantages": torch.randn((batch_size, num_actions), generator=gen),
-                "action_mask": response_mask.to(dtype=torch.int64),
             }
         )
         training_input.metadata = {"response_length": num_actions}
