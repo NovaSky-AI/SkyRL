@@ -35,6 +35,13 @@ _HIST_TTFT_SUM = "ray_vllm_time_to_first_token_seconds_sum"
 _HIST_TTFT_COUNT = "ray_vllm_time_to_first_token_seconds_count"
 _HIST_ITL_SUM = "ray_vllm_inter_token_latency_seconds_sum"
 _HIST_ITL_COUNT = "ray_vllm_inter_token_latency_seconds_count"
+# Speculative-decoding (MTP draft) counters. The per-position counter additionally carries a
+# `position` label ("0".."k-1"); it is summed per-position in `sum_by_position` rather than through
+# `_SUM_METRICS` (which would collapse the label and lose the per-depth breakdown).
+_COUNTER_SPEC_DRAFTS = "ray_vllm_spec_decode_num_drafts_total"
+_COUNTER_SPEC_DRAFT_TOKENS = "ray_vllm_spec_decode_num_draft_tokens_total"
+_COUNTER_SPEC_ACCEPTED_TOKENS = "ray_vllm_spec_decode_num_accepted_tokens_total"
+_COUNTER_SPEC_ACCEPTED_PER_POS = "ray_vllm_spec_decode_num_accepted_tokens_per_pos_total"
 
 _SUM_METRICS = (
     _GAUGE_NUM_RUNNING,
@@ -47,6 +54,9 @@ _SUM_METRICS = (
     _HIST_TTFT_COUNT,
     _HIST_ITL_SUM,
     _HIST_ITL_COUNT,
+    _COUNTER_SPEC_DRAFTS,
+    _COUNTER_SPEC_DRAFT_TOKENS,
+    _COUNTER_SPEC_ACCEPTED_TOKENS,
 )
 _MEAN_METRICS = (_GAUGE_KV_CACHE_USAGE,)
 
@@ -121,6 +131,26 @@ def aggregate(parsed: ParsedSamples, names: Iterable[str], how: str) -> Dict[str
         else:
             raise ValueError(f"unknown aggregation: {how}")
     return result
+
+
+def sum_by_position(parsed: ParsedSamples, name: str) -> Dict[str, float]:
+    """Sum a per-position-labelled counter into ``{name::position: value}`` keys.
+
+    The vLLM ``..._per_pos`` spec-decode counter carries a ``position`` label ("0".."k-1"), so
+    plain ``aggregate`` would collapse all positions into one sum. Grouping by that label keeps the
+    per-depth breakdown so ``_derive`` can emit one acceptance rate per draft position. Samples
+    across replicas (different ReplicaId labels) add for the same position.
+    """
+    out: Dict[str, float] = {}
+    for (sample_name, labels), value in parsed.items():
+        if sample_name != name:
+            continue
+        pos = next((val for key, val in labels if key == "position"), None)
+        if pos is None:
+            continue
+        key = f"{name}::{pos}"
+        out[key] = out.get(key, 0.0) + value
+    return out
 
 
 def discover_ray_metrics_urls() -> List[str]:
@@ -232,7 +262,8 @@ class VLLMMetricsScraper:
 
         sums = aggregate(parsed, _SUM_METRICS, how="sum")
         means = aggregate(parsed, _MEAN_METRICS, how="mean")
-        return {**sums, **means}
+        per_pos = sum_by_position(parsed, _COUNTER_SPEC_ACCEPTED_PER_POS)
+        return {**sums, **means, **per_pos}
 
     async def sample(self, generation_time_s: Optional[float] = None) -> Dict[str, float]:
         """Return ``vllm/...`` scalars for the current step (empty if unavailable).
@@ -373,5 +404,33 @@ class VLLMMetricsScraper:
         itl_count_d = delta(_HIST_ITL_COUNT)
         if itl_sum_d is not None and itl_count_d is not None and itl_count_d > 0:
             out[f"{prefix}tpot_seconds_avg"] = itl_sum_d / itl_count_d
+
+        # Speculative-decoding (MTP draft) acceptance. Counters, so pure deltas over the window --
+        # no throughput denominator needed. Keys mirror the legacy metrics: raw draft/accept counts,
+        # an overall acceptance rate (accepted / drafted tokens), and one rate per draft position
+        # (accepted-at-position / draft rounds), 1-based to match `..._pos_k`.
+        drafts_d = delta(_COUNTER_SPEC_DRAFTS)
+        drafted_d = delta(_COUNTER_SPEC_DRAFT_TOKENS)
+        accepted_d = delta(_COUNTER_SPEC_ACCEPTED_TOKENS)
+        if drafted_d is not None:
+            out[f"{prefix}draft_num_draft_tokens"] = drafted_d
+        if accepted_d is not None:
+            out[f"{prefix}draft_num_accepted_tokens"] = accepted_d
+        if drafted_d is not None and accepted_d is not None and drafted_d > 0:
+            out[f"{prefix}draft_acceptance_rate"] = accepted_d / drafted_d
+        if drafts_d is not None and accepted_d is not None and drafts_d > 0:
+            # Mean acceptance length (vLLM's definition): 1 always-emitted target token per draft
+            # round + the accepted draft tokens per round. This is the average number of tokens
+            # produced per target forward pass -- i.e. the spec-decode speedup factor (1.0 == no gain).
+            out[f"{prefix}draft_mean_acceptance_length"] = 1 + accepted_d / drafts_d
+        if drafts_d is not None and drafts_d > 0:
+            for name in cur:
+                if not name.startswith(f"{_COUNTER_SPEC_ACCEPTED_PER_POS}::"):
+                    continue
+                pos_d = delta(name)
+                if pos_d is None:
+                    continue
+                pos = int(name.rsplit("::", 1)[1])
+                out[f"{prefix}draft_acceptance_rate_pos_{pos + 1}"] = pos_d / drafts_d
 
         return out

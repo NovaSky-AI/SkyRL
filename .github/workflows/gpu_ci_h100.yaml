@@ -54,12 +54,17 @@ jobs:
           activate-environment: true
       - name: Install basic dependencies
         run: uv pip install anyscale==0.26.103 typer==0.9.0
+      - name: Install envsubst
+        run: sudo apt-get update && sudo apt-get install -y gettext-base
       - name: GPU tests
         env:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          envsubst < ci/anyscale_gpu_ci_h100.yaml > ci/anyscale_gpu_ci_h100_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           JOB_NAME="skyrl-train-gpu-ci-h100-${COMMIT_SHA:0:7}-${{ github.run_id }}"
-          anyscale job submit -f ci/anyscale_gpu_ci_h100.yaml --name "$JOB_NAME" --timeout 5400
+          anyscale job submit -f ci/anyscale_gpu_ci_h100_envsubst.yaml --name "$JOB_NAME" --timeout 5400
           anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 5400
+          rm -f ci/anyscale_gpu_ci_h100_envsubst.yaml

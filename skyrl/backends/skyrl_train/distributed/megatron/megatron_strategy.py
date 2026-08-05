@@ -47,6 +47,44 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
 _PP_SEED_OFFSET = 100
 
 
+def _stage_async_request_to_host(async_request):
+    """Run an async checkpoint request's GPU->host staging in *this* process.
+
+    Megatron's ``PersistentAsyncCaller`` pickles the whole ``AsyncRequest`` to a
+    spawned worker and calls ``preload_fn`` *there*, so the still-on-GPU shards
+    cross the process boundary via CUDA IPC.
+
+    That can break under ``expandable_segments:True`` -- which SkyRL turns on for
+    training workers (see ``Worker._set_expandable_segments``). Expandable
+    segments are ``cuMemCreate``-backed, and their shareable handle is a POSIX
+    file descriptor rather than a copyable ``cudaIpcMemHandle_t``, so the
+    importing process has to pull the fd out of the producer with
+    ``pidfd_getfd``. That syscall requires ptrace-attach permission.
+    The checkpoint worker is a child of the training rank,
+    so it can error out with ``pidfd_getfd: Operation not permitted`` on machines
+    with restricted ptrace permissions and the training rank
+    then hangs forever on the preload barrier.
+
+    Staging here avoids CUDA IPC altogether: only CPU tensors get pickled to the
+    worker, and those cross by fd-passing over a unix socket, which needs no ptrace
+    permission. Reference:
+    https://github.com/NVIDIA/Megatron-LM/blob/b78cfd5279be41ced082d344e9380a09a146c458/megatron/core/dist_checkpointing/strategies/async_utils.py#L578-L584
+
+    Takes and returns an ``AsyncRequest``; both the ``mcore`` and ``nvrx`` request types
+    are named tuples with the same ``async_fn_args``/``preload_fn`` fields. The attribute
+    access is deliberately unguarded so a future upstream change to that contract fails
+    loudly here rather than silently restoring the hang.
+    """
+    if async_request.preload_fn is None:
+        return async_request
+    args = list(async_request.async_fn_args)
+    # ``preload_fn`` stages ``async_fn_args[1]`` (the write buckets); Megatron
+    # asserts the same arity in ``AsyncRequest.execute_sync``.
+    assert len(args) == 3, f"expected 3 async_fn_args, got {len(args)}: {args!r}"
+    args[1] = async_request.preload_fn()
+    return async_request._replace(async_fn_args=tuple(args), preload_fn=None)
+
+
 def _patched_update_fp32_params_by_new_state(self):
     """Monkeypatch for megatron-core HybridDeviceOptimizer._update_fp32_params_by_new_state.
 
@@ -299,16 +337,35 @@ class MegatronStrategy(DistributedStrategy):
             save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
         )
 
+        async_save = self.megatron_config.async_dist_ckpt_save
+        if async_save and io.is_cloud_path(ckpt_dir):
+            # local_work_dir uploads on context exit, which would race the still-running
+            # background write. Async is only safe writing in-place to a local/shared FS.
+            self.print(f"async_dist_ckpt_save unsupported for cloud path {ckpt_dir}; saving synchronously")
+            async_save = False
+        if async_save:
+            # The queue holds one in-flight write; the prior checkpoint dir must be
+            # fully written before this save reuses it.
+            self._finalize_async_calls()
+
         with io.local_work_dir(ckpt_dir) as work_dir:
-            # TODO(tgriggs): Support configurable async saves.
             async_save_request = dist_checkpointing.save(
                 sharded_state_dict=sharded_state_dict,
                 checkpoint_dir=work_dir,
                 sharded_strategy=save_strategy,
-                async_sharded_save=False,
+                async_sharded_save=async_save,
+                async_strategy=self.megatron_config.async_dist_ckpt_strategy,
                 validate_access_integrity=True,
             )
-            assert async_save_request is None, "Async save is not yet supported for Megatron"
+            if async_save:
+                # Shards are staged to host; the disk write runs in the background.
+                if self.megatron_config.async_save_prestage_to_cpu:
+                    # Keeps GPU tensors from crossing the process boundary, which the writer
+                    # cannot always do -- see `_stage_async_request_to_host`.
+                    async_save_request = _stage_async_request_to_host(async_save_request)
+                ckpt_base.async_calls.schedule_async_request(async_save_request)
+            else:
+                assert async_save_request is None, "save() must not return a request when sync"
 
             # Only global rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
@@ -319,9 +376,27 @@ class MegatronStrategy(DistributedStrategy):
             self._save_lora_adapters(unwrapped_model, ckpt_dir)
 
         dist.barrier()
-        ckpt_base.async_calls.close()
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+        if not async_save:
+            # Async path keeps the pending request alive in the queue until its finalize;
+            # tearing it down here would orphan that write.
+            ckpt_base.async_calls.close()
+            ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
+
+    @staticmethod
+    def _finalize_async_calls() -> None:
+        # Finalization may run in a helper thread, whose current CUDA device defaults to 0.
+        local_rank = os.environ.get("LOCAL_RANK")
+        if local_rank is not None and torch.cuda.is_available():
+            torch.cuda.set_device(int(local_rank))
+        ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
+
+    def finalize_pending_saves(self) -> None:
+        """Block until any in-flight async checkpoint write completes.
+
+        No-op when ``async_dist_ckpt_save`` is off or nothing is pending.
+        """
+        self._finalize_async_calls()
 
     def _get_rank_path(self, ckpt_dir):
         tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -364,6 +439,9 @@ class MegatronStrategy(DistributedStrategy):
     ):
         if not ckpt_dir or not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+
+        # A reload must observe a fully-written checkpoint.
+        self.finalize_pending_saves()
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
@@ -518,7 +596,22 @@ class MegatronStrategy(DistributedStrategy):
                 raise ValueError(f"Unexpected keys in LoRA adapter state dict: {unexpected}")
             self.print(f"Loaded {len(state_dict['model_state_dict'])} LoRA adapters from {adapter_path}.")
 
-    def save_hf_model(self, bridge, model: MegatronModelWrapper, output_dir: str, tokenizer=None, **kwargs) -> None:
+    def save_hf_model(
+        self,
+        bridge,
+        model: MegatronModelWrapper,
+        output_dir: str,
+        tokenizer=None,
+        *,
+        distributed_save: bool = False,
+        save_every_n_ranks: int = 1,
+        **kwargs,
+    ) -> None:
+        if distributed_save and io.is_cloud_path(output_dir):
+            raise ValueError(
+                f"distributed_save=True is incompatible with cloud paths (got {output_dir}). "
+                "Please use a shared filesystem path for distributed_save."
+            )
         # Create checkpoint directory if it doesn't exist.
         if self.is_rank_0():
             io.makedirs(output_dir, exist_ok=True)
@@ -530,7 +623,17 @@ class MegatronStrategy(DistributedStrategy):
             # on a Qwen3.5 VL checkpoint, whose shards co-mingle vision and text
             # weights): the bridge writes a shard only once all its keys are yielded,
             # so strict=True silently writes zero weights. No-op for complete exports.
-            bridge.save_hf_weights(model.actor_module, work_dir, strict=False)
+            #
+            # distributed_save fans the shard writes across ranks (one saver per
+            # save_every_n_ranks) instead of serializing them on rank 0 -- the same
+            # standard HF sharded layout, just written in parallel.
+            bridge.save_hf_weights(
+                model.actor_module,
+                work_dir,
+                strict=False,
+                distributed_save=distributed_save,
+                save_every_n_ranks=save_every_n_ranks,
+            )
             self.print(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.

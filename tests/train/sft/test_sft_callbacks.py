@@ -30,6 +30,7 @@ from skyrl.train.utils.callbacks import (
     CallbackInput,
     TrainingCallback,
 )
+from tests.train.sft.util import attach_mock_sft_deps
 
 _FAKE_CKPT_PATH = "/fake/sft-callback-test/global_step_2"
 
@@ -115,15 +116,17 @@ class ForceEvaluateAtStep(TrainingCallback):
 def _build_test_sft_config() -> SFTConfig:
     cfg = SFTConfig()
     cfg.strategy = "fsdp"
-    # model.path / dataset_name are unused — we never load the model and
-    # monkeypatch _load_and_tokenize. eval_dataset_name must be non-empty so
-    # load_eval_dataset actually invokes _load_and_tokenize.
+    # model.path / train_datasets are unused — we never load the model and
+    # monkeypatch _load_and_tokenize. eval_datasets must be non-empty so
+    # load_eval_datasets actually invokes _load_and_tokenize.
     cfg.model.path = "unused"
     cfg.placement = SFTPlacementConfig(num_nodes=1, num_gpus_per_node=1)
-    cfg.dataset_name = "unused-monkeypatched"
-    cfg.dataset_split = "train"
-    cfg.eval_dataset_name = "unused-monkeypatched"
-    cfg.eval_dataset_split = "train"
+    cfg.train_datasets = ["unused-monkeypatched"]
+    cfg.train_dataset_splits = ["train"]
+    cfg.eval_datasets = ["unused-monkeypatched"]
+    cfg.eval_dataset_splits = ["train"]
+    # Shorthand logging name: eval metrics land under eval/evalset/...
+    cfg.eval_dataset_names = ["evalset"]
     # eval_interval=2 means step 1 has no interval-driven eval; only the force-evaluate
     # callback can trigger eval at step 1. Step 2 still gets an interval-driven eval.
     cfg.eval_interval = 2
@@ -158,7 +161,7 @@ def _dummy_tokenized() -> list[dict]:
     return [example, example]
 
 
-def test_callbacks_fire_during_sft_training(monkeypatch):
+def test_callbacks_fire_during_sft_training(monkeypatch, mock_dispatch):
     """A 2-step SFT run fires every relevant event, in order, with the right payloads."""
     cfg = _build_test_sft_config()
     skyrl_cfg = build_skyrl_config_for_sft(cfg)
@@ -168,29 +171,9 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
     force_save = ForceSaveAtStep(step=2)
     trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg, callbacks=[recorder, force_eval, force_save])
 
-    # Skip setup() (which would load the model + spin up workers). Replace
-    # what setup() would have set with mocks.
-    tokenizer = MagicMock()
-    tokenizer.pad_token_id = 0
-    trainer.tokenizer = tokenizer
-    # setup() also builds the collator once the tokenizer is available.
-    trainer.collator = trainer._build_collator(tokenizer)
+    # Skip setup() by wiring the deps it normally creates.
+    attach_mock_sft_deps(trainer, mock_dispatch)
     trainer.tracker = MagicMock()
-
-    # Mock the worker dispatch — the only thing train_step / run_eval touch
-    # that requires real GPU workers. forward_backward returns an object with
-    # ``.metrics`` (loss); optim_step returns a grad_norm; forward (eval path)
-    # returns ``.metrics`` with a per-batch loss.
-    step_output = MagicMock()
-    step_output.metrics = {"loss": 0.42, "final_loss": 0.42}
-    eval_output = MagicMock()
-    eval_output.metrics = {"loss": 0.31}
-    dispatch_mock = MagicMock()
-    dispatch_mock.forward_backward = MagicMock(return_value=step_output)
-    dispatch_mock.optim_step = MagicMock(return_value=1.0)
-    dispatch_mock.forward = MagicMock(return_value=eval_output)
-    dispatch_mock.dp_size = MagicMock(return_value=1)
-    trainer.dispatch = dispatch_mock
 
     # Bypass HF network fetch + tokenization: both load_dataset() and
     # load_eval_dataset() funnel through _load_and_tokenize.
@@ -252,16 +235,16 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
         assert snap["has_metrics"], "on_step_end should see step metrics"
         assert "loss" in snap["metrics_keys"], snap["metrics_keys"]
 
-    # Both eval ends carry eval metrics
+    # Both eval ends carry eval metrics, namespaced by the eval dataset name
     for snap in snaps_by_event["on_eval_end"]:
         assert snap["has_metrics"], "on_eval_end should see eval metrics"
-        assert "eval_loss" in snap["metrics_keys"], snap["metrics_keys"]
+        assert "evalset/loss" in snap["metrics_keys"], snap["metrics_keys"]
 
-    # Both on_log calls carry train/loss + eval/eval_loss
+    # Both on_log calls carry train/loss + eval/{name}/loss
     for snap in snaps_by_event["on_log"]:
         log_keys = snap["logs_keys"]
         assert "train/loss" in log_keys, log_keys
-        assert "eval/eval_loss" in log_keys, log_keys
+        assert "eval/evalset/loss" in log_keys, log_keys
 
     # on_save fired exactly once at step 2, with the fake ckpt path
     assert len(snaps_by_event["on_save"]) == 1, snaps_by_event["on_save"]

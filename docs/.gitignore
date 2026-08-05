@@ -37,7 +37,8 @@ next-env.d.ts
 # fumadocs
 /.source
 
-# auto-generated API reference pages (built by generate-api-docs.py)
-/content/docs/api-ref/skyrl/*.mdx
-/content/docs/api-ref/skyrl/skyrl-train/*.mdx
-/content/docs/api-ref/skyrl-gym/*.mdx
+# auto-generated API reference pages (built by generate-api-docs.py).
+# Recursive so new subdirectories under these groups are covered automatically.
+# The hand-written api-ref/index.mdx and every meta.json stay tracked.
+/content/docs/api-ref/skyrl/**/*.mdx
+/content/docs/api-ref/skyrl-gym/**/*.mdx

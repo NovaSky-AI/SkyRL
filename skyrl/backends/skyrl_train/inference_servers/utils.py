@@ -97,7 +97,9 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         max_num_batched_tokens=ie_cfg.max_num_batched_tokens,
         enable_expert_parallel=ie_cfg.expert_parallel_size > 1,
         max_num_seqs=ie_cfg.max_num_seqs,
-        enable_sleep_mode=cfg.trainer.placement.colocate_all,
+        # Sleep mode is required for colocated (offload/backload each step) and also when
+        # non-colocated weight sync opts into offloading the KV cache around the sync.
+        enable_sleep_mode=cfg.trainer.placement.colocate_all or ie_cfg.offload_kv_for_weight_sync,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         weight_transfer_config=WeightTransferConfig(
             backend=get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
@@ -114,6 +116,9 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         language_model_only=ie_cfg.language_model_only,
         mm_processor_cache_gb=0,
         kv_cache_metrics=True,
+        # models with custom modeling code (MiMo, Qwen3.5, DeepSeek-V3, ...) require it to load.
+        # Overridable via generator.inference_engine.engine_init_kwargs.trust_remote_code below.
+        trust_remote_code=True,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -143,7 +148,12 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     else:
         args.enable_lora = False
 
-    # Add any extra engine_init_kwargs
+    # Speculative decoding (e.g. MTP): passed straight through to vLLM's speculative_config.
+    if ie_cfg.speculative_config is not None:
+        spec_cfg = get_config_as_dict(ie_cfg.speculative_config)
+        args.speculative_config = spec_cfg
+        logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
+
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
     for key, value in engine_kwargs.items():
         setattr(args, key, value)

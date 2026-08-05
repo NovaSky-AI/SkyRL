@@ -3,7 +3,10 @@ import gc
 import json
 import os
 import random
+import shutil
+import tempfile
 from collections import defaultdict
+from contextlib import contextmanager
 from typing import List, Optional, Union
 
 import numpy as np
@@ -572,7 +575,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 4: Save on rank 0 only
         if self.is_rank_0():
-            with io.local_work_dir(output_dir) as work_dir:
+            with self._atomic_local_export_dir(output_dir) as work_dir:
                 # Save the model in HuggingFace format using safetensors
                 model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
 
@@ -597,3 +600,36 @@ class FSDPStrategy(DistributedStrategy):
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 
         dist.barrier()
+
+    @contextmanager
+    def _atomic_local_export_dir(self, output_dir: str):
+        """Rank-0 HF export dir that appears at ``output_dir`` only once complete.
+
+        Atomic write to the local export path provides a consistent way to signal export
+        finish. Ex: An asynchronous watcher can watch for ``config.json`` file to populate
+        in the export directory.
+        """
+        if io.is_cloud_path(output_dir):
+            with io.local_work_dir(output_dir) as work_dir:
+                yield work_dir
+            return
+
+        parent = os.path.dirname(os.path.abspath(output_dir)) or "."
+        io.makedirs(parent, exist_ok=True)
+        staging_dir = tempfile.mkdtemp(prefix=".tmp-hf-export-", dir=parent)
+        old_dir = None
+        try:
+            yield staging_dir
+            # Swap via renames only (each atomic on the same filesystem) so a reader
+            # never sees output_dir mid-delete: move any prior export aside, move the
+            # new one in, then rmtree the old one afterwards.
+            if os.path.lexists(output_dir):
+                old_dir = tempfile.mktemp(prefix=".old-hf-export-", dir=parent)
+                os.replace(output_dir, old_dir)
+            os.replace(staging_dir, output_dir)
+            staging_dir = None
+        finally:
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            if old_dir is not None:
+                shutil.rmtree(old_dir, ignore_errors=True)

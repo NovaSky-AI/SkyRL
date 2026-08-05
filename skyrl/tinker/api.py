@@ -1,6 +1,8 @@
 import asyncio
 import os
 import random
+import re
+import shutil
 import signal
 import threading
 import time
@@ -1220,8 +1222,57 @@ async def validate_checkpoint(
     if checkpoint_db.status == CheckpointStatus.FAILED:
         raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
 
-    subdir = "sampler_weights" if checkpoint_type == types.CheckpointType.SAMPLER else ""
-    return request.app.state.engine_config.checkpoints_base / unique_id / subdir / f"{checkpoint_id}.tar.gz"
+    return checkpoint_file_path(request, unique_id, checkpoint_id, checkpoint_type)
+
+
+def checkpoint_file_path(
+    request: Request, unique_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType
+) -> Any:
+    checkpoint_dir = request.app.state.engine_config.checkpoints_base / unique_id
+    if checkpoint_type == types.CheckpointType.SAMPLER:
+        checkpoint_dir = checkpoint_dir / "sampler_weights"
+    return checkpoint_dir / f"{checkpoint_id}.tar.gz"
+
+
+def parse_checkpoint_delete_path(
+    checkpoint_path: str, checkpoint_type: types.CheckpointType | None
+) -> tuple[str, types.CheckpointType | None]:
+    path_kind, separator, checkpoint_id = checkpoint_path.partition("/")
+    if separator:
+        if path_kind == "weights":
+            inferred_checkpoint_type = types.CheckpointType.TRAINING
+        elif path_kind == "sampler_weights":
+            inferred_checkpoint_type = types.CheckpointType.SAMPLER
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid checkpoint path: {checkpoint_path}")
+
+        if checkpoint_type is not None and checkpoint_type != inferred_checkpoint_type:
+            raise HTTPException(status_code=400, detail="checkpoint_type does not match checkpoint path")
+    else:
+        checkpoint_id = checkpoint_path
+        inferred_checkpoint_type = checkpoint_type
+
+    if not re.fullmatch(ID_PATTERN, checkpoint_id) or len(checkpoint_id) > ID_MAX_LENGTH:
+        raise HTTPException(status_code=422, detail="Invalid checkpoint_id")
+
+    return checkpoint_id, inferred_checkpoint_type
+
+
+def delete_checkpoint_file(checkpoint_path: Any) -> None:
+    # Only remove the checkpoint artifact itself; leave the enclosing directories in
+    # place. The run may still be active, and every save path recreates its directory
+    # on demand (parents=True / makedirs), so pruning them here is pointless churn that
+    # couples a per-checkpoint delete to run-wide directory state.
+    if checkpoint_path.is_dir():
+        if hasattr(checkpoint_path, "rmtree"):
+            checkpoint_path.rmtree()
+        else:
+            shutil.rmtree(checkpoint_path)
+    else:
+        try:
+            checkpoint_path.unlink()
+        except FileNotFoundError:
+            return
 
 
 @app.get("/api/v1/training_runs")
@@ -1304,6 +1355,47 @@ async def download_checkpoint_archive(
     return StreamingResponse(file_buffer, media_type="application/octet-stream", headers=headers)
 
 
+@app.delete("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_path:path}", status_code=204)
+async def delete_checkpoint(
+    request: Request,
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    checkpoint_path: str = fastapi.Path(...),
+    checkpoint_type: types.CheckpointType | None = fastapi.Query(None),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Delete a saved checkpoint artifact and its database row."""
+    checkpoint_id, resolved_checkpoint_type = parse_checkpoint_delete_path(checkpoint_path, checkpoint_type)
+    if resolved_checkpoint_type is None:
+        # The PK is (unique_id, checkpoint_id, checkpoint_type), so a training and a
+        # sampler checkpoint can share an id. Rather than guessing a type (which would
+        # make two identical DELETEs delete different rows), require the type to be
+        # explicit -- either via the "weights/"/"sampler_weights/" path prefix or the
+        # checkpoint_type query param. This matches upstream tinker, which rejects a
+        # bare id with a 400 and the same guidance.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid checkpoint identifier. Expected format 'weights/<name>' (training weights) "
+                "or 'sampler_weights/<name>' (sampler weights), where <name> is a single path segment."
+            ),
+        )
+
+    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
+    if not checkpoint_db:
+        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
+
+    if checkpoint_db.status == CheckpointStatus.PENDING:
+        raise HTTPException(status_code=425, detail="Checkpoint is still being created")
+
+    # Commit the row deletion before unlinking the artifact. If the commit fails we
+    # leave an orphaned file (GC-able) rather than a row that lists a checkpoint whose
+    # archive is gone, which would make every subsequent download 500.
+    path = checkpoint_file_path(request, unique_id, checkpoint_id, resolved_checkpoint_type)
+    await session.delete(checkpoint_db)
+    await session.commit()
+    await asyncio.to_thread(delete_checkpoint_file, path)
+
+
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints")
 async def list_checkpoints(
     unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
@@ -1380,12 +1472,22 @@ async def root():
         "name": "Tinker API Mock",
         "version": "0.0.1",
         "endpoints": {
-            "models": ["/api/v1/create_model", "/api/v1/get_info", "/api/v1/training_runs/{model_id}"],
+            "models": [
+                "/api/v1/create_model",
+                "/api/v1/get_info",
+                "/api/v1/training_runs/{model_id}",
+            ],
             "training": ["/api/v1/forward_backward", "/api/v1/optim_step"],
             "futures": ["/api/v1/retrieve_future"],
             "service": ["/api/v1/get_server_capabilities"],
             "telemetry": ["/api/v1/telemetry"],
-            "checkpoints": ["/api/v1/training_runs/{unique_id}/checkpoints"],
+            "checkpoints": [
+                "/api/v1/training_runs/{unique_id}/checkpoints",
+                # Delete requires an explicit checkpoint type via the path prefix (or the
+                # checkpoint_type query param); a bare checkpoint_id is rejected with 400.
+                "DELETE /api/v1/training_runs/{unique_id}/checkpoints/weights/{checkpoint_id}",
+                "DELETE /api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}",
+            ],
             "download": [
                 "/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive",
                 "/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/download",

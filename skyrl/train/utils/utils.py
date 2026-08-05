@@ -194,7 +194,10 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
-    assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
+    assert ie_cfg.weight_sync_backend in {
+        "nccl",
+        "delta",
+    }, "only nccl and delta are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
@@ -205,6 +208,15 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
+        # Megatron's fused top-k returns before compute_topk consults router_replay
+        # (moe_utils.topk_routing_with_score_function), so the replayed experts are
+        # silently discarded while R3 still pays its full cost. Refuse the pair rather
+        # than train against routing that does not match the rollout.
+        if config.megatron_config.moe_enable_routing_replay:
+            assert not config.megatron_config.transformer_config_kwargs.get("moe_router_fusion"), (
+                f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
+                "moe_router_fusion=True -- the fused router bypasses replay. Set moe_router_fusion=False."
+            )
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert (
@@ -218,6 +230,46 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
 
 # TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses
+def _apply_mtp_config(cfg: SkyRLTrainConfig):
+    """Propagate the high-level ``trainer.mtp`` knob to the training + inference configs: train the
+    model's native MTP heads with the decoupled draft loss and enable vLLM MTP speculative decoding.
+    The vLLM draft depth (``num_speculative_tokens``) is decoupled from the trained head count
+    (depth > 1 reuses the head autoregressively). When disabled, force the heads off.
+    """
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is None:
+        return
+
+    mcfg = cfg.trainer.policy.megatron_config
+    if not mtp.enabled:
+        # Explicit 0 force-disables MTP even on MTP-capable models.
+        mcfg.mtp_num_layers = 0
+        return
+
+    assert mtp.num_speculative_tokens >= 1, "trainer.mtp.num_speculative_tokens must be >= 1 when enabled"
+    if mcfg.mtp_num_layers == 0:
+        raise ValueError(
+            "trainer.mtp.enabled=true but trainer.policy.megatron_config.mtp_num_layers=0 "
+            "(explicit force-disable). Remove the mtp_num_layers override or disable trainer.mtp."
+        )
+    # Leave mcfg.mtp_num_layers untouched (None => megatron-bridge infers the head count from the
+    # model's HF config; MegatronWorker fails loud if it resolves to zero while MTP is enabled).
+    mcfg.mtp_loss_weight = mtp.loss_weight
+
+    # SKYRL_DISABLE_SPEC=1: train the MTP heads, but keep the vLLM rollout plain autoregressive.
+    if os.environ.get("SKYRL_DISABLE_SPEC") == "1":
+        return
+
+    # Inference side: vLLM MTP speculative decoding with the same draft depth. Don't clobber an
+    # explicit user-provided speculative_config.
+    ie_cfg = cfg.generator.inference_engine
+    if ie_cfg.speculative_config is None:
+        ie_cfg.speculative_config = {
+            "method": "mtp",
+            "num_speculative_tokens": mtp.num_speculative_tokens,
+        }
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -235,6 +287,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
+
+    # Multi-Token Prediction (MTP): the high-level `trainer.mtp` knob is the single source of truth.
+    # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
+    # side (vLLM MTP speculative decoding) so both stay consistent.
+    _apply_mtp_config(cfg)
+
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
         PolicyLossRegistry,
@@ -386,6 +444,14 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
 
+        # delta weight sync is not yet supported
+        # TODO (sumanthrh): Delta weight sync should be naturally supported for `merge_lora=true`, we should
+        # test and enable this in a follow-up. `merge_lora=false` needs bookkeeping of per-LoRA safetensors
+        # on the inference side.
+        assert (
+            cfg.generator.inference_engine.weight_sync_backend != "delta"
+        ), "Delta weight sync is not yet supported for LoRA"
+
     # Validate placement
     if cfg.trainer.placement.colocate_all:
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -518,6 +584,20 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         raise ValueError(
             "Each inference engine DP rank (TP*PP workers) must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
         )
+
+    # Validate the non-colocated sleep-during-weight-sync option.
+    if ie_cfg.offload_kv_for_weight_sync:
+        assert not cfg.trainer.placement.colocate_all, (
+            "offload_kv_for_weight_sync is for non-colocated weight sync only; "
+            "colocated mode already sleeps the engines and wakes weights/KV cache around sync."
+        )
+        assert cfg.trainer.policy.model.lora.rank == 0, (
+            "offload_kv_for_weight_sync does not support LoRA weight sync "
+            "(the in-place LoRA adapter swap path does not go through the sleep/wake broadcast)."
+        )
+        assert (
+            ie_cfg.weight_sync_backend != "delta"
+        ), "Offloading KV cache during weight sync is not supported for delta weight sync"
 
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
@@ -687,6 +767,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
 
+    if os.environ.get("NCCL_NET_PLUGIN"):
+        logger.info(f"Exporting NCCL_NET_PLUGIN to ray runtime env: {os.environ['NCCL_NET_PLUGIN']}")
+        env_vars["NCCL_NET_PLUGIN"] = os.environ["NCCL_NET_PLUGIN"]
+
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
     if os.environ.get("WANDB_API_KEY"):
@@ -723,6 +807,32 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
+
+    if worker_nccl_timeout := os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S"):
+        logger.info(f"Exporting `SKYRL_WORKER_NCCL_TIMEOUT_IN_S` to ray runtime env: {worker_nccl_timeout}")
+        env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = worker_nccl_timeout
+    # Forward uv's project-environment selection to the workers. Ray's uv runtime-env hook makes each
+    # worker re-run `uv run ... --extra <backend>`, and that subprocess must resolve to the SAME venv
+    # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a
+    # driver-only `UV_PROJECT_ENVIRONMENT` (e.g. from a local `.env`) would otherwise be lost and the
+    # worker's `uv run` would fall back to the empty project `.venv` (-> `No module named 'megatron'`).
+    for var_name in (
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_CACHE_DIR",
+        "UV_LINK_MODE",
+        "UV_PYTHON",
+        "UV_OFFLINE",
+        "PYTORCH_CUDA_ALLOC_CONF",
+        # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
+        "CUDA_LAUNCH_BLOCKING",
+        "PYTHONFAULTHANDLER",
+        "TORCH_SHOW_CPP_STACKTRACES",
+        "TORCH_USE_CUDA_DSA",
+        "NCCL_DEBUG",
+    ):
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            env_vars[var_name] = value
 
     # Health-check timeout for the inference server actor. Forwarded so `VLLMServerActor.start`
     # sees the override.

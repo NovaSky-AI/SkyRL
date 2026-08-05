@@ -67,9 +67,13 @@ try:
                     hf_config.rope_theta = orig_rope_theta
 
             provider.moe_router_score_function = "sigmoid"
-            # TODO (erictang000): follow up when Megatron-Bridge supports MTP
-            # layers for DeepSeek-V3 style models
-            provider.mtp_num_layers = None
+            # NOTE: MTP is now honored. DeepSeekV3Bridge.provider_bridge already sets
+            # provider.mtp_num_layers from hf_config.num_nextn_predict_layers, and
+            # megatron-bridge's get_common_mapping_list emits the MTP weight mappings
+            # (enorm/hnorm/eh_proj/shared_head.* + nextn transformer layers) for HF
+            # round-tripping. SkyRL's MegatronWorker.init_configs can still override
+            # provider.mtp_num_layers via policy.megatron_config.mtp_num_layers (e.g.
+            # set it to 0 to force-disable, or leave None to use the model default).
             return provider
 
     # Qwen3.5 (language-model-only) -> GPTModel.
