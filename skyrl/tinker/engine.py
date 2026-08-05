@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel
@@ -344,11 +344,18 @@ class TinkerEngine:
                     )
                 session.commit()
 
-    def _load_request_payloads(self, session: Session, request_ids: list[int]) -> dict[int, dict]:
-        """Fetch request_data for the given requests, keyed by request_id.
+    def _load_requests(
+        self,
+        session: Session,
+        requests: list[tuple[Any, ...]],
+        payload_type: type[BaseModel] | None = None,
+    ) -> dict[str, tuple[Any, ...]]:
+        """Fetch request_data and append it to each request tuple, keyed by request_id.
 
         Chunked to stay under SQLite's limit on bound parameters per statement.
+        If payload_type is provided, request_data is validated as that model type.
         """
+        request_ids = [request_id for request_id, *_ in requests]
         payloads: dict[int, dict] = {}
         for start in range(0, len(request_ids), _MAX_IDS_PER_QUERY):
             chunk = request_ids[start : start + _MAX_IDS_PER_QUERY]
@@ -356,7 +363,14 @@ class TinkerEngine:
                 select(FutureDB.request_id, FutureDB.request_data).where(FutureDB.request_id.in_(chunk))
             ).all()
             payloads.update(rows)
-        return payloads
+        return {
+            str(request_id): (
+                *args,
+                payload_type.model_validate(payloads[request_id]) if payload_type else payloads[request_id],
+            )
+            for request_id, *args in requests
+            if request_id in payloads
+        }
 
     def _find_destructive_barriers(self, session: Session) -> dict[str, int]:
         """Find the earliest pending destructive operation (optim_step/load_weights) per model.
@@ -408,12 +422,7 @@ class TinkerEngine:
             if model_id not in barriers or request_id < barriers[model_id]
         ]
 
-        payloads = self._load_request_payloads(session, [request_id for request_id, _ in batchable])
-        return {
-            str(request_id): (model_id, types.ForwardBackwardInput.model_validate(payloads[request_id]))
-            for request_id, model_id in batchable
-            if request_id in payloads
-        }
+        return self._load_requests(session, batchable, types.ForwardBackwardInput)
 
     def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
         """Find all sample ops that can be safely batched together.
@@ -453,12 +462,7 @@ class TinkerEngine:
         if self.config.backend == "jax" and self.backend.config.sample_max_num_sequences > 0:
             batchable = batchable[: self.backend.config.sample_max_num_sequences]
 
-        payloads = self._load_request_payloads(session, [request_id for request_id, _ in batchable])
-        return {
-            str(request_id): (model_id, types.SampleInput.model_validate(payloads[request_id]))
-            for request_id, model_id in batchable
-            if request_id in payloads
-        }
+        return self._load_requests(session, batchable, types.SampleInput)
 
     def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
         """Find all requests that need to be processed individually (not batchable).
@@ -507,12 +511,7 @@ class TinkerEngine:
             if model_id not in blocked_pass_barriers or request_id < blocked_pass_barriers[model_id]
         ]
 
-        payloads = self._load_request_payloads(session, [request_id for request_id, _, _ in other_futures])
-        return {
-            str(request_id): (model_id, request_type, payloads[request_id])
-            for request_id, model_id, request_type in other_futures
-            if request_id in payloads
-        }
+        return self._load_requests(session, other_futures)
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
