@@ -15,7 +15,15 @@ from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
 )
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator, TurnOutput
+from skyrl.train.generators.skyrl_gym_generator import (
+    ROLLOUT_ERROR_STOP_REASON,
+    SkyRLGymGenerator,
+    TrajectoryOutput,
+    TurnOutput,
+)
+from skyrl.train.utils.trainer_utils import (
+    validate_generator_output as validate_generator_output_for_trainer,
+)
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
 # Mock constants, where 4 is the eos token id
@@ -1878,3 +1886,192 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
         # The environment is ~3x slower than the engine here, so a swapped attribution would flip this.
         assert env_t > llm_t
         assert llm_t + env_t <= e2e_t + 1e-6
+
+
+def _trajectory_output(reward, rollout_logprobs=None):
+    """A minimal successful rollout with a 3-token response."""
+    return TrajectoryOutput(
+        response_ids=[10, 11, 4],
+        reward=reward,
+        stop_reason="stop",
+        loss_mask=[1, 1, 1],
+        prompt_ids=[1, 2],
+        rollout_logprobs=rollout_logprobs,
+        env_metrics={},
+    )
+
+
+def _skip_failed_rollouts_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer):
+    generator_cfg.batched = False
+    generator_cfg.skip_failed_rollouts = True
+    mock_tokenizer.pad_token_id = 0
+    return SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+
+def _two_prompt_input(mock_env_cfg) -> GeneratorInput:
+    return {
+        "prompts": [[{"role": "user", "content": "first"}], [{"role": "user", "content": "second"}]],
+        "env_extras": [{}, {}],
+        "env_classes": [mock_env_cfg.env_class] * 2,
+    }
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_skip_failed_rollouts_substitutes_placeholder(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """A rollout that raises is replaced by a masked placeholder, and the batch still completes."""
+    mock_make.return_value = mock_env
+    generator = _skip_failed_rollouts_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    async def agent_loop(prompt, *args, **kwargs):
+        if prompt[0]["content"] == "first":
+            raise RuntimeError("network blip")
+        return _trajectory_output(reward=1.0)
+
+    generator.agent_loop = agent_loop
+
+    output = await generator.generate(_two_prompt_input(mock_env_cfg))
+
+    assert output["stop_reasons"] == [ROLLOUT_ERROR_STOP_REASON, "stop"]
+    # The placeholder is a single padding token that contributes no reward and no loss.
+    assert output["response_ids"][0] == [mock_tokenizer.pad_token_id]
+    assert output["loss_masks"][0] == [0]
+    assert output["rewards"] == [0.0, 1.0]
+    # The successful rollout is untouched.
+    assert output["response_ids"][1] == [10, 11, 4]
+    assert output["loss_masks"][1] == [1, 1, 1]
+
+    # The substituted batch must still satisfy the trainer's contract.
+    validate_generator_output_for_trainer(2, output)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_skip_failed_rollouts_matches_token_level_rewards(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """The placeholder's reward shape follows the successful rollouts, which the trainer requires."""
+    mock_make.return_value = mock_env
+    generator_cfg.sampling_params.logprobs = 0
+    generator = _skip_failed_rollouts_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    async def agent_loop(prompt, *args, **kwargs):
+        if prompt[0]["content"] == "first":
+            raise RuntimeError("network blip")
+        return _trajectory_output(reward=[0.0, 0.0, 1.0], rollout_logprobs=[-0.1, -0.2, -0.3])
+
+    generator.agent_loop = agent_loop
+
+    output = await generator.generate(_two_prompt_input(mock_env_cfg))
+
+    assert output["rewards"] == [[0.0], [0.0, 0.0, 1.0]]
+    # Logprobs are requested, so the placeholder must carry one per response token.
+    assert output["rollout_logprobs"][0] == [0.0]
+    validate_generator_output_for_trainer(2, output)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_skip_failed_rollouts_raises_when_every_rollout_fails(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """With no successful rollout there is nothing to train on, so the failure is surfaced."""
+    mock_make.return_value = mock_env
+    generator = _skip_failed_rollouts_generator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    async def agent_loop(*args, **kwargs):
+        raise RuntimeError("inference engine is down")
+
+    generator.agent_loop = agent_loop
+
+    with pytest.raises(RuntimeError, match="All 2 rollouts in the batch failed") as exc_info:
+        await generator.generate(_two_prompt_input(mock_env_cfg))
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "inference engine is down"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_failed_rollout_aborts_step_by_default(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """Without the flag, a failed rollout still aborts the whole step."""
+    mock_make.return_value = mock_env
+    generator_cfg.batched = False
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    async def agent_loop(prompt, *args, **kwargs):
+        if prompt[0]["content"] == "first":
+            raise RuntimeError("network blip")
+        return _trajectory_output(reward=1.0)
+
+    generator.agent_loop = agent_loop
+
+    with pytest.raises(RuntimeError, match="network blip"):
+        await generator.generate(_two_prompt_input(mock_env_cfg))
+
+
+def test_skip_failed_rollouts_rejects_unsupported_configs(mock_tokenizer, mock_llm, mock_env_cfg, generator_cfg):
+    """The placeholder cannot stand in for batched generation or routed-expert indices."""
+    generator_cfg.skip_failed_rollouts = True
+    generator_cfg.batched = True
+    with pytest.raises(ValueError, match="`skip_failed_rollouts` doesn't support `batched=True`"):
+        SkyRLGymGenerator(
+            generator_cfg=generator_cfg,
+            skyrl_gym_cfg=mock_env_cfg,
+            inference_engine_client=mock_llm,
+            tokenizer=mock_tokenizer,
+        )
+
+    generator_cfg.batched = False
+    generator_cfg.inference_engine.enable_return_routed_experts = True
+    with pytest.raises(ValueError, match="doesn't support `enable_return_routed_experts=True`"):
+        SkyRLGymGenerator(
+            generator_cfg=generator_cfg,
+            skyrl_gym_cfg=mock_env_cfg,
+            inference_engine_client=mock_llm,
+            tokenizer=mock_tokenizer,
+        )
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_agent_loop_closes_env_when_rollout_raises(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    """The environment is released on the failure path, not only after a completed episode."""
+    mock_make.return_value = mock_env
+    generator_cfg.batched = False
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_env.step.side_effect = RuntimeError("env exploded")
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    with pytest.raises(RuntimeError, match="env exploded"):
+        await generator.agent_loop(
+            [{"role": "user", "content": "Test prompt"}],
+            mock_env_cfg.env_class,
+            {},
+            max_tokens=5,
+            max_input_length=512,
+        )
+
+    mock_env.close.assert_called_once()
+    mock_llm.finish_session.assert_awaited()
