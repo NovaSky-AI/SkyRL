@@ -124,7 +124,7 @@ class VLLMRouter:
         router_url = f"http://{ip}:{self._router_args.port}"
         self._wait_until_healthy(router_url)
 
-        is_pd = self._router_args.vllm_pd_disaggregation or self._router_args.pd_disaggregation
+        is_pd = self._router_args.vllm_pd_disaggregation
         if is_pd:
             logger.info(
                 f"VLLMRouter (PD) started at {router_url}: "
