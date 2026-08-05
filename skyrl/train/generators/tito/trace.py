@@ -21,10 +21,11 @@ from typing import (
 from .types import (
     BridgeAnchor,
     CommitResult,
-    CommittedTurn,
     Message,
     ModelTurnResult,
     PendingTurn,
+    RoutedExperts,
+    TransitionRecord,
 )
 
 
@@ -65,6 +66,155 @@ class MessageNode:
     sampled_mask: Tuple[bool, ...]
     logprobs: Tuple[float, ...]
     sampled_start: Optional[int]
+    routed_experts: Optional[RoutedExperts] = None
+
+
+class TransitionView:
+    """Lazy exact view of one successful inference call."""
+
+    __slots__ = ("_record", "_trace")
+
+    def __init__(self, trace: "Trace", record: TransitionRecord) -> None:
+        self._trace = trace
+        self._record = record
+
+    @property
+    def transition_id(self) -> int:
+        return self._record.transition_id
+
+    @property
+    def request_key(self) -> str:
+        return self._record.request_key
+
+    @property
+    def tools_hash(self) -> str:
+        return self._record.tools_hash
+
+    @property
+    def assistant_node_id(self) -> int:
+        return self._record.assistant_node_id
+
+    @property
+    def stop_reason(self) -> str:
+        return self._record.stop_reason
+
+    @property
+    def model(self) -> str:
+        return self._record.model
+
+    @property
+    def sampling_params(self) -> Dict[str, Any]:
+        return json.loads(self._record.sampling_params_json)
+
+    @property
+    def tools(self) -> Optional[Tuple[Dict[str, Any], ...]]:
+        return self._trace._tools_by_hash.get(self.tools_hash)
+
+    @property
+    def node_ids(self) -> Tuple[int, ...]:
+        return self._trace._path_to_node(self.assistant_node_id)
+
+    @property
+    def messages(self) -> Tuple[Message, ...]:
+        return tuple(self._trace._nodes[node_id].message for node_id in self.node_ids[:-1])
+
+    @property
+    def assistant_message(self) -> Message:
+        return self._trace._nodes[self.assistant_node_id].message
+
+    @property
+    def prompt_token_ids(self) -> Tuple[int, ...]:
+        node = self._trace._nodes[self.assistant_node_id]
+        if node.sampled_start is None:
+            raise RuntimeError("Transition assistant node has no sampled boundary")
+        tokens = list(self._trace._tokens_for_nodes(self.node_ids[:-1]))
+        tokens.extend(node.token_ids[: node.sampled_start])
+        return tuple(tokens)
+
+    @property
+    def completion_ids(self) -> Tuple[int, ...]:
+        node = self._trace._nodes[self.assistant_node_id]
+        if node.sampled_start is None:
+            raise RuntimeError("Transition assistant node has no sampled boundary")
+        return node.token_ids[node.sampled_start :]
+
+    @property
+    def completion_logprobs(self) -> Tuple[float, ...]:
+        node = self._trace._nodes[self.assistant_node_id]
+        if node.sampled_start is None:
+            raise RuntimeError("Transition assistant node has no sampled boundary")
+        return node.logprobs[node.sampled_start :]
+
+    @property
+    def full_token_ids(self) -> Tuple[int, ...]:
+        return self.prompt_token_ids + self.completion_ids
+
+    def is_exact_extension_of(self, previous: "TransitionView") -> bool:
+        previous_ids = previous.full_token_ids
+        prompt_ids = self.prompt_token_ids
+        return len(previous_ids) <= len(prompt_ids) and prompt_ids[: len(previous_ids)] == previous_ids
+
+
+class BranchView:
+    """Lazy root-to-leaf exact token path."""
+
+    __slots__ = ("_leaf_id", "_trace")
+
+    def __init__(self, trace: "Trace", leaf_id: int) -> None:
+        self._trace = trace
+        self._leaf_id = leaf_id
+
+    @property
+    def leaf_id(self) -> int:
+        return self._leaf_id
+
+    @property
+    def node_ids(self) -> Tuple[int, ...]:
+        return self._trace._path_to_node(self._leaf_id)
+
+    @property
+    def nodes(self) -> Tuple[MessageNode, ...]:
+        return tuple(self._trace._nodes[node_id] for node_id in self.node_ids)
+
+    @property
+    def transition_ids(self) -> Tuple[int, ...]:
+        return tuple(
+            self._trace._transition_id_by_assistant_node[node_id]
+            for node_id in self.node_ids
+            if node_id in self._trace._transition_id_by_assistant_node
+        )
+
+    @property
+    def messages(self) -> Tuple[Message, ...]:
+        return tuple(node.message for node in self.nodes)
+
+    @property
+    def token_ids(self) -> Tuple[int, ...]:
+        return self._trace._tokens_for_nodes(self.node_ids)
+
+    @property
+    def sampled_mask(self) -> Tuple[bool, ...]:
+        mask: List[bool] = []
+        for node_id in self.node_ids:
+            mask.extend(self._trace._nodes[node_id].sampled_mask)
+        return tuple(mask)
+
+    @property
+    def logprobs(self) -> Tuple[float, ...]:
+        values: List[float] = []
+        for node_id in self.node_ids:
+            values.extend(self._trace._nodes[node_id].logprobs)
+        return tuple(values)
+
+    @property
+    def routed_experts(self) -> Optional[RoutedExperts]:
+        routed = []
+        for node_id in self.node_ids:
+            node_routed = self._trace._nodes[node_id].routed_experts
+            if node_routed is None:
+                return None
+            routed.extend(node_routed)
+        return tuple(routed)
 
 
 class Trace:
@@ -73,8 +223,9 @@ class Trace:
     def __init__(self) -> None:
         self._nodes: List[MessageNode] = []
         self._children: DefaultDict[Tuple[Optional[int], str], List[int]] = defaultdict(list)
-        self._turns: List[CommittedTurn] = []
-        self._turn_ids_by_assistant_node: DefaultDict[int, List[int]] = defaultdict(list)
+        self._transitions: List[TransitionRecord] = []
+        self._transition_id_by_assistant_node: Dict[int, int] = {}
+        self._tools_by_hash: Dict[str, Optional[Tuple[Dict[str, Any], ...]]] = {}
         self._commits_by_request_key: Dict[str, CommitResult] = {}
         self._revision = 0
         self._sealed = False
@@ -86,11 +237,77 @@ class Trace:
     def seal(self) -> None:
         self._sealed = True
 
-    def committed_turns(self) -> Tuple[CommittedTurn, ...]:
-        return tuple(self._turns)
+    def transitions(self) -> Tuple[TransitionView, ...]:
+        return tuple(TransitionView(self, record) for record in self._transitions)
+
+    def transition(self, transition_id: int) -> TransitionView:
+        return TransitionView(self, self._transitions[transition_id])
+
+    def committed_turns(self) -> Tuple[TransitionView, ...]:
+        """Compatibility alias for callers that predate ``transitions()``."""
+        return self.transitions()
 
     def nodes(self) -> Tuple[MessageNode, ...]:
         return tuple(self._nodes)
+
+    def branches(self) -> Tuple[BranchView, ...]:
+        parents = {node.parent_id for node in self._nodes if node.parent_id is not None}
+        return tuple(BranchView(self, node.node_id) for node in self._nodes if node.node_id not in parents)
+
+    def to_debug_dict(self) -> Dict[str, Any]:
+        return {
+            "storage": {
+                "nodes": len(self._nodes),
+                "transitions": len(self._transitions),
+                "branches": len(self.branches()),
+                "stored_token_ids": sum(len(node.token_ids) for node in self._nodes),
+                "materialized_transition_token_ids": sum(
+                    len(transition.full_token_ids) for transition in self.transitions()
+                ),
+            },
+            "nodes": [
+                {
+                    "node_id": node.node_id,
+                    "parent_id": node.parent_id,
+                    "message": node.message,
+                    "token_ids": list(node.token_ids),
+                    "sampled_mask": list(node.sampled_mask),
+                    "logprobs": list(node.logprobs),
+                    "sampled_start": node.sampled_start,
+                }
+                for node in self._nodes
+            ],
+            "transitions": [
+                {
+                    "transition_id": transition.transition_id,
+                    "request_key": transition.request_key,
+                    "assistant_node_id": transition.assistant_node_id,
+                    "messages": list(transition.messages),
+                    "assistant_message": transition.assistant_message,
+                    "prompt_token_ids": list(transition.prompt_token_ids),
+                    "completion_ids": list(transition.completion_ids),
+                    "completion_logprobs": list(transition.completion_logprobs),
+                    "stop_reason": transition.stop_reason,
+                    "model": transition.model,
+                    "sampling_params": transition.sampling_params,
+                    "tools": list(transition.tools) if transition.tools is not None else None,
+                }
+                for transition in self.transitions()
+            ],
+            "branches": [
+                {
+                    "branch_index": branch_index,
+                    "leaf_id": branch.leaf_id,
+                    "node_ids": list(branch.node_ids),
+                    "transition_ids": list(branch.transition_ids),
+                    "messages": list(branch.messages),
+                    "token_ids": list(branch.token_ids),
+                    "sampled_mask": list(branch.sampled_mask),
+                    "logprobs": list(branch.logprobs),
+                }
+                for branch_index, branch in enumerate(self.branches())
+            ],
+        }
 
     def prepare_turn(
         self,
@@ -146,6 +363,8 @@ class Trace:
 
         parent_id, message_chunks, assistant_scaffold = self._prepare_prompt_commit(pending, result)
         staged_nodes: List[MessageNode] = []
+        routed_experts = result.routed_experts
+        routed_cursor = len(self._tokens_for_nodes(self._path_to_node(parent_id))) if parent_id is not None else 0
 
         message_start = len(pending.messages) - len(message_chunks)
         for offset, token_ids in enumerate(message_chunks):
@@ -153,59 +372,61 @@ class Trace:
             reusable = self._find_exact_child(parent_id, message, token_ids)
             if reusable is not None:
                 parent_id = reusable
+                routed_cursor += len(token_ids)
                 continue
+            node_routed = (
+                routed_experts[routed_cursor : routed_cursor + len(token_ids)] if routed_experts is not None else None
+            )
             node = self._build_node(
                 parent_id=parent_id,
                 message=message,
                 token_ids=token_ids,
                 sampled_start=None,
                 completion_logprobs=(),
+                routed_experts=node_routed,
                 staged_count=len(staged_nodes),
             )
             staged_nodes.append(node)
             parent_id = node.node_id
+            routed_cursor += len(token_ids)
 
         assistant_tokens = assistant_scaffold + result.completion_ids
         assistant_sampled_start = len(assistant_scaffold)
-        assistant_node_id = self._find_exact_child(
-            parent_id,
-            result.assistant_message,
-            assistant_tokens,
-            sampled_start=assistant_sampled_start,
+        assistant_routed = (
+            routed_experts[routed_cursor : routed_cursor + len(assistant_tokens)]
+            if routed_experts is not None
+            else None
         )
-        if assistant_node_id is None:
-            assistant_node = self._build_node(
-                parent_id=parent_id,
-                message=_canonical_message(result.assistant_message),
-                token_ids=assistant_tokens,
-                sampled_start=assistant_sampled_start,
-                completion_logprobs=result.completion_logprobs,
-                staged_count=len(staged_nodes),
-            )
-            staged_nodes.append(assistant_node)
-            assistant_node_id = assistant_node.node_id
+        assistant_node = self._build_node(
+            parent_id=parent_id,
+            message=_canonical_message(result.assistant_message),
+            token_ids=assistant_tokens,
+            sampled_start=assistant_sampled_start,
+            completion_logprobs=result.completion_logprobs,
+            routed_experts=assistant_routed,
+            staged_count=len(staged_nodes),
+        )
+        staged_nodes.append(assistant_node)
+        assistant_node_id = assistant_node.node_id
 
-        turn_id = len(self._turns)
-        committed_turn = CommittedTurn(
-            turn_id=turn_id,
+        transition_id = len(self._transitions)
+        transition = TransitionRecord(
+            transition_id=transition_id,
             request_key=pending.request_key,
             tools_hash=pending.tools_hash,
-            prompt_leaf_id=parent_id,
             assistant_node_id=assistant_node_id,
-            prompt_token_ids=result.prompt_token_ids,
-            completion_ids=result.completion_ids,
-            completion_logprobs=result.completion_logprobs,
-            assistant_message=_canonical_message(result.assistant_message),
             stop_reason=result.stop_reason,
-            routed_experts=result.routed_experts,
+            model=result.model,
+            sampling_params_json=result.sampling_params_json,
         )
 
         for node in staged_nodes:
             self._nodes.append(node)
             self._children[(node.parent_id, node.message_hash)].append(node.node_id)
-        self._turns.append(committed_turn)
-        self._turn_ids_by_assistant_node[assistant_node_id].append(turn_id)
-        commit_result = CommitResult(turn_id=turn_id, assistant_node_id=assistant_node_id)
+        self._transitions.append(transition)
+        self._transition_id_by_assistant_node[assistant_node_id] = transition_id
+        self._tools_by_hash.setdefault(pending.tools_hash, pending.tools)
+        commit_result = CommitResult(turn_id=transition_id, assistant_node_id=assistant_node_id)
         self._commits_by_request_key[pending.request_key] = commit_result
         self._revision += 1
         return commit_result
@@ -227,22 +448,50 @@ class Trace:
             best = max((path for _, path in candidates), key=lambda path: path[-1])
         return best
 
+    def _longest_exact_prefix(
+        self,
+        messages: Sequence[Message],
+        prompt_token_ids: Sequence[int],
+    ) -> Tuple[int, ...]:
+        """Find the longest semantic path whose node deltas exactly prefix the prompt."""
+        candidates: List[Tuple[Optional[int], Tuple[int, ...], int]] = [(None, (), 0)]
+        best: Tuple[int, ...] = ()
+        for message in messages:
+            message_hash = _stable_hash(message)
+            next_candidates: List[Tuple[Optional[int], Tuple[int, ...], int]] = []
+            for parent_id, path, offset in candidates:
+                for node_id in self._children.get((parent_id, message_hash), ()):
+                    node = self._nodes[node_id]
+                    if node.message != message:
+                        continue
+                    end = offset + len(node.token_ids)
+                    if tuple(prompt_token_ids[offset:end]) != node.token_ids:
+                        continue
+                    next_path = path + (node_id,)
+                    next_candidates.append((node_id, next_path, end))
+                    if len(next_path) > len(best) or (len(next_path) == len(best) and next_path[-1] > best[-1]):
+                        best = next_path
+            if not next_candidates:
+                break
+            candidates = next_candidates
+        return best
+
     def _find_bridge_anchor(self, matched_node_ids: Sequence[int], tools_hash: str) -> Optional[BridgeAnchor]:
         for message_index in range(len(matched_node_ids) - 1, -1, -1):
             node_id = matched_node_ids[message_index]
-            turn_ids = self._turn_ids_by_assistant_node.get(node_id)
-            if not turn_ids:
+            transition_id = self._transition_id_by_assistant_node.get(node_id)
+            if transition_id is None:
                 continue
-            for turn_id in reversed(turn_ids):
-                turn = self._turns[turn_id]
-                if turn.tools_hash != tools_hash:
-                    continue
-                return BridgeAnchor(
-                    node_id=node_id,
-                    matched_message_count=message_index + 1,
-                    previous_prompt_ids=turn.prompt_token_ids,
-                    previous_completion_ids=turn.completion_ids,
-                )
+            transition = self._transitions[transition_id]
+            if transition.tools_hash != tools_hash:
+                continue
+            view = TransitionView(self, transition)
+            return BridgeAnchor(
+                node_id=node_id,
+                matched_message_count=message_index + 1,
+                previous_prompt_ids=view.prompt_token_ids,
+                previous_completion_ids=view.completion_ids,
+            )
         return None
 
     def _validate_result(self, pending: PendingTurn, result: ModelTurnResult) -> None:
@@ -252,6 +501,10 @@ class Trace:
             raise ValueError("completion token IDs and logprobs must have the same length")
         if not result.completion_ids:
             raise ValueError("Cannot commit an empty completion")
+        if result.routed_experts is not None and len(result.routed_experts) != (
+            len(result.prompt_token_ids) + len(result.completion_ids)
+        ):
+            raise ValueError("Routed-expert data must align with the full prompt and completion")
         if result.reused_prefix_length < 0 or result.reused_prefix_length > len(result.prompt_token_ids):
             raise ValueError("reused_prefix_length is outside the prompt token range")
         if result.reused_prefix_length > 0:
@@ -288,23 +541,16 @@ class Trace:
             )
             return parent_id, message_chunks, assistant_scaffold
 
+        exact_prefix = self._longest_exact_prefix(pending.messages, result.prompt_token_ids)
+        parent_id = exact_prefix[-1] if exact_prefix else None
+        path_len = len(self._tokens_for_nodes(exact_prefix))
         message_chunks, assistant_scaffold = self._attribute_prompt_tokens(
-            result.prompt_token_ids,
-            result.prompt_message_indices,
-            message_start=0,
+            result.prompt_token_ids[path_len:],
+            result.prompt_message_indices[path_len:],
+            message_start=len(exact_prefix),
             message_count=len(pending.messages),
         )
-        parent_id = None
-        reusable_count = min(len(pending.matched_node_ids), len(message_chunks))
-        for index in range(reusable_count):
-            node_id = pending.matched_node_ids[index]
-            node = self._nodes[node_id]
-            if node.parent_id != parent_id or node.token_ids != message_chunks[index]:
-                break
-            parent_id = node_id
-        else:
-            index = reusable_count
-        return parent_id, message_chunks[index:], assistant_scaffold
+        return parent_id, message_chunks, assistant_scaffold
 
     def _attribute_prompt_tokens(
         self,
@@ -324,11 +570,14 @@ class Trace:
         for position in range(len(token_ids) - 1, -1, -1):
             message_index = message_indices[position]
             if message_index >= 0:
-                if message_index < message_start or message_index >= message_count:
+                if message_index >= message_count:
                     raise ValueError(
                         f"Renderer message index {message_index} is outside the expected range "
                         f"[{message_start}, {message_count})"
                     )
+                if message_index < message_start:
+                    owners[position] = next_owner
+                    continue
                 next_owner = message_index
                 owners[position] = message_index
             elif message_index == -1:
@@ -373,6 +622,7 @@ class Trace:
         token_ids: Sequence[int],
         sampled_start: Optional[int],
         completion_logprobs: Sequence[float],
+        routed_experts: Optional[RoutedExperts],
         staged_count: int,
     ) -> MessageNode:
         canonical = _canonical_message(message)
@@ -397,6 +647,7 @@ class Trace:
             sampled_mask=sampled_mask,
             logprobs=logprobs,
             sampled_start=sampled_start,
+            routed_experts=routed_experts,
         )
 
     def _path_to_node(self, node_id: int) -> Tuple[int, ...]:

@@ -47,6 +47,8 @@ class ModelTurnResult:
     assistant_message: Message
     stop_reason: str
     routed_experts: Optional[RoutedExperts] = None
+    model: str = ""
+    sampling_params_json: str = "{}"
 
 
 @dataclass(frozen=True)
@@ -58,20 +60,16 @@ class CommitResult:
 
 
 @dataclass(frozen=True)
-class CommittedTurn:
-    """Internal exact record for one successful inference call."""
+class TransitionRecord:
+    """Constant-size reference to one successful inference call."""
 
-    turn_id: int
+    transition_id: int
     request_key: str
     tools_hash: str
-    prompt_leaf_id: Optional[int]
     assistant_node_id: int
-    prompt_token_ids: Tuple[int, ...]
-    completion_ids: Tuple[int, ...]
-    completion_logprobs: Tuple[float, ...]
-    assistant_message: Message
     stop_reason: str
-    routed_experts: Optional[RoutedExperts] = None
+    model: str
+    sampling_params_json: str
 
 
 @dataclass(frozen=True)

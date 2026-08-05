@@ -352,6 +352,8 @@ class TITOProxy:
             assistant_message=assistant_message,
             stop_reason=engine_output["stop_reasons"][0],
             routed_experts=convert_routed_experts(routed_experts),
+            model=parsed.model,
+            sampling_params_json=json.dumps(parsed.sampling_params, sort_keys=True, separators=(",", ":")),
         )
         registration.trace.commit(pending, result)
 

@@ -166,11 +166,127 @@ def test_routed_experts_align_with_prompt_deltas():
 
     assert output["rollout_expert_indices"] == [
         [
-            [[10, 11]],
-            [[12, 13]],
-            [[14, 15]],
+            [[1, 2]],
+            [[3, 4]],
+            [[5, 6]],
             [[16, 17]],
             [[18, 19]],
             [[20, 21]],
         ]
     ]
+
+
+def test_shared_sampled_prefix_is_trained_once_across_branches():
+    trace = Trace()
+    _commit(trace, "root", [{"role": "user", "content": "q"}], [1, 9], [0, -1], [2], "a")
+    _commit(
+        trace,
+        "left",
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+            {"role": "user", "content": "left"},
+        ],
+        [1, 9, 2, 3, 9],
+        [-1, -1, -1, 2, -1],
+        [4],
+        "left-answer",
+        reused=3,
+    )
+    _commit(
+        trace,
+        "right",
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+            {"role": "user", "content": "right"},
+        ],
+        [1, 9, 2, 5, 9],
+        [-1, -1, -1, 2, -1],
+        [6],
+        "right-answer",
+        reused=3,
+    )
+    outcome = TraceOutcome(
+        trace=trace,
+        trajectory_id=TrajectoryID("instance", 0),
+        reward=1.0,
+        stop_reason="complete",
+        generation_time=2.0,
+        num_turns=3,
+    )
+
+    output = build_trace_generator_output([outcome], overlong_filtering=False, step_wise=True)
+
+    assert len(output["response_ids"]) == 2
+    assert sum(sum(mask) for mask in output["loss_masks"]) == 3
+    assert output["rewards"] == [0.0, 1.0]
+    assert output["is_last_step"] == [False, True]
+
+
+def test_harbor_style_summarization_emits_one_row_per_exact_branch():
+    trace = Trace()
+    user = {"role": "user", "content": "task"}
+    main = {"role": "assistant", "content": "main"}
+    summary_prompt = {"role": "user", "content": "summarize"}
+    summary = {"role": "assistant", "content": "summary"}
+    questions_prompt = {"role": "user", "content": "questions prompt"}
+    questions = {"role": "assistant", "content": "questions"}
+
+    _commit(trace, "main", [user], [1, 9], [0, -1], [2], "main")
+    _commit(
+        trace,
+        "summary",
+        [user, main, summary_prompt],
+        [1, 9, 2, 3, 9],
+        [-1, -1, -1, 2, -1],
+        [4],
+        "summary",
+        reused=3,
+    )
+    _commit(trace, "questions", [questions_prompt], [5, 9], [0, -1], [6], "questions")
+    _commit(
+        trace,
+        "answers",
+        [
+            user,
+            main,
+            summary_prompt,
+            summary,
+            {"role": "user", "content": "answers prompt"},
+        ],
+        [1, 99, 2, 3, 4, 7, 9],
+        [0, 1, 1, 2, 3, 4, -1],
+        [8],
+        "answers",
+    )
+    _commit(
+        trace,
+        "main-post",
+        [
+            user,
+            questions_prompt,
+            questions,
+            {"role": "user", "content": "handoff"},
+        ],
+        [1, 5, 6, 10, 9],
+        [0, 1, 2, 3, -1],
+        [11],
+        "main-post",
+    )
+    outcome = TraceOutcome(
+        trace=trace,
+        trajectory_id=TrajectoryID("instance", 0),
+        reward=0.75,
+        stop_reason="complete",
+        generation_time=2.0,
+        num_turns=2,
+    )
+
+    output = build_trace_generator_output([outcome], overlong_filtering=False, step_wise=True)
+
+    assert len(trace.transitions()) == 5
+    assert len(trace.branches()) == 4
+    assert len(output["response_ids"]) == 4
+    assert output["rewards"] == [0.0, 0.0, 0.0, 0.75]
+    assert output["is_last_step"] == [False, False, False, True]

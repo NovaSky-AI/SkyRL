@@ -3,7 +3,7 @@
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Optional, cast
 
 import ray
 import yaml
@@ -27,6 +27,7 @@ class TITOHarborGeneratorConfig(HarborGeneratorConfig):
     """Harbor generator configuration with optional trace parity checks."""
 
     tito_validate_rollout_details: bool = True
+    tito_trace_log_dir: Optional[str] = None
 
 
 @dataclass

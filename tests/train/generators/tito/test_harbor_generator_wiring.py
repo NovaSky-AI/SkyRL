@@ -8,6 +8,8 @@ import pytest
 from skyrl.train.generators.base import TrajectoryID
 from skyrl.train.generators.tito.proxy import TITOProxy
 from skyrl.train.generators.tito.renderer import RenderedPrompt
+from skyrl.train.generators.tito.trace import Trace
+from skyrl.train.generators.tito.types import ModelTurnResult
 
 
 class _Renderer:
@@ -133,3 +135,58 @@ async def test_harbor_attempt_uses_registered_proxy_endpoint(monkeypatch):
     assert output.trace is not None
     assert len(output.trace.committed_turns()) == 1
     assert len(engine.finished_sessions) == 1
+
+
+def test_parity_matches_multiple_harbor_segments_to_transitions():
+    from examples.train_integrations.harbor_tito.harbor_generator import (
+        TITOHarborGenerator,
+    )
+
+    trace = Trace()
+    calls = [
+        ([{"role": "user", "content": "main"}], [1, 9], [0, -1], [2], "main-answer"),
+        ([{"role": "user", "content": "aux"}], [3, 9], [0, -1], [4], "aux-answer"),
+        ([{"role": "user", "content": "next"}], [5, 9], [0, -1], [6], "next-answer"),
+    ]
+    for index, (messages, prompt, attribution, completion, content) in enumerate(calls):
+        pending = trace.prepare_turn(messages, request_key=str(index))
+        trace.commit(
+            pending,
+            ModelTurnResult(
+                prompt_token_ids=tuple(prompt),
+                prompt_message_indices=tuple(attribution),
+                reused_prefix_length=0,
+                completion_ids=tuple(completion),
+                completion_logprobs=(-0.1,),
+                assistant_message={"role": "assistant", "content": content},
+                stop_reason="stop",
+            ),
+        )
+
+    transitions = trace.transitions()
+    rollout_details = [
+        {
+            "prompt_token_ids": [
+                list(transitions[0].prompt_token_ids),
+                list(transitions[2].prompt_token_ids),
+            ],
+            "completion_token_ids": [
+                list(transitions[0].completion_ids),
+                list(transitions[2].completion_ids),
+            ],
+            "logprobs": [
+                list(transitions[0].completion_logprobs),
+                list(transitions[2].completion_logprobs),
+            ],
+        },
+        {
+            "prompt_token_ids": [list(transitions[1].prompt_token_ids)],
+            "completion_token_ids": [list(transitions[1].completion_ids)],
+            "logprobs": [list(transitions[1].completion_logprobs)],
+        },
+    ]
+
+    assert TITOHarborGenerator._validate_trace_parity(trace, rollout_details) == [
+        [0, 2],
+        [1],
+    ]

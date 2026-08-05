@@ -747,6 +747,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if os.environ.get("NCCL_NET_PLUGIN"):
         logger.info(f"Exporting NCCL_NET_PLUGIN to ray runtime env: {os.environ['NCCL_NET_PLUGIN']}")
         env_vars["NCCL_NET_PLUGIN"] = os.environ["NCCL_NET_PLUGIN"]
+    if os.environ.get("NCCL_NET"):
+        logger.info(f"Exporting NCCL_NET to ray runtime env: {os.environ['NCCL_NET']}")
+        env_vars["NCCL_NET"] = os.environ["NCCL_NET"]
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart

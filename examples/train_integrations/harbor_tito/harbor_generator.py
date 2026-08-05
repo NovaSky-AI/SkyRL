@@ -1,9 +1,11 @@
 """Harbor generator backed by SkyRL's token-in/token-out proxy."""
 
 import asyncio
+import json
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 from uuid import uuid4
 
@@ -39,6 +41,7 @@ class TITOHarborTrajectoryOutput(HarborTrajectoryOutput):
     """One Harbor outcome whose trace is authoritative for training."""
 
     trace: Optional[Trace] = None
+    summarization_count: int = 0
 
 
 class TITOHarborGenerator(HarborGenerator):
@@ -60,6 +63,8 @@ class TITOHarborGenerator(HarborGenerator):
         self.max_seq_len = max_seq_len
         self.renderer = PrimeRendererAdapter(tokenizer)
         self._validate_rollout_details = getattr(generator_cfg, "tito_validate_rollout_details", True)
+        trace_log_dir = getattr(generator_cfg, "tito_trace_log_dir", None)
+        self._trace_log_dir = Path(trace_log_dir).expanduser() if trace_log_dir else None
         self._harbor_trial_config_template = deepcopy(harbor_cfg)
         self._served_model_name = ie_cfg.served_model_name
 
@@ -81,12 +86,6 @@ class TITOHarborGenerator(HarborGenerator):
                 "TITO requires interleaved_thinking=true to preserve assistant history; enabling automatically."
             )
             agent_kwargs["interleaved_thinking"] = True
-        if agent_kwargs.get("enable_summarize", False):
-            raise ValueError(
-                "TITO Harbor generation does not yet support enable_summarize=true. "
-                "Set harbor_trial_config.agent.kwargs.enable_summarize=false."
-            )
-
         logger.info(
             f"TITOHarborGenerator initialized. "
             f"Agent: {self._harbor_trial_config_template.get('agent', {}).get('name')}, "
@@ -165,7 +164,9 @@ class TITOHarborGenerator(HarborGenerator):
         results = None
         rollout_details = None
         num_turns = None
+        summarization_count = 0
         successful_trace = None
+        segment_transition_ids: List[List[int]] = []
         successful = False
         is_context_length_error = False
         is_agent_timeout_error = False
@@ -223,13 +224,23 @@ class TITOHarborGenerator(HarborGenerator):
                 if metadata is None or "n_episodes" not in metadata:
                     raise RuntimeError("Harbor agent result is missing n_episodes metadata")
                 num_turns = int(metadata["n_episodes"])
+                summarization_count = int(metadata.get("summarization_count", 0))
 
                 if not trace.committed_turns():
                     logger.warning(f"{prefix} failed: proxy trace contains no committed turns. Results: {results}")
                     continue
                 if getattr(self, "_validate_rollout_details", True):
-                    self._validate_trace_parity(trace, rollout_details)
+                    segment_transition_ids = self._validate_trace_parity(trace, rollout_details)
                 successful_trace = trace
+                self._write_trace_log(
+                    trace,
+                    trajectory_id=trajectory_id,
+                    session_id=session_id,
+                    reward=reward,
+                    summarization_count=summarization_count,
+                    rollout_details=rollout_details,
+                    segment_transition_ids=segment_transition_ids,
+                )
                 successful = True
                 logger.debug(f"{prefix} successful: reward={reward}.")
                 break
@@ -255,6 +266,7 @@ class TITOHarborGenerator(HarborGenerator):
             trace=successful_trace,
             reward=reward,
             num_turns=num_turns,
+            summarization_count=summarization_count,
             stop_reason="context_length" if is_context_length_error else "complete",
             e2e_time=time.monotonic() - agent_loop_start_time,
         )
@@ -266,27 +278,83 @@ class TITOHarborGenerator(HarborGenerator):
         return trace
 
     @staticmethod
-    def _validate_trace_parity(trace: Trace, rollout_details: Optional[List[RolloutDetail]]) -> None:
+    def _validate_trace_parity(
+        trace: Trace,
+        rollout_details: Optional[List[RolloutDetail]],
+    ) -> List[List[int]]:
         if not rollout_details:
             raise ValueError("Harbor did not return rollout details for TITO parity validation")
-        if len(rollout_details) != 1:
-            raise ValueError(f"Expected one Harbor rollout segment, got {len(rollout_details)}")
+        transitions = list(trace.transitions())
+        unmatched = set(range(len(transitions)))
+        segment_transition_ids: List[List[int]] = []
 
-        detail = rollout_details[0]
-        prompt_ids = detail.get("prompt_token_ids", [])
-        completion_ids = detail.get("completion_token_ids", [])
-        logprobs = detail.get("logprobs", [])
-        turns = trace.committed_turns()
-        if not (len(prompt_ids) == len(completion_ids) == len(logprobs) == len(turns)):
-            raise ValueError(
-                "Harbor rollout detail lengths do not match committed TITO turns: "
-                f"prompts={len(prompt_ids)}, completions={len(completion_ids)}, "
-                f"logprobs={len(logprobs)}, turns={len(turns)}"
-            )
-        for index, turn in enumerate(turns):
-            if list(turn.prompt_token_ids) != prompt_ids[index]:
-                raise ValueError(f"TITO prompt IDs differ from Harbor rollout details at turn {index}")
-            if list(turn.completion_ids) != completion_ids[index]:
-                raise ValueError(f"TITO completion IDs differ from Harbor rollout details at turn {index}")
-            if list(turn.completion_logprobs) != logprobs[index]:
-                raise ValueError(f"TITO completion logprobs differ from Harbor rollout details at turn {index}")
+        for segment_index, detail in enumerate(rollout_details):
+            prompts = detail.get("prompt_token_ids", [])
+            completions = detail.get("completion_token_ids", [])
+            logprobs = detail.get("logprobs", [])
+            if not (len(prompts) == len(completions) == len(logprobs)):
+                raise ValueError(
+                    f"Malformed Harbor rollout segment {segment_index}: "
+                    f"prompts={len(prompts)}, completions={len(completions)}, logprobs={len(logprobs)}"
+                )
+
+            matched_segment: List[int] = []
+            for call_index, (prompt_ids, completion_ids, call_logprobs) in enumerate(
+                zip(prompts, completions, logprobs)
+            ):
+                match = next(
+                    (
+                        transition_id
+                        for transition_id in unmatched
+                        if list(transitions[transition_id].prompt_token_ids) == prompt_ids
+                        and list(transitions[transition_id].completion_ids) == completion_ids
+                        and list(transitions[transition_id].completion_logprobs) == call_logprobs
+                    ),
+                    None,
+                )
+                if match is None:
+                    raise ValueError(
+                        f"Harbor rollout segment {segment_index} call {call_index} "
+                        "does not match any committed TITO transition"
+                    )
+                unmatched.remove(match)
+                matched_segment.append(match)
+            segment_transition_ids.append(matched_segment)
+
+        if unmatched:
+            raise ValueError(f"TITO transitions missing from Harbor rollout details: {sorted(unmatched)}")
+        return segment_transition_ids
+
+    def _write_trace_log(
+        self,
+        trace: Trace,
+        *,
+        trajectory_id: TrajectoryID,
+        session_id: str,
+        reward: float,
+        summarization_count: int,
+        rollout_details: Optional[List[RolloutDetail]],
+        segment_transition_ids: List[List[int]],
+    ) -> None:
+        trace_log_dir = getattr(self, "_trace_log_dir", None)
+        if trace_log_dir is None:
+            return
+        trace_log_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "trajectory_id": trajectory_id.to_string(),
+            "session_id": session_id,
+            "reward": reward,
+            "summarization_count": summarization_count,
+            "harbor_rollout_segments": [
+                {
+                    "prompt_lengths": [len(ids) for ids in segment.get("prompt_token_ids", [])],
+                    "completion_lengths": [len(ids) for ids in segment.get("completion_token_ids", [])],
+                    "logprob_lengths": [len(values) for values in segment.get("logprobs", [])],
+                }
+                for segment in rollout_details or []
+            ],
+            "harbor_segment_transition_ids": segment_transition_ids,
+            "trace": trace.to_debug_dict(),
+        }
+        path = trace_log_dir / f"{trajectory_id.to_string()}-{session_id}.json"
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))

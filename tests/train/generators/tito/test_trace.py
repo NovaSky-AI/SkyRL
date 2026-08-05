@@ -58,6 +58,10 @@ def test_linear_bridge_preserves_exact_tokens():
     turns = trace.committed_turns()
     assert len(turns) == 2
     assert turns[1].prompt_token_ids == (10, 11, 12, 20, 21, 30, 31)
+    assert turns[1].completion_ids == (40,)
+    assert turns[1].full_token_ids == (10, 11, 12, 20, 21, 30, 31, 40)
+    assert turns[1].is_exact_extension_of(turns[0])
+    assert len(trace.branches()) == 1
     assert [node.token_ids for node in trace.nodes()] == [
         (10, 11),
         (12, 20, 21),
@@ -92,8 +96,37 @@ def test_full_render_token_mismatch_creates_new_exact_path():
 
     assert len(trace.committed_turns()) == 2
     assert trace.committed_turns()[1].prompt_token_ids == (9, 2, 3, 4, 5)
+    assert len(trace.branches()) == 2
     assert trace.nodes()[2].parent_id is None
     assert trace.nodes()[2].token_ids == (9, 2)
+
+
+def test_full_render_reuses_best_exact_semantic_candidate():
+    trace = Trace()
+    user = {"role": "user", "content": "same"}
+    assistant = {"role": "assistant", "content": "answer"}
+
+    first = trace.prepare_turn([user], request_key="turn-1")
+    trace.commit(first, _result([1, 2], [0, -1], [3], "answer"))
+
+    rewritten = trace.prepare_turn([user, assistant], request_key="turn-2")
+    trace.commit(
+        rewritten,
+        _result([9, 2, 3, 5], [0, 0, 1, -1], [6], "rewritten"),
+    )
+    assert len(trace.branches()) == 2
+
+    exact = trace.prepare_turn(
+        [user, assistant, {"role": "user", "content": "next"}],
+        request_key="turn-3",
+    )
+    trace.commit(
+        exact,
+        _result([1, 2, 3, 7, 8], [0, 1, 1, 2, -1], [10], "next-answer"),
+    )
+
+    assert len(trace.branches()) == 2
+    assert trace.transition(2).prompt_token_ids == (1, 2, 3, 7, 8)
 
 
 def test_identical_request_key_is_idempotent():
@@ -105,6 +138,7 @@ def test_identical_request_key_is_idempotent():
 
     assert first == second
     assert len(trace.committed_turns()) == 1
+    assert len(trace.branches()) == 1
 
 
 def test_stale_pending_turn_is_rejected():
@@ -123,3 +157,118 @@ def test_sealed_trace_rejects_new_work():
 
     with pytest.raises(RuntimeError, match="sealed trace"):
         trace.prepare_turn([{"role": "user", "content": "q"}], request_key="turn")
+
+
+def test_transition_records_do_not_duplicate_cumulative_tokens():
+    trace = Trace()
+    first = trace.prepare_turn([{"role": "user", "content": "q"}], request_key="one")
+    trace.commit(first, _result([1, 9], [0, -1], [2], "a"))
+    second = trace.prepare_turn(
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+            {"role": "user", "content": "next"},
+        ],
+        request_key="two",
+    )
+    trace.commit(
+        second,
+        _result(
+            [1, 9, 2, 3, 9],
+            [-1, -1, -1, 2, -1],
+            [4],
+            "b",
+            reused_prefix_length=3,
+        ),
+    )
+
+    debug = trace.to_debug_dict()
+    assert debug["storage"]["stored_token_ids"] == 6
+    assert debug["storage"]["materialized_transition_token_ids"] == 9
+    assert not hasattr(trace._transitions[0], "prompt_token_ids")
+
+
+def test_harbor_style_summarization_produces_four_exact_branches():
+    trace = Trace()
+    user = {"role": "user", "content": "task"}
+    main = {"role": "assistant", "content": "main", "reasoning_content": "main-think"}
+    summary_prompt = {"role": "user", "content": "summarize"}
+    summary = {"role": "assistant", "content": "summary", "reasoning_content": "summary-think"}
+    questions_prompt = {"role": "user", "content": "questions prompt"}
+    questions = {"role": "assistant", "content": "questions"}
+    answers_prompt = {"role": "user", "content": "answers prompt"}
+    handoff = {"role": "user", "content": "handoff"}
+
+    pending = trace.prepare_turn([user], request_key="main-pre")
+    trace.commit(
+        pending,
+        ModelTurnResult(
+            prompt_token_ids=(1, 9),
+            prompt_message_indices=(0, -1),
+            reused_prefix_length=0,
+            completion_ids=(2,),
+            completion_logprobs=(-0.1,),
+            assistant_message=main,
+            stop_reason="stop",
+        ),
+    )
+
+    pending = trace.prepare_turn([user, main, summary_prompt], request_key="summary")
+    trace.commit(
+        pending,
+        ModelTurnResult(
+            prompt_token_ids=(1, 9, 2, 3, 9),
+            prompt_message_indices=(-1, -1, -1, 2, -1),
+            reused_prefix_length=3,
+            completion_ids=(4,),
+            completion_logprobs=(-0.1,),
+            assistant_message=summary,
+            stop_reason="stop",
+        ),
+    )
+
+    pending = trace.prepare_turn([questions_prompt], request_key="questions")
+    trace.commit(pending, _result([5, 9], [0, -1], [6], "questions"))
+
+    # Harbor reconstructs summary history without the sampled reasoning fields.
+    pending = trace.prepare_turn(
+        [
+            user,
+            {"role": "assistant", "content": "main"},
+            summary_prompt,
+            {"role": "assistant", "content": "summary"},
+            answers_prompt,
+        ],
+        request_key="answers",
+    )
+    trace.commit(
+        pending,
+        _result(
+            [1, 99, 2, 3, 4, 7, 9],
+            [0, 1, 1, 2, 3, 4, -1],
+            [8],
+            "answers",
+        ),
+    )
+
+    pending = trace.prepare_turn(
+        [user, questions_prompt, questions, handoff],
+        request_key="main-post",
+    )
+    trace.commit(
+        pending,
+        _result(
+            [1, 5, 6, 10, 9],
+            [0, 1, 2, 3, -1],
+            [11],
+            "main-post",
+        ),
+    )
+
+    assert len(trace.transitions()) == 5
+    assert [branch.transition_ids for branch in trace.branches()] == [
+        (0, 1),
+        (2,),
+        (3,),
+        (4,),
+    ]

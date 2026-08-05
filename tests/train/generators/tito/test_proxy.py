@@ -90,6 +90,9 @@ async def test_proxy_runs_token_inference_and_commits_trace():
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "50,51"
     assert len(trace.committed_turns()) == 1
+    assert trace.transition(0).model == "model"
+    assert trace.transition(0).sampling_params["temperature"] == 0.7
+    assert trace.transition(0).sampling_params["max_tokens"] == 8
     assert engine.generate_calls[0][0]["prompt_token_ids"] == [[10, 99]]
     assert engine.generate_calls[0][0]["cache_salt"] == "salt"
     assert engine.finished_sessions == ["session-1"]
