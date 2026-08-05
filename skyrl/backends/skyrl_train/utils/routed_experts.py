@@ -46,9 +46,10 @@ class RoutedExpertTrace:
         if self.prompt_start > token_count:
             raise ValueError(f"routed-expert trace has {self.prompt_start} rows for {token_count} tokens")
 
-        for source_index in range(self.prompt_start, token_count - 1):
-            if loss_mask[source_index + 1] != 0:
-                raise ValueError(f"missing routed-expert row for loss-active target at token {source_index + 1}")
+        if any(loss_mask[self.prompt_start + 1 : token_count]):
+            for source_index in range(self.prompt_start, token_count - 1):
+                if loss_mask[source_index + 1] != 0:
+                    raise ValueError(f"missing routed-expert row for loss-active target at token {source_index + 1}")
 
         padding_count = token_count - self.prompt_start
         if padding_count:
