@@ -30,10 +30,22 @@ def test_packed_alignment_uses_layout_only_without_fp8():
 
 
 def test_packed_alignment_adds_fp8_local_rank_multiple():
-    assert get_packed_seq_align_size(tp_size=4, cp_size=1, fp8_enabled=True) == 16
+    assert get_packed_seq_align_size(tp_size=4, cp_size=1, fp8_enabled=True) == 32
+    assert get_packed_seq_align_size(tp_size=8, cp_size=1, fp8_enabled=True) == 64
     assert get_packed_seq_align_size(tp_size=1, cp_size=2, fp8_enabled=True) == 32
+    assert get_packed_seq_align_size(tp_size=4, cp_size=2, fp8_enabled=True) == 64
+
+
+def test_packed_alignment_prevents_unaligned_fp8_gemm_after_tp_sharding():
+    tp_size = 8
+    global_tokens = 844 * tp_size
+    align_size = get_packed_seq_align_size(tp_size=tp_size, cp_size=1, fp8_enabled=True)
+    padded_tokens = ((global_tokens + align_size - 1) // align_size) * align_size
+
+    assert (padded_tokens // tp_size) % 8 == 0
 
 
 def test_unpacked_alignment_adds_fp8_multiple_only_when_enabled():
     assert get_unpacked_seq_align_size(tp_size=4) == 4
-    assert get_unpacked_seq_align_size(tp_size=4, fp8_enabled=True) == 16
+    assert get_unpacked_seq_align_size(tp_size=4, fp8_enabled=True) == 32
+    assert get_unpacked_seq_align_size(tp_size=8, fp8_enabled=True) == 64

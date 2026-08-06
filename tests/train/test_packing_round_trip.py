@@ -177,17 +177,17 @@ class TestPreprocessPackedRows:
         )
 
         # Sanity: collator layout matches what PackedDataCollator does.
-        #   row 0: [101..107] + pad-to-16 + [201..205] + pad-to-16 => 32 slots
-        #   row 1: [301..303] + pad-to-16 + [401..411] + pad-to-16 => 32 slots
-        assert sequences.shape == (2, 32)
+        #   row 0: [101..107] + pad-to-32 + [201..205] + pad-to-32 => 64 slots
+        #   row 1: [301..303] + pad-to-32 + [401..411] + pad-to-32 => 64 slots
+        assert sequences.shape == (2, 64)
         assert sequences[0, :7].tolist() == row_0_sub_0
-        assert sequences[0, 7:16].tolist() == [0] * 9
-        assert sequences[0, 16:21].tolist() == row_0_sub_1
+        assert sequences[0, 7:32].tolist() == [0] * 25
+        assert sequences[0, 32:37].tolist() == row_0_sub_1
         assert sequences[1, :3].tolist() == row_1_sub_0
-        assert sequences[1, 3:16].tolist() == [0] * 13
-        assert sequences[1, 16:27].tolist() == row_1_sub_1
+        assert sequences[1, 3:32].tolist() == [0] * 29
+        assert sequences[1, 32:43].tolist() == row_1_sub_1
         # attention_mask is True ONLY at valid slots (NOT at TP-alignment gaps).
-        assert attention_mask[0, 7:16].any().item() is False
+        assert attention_mask[0, 7:32].any().item() is False
         assert attention_mask[0].sum().item() == 7 + 5
         assert attention_mask[1].sum().item() == 3 + 11
 
@@ -207,19 +207,19 @@ class TestPreprocessPackedRows:
             )
 
         # cu_seqlens_q (== cu_seqlens_q_padded for THD) enumerates 4 sub-seqs:
-        assert params.cu_seqlens_q.tolist() == [0, 16, 32, 48, 64]
-        # Packed slab is 64 tokens. Verify each sub-seq's *valid* tokens were
+        assert params.cu_seqlens_q.tolist() == [0, 32, 64, 96, 128]
+        # Packed slab is 128 tokens. Verify each sub-seq's *valid* tokens were
         # read from the *correct intra-row offset* — i.e. preprocess respected
         # the TP-alignment gap that the collator inserted.
-        assert packed.shape == (1, 64)
+        assert packed.shape == (1, 128)
         assert packed[0, :7].tolist() == row_0_sub_0  # row 0 sub 0
-        assert packed[0, 7:16].tolist() == [0] * 9  # alignment pad
-        assert packed[0, 16:21].tolist() == row_0_sub_1  # row 0 sub 1
-        assert packed[0, 21:32].tolist() == [0] * 11  # alignment pad
-        assert packed[0, 32:35].tolist() == row_1_sub_0  # row 1 sub 0
-        assert packed[0, 35:48].tolist() == [0] * 13  # alignment pad
-        assert packed[0, 48:59].tolist() == row_1_sub_1  # row 1 sub 1
-        assert packed[0, 59:64].tolist() == [0] * 5  # alignment pad
+        assert packed[0, 7:32].tolist() == [0] * 25  # alignment pad
+        assert packed[0, 32:37].tolist() == row_0_sub_1  # row 0 sub 1
+        assert packed[0, 37:64].tolist() == [0] * 27  # alignment pad
+        assert packed[0, 64:67].tolist() == row_1_sub_0  # row 1 sub 0
+        assert packed[0, 67:96].tolist() == [0] * 29  # alignment pad
+        assert packed[0, 96:107].tolist() == row_1_sub_1  # row 1 sub 1
+        assert packed[0, 107:128].tolist() == [0] * 21  # alignment pad
 
     def test_mbs2_tp1_singlesubseq_rows_match_legacy_preprocess_path(self):
         """No regression in the legacy path: when each row has 1 sub-seq and tp_size=1."""
