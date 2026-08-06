@@ -15,6 +15,7 @@ def test_delete_model_keeps_prewarmed_inference():
             self.stopped = True
 
     dispatch = Dispatch()
+    backend.config = backend_module.MegatronBackendOverrides()
     backend._model_ids_to_role = {"model": "policy"}
     backend._model_metadata = {"model": object()}
     backend._keep_inference_warm = True
@@ -25,6 +26,7 @@ def test_delete_model_keeps_prewarmed_inference():
     backend._base_lora_signature = (8, 16)
     backend._inference_engine_client = object()
     backend._inference_engines_initialized = True
+    backend._inference_adapter_ids = set()
     backend._server_groups = []
     backend._inference_router = None
 

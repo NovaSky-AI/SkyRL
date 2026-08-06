@@ -34,9 +34,11 @@ Required `--backend-config` keys to run multi-tenant LoRA on Megatron:
 }
 ```
 
+Set `"keep_runtime_warm_on_last_unload": true` to remove a job's LoRA and optimizer state while retaining Ray, the workers, inference engines, and the shared base model after the final model unloads. The next compatible `create_model` still creates a fresh LoRA adapter, but it reuses the warm runtime instead of rebuilding the base model. The default is `false`.
+
 All adapters must share the same `(rank, alpha, target_modules)` signature. Mismatches are hard-rejected at `create_model` with a `LoRA signature mismatch …` error.
 
-The first `create_model` on a fresh server triggers the policy build and bootstraps the per-tenant adapter slot infrastructure; subsequent `create_model` calls register additional adapter slots and complete in milliseconds. When the *last* registered model is unloaded the server tears down the Ray runtime via `ray.shutdown()`; the next `create_model` rebuilds it.
+The first `create_model` on a fresh server triggers the policy build and bootstraps the per-tenant adapter slot infrastructure; subsequent `create_model` calls register additional adapter slots and complete in milliseconds. By default, when the *last* registered model is unloaded the server tears down the Ray runtime via `ray.shutdown()` and the next `create_model` rebuilds it. With `keep_runtime_warm_on_last_unload` enabled, the last adapter is removed but the shared runtime remains available for the next compatible `create_model`.
 
 ## Quickstart — Two SL clients
 
