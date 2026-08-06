@@ -40,6 +40,26 @@ def test_process_exit_raises_runtime_error():
                 router._wait_until_healthy("http://127.0.0.1:9999", timeout=1)
 
 
+def test_start_uniform_router_with_vllm_router_0_1_15():
+    """start() supports the non-PD RouterArgs shape from vllm-router 0.1.15."""
+    with (
+        patch(
+            "skyrl.backends.skyrl_train.inference_servers.vllm_router.find_and_reserve_port",
+            side_effect=[(9999, MagicMock()), (29000, MagicMock())],
+        ),
+        patch("skyrl.backends.skyrl_train.inference_servers.vllm_router.multiprocessing.Process"),
+        patch(
+            "skyrl.backends.skyrl_train.inference_servers.vllm_router.get_node_ip",
+            return_value="127.0.0.1",
+        ),
+    ):
+        router = VLLMRouter(_make_router_args())
+        with patch.object(router, "_wait_until_healthy"):
+            router_url = router.start()
+
+    assert router_url == "http://127.0.0.1:9999"
+
+
 def test_shutdown_terminates_process():
     """shutdown() sends SIGTERM to the child process."""
     router_args = _make_router_args()
