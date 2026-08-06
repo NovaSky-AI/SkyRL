@@ -1232,8 +1232,8 @@ class SkyRLTrainBackend(AbstractBackend):
 
         logger.info(f"Saved checkpoint for {model_id} to {output_path}")
 
-    def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
-        """Load full training checkpoint (model + optimizer + scheduler) from tar."""
+    def load_checkpoint(self, checkpoint_path, model_id: str, load_optimizer: bool) -> None:
+        """Load model state and optionally optimizer state from a training checkpoint."""
         self._validate_model_state(model_id)
         role = self._get_role(model_id)
 
@@ -1244,12 +1244,11 @@ class SkyRLTrainBackend(AbstractBackend):
             with tarfile.open(checkpoint_path, "r") as tar:
                 tar.extractall(temp_dir, filter="data")
 
-            # Load checkpoint (includes optimizer and scheduler states)
             self._dispatch.load_checkpoint(
                 model=role,
                 ckpt_dir=temp_dir,
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
+                load_optimizer_states=load_optimizer,
+                load_lr_scheduler_states=load_optimizer,
                 model_id=model_id,
             )
 

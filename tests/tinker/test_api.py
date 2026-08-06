@@ -222,10 +222,11 @@ def test_training_workflow(service_client):
     # The third example omits weights (auto-filled with 1s), so all losses should be non-zero
     assert all(v != 0.0 for v in fwdbwd_result.loss_fn_outputs[2]["elementwise_loss"].data)
 
-    # Load the optimizer state and verify another forward_backward pass has the same loss
-    training_client.load_state(resume_path)
+    # Load weights without optimizer state and verify another forward_backward pass has the same loss
+    training_client.load_state(resume_path).result()
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert_loss_fn_outputs_equal(fwdbwd_result2.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
+    training_client.load_state_with_optimizer(resume_path).result()
     # Also check that custom loss function produces the same loss
     fwdbwd_result_custom = training_client.forward_backward_custom(
         processed_examples, loss_fn=custom_cross_entropy_loss
