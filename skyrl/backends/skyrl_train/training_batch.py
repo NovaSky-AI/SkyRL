@@ -473,7 +473,7 @@ class TrainingInput(TypedDict, total=False):
 
     sequences: Integer[torch.Tensor, "batch_size seq_len"]  # prompt + response token ids
     attention_mask: Integer[torch.Tensor, "batch_size seq_len"]  # 1 = real token, 0 = padding
-    loss_mask: Integer[torch.Tensor, "batch_size response_len"]  # 1 = trainable; 0 masks e.g. tool output
+    loss_mask: Float[torch.Tensor, "batch_size response_len"]  # 1 = trainable; 0 masks e.g. tool output
     response_mask: Integer[torch.Tensor, "batch_size response_len"]  # 1 = response (not prompt) token
     action_log_probs: Float[torch.Tensor, "batch_size response_len"]  # current policy, from the training forward
     base_action_log_probs: Float[torch.Tensor, "batch_size response_len"]  # reference policy, for the KL term
