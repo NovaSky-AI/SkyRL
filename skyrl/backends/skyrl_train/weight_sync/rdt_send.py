@@ -115,8 +115,10 @@ def _qkv_index_device_ctx():
     single-threaded export, and the four ``arange`` calls inside each function are
     exactly the index tensors this is for.
 
-    Fixed upstream in the Megatron-Bridge fork by adding ``device=qkv.device``;
-    this is the same change reached from outside, so the fork is not needed for it.
+    The in-tree fix is four characters — ``device=qkv.device`` on the aranges —
+    and belongs upstream as a PR against megatron-bridge, since it taxes every
+    megatron->hf export of every GQA model. Until that lands, reaching it from
+    outside gets the same result with no forked copy to carry.
     """
     if not _qkv_device_fix_enabled():
         yield
@@ -917,18 +919,6 @@ class MegatronStackedWeightSource(WeightSource):
         clean PP-collective caches each call (the same reason
         ``MegatronWeightExtractor`` rebuilds them per sync).
         """
-        # Which megatron-bridge is actually loaded, and how much export metadata it
-        # has cached. Rides the phase-timing jsonl because loguru does not forward
-        # from Megatron rank actors; a missing "mb_fork" key means the stock wheel.
-        try:
-            from megatron.bridge.models.conversion import batched_export as _be
-
-            self._phase_add("mb_fork", 1.0)
-            self._phase_add("mb_spec_entries", float(_be.shared_cache_stats()["spec_entries"]))
-            self._phase_add("mb_obj_entries", float(_be.shared_cache_stats()["obj_entries"]))
-        except ImportError:
-            pass
-
         _t0 = time.perf_counter()
         tasks = self._bridge.get_conversion_tasks(self._module)
         self._phase_add("src_setup_tasks", time.perf_counter() - _t0)
