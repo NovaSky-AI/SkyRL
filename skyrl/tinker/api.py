@@ -614,7 +614,7 @@ class SaveWeightsRequest(BaseModel):
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
-    optimizer: bool
+    optimizer: bool = True
     type: Literal["load_weights"] | None = None
 
 
