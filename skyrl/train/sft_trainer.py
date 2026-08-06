@@ -2253,14 +2253,17 @@ class SFTTrainer:
         within the task would be incorrect.  The head-node process owns
         the Ray lifecycle.
         """
-        dataloaders = [("train", self.train_dataloader)]
+        try:
+            shutdown_dataloader(self.train_dataloader)
+        except Exception:
+            logger.exception("Failed to shut down train DataLoader workers")
+
         if self.eval_dataloaders is not None:
-            dataloaders.extend((f"eval/{name}", dataloader) for name, dataloader in self.eval_dataloaders)
-        for name, dataloader in dataloaders:
-            try:
-                shutdown_dataloader(dataloader)
-            except Exception:
-                logger.exception(f"Failed to shut down {name} DataLoader workers")
+            for name, dataloader in self.eval_dataloaders:
+                try:
+                    shutdown_dataloader(dataloader)
+                except Exception:
+                    logger.exception(f"Failed to shut down eval/{name} DataLoader workers")
 
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.stop()
