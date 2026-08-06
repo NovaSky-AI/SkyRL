@@ -8,15 +8,55 @@ All registrations are guarded by a top-level ``try/except ImportError`` so that
 the rest of the codebase still works in CPU-only (no megatron-bridge) environments.
 """
 
+import torch
+
 try:
     from megatron.bridge.models.conversion.mapping_registry import (
         MegatronMappingRegistry,
     )
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
+    from megatron.bridge.models.conversion.quantization_utils import (
+        dequantize_fp8_e4m3fn_with_scale,
+    )
     from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
+    from megatron.bridge.models.glm_moe_dsa.glm5_bridge import GLM5Bridge
     from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
+    from megatron.bridge.models.mla_provider import MLAModelProvider
     from megatron.bridge.models.qwen.qwen35_bridge import Qwen35Bridge, Qwen35MoEBridge
     from megatron.core.models.gpt.gpt_model import GPTModel
+    from transformers import GlmMoeDsaForCausalLM
+
+    @MegatronModelBridge.register_bridge(
+        source=GlmMoeDsaForCausalLM,
+        target=GPTModel,
+        provider=MLAModelProvider,
+        model_type="glm_moe_dsa",
+    )
+    class GLM5FP8Bridge(GLM5Bridge):
+        """Load GLM-5 FP8 checkpoints as dequantized Megatron parameters."""
+
+        def maybe_modify_loaded_hf_weight(self, hf_param, hf_state_dict):
+            hf_weights = super().maybe_modify_loaded_hf_weight(hf_param, hf_state_dict)
+            if isinstance(hf_weights, dict):
+                return {
+                    key: self._maybe_dequantize_fp8(weight, hf_param[key], hf_state_dict)
+                    for key, weight in hf_weights.items()
+                }
+            return self._maybe_dequantize_fp8(hf_weights, hf_param, hf_state_dict)
+
+        @staticmethod
+        def _maybe_dequantize_fp8(weight, param_name, hf_state_dict):
+            if weight.dtype != torch.float8_e4m3fn:
+                return weight
+
+            scale_key = f"{param_name}_scale_inv"
+            if scale_key not in hf_state_dict:
+                raise KeyError(f"Missing FP8 scale tensor: {scale_key}")
+            return dequantize_fp8_e4m3fn_with_scale(
+                weight,
+                hf_state_dict[scale_key],
+                name=param_name,
+            )
 
     @MegatronModelBridge.register_bridge(
         source="Glm4MoeLiteForCausalLM",
@@ -163,6 +203,6 @@ try:
 
 except ImportError:
 
-    def maybe_force_qwen35_text_bridge(bridge, hf_config) -> bool:  # noqa: D103
+    def maybe_force_qwen35_text_bridge(bridge, hf_config) -> bool:
         # megatron-bridge not installed (e.g. CPU-only environment): nothing to force.
         return False
