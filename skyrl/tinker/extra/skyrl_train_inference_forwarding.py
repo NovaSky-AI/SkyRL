@@ -96,8 +96,8 @@ class SkyRLTrainInferenceForwardingClient:
             await session.commit()
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        # Retry missing/stale vLLM proxy discovery and transport failures; genuine
-        # vLLM response errors still surface immediately.
+        # Retry missing/stale vLLM proxy discovery and httpx transport errors.
+        # Keep vLLM HTTP 4xx/5xx responses non-retryable.
         timeout_sec = float(os.environ.get("SKYRL_PROXY_RETRY_TIMEOUT_SEC", "900"))
         backoff_sec = float(os.environ.get("SKYRL_PROXY_RETRY_BACKOFF_SEC", "5"))
         deadline = time.monotonic() + timeout_sec
