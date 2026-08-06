@@ -953,7 +953,7 @@ class JaxBackendImpl(AbstractBackend):
             "lora_config": self.models[model_id].lora_config.model_dump(),
         }
 
-    def _insert_checkpoint_data(self, model_id: str, checkpoint_data: dict, optimizer: bool) -> None:
+    def _insert_checkpoint_data(self, model_id: str, checkpoint_data: dict, load_optimizer: bool) -> None:
         """Insert checkpoint data into model state."""
         adapter_index = self.models[model_id].adapter_index
         rank = checkpoint_data["lora_config"]["rank"]
@@ -965,12 +965,12 @@ class JaxBackendImpl(AbstractBackend):
             )
 
         insert_adapter_state(adapter_index, self.lora_params, checkpoint_data["lora_weights"], rank)
-        if optimizer:
+        if load_optimizer:
             insert_adapter_state(
                 adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
             )
 
-    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, optimizer: bool) -> None:
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, load_optimizer: bool) -> None:
         """Load training checkpoint using Flax checkpoints."""
         checkpoint = checkpoints.restore_checkpoint(
             ckpt_dir=checkpoint_path,
@@ -981,7 +981,7 @@ class JaxBackendImpl(AbstractBackend):
         if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_path}")
 
-        self._insert_checkpoint_data(model_id, checkpoint, optimizer)
+        self._insert_checkpoint_data(model_id, checkpoint, load_optimizer)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
@@ -1153,9 +1153,9 @@ class JaxBackend(JaxBackendImpl):
     def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         self._broadcast_and_call("save_checkpoint", output_path=output_path, model_id=model_id)
 
-    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, optimizer: bool) -> None:
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, load_optimizer: bool) -> None:
         self._broadcast_and_call(
-            "load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id, optimizer=optimizer
+            "load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id, load_optimizer=load_optimizer
         )
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:

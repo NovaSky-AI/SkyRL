@@ -18,8 +18,8 @@ from skyrl.tinker.engine import (
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
 
-@pytest.mark.parametrize("optimizer", [False, True])
-def test_process_load_weights_forwards_optimizer_choice(optimizer):
+@pytest.mark.parametrize("load_optimizer", [False, True])
+def test_process_load_weights_forwards_optimizer_choice(load_optimizer):
     engine = object.__new__(TinkerEngine)
     engine.config = SimpleNamespace(checkpoints_base=AnyPath("/checkpoints"))
     engine.backend = MagicMock()
@@ -30,14 +30,14 @@ def test_process_load_weights_forwards_optimizer_choice(optimizer):
         types.LoadWeightsInput(
             source_model_id="source_model",
             checkpoint_id="checkpoint",
-            optimizer=optimizer,
+            load_optimizer=load_optimizer,
         ),
     )
 
     engine.backend.load_checkpoint.assert_called_once_with(
         AnyPath("/checkpoints/source_model/checkpoint.tar.gz"),
         "target_model",
-        optimizer=optimizer,
+        load_optimizer=load_optimizer,
     )
     assert result.type == "load_weights"
 

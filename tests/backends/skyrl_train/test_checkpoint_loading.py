@@ -7,8 +7,8 @@ from skyrl.backends.skyrl_train.workers.worker import Worker
 from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend
 
 
-@pytest.mark.parametrize("optimizer", [False, True])
-def test_load_checkpoint_restores_requested_training_state(tmp_path, optimizer):
+@pytest.mark.parametrize("load_optimizer", [False, True])
+def test_load_checkpoint_restores_requested_training_state(tmp_path, load_optimizer):
     checkpoint_path = tmp_path / "checkpoint.tar.gz"
     with tarfile.open(checkpoint_path, "w"):
         pass
@@ -17,12 +17,12 @@ def test_load_checkpoint_restores_requested_training_state(tmp_path, optimizer):
     backend._model_ids_to_role = {"model_test": "policy"}
     backend._dispatch = MagicMock()
 
-    backend.load_checkpoint(str(checkpoint_path), "model_test", optimizer=optimizer)
+    backend.load_checkpoint(str(checkpoint_path), "model_test", load_optimizer=load_optimizer)
 
     backend._dispatch.load_checkpoint.assert_called_once()
     call = backend._dispatch.load_checkpoint.call_args
-    assert call.kwargs["load_optimizer_states"] is optimizer
-    assert call.kwargs["load_lr_scheduler_states"] is optimizer
+    assert call.kwargs["load_optimizer_states"] is load_optimizer
+    assert call.kwargs["load_lr_scheduler_states"] is load_optimizer
 
 
 def test_weights_only_load_does_not_reset_live_optimizer():
