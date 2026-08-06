@@ -260,7 +260,8 @@ def _make_sft_cfg(use_sequence_packing: bool, cp: int, gpus: int) -> SFTConfig:
         max_tokens_per_microbatch=MAX_LENGTH if use_sequence_packing else None,
         seed=SEED,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
-        dataset_name="allenai/tulu-3-sft-mixture",
+        train_datasets=["allenai/tulu-3-sft-mixture"],
+        train_dataset_splits=["train[:100]"],
         placement=SFTPlacementConfig(num_nodes=1, num_gpus_per_node=gpus),
         megatron_config=MegatronConfig(
             tensor_model_parallel_size=1,

@@ -6,7 +6,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel
@@ -26,6 +26,8 @@ from skyrl.tinker.db_models import (
     enable_sqlite_wal,
 )
 from skyrl.utils.log import logger
+
+_MAX_IDS_PER_QUERY = 500
 
 
 def _model_not_found_error(model_id: str) -> types.ErrorResponse:
@@ -90,7 +92,14 @@ def prepare_sample_batch(
             all_session_ids.append(session_id)
 
         request_batch_slices.append(
-            (request_id, model_id, request_start, len(all_model_inputs), request_data.prompt_logprobs)
+            (
+                request_id,
+                model_id,
+                request_start,
+                len(all_model_inputs),
+                request_data.prompt_logprobs,
+                request_data.topk_prompt_logprobs,
+            )
         )
 
     return types.PreparedSampleBatch(
@@ -336,6 +345,21 @@ class TinkerEngine:
                     )
                 session.commit()
 
+    def _load_requests(self, session: Session, requests: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+        """Append each request's request_data to its tuple, dropping any request that no longer exists.
+
+        Chunked to stay under SQLite's limit on bound parameters per statement.
+        """
+        request_ids = [request_id for request_id, *_ in requests]
+        payloads: dict[int, dict] = {}
+        for start in range(0, len(request_ids), _MAX_IDS_PER_QUERY):
+            chunk = request_ids[start : start + _MAX_IDS_PER_QUERY]
+            rows = session.exec(
+                select(FutureDB.request_id, FutureDB.request_data).where(FutureDB.request_id.in_(chunk))
+            ).all()
+            payloads.update(rows)
+        return [(request_id, *args, payloads[request_id]) for request_id, *args in requests if request_id in payloads]
+
     def _find_destructive_barriers(self, session: Session) -> dict[str, int]:
         """Find the earliest pending destructive operation (optim_step/load_weights) per model.
 
@@ -372,7 +396,7 @@ class TinkerEngine:
 
         # Get all pending operations of the requested type ordered by request_id
         query = (
-            select(FutureDB)
+            select(FutureDB.request_id, FutureDB.model_id)
             .where(FutureDB.request_type == request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
@@ -380,11 +404,15 @@ class TinkerEngine:
         ops = session.exec(query).all()
 
         # Filter: only include ops that come before their model's barrier
-        batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
+        batchable = [
+            (request_id, model_id)
+            for request_id, model_id in ops
+            if model_id not in barriers or request_id < barriers[model_id]
+        ]
 
         return {
-            str(f.request_id): (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
-            for f in batchable
+            str(request_id): (model_id, types.ForwardBackwardInput.model_validate(request_data))
+            for request_id, model_id, request_data in self._load_requests(session, batchable)
         }
 
     def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
@@ -403,8 +431,9 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id to (model_id, request_data) tuples
         """
+        # checkpoint_id is extracted in the database so prompts stay out of this query
         sample_query = (
-            select(FutureDB)
+            select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_data["checkpoint_id"].as_string())
             .where(FutureDB.request_type == types.RequestType.SAMPLE)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
@@ -413,19 +442,21 @@ class TinkerEngine:
 
         batchable = []
         model_checkpoints = {}  # Map from model_id to checkpoint_id of first request to that model
-        for op in sample_ops:
-            checkpoint_id = op.request_data["checkpoint_id"]
+        for request_id, model_id, checkpoint_id in sample_ops:
             # Base model requests (empty checkpoint_id) are always compatible, otherwise only
             # take only requests with one checkpoint_id for a given model_id
-            if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
-                batchable.append(op)
+            if not checkpoint_id or model_checkpoints.setdefault(model_id, checkpoint_id) == checkpoint_id:
+                batchable.append((request_id, model_id))
 
         # TODO: This leaks the abstraction by accessing backend-specific config.
         # We should find a better way to handle this going forward.
         if self.config.backend == "jax" and self.backend.config.sample_max_num_sequences > 0:
             batchable = batchable[: self.backend.config.sample_max_num_sequences]
 
-        return {str(f.request_id): (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
+        return {
+            str(request_id): (model_id, types.SampleInput.model_validate(request_data))
+            for request_id, model_id, request_data in self._load_requests(session, batchable)
+        }
 
     def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
         """Find all requests that need to be processed individually (not batchable).
@@ -457,7 +488,7 @@ class TinkerEngine:
                     blocked_pass_barriers.setdefault(model_id, req_id)
 
         statement = (
-            select(FutureDB)
+            select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
             .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.request_type != types.RequestType.FORWARD)
@@ -469,12 +500,15 @@ class TinkerEngine:
 
         # Filter: only include ops that come before the first blocked pass for their model
         other_futures = [
-            op
-            for op in other_futures
-            if op.model_id not in blocked_pass_barriers or op.request_id < blocked_pass_barriers[op.model_id]
+            (request_id, model_id, request_type)
+            for request_id, model_id, request_type in other_futures
+            if model_id not in blocked_pass_barriers or request_id < blocked_pass_barriers[model_id]
         ]
 
-        return {str(f.request_id): (f.model_id, f.request_type, f.request_data) for f in other_futures}
+        return {
+            str(request_id): (model_id, request_type, request_data)
+            for request_id, model_id, request_type, request_data in self._load_requests(session, other_futures)
+        }
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""

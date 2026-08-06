@@ -7,7 +7,9 @@ from typing import Any, Dict, Generic, List, Optional, TypedDict, TypeVar
 
 import numpy as np
 import torch
-from jaxtyping import Float, Integer
+from jaxtyping import Bool, Float, Integer
+
+from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
 
 DictType = TypeVar("DictType")
 
@@ -297,7 +299,7 @@ class TensorBatch(dict, Generic[DictType]):
         self._check_consistency()
         return self
 
-    def repeat(self, repeats: int):
+    def repeat(self, repeats: int) -> "TensorBatch[DictType]":
         """Repeat entries in the data batch a specified number of times.
 
         This is similar to `torch.repeat` (and `numpy.tile`). `metadata` is not repeated.
@@ -321,7 +323,7 @@ class TensorBatch(dict, Generic[DictType]):
         new_batch.metadata = self.metadata
         return new_batch
 
-    def repeat_interleave(self, repeats: int):
+    def repeat_interleave(self, repeats: int) -> "TensorBatch[DictType]":
         """Repeat entries in the data batch a specified number of times.
 
         This is similar to `torch.repeat_interleave` (and `numpy.repeat`). `metadata` is not repeated.
@@ -461,21 +463,28 @@ class TensorBatch(dict, Generic[DictType]):
 
 
 class TrainingInput(TypedDict, total=False):
-    """Schema for training input batch"""
+    """Schema for training input batch.
 
-    sequences: Integer[torch.Tensor, "batch_size seq_len"]
-    attention_mask: Integer[torch.Tensor, "batch_size seq_len"]
-    loss_mask: Integer[torch.Tensor, "batch_size seq_len"]
-    response_mask: Integer[torch.Tensor, "batch_size seq_len"]
-    action_log_probs: Float[torch.Tensor, "batch_size seq_len"]
-    base_action_log_probs: Float[torch.Tensor, "batch_size seq_len"]
-    values: Optional[Float[torch.Tensor, "batch_size seq_len"]]
-    returns: Float[torch.Tensor, "batch_size seq_len"]
-    advantages: Float[torch.Tensor, "batch_size seq_len"]
-    kl: Float[torch.Tensor, "batch_size seq_len"]
-    rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
-    rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
-    rollout_expert_indices: Optional[Integer[torch.Tensor, "batch_size seq_len layer_num topk"]]
+    Every tensor is padded on the left, so real values are right-aligned.
+    Only the width differs: ``seq_len`` spans prompt+response, while ``response_len``
+    covers response tokens only and has no representation of the prompt. Built by
+    ``convert_prompts_responses_to_batch_tensors``, which documents the layout in full.
+    """
+
+    sequences: Integer[torch.Tensor, "batch_size seq_len"]  # prompt + response token ids
+    attention_mask: Integer[torch.Tensor, "batch_size seq_len"]  # 1 = real token, 0 = padding
+    loss_mask: Float[torch.Tensor, "batch_size response_len"]  # 1 = trainable; 0 masks e.g. tool output
+    response_mask: Integer[torch.Tensor, "batch_size response_len"]  # 1 = response (not prompt) token
+    action_log_probs: Float[torch.Tensor, "batch_size response_len"]  # current policy, from the training forward
+    base_action_log_probs: Float[torch.Tensor, "batch_size response_len"]  # reference policy, for the KL term
+    values: Optional[Float[torch.Tensor, "batch_size response_len"]]  # critic estimates; None without a critic
+    returns: Float[torch.Tensor, "batch_size response_len"]  # critic regression target
+    advantages: Float[torch.Tensor, "batch_size response_len"]  # per-token advantage
+    kl: Float[torch.Tensor, "batch_size response_len"]  # per-token KL, current vs reference policy
+    rewards: Optional[Float[torch.Tensor, "batch_size response_len"]]  # env reward, typically only on the last token
+    rollout_logprobs: Optional[Float[torch.Tensor, "batch_size response_len"]]  # sampling policy; off-policy corr.
+    rollout_expert_indices: Optional[Integer[torch.Tensor, "batch_size seq_len layer_num topk"]]  # MoE router replay
+    router_padding_mask: Optional[Bool[torch.Tensor, "batch_size seq_len"]]  # True = no captured route (skip in replay)
     pixel_values: Optional[TensorList]  # list of `batch_size` [num_patches_i, dim] tensors
     image_grid_thw: Optional[TensorList]  # list of `batch_size` [num_images_i, 3] tensors
 
@@ -523,6 +532,18 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
             # Ensures that padding tensors don't count towards the loss
             additional_dims = tensor.shape[1:]
             padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+        elif key == "rollout_expert_indices":
+            additional_dims = tensor.shape[1:]
+            padding_tensor = make_replay_padding_indices(
+                (pad_size, *additional_dims),
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+        elif key == "router_padding_mask":
+            additional_dims = tensor.shape[1:]
+            padding_tensor = torch.ones(pad_size, *additional_dims, dtype=torch.bool, device=tensor.device)
             new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
         else:
             # Copy row 0 `pad_size` times. Loss masked so values don't affect the loss. Just need valid shape/dtype.

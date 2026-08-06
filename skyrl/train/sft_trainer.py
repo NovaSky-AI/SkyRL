@@ -28,6 +28,7 @@ import tempfile
 from dataclasses import asdict
 from typing import Any, Optional
 
+import numpy as np
 import ray
 import torch
 from datasets import Dataset, load_dataset
@@ -49,12 +50,16 @@ from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.config.sft_config import (
     SFTConfig,
     TrainOnWhat,
+    _normalize_dataset_cfg,
     build_skyrl_config_for_sft,
 )
+from skyrl.train.dataset.pretokenized import load_from_pretokenized
+from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, SFTDataset, TextDataset
 from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.async_batch_collator import AsyncBatchCollator
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
@@ -703,10 +708,12 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     """
     max_len = max(len(ex["input_ids"]) for ex in examples)
     max_num_actions = max(ex["num_actions"] for ex in examples)
+    num_examples = len(examples)
 
-    sequences = []
-    attention_masks = []
-    loss_masks = []
+    # Fill NumPy buffers by slice, then convert once.
+    sequences_np = np.full((num_examples, max_len), tokenizer.pad_token_id, dtype=np.int64)
+    attention_mask_np = np.zeros((num_examples, max_len), dtype=np.int64)
+    loss_mask_np = np.zeros((num_examples, max_num_actions), dtype=np.int64)
 
     # VLM image tensors travel as a TensorList (one variable-shape tensor per
     # sample). Mixed text+image batches are not supported; every sample in a VLM
@@ -722,14 +729,14 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     pixel_values = []
     image_grid_thw = []
 
-    for ex in examples:
+    for i, ex in enumerate(examples):
+        # Left-pad sequences; right-align response loss masks.
         pad_len = max_len - len(ex["input_ids"])
-        # Left-pad sequences (SkyRL convention)
-        sequences.append([tokenizer.pad_token_id] * pad_len + ex["input_ids"])
-        attention_masks.append([0] * pad_len + ex["attention_mask"])
+        sequences_np[i, pad_len:] = ex["input_ids"]
+        attention_mask_np[i, pad_len:] = ex["attention_mask"]
 
         action_pad = max_num_actions - ex["num_actions"]
-        loss_masks.append([0] * action_pad + ex["loss_mask"])
+        loss_mask_np[i, action_pad:] = ex["loss_mask"]
 
         if batch_has_images:
             pixel_values.append(torch.as_tensor(ex["pixel_values"]))
@@ -737,9 +744,9 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
 
     batch = TrainingInputBatch(
         {
-            "sequences": torch.tensor(sequences, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
-            "loss_mask": torch.tensor(loss_masks, dtype=torch.long),
+            "sequences": torch.from_numpy(sequences_np),
+            "attention_mask": torch.from_numpy(attention_mask_np),
+            "loss_mask": torch.from_numpy(loss_mask_np),
             "pixel_values": TensorList(pixel_values) if batch_has_images else None,
             "image_grid_thw": TensorList(image_grid_thw) if batch_has_images else None,
         }
@@ -779,6 +786,11 @@ def collate_sft_examples(
 # ---------------------------------------------------------------------------
 
 
+def _format_eval_metrics(eval_metrics: dict) -> str:
+    """Render per-dataset eval metrics (``{name}/loss``) for stdout logging."""
+    return ", ".join(f"{k}={v:.4f}" for k, v in eval_metrics.items())
+
+
 class SFTTrainer:
     """SFT trainer supporting FSDP and Megatron backends.
 
@@ -801,6 +813,7 @@ class SFTTrainer:
         callbacks: Optional[list[TrainingCallback]] = None,
     ):
         self.sft_cfg = cfg
+        _normalize_dataset_cfg(cfg)
         # Accept a pre-built bridge config to avoid redundant rebuilds.
         # When not provided (e.g. standalone usage), build it here.
         self.cfg = skyrl_cfg if skyrl_cfg is not None else build_skyrl_config_for_sft(cfg)
@@ -811,7 +824,11 @@ class SFTTrainer:
         self.tracker: Tracking | None = None
         # Stateful dataloaders, built in train() once data is tokenized.
         self.train_dataloader: StatefulDataLoader | None = None
-        self.eval_dataloader: StatefulDataLoader | None = None
+        # One ``(name, dataloader)`` pair per configured eval dataset; ``None``
+        # when eval is disabled. Names are unique (enforced in config validation)
+        # and namespace the eval metrics as ``eval/{name}/...``.
+        self.eval_dataloaders: list[tuple[str, StatefulDataLoader]] | None = None
+        self._checkpoint_dataloader_state: dict | None = None
         self.global_step = 0
         # running count of total non-padding tokens trained on
         self._total_tokens_processed = 0
@@ -1216,27 +1233,88 @@ class SFTTrainer:
 
             shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
 
-    def load_dataset(self) -> list:
-        """Load and tokenize the training dataset."""
-        return self._load_and_tokenize(self.sft_cfg.dataset_name, self.sft_cfg.dataset_split)
+    def load_dataset(self) -> SFTDataset:
+        """Load the training dataset(s): pretokenized stores or tokenize-on-load.
 
-    def load_eval_dataset(self) -> Optional[list]:
-        """Load and tokenize the eval dataset, or return ``None`` if not configured."""
-        if not self.sft_cfg.eval_dataset_name:
+        When ``pretokenized_dataset_paths`` is set, each store is loaded through
+        :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized` (a
+        map-style, memory-mapped dataset yielding the same normalized row
+        dicts as :meth:`_load_and_tokenize`, no online tokenization).
+        Otherwise each ``(name, split)`` pair from
+        ``train_datasets``/``train_dataset_splits`` is tokenized independently
+        through :meth:`_load_and_tokenize` (preserving per-dataset cache keys)
+        and wrapped in a :class:`TextDataset`.
+
+        Returns:
+            A single :class:`SFTDataset`. Multiple sources are concatenated in
+            config order as a :class:`ConcatSFTDataset` (a map-style view, no
+            row materialization), whose ``dataset_lengths`` configures weighted
+            mixing in :meth:`build_train_sampler`.
+        """
+        sources: list[SFTDataset] = []
+        if self.sft_cfg.pretokenized_dataset_paths:
+            # The loader raises on 0 usable rows, so no empty-source check.
+            source_names = self.sft_cfg.pretokenized_dataset_paths
+            sources = [load_from_pretokenized(path, max_length=self.sft_cfg.max_length) for path in source_names]
+        else:
+            source_names = self.sft_cfg.train_datasets
+            for name, split in zip(self.sft_cfg.train_datasets, self.sft_cfg.train_dataset_splits):
+                source = self._load_and_tokenize(name, split)
+                if len(source) == 0:
+                    raise ValueError(f"Training dataset '{name}' (split '{split}') tokenized to 0 examples.")
+                sources.append(TextDataset(source))
+        if len(sources) == 1:
+            return sources[0]
+        per_dataset = ", ".join(f"{name}={len(source)}" for name, source in zip(source_names, sources))
+        logger.info(f"Concatenated {len(sources)} training datasets: {per_dataset}")
+        return ConcatSFTDataset(sources)
+
+    def load_eval_datasets(self) -> Optional[list[tuple[str, list]]]:
+        """Load and tokenize the eval dataset(s), or return ``None`` if not configured.
+
+        When ``eval_pretokenized_dataset_paths`` is set, each store is loaded
+        through :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized`
+        and named by the corresponding entry of ``eval_dataset_names`` (filled
+        from the path basenames by config normalization when not set
+        explicitly).
+
+        Returns:
+            One ``(name, tokenized)`` pair per eval source, where ``name``
+            namespaces the eval metrics (``eval/{name}/...``).
+        """
+        if self.sft_cfg.eval_pretokenized_dataset_paths:
+            return [
+                (name, load_from_pretokenized(path, max_length=self.sft_cfg.max_length))
+                for name, path in zip(self.sft_cfg.eval_dataset_names, self.sft_cfg.eval_pretokenized_dataset_paths)
+            ]
+        if not self.sft_cfg.eval_datasets:
             return None
-        return self._load_and_tokenize(self.sft_cfg.eval_dataset_name, self.sft_cfg.eval_dataset_split)
+        eval_sets: list[tuple[str, list]] = []
+        for name, dataset, split in zip(
+            self.sft_cfg.eval_dataset_names, self.sft_cfg.eval_datasets, self.sft_cfg.eval_dataset_splits
+        ):
+            eval_tokenized = self._load_and_tokenize(dataset, split)
+            if len(eval_tokenized) == 0:
+                raise ValueError(
+                    f"Eval dataset '{dataset}' (split '{split}') tokenized to 0 examples. "
+                    f"Provide a non-empty eval split or remove it from eval_datasets."
+                )
+            eval_sets.append((name, eval_tokenized))
+        return eval_sets
 
-    def _log_dataset_stats(self, tokenized: list) -> None:
+    def _log_dataset_stats(self, tokenized: SFTDataset) -> None:
         """Log tokenized sequence length statistics over the training set.
 
         Reports count, mean, median (q50), q25, q75, min, max of the tokenized
         ``input_ids`` lengths. Logs once via ``logger.info``.
         """
-        if not tokenized:
+        if len(tokenized) == 0:
             logger.warning("No tokenized examples to compute stats over")
             return
 
-        lengths = [len(ex["input_ids"]) for ex in tokenized]
+        # Every SFTDataset provides lengths without materializing rows
+        # (pretokenized stores derive them from arrow offsets at load time).
+        lengths = [int(v) for v in tokenized.sequence_lengths]
         n = len(lengths)
         sorted_lengths = sorted(lengths)
 
@@ -1275,36 +1353,62 @@ class SFTTrainer:
     # Dataloaders & samplers
     # ------------------------------------------------------------------ #
 
-    def build_train_sampler(self, tokenized: list) -> Optional[torch.utils.data.Sampler]:
+    def build_train_sampler(self, tokenized) -> Optional[torch.utils.data.Sampler]:
         """Build the training sampler from ``sft_cfg.sampler``.
 
-        Returns ``None`` for the default ``"random"`` strategy, signalling
-        :meth:`build_train_dataloader` to use the dataloader's built-in
-        ``shuffle=True`` path (which is statefully checkpointed by
-        ``StatefulDataLoader``). For ``"sequential"`` and ``"custom"`` it
-        returns an explicit stateful sampler.
+        Returns ``None`` for the default ``"random"`` strategy over a single
+        dataset, signalling :meth:`build_train_dataloader` to use the
+        dataloader's built-in ``shuffle=True`` path (which is statefully
+        checkpointed by ``StatefulDataLoader``). Over a
+        :class:`ConcatSFTDataset` (multiple training datasets), ``"random"``
+        instead returns a :class:`DataMixingSampler` configured with its
+        ``dataset_lengths`` and ``train_dataset_weights``. For ``"sequential"``
+        and ``"custom"`` it returns an explicit stateful sampler.
 
         Custom samplers are imported from ``sft_cfg.sampler_class_path`` and
-        instantiated as ``ClassName(tokenized, **sft_cfg.sampler_kwargs)``.
+        instantiated as ``ClassName(tokenized, **sft_cfg.sampler_kwargs)``. With
+        multiple datasets, the per-dataset ``lengths`` are injected into the
+        kwargs (unless the user already supplied ``lengths``), so the sampler
+        constructor must accept them.
+
+        Args:
+            tokenized: The training dataset (an :class:`SFTDataset`;
+                multi-source runs pass a :class:`ConcatSFTDataset`).
         """
         from skyrl.train.dataset.samplers import (
+            DataMixingSampler,
             StatefulSequentialSampler,
             import_sampler_class,
         )
 
+        multi_dataset = isinstance(tokenized, ConcatSFTDataset) and len(tokenized.dataset_lengths) > 1
+        dataset_lengths = tokenized.dataset_lengths if multi_dataset else None
         sampler_type = self.sft_cfg.sampler
         if sampler_type == "random":
-            return None
+            if not multi_dataset:
+                return None
+            # Config normalization (validate_sft_cfg) fills equal weights for
+            # the random sampler on every construction path.
+            return DataMixingSampler(
+                tokenized,
+                lengths=dataset_lengths,
+                weights=self.sft_cfg.train_dataset_weights,
+                seed=self.sft_cfg.seed,
+            )
         if sampler_type == "sequential":
             return StatefulSequentialSampler(tokenized)
         if sampler_type == "custom":
             if not self.sft_cfg.sampler_class_path:
                 raise ValueError("sampler='custom' requires sampler_class_path to be set.")
             sampler_cls = import_sampler_class(self.sft_cfg.sampler_class_path)
-            return sampler_cls(tokenized, **self.sft_cfg.sampler_kwargs)
+            sampler_kwargs = self.sft_cfg.sampler_kwargs
+            if multi_dataset:
+                # User-provided kwargs win over the injected lengths.
+                sampler_kwargs = {"lengths": dataset_lengths, **sampler_kwargs}
+            return sampler_cls(tokenized, **sampler_kwargs)
         raise ValueError(f"Unknown sampler '{sampler_type}'. Must be one of 'random', 'sequential', 'custom'.")
 
-    def build_train_dataloader(self, tokenized: list) -> StatefulDataLoader:
+    def build_train_dataloader(self, tokenized) -> StatefulDataLoader:
         """Build the training ``StatefulDataLoader``.
 
         Sampling order is seeded for reproducibility and captured in the dataloader's
@@ -1485,9 +1589,38 @@ class SFTTrainer:
     # ------------------------------------------------------------------ #
 
     def run_eval(self) -> tuple[dict, int]:
-        """Compute eval loss over the full eval dataset.
+        """Compute eval loss over every configured eval dataset.
 
-        Iterates :attr:`eval_dataloader` (chunks of ``micro_train_batch_size_per_gpu * dp_size``,
+        Runs :meth:`_run_eval_one` per ``(name, dataloader)`` pair in
+        :attr:`eval_dataloaders`, namespacing each dataset's metrics by its
+        name. The keys are later prefixed with ``eval/`` at the logging sites,
+        yielding ``eval/{name}/loss`` — nested even with a single eval dataset,
+        so runs with and without dataset mixing chart the same metric keys.
+
+        Returns:
+            ``(metrics, num_eval_batches)`` where ``metrics`` maps
+            ``{name}/loss`` to that dataset's token-weighted mean loss and
+            ``num_eval_batches`` is the total batch count across datasets
+            (stdout bookkeeping, not a wandb metric).
+        """
+        if not self.eval_dataloaders:
+            raise ValueError(
+                "run_eval called without eval dataloaders. Provide non-empty eval splits or "
+                "disable eval by setting eval_datasets=None."
+            )
+        metrics: dict[str, float] = {}
+        total_eval_batches = 0
+        for name, eval_dataloader in self.eval_dataloaders:
+            eval_loss, num_eval_batches = self._run_eval_one(eval_dataloader)
+            metrics[f"{name}/loss"] = eval_loss
+            total_eval_batches += num_eval_batches
+            logger.info(f"Eval dataset '{name}': loss={eval_loss:.4f} over {num_eval_batches} batches")
+        return metrics, total_eval_batches
+
+    def _run_eval_one(self, eval_dataloader: StatefulDataLoader) -> tuple[float, int]:
+        """Compute eval loss over one eval dataset.
+
+        Iterates the dataloader (chunks of ``micro_train_batch_size_per_gpu * dp_size``,
         i.e. exactly one micro-batch per DP rank per dispatch call), calls
         :meth:`WorkerDispatch.forward` with ``loss_fn="cross_entropy"`` (which
         runs the model in ``eval()`` mode under ``no_grad``), and aggregates the
@@ -1498,25 +1631,11 @@ class SFTTrainer:
         yields the true per-non-pad-token mean across the eval dataset.
 
         Returns:
-            ``(metrics, num_eval_batches)`` where ``metrics`` contains
-            ``eval_loss`` and ``num_eval_batches`` is bookkeeping for
-            stdout logging (not a wandb metric).
+            ``(eval_loss, num_eval_batches)``.
         """
-        if self.eval_dataloader is None:
-            raise ValueError(
-                "run_eval called without an eval dataloader. Provide a non-empty eval split or "
-                "disable eval by setting eval_dataset_name=None."
-            )
-        num_eval = len(self.eval_dataloader.dataset)
-        if num_eval == 0:
-            raise ValueError(
-                "Eval dataset is empty. Provide a non-empty eval split or disable eval "
-                "by setting eval_dataset_name=None."
-            )
-
         # The dataloader yields one chunk per DP rank's micro-batch; the final
         # (possibly short) chunk is padded below up to the full chunk size.
-        eval_chunk_size = self.eval_dataloader.batch_size
+        eval_chunk_size = eval_dataloader.batch_size
 
         # Pad a trailing partial batch up to ``eval_chunk_size`` via
         # ``pad_training_input_batch`` (which zeros ``loss_mask`` on padded rows).
@@ -1527,7 +1646,7 @@ class SFTTrainer:
         total_loss_weighted = 0.0
         total_tokens = 0
         num_eval_batches = 0
-        for batch in self.eval_dataloader:
+        for batch in eval_dataloader:
             num_eval_batches += 1
             # Pad the last (possibly-short) chunk so every dispatch sees exactly
             # ``eval_chunk_size`` rows. ``pad_training_input_batch`` zeros the
@@ -1546,18 +1665,19 @@ class SFTTrainer:
             # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
             # Padded rows have loss_mask=0 so they are excluded here.
             nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
+            # Eval consumes metrics only; skip per-token loss_fn_outputs.
             output = self.dispatch.forward(
                 "policy",
                 batch,
                 loss_fn="cross_entropy",
-                loss_fn_config=None,
+                return_per_token_outputs=False,
             )
             batch_loss = float(output.metrics.get("loss", float("nan")))
             total_loss_weighted += batch_loss * nonpad_tokens
             total_tokens += nonpad_tokens
 
         eval_loss = total_loss_weighted / max(total_tokens, 1)
-        return {"eval_loss": eval_loss}, num_eval_batches
+        return eval_loss, num_eval_batches
 
     def train_step(self, batch: TrainingInputBatch, step: int) -> dict:
         """Execute a single training step: forward_backward + optim_step.
@@ -1571,7 +1691,13 @@ class SFTTrainer:
         """
         timings: dict[str, float] = {}
         with Timer("forward_backward", timings):
-            output = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+            # SFT consumes metrics only; skip per-token loss_fn_outputs.
+            output = self.dispatch.forward_backward(
+                "policy",
+                batch,
+                loss_fn="cross_entropy",
+                return_per_token_outputs=False,
+            )
         with Timer("optim_step", timings):
             grad_norm = self.dispatch.optim_step("policy")
 
@@ -1735,11 +1861,12 @@ class SFTTrainer:
         # Log tokenized sequence length statistics (once, before training loop)
         self._log_dataset_stats(tokenized)
 
-        # Load eval dataset (if configured). We load once up-front so the
+        # Load eval datasets (if configured). We load once up-front so the
         # tokenization cost is amortized across all eval invocations.
-        eval_tokenized = self.load_eval_dataset()
-        if eval_tokenized is not None:
-            logger.info(f"Eval dataset loaded: {len(eval_tokenized)} examples")
+        eval_datasets = self.load_eval_datasets()
+        if eval_datasets is not None:
+            for eval_name, eval_tokenized in eval_datasets:
+                logger.info(f"Eval dataset '{eval_name}' loaded: {len(eval_tokenized)} examples")
 
         batch_size = self.sft_cfg.batch_size
 
@@ -1749,8 +1876,10 @@ class SFTTrainer:
         # The training sampler is selected by ``sft_cfg.sampler`` and its
         # position is captured in the checkpoint for resume.
         self.train_dataloader = self.build_train_dataloader(tokenized)
-        if eval_tokenized is not None:
-            self.eval_dataloader = self.build_eval_dataloader(eval_tokenized)
+        if eval_datasets is not None:
+            self.eval_dataloaders = [
+                (eval_name, self.build_eval_dataloader(eval_tokenized)) for eval_name, eval_tokenized in eval_datasets
+            ]
 
         # Validate the invariant the training loop relies on: the dataloader must
         # yield at least one batch. With drop_last=False (the final short batch is
@@ -1822,7 +1951,7 @@ class SFTTrainer:
         # Baseline eval before training begins (logged at step 0).
         # Wandb's step counter starts at 0; the training loop's first commit
         # advances it to >=1, so step=0 here does not conflict with later steps.
-        if self.sft_cfg.eval_before_train and eval_tokenized is not None:
+        if self.sft_cfg.eval_before_train and self.eval_dataloaders is not None:
             self._fire("on_eval_start")
             eval_metrics, num_eval_batches = self.run_eval()
             self._fire("on_eval_end", metrics=eval_metrics)
@@ -1830,8 +1959,7 @@ class SFTTrainer:
             self._fire("on_log", logs=baseline_log)
             self.tracker.log(baseline_log, step=self.global_step, commit=True)
             logger.info(
-                f"Baseline eval before training: "
-                f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                f"Baseline eval before training: {_format_eval_metrics(eval_metrics)} "
                 f"over {num_eval_batches} batches"
             )
 
@@ -1846,6 +1974,16 @@ class SFTTrainer:
         # their state across the (conceptual) epoch boundaries.
         data_iter = iter(self.train_dataloader)
 
+        collate_ahead_enabled = self.sft_cfg.async_batch_collation
+        async_collator: Optional[AsyncBatchCollator] = (
+            AsyncBatchCollator(lambda _step: next(data_iter, None), thread_name_prefix="sft-batch-collate")
+            if collate_ahead_enabled
+            else None
+        )
+        logger.info(
+            f"SFT async batch collation (double-buffering): {'ENABLED' if collate_ahead_enabled else 'disabled'}"
+        )
+
         if self._torch_profiler_enabled:
             self.dispatch.start_profile("policy")
         try:
@@ -1854,10 +1992,14 @@ class SFTTrainer:
 
                 with Timer("step", all_timings):
 
-                    # Fetch the next batch; on epoch exhaustion, close the epoch and
-                    # restart the iterator (reshuffles the random/sequential samplers).
+                    # With async enabled, this is usually just the wait for an
+                    # already-running collate. ``None`` marks epoch exhaustion.
                     with Timer("data_loading", all_timings):
-                        batch = next(data_iter, None)
+                        if async_collator is not None and async_collator.pending_step() == self.global_step:
+                            batch = async_collator.get(self.global_step)
+                            self._checkpoint_dataloader_state = None
+                        else:
+                            batch = next(data_iter, None)
                     if batch is None:
                         self._fire("on_epoch_end")
                         current_epoch += 1
@@ -1866,6 +2008,13 @@ class SFTTrainer:
                         data_iter = iter(self.train_dataloader)
                         with Timer("data_loading", all_timings):
                             batch = next(data_iter)
+
+                    if async_collator is not None and self.global_step < num_steps:
+                        # Advancing the iterator in the worker moves the live
+                        # dataloader state one batch ahead. Preserve the state after
+                        # the current batch so checkpoints still resume exactly.
+                        self._checkpoint_dataloader_state = self.train_dataloader.state_dict()
+                        async_collator.submit(self.global_step + 1)
 
                     self._fire("on_step_start", batch=batch)
 
@@ -1930,7 +2079,7 @@ class SFTTrainer:
                 # Eval fires at step N where N % eval_interval == 0 and N > 0, OR
                 # whenever a callback set ``control.should_evaluate``.
                 interval_eval = self.sft_cfg.eval_interval > 0 and self.global_step % self.sft_cfg.eval_interval == 0
-                if eval_tokenized is not None and (force_eval or interval_eval):
+                if self.eval_dataloaders is not None and (force_eval or interval_eval):
                     self._fire("on_eval_start")
                     with Timer("eval", all_timings):
                         eval_metrics, num_eval_batches = self.run_eval()
@@ -1952,7 +2101,7 @@ class SFTTrainer:
 
                 if eval_metrics:
                     logger.info(
-                        f"Step {self.global_step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                        f"Step {self.global_step}: {_format_eval_metrics(eval_metrics)} "
                         f"over {num_eval_batches} batches"
                     )
 
@@ -1961,6 +2110,13 @@ class SFTTrainer:
 
                 self.global_step += 1
         finally:
+            # Always tear down the async collation thread (drains any in-flight
+            # batch and joins the worker) so neither the background thread
+            # nor the dataset reference is leaked, even on exception. No-op
+            # when async collation is disabled.
+            if async_collator is not None:
+                async_collator.shutdown()
+            self._checkpoint_dataloader_state = None
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
         self.global_step = min(self.global_step, num_steps)
@@ -1989,6 +2145,10 @@ class SFTTrainer:
                 logger.info(f"Saving final HF model at step {final_step}")
                 self.save_hf_model()
 
+        # Drain any in-flight async checkpoint write before teardown. Unconditional:
+        # a save may have happened outside the periodic path. No-op when nothing is pending.
+        self.dispatch.finalize_pending_saves("policy")
+
         # Final eval pass (skip if the last step already ran eval).
         # NOTE: The last in-loop tracker.log(..., commit=True) at step=num_steps
         # advanced wandb's internal step counter to num_steps+1. Logging the
@@ -1999,7 +2159,7 @@ class SFTTrainer:
         # ``final_eval_step`` rather than mutating ``self.global_step``: the
         # bump is purely a wandb-step accounting concern, not real trainer
         # state.
-        if eval_tokenized is not None:
+        if self.eval_dataloaders is not None:
             already_ran = self.sft_cfg.eval_interval > 0 and num_steps % self.sft_cfg.eval_interval == 0
             if not already_ran:
                 final_eval_step = num_steps + 1
@@ -2014,8 +2174,7 @@ class SFTTrainer:
                     self._fire("on_log", logs=eval_log)
                     self.tracker.log(eval_log, step=final_eval_step, commit=True)
                     logger.info(
-                        f"Final eval at step {final_eval_step}: "
-                        f"eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f} "
+                        f"Final eval at step {final_eval_step}: {_format_eval_metrics(eval_metrics)} "
                         f"over {num_eval_batches} batches"
                     )
 
@@ -2036,7 +2195,12 @@ class SFTTrainer:
             dataloader_save_path = os.path.join(global_step_folder, "data.pt")
             try:
                 with io.open_file(dataloader_save_path, "wb") as f:
-                    torch.save(self.train_dataloader.state_dict(), f)
+                    dataloader_state = (
+                        self._checkpoint_dataloader_state
+                        if self._checkpoint_dataloader_state is not None
+                        else self.train_dataloader.state_dict()
+                    )
+                    torch.save(dataloader_state, f)
                 logger.info(f"Saved dataloader state to {dataloader_save_path}")
             except Exception as e:
                 logger.warning(f"Failed to save dataloader state: {e}")

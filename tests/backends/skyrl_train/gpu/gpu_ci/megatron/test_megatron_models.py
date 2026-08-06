@@ -146,7 +146,7 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
 
     sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _ = (
         convert_prompts_responses_to_batch_tensors(
-            tokenizer=tokenizer,
+            pad_token_id=tokenizer.pad_token_id,
             prompts=generator_output["prompt_token_ids"],
             responses=responses,
             rewards=rewards,
@@ -173,7 +173,6 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "action_mask": response_mask.to(dtype=torch.int64),
             }
         )
         training_input.metadata = {"response_length": num_actions}
@@ -184,7 +183,7 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
 
 async def construct_training_input_from_generator_output(generator_output, tokenizer):
     return convert_prompts_responses_to_batch_tensors(
-        tokenizer=tokenizer,
+        pad_token_id=tokenizer.pad_token_id,
         prompts=generator_output["prompt_token_ids"],
         responses=generator_output["response_ids"],
         rewards=generator_output["rewards"],

@@ -33,11 +33,16 @@ class WeightTransferSender(ABC):
     with inference actors.
     """
 
+    handles_prefix_cache_reset: bool = False
+    """Indicates whether the transfer strategy handles resetting prefix cache
+        for the inference engines internally."""
+
     @abstractmethod
     async def send_chunks(
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        **kwargs,
     ) -> None:
         """Send chunks using this transfer strategy.
 
@@ -80,7 +85,9 @@ class WeightTransferStrategy(ABC):
     @staticmethod
     @abstractmethod
     def create_init_info(
-        ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None
+        ie_cfg: "InferenceEngineConfig",
+        inference_world_size: Optional[int] = None,
+        base_model_path: Optional[str] = None,
     ) -> WeightSyncInitInfo:
         """Create init info with all config-derived args.
 
@@ -89,6 +96,7 @@ class WeightTransferStrategy(ABC):
             inference_world_size: Total number of inference workers (from
                 ``client.get_world_size()``). Required by strategies that use it
                 (broadcast); strategies that don't (CUDA IPC) ignore it.
+            base_model_path: Policy model path.
 
         Returns:
             WeightSyncInitInfo containing all args needed for sender/receiver creation.

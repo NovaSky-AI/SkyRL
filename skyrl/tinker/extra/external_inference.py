@@ -8,6 +8,7 @@ from cloudpathlib import AnyPath
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.backends.renderer import render_model_input
+from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import FutureDB, RequestStatus
@@ -123,6 +124,12 @@ class ExternalInferenceClient:
             "stream": False,
             "return_token_ids": True,
         }
+        # vLLM's `prompt_logprobs` is an int: 0 returns just the prompt tokens'
+        # own logprobs, k>0 also returns the top-k per position.
+        topk_prompt_logprobs = getattr(request, "topk_prompt_logprobs", 0) or 0
+        want_prompt_logprobs = bool(request.prompt_logprobs) or topk_prompt_logprobs > 0
+        if want_prompt_logprobs:
+            payload["prompt_logprobs"] = topk_prompt_logprobs
 
         # Pass X-Session-ID for deterministic routing
         headers = {}
@@ -133,6 +140,16 @@ class ExternalInferenceClient:
         response = await http_client.post("/completions", json=payload, headers=headers)
         response.raise_for_status()
         result = response.json()
+
+        prompt_logprobs = None
+        topk = None
+        if want_prompt_logprobs:
+            # All `n` choices share one prompt, so vLLM repeats the same prompt
+            # logprobs on each choice; read them off the first.
+            raw = result["choices"][0].get("prompt_logprobs") if result["choices"] else None
+            if raw is None:
+                logger.warning("Requested prompt logprobs but vLLM /completions returned none")
+            prompt_logprobs, topk = convert_vllm_prompt_logprobs(prompt_tokens, raw, topk=topk_prompt_logprobs)
 
         sequences = []
         for choice in result["choices"]:
@@ -145,4 +162,8 @@ class ExternalInferenceClient:
                 )
             )
 
-        return types.SampleOutput(sequences=sequences, prompt_logprobs=[])
+        return types.SampleOutput(
+            sequences=sequences,
+            prompt_logprobs=prompt_logprobs,
+            topk_prompt_logprobs=topk,
+        )

@@ -29,6 +29,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy_packed_sequences,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    build_token_metadata_layout,
+)
 from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits
 from skyrl.backends.skyrl_train.mtp.hidden_capture import maybe_capture_mtp_hidden
 from skyrl.backends.skyrl_train.mtp.soft_ce import (
@@ -38,11 +41,13 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     shift_mask_for_mtp,
     unpadded_vocab_shard_width,
 )
+from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
 )
 from skyrl.backends.skyrl_train.utils.replay_utils import (
+    router_replay_schedule,
     setup_per_microbatch_replay_backward,
     setup_per_microbatch_replay_forward,
 )
@@ -123,6 +128,23 @@ def _build_packed_valid_mask(
     packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
     mask[packed_indices[attn]] = 1.0
     return mask.unsqueeze(0)
+
+
+def _copy_tensor_tree_to_device(value: Any, device: int) -> Any:
+    """Move all tensors in a nested microbatch to a CUDA device."""
+    if torch.is_tensor(value) or isinstance(value, TensorList):
+        return value.to(device=device, non_blocking=True)
+    if isinstance(value, dict):
+        return {key: _copy_tensor_tree_to_device(item, device) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_tensor_tree_to_device(item, device) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_tensor_tree_to_device(item, device) for item in value)
+    return value
+
+
+def _copy_tensor_dict_to_device(batch: Dict[str, Any], device: int) -> Dict[str, Any]:
+    return {key: _copy_tensor_tree_to_device(value, device) for key, value in batch.items()}
 
 
 def _fused_lm_head_output_processor(**kwargs):
@@ -325,17 +347,14 @@ class MegatronModelWrapper:
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
+            # Microbatches are held on CPU and transferred just before their forward
+            # step to cap resident input memory (no-op if already on device).
+            batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
-            if rollout_expert_indices is not None:
-                setup_per_microbatch_replay_forward(
-                    rollout_expert_indices,
-                    batch["attention_mask"],
-                    model_config=model_config,
-                    remove_microbatch_padding=self.remove_microbatch_padding,
-                )
+            router_padding_mask = batch.pop("router_padding_mask", None)
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
@@ -378,6 +397,27 @@ class MegatronModelWrapper:
                 if self.is_vlm:
                     new_position_ids = None
 
+            metadata_layout = None
+            if rollout_expert_indices is not None:
+                metadata_layout = build_token_metadata_layout(
+                    attention_mask,
+                    attention_mask.device,
+                    packed=packed_seq_params is not None,
+                    fp8_enabled=fp8_enabled,
+                )
+
+            model_replay_kwargs = {}
+            if rollout_expert_indices is not None:
+                model_replay_kwargs = setup_per_microbatch_replay_forward(
+                    rollout_expert_indices,
+                    router_padding_mask,
+                    attention_mask,
+                    model=model,
+                    model_config=model_config,
+                    metadata_layout=metadata_layout,
+                    remove_microbatch_padding=self.remove_microbatch_padding,
+                )
+
             if self._fused_lm_head:
                 # Fused LM-head inference: the output_processor returns decoder
                 # hidden states (not logits) and stashes the LM-head weight, so
@@ -393,6 +433,7 @@ class MegatronModelWrapper:
                     packed_seq_params=packed_seq_params,
                     output_processor=_fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
+                    **model_replay_kwargs,
                     **vlm_inputs,
                 )
                 batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
@@ -402,6 +443,7 @@ class MegatronModelWrapper:
                     new_position_ids,
                     to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
+                    **model_replay_kwargs,
                     **vlm_inputs,
                 )
 
@@ -418,15 +460,17 @@ class MegatronModelWrapper:
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        output = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=batch_generator,
-            model=self.actor_module,
-            num_microbatches=len(micro_batches),
-            seq_length=seq_len,
-            micro_batch_size=micro_batch_size,
-            forward_only=True,
-        )
+        replay_enabled = any(batch["rollout_expert_indices"] is not None for batch in micro_batches)
+        with router_replay_schedule(replay_enabled):
+            output = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=batch_generator,
+                model=self.actor_module,
+                num_microbatches=len(micro_batches),
+                seq_length=seq_len,
+                micro_batch_size=micro_batch_size,
+                forward_only=True,
+            )
 
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             log_probs = [o["log_probs"] for o in output]
@@ -450,6 +494,7 @@ class MegatronModelWrapper:
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
         forward_only: bool = False,
+        return_per_token_outputs: bool = True,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -468,6 +513,8 @@ class MegatronModelWrapper:
             forward_only: If True, run the forward pass without backward (no gradients).
                           Useful for evaluation / loss-only inference paths (e.g., SFT
                           ``forward(loss_fn=...)`` codepath).
+            return_per_token_outputs: When False, skip building per-token
+                ``loss_fn_outputs`` when callers read only ``metrics``.
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
@@ -510,8 +557,7 @@ class MegatronModelWrapper:
 
         # Build config for loss function, applying any overrides
         loss_config = self.cfg.algorithm
-        if loss_fn_config is not None:
-
+        if loss_fn_config:
             new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
@@ -526,7 +572,7 @@ class MegatronModelWrapper:
             advantages = data["advantages"]
             loss_mask = data["loss_mask"]
             rollout_action_logprobs = data["rollout_action_logprobs"]
-            action_mask = data.get("action_mask")
+            response_mask = data.get("response_mask")
             num_microbatches = data.get("num_microbatches")
             # Number of microbatches carrying real samples (excludes fully-padding
             # microbatches added by token-based batching). Used to normalize the
@@ -710,41 +756,46 @@ class MegatronModelWrapper:
                     loss = loss + mtp_loss_weight * draft_loss * kl_entropy_microbatch_scale
                 unscaled_loss = policy_loss
 
-                # Compute elementwise loss for Tinker API (per-token NLL)
-                with torch.no_grad():
-                    elementwise_loss = -action_log_probs
-                    if loss_mask is not None:
-                        elementwise_loss = elementwise_loss * loss_mask
+                # Only build per-token outputs for callers that consume them.
+                if return_per_token_outputs:
+                    # Tinker consumes per-token NLL.
+                    with torch.no_grad():
+                        elementwise_loss = -action_log_probs
+                        if loss_mask is not None:
+                            elementwise_loss = elementwise_loss * loss_mask
 
-                # Build per-sequence loss_fn_outputs.
-                # Compute valid_lens vectorized on GPU, then move tensors to CPU
-                # exactly once before iterating in Python — avoids ~3N GPU->CPU
-                # syncs per micro-batch (item()/cpu()/tolist() inside the loop).
-                batch_size = action_log_probs.shape[0]
-                seq_len = action_log_probs.shape[1]
-                if action_mask is not None:
-                    valid_lens_t = action_mask.sum(dim=-1).long()
-                elif loss_mask is not None:
-                    valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
+                    # Build per-sequence loss_fn_outputs.
+                    # Compute valid_lens vectorized on GPU, then move tensors to CPU
+                    # exactly once before iterating in Python — avoids ~3N GPU->CPU
+                    # syncs per micro-batch (item()/cpu()/tolist() inside the loop).
+                    batch_size = action_log_probs.shape[0]
+                    seq_len = action_log_probs.shape[1]
+                    if response_mask is not None:
+                        valid_lens_t = response_mask.sum(dim=-1).long()
+                    elif loss_mask is not None:
+                        valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
+                    else:
+                        valid_lens_t = torch.full(
+                            (batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long
+                        )
+
+                    action_log_probs_cpu = action_log_probs.detach().cpu()
+                    elementwise_loss_cpu = elementwise_loss.detach().cpu()
+                    valid_lens = valid_lens_t.cpu().tolist()
+
+                    loss_fn_outputs = []
+                    for i in range(batch_size):
+                        valid_len = valid_lens[i]
+                        loss_fn_outputs.append(
+                            {
+                                "logprobs": (action_log_probs_cpu[i, -valid_len:].tolist() if valid_len > 0 else []),
+                                "elementwise_loss": (
+                                    elementwise_loss_cpu[i, -valid_len:].tolist() if valid_len > 0 else []
+                                ),
+                            }
+                        )
                 else:
-                    valid_lens_t = torch.full((batch_size,), seq_len, device=action_log_probs.device, dtype=torch.long)
-
-                # Bulk GPU->CPU sync: one transfer for logprobs, elementwise_loss, and valid_lens.
-                action_log_probs_cpu = action_log_probs.detach().cpu()
-                elementwise_loss_cpu = elementwise_loss.detach().cpu()
-                valid_lens = valid_lens_t.cpu().tolist()
-
-                loss_fn_outputs = []
-                for i in range(batch_size):
-                    valid_len = valid_lens[i]
-                    loss_fn_outputs.append(
-                        {
-                            "logprobs": (action_log_probs_cpu[i, -valid_len:].tolist() if valid_len > 0 else []),
-                            "elementwise_loss": (
-                                elementwise_loss_cpu[i, -valid_len:].tolist() if valid_len > 0 else []
-                            ),
-                        }
-                    )
+                    loss_fn_outputs = [{} for _ in range(action_log_probs.shape[0])]
 
                 metrics = {
                     "loss": unscaled_loss.detach().item(),
@@ -793,10 +844,16 @@ class MegatronModelWrapper:
                         loss_mask,
                         mpu.get_context_parallel_group(),
                         sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                        chunk_size=self.cfg.vocab_entropy_chunk_size,
+                        chunk_memory_mb=self.cfg.vocab_entropy_chunk_memory_mb,
                     )
                 else:
                     action_logits = logits[:, -num_actions - 1 : -1, :]
-                    entropy_BS = vocab_parallel_entropy(action_logits)
+                    entropy_BS = vocab_parallel_entropy(
+                        action_logits,
+                        chunk_size=self.cfg.vocab_entropy_chunk_size,
+                        chunk_memory_mb=self.cfg.vocab_entropy_chunk_memory_mb,
+                    )
                     entropy = masked_mean(entropy_BS, loss_mask)
                     entropy_for_loss = entropy
 
@@ -853,8 +910,8 @@ class MegatronModelWrapper:
             batch_size = action_log_probs.shape[0]
             seq_len = action_log_probs.shape[1]
 
-            if action_mask is not None:
-                valid_lens = action_mask.sum(dim=1).int().tolist()
+            if response_mask is not None:
+                valid_lens = response_mask.sum(dim=1).int().tolist()
             elif loss_mask is not None:
                 valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
             else:
@@ -891,17 +948,14 @@ class MegatronModelWrapper:
             # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
             # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
             batch = next(batch_iter)
+            # Microbatches are held on CPU and transferred just before their forward
+            # step to cap resident input memory (no-op if already on device).
+            batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
-            if rollout_expert_indices is not None:
-                setup_per_microbatch_replay_forward(
-                    rollout_expert_indices,
-                    batch["attention_mask"],
-                    model_config=model_config,
-                    remove_microbatch_padding=self.remove_microbatch_padding,
-                )
+            router_padding_mask = batch.pop("router_padding_mask", None)
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
@@ -965,6 +1019,27 @@ class MegatronModelWrapper:
 
             is_last_stage = mpu.is_pipeline_last_stage(ignore_virtual=True)
 
+            metadata_layout = None
+            if rollout_expert_indices is not None:
+                metadata_layout = build_token_metadata_layout(
+                    attention_mask,
+                    attention_mask.device,
+                    packed=packed_seq_params is not None,
+                    fp8_enabled=fp8_enabled,
+                )
+
+            model_replay_kwargs = {}
+            if rollout_expert_indices is not None:
+                model_replay_kwargs = setup_per_microbatch_replay_forward(
+                    rollout_expert_indices,
+                    router_padding_mask,
+                    attention_mask,
+                    model=model,
+                    model_config=model_config,
+                    metadata_layout=metadata_layout,
+                    remove_microbatch_padding=self.remove_microbatch_padding,
+                )
+
             # Recover [batch, seq_len, ...] from Megatron's internal (left-removed) layout. Only used
             # on the non-packed path: with sample packing (remove_microbatch_padding) the logits stay
             # packed ([1, T, vocab]) and loss_func consumes packed_targets instead. MTP draft training
@@ -1017,6 +1092,7 @@ class MegatronModelWrapper:
                         packed_seq_params=packed_seq_params,
                         output_processor=_fused_lm_head_output_processor,
                         output_processor_context=_op_ctx,
+                        **model_replay_kwargs,
                         **vlm_inputs,
                     )
                     batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
@@ -1026,6 +1102,7 @@ class MegatronModelWrapper:
                         new_position_ids,
                         to_te_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
+                        **model_replay_kwargs,
                         **vlm_inputs,
                     )
                 # Replay the MTP block on *detached* trunk hidden states (decoupled draft forward)
@@ -1059,15 +1136,17 @@ class MegatronModelWrapper:
         # batch should be a list of micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        metrics_list = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=batch_generator,
-            model=self.actor_module,
-            num_microbatches=len(micro_batches),
-            seq_length=seq_len,
-            micro_batch_size=micro_batch_size,
-            forward_only=forward_only,
-        )
+        replay_enabled = any(batch["rollout_expert_indices"] is not None for batch in micro_batches)
+        with router_replay_schedule(replay_enabled):
+            metrics_list = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=batch_generator,
+                model=self.actor_module,
+                num_microbatches=len(micro_batches),
+                seq_length=seq_len,
+                micro_batch_size=micro_batch_size,
+                forward_only=forward_only,
+            )
 
         # The decoupled MTP/draft loss is computed and logged per-microbatch inside loss_func
         # (metric key "mtp_loss"); no MTPLossLoggingHelper plumbing is needed.

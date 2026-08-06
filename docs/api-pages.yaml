@@ -132,6 +132,7 @@
           description: ""
           objects:
             - skyrl.train.config.config.DataConfig
+            - skyrl.train.config.config.DataLoaderConfig
             - skyrl.train.config.config.ModelConfig
             - skyrl.train.config.config.SkyRLLoraConfig
         - heading: Training
@@ -140,6 +141,8 @@
             - skyrl.train.config.config.TrainerConfig
             - skyrl.train.config.config.OptimizerConfig
             - skyrl.train.config.config.MixedPrecisionConfig
+            - skyrl.train.config.config.FakeInt4QatConfig
+            - skyrl.train.config.config.MTPConfig
         - heading: Backend Config
           description: ""
           objects:
@@ -147,6 +150,7 @@
             - skyrl.train.config.config.MegatronConfig
             - skyrl.train.config.config.MegatronDDPConfig
             - skyrl.train.config.config.MegatronLoraConfig
+            - skyrl.train.config.config.MegatronHFExportConfig
             - skyrl.train.config.config.TorchProfilerConfig
         - heading: Placement
           description: ""
@@ -168,6 +172,7 @@
             - skyrl.train.config.config.ClipCovConfig
             - skyrl.train.config.config.KLCovConfig
             - skyrl.train.config.config.CISPOConfig
+            - skyrl.train.config.config.DPPOConfig
             - skyrl.train.config.config.OffPolicyCorrectionConfig
             - skyrl.train.config.config.FullyAsyncConfig
         - heading: Inference & Generation
@@ -176,6 +181,7 @@
             - skyrl.train.config.config.SamplingParams
             - skyrl.train.config.config.ChatTemplateConfig
             - skyrl.train.config.config.InferenceEngineConfig
+            - skyrl.train.config.config.DeltaWeightSyncConfig
             - skyrl.train.config.config.GeneratorConfig
         - heading: Environment
           description: ""
@@ -183,25 +189,6 @@
             - skyrl.train.config.config.EnvironmentConfig
             - skyrl.train.config.config.SkyRLGymConfig
             - skyrl.train.config.config.GSM8kLLMJudgeEnvConfig
-
-    - slug: sft
-      title: SFT
-      description: Supervised Fine-Tuning configuration and trainer.
-      sections:
-        - heading: Configuration
-          description: ""
-          objects:
-            - skyrl.train.config.sft_config.SFTPlacementConfig
-            - skyrl.train.config.sft_config.SFTConfig
-        - heading: Trainer
-          description: ""
-          objects:
-            - skyrl.train.sft_trainer.SFTTrainer
-        - heading: Config Bridge
-          description: ""
-          objects:
-            - skyrl.train.config.sft_config.validate_sft_cfg
-            - skyrl.train.config.sft_config.build_skyrl_config_for_sft
 
     - slug: callbacks
       title: Callbacks
@@ -229,6 +216,47 @@
           description: ""
           objects:
             - skyrl.env_vars
+
+- path: skyrl/sft
+  pages:
+    - slug: sft_config
+      title: Configuration
+      description: Supervised Fine-Tuning configuration.
+      sections:
+        - heading: Configuration
+          description: ""
+          objects:
+            - skyrl.train.config.sft_config.SFTPlacementConfig
+            - skyrl.train.config.sft_config.SFTConfig
+            - skyrl.train.config.sft_config.TrainOnWhat
+        - heading: Config Bridge
+          description: ""
+          objects:
+            - skyrl.train.config.sft_config.validate_sft_cfg
+            - skyrl.train.config.sft_config.build_skyrl_config_for_sft
+      
+    - slug: sft_trainer
+      title: SFT Trainer
+      description: Supervised Fine-Tuning Trainer.
+      sections:
+        - heading: Trainer
+          description: ""
+          objects:
+            - skyrl.train.sft_trainer.SFTTrainer
+    
+    - slug: sft_samplers
+      title: Samplers
+      description: Supervised Fine-Tuning Samplers.
+      sections:
+        - heading: Samplers
+          description: ""
+          objects:
+            - skyrl.train.dataset.samplers.StatefulSequentialSampler
+            - skyrl.train.dataset.samplers.DataMixingSampler
+        - heading: Sampler Utilities
+          description: ""
+          objects:
+            - skyrl.train.dataset.samplers.import_sampler_class
 
 - path: skyrl/skyrl-train
   pages:

@@ -273,13 +273,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
-
+        sender_handles_prefix_cache_reset = self._weight_transfer_sender.handles_prefix_cache_reset
         # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
-        if (
-            use_prefix_cache
-            and torch.distributed.get_rank() == 0
-            and (not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync)
-        ):
+        reset_prefix_cache: bool = use_prefix_cache and (
+            not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync
+        )
+        send_chunks_kwargs = {"reset_prefix_cache": reset_prefix_cache}
+
+        if reset_prefix_cache and torch.distributed.get_rank() == 0 and not sender_handles_prefix_cache_reset:
             # clear prefix cache
             cache_reset_task = inference_engine_client.reset_prefix_cache(reset_running_requests=True)
 
@@ -311,6 +312,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 await self._weight_transfer_sender.send_chunks(
                     weight_iterator,
                     weight_metadata=weight_metadata,
+                    **send_chunks_kwargs,
                 )
 
         if cache_reset_task is not None:
@@ -327,12 +329,18 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         data: TrainingInputBatch,
         loss_fn=None,
         loss_fn_config=None,
+        return_per_token_outputs: bool = True,
     ) -> WorkerOutput:
         """Run forward pass on data in inference mode.
 
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
         """
-        output = super().forward(data, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
+        output = super().forward(
+            data,
+            loss_fn=loss_fn,
+            loss_fn_config=loss_fn_config,
+            return_per_token_outputs=return_per_token_outputs,
+        )
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         return output
 
