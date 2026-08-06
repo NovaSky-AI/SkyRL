@@ -28,6 +28,10 @@ concurrency:
 
 jobs:
   skyrl_gpu_tests:
+    # GitHub does not expose repository secrets to pull requests from forks.
+    # Fork GPU validation is handled by the label-gated pull_request_target
+    # workflows, which require an explicit maintainer action.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     defaults:
       run:
