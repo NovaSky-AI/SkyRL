@@ -212,15 +212,15 @@ class TestPackingCollator:
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
         assert sum(subseq_lengths) == 12  # raw, un-padded
 
-    def test_fp8_tp_alignment_pads_each_sub_seq_to_16(self):
-        """When FP8 is enabled, TP-only packed subseqs are also 16-aligned."""
+    def test_fp8_tp_alignment_pads_for_local_gemm(self):
+        """FP8 padding keeps each TP rank's local token count 8-aligned."""
         collator = _make_collator(num_gpus=4, batch_size=2, max_length=128, tp=4, fp8="hybrid")
         examples = [
             _make_example(7, 3),
             _make_example(5, 3),
         ]
         batch = collator(examples, batch_size=2)
-        assert batch["sequences"].shape[1] >= 32
+        assert batch["sequences"].shape[1] >= 64
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
         assert sum(subseq_lengths) == 12
 
