@@ -532,7 +532,12 @@ async def _build_and_serve_vllm_server(
     # vllm's engine_error_handler reads app.state.server to call
     # terminate_if_errored; normally wired up by vllm's own launcher.
     app.state.server = server
-    await server.serve(sockets=[sock])
+    try:
+        await server.serve(sockets=[sock])
+    finally:
+        # AsyncLLMEngine owns multiprocessing workers that outlive a cancelled
+        # uvicorn task unless the engine is explicitly shut down.
+        engine.shutdown()
 
 
 def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
