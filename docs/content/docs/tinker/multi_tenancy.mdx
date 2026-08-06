@@ -34,9 +34,13 @@ Required `--backend-config` keys to run multi-tenant LoRA on Megatron:
 }
 ```
 
+Optionally, set `"keep_runtime_warm_on_last_unload": true` to keep the shared runtime (Ray, training workers, inference engines, and the base model) alive when the last registered model unloads. The default is `false`.
+
 All adapters must share the same `(rank, alpha, target_modules)` signature. Mismatches are hard-rejected at `create_model` with a `LoRA signature mismatch …` error.
 
-The first `create_model` on a fresh server triggers the policy build and bootstraps the per-tenant adapter slot infrastructure; subsequent `create_model` calls register additional adapter slots and complete in milliseconds. When the *last* registered model is unloaded the server tears down the Ray runtime via `ray.shutdown()`; the next `create_model` rebuilds it.
+The first `create_model` on a fresh server triggers the policy build and bootstraps the per-tenant adapter slot infrastructure; subsequent `create_model` calls register additional adapter slots and complete in milliseconds. Deleting a model removes its adapter slot and unregisters its adapter from vLLM; the shared runtime is untouched while other tenants remain.
+
+By default, when the *last* registered model is unloaded the server tears down the Ray runtime via `ray.shutdown()`; the next `create_model` rebuilds it. With `keep_runtime_warm_on_last_unload` enabled, the last unload also just removes the adapter, and the next `create_model` (which must match the server's LoRA signature) registers a fresh adapter against the warm runtime in milliseconds instead of rebuilding it. Because the inference engines are never torn down in this mode, the internal vLLM proxy URL is published exactly once for the server's lifetime, so in-flight sample requests can never race a teardown/rebuild. Full-parameter fine-tuning (rank 0) always tears down on unload regardless of the flag.
 
 ## Quickstart — Two SL clients
 

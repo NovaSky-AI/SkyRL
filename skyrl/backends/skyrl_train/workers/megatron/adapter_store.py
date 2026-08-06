@@ -149,6 +149,10 @@ class AdapterStore:
         self._pristine: Optional[AdapterSlot] = None
         self._current_id: Optional[str] = None
         self._signature: Optional[LoraSignature] = None
+        # True when the live GPU state mirrors a *deleted* adapter (deleting
+        # the current adapter clears current_id without restoring anything).
+        # While set, live state must not be treated as pristine.
+        self._live_stale = False
 
     @property
     def current_id(self) -> Optional[str]:
@@ -330,12 +334,15 @@ class AdapterStore:
             raise ValueError(f"AdapterStore: adapter '{model_id}' already registered")
 
         slot = self._allocate_empty_slot(model_chunks, optimizer)
-        if self._current_id is None:
+        if self._current_id is None and not self._live_stale:
             # First adapter: live state IS pristine; slot will be filled on
             # the next snapshot (i.e. swap-away). Treat live as authoritative.
             self._current_id = model_id
         else:
-            # Seed the new slot from pristine.
+            # Seed the new slot from pristine. When live is stale (the
+            # previously-current adapter was deleted), current_id stays None
+            # so the next swap_to restores this pristine copy instead of the
+            # deleted adapter's leftover live state.
             self._copy_slot(self._pristine, slot)
         self._slots[model_id] = slot
 
@@ -385,6 +392,7 @@ class AdapterStore:
         del self._slots[model_id]
         if self._current_id == model_id:
             self._current_id = None
+            self._live_stale = True
 
     @torch.no_grad()
     def swap_to(self, model_id: str, model_chunks, optimizer) -> None:
@@ -422,6 +430,7 @@ class AdapterStore:
         torch.cuda.current_stream().synchronize()
 
         self._current_id = model_id
+        self._live_stale = False
 
         if dist.is_available() and dist.is_initialized():
             dist.barrier(group=dp_group)
