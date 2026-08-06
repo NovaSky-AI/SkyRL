@@ -1127,7 +1127,7 @@ class RayPPOTrainer:
         Expects:
             - `["sequences"]`: Integer[torch.Tensor, "batch_size seqlen"]
             - `["response_mask"]`: Integer[torch.Tensor, "batch_size response_len"]
-            - `["loss_mask"]`: Integer[torch.Tensor, "batch_size response_len"]
+            - `["loss_mask"]`: Float[torch.Tensor, "batch_size response_len"]
             - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
             - `["rewards"]`: Float[torch.Tensor, "batch_size response_len"]
             - `.metadata["uids"]`: List[str]
