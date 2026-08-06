@@ -1287,16 +1287,18 @@ class RemoteInferenceClient(InferenceEngineInterface):
         update_info: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Receive one layer-group of weights via the sharded_rdt engine.
+        Receive a full set of weights via the sharded_rdt engine.
 
         Calls NewInferenceWorkerWrap.update_weights_rdt on all workers, which
-        pulls each worker's consumed slices from the trainer actor over NIXL.
-        Called once per layer-aligned group between start_weight_update and
-        finish_weight_update.
+        pulls each worker's consumed slices from the trainer actors over NIXL.
+        Called ONCE between start_weight_update and finish_weight_update: each
+        worker blocks inside it until it has pulled every gather group, so the
+        call overlaps the trainer's gather/publish loop.
 
         Args:
-            update_info: asdict(ShardedRDTWeightTransferUpdateInfo) — the subset
-                of init names gathered for this group ({"names": [...]}).
+            update_info: asdict(ShardedRDTWeightTransferUpdateInfo), which is
+                empty — the pull plan is built once at init from the group-major
+                init metadata and nothing arrives per sync.
 
         Returns:
             Dict mapping server_url to response.

@@ -15,11 +15,18 @@ broadcasts) this engine does not push anything from `send_weights`; instead it
     sender) drives the inference-side `start/update/finish` handshake — the
     single empty `update_weights` unblocks the workers to pull.
 
-Everything the old `RDTShardedProducer` example mixin held — gather cache, serve
-rings, free ref-counting, arena registration — now lives on the server actor,
-spawned and owned by this engine. Trainer processes need no mixin, no named
-actors, and no `enable_tensor_transport` / `max_concurrency` actor options: any
-process that can reach Ray and (for multi-rank) `torch.distributed` works.
+All serve-side state — gather cache, serve rings, free ref-counting, arena
+registration — lives on the server actor, spawned and owned by this engine. So
+trainer processes need no mixin, no named actors, and no
+`enable_tensor_transport` / `max_concurrency` actor options: any process that can
+reach Ray and (for multi-rank) `torch.distributed` works.
+
+Vendored from the vLLM RDT fork (``vllm/distributed/weight_transfer/``); see that
+tree's ``docs/training/weight_transfer/sharded_rdt.md`` for the publish -> serve
+-> free_gather -> release lifecycle, the ownership model, and the known
+concurrency rough edges. Keep edits in sync with the fork — the intended
+differences here are the import paths, the LIBFABRIC shim, and the
+[RDT-LINK-TIMING] instrumentation.
 """
 
 import contextlib
@@ -29,7 +36,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 import ray
 import torch
@@ -37,25 +44,21 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from typing_extensions import Self
 from vllm.logger import init_logger
 
+from skyrl.backends.skyrl_train.weight_sync.rdt_libfabric_shim import (
+    ensure_ray_rdt_libfabric,
+)
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
     ParamMeta,
     TrainerInitInfo,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
+    layerwise_groups,
 )
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
     ALLOWED_OPS,
     RdtRouter,
     arena_alloc_bytes,
-    layerwise_groups,
-)
-
-if TYPE_CHECKING:
-    pass
-
-from skyrl.backends.skyrl_train.weight_sync.rdt_libfabric_shim import (
-    ensure_ray_rdt_libfabric,
 )
 
 ensure_ray_rdt_libfabric()
@@ -63,7 +66,7 @@ ensure_ray_rdt_libfabric()
 logger = init_logger(__name__)
 
 # How many gathered groups may be resident (and served) at once before the
-# gather loop blocks. Matches the old RDTShardedProducer GATHER_LOOKAHEAD.
+# gather loop blocks. Bounds resident gathered groups on the trainer.
 DEFAULT_GATHER_LOOKAHEAD = 2
 
 # The actor method name the worker engine dials for the NIXL pull. Fixed by
@@ -113,10 +116,9 @@ class _RDTProducerServer:
     """Per-rank NIXL serve surface for the sharded-RDT backend.
 
     Spawned by the engine as an internal Ray actor sharing the trainer rank's
-    GPU (via CUDA IPC). Absorbs the serve half of the old `RDTShardedProducer`
-    example mixin: a gather cache of rebuilt IPC tensors, per-consumer serve
-    rings, free ref-counting, and the byte-exact packed serve. The engine feeds
-    it gathered weights with `publish_group`; the workers pull with
+    GPU (via CUDA IPC). Holds a gather cache of rebuilt IPC tensors, per-consumer
+    serve rings, free ref-counting, and the byte-exact packed serve. The engine
+    feeds it gathered weights with `publish_group`; the workers pull with
     `rdt_produce_weights_batched` and free with `free_gather`.
 
     This is a plain class; the engine wraps it with `ray.remote(...)` at spawn
@@ -127,12 +129,12 @@ class _RDTProducerServer:
     def __init__(
         self,
         *,
-        served_names: list[str] | None,
         num_rdt_buffers: int,
         arena_presize_gb: float,
         nosync: bool,
         pack_check: bool,
         gather_lookahead: int,
+        served_names: list[str] | None = None,
     ) -> None:
         import gc
 
@@ -173,11 +175,17 @@ class _RDTProducerServer:
         self._arena_presize = int(arena_presize_gb * (1 << 30))
 
         # [RDT-NOSYNC] Scoped-sync serve stream + per-name completion events.
-        self._scoped_sync = nosync
+        # The stream's presence IS the mode: everything downstream branches on
+        # ``self._serve_stream is not None``.
         self._serve_stream = torch.cuda.Stream() if nosync else None
         self._cache_event: dict[str, torch.cuda.Event] = {}
 
         self._pack_check = pack_check
+        # [RDT-PACK-DSTS] (consumer_id, ring idx, packed layout) ->
+        # (arena data_ptr, destination views). Keyed on the arena pointer too, so
+        # a ring regrow invalidates rather than writing into a freed buffer. See
+        # the serve path for why the layout, not the spec names, is the key.
+        self._pack_dsts: dict[tuple, tuple[int, list[torch.Tensor]]] = {}
 
         # profiling counters
         self._timing_lock = threading.Lock()
@@ -243,7 +251,11 @@ class _RDTProducerServer:
     def begin_sync(self) -> None:
         """Reset per-sync free/backpressure state. The driver awaits the
         previous sync's finish (which drains every consumer's frees) before the
-        next begins, so nothing is in flight here."""
+        next begins, so nothing is in flight here.
+
+        The packed-destination cache deliberately SURVIVES: the layout repeats
+        every sync, which is what makes caching it worthwhile.
+        """
         with self._cache_cond:
             self._gather_error = None
             self._free_counts.clear()
@@ -417,14 +429,15 @@ class _RDTProducerServer:
                 rings[i] = t
 
     @ray.method(tensor_transport="nixl")
-    def rdt_produce_weights_batched(self, specs: list, pack: bool = True, consumer_id: int = 0):
+    def rdt_produce_weights_batched(self, specs: list, consumer_id: int = 0):
         """Serve one batched slice request over NIXL.
 
         Waits until the specs' names are cached, replays each spec's op chain
         (pure views into cached tensors, guarded by ALLOWED_OPS), byte-packs the
         slices 16B-aligned into this consumer's ring slot (mirroring the
-        consumer's identical layout), and returns the one packed blob.
-        `pack=False` serves one tensor per spec (the rare unbaked path).
+        consumer's identical layout), and returns the one packed blob. Callers
+        that want a single slice pass one spec and read the blob back with that
+        slice's dtype/shape (see the consumer's ``PullSink``).
         """
         t_m0 = time.perf_counter()
         needed = sorted({n for n, _ in specs})
@@ -473,12 +486,6 @@ class _RDTProducerServer:
             sliced.append((off, t))
             nbytes += t.numel() * t.element_size()
 
-        if not pack:
-            out = [t.contiguous().clone() for _off, t in sliced]
-            torch.accelerator.synchronize()
-            self._bump_timing(t_m0, wait_s, t_s0, len(specs), nbytes, _grp_key)
-            return out
-
         with self._serve_lock:
             rings = self._serve_rings.setdefault(consumer_id, [None] * self._nring)
             idx = self._serve_idx.get(consumer_id, 0)
@@ -497,11 +504,37 @@ class _RDTProducerServer:
         if ss is not None:
             for ev in {id(e): e for e in (self._cache_event.get(n) for n in needed) if e is not None}.values():
                 ss.wait_event(ev)
-        with torch.cuda.stream(ss):
+        # [RDT-PACK-DSTS] The destination views are a pure function of this
+        # consumer's packed layout, which is byte-identical every sync (its plan
+        # is static), so build them ONCE per (consumer, ring slot, layout) and
+        # reuse. Rebuilding them per call cost 5.2ms of the 7.5ms measured for a
+        # 384-spec 235B group — three Python ops per spec, all redundant.
+        # _foreach_copy_ then issues the copies in one dispatch (a further
+        # 0.6ms; verified byte-identical to the per-view loop).
+        #
+        # The key is the LAYOUT the views were carved for — each slice's packed
+        # offset, dtype and shape — not the spec names. Names alone do not
+        # identify it: a name can appear in two requests with different op chains
+        # (the same source sliced differently, which layerwise_split > 1 produces
+        # when one name's copies land in separate chunks), and serving the second
+        # through the first's views would write the wrong bytes with nothing
+        # downstream to catch it. Building the signature costs ~1.5% of the pack.
+        dst_key = (
+            consumer_id,
+            idx,
+            tuple((off, t.dtype, t.shape) for off, t in sliced),
+        )
+        cached = self._pack_dsts.get(dst_key)
+        if cached is None or cached[0] != arena.data_ptr():
+            dsts = []
             for off, t in sliced:
                 nb = t.numel() * t.element_size()
-                view = arena[off : off + nb].view(t.dtype).reshape(t.shape)
-                view.copy_(t)
+                dsts.append(arena[off : off + nb].view(t.dtype).reshape(t.shape))
+            self._pack_dsts[dst_key] = (arena.data_ptr(), dsts)
+        else:
+            dsts = cached[1]
+        with torch.cuda.stream(ss):
+            torch._foreach_copy_(dsts, [t for _off, t in sliced])
         if ss is not None:
             ss.synchronize()
 
@@ -579,7 +612,7 @@ class _RDTProducerServer:
                 cfg_lookahead=self._lookahead,
                 cfg_nring=self._nring,
                 cfg_served_names=-1 if self._served_names is None else len(self._served_names),
-                cfg_scoped_sync=self._scoped_sync,
+                cfg_scoped_sync=self._serve_stream is not None,
                 cfg_nosync_env=os.environ.get("SKYRL_RDT_NOSYNC"),
                 cfg_extract_sync_patched=_extract_patched,
             )
@@ -614,6 +647,10 @@ class _RDTProducerServer:
             self._cache_event.clear()
         with self._serve_lock:
             self._serve_rings.clear()
+            # Must go with the rings: these are views INTO them, and the
+            # data_ptr guard that normally invalidates them cannot tell a freed
+            # arena from a new one recycled at the same address.
+            self._pack_dsts.clear()
 
 
 class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedRDTTrainerInitInfo]):
@@ -948,18 +985,15 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         _t_next = _t_pub = _t_exp = 0.0
         assert self.source is not None  # guaranteed by trainer_init
         self._rpc("begin_sync")
-        # [RDT-GROUP-SOURCE] Sources may expose iter_groups() — (names,
-        # tensors) parallel lists per layerwise group — so the handoff is one
-        # generator hop per GROUP instead of per tensor (~95 vs ~37k at 235B;
-        # the per-tensor path cost ~0.9s/sync of pure Python). Falls back to
-        # the per-name iterator for sources without it (FSDP, plain Megatron).
-        # The source yields only the groups this rank owns (all of them unless it
-        # declares ownership), in metadata order; the checks below hold it to
-        # that. Every owner of a group must reach it in the same order or their
-        # shared gather collective mismatches.
-        _iter_groups = getattr(self.source, "iter_groups", None)
-        git = _iter_groups() if _iter_groups is not None else None
-        it = iter(self.source) if git is None else None
+        # [RDT-GROUP-SOURCE] One generator hop per GROUP, not per tensor:
+        # `iter_groups` yields (names, tensors) for each group this rank owns, in
+        # metadata order (~95 hops vs ~37k at 235B; the per-tensor path cost
+        # ~0.9s/sync of pure Python). Sources that can materialize a whole group
+        # at once override it (MegatronStackedWeightSource); the base default
+        # batches `__iter__` and checks the order as it goes, which covers FSDP
+        # and plain Megatron. Every owner of a group must reach it in the same
+        # order or their shared gather collective mismatches.
+        groups = self.source.iter_groups()
         # [RDT-ASYNC-PUBLISH] Publishes are fired without an inline ray.get and
         # harvested this window deep, so the publish RPC + server-side rebuild
         # overlap the NEXT group's gather/export instead of serializing the
@@ -974,25 +1008,13 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
                 group = self._groups[gi]
                 key = tuple(group)
                 _tn = time.perf_counter()
-                if git is not None:
-                    names, tensors = next(git)
-                    if list(names) != list(group):
-                        raise RuntimeError(
-                            f"WeightSource group yielded {len(names)} names starting {names[:2]!r} "
-                            f"but expected {len(group)} starting {group[:2]!r}; "
-                            "iteration order must match metadata."
-                        )
-                else:
-                    names, tensors = [], []
-                    for expected in group:
-                        name, tensor = next(it)
-                        if name != expected:
-                            raise RuntimeError(
-                                f"WeightSource yielded {name!r} but expected "
-                                f"{expected!r}; iteration order must match metadata."
-                            )
-                        names.append(name)
-                        tensors.append(tensor)
+                names, tensors = next(groups)
+                if list(names) != list(group):
+                    raise RuntimeError(
+                        f"WeightSource group yielded {len(names)} names starting {names[:2]!r} "
+                        f"but expected {len(group)} starting {group[:2]!r}; "
+                        "iteration order must match metadata."
+                    )
                 _te = time.perf_counter()
                 _t_next += _te - _tn
                 free_target = self._free_targets.get(gi, 0)

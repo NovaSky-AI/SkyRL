@@ -71,8 +71,22 @@ _DEFAULT_GATHER_LOOKAHEAD = 2
 def _pp_local_requested() -> bool:
     """PP-local gather: each pipeline stage gathers and serves only its OWN layers
     instead of every stage gathering the whole model (see
-    ``MegatronStackedWeightSource.owned_groups``). Off by default."""
-    return os.environ.get("SKYRL_RDT_PP_LOCAL") == "1"
+    ``MegatronStackedWeightSource.owned_groups``).
+
+    ON by default. It only engages at pp > 1, and it is self-healing: if any gather
+    group turns out to be produced by more than one stage (tied embeddings, MTP),
+    ``owned_groups`` logs and reverts the whole sync to gather-to-all. So the
+    failure mode of defaulting it on is "no change", not a broken sync.
+
+    Worth 15-25% of the 235B wall (multi_node_rdt.md X.20.4: warm mean 4.89s with
+    it, against a 5.5-5.9s gather-to-all baseline on the same topology). It halves
+    how many layers each stage gathers; it does NOT reduce peak memory, since a
+    gathered layer's stack is still full-E and the resident set is still
+    lookahead x per-layer.
+
+    Set ``SKYRL_RDT_PP_LOCAL=0`` to force the gather-to-all path.
+    """
+    return os.environ.get("SKYRL_RDT_PP_LOCAL", "1") == "1"
 
 
 def _qkv_device_fix_enabled() -> bool:
@@ -378,11 +392,11 @@ class MegatronStackedWeightSource(WeightSource):
     expert tensors against the bridge's per-expert export for sampled layers on
     the first iteration (raises on mismatch; one-time cost of a few seconds).
 
-    With ``SKYRL_RDT_PP_LOCAL=1`` (and pp>1) the source stops gathering across
-    pipeline stages: each stage yields only its own layers and declares them
-    through ``owned_groups()``, so the RDT consumers route each layer's pull to a
-    stage that holds it. See ``owned_groups`` for how ownership is discovered and
-    when the mode falls back.
+    PP-local gather is ON by default (``SKYRL_RDT_PP_LOCAL=0`` disables it) and
+    engages at pp>1: the source stops gathering across pipeline stages, so each
+    stage yields only its own layers and declares them through ``owned_groups()``,
+    and the RDT consumers route each layer's pull to a stage that holds it. See
+    ``owned_groups`` for how ownership is discovered and when the mode falls back.
     """
 
     _EXPERT_PRED = ".experts.linear_fc"  # model_bridge.py uses the same predicate

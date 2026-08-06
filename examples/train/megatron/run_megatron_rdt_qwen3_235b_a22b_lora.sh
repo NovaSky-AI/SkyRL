@@ -34,7 +34,10 @@ set -x
 # vLLM's startup free-memory check.)
 #
 # Optional RDT tuning (defaults shown): SKYRL_RDT_NUM_BUFFERS=2 (publish ring
-# depth), SKYRL_RDT_LOOKAHEAD=2 (gather lookahead credits).
+# depth), SKYRL_RDT_LOOKAHEAD=2 (gather lookahead credits),
+# SKYRL_RDT_PP_LOCAL=1 (each pipeline stage gathers and serves only its own
+# layers; engages at pp>1 and reverts to gather-to-all on its own if a group
+# spans two stages -- set 0 to force the old path).
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout

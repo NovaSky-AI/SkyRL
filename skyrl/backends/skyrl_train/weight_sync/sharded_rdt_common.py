@@ -3,36 +3,72 @@
 """Helpers shared by the sharded-RDT consumer (worker) and producer (trainer)
 engines.
 
-Both sides must agree on the M:N producer/consumer binding, the per-group
-routing, the arena byte sizing, the greedy byte-balanced split, the gather-group
-partition, and the op-chain allowlist. Keeping them here — imported by both
+Both sides must agree on the M:N producer/consumer binding and per-group
+routing (``RdtRouter``), the arena byte sizing, the greedy byte-balanced
+split, and the op-chain allowlist. Keeping them here — imported by both
 ``sharded_rdt_engine`` (consumer) and ``sharded_rdt_trainer`` (producer) —
 makes that agreement a single source of truth rather than two copies that can
 silently drift.
+
+The gather-group partition itself lives on ``sharded_rdt_base.layerwise_groups``:
+it defines what a group index means for ``WeightSource``, not just for this
+transport. Re-exported here for the callers that already import it from this
+module.
 """
 
-# Op chains the consumer's baked plan may request the producer to replay on a
-# cached tensor. The producer refuses any op outside this set so a misbehaving
-# or spoofed consumer cannot invoke arbitrary methods on trainer tensors.
-ALLOWED_OPS = frozenset(
-    (
-        "narrow",
-        "view",
-        "reshape",
-        "transpose",
-        "permute",
-        "contiguous",
-        "squeeze",
-        "unsqueeze",
-        "__getitem__",
-        "to",
-        "chunk",
-        "split",
-        "select",
-        "flatten",
-        "unbind",
-    )
-)
+from collections.abc import Callable
+
+import torch
+
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import layerwise_groups
+
+__all__ = [
+    "ALLOWED_OPS",
+    "RdtRouter",
+    "SUPPORTED_OPS",
+    "arena_alloc_bytes",
+    "assign_producer_indices",
+    "greedy_run_starts",
+    "layerwise_groups",
+]
+
+# The op-chain contract, in one place because it has two enforcers.
+#
+# CONSUMER: ``LazyRDTTensor`` intercepts exactly these ``torch.Tensor`` methods
+# during the bake and records the string name in the op chain. Anything else
+# reaches ``__torch_dispatch__`` and raises, so a loader that needs real data
+# (arithmetic, ``.to``, ``.float``, ``.item``, ``.data``, bool-mask indexing)
+# fails loudly at init rather than silently transferring the wrong bytes.
+#
+# PRODUCER: replaying a chain is ``getattr(tensor, op)(*args, **kwargs)`` on a
+# live trainer tensor, so it refuses any op outside ``ALLOWED_OPS`` -- a
+# misbehaving or spoofed consumer must not be able to invoke arbitrary methods.
+#
+# Every entry must be a pure view / shape-only / byte-bounding operation. The two
+# sets are DERIVED from this one table: when they were written out separately
+# they drifted, leaving ``t`` consumer-emittable but producer-rejected (a loader
+# calling ``.t()`` baked at init and then failed at first pull) while
+# ``to``/``split``/``select`` were producer-allowed but unreachable -- and ``to``
+# is exactly the dtype/device escape the bake exists to reject.
+SUPPORTED_OPS: dict[Callable, str] = {
+    torch.Tensor.narrow: "narrow",
+    torch.Tensor.view: "view",
+    torch.Tensor.reshape: "reshape",
+    torch.Tensor.__getitem__: "__getitem__",
+    torch.Tensor.unsqueeze: "unsqueeze",
+    torch.Tensor.squeeze: "squeeze",
+    torch.Tensor.transpose: "transpose",
+    torch.Tensor.t: "t",
+    torch.Tensor.permute: "permute",
+    torch.Tensor.flatten: "flatten",
+    torch.Tensor.contiguous: "contiguous",
+    torch.Tensor.chunk: "chunk",
+    # Multi-return, handled like chunk: the consumer emits one child per output
+    # with a trailing __getitem__(i); the producer replays unbind()[i].
+    torch.Tensor.unbind: "unbind",
+}
+
+ALLOWED_OPS = frozenset(SUPPORTED_OPS.values())
 
 
 def assign_producer_indices(num_producers: int, num_consumers: int, consumer_idx: int) -> list[int]:
@@ -72,10 +108,6 @@ class RdtRouter:
         self.num_consumers = max(1, num_consumers)
         self._owners = [sorted(set(owners)) for owners in group_owners] if group_owners else None
         self.num_groups = len(self._owners) if self._owners else max(0, num_groups)
-
-    @property
-    def homogeneous(self) -> bool:
-        return self._owners is None
 
     def owners(self, group_idx: int) -> list[int]:
         """Producer ranks that gather and publish ``group_idx``."""
@@ -169,32 +201,3 @@ def greedy_run_starts(weights: list[int], n: int) -> list[int]:
             cur = 0
         cur += w
     return starts
-
-
-def layerwise_groups(names: list[str]) -> list[list[str]]:
-    """Partition flat parameter names into pre / per-decoder-layer / post gather
-    groups (keys on ``model.layers.<N>.``). The group is the unit of gathering,
-    freeing, AND the packed pull's chunk budget — without it a whole model
-    becomes one chunk and the receive/serve arenas balloon to the full
-    per-worker share."""
-    pre: list[str] = []
-    layers: dict[int, list[str]] = {}
-    post: list[str] = []
-    seen = False
-    for n in names:
-        if n.startswith("model.layers."):
-            seen = True
-            idx = int(n[len("model.layers.") :].split(".", 1)[0])
-            layers.setdefault(idx, []).append(n)
-        elif not seen:
-            pre.append(n)
-        else:
-            post.append(n)
-    groups: list[list[str]] = []
-    if pre:
-        groups.append(pre)
-    for i in sorted(layers):
-        groups.append(layers[i])
-    if post:
-        groups.append(post)
-    return groups
