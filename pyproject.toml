@@ -295,10 +295,11 @@ explicit = true
 skyrl-gym = { path = "./skyrl-gym", editable = true }
 # Match torch's CUDA variant (cu128).
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
-# vllm 0.23.0's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
-# links libcudart.so.12, which torch+cu128 supplies.
+# Official vLLM 0.23.0 cu129 wheels plus upstream vllm-project/vllm@24dd2aec,
+# which preserves GLM-5.2 FP8 indexer pairs across incremental weight loads.
 vllm = [
-    { index = "vllm-cu129", marker = "sys_platform == 'linux'" },
+    { url = "https://github.com/j316chuck/vllm/releases/download/v0.23.0-cu129-glm52-indexer-fp8/vllm-0.23.0%2Bcu129-cp38-abi3-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine != 'aarch64'" },
+    { url = "https://github.com/j316chuck/vllm/releases/download/v0.23.0-cu129-glm52-indexer-fp8/vllm-0.23.0%2Bcu129-cp38-abi3-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 # torch-2.11 wheels for these three aren't published upstream; built locally
 # on erictang000 forks (cu128 / cxx11abiTRUE / py3.12). flash-attn has its
@@ -321,9 +322,9 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "91a15142a4b4442a8d46ab539d1b923bd08570d0", marker = "sys_platform == 'linux'"}
-# megatron-core main branch: https://github.com/NVIDIA/Megatron-LM/tree/main latest as of 6/8/26
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "71e418ea7d7b3a6c9a53238c543c3e0b43e11026", marker = "sys_platform == 'linux'"}
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "778009a06c96381051916d751a52c65ac5ca5f19", marker = "sys_platform == 'linux'"}
+# Match the Megatron-LM submodule pinned by the Megatron-Bridge revision above.
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "cf2f07d7b1315c96c05554c670c43207c6783e5e", marker = "sys_platform == 'linux'"}
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14
 # TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
 vllm-router = [

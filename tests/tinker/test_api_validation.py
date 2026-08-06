@@ -102,6 +102,25 @@ def test_datum_to_types_preserves_values_and_returns():
     assert datum.loss_fn_inputs.returns.data == [0.4, 0.5, 0.6]
 
 
+def test_json_safe_future_result_sanitizes_only_metrics():
+    result = {
+        "metrics": {"loss": float("nan"), "nested": [float("inf"), 1.0]},
+        "loss_fn_outputs": [{"logprobs": [float("-inf")]}],
+    }
+
+    sanitized = api._json_safe_future_result(result)
+
+    assert sanitized["metrics"] == {"loss": None, "nested": [None, 1.0]}
+    assert sanitized["loss_fn_outputs"] == result["loss_fn_outputs"]
+    assert result["metrics"]["loss"] != result["metrics"]["loss"]
+
+
+def test_json_safe_future_result_leaves_non_metric_payload_unchanged():
+    result = {"path": "tinker://model/checkpoint", "value": float("inf")}
+
+    assert api._json_safe_future_result(result) is result
+
+
 # --- ModelInputChunk discriminator tests (api) ---
 
 _api_adapter = TypeAdapter(api.ModelInputChunk)

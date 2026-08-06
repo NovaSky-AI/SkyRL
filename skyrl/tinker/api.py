@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import random
 import re
@@ -1153,6 +1154,26 @@ async def get_server_capabilities(request: Request):
     return GetServerCapabilitiesResponse(supported_models=supported_models)
 
 
+def _json_safe_metric_value(value):
+    """Replace non-finite metric floats that JSON cannot represent."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe_metric_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_metric_value(item) for item in value]
+    return value
+
+
+def _json_safe_future_result(value):
+    """Sanitize metrics without changing model outputs or checkpoint data."""
+    if isinstance(value, dict) and isinstance(value.get("metrics"), dict):
+        result = dict(value)
+        result["metrics"] = _json_safe_metric_value(value["metrics"])
+        return result
+    return value
+
+
 class RetrieveFutureRequest(BaseModel):
     request_id: str
 
@@ -1185,7 +1206,7 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
                     future = result.first()
 
                     if future.status == RequestStatus.COMPLETED:
-                        return future.result_data
+                        return _json_safe_future_result(future.result_data)
 
                     if future.status == RequestStatus.FAILED:
                         # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
