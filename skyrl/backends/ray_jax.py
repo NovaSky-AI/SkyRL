@@ -71,8 +71,8 @@ class RayJaxBackendImpl:
     def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         self.backend.save_checkpoint(output_path, model_id)
 
-    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
-        self.backend.load_checkpoint(checkpoint_path, model_id)
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, optimizer: bool) -> None:
+        self.backend.load_checkpoint(checkpoint_path, model_id, optimizer)
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
         self.backend.save_sampler_checkpoint(output_path, model_id, persist)
@@ -182,8 +182,8 @@ class RayJaxBackend(AbstractBackend):
         results = ray.get([w.sample.remote(prepared_batch) for w in self.workers])
         return results[0]
 
-    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
-        ray.get([w.load_checkpoint.remote(checkpoint_path, model_id) for w in self.workers])
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, optimizer: bool) -> None:
+        ray.get([w.load_checkpoint.remote(checkpoint_path, model_id, optimizer) for w in self.workers])
 
     def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         ray.get([w.save_checkpoint.remote(output_path, model_id) for w in self.workers])

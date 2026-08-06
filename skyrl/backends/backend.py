@@ -125,12 +125,13 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, optimizer: bool) -> None:
         """Load training checkpoint from disk.
 
         Args:
             checkpoint_path: Path to the checkpoint file
             model_id: The model identifier
+            optimizer: Whether to restore optimizer and scheduler state
         """
         pass
 
