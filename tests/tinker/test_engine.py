@@ -27,7 +27,7 @@ def test_prewarm_inference_is_opt_in(monkeypatch: pytest.MonkeyPatch):
         def prewarm_inference(self):
             self.prewarmed = True
 
-    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_: (Backend, dict))
+    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_args, **_kwargs: (Backend, dict))
     engine = TinkerEngine(EngineConfig(base_model=BASE_MODEL, prewarm_inference=True))
     assert engine.backend.prewarmed
 
