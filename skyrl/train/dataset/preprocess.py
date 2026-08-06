@@ -118,6 +118,11 @@ def convert_prompts_responses_to_batch_tensors(
     The padded sequence length is ``max(prompt_len_i + response_len_i)``.
     This way, the max padded sequence length is ``max_seq_len``.
 
+    So the attention_mask is:
+    | 0       0       1       1       1       1       1 |
+    | 0       1       1       1       1       1       1 |
+    | 1       1       1       1       1       1       1 |
+
     This makes the response-level tensors (response_mask, rewards, loss_masks, logprobs):
     | prompt prompt respon respon |
     | prompt respon respon respon |
@@ -128,8 +133,8 @@ def convert_prompts_responses_to_batch_tensors(
     | 0       1       1      1    |
     | 1       1       1      1    |
 
-    Attention mask is 1 for all real tokens, 0 for padding.
-    Action mask is 1 for the last ``response_len_i`` positions, 0 for padding.
+    attention_mask is 1 for all real tokens, 0 for padding.
+    response_mask_i is 1 for the last ``response_len_i`` positions, 0 for padding.
 
     Response-level tensors are **right-aligned** within ``(batch, max_response_len)``: non-padded
     values occupy the last ``response_len_i`` positions, with leading zeros. This matches the model
