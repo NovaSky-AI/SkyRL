@@ -344,16 +344,10 @@ class TinkerEngine:
                     )
                 session.commit()
 
-    def _load_requests(
-        self,
-        session: Session,
-        requests: list[tuple[Any, ...]],
-        payload_type: type[BaseModel] | None = None,
-    ) -> dict[str, tuple[Any, ...]]:
-        """Fetch request_data and append it to each request tuple, keyed by request_id.
+    def _load_requests(self, session: Session, requests: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+        """Append each request's request_data to its tuple, dropping any request that no longer exists.
 
         Chunked to stay under SQLite's limit on bound parameters per statement.
-        If payload_type is provided, request_data is validated as that model type.
         """
         request_ids = [request_id for request_id, *_ in requests]
         payloads: dict[int, dict] = {}
@@ -363,14 +357,7 @@ class TinkerEngine:
                 select(FutureDB.request_id, FutureDB.request_data).where(FutureDB.request_id.in_(chunk))
             ).all()
             payloads.update(rows)
-        return {
-            str(request_id): (
-                *args,
-                payload_type.model_validate(payloads[request_id]) if payload_type else payloads[request_id],
-            )
-            for request_id, *args in requests
-            if request_id in payloads
-        }
+        return [(request_id, *args, payloads[request_id]) for request_id, *args in requests if request_id in payloads]
 
     def _find_destructive_barriers(self, session: Session) -> dict[str, int]:
         """Find the earliest pending destructive operation (optim_step/load_weights) per model.
@@ -422,7 +409,10 @@ class TinkerEngine:
             if model_id not in barriers or request_id < barriers[model_id]
         ]
 
-        return self._load_requests(session, batchable, types.ForwardBackwardInput)
+        return {
+            str(request_id): (model_id, types.ForwardBackwardInput.model_validate(request_data))
+            for request_id, model_id, request_data in self._load_requests(session, batchable)
+        }
 
     def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
         """Find all sample ops that can be safely batched together.
@@ -462,7 +452,10 @@ class TinkerEngine:
         if self.config.backend == "jax" and self.backend.config.sample_max_num_sequences > 0:
             batchable = batchable[: self.backend.config.sample_max_num_sequences]
 
-        return self._load_requests(session, batchable, types.SampleInput)
+        return {
+            str(request_id): (model_id, types.SampleInput.model_validate(request_data))
+            for request_id, model_id, request_data in self._load_requests(session, batchable)
+        }
 
     def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
         """Find all requests that need to be processed individually (not batchable).
@@ -511,7 +504,10 @@ class TinkerEngine:
             if model_id not in blocked_pass_barriers or request_id < blocked_pass_barriers[model_id]
         ]
 
-        return self._load_requests(session, other_futures)
+        return {
+            str(request_id): (model_id, request_type, request_data)
+            for request_id, model_id, request_type, request_data in self._load_requests(session, other_futures)
+        }
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
