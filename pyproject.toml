@@ -17,7 +17,7 @@ dependencies = [
     "rich>=14.1.0",
     "safetensors>=0.6.2",
     "tokenizers>=0.21.2",
-    "transformers>=5.6.1,<=5.8.0",
+    "transformers==5.8.1",
     "typer>=0.17.4",
     "peft==0.18.1",
     "hf_transfer",
@@ -234,7 +234,7 @@ no-build-isolation-package = [
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
-    "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
+    "transformers==5.8.1; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
     "transformer-engine-cu13; sys_platform == 'never'",
@@ -293,6 +293,9 @@ explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
+# Upstream v5.8.1 plus huggingface/transformers@31637182, which fixes GLM
+# MoE DSA's qk_rope_head_dim mapping. This is already fixed on upstream main.
+transformers = { url = "https://github.com/j316chuck/transformers/releases/download/v5.8.1-glm52-head-dim/transformers-5.8.1-py3-none-any.whl" }
 # Match torch's CUDA variant (cu128).
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
 # Official vLLM 0.23.0 cu129 wheels plus upstream vllm-project/vllm@24dd2aec,
