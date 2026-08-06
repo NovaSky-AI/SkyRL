@@ -613,7 +613,7 @@ class TinkerEngine:
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
         )
 
-        self.backend.load_checkpoint(checkpoint_path, model_id, optimizer=request_data.optimizer)
+        self.backend.load_checkpoint(checkpoint_path, model_id, load_optimizer=request_data.load_optimizer)
 
         return types.LoadWeightsOutput(type="load_weights")
 

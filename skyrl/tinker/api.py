@@ -997,7 +997,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
         request_data=types.LoadWeightsInput(
             source_model_id=source_model_id,
             checkpoint_id=checkpoint_id,
-            optimizer=request.optimizer,
+            load_optimizer=request.optimizer,
         ),
     )
 
