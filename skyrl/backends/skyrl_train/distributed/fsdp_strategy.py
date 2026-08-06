@@ -328,12 +328,11 @@ class FSDPStrategy(DistributedStrategy):
 
     def _save_lora_adapters(self, model, ckpt_dir):
         """Save LoRA adapters in HuggingFace PEFT format"""
-        from dataclasses import asdict
-
         from safetensors.torch import save_file
 
         from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
             layered_summon_lora_params,
+            serialize_peft_config,
         )
 
         lora_save_path = os.path.join(ckpt_dir, "lora_adapter")
@@ -341,11 +340,7 @@ class FSDPStrategy(DistributedStrategy):
 
         if self.is_rank_0():
             io.makedirs(lora_save_path, exist_ok=True)
-            peft_config = asdict(model.peft_config.get("default", {}))
-            if peft_config:
-                peft_config["task_type"] = peft_config["task_type"].value
-                peft_config["peft_type"] = peft_config["peft_type"].value
-                peft_config["target_modules"] = list(peft_config["target_modules"])
+            peft_config = serialize_peft_config(model.peft_config["default"])
 
         lora_params = layered_summon_lora_params(model)
 
@@ -441,7 +436,14 @@ class FSDPStrategy(DistributedStrategy):
                 # Also save runtime FSDP config
                 fsdp_config_path = os.path.join(work_dir, "fsdp_config.json")
                 with io.open_file(fsdp_config_path, "w") as f:
-                    json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
+                    json.dump(
+                        {
+                            "fsdp_strategy": self.fsdp_strategy,
+                            "world_size": self.world_size,
+                        },
+                        f,
+                        indent=4,
+                    )
 
         # Save LoRA adapters if using LoRA
         if self.is_lora and hasattr(save_model, "peft_config"):
@@ -554,7 +556,13 @@ class FSDPStrategy(DistributedStrategy):
         return ckpt_dir, states
 
     # TODO (erictang000): Test in multi-node setting
-    def save_hf_model(self, model: Union[HFModelWrapper, nn.Module], output_dir: str, tokenizer=None, **kwargs) -> None:
+    def save_hf_model(
+        self,
+        model: Union[HFModelWrapper, nn.Module],
+        output_dir: str,
+        tokenizer=None,
+        **kwargs,
+    ) -> None:
         """Save model in HuggingFace safetensors format using FSDP's full state dict gathering"""
 
         # Step 1: Create output directory (rank 0 only)
@@ -577,7 +585,12 @@ class FSDPStrategy(DistributedStrategy):
         if self.is_rank_0():
             with self._atomic_local_export_dir(output_dir) as work_dir:
                 # Save the model in HuggingFace format using safetensors
-                model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
+                model_to_save.save_pretrained(
+                    work_dir,
+                    state_dict=output_state_dict,
+                    safe_serialization=True,
+                    **kwargs,
+                )
 
                 # Fix and save the config
                 config_to_save = self._fix_fsdp_config(model_to_save.config)
