@@ -1167,11 +1167,16 @@ class RetrieveFutureRequest(BaseModel):
 @app.post("/api/v1/retrieve_future")
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
-    try:
-        result = await req.app.state.future_waiter.wait(int(request.request_id), RETRIEVE_FUTURE_TIMEOUT_SECONDS)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Future not found")
+    request_id = int(request.request_id)
 
+    # Rows are created before their request_id is returned to the client and
+    # never deleted, so a missing row means the id never existed.
+    async with AsyncSession(req.app.state.db_engine) as session:
+        statement = select(FutureDB.request_id).where(FutureDB.request_id == request_id)
+        if (await session.exec(statement)).first() is None:
+            raise HTTPException(status_code=404, detail="Future not found")
+
+    result = await req.app.state.future_waiter.wait(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
     if result is None:
         raise HTTPException(status_code=408, detail="Timeout waiting for result")
 

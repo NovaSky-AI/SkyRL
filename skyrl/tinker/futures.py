@@ -43,7 +43,6 @@ class FutureWaiter:
         self._db_engine = db_engine
         self._poll_interval_sec = poll_interval_sec
         self._waiters: dict[int, set[asyncio.Future]] = {}
-        self._wakeup = asyncio.Event()
         self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -62,12 +61,11 @@ class FutureWaiter:
     async def wait(self, request_id: int, timeout: float) -> FutureResult | None:
         """Wait for ``request_id`` to reach a terminal status.
 
-        Returns None if ``timeout`` elapses first. Raises KeyError if no such
-        request exists.
+        Returns None if ``timeout`` elapses first. The caller is responsible
+        for ensuring the request exists; an unknown id simply times out.
         """
         waiter = asyncio.get_running_loop().create_future()
         self._waiters.setdefault(request_id, set()).add(waiter)
-        self._wakeup.set()
         try:
             return await asyncio.wait_for(waiter, timeout)
         except asyncio.TimeoutError:
@@ -79,31 +77,21 @@ class FutureWaiter:
                 if not remaining:
                     del self._waiters[request_id]
 
-    def _resolve(self, request_id: int, outcome: "FutureResult | BaseException") -> None:
+    def _resolve(self, request_id: int, result: FutureResult) -> None:
         for waiter in list(self._waiters.get(request_id, ())):
-            if waiter.done():
-                continue
-            if isinstance(outcome, BaseException):
-                waiter.set_exception(outcome)
-            else:
-                waiter.set_result(outcome)
+            if not waiter.done():
+                waiter.set_result(result)
 
     async def _run(self) -> None:
         while True:
-            if not self._waiters:
-                # Safe against lost wakeups: registration adds to _waiters and
-                # sets the event with no await in between, so an empty dict here
-                # means nothing has been registered yet.
-                self._wakeup.clear()
-                await self._wakeup.wait()
-                continue
-            try:
-                await self._poll_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Keep the poller alive; waiters fall back on their own timeouts.
-                logger.exception("Future poller iteration failed")
+            if self._waiters:
+                try:
+                    await self._poll_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Keep the poller alive; waiters fall back on their own timeouts.
+                    logger.exception("Future poller iteration failed")
             await asyncio.sleep(self._poll_interval_sec)
 
     async def _poll_once(self) -> None:
@@ -112,16 +100,8 @@ class FutureWaiter:
             for start in range(0, len(request_ids), _MAX_IDS_PER_QUERY):
                 chunk = request_ids[start : start + _MAX_IDS_PER_QUERY]
                 statement = select(FutureDB.request_id, FutureDB.status, FutureDB.result_data).where(
-                    FutureDB.request_id.in_(chunk)
+                    FutureDB.request_id.in_(chunk),
+                    FutureDB.status.in_((RequestStatus.COMPLETED, RequestStatus.FAILED)),
                 )
-                rows = (await session.exec(statement)).all()
-
-                found = set()
-                for request_id, status, result_data in rows:
-                    found.add(request_id)
-                    if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
-                        self._resolve(request_id, FutureResult(status=status, result_data=result_data))
-
-                # Rows are never deleted, so an id with no row never existed.
-                for request_id in set(chunk) - found:
-                    self._resolve(request_id, KeyError(request_id))
+                for request_id, status, result_data in (await session.exec(statement)).all():
+                    self._resolve(request_id, FutureResult(status=status, result_data=result_data))

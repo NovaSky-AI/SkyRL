@@ -111,9 +111,9 @@ async def test_wait_surfaces_failed_status(waiter, sync_engine):
 
 
 @pytest.mark.asyncio
-async def test_wait_raises_for_unknown_request(waiter):
-    with pytest.raises(KeyError):
-        await waiter.wait(123456, timeout=5)
+async def test_wait_times_out_for_unknown_request(waiter):
+    """Existence is the endpoint's job; the waiter just times out on unknown ids."""
+    assert await waiter.wait(123456, timeout=0.05) is None
 
 
 @pytest.mark.asyncio
