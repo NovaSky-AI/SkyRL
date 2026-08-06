@@ -147,6 +147,53 @@ class TestTopLevelOverrides:
         skyrl_cfg_on = build_skyrl_config_for_sft(cfg_on)
         assert skyrl_cfg_on.trainer.remove_microbatch_padding is True
 
+    def test_flash_attention_propagates(self):
+        cfg = _sft_cfg_from_overrides(["flash_attn=false"])
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.flash_attn is False
+
+
+class TestQLoRAConfig:
+    def test_4bit_config_bridges_to_policy_model(self):
+        cfg = _sft_cfg_from_overrides(
+            [
+                "strategy=fsdp",
+                "model.path=test/my-model",
+                "model.lora.rank=8",
+                "model.bitsandbytes_4bit.enabled=true",
+                "model.bitsandbytes_4bit.quant_type=fp4",
+                "model.bitsandbytes_4bit.use_double_quant=false",
+            ]
+        )
+
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+
+        quantization = skyrl_cfg.trainer.policy.model.bitsandbytes_4bit
+        assert quantization.enabled is True
+        assert quantization.quant_type == "fp4"
+        assert quantization.use_double_quant is False
+
+    def test_4bit_requires_lora(self):
+        cfg = _sft_cfg_from_overrides(
+            ["strategy=fsdp", "model.path=test/my-model", "model.bitsandbytes_4bit.enabled=true"]
+        )
+
+        with pytest.raises(ValueError, match="requires model.lora.rank > 0"):
+            validate_sft_cfg(cfg)
+
+    def test_4bit_rejects_megatron(self):
+        cfg = _sft_cfg_from_overrides(
+            [
+                "strategy=megatron",
+                "model.path=test/my-model",
+                "model.lora.rank=8",
+                "model.bitsandbytes_4bit.enabled=true",
+            ]
+        )
+
+        with pytest.raises(ValueError, match="only supported with strategy='fsdp'"):
+            validate_sft_cfg(cfg)
+
 
 class TestMegatronConfigOverrides:
     """Megatron parallelism config overrides propagate correctly."""
@@ -206,6 +253,13 @@ class TestLoraConfigOverrides:
         )
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         assert skyrl_cfg.trainer.policy.model.lora.target_modules == "all-linear"
+
+    def test_lora_target_module_list_propagates(self):
+        cfg = _sft_cfg_from_overrides(
+            ["model.path=test/my-model", "model.lora.rank=16", "model.lora.target_modules=[q_a_proj]"]
+        )
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.model.lora.target_modules == ["q_a_proj"]
 
     def test_lora_disabled_by_default(self):
         cfg = _sft_cfg_from_overrides([])

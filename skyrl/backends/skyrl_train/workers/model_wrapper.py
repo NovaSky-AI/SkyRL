@@ -3,6 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
+import re
 from typing import Optional, Union
 
 import numpy as np
@@ -33,6 +34,24 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
 )
 
 
+def _language_model_only_lora_exclusions(model: nn.Module, exclude_modules):
+    prefixes = [
+        name for name, _ in model.named_modules() if name == "language_model" or name.endswith(".language_model")
+    ]
+    if not prefixes:
+        return exclude_modules
+
+    prefix = min(prefixes, key=len)
+    outside_language_model = rf"^(?!{re.escape(prefix)}(?:\.|$)).*$"
+    if not exclude_modules:
+        return outside_language_model
+    if isinstance(exclude_modules, str):
+        return rf"(?:{outside_language_model})|(?:{exclude_modules})"
+
+    excluded_names = "|".join(rf"(?:.*\.)?{re.escape(name)}" for name in exclude_modules)
+    return rf"(?:{outside_language_model})|(?:{excluded_names})"
+
+
 class HFModelWrapper(nn.Module):
     """
     Base class for wrapped HF models in reinforcement learning.
@@ -44,6 +63,8 @@ class HFModelWrapper(nn.Module):
         use_flash_attention_2 (bool, optional): Whether to utilize Flash Attention 2.0 for improved performance. Defaults to False.
         bf16 (bool, optional): Enable bfloat16 precision for model computations. Defaults to True.
         load_in_4bit (bool, optional): Load the model in 4-bit precision. Defaults to False.
+        bnb_4bit_quant_type (str, optional): bitsandbytes 4-bit data type. Defaults to "nf4".
+        bnb_4bit_use_double_quant (bool, optional): Enable nested quantization. Defaults to True.
         lora_rank (int, optional): Rank for LoRA adaptation. Defaults to 0.
         lora_alpha (int, optional): Alpha parameter for LoRA. Defaults to 16.
         lora_dropout (float, optional): Dropout rate for LoRA layers. Defaults to 0.
@@ -62,6 +83,8 @@ class HFModelWrapper(nn.Module):
         use_flash_attention_2=False,
         bf16=True,
         load_in_4bit=False,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
         # TODO(shu): combine all LoRA specific configs into one place?
         lora_rank=0,
         lora_alpha=16,
@@ -97,9 +120,10 @@ class HFModelWrapper(nn.Module):
                 assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
                 nf4_config = BitsAndBytesConfig(
                     load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type=bnb_4bit_quant_type,
+                    bnb_4bit_use_double_quant=bnb_4bit_use_double_quant,
                     bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_quant_storage=torch.bfloat16,
                 )
             else:
                 nf4_config = None
@@ -186,6 +210,8 @@ class HFModelWrapper(nn.Module):
             if lora_rank > 0:
                 # https://github.com/huggingface/peft/issues/137
                 self.model.enable_input_require_grads()
+                if language_model_only:
+                    exclude_modules = _language_model_only_lora_exclusions(self.model, exclude_modules)
                 lora_config = LoraConfig(
                     task_type=TaskType.CAUSAL_LM,
                     r=lora_rank,
