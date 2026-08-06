@@ -390,6 +390,23 @@ def test_optim_step_returns_metrics():
     assert no_grad_output.metrics["skyrl.ai/mhc_gradient_norm"] == pytest.approx(0.0)
 
 
+def test_ephemeral_sampler_checkpoint_stays_in_memory(monkeypatch, tmp_path):
+    backend = create_backend(max_lora_adapters=2)
+    model_id = "ephemeral_sampler"
+    create_model(backend, model_id)
+    output_path = tmp_path / "ss0_seq1.tar.gz"
+
+    def fail_if_saved(*args, **kwargs):
+        pytest.fail("ephemeral sampler weights should not be written to disk")
+
+    monkeypatch.setattr("skyrl.backends.jax.save_lora_checkpoint", fail_if_saved)
+
+    backend.save_sampler_checkpoint(output_path, model_id, persist=False)
+
+    assert backend.models[model_id].loaded_checkpoint_id == "ss0_seq1"
+    assert not output_path.exists()
+
+
 def test_gradient_checkpointing():
     """
     Verify gradient checkpointing doesn't affect loss values.

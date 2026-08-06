@@ -984,17 +984,26 @@ class JaxBackendImpl(AbstractBackend):
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
-        """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
+        """Make the current LoRA weights available to the sampler."""
         lora_model = self.models[model_id]
-        save_lora_checkpoint(
-            self.model,
-            self.base_model,
-            lora_model.lora_config,
-            lora_model.adapter_index,
-            output_path,
-            self.process_id,
-        )
-        logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
+        if persist:
+            save_lora_checkpoint(
+                self.model,
+                self.base_model,
+                lora_model.lora_config,
+                lora_model.adapter_index,
+                output_path,
+                self.process_id,
+            )
+            logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
+
+        # Training and sampling share one in-memory model in this backend. Marking
+        # these weights as loaded avoids a redundant archive round trip on the
+        # next sample request, and lets ephemeral RL syncs skip disk entirely.
+        checkpoint_id = output_path.name.removesuffix(".tar.gz")
+        lora_model.loaded_checkpoint_id = checkpoint_id
+        if not persist:
+            logger.info(f"Updated in-memory LoRA sampler weights for model {model_id}")
 
     def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path: AnyPath) -> None:
         """Insert sampler weights from checkpoint file."""

@@ -85,6 +85,20 @@ class KVCache:
         """
         k_cache, v_cache = kv_cache
 
+        if jax.default_backend() == "mps":
+            # jax-mps does not yet support the batched scatter produced by
+            # vmap(dynamic_update_slice).
+            max_start = max(k_cache.shape[1] - k.shape[1], 0)
+            update_start = jnp.clip(positions[:, :1], 0, max_start)
+            update_positions = update_start + jnp.arange(k.shape[1])[None, :]
+            update_mask = jnp.arange(k_cache.shape[1])[None, :, None] == update_positions[:, None, :]
+
+            def update(cache, values):
+                updates = jnp.einsum("bts,bsnh->btnh", update_mask.astype(values.dtype), values)
+                return jnp.where(update_mask.any(axis=-1)[..., None, None], updates, cache)
+
+            return update(k_cache, k), update(v_cache, v)
+
         def update_at_pos(cache_slice, new_val_slice, pos):
             return jax.lax.dynamic_update_slice(cache_slice, new_val_slice, (pos, 0, 0))
 
@@ -274,8 +288,12 @@ class GeneratorMixin:
             stop_pos = jnp.where((s.stop_pos == -1) & is_stop, step + 1, s.stop_pos)
 
             # Update attention mask at per-sequence positions (for left-aligned sequences)
-            batch_idx = jnp.arange(s.attention_mask.shape[0])
-            next_attention_mask = s.attention_mask.at[batch_idx, s.kv_cache.cache_position].set(1)
+            if jax.default_backend() == "mps":
+                position_mask = jnp.arange(s.attention_mask.shape[1])[None, :] == s.kv_cache.cache_position[:, None]
+                next_attention_mask = jnp.where(position_mask, 1, s.attention_mask)
+            else:
+                batch_idx = jnp.arange(s.attention_mask.shape[0])
+                next_attention_mask = s.attention_mask.at[batch_idx, s.kv_cache.cache_position].set(1)
 
             outputs = model(
                 next_token,
