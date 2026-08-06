@@ -123,7 +123,7 @@ class AdapterSlot:
 
     cpu_param_data: List[List[torch.Tensor]] = field(default_factory=list)
     cpu_grad_data: List[List[torch.Tensor]] = field(default_factory=list)
-    cpu_main_param: List[List[List[torch.Tensor]]] = field(default_factory=list)
+    cpu_main_param: List[List[List[torch.Tensor | None]]] = field(default_factory=list)
     cpu_opt_state: List[List[List[dict]]] = field(default_factory=list)
     # Per-param-group state from optimizer.param_groups[g]. TE FusedAdam (used
     # by Megatron's DistributedOptimizer) tracks `step` here at the group
@@ -191,13 +191,19 @@ class AdapterStore:
             slot.cpu_grad_data[mc_idx].append(_new_pinned_like(buf.grad_data))
         # Main params + optimizer state: per (opt_idx, group, param_idx).
         for _opt in iter_opts(optimizer):
-            opt_main: List[List[torch.Tensor]] = []
+            opt_main: List[List[torch.Tensor | None]] = []
             opt_state: List[List[dict]] = []
             groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
             for g, group in enumerate(groups):
-                main_g: List[torch.Tensor] = []
+                main_g: List[torch.Tensor | None] = []
                 state_g: List[dict] = []
                 for main_param in group:
+                    # Megatron uses None placeholders when an optimizer group
+                    # has no local shard on this rank.
+                    if main_param is None:
+                        main_g.append(None)
+                        state_g.append({})
+                        continue
                     main_g.append(_new_pinned_like(main_param))
                     state = _opt.optimizer.state.get(main_param, {})
                     # Tensor entries get pinned-CPU mirrors; non-tensor scalar
@@ -232,7 +238,12 @@ class AdapterStore:
             groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
             for g, group in enumerate(groups):
                 for i, main_param in enumerate(group):
-                    slot.cpu_main_param[opt_idx][g][i].copy_(main_param, non_blocking=True)
+                    cpu_main_param = slot.cpu_main_param[opt_idx][g][i]
+                    if main_param is None:
+                        assert cpu_main_param is None
+                        continue
+                    assert cpu_main_param is not None
+                    cpu_main_param.copy_(main_param, non_blocking=True)
                     state = _opt.optimizer.state.get(main_param, {})
                     cpu_state = slot.cpu_opt_state[opt_idx][g][i]
                     for k, v in state.items():
@@ -259,7 +270,12 @@ class AdapterStore:
             groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
             for g, group in enumerate(groups):
                 for i, main_param in enumerate(group):
-                    main_param.copy_(slot.cpu_main_param[opt_idx][g][i], non_blocking=True)
+                    cpu_main_param = slot.cpu_main_param[opt_idx][g][i]
+                    if main_param is None:
+                        assert cpu_main_param is None
+                        continue
+                    assert cpu_main_param is not None
+                    main_param.copy_(cpu_main_param, non_blocking=True)
                     state = _opt.optimizer.state.get(main_param, {})
                     cpu_state = slot.cpu_opt_state[opt_idx][g][i]
                     # Restore both tensor and non-tensor entries: tensors get
@@ -350,7 +366,12 @@ class AdapterStore:
         for opt_idx, opt_groups in enumerate(src.cpu_main_param):
             for g, group in enumerate(opt_groups):
                 for i, t in enumerate(group):
-                    dst.cpu_main_param[opt_idx][g][i].copy_(t)
+                    dst_t = dst.cpu_main_param[opt_idx][g][i]
+                    if t is None:
+                        assert dst_t is None
+                        continue
+                    assert dst_t is not None
+                    dst_t.copy_(t)
         for opt_idx, opt_groups in enumerate(src.cpu_opt_state):
             for g, group in enumerate(opt_groups):
                 for i, state in enumerate(group):
@@ -410,7 +431,6 @@ class AdapterStore:
         dp_group = mpu.get_data_parallel_group()
         if dist.is_available() and dist.is_initialized():
             dist.barrier(group=dp_group)
-
         if self._current_id is not None:
             current_slot = self._slots[self._current_id]
             self._snapshot(current_slot, model_chunks, optimizer)
