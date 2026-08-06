@@ -86,11 +86,20 @@ class WorkerDispatch:
         No-op when ``model_id is None`` (single-tenant / FFT path) or when
         the workers don't have an AdapterStore (non-LoRA strategies).
 
-        Must be called *after* ``_ensure_on_gpu(role, ...)`` so the model
-        and optimizer storages are live before we tensor.copy_() into them.
+        The swap tensor.copy_()s the live param buffer, grad buffer, fp32 main
+        params and Adam state to/from CPU slots, so all of them must be
+        resident first. Megatron's grad offload *frees* grad_data in place
+        (``storage().resize_(0)``) instead of moving it, so swapping while the
+        optimizer half is offloaded reads a dangling device pointer and dies
+        with "CUDA error: invalid argument". Hence we backload with
+        ``need_optimizer=True`` here rather than trusting the caller: paths
+        like ``forward`` and ``save_weights_for_sampler`` deliberately keep the
+        optimizer off GPU. For LoRA (the only case with adapters) the grad
+        buffer and optimizer state cover adapter params only, so this is cheap.
         """
         if model_id is None or role not in self._actor_groups:
             return
+        self._ensure_on_gpu(role, need_optimizer=True, need_model=True)
         ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
 
     def register_adapter(self, role: str, model_id: str) -> None:
@@ -641,11 +650,14 @@ class WorkerDispatch:
                 "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
             )
 
-        # Sync weights to inference engine
-        self._prepare_for_weight_sync()
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
+        # This runs *before* _prepare_for_weight_sync: the swap needs the grad
+        # buffer + optimizer state resident (see ensure_active_adapter), and
+        # _prepare_for_weight_sync is what pushes them back off GPU.
         self.ensure_active_adapter("policy", model_id)
+        # Sync weights to inference engine
+        self._prepare_for_weight_sync()
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
             self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
