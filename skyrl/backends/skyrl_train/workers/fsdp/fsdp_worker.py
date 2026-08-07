@@ -20,6 +20,7 @@ from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
+    RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
@@ -319,6 +320,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+
+        # Ray deserializes a fresh client for this worker call. Close the
+        # rank-local aiohttp session instead of leaving it for GC to warn about.
+        if isinstance(inference_engine_client, RemoteInferenceClient):
+            await inference_engine_client.teardown()
 
     def _set_pad_token_id(self, pad_token_id):
         # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model.model -> AutoModelForCausalLM

@@ -38,6 +38,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
+    RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
@@ -1389,7 +1390,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         adapter_state = {}
         for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
-            adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
+            # Preserve the BF16 training dtype on disk. vLLM casts adapters to
+            # its requested LoRA dtype while loading; forcing FP32 here only
+            # doubles the file size and NFS transfer time.
+            adapter_state[f"base_model.model.{name}"] = tensor.clone()
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
@@ -1477,6 +1481,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+
+        # Ray deserializes a fresh client for this worker call. Close the
+        # rank-local aiohttp session instead of leaving it for GC to warn about.
+        if isinstance(inference_engine_client, RemoteInferenceClient):
+            await inference_engine_client.teardown()
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method
