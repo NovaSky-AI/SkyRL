@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytest.importorskip("vllm")
+
 from skyrl.backends.skyrl_train.inference_servers import vllm_server_actor
+
+pytestmark = pytest.mark.vllm
 
 
 @pytest.mark.asyncio

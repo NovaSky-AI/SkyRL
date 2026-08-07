@@ -1,10 +1,13 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import megatron.bridge.models.conversion.peft_bridge as peft_bridge
 import pytest
 import safetensors.torch
 import torch
+
+pytest.importorskip("megatron.bridge")
+
+import megatron.bridge.models.conversion.peft_bridge as peft_bridge
 
 import skyrl.backends.skyrl_train.workers.megatron.megatron_worker as worker_module
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
