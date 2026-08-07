@@ -75,11 +75,6 @@ async def wait_for_future(
 
     Returns None if ``timeout`` elapses first.
 
-    Polling per caller would cost one query per in-flight request per tick. Under
-    a multi-LoRA RL workload -- hundreds of concurrent rollouts, each long-polling
-    its own future -- that is the dominant read load on the database, so callers
-    park a future in ``waiters`` for the one shared query in :func:`poll_futures`.
-
     Each caller gets its own future rather than sharing one per id, so that a
     caller giving up removes only its own entry. That matters because concurrent
     waiters on one id are routine: the SDK times out a retrieve_future call after
