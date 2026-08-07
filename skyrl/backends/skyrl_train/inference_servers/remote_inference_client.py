@@ -817,9 +817,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
         """
         Generate completion for a single prompt.
 
-        With keep-mode pause, in-flight requests are frozen by the vLLM
-        scheduler and resume where they left off after /resume. No retry
-        logic is needed.
+        A keep-mode pause needs no retry: in-flight requests are frozen by the vLLM
+        scheduler and resume where they left off after /resume.
+
+        An engine DEATH is a different matter, and ``_post`` below does retry it --
+        reissuing this same request, with this same ``X-Session-ID``, through the
+        router. That preserves the trajectory (earlier turns and env state survive;
+        only this turn's generation is redone), and it is why the fleet reconcile
+        happens before the first backoff: routing is ``consistent_hash`` on the
+        session id, so a retry against a ring that still contains the dead worker
+        would hash straight back onto it. Only if ``_post`` exhausts its attempts
+        does the whole trajectory get re-run (``_agent_loop_with_retry``).
 
         Returns:
             Dict with keys: stop_reason, response_ids, response_logprobs
