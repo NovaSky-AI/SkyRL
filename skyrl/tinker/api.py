@@ -44,7 +44,7 @@ from skyrl.tinker.extra import (
     ExternalInferenceClient,
     SkyRLTrainInferenceForwardingClient,
 )
-from skyrl.tinker.futures import FutureWaiter
+from skyrl.tinker.futures import FutureResult, FutureWaiter
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
 
@@ -1172,13 +1172,17 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     # Rows are created before their request_id is returned to the client and
     # never deleted, so a missing row means the id never existed.
     async with AsyncSession(req.app.state.db_engine) as session:
-        statement = select(FutureDB.request_id).where(FutureDB.request_id == request_id)
-        if (await session.exec(statement)).first() is None:
-            raise HTTPException(status_code=404, detail="Future not found")
+        statement = select(FutureDB.status, FutureDB.result_data).where(FutureDB.request_id == request_id)
+        row = (await session.exec(statement)).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Future not found")
 
-    result = await req.app.state.future_waiter.wait(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
-    if result is None:
-        raise HTTPException(status_code=408, detail="Timeout waiting for result")
+    status, result_data = row
+    result = FutureResult(status=status, result_data=result_data)
+    if status == RequestStatus.PENDING:
+        result = await req.app.state.future_waiter.wait(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        if result is None:
+            raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
     if result.status == RequestStatus.COMPLETED:
         return result.result_data

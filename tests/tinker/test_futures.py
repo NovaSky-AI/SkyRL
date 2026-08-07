@@ -14,7 +14,7 @@ from skyrl.tinker.db_models import (
     enable_sqlite_wal,
     get_async_database_url,
 )
-from skyrl.tinker.futures import FutureWaiter
+from skyrl.tinker.futures import FutureResult, FutureWaiter
 
 
 @pytest.fixture()
@@ -111,12 +111,6 @@ async def test_wait_surfaces_failed_status(waiter, sync_engine):
 
 
 @pytest.mark.asyncio
-async def test_wait_times_out_for_unknown_request(waiter):
-    """Existence is the endpoint's job; the waiter just times out on unknown ids."""
-    assert await waiter.wait(123456, timeout=0.05) is None
-
-
-@pytest.mark.asyncio
 async def test_wait_returns_none_on_timeout(waiter, sync_engine):
     request_id = insert_pending(sync_engine)[0]
 
@@ -156,3 +150,67 @@ async def test_multiple_waiters_on_same_request_all_resolve(waiter, sync_engine)
     results = await asyncio.gather(*(waiter.wait(request_id, timeout=5) for _ in range(3)))
 
     assert all(result.result_data == {"ok": True} for result in results)
+
+
+class _RecordingWaiter:
+    """Stands in for FutureWaiter so tests can see whether the endpoint waited."""
+
+    def __init__(self, result=None):
+        self.calls = 0
+        self._result = result
+
+    async def wait(self, request_id: int, timeout: float):
+        self.calls += 1
+        return self._result
+
+
+def _stub_request(async_engine, waiter):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db_engine=async_engine, future_waiter=waiter)))
+
+
+@pytest.mark.asyncio
+async def test_retrieve_future_returns_terminal_result_without_waiting(async_engine, sync_engine):
+    """A request that already finished is served by the lookup, not by a poll tick."""
+    from skyrl.tinker.api import RetrieveFutureRequest, retrieve_future
+
+    request_id = insert_pending(sync_engine)[0]
+    mark_completed(sync_engine, request_id, {"sequences": [1]})
+    waiter = _RecordingWaiter()
+
+    result = await retrieve_future(
+        RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiter)
+    )
+
+    assert result == {"sequences": [1]}
+    assert waiter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_retrieve_future_waits_only_while_pending(async_engine, sync_engine):
+    from skyrl.tinker.api import RetrieveFutureRequest, retrieve_future
+
+    request_id = insert_pending(sync_engine)[0]
+    waiter = _RecordingWaiter(result=FutureResult(status=RequestStatus.COMPLETED, result_data={"late": True}))
+
+    result = await retrieve_future(
+        RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiter)
+    )
+
+    assert result == {"late": True}
+    assert waiter.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_future_404s_for_unknown_request(async_engine):
+    from fastapi import HTTPException
+
+    from skyrl.tinker.api import RetrieveFutureRequest, retrieve_future
+
+    waiter = _RecordingWaiter()
+    with pytest.raises(HTTPException) as excinfo:
+        await retrieve_future(RetrieveFutureRequest(request_id="123456"), _stub_request(async_engine, waiter))
+
+    assert excinfo.value.status_code == 404
+    assert waiter.calls == 0

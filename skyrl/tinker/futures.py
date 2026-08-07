@@ -59,10 +59,9 @@ class FutureWaiter:
             self._task = None
 
     async def wait(self, request_id: int, timeout: float) -> FutureResult | None:
-        """Wait for ``request_id`` to reach a terminal status.
+        """Wait for a pending ``request_id`` to reach a terminal status.
 
-        Returns None if ``timeout`` elapses first. The caller is responsible
-        for ensuring the request exists; an unknown id simply times out.
+        Returns None if ``timeout`` elapses first.
         """
         waiter = asyncio.get_running_loop().create_future()
         self._waiters.setdefault(request_id, set()).add(waiter)
