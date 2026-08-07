@@ -121,3 +121,25 @@ async def test_no_reset_when_prefix_caching_disabled(strategy, monkeypatch):
 
     client.reset_prefix_cache.assert_not_awaited()
     assert worker._weight_transfer_sender.send_chunks.await_args.kwargs["reset_prefix_cache"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)])
+async def test_worker_closes_deserialized_remote_client(strategy, monkeypatch):
+    from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+        RemoteInferenceClient,
+    )
+
+    worker_cls = get_worker_cls(strategy)
+    _patch_collectives(monkeypatch)
+    worker = _make_worker(worker_cls, handles_prefix_cache_reset=True)
+    client = RemoteInferenceClient(
+        proxy_url="http://router",
+        server_urls=["http://server"],
+        data_parallel_size=1,
+    )
+    client.teardown = AsyncMock()
+
+    await worker.broadcast_to_inference_engines(client, _ie_cfg())
+
+    client.teardown.assert_awaited_once()
