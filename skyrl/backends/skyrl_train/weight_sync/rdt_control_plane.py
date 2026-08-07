@@ -56,6 +56,9 @@ from skyrl.backends.skyrl_train.inference_servers.rdt_control_protocol import (
 
 logger = logging.getLogger(__name__)
 
+_CONNECT_TIMEOUT_S = 10.0
+"""TCP-connect bound for control-plane POSTs. The read side stays unbounded."""
+
 
 class SyncRdtControlPlaneClient:
     """Blocking ``VLLMWeightSyncClient`` over the inference servers' ``/collective_rpc``.
@@ -71,7 +74,12 @@ class SyncRdtControlPlaneClient:
     def __init__(self, server_urls: Sequence[str], data_parallel_size: int) -> None:
         import requests  # local: Ray (an RDT hard-dep) provides it; keep it off non-RDT paths.
 
+        # The PROVISIONED list. `_urls` is the identity list -- `build_rdt_init_payloads`
+        # derives each server's `replica_rank` from its position in it -- so it is never
+        # mutated. `_live_urls` is the per-sync view the start/update/finish fan-outs
+        # target; see `set_live`.
         self._urls = list(server_urls)
+        self._live_urls = list(self._urls)
         self._dp = int(data_parallel_size)
         if not self._urls:
             raise ValueError("SyncRdtControlPlaneClient requires at least one server_url.")
@@ -82,6 +90,33 @@ class SyncRdtControlPlaneClient:
         self._session.headers["Connection"] = "close"
         # One worker per server so a fan-out call issues every POST concurrently.
         self._pool = ThreadPoolExecutor(max_workers=len(self._urls), thread_name_prefix="rdt-ctrl")
+
+    # ---- membership ----
+
+    def set_live(self, urls: Optional[Sequence[str]]) -> None:
+        """Restrict the per-sync fan-outs to ``urls``; ``None`` restores the full set.
+
+        Only start/update/finish honour this. ``init_weight_transfer_engine``
+        deliberately keeps the provisioned list: init runs once, before anything can
+        have died, and ``build_rdt_init_payloads`` must see the whole list for
+        ``replica_rank = index // dp`` to mean the right thing.
+
+        Raises:
+            ValueError: a URL that was never provisioned. That would mean the fleet
+                geometry moved under us — the consumer ids this sync's free targets
+                were computed from would no longer describe these servers.
+        """
+        if urls is None:
+            self._live_urls = list(self._urls)
+            return
+        provisioned = set(self._urls)
+        unknown = [u for u in urls if u not in provisioned]
+        if unknown:
+            raise ValueError(f"set_live got URLs outside the provisioned set: {unknown}. " f"Provisioned: {self._urls}")
+        # Provisioned order, deduplicated: the fan-out is order-insensitive, but a
+        # stable order keeps logs and test assertions readable.
+        live = set(urls)
+        self._live_urls = [u for u in self._urls if u in live]
 
     # ---- VLLMWeightSyncClient protocol ----
 
@@ -108,7 +143,7 @@ class SyncRdtControlPlaneClient:
         payload: Dict[str, Any] = {"method": method}
         if kwargs is not None:
             payload["kwargs"] = kwargs
-        self._fanout([(url, payload) for url in self._urls])
+        self._fanout([(url, payload) for url in self._live_urls])
 
     def _fanout(self, url_payloads: List[Tuple[str, Dict[str, Any]]]) -> None:
         """POST to every server concurrently; raise the first failure after all
@@ -127,10 +162,13 @@ class SyncRdtControlPlaneClient:
             raise first_exc
 
     def _post(self, url: str, payload: Dict[str, Any]) -> None:
-        # No timeout (bake + NIXL pull are long) and no retry (retrying a
-        # half-done stateful call would be wrong; Connection: close already
-        # removes the stale-keepalive race the async path guarded against).
-        resp = self._session.post(f"{url}{COLLECTIVE_RPC_ENDPOINT}", json=payload, timeout=None)
+        # (connect, read) — bounded connect, unbounded read. The read stays unbounded
+        # because bake + NIXL pull are legitimately long; the connect bound is what
+        # makes a DEAD host fail in seconds instead of hanging the fan-out behind a
+        # server that will never accept. Still no retry: retrying a half-done stateful
+        # call would be wrong, and `Connection: close` already removes the
+        # stale-keepalive race the async control path guarded against.
+        resp = self._session.post(f"{url}{COLLECTIVE_RPC_ENDPOINT}", json=payload, timeout=(_CONNECT_TIMEOUT_S, None))
         if resp.status_code >= 400:
             raise RuntimeError(_error_message(url, payload, resp))
 

@@ -29,6 +29,46 @@ The weight sync implementation relies on the native vLLM weight sync APIs - `Wei
 
 Strategy choice is decided by the sender (`get_transfer_strategy_cls`). The init info is expanded per server via `for_servers()` / `to_api_payload()` and pushed to the servers through the HTTP control plane (`init_weight_update_communicator` → vLLM's native `/init_weight_transfer_engine`); the receive side is vLLM's native weight-transfer engine, driven by `NewInferenceWorkerWrap`.
 
+## Degraded sync (engine fault tolerance)
+
+When `generator.inference_engine.fault_tolerance.enabled=true` and an inference server
+has died, the sync serves only the survivors. This works for `sharded_rdt` and nothing
+else: NCCL and cuda_ipc broadcast over a communicator fixed at provision, so losing a
+member hangs the broadcast rather than degrading it. `_live_server_urls` in
+`worker_dispatch.py` is the runtime backstop that refuses a partial broadcast.
+
+The mechanism is small because the routing already carried it:
+
+```
+[driver]   save_weights_for_sampler: live = client.active_server_urls (None if whole)
+             -> _broadcast_to_inference_engines(..., live_server_urls=live)   # one dispatch,
+                                                                              # so all ranks agree
+[worker]   RdtWeightSyncSender.send(extractor, live_server_urls)
+             live_cids = urls -> PROVISIONED indices -> replica ranks -> consumer ids
+             control_plane.set_live(live)          # start/update/finish only; init keeps the
+                                                   # provisioned list (replica_rank is a position)
+[producer] send_weights(live_consumer_ids) -> _live_consumers recomputes this sync's
+             _free_targets from RdtRouter.free_target(rank, g, live), restoring them after
+           groups whose live target hits 0 are gathered and DROPPED (pre-existing path)
+[consumer] unchanged — a consumer's plan depends only on its own consumer_id
+```
+
+Invariants worth not breaking: provisioned geometry (`num_consumers`, the router,
+ownership, `served_names`) is frozen for the run and liveness is only ever a *filter*
+over it; every rank must get the same live set; and the gather loop still iterates every
+owned group on every rank, because the gather is a collective.
+
+`_RDTProducerServer` also carries a **stall watchdog** (`stall_timeout_s`, default 300s).
+Detection is generation-driven and no generation is in flight during a sync, so a death
+inside the sync window has no detector — the dead consumer never sends `free_gather`, the
+three waits block forever, and every trainer rank wedges in NCCL with no exception
+anywhere. On no publish/serve/free progress for the timeout, the producer fires the
+existing `set_gather_error` channel and the run fails with a real error. Part 1 does not
+recover from this; it only makes it diagnosable.
+
+Vendored files (`sharded_rdt_*.py`) mirror `~/default/vllm-rdt-weight-sync`; keep both in
+sync. Design doc: `~/default/rdt_fault_tolerance.md`.
+
 ## Lifecycle (`NewInferenceWorkerWrap`)
 1. `start_weight_update(is_checkpoint_format=True)` — initializes layerwise reload (moves layers to meta device, wraps loaders).
 2. `update_weights_chunk(update_info)` — called repeatedly. Unpacks the SkyRL packed CUDA-IPC payload, slices the contiguous buffer per param, calls `model.load_weights(weights=...)` under `set_current_vllm_config`.

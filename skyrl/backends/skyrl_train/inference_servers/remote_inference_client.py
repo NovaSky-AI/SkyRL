@@ -28,6 +28,12 @@ Key features:
 - Two URL types:
   - proxy_url: Single URL for data plane operations (routed requests)
   - server_urls: List of backend URLs for control plane operations (fan-out)
+- Fault tolerance (opt-in, ``fault_tolerance.enabled``): ``server_urls`` is the
+  PROVISIONED list and is never mutated — position in it is engine identity for the
+  whole run. ``active_server_urls`` is the subset that has not been found dead, and
+  is what the control plane and weight sync talk to. Detection is reactive: a caught
+  data-plane failure triggers one ``/health`` probe of the fleet, non-responders are
+  dropped from the router, and generation retries land on the survivors.
 - Lazy world_size fetching from /get_server_info
 - Keep-mode pause: in-flight requests are frozen by the vLLM scheduler and
   resume where they left off after /resume. No client-side retry needed.
@@ -47,6 +53,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -79,6 +86,19 @@ from skyrl.env_vars import (
 
 _DATA_PLANE_RETRIES = 30
 
+# Router worker-management routes (see `_router_post_worker`). Confirmed present in
+# vllm-router 0.1.14.post1; the backend URL travels as the `url` query parameter.
+_ROUTER_ADD_WORKER = "/add_worker"
+_ROUTER_REMOVE_WORKER = "/remove_worker"
+_ROUTER_LIST_WORKERS = "/list_workers"
+_ROUTER_ADMIN_TIMEOUT_S = 10.0
+"""Bound for router membership calls. These run on the failure path, where the
+router may itself be struggling; an unbounded admin call would defeat the point."""
+
+# Router status codes that mean "the backend behind me is gone or unreachable", as
+# opposed to a client error we should surface. Retried (and reconciled) under FT.
+_ROUTER_BACKEND_FAILURE_STATUSES = frozenset({502, 503, 504})
+
 SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 """Default LoRA adapter name used for single-LoRA training inside SkyRL."""
 
@@ -96,9 +116,20 @@ if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
         WeightSyncInitInfo,
     )
+    from skyrl.train.config.config import InferenceFaultToleranceConfig
 
 
 logger = logging.getLogger(__name__)
+
+
+class EngineFleetError(RuntimeError):
+    """Too few inference engines are alive to continue.
+
+    Raised by ``_reconcile_fleet`` when a probe would take the active set below
+    ``fault_tolerance.min_live_engines``. Part 1 cannot bring engines back, so
+    there is nothing to wait for — failing here is strictly better than training
+    against a fleet that cannot serve.
+    """
 
 
 def _extract_session_id_and_body(
@@ -219,6 +250,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
     tokenizer: Optional[Any] = None
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
 
+    fault_tolerance: Optional["InferenceFaultToleranceConfig"] = None
+    """Engine fault-tolerance policy (``generator.inference_engine.fault_tolerance``).
+    ``None`` or ``enabled=False`` leaves every FT path inert."""
+
     # Private fields excluded from repr for cleaner output
     _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
@@ -227,6 +262,19 @@ class RemoteInferenceClient(InferenceEngineInterface):
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
     # Monotonic counter of weight syncs (see `increment_weight_version`); source of the prefix-cache salt.
     _weight_version: int = field(default=0, repr=False)
+    # [FT] Backends a health probe found dead. Driver-side; written only by
+    # `_reconcile_fleet`. `server_urls` itself is NEVER mutated -- it is the
+    # provisioned list, and position in it IS engine identity for the whole run
+    # (`replica_rank = index // data_parallel_size`). Slots are never compacted.
+    _disabled_server_urls: set = field(default_factory=set, repr=False)
+    # Bumps on every membership change. Callers capture it before a request and
+    # pass it back on failure, so a burst of failures under one membership state
+    # triggers exactly one probe.
+    _membership_generation: int = field(default=0, repr=False)
+    # The single in-flight probe (see `_reconcile_fleet`), and the loop it belongs
+    # to. Both are dropped on pickle.
+    _reconcile_task: Optional[Any] = field(default=None, repr=False)
+    _reconcile_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
 
     @property
     def weight_version(self) -> int:
@@ -236,6 +284,250 @@ class RemoteInferenceClient(InferenceEngineInterface):
     def increment_weight_version(self) -> None:
         """Advance the weight version. Called once per completed weight sync to the engines."""
         self._weight_version += 1
+
+    # ---------------------------
+    # Fleet membership (fault tolerance)
+    # ---------------------------
+
+    @property
+    def _ft_enabled(self) -> bool:
+        return bool(self.fault_tolerance is not None and self.fault_tolerance.enabled)
+
+    @property
+    def active_server_urls(self) -> List[str]:
+        """Provisioned URLs minus the ones a health probe found dead.
+
+        In provisioned order, and never compacted: a URL leaving this list does not
+        renumber the ones after it. Use this for anything that talks to backends now
+        (control plane, weight sync); use ``server_urls`` for anything that encodes
+        identity or geometry (``replica_rank``, ``num_consumers``).
+        """
+        if not self._disabled_server_urls:
+            return list(self.server_urls)
+        return [u for u in self.server_urls if u not in self._disabled_server_urls]
+
+    @property
+    def disabled_server_urls(self) -> List[str]:
+        """Provisioned URLs currently marked dead, in provisioned order."""
+        return [u for u in self.server_urls if u in self._disabled_server_urls]
+
+    @property
+    def membership_generation(self) -> int:
+        """Monotonic counter of membership changes; 0 until the first engine dies."""
+        return self._membership_generation
+
+    def sync_membership(self, live_server_urls: Optional[List[str]]) -> None:
+        """Adopt someone else's membership view. Local bookkeeping only, no I/O.
+
+        For copies of this client that cannot reconcile for themselves: a worker's
+        copy was pickled at ``init_weight_sync_state``, so its ``_disabled_server_urls``
+        is frozen at "nothing has died". Without this, the rank-0
+        ``reset_prefix_cache`` fan-out inside a weight sync would discover the dead
+        engine on its own — re-probing the fleet and re-issuing router removals from
+        the worker, in the middle of the sync window, for a conclusion the driver
+        already reached.
+
+        ``None`` means the whole provisioned fleet is live.
+
+        Raises:
+            ValueError: a URL outside the provisioned set, which would mean the
+                geometry moved.
+        """
+        if live_server_urls is None:
+            live = set(self.server_urls)
+        else:
+            live = set(live_server_urls)
+            unknown = sorted(live - set(self.server_urls))
+            if unknown:
+                raise ValueError(
+                    f"sync_membership got URLs outside the provisioned set: {unknown}. "
+                    f"Provisioned: {self.server_urls}"
+                )
+        disabled = {u for u in self.server_urls if u not in live}
+        if disabled != self._disabled_server_urls:
+            self._disabled_server_urls = disabled
+            self._membership_generation += 1
+
+    async def _probe_health(self, url: str) -> bool:
+        """One ``GET /health`` against a backend. True iff it answered 200.
+
+        ``/health`` is the same endpoint ``VLLMServerActor`` waits on at startup, so
+        a 200 here means the same thing it meant then. Any failure — refused,
+        timed out, non-200 — counts as dead: this runs only after something already
+        broke, so the cost of a false positive (one engine sits out the run) is far
+        below the cost of a false negative (every retry re-picks the dead backend).
+        """
+        assert self.fault_tolerance is not None
+        timeout = aiohttp.ClientTimeout(total=self.fault_tolerance.health_probe_timeout_s)
+        try:
+            session = await self._get_session()
+            async with session.get(f"{url}/health", timeout=timeout) as resp:
+                await resp.read()  # drain so the keep-alive connection is reusable
+                return resp.status == 200
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - any failure to answer means dead
+            logger.debug(f"health probe for {url} failed: {type(e).__name__}: {e}")
+            return False
+
+    async def _probe_and_disable(self) -> None:
+        """Probe every active backend once; disable and de-route the non-responders.
+
+        This is the whole detector. There is no interval, no background task and no
+        per-URL failure counter carried across time — it runs only because a request
+        already failed. See ``_reconcile_fleet`` for why it is a probe rather than a
+        reading of the failure itself.
+        """
+        assert self.fault_tolerance is not None
+        candidates = self.active_server_urls
+        if not candidates:
+            return
+        alive = await asyncio.gather(*[self._probe_health(u) for u in candidates])
+        dead = [u for u, ok in zip(candidates, alive) if not ok]
+        if not dead:
+            logger.info(
+                "[ft] fleet probe found no dead engines (%d active); the failure was transient",
+                len(candidates),
+            )
+            return
+
+        self._disabled_server_urls.update(dead)
+        self._membership_generation += 1
+        remaining = len(candidates) - len(dead)
+        logger.warning(
+            "[ft] inference engines died: %s. Active %d -> %d (membership generation %d).",
+            dead,
+            len(candidates),
+            remaining,
+            self._membership_generation,
+        )
+
+        floor = self.fault_tolerance.min_live_engines
+        if remaining < floor:
+            # Nothing can bring them back in Part 1, so waiting would only delay the
+            # same outcome. Skip the router calls: the run is over.
+            raise EngineFleetError(
+                f"only {remaining} inference engine(s) still alive, below "
+                f"fault_tolerance.min_live_engines={floor}. Dead: {dead}"
+            )
+
+        # Best-effort de-route. The router's own health checker is the backstop, so a
+        # failure here costs latency (requests keep hashing onto a dead backend until
+        # it ejects), not correctness — and the URL is already locally disabled.
+        await asyncio.gather(*[self._router_remove_worker(u) for u in dead], return_exceptions=True)
+
+    async def _reconcile_fleet(self, seen_generation: Optional[int] = None) -> int:
+        """Turn "something in the fleet is broken" into "these URLs are broken".
+
+        Triggered by a caught data-plane failure, never by a timer. A probe rather
+        than a reading of the failure itself because the failure arrives from the
+        *router* (a 502/503/504), which does not reliably name the backend that died.
+
+        Debounced two ways so a batch of 512 trajectories failing at once costs one
+        probe, not 512:
+
+        * callers pass the ``membership_generation`` they failed under; if it has
+          already moved, someone else's probe covered them and this returns at once;
+        * otherwise they all await one shared probe task.
+
+        Returns the membership generation after reconciling, for the caller to carry
+        into its next attempt.
+        """
+        if not self._ft_enabled:
+            return self._membership_generation
+        if seen_generation is not None and seen_generation != self._membership_generation:
+            return self._membership_generation
+
+        loop = asyncio.get_running_loop()
+        # No await between the check and the assignment, so concurrent callers on this
+        # loop cannot both create a task.
+        task = self._reconcile_task
+        if task is None or task.done() or self._reconcile_loop is not loop:
+            task = loop.create_task(self._probe_and_disable())
+            self._reconcile_task = task
+            self._reconcile_loop = loop
+        # Shielded: one caller giving up (cancelled trajectory) must not cancel the
+        # probe every other caller is waiting on.
+        await asyncio.shield(task)
+        return self._membership_generation
+
+    # ---------------------------
+    # Router worker management
+    # ---------------------------
+
+    async def _router_worker_call(self, endpoint: str, url: str) -> Tuple[int, str]:
+        """POST a worker-management route on the router. Returns (status, body text).
+
+        The backend URL travels as the ``url`` query parameter and the response body
+        is plain text, not JSON — verified against vllm-router 0.1.14.post1, which
+        answers ``400 missing field `url``` to any other spelling.
+        """
+        session = await self._get_session()
+        async with session.post(
+            f"{self.proxy_url}{endpoint}",
+            params={"url": url},
+            timeout=aiohttp.ClientTimeout(total=_ROUTER_ADMIN_TIMEOUT_S),
+        ) as resp:
+            return resp.status, (await resp.text())
+
+    async def _router_remove_worker(self, url: str) -> bool:
+        """Drop a backend from the router's ring. Best-effort; never raises.
+
+        Idempotent server-side: the router answers 200 for a URL it does not have.
+        ``consistent_hash`` rehashes onto the remaining ring on removal, so sessions
+        land on survivors with no policy change.
+        """
+        try:
+            status, body = await self._router_worker_call(_ROUTER_REMOVE_WORKER, url)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ft] router remove_worker({url}) failed: {type(e).__name__}: {e}")
+            return False
+        if status != 200:
+            logger.warning(f"[ft] router remove_worker({url}) returned HTTP {status}: {body[:200]}")
+            return False
+        logger.info(f"[ft] removed {url} from the router")
+        return True
+
+    async def _router_add_worker(self, url: str) -> bool:
+        """Add a backend to the router's ring. Best-effort; never raises.
+
+        Unused in Part 1 (nothing is restarted, so nothing rejoins) — it exists so
+        the membership surface is symmetric and testable. Unlike removal the router
+        is NOT idempotent here: re-adding a live worker is a 400 ``already exists``,
+        which we treat as success since the post-condition holds either way.
+        """
+        try:
+            status, body = await self._router_worker_call(_ROUTER_ADD_WORKER, url)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ft] router add_worker({url}) failed: {type(e).__name__}: {e}")
+            return False
+        if status == 400 and "already exists" in body:
+            return True
+        if status != 200:
+            logger.warning(f"[ft] router add_worker({url}) returned HTTP {status}: {body[:200]}")
+            return False
+        logger.info(f"[ft] added {url} to the router")
+        return True
+
+    async def router_list_workers(self) -> List[str]:
+        """Backends the router currently routes to (``GET /list_workers``).
+
+        The router's view, which is not necessarily ours: it lags on its own health
+        interval, and a worker we removed locally but failed to de-route is still
+        here. Used by tests and diagnostics, never as an input to routing decisions.
+        """
+        session = await self._get_session()
+        async with session.get(
+            f"{self.proxy_url}{_ROUTER_LIST_WORKERS}",
+            timeout=aiohttp.ClientTimeout(total=_ROUTER_ADMIN_TIMEOUT_S),
+        ) as resp:
+            body = await resp.json(content_type=None)
+            raise_for_status(resp, body if isinstance(body, dict) else None)
+        return list(body.get("urls", []) if isinstance(body, dict) else body)
 
     def __post_init__(self):
         if self.data_parallel_size <= 0:
@@ -305,12 +597,36 @@ class RemoteInferenceClient(InferenceEngineInterface):
         retry would grab another stale connection from the same pool, so we
         sleep briefly to let the connector detect and purge dead sockets
         before the next attempt.
+
+        Two of the retryable classes are new and apply **unconditionally**, because
+        they were always transport failures that a retry is the right answer to:
+        ``ClientPayloadError`` (a response truncated mid-body) and
+        ``asyncio.TimeoutError`` (which also covers ``ServerTimeoutError``).
+        ``ClientConnectorError`` is already a ``ClientOSError`` subclass.
+
+        Under fault tolerance, two more behaviours switch on:
+
+        * a router 502/503/504 is retried. This is the actual signature of a dead
+          backend — the router answers, the engine behind it does not — and without
+          it ``raise_for_status`` raises straight out and kills the trajectory.
+        * a per-request total timeout (the shared session has none), so a *wedged*
+          engine — one that accepts the connection and never answers — becomes a
+          bounded failure instead of an eternal hang.
+
+        On the first retryable failure the fleet is reconciled before backing off,
+        so the retry is issued after the dead backend has left the router's ring
+        rather than hashing straight back onto it.
         """
         session = await self._get_session()
+        post_kwargs: Dict[str, Any] = {}
+        if self._ft_enabled and self.fault_tolerance.request_timeout_s is not None:
+            post_kwargs["timeout"] = aiohttp.ClientTimeout(total=self.fault_tolerance.request_timeout_s)
         last_exc: Optional[Exception] = None
+        reconciled = False
+        generation = self._membership_generation
         for attempt in range(_DATA_PLANE_RETRIES):
             try:
-                async with session.post(url, json=json, headers=headers) as resp:
+                async with session.post(url, json=json, headers=headers, **post_kwargs) as resp:
                     try:
                         body = await resp.json(content_type=None)
                     except Exception as e:
@@ -331,11 +647,22 @@ class RemoteInferenceClient(InferenceEngineInterface):
                         continue
                     raise_for_status(resp, body)
                     return body
-            except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
+            except aiohttp.ClientResponseError as e:
+                if not (self._ft_enabled and e.status in _ROUTER_BACKEND_FAILURE_STATUSES):
+                    raise
                 last_exc = e
-                logger.debug(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
-                await asyncio.sleep(1)
-                continue
+            except (
+                aiohttp.ServerDisconnectedError,
+                aiohttp.ClientOSError,
+                aiohttp.ClientPayloadError,
+                asyncio.TimeoutError,
+            ) as e:
+                last_exc = e
+            logger.debug(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {last_exc}")
+            if not reconciled:
+                reconciled = True
+                generation = await self._reconcile_fleet(seen_generation=generation)
+            await asyncio.sleep(1)
         raise last_exc  # type: ignore[misc]
 
     # ---------------------------
@@ -980,12 +1307,54 @@ class RemoteInferenceClient(InferenceEngineInterface):
             params: URL query parameters (e.g., for FastAPI Query() params).
 
         Returns:
-            Dict mapping server_url to response.
+            Dict mapping server_url to response. Under fault tolerance this may be a
+            SUBSET of the active set — see below.
         """
-        results = await asyncio.gather(
-            *[self._call_server(url, endpoint, json, method, params) for url in self.server_urls]
+        urls = self.active_server_urls
+        if not self._ft_enabled:
+            results = await asyncio.gather(*[self._call_server(url, endpoint, json, method, params) for url in urls])
+            return {url: resp for url, resp in results}
+
+        if not urls:
+            # Reachable only after a reconcile that already breached the floor (it
+            # disables the URLs before raising). Returning {} here would read as
+            # "fan-out succeeded" to every caller.
+            raise EngineFleetError(f"{endpoint}: every inference server is marked dead ({self.server_urls}).")
+
+        # [FT] Degrade instead of abort. A bare gather aborts the whole fan-out on the
+        # first failure, so one dead engine breaks pause/resume/reset_prefix_cache
+        # fleet-wide — and pause/resume bracket every non-colocated weight sync, which
+        # means a dead engine breaks the sync path before RDT is even involved.
+        outcomes = await asyncio.gather(
+            *[self._call_server(url, endpoint, json, method, params) for url in urls],
+            return_exceptions=True,
         )
-        return {url: resp for url, resp in results}
+        ok: Dict[str, Any] = {}
+        failed: List[Tuple[str, BaseException]] = []
+        for url, outcome in zip(urls, outcomes):
+            if isinstance(outcome, BaseException):
+                if isinstance(outcome, asyncio.CancelledError):
+                    raise outcome
+                failed.append((url, outcome))
+            else:
+                ok[outcome[0]] = outcome[1]
+        if failed:
+            logger.warning(
+                "[ft] %s failed on %d/%d active servers: %s",
+                endpoint,
+                len(failed),
+                len(urls),
+                [(u, f"{type(e).__name__}: {e}") for u, e in failed],
+            )
+            # Reconcile first even when nothing answered: the probe's verdict ("the
+            # whole fleet is gone") is a better error than one server's transport
+            # exception, and it is the one that stops the run.
+            await self._reconcile_fleet()
+            if not ok:
+                # Returning {} would read as "fan-out succeeded, no servers" to every
+                # caller; surface the first failure instead.
+                raise failed[0][1]
+        return ok
 
     async def pause(self, mode: Union[PauseMode, str] = PauseMode.KEEP, clear_cache: bool = False) -> Dict[str, Any]:
         """
@@ -1276,6 +1645,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
             build_rdt_init_payloads,
         )
 
+        # PROVISIONED, deliberately -- not `active_server_urls`. Position in this list
+        # is what `replica_rank = index // data_parallel_size` means, so handing it a
+        # degraded list would silently re-map every surviving consumer. Init runs once,
+        # before anything can have died, so the two are equal here anyway.
         payloads = build_rdt_init_payloads(init_info, self.server_urls, self.data_parallel_size)
         results = await asyncio.gather(
             *[self._call_server(url, "/collective_rpc", payload) for url, payload in payloads]
@@ -1353,7 +1726,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     raise_for_status(resp, body)
                 return server_url, {"status": resp.status, "body": await resp.text()}
 
-        results = await asyncio.gather(*[_load_on_server(url) for url in self.server_urls])
+        results = await asyncio.gather(*[_load_on_server(url) for url in self.active_server_urls])
 
         logger.info(f"Loaded LoRA adapter '{lora_name}' from {lora_path}")
 
@@ -1387,7 +1760,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     raise_for_status(resp, body)
                 return server_url, {"status": resp.status, "body": await resp.text()}
 
-        results = await asyncio.gather(*[_unload_on_server(url) for url in self.server_urls])
+        results = await asyncio.gather(*[_unload_on_server(url) for url in self.active_server_urls])
 
         logger.info(f"Unloaded LoRA adapter '{lora_name}'")
 
@@ -1418,6 +1791,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         results = await self._call_all_servers("/get_world_size", {}, method="GET")
 
+        # PROVISIONED, deliberately. The RDT geometry (`num_consumers`) is frozen at
+        # provision and must not shrink when an engine dies -- deriving it from a
+        # degraded list would re-map every surviving consumer. That also means this
+        # must be resolved before any failure, which it is: the first call happens
+        # during weight-sync init. A dead engine here is a real error.
         per_server = []
         for server_url in self.server_urls:
             resp = results.get(server_url)
@@ -1447,6 +1825,14 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
     async def teardown(self) -> None:
         """Close HTTP session."""
+        task = self._reconcile_task
+        self._reconcile_task = None
+        self._reconcile_loop = None
+        if task is not None and not task.done():
+            # Shielded against its awaiters' cancellation, so it has to be cancelled here.
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
@@ -1464,12 +1850,22 @@ class RemoteInferenceClient(InferenceEngineInterface):
     # ---------------------------
 
     def __getstate__(self) -> dict:
-        """Exclude non-serializable fields from pickle."""
+        """Exclude non-serializable fields from pickle.
+
+        ``_disabled_server_urls`` DOES travel, but only as a snapshot: the driver is
+        the single writer, and worker copies were pickled at ``init_weight_sync_state``
+        — before anything could have died — so a worker's view never updates. That is
+        why the live set is passed explicitly into the weight-sync call rather than
+        read off the worker's client (see ``RdtWeightSyncSender.send``). A worker-side
+        fan-out that hits a since-dead engine degrades through ``_call_all_servers``.
+        """
         state = self.__dict__.copy()
         state["_session"] = None
         state["_gen_sem"] = None
         state["_detok_sem"] = None
         state["_sem_loop"] = None
+        state["_reconcile_task"] = None
+        state["_reconcile_loop"] = None
         return state
 
     def __setstate__(self, state: dict) -> None:
@@ -1479,6 +1875,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
         self._gen_sem = None
         self._detok_sem = None
         self._sem_loop = None
+        self._reconcile_task = None
+        self._reconcile_loop = None
+        # Older pickles (and hand-built states in tests) predate the FT fields.
+        self._disabled_server_urls = set(state.get("_disabled_server_urls", ()))
+        self._membership_generation = int(state.get("_membership_generation", 0))
 
     async def aclose(self):
         if self._session is not None:

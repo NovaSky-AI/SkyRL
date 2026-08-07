@@ -296,6 +296,7 @@ def build_new_inference_client(
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,
+        fault_tolerance=ie_cfg.fault_tolerance,
     )
 
     return client, server_setup

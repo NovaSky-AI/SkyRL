@@ -307,6 +307,103 @@ class TestRdtRouter:
             RdtRouter(2, 2, [[0, 5]]).validate()
 
 
+class TestRdtRouterLiveConsumers:
+    """``free_target(..., live_consumer_ids=...)`` — the whole producer-side
+    mechanism for syncing to a fleet that has lost an inference engine.
+
+    The property that makes degradation safe is that ``producer_for`` is pure in
+    the consumer id: dropping consumers cannot change any SURVIVING consumer's
+    binding, so a live target is always a subset-count of the provisioned one and
+    a producer never has to serve a name it did not register at init. These pin
+    that, across the routing shapes the real deployments use."""
+
+    ROUTERS = {
+        # (num_producers, num_consumers, group_owners, num_groups)
+        "identity_8x8": (8, 8, None, 6),
+        "gather_to_all_16x8": (16, 8, None, 95),
+        "fan_in_2x8": (2, 8, None, 5),
+        "pp_local_2stage": (16, 8, [list(range(8))] * 3 + [list(range(8, 16))] * 3, 6),
+        "owners_exceed_consumers": (8, 2, [list(range(8))] * 4, 4),
+    }
+
+    @staticmethod
+    def _router(spec):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
+
+        p, c, owners, ngroups = spec
+        return RdtRouter(p, c, owners, num_groups=ngroups), ngroups
+
+    @pytest.mark.parametrize("name", list(ROUTERS))
+    def test_full_live_set_is_identical_to_no_live_set(self, name):
+        """Passing every consumer must be byte-identical to passing None, so an
+        FT-enabled run that never loses an engine behaves exactly like today."""
+        r, ngroups = self._router(self.ROUTERS[name])
+        everyone = list(range(r.num_consumers))
+        for g in range(ngroups):
+            for p in r.owners(g):
+                assert r.free_target(p, g, everyone) == r.free_target(p, g)
+
+    @pytest.mark.parametrize("name", list(ROUTERS))
+    def test_live_targets_match_a_direct_count_over_producer_for(self, name):
+        """Cross-check against the definition, over hole-y live sets — the live set
+        is not required to be a prefix or contiguous (a restarted-slot fleet in
+        Part 2 will not be)."""
+        r, ngroups = self._router(self.ROUTERS[name])
+        c = r.num_consumers
+        for live in ({0}, set(range(c)) - {0}, set(range(0, c, 2)), {c - 1}, set(range(c))):
+            for g in range(ngroups):
+                for p in r.owners(g):
+                    expected = sum(1 for x in sorted(live) if r.producer_for(x, g) == p)
+                    assert r.free_target(p, g, live) == expected
+
+    @pytest.mark.parametrize("name", list(ROUTERS))
+    def test_live_targets_never_exceed_provisioned(self, name):
+        r, ngroups = self._router(self.ROUTERS[name])
+        live = set(range(r.num_consumers)) - {0}
+        for g in range(ngroups):
+            for p in r.owners(g):
+                assert r.free_target(p, g, live) <= r.free_target(p, g)
+
+    @pytest.mark.parametrize("name", list(ROUTERS))
+    def test_live_targets_still_conserve_over_the_live_set(self, name):
+        """The termination law, restated for a degraded sync: every live consumer
+        frees each group exactly once, so the per-producer targets sum to the LIVE
+        count. Anything else is a hang (short) or a double-free (long)."""
+        r, ngroups = self._router(self.ROUTERS[name])
+        live = sorted(set(range(r.num_consumers)) - {0})
+        for g in range(ngroups):
+            assert sum(r.free_target(p, g, live) for p in r.owners(g)) == len(live)
+
+    def test_surviving_consumers_keep_their_bindings(self):
+        """The property degradation rests on: removing a consumer must not move any
+        other consumer's producer for any group."""
+        r, ngroups = self._router(self.ROUTERS["gather_to_all_16x8"])
+        before = {(c, g): r.producer_for(c, g) for c in range(r.num_consumers) for g in range(ngroups)}
+        live = sorted(set(range(r.num_consumers)) - {3})
+        after = {(c, g): r.producer_for(c, g) for c in live for g in range(ngroups)}
+        assert all(after[k] == before[k] for k in after)
+
+    def test_an_entirely_dead_consumer_block_zeroes_its_producers(self):
+        """2 producers, 8 consumers: consumers 0-3 pull from producer 0. Kill all
+        four and producer 0 has nothing to publish — it still runs every gather
+        collective, but its groups become gather-and-drop."""
+        r, ngroups = self._router(self.ROUTERS["fan_in_2x8"])
+        live = [4, 5, 6, 7]
+        for g in range(ngroups):
+            assert r.free_target(0, g, live) == 0
+            assert r.free_target(1, g, live) == 4
+
+    def test_empty_live_set_zeroes_everything(self):
+        r, ngroups = self._router(self.ROUTERS["identity_8x8"])
+        assert all(r.free_target(p, g, []) == 0 for g in range(ngroups) for p in r.owners(g))
+
+    def test_validate_still_runs_over_the_provisioned_set(self):
+        """``validate()`` asserts a PROVISIONING invariant (targets sum to
+        num_consumers), not a per-sync one, so it must keep ignoring liveness."""
+        r, _ = self._router(self.ROUTERS["pp_local_2stage"])
+        r.validate()  # unchanged by anything above
+
+
 class TestPpLocalOwnership:
     """``MegatronStackedWeightSource`` ownership detection (SKYRL_RDT_PP_LOCAL).
 
@@ -462,13 +559,19 @@ class TestPpLocalOwnership:
         with pytest.raises(RuntimeError, match="not in the assembled partition"):
             list(src._walk_in_group_order(walk))
 
-    def test_pp_local_is_off_without_the_env_var(self, monkeypatch):
+    def test_pp_local_is_on_by_default_and_opt_out_only(self, monkeypatch):
+        """PP-local is the default; only an explicit ``0`` forces gather-to-all.
+
+        It engages only at pp > 1 and is self-healing, so the opt-out exists as an
+        escape hatch rather than a knob anyone is expected to set."""
         from skyrl.backends.skyrl_train.weight_sync import rdt_send
 
         monkeypatch.delenv("SKYRL_RDT_PP_LOCAL", raising=False)
-        assert rdt_send._pp_local_requested() is False
+        assert rdt_send._pp_local_requested() is True
         monkeypatch.setenv("SKYRL_RDT_PP_LOCAL", "1")
         assert rdt_send._pp_local_requested() is True
+        monkeypatch.setenv("SKYRL_RDT_PP_LOCAL", "0")
+        assert rdt_send._pp_local_requested() is False
 
 
 class TestQkvIndexDeviceCtx:

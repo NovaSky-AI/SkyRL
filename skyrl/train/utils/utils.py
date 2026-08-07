@@ -568,8 +568,93 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             "Each inference engine DP rank (TP*PP workers) must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
         )
 
+    _validate_inference_fault_tolerance_cfg(cfg)
+
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
+
+
+def _validate_inference_fault_tolerance_cfg(cfg: SkyRLTrainConfig):
+    """Gate ``generator.inference_engine.fault_tolerance.enabled`` to the topologies
+    that can actually survive an engine death.
+
+    The hard requirement is the weight-sync backend. NCCL and cuda_ipc build a fixed
+    communicator over the provisioned worker set: losing a member does not degrade
+    the broadcast, it hangs it. Only ``sharded_rdt`` creates no process group — the
+    consumers pull over NIXL — so its membership is a per-sync input rather than a
+    communicator.
+
+    The rest are cases where the failure unit is not a single engine: DP deployments
+    rendezvous through server 0, colocation puts the trainer ranks on the dying GPUs,
+    PD and external engines are not ours to restart, and one engine has nothing to
+    fail over to.
+    """
+    ie_cfg = cfg.generator.inference_engine
+    ft = ie_cfg.fault_tolerance
+    if not ft.enabled:
+        return
+
+    if ie_cfg.weight_sync_backend != "sharded_rdt":
+        raise ValueError(
+            f"generator.inference_engine.fault_tolerance.enabled=true requires "
+            f"weight_sync_backend='sharded_rdt', got {ie_cfg.weight_sync_backend!r}. "
+            "NCCL and cuda_ipc pin a fixed communicator over the provisioned worker "
+            "set, so a membership change cannot be tolerated — losing an engine hangs "
+            "the broadcast rather than degrading it. sharded_rdt creates no process "
+            "group (consumers pull over NIXL), so its live set is a per-sync input."
+        )
+    if cfg.trainer.placement.colocate_all:
+        raise ValueError(
+            "generator.inference_engine.fault_tolerance.enabled=true requires "
+            "placement.colocate_all=false. Under colocation an engine death means the "
+            "trainer ranks on those GPUs died too, so there is no independent failure "
+            "domain to tolerate."
+        )
+    if ie_cfg.data_parallel_size != 1:
+        raise ValueError(
+            f"generator.inference_engine.fault_tolerance.enabled=true requires "
+            f"data_parallel_size=1, got {ie_cfg.data_parallel_size}. The servers of a DP "
+            "deployment share a rendezvous through server 0, so the failure unit is the "
+            "whole deployment rather than one engine."
+        )
+    if ie_cfg.enable_pd:
+        raise ValueError(
+            "generator.inference_engine.fault_tolerance.enabled=true does not support "
+            "prefill-decode disaggregation (enable_pd=true): prefill and decode engines "
+            "are routed as distinct pools and a KV-transfer peer cannot simply be dropped."
+        )
+    if not ie_cfg.run_engines_locally:
+        raise ValueError(
+            "generator.inference_engine.fault_tolerance.enabled=true requires "
+            "run_engines_locally=true. External engines are not ours to probe, remove "
+            "from the router, or account for in the weight-sync geometry."
+        )
+    if ie_cfg.num_engines < 2:
+        raise ValueError(
+            f"generator.inference_engine.fault_tolerance.enabled=true requires "
+            f"num_engines>=2, got {ie_cfg.num_engines}: with one engine there is nothing "
+            "to fail over to."
+        )
+    if not 1 <= ft.min_live_engines <= ie_cfg.num_engines:
+        raise ValueError(
+            f"generator.inference_engine.fault_tolerance.min_live_engines must be in "
+            f"[1, num_engines={ie_cfg.num_engines}], got {ft.min_live_engines}."
+        )
+    if ft.max_trajectory_retries < 0:
+        raise ValueError(
+            f"generator.inference_engine.fault_tolerance.max_trajectory_retries must be "
+            f">= 0, got {ft.max_trajectory_retries}."
+        )
+    for _field in ("health_probe_timeout_s", "stall_timeout_s"):
+        if getattr(ft, _field) <= 0:
+            raise ValueError(
+                f"generator.inference_engine.fault_tolerance.{_field} must be > 0, " f"got {getattr(ft, _field)}."
+            )
+    if ft.request_timeout_s is not None and ft.request_timeout_s <= 0:
+        raise ValueError(
+            "generator.inference_engine.fault_tolerance.request_timeout_s must be > 0 "
+            f"or None (no timeout), got {ft.request_timeout_s}."
+        )
 
 
 def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):

@@ -20,6 +20,7 @@ covered by the GPU tests in `the fork's test_weight_transfer.py`.
 
 import gc
 import threading
+import time
 
 import pytest
 import torch
@@ -347,6 +348,104 @@ class TestServedNamesGuard:
         to guard. The call proceeds to the cache wait (not exercised here)."""
         server = server_factory(served_names=None)
         assert server._served_names is None
+
+
+class TestStallWatchdog:
+    """The bound on the three waits that used to be unbounded.
+
+    Engine-death detection is generation-driven, and no generation is in flight
+    during a weight sync, so a consumer that dies INSIDE the sync window has no
+    detector. It never sends its `free_gather`, the group is never released, and
+    `publish_group` / `end_sync` / the serve cache wait block forever — which stops
+    this rank iterating its WeightSource, which is a collective, which wedges every
+    other trainer rank in NCCL with no exception anywhere.
+
+    The watchdog converts that into one real error. These use a tiny timeout; the
+    production default is 300s.
+    """
+
+    def test_a_blocked_publish_fails_instead_of_hanging(self, server_factory):
+        server = server_factory(gather_lookahead=1, stall_timeout_s=0.3)
+        server.begin_sync()
+        _publish(server, GROUP_A)  # fills the only credit; nobody will free it
+
+        done = threading.Event()
+        threading.Thread(target=lambda: (_publish(server, GROUP_B), done.set()), daemon=True).start()
+
+        assert done.wait(timeout=10), "publish_group must give up rather than block forever"
+        assert isinstance(server._gather_error, RuntimeError)
+        assert "RDT stall" in str(server._gather_error)
+
+    def test_end_sync_fails_when_a_consumer_never_frees(self, server_factory):
+        """The exact mid-sync death signature: the group is published, the consumer
+        that owed the free is gone."""
+        server = server_factory(stall_timeout_s=0.3)
+        server.begin_sync()
+        _publish(server, GROUP_A, free_target=2)
+        server.free_gather(list(GROUP_A))  # one of the two consumers frees; the other died
+
+        server.end_sync()
+        assert server._gather_error is not None
+        assert "RDT stall" in str(server._gather_error)
+
+    def test_the_error_reaches_every_blocked_waiter(self, server_factory):
+        """The watchdog fires on the existing `set_gather_error` channel, so one
+        stall unwinds the whole rank through one path rather than each waiter
+        timing out separately."""
+        server = server_factory(gather_lookahead=1, stall_timeout_s=0.3)
+        server.begin_sync()
+        _publish(server, GROUP_A)
+
+        errors: list = []
+
+        def _pull():
+            try:
+                server.rdt_produce_weights_batched([(GROUP_B[0], ())], consumer_id=0)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        puller = threading.Thread(target=_pull, daemon=True)
+        publisher = threading.Thread(target=lambda: _publish(server, GROUP_B), daemon=True)
+        puller.start()
+        publisher.start()
+        puller.join(timeout=10)
+        publisher.join(timeout=10)
+        assert not puller.is_alive() and not publisher.is_alive()
+        assert errors and "gather errored" in str(errors[0])
+
+    def test_progress_anywhere_keeps_a_slow_sync_alive(self, server_factory):
+        """A consumer that is slow but pulling must never trip it: the stamp is
+        global to the producer, so a steady trickle of frees holds the whole rank
+        open. Nine sequential publishes with a 0.3s timeout each take longer in
+        total than the timeout, and none may fire."""
+        server = server_factory(gather_lookahead=1, stall_timeout_s=0.3)
+        server.begin_sync()
+        for i in range(9):
+            key = (f"model.layers.{i}.w",)
+            _publish(server, key)
+            time.sleep(0.1)
+            server.free_gather(list(key))
+        assert server._gather_error is None
+        server.end_sync()
+        assert server._gather_error is None
+
+    def test_begin_sync_resets_the_progress_stamp(self, server_factory):
+        """Syncs are minutes apart. Without the reset the first publish of sync N+1
+        would measure its stall from somewhere inside sync N and fire immediately."""
+        server = server_factory(gather_lookahead=1, stall_timeout_s=0.3)
+        server.begin_sync()
+        _publish(server, GROUP_A)
+        server.free_gather(list(GROUP_A))
+        server.end_sync()
+
+        time.sleep(0.5)  # the idle gap between syncs, > the timeout
+        server.begin_sync()
+        _publish(server, GROUP_B)
+        assert server._gather_error is None
+
+    def test_default_timeout_is_the_documented_one(self, server_factory):
+        server = server_factory()
+        assert server._stall_timeout == trainer_mod.DEFAULT_STALL_TIMEOUT_S
 
 
 # NOTE (SkyRL): the fork's test_weight_transfer.py also has a

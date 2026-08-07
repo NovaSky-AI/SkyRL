@@ -16,7 +16,7 @@ transport. Re-exported here for the callers that already import it from this
 module.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 import torch
 
@@ -138,13 +138,34 @@ class RdtRouter:
             return assign_producer_indices(self.num_producers, self.num_consumers, consumer_id)
         return sorted({self.producer_for(consumer_id, g) for g in range(self.num_groups)})
 
-    def free_target(self, producer_rank: int, group_idx: int) -> int:
+    def free_target(
+        self,
+        producer_rank: int,
+        group_idx: int,
+        live_consumer_ids: Collection[int] | None = None,
+    ) -> int:
         """How many consumers pull ``group_idx`` from ``producer_rank``.
 
         Zero is normal: an owner with more peers than consumers still has to run
         the group's collective, but must not publish it — nothing would free it.
+
+        ``live_consumer_ids`` restricts the scan to the consumers still alive for
+        THIS sync; ``None`` means the whole provisioned set (the only behaviour
+        before engine fault tolerance, and still the behaviour of every non-FT run).
+        This is the entire producer-side degraded-sync mechanism: ``producer_for`` is
+        pure in the consumer id, so removing consumers cannot change any surviving
+        consumer's binding — it can only lower some free targets, and a target that
+        falls to zero turns that group into gather-and-drop, which the publish loop
+        already handles. Liveness is a FILTER over the provisioned geometry, never a
+        re-derivation of it: rebuilding the router from a shrunken consumer count
+        would silently re-map every survivor.
         """
-        return sum(1 for c in range(self.num_consumers) if self.producer_for(c, group_idx) == producer_rank)
+        live = None if live_consumer_ids is None else set(live_consumer_ids)
+        return sum(
+            1
+            for c in range(self.num_consumers)
+            if (live is None or c in live) and self.producer_for(c, group_idx) == producer_rank
+        )
 
     def owned_groups(self, producer_rank: int) -> list[int]:
         """Groups ``producer_rank`` gathers and publishes."""

@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+import aiohttp
 import torch
 from loguru import logger
 from tqdm.asyncio import tqdm
@@ -141,6 +142,10 @@ class TurnOutput:
 
 
 class SkyRLGymGenerator(GeneratorInterface):
+    # Class-level so a subclass that skips ``super().__init__`` still gets the
+    # fail-fast default rather than an AttributeError inside a rollout.
+    _max_trajectory_retries: int = 0
+
     def __init__(
         self,
         generator_cfg: GeneratorConfig,
@@ -178,6 +183,12 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
         else:
             self.env_executor = None
+
+        # Whole-trajectory retry on transport failures. 0 (the default when fault
+        # tolerance is off) keeps today's behaviour: the first transport error out of
+        # a trajectory propagates.
+        _ft = getattr(generator_cfg.inference_engine, "fault_tolerance", None)
+        self._max_trajectory_retries = _ft.max_trajectory_retries if (_ft is not None and _ft.enabled) else 0
 
         self._validate_cfg(generator_cfg)
 
@@ -280,6 +291,66 @@ class SkyRLGymGenerator(GeneratorInterface):
         version = f"{self.policy_model_name}@" if self.policy_model_name is not None else ""
         return f"{version}{weight_version}"
 
+    async def _agent_loop_with_retry(self, *args, **kwargs):
+        """Run one trajectory, re-running it from scratch on a transport failure.
+
+        Retries at the TRAJECTORY level, not the turn level: a trajectory is a sample,
+        so regenerating it (fresh env, fresh session id) is semantically clean, needs
+        no partial-result channel, and preserves the positional ``GeneratorOutput``
+        invariants ``validate_generator_output`` asserts. A mid-turn failure, by
+        contrast, leaves env state ambiguous — there is no correct place to resume.
+
+        Only transport-class failures are retried. Everything else (``ValueError``,
+        env bugs, ``EngineFleetError`` when the fleet is below its floor) still fails
+        fast, because re-running would just reproduce it.
+
+        A no-op when fault tolerance is off: ``_max_trajectory_retries`` is 0, so this
+        is one call to ``agent_loop`` inside a loop that runs once.
+        """
+        last_exc: Optional[BaseException] = None
+        for attempt in range(self._max_trajectory_retries + 1):
+            try:
+                return await self.agent_loop(*args, attempt=attempt, **kwargs)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_exc = e
+                if attempt >= self._max_trajectory_retries:
+                    break
+                logger.warning(
+                    f"[ft] trajectory failed with {type(e).__name__}: {e}; "
+                    f"re-running from scratch (attempt {attempt + 2}/{self._max_trajectory_retries + 1})"
+                )
+        raise last_exc  # type: ignore[misc]
+
+    async def _gather_trajectories(self, tasks: List[Any], disable_tqdm: bool = False) -> List[Any]:
+        """Await every trajectory, cancelling the siblings if one fails.
+
+        ``tqdm.gather`` without ``return_exceptions`` propagates the first exception
+        and leaves every sibling running: they keep hammering a fleet that is already
+        in trouble while the driver unwinds, and their ``finish_session`` cleanup races
+        the teardown. Wrapping them in real tasks makes them cancellable, and draining
+        after cancellation means we return only once the fleet is actually quiet.
+
+        Unconditional — this is a strict improvement whether or not fault tolerance
+        is enabled.
+        """
+        futures = [asyncio.ensure_future(t) for t in tasks]
+        try:
+            return await tqdm.gather(
+                *futures,
+                desc="Generating Trajectories",
+                miniters=max(1, len(futures) // 10),
+                mininterval=5,
+                disable=disable_tqdm,
+            )
+        except BaseException:
+            for f in futures:
+                if not f.done():
+                    f.cancel()
+            # Drain so cancellation has actually landed (and each trajectory's
+            # `finally: finish_session` has run) before the exception propagates.
+            await asyncio.gather(*futures, return_exceptions=True)
+            raise
+
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -290,6 +361,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
         cache_salt: Optional[str] = None,
+        attempt: int = 0,
     ) -> Union[TrajectoryOutput, StepWiseOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -297,6 +369,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         The per-trajectory ``session_id`` is released via ``finish_session`` on
         completion, error, or cancellation so session-aware routing policies can
         free the replica capacity held by the trajectory.
+
+        ``attempt`` is the 0-based retry ordinal (see ``_agent_loop_with_retry``). It
+        only salts the session id, so a re-run does not inherit the sticky routing
+        of the attempt that just failed. Attempt 0 keeps the historical id exactly.
 
         Note:
             We ensure token-in-token-out generation. With two exceptions:
@@ -325,6 +401,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
+        if attempt:
+            session_id = f"{session_id}_retry{attempt}"
         try:
             # NOTE: `custom_chat_template` was mainly for getting accurate loss masks for thinking models.
             # This is no longer needed now given that step wise training is supported
@@ -848,7 +926,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         tasks = []
         for i in range(len(prompts)):
             tasks.append(
-                self.agent_loop(
+                self._agent_loop_with_retry(
                     prompts[i],
                     env_classes[i],
                     env_extras[i],
@@ -860,13 +938,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
             )
 
-        all_outputs = await tqdm.gather(
-            *tasks,
-            desc="Generating Trajectories",
-            miniters=max(1, len(tasks) // 10),
-            mininterval=5,
-            disable=disable_tqdm,
-        )
+        all_outputs = await self._gather_trajectories(tasks, disable_tqdm=disable_tqdm)
         # Per-trajectory end-to-end generation times (one entry per prompt, preserving input order).
         # ``e2e_time`` is optional for agent loops; if any trajectory did not record it, we omit the
         # field entirely rather than emit a partially-populated list.

@@ -66,6 +66,10 @@ _DEFAULT_ARENA_PRESIZE_GB = 0.0
 _DEFAULT_PACK_CHECK = False
 # Max gathered-but-not-yet-freed groups the producer holds at once (backpressure).
 _DEFAULT_GATHER_LOOKAHEAD = 2
+# Producer stall watchdog (seconds). Mirrors sharded_rdt_trainer.DEFAULT_STALL_TIMEOUT_S
+# and InferenceFaultToleranceConfig.stall_timeout_s; duplicated rather than imported so
+# resolving the knob does not pull the vendored trainer module into every worker.
+_DEFAULT_STALL_TIMEOUT_S = 300.0
 
 
 def _pp_local_requested() -> bool:
@@ -1405,18 +1409,66 @@ class RdtWeightSyncSender:
             _loguru.info("[rdt-profile] channel-check: loguru forwarding OK (rank init)")
             self._engine = self._trainer_init_blocking(weight_extractor)
 
-    async def send(self, weight_extractor: Any) -> None:
+    def _live_consumer_ids(self, live_server_urls: Optional[List[str]]) -> Optional[set]:
+        """Map live server URLs to the consumer ids those servers own.
+
+        Every index here comes from the PROVISIONED snapshot taken at construction —
+        the consumer-id block of a server is a function of its position in that list,
+        not of how many servers are currently alive. Re-deriving the geometry from a
+        degraded list is the one genuinely dangerous mistake available on this path:
+        it would silently renumber every surviving consumer, and each would then pull
+        another consumer's slice with nothing downstream to notice.
+
+        Returns ``None`` when the whole fleet is live, so the engine takes its
+        historical (non-degraded) path exactly.
+        """
+        if live_server_urls is None:
+            return None
+        live = list(dict.fromkeys(live_server_urls))
+        unknown = [u for u in live if u not in self._server_urls]
+        if unknown:
+            raise RuntimeError(
+                f"live_server_urls contains URLs outside the provisioned set: {unknown}. "
+                f"Provisioned: {self._server_urls}. The inference fleet geometry is frozen "
+                "at provision; a new URL means something re-created a server, which Part 1 "
+                "of engine fault tolerance does not support."
+            )
+        if len(live) == len(self._server_urls):
+            return None
+        if not live:
+            raise RuntimeError("live_server_urls is empty: no inference server is alive to receive weights.")
+
+        # replica ordinal -> its block of consumer ids. `num_replicas` is the
+        # PROVISIONED deployment count, matching what the consumers were stamped with
+        # at init (`replica_rank = index // dp`).
+        num_replicas = len(self._server_urls) // self._data_parallel_size
+        workers_per_replica = self._world_size // max(1, num_replicas)
+        live_replicas = {self._server_urls.index(u) // self._data_parallel_size for u in live}
+        return {rr * workers_per_replica + w for rr in live_replicas for w in range(workers_per_replica)}
+
+    async def send(self, weight_extractor: Any, live_server_urls: Optional[List[str]] = None) -> None:
         """Sync weights once; every rank must call it (the gather is a
         collective). ``initialize()`` should already have run; the lazy fallback
         here only covers callers that skipped it (and reintroduces the
-        first-send deadlock risk described there — do not rely on it)."""
+        first-send deadlock risk described there — do not rely on it).
+
+        ``live_server_urls`` is the driver's current view of which inference servers
+        are alive. ``None`` (the default) means the whole provisioned fleet, which is
+        every non-fault-tolerant run. Every rank must be handed the SAME value —
+        the ranks share gather collectives — which the driver guarantees by computing
+        it once and dispatching it to all of them."""
         if weight_extractor is None:
             raise RuntimeError(
                 "sharded_rdt weight sync requires the worker's weight_extractor " "(built in init_weight_sync_state)."
             )
         if self._engine is None:
             self._engine = await asyncio.to_thread(self._trainer_init_blocking, weight_extractor)
-        await asyncio.to_thread(self._engine.send_weights)
+        live_cids = self._live_consumer_ids(live_server_urls)
+        if self._control_plane is not None:
+            # Only rank 0 issues control-plane calls, but every rank holds a client
+            # and setting this everywhere keeps the two views from drifting.
+            self._control_plane.set_live(live_server_urls)
+        await asyncio.to_thread(self._engine.send_weights, live_cids)
         try:
             import json as _json
             import os as _os
@@ -1491,6 +1543,14 @@ class RdtWeightSyncSender:
             pack_check=bool(getattr(self._ie_cfg, "rdt_pack_check", _DEFAULT_PACK_CHECK)),
             nosync=os.environ.get("SKYRL_RDT_NOSYNC") == "1",
             gather_lookahead=int(_knob("SKYRL_RDT_LOOKAHEAD", "rdt_gather_lookahead", _DEFAULT_GATHER_LOOKAHEAD)),
+            # Resolved here, not in the sidecar: the sidecar is a Ray actor that
+            # inherits the raylet's environment, so a launch-time SKYRL_* override
+            # never reaches it. Env first, then the FT config, then the default.
+            stall_timeout_s=float(
+                os.environ.get("SKYRL_RDT_STALL_TIMEOUT_S")
+                or getattr(getattr(self._ie_cfg, "fault_tolerance", None), "stall_timeout_s", None)
+                or _DEFAULT_STALL_TIMEOUT_S
+            ),
         )
         return ShardedRDTTrainerWeightTransferEngine.trainer_init(
             init_info,

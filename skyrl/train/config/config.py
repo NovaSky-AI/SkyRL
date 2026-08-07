@@ -739,6 +739,58 @@ class ChatTemplateConfig(BaseConfig):
 
 
 @dataclass
+class InferenceFaultToleranceConfig(BaseConfig):
+    """Survive the death of an inference server mid-run (Part 1).
+
+    When enabled, a data-plane failure triggers a one-shot ``/health`` probe of the
+    fleet; non-responders are dropped from the router and from the client's active
+    URL set, trajectories that failed on transport errors are re-run, and the next
+    RDT weight sync targets only the survivors. Training continues at reduced
+    generation capacity — nothing is restarted, and the dead slot stays dead for
+    the rest of the run.
+
+    This is not an active health monitor: there is no interval, no background task,
+    and no per-URL failure counters carried across time. In steady state it costs
+    nothing.
+
+    Requires ``weight_sync_backend="sharded_rdt"``: NCCL and cuda_ipc pin a fixed
+    communicator over the provisioned worker set and cannot survive a membership
+    change. See ``validate_inference_engine_cfg`` for the full gate list.
+    """
+
+    enabled: bool = False
+    """Master switch. When ``False`` every FT code path is inert and behaviour is
+    byte-identical to a build without this feature (two strict improvements aside:
+    sibling-task cancellation and the broadened transport-retry set, which apply
+    unconditionally)."""
+    health_probe_timeout_s: float = 5.0
+    """Per-URL timeout for the ``/health`` probe issued when reconciling the fleet.
+    A backend that cannot answer ``/health`` within this window counts as dead."""
+    request_timeout_s: Optional[float] = 900.0
+    """Total per-request timeout for data-plane calls. Turns a wedged engine (one
+    that accepts the connection and never answers) into a bounded failure the retry
+    path can act on, instead of an unbounded hang — the shared aiohttp session has
+    no timeout by default. ``None`` disables it."""
+    max_trajectory_retries: int = 2
+    """How many times a trajectory that died on a transport error is re-run from
+    scratch (fresh env, new session id). A trajectory is a sample, so regenerating
+    it is semantically clean; partial-trajectory recovery is deliberately not
+    attempted because mid-turn failure leaves env state ambiguous."""
+    min_live_engines: int = 1
+    """Floor on the active engine count. A reconcile that would drop below it raises
+    ``EngineFleetError`` immediately rather than training against nothing. Part 1
+    cannot bring engines back, so there is nothing to wait for."""
+    stall_timeout_s: float = 300.0
+    """Producer-side watchdog for the weight-sync window (``SKYRL_RDT_STALL_TIMEOUT_S``
+    overrides it in the sidecar). Detection is generation-driven and no generation is
+    in flight during a sync, so a death that lands inside the sync window has no
+    detector; without this the producer blocks forever on a ``free_gather`` that will
+    never arrive and wedges every trainer rank in NCCL. On no progress for this long
+    the producer fails the sync with a real error. Nominal inter-progress gaps are
+    sub-second, so the default is a ~100x margin even at 235B."""
+
+
+@dataclass
 class InferenceEngineConfig(BaseConfig):
     """Configuration for inference engine instantiation and management."""
 
@@ -804,6 +856,8 @@ class InferenceEngineConfig(BaseConfig):
     router_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs applied to ``RouterArgs`` for the vllm-router.
     Names must match ``vllm_router.RouterArgs`` fields (e.g. ``policy``, ``request_timeout_secs``)."""
+    fault_tolerance: InferenceFaultToleranceConfig = field(default_factory=InferenceFaultToleranceConfig)
+    """Tolerate the death of an inference server mid-run. Off by default."""
 
 
 # ---------------------------------------------------------------------------

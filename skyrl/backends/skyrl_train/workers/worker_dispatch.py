@@ -574,18 +574,32 @@ class WorkerDispatch:
             )
         )
 
-    def _broadcast_to_inference_engines(self, inference_engine_client, model_id: Optional[str] = None) -> None:
+    def _broadcast_to_inference_engines(
+        self,
+        inference_engine_client,
+        model_id: Optional[str] = None,
+        live_server_urls: Optional[List[str]] = None,
+    ) -> None:
         """Broadcast policy weights to inference engines. Helper for save_weights_for_sampler.
 
         ``model_id`` is forwarded to the worker so that, on the LoRA path, the
         adapter is saved into a per-tenant subdir of ``lora_sync_path`` and
         registered on vLLM under that name. None preserves single-tenant
         behavior (the legacy ``SKYRL_LORA_ADAPTER_NAME`` path).
+
+        ``live_server_urls`` is the driver's view of which inference servers are
+        alive, computed once here and dispatched to every rank in this one call —
+        which is what guarantees they all agree (they share gather collectives, so a
+        rank with a different live set would compute different free targets and hang
+        its peers). ``None`` means the full provisioned fleet.
         """
         # Pass None for the client: workers cached it at init_weight_sync_state.
         # It carries the HF tokenizer (~10MB — 0.13s pickle driver-side, 0.34s
         # unpickle on EVERY worker), so shipping it per sync costs ~0.5s of the
-        # sync wall even via ray.put (deref still deserializes per worker).
+        # sync wall even via ray.put (deref still deserializes per worker). The live
+        # URL list is a handful of strings, so it rides along for free -- and it has
+        # to, since the workers' cached client copies are snapshots from init and can
+        # never learn that an engine died.
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
@@ -593,8 +607,37 @@ class WorkerDispatch:
                 None,
                 self.cfg.generator.inference_engine,
                 model_id=model_id,
+                live_server_urls=live_server_urls,
             )
         )
+
+    def _live_server_urls(self) -> Optional[List[str]]:
+        """The active inference servers, or ``None`` when the fleet is whole.
+
+        ``None`` is not merely an optimization: it makes a non-degraded sync take the
+        exact code path it took before fault tolerance existed, so an FT-enabled run
+        that never loses an engine is behaviourally identical to an FT-disabled one.
+
+        Raises:
+            RuntimeError: the fleet is degraded but the weight-sync backend cannot
+                survive it. NCCL and cuda_ipc broadcast over a fixed communicator, so
+                a partial broadcast is not a degraded sync — it is a hang, or worse,
+                silently stale weights on the survivors. ``validate_cfg`` already
+                rejects FT with those backends; this is the runtime backstop.
+        """
+        client = self._inference_engine_client
+        active = getattr(client, "active_server_urls", None)
+        if active is None or len(active) == len(client.server_urls):
+            return None
+        backend = self.cfg.generator.inference_engine.weight_sync_backend
+        if backend != "sharded_rdt":
+            raise RuntimeError(
+                f"{len(client.server_urls) - len(active)} inference server(s) are down, but "
+                f"weight_sync_backend={backend!r} broadcasts over a fixed communicator built "
+                "from the provisioned worker set and cannot sync to a subset. Refusing to "
+                "issue a partial broadcast."
+            )
+        return list(active)
 
     def _prepare_for_weight_sync(self) -> None:
         """Prepare for weight sync: ensure policy model is on GPU, offload optimizer. Helper for save_weights_for_sampler."""
@@ -632,9 +675,15 @@ class WorkerDispatch:
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
         self.ensure_active_adapter("policy", model_id)
+        # Resolved once, before pause_generation, and used for the whole sync: the
+        # membership must not move between the pause and the broadcast, or the ranks
+        # would disagree about who is being served.
+        live_server_urls = self._live_server_urls()
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
-            self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+            self._broadcast_to_inference_engines(
+                self._inference_engine_client, model_id=model_id, live_server_urls=live_server_urls
+            )
             self._finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
@@ -644,14 +693,18 @@ class WorkerDispatch:
                 strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
             ):
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
-                self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+                self._broadcast_to_inference_engines(
+                    self._inference_engine_client, model_id=model_id, live_server_urls=live_server_urls
+                )
                 self._finish_weight_sync()
             else:
                 # Non-colocated single tenant: pause generation to prevent in-flight requests from
                 # reading partially-updated weights during the NCCL broadcast.
                 await self._inference_engine_client.pause_generation()
                 try:
-                    self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+                    self._broadcast_to_inference_engines(
+                        self._inference_engine_client, model_id=model_id, live_server_urls=live_server_urls
+                    )
                     self._finish_weight_sync()
                 finally:
                     await self._inference_engine_client.resume_generation()

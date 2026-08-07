@@ -139,6 +139,66 @@ class VLLMRouter:
 
         return router_url
 
+    # ---------------------------
+    # Worker management
+    # ---------------------------
+    #
+    # The router's membership is mutable at runtime; ``worker_urls`` is only the
+    # starting set. These three are the synchronous, driver-side mirror of the same
+    # calls on ``RemoteInferenceClient`` (which owns the async/data-plane copy) —
+    # used by the fault-tolerance path's tests and by anything holding the router
+    # object rather than a client.
+    #
+    # Verified against vllm-router 0.1.14.post1: the backend URL travels as the
+    # ``url`` query parameter (any other spelling is a 400 "missing field `url`"),
+    # add/remove answer with plain text, and ``/list_workers`` answers
+    # ``{"urls": [...]}``.
+
+    def _base_url(self) -> str:
+        return f"http://{get_node_ip()}:{self._router_args.port}"
+
+    def add_worker(self, url: str, timeout: float = 10.0) -> None:
+        """Register a backend with the router.
+
+        Not idempotent server-side — re-adding a known worker is a 400
+        ``already exists`` — so that case is normalized to success here, since the
+        post-condition (the worker is routable) holds either way.
+
+        BLOCKING: the router health-checks the backend before accepting it and does
+        not answer until it responds, so this cannot pre-register a URL that is not
+        yet serving. Call it only once the engine is up.
+
+        Raises:
+            RuntimeError: the router rejected the call for any other reason.
+            httpx.TimeoutException: the backend never became healthy within *timeout*.
+        """
+        resp = httpx.post(f"{self._base_url()}/add_worker", params={"url": url}, timeout=timeout)
+        if resp.status_code == 400 and "already exists" in resp.text:
+            return
+        if resp.status_code != 200:
+            raise RuntimeError(f"router add_worker({url}) failed [{resp.status_code}]: {resp.text[:200]}")
+
+    def remove_worker(self, url: str, timeout: float = 10.0) -> None:
+        """Drop a backend from the router's ring.
+
+        Idempotent server-side: removing a URL the router does not have is a 200.
+        ``consistent_hash`` rebuilds the ring on removal, so sessions pinned to the
+        removed backend rehash onto survivors.
+
+        Raises:
+            RuntimeError: the router rejected the call.
+        """
+        resp = httpx.post(f"{self._base_url()}/remove_worker", params={"url": url}, timeout=timeout)
+        if resp.status_code != 200:
+            raise RuntimeError(f"router remove_worker({url}) failed [{resp.status_code}]: {resp.text[:200]}")
+
+    def list_workers(self, timeout: float = 10.0) -> list[str]:
+        """Backend URLs the router currently routes to."""
+        resp = httpx.get(f"{self._base_url()}/list_workers", timeout=timeout)
+        resp.raise_for_status()
+        body = resp.json()
+        return list(body.get("urls", []) if isinstance(body, dict) else body)
+
     def _wait_until_healthy(
         self,
         router_url: str,

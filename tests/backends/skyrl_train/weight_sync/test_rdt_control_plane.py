@@ -180,6 +180,108 @@ def test_error_surfaces_body_message_and_drains_all():
     assert {u for u, _ in sess.calls} == set(urls)
 
 
+class TestSetLive:
+    """Restricting the per-sync fan-out to the inference servers still alive.
+
+    The split matters: start/update/finish are per-sync and must skip a dead
+    server (a POST to it would fail the whole sync, and it has no consumers left to
+    pull anyway), while init is once-per-run and must keep the PROVISIONED list,
+    because ``build_rdt_init_payloads`` derives each server's ``replica_rank`` from
+    its position in it.
+    """
+
+    @staticmethod
+    def _urls():
+        return ["http://a", "http://b", "http://c"]
+
+    def test_uniform_calls_target_only_live_servers(self):
+        urls = self._urls()
+        sess = _RecordingSession()
+        c = _client(urls, session=sess)
+        try:
+            c.set_live(["http://a", "http://c"])
+            c.update_weights({"names": []})
+        finally:
+            c.close()
+        assert {u for u, _ in sess.calls} == {"http://a", "http://c"}
+
+    def test_none_restores_the_full_set(self):
+        urls = self._urls()
+        sess = _RecordingSession()
+        c = _client(urls, session=sess)
+        try:
+            c.set_live(["http://a"])
+            c.set_live(None)
+            c.start_weight_update()
+        finally:
+            c.close()
+        assert {u for u, _ in sess.calls} == set(urls)
+
+    def test_init_keeps_the_provisioned_list_and_ranks(self):
+        """A degraded init fan-out would renumber every survivor: with b dead,
+        c would be handed replica_rank 1 — the rank b's consumers already own."""
+        urls = self._urls()
+        sess = _RecordingSession()
+        c = _client(urls, session=sess)
+        try:
+            c.set_live(["http://a", "http://c"])
+            c.init_weight_transfer_engine({"num_consumers": 3})
+        finally:
+            c.close()
+        infos = _init_infos(sess)
+        assert set(infos) == set(urls)
+        assert [infos[u]["replica_rank"] for u in urls] == [0, 1, 2]
+        assert all(i["num_replicas"] == 3 for i in infos.values())
+
+    def test_unprovisioned_url_is_rejected(self):
+        c = _client(self._urls(), session=_RecordingSession())
+        try:
+            with pytest.raises(ValueError, match="outside the provisioned set"):
+                c.set_live(["http://a", "http://zzz"])
+        finally:
+            c.close()
+
+    def test_live_order_follows_the_provisioned_order(self):
+        c = _client(self._urls(), session=_RecordingSession())
+        try:
+            c.set_live(["http://c", "http://a", "http://c"])
+            assert c._live_urls == ["http://a", "http://c"]
+        finally:
+            c.close()
+
+    def test_full_live_set_is_the_same_as_no_call(self):
+        urls = self._urls()
+        sess = _RecordingSession()
+        c = _client(urls, session=sess)
+        try:
+            c.set_live(urls)
+            assert c._live_urls == urls
+        finally:
+            c.close()
+
+
+def test_post_bounds_connect_but_not_read():
+    """A dead host must fail on connect in seconds instead of hanging the fan-out,
+    while the read side stays unbounded because bake + NIXL pull are legitimately
+    long. Pinned because getting it backwards (a read timeout) would abort healthy
+    syncs at scale."""
+    from skyrl.backends.skyrl_train.weight_sync import rdt_control_plane
+
+    seen = []
+
+    class _TimeoutRecordingSession(_RecordingSession):
+        def post(self, url, json=None, timeout=None):
+            seen.append(timeout)
+            return super().post(url, json=json, timeout=timeout)
+
+    c = _client(["http://a"], session=_TimeoutRecordingSession())
+    try:
+        c.start_weight_update()
+    finally:
+        c.close()
+    assert seen == [(rdt_control_plane._CONNECT_TIMEOUT_S, None)]
+
+
 def test_close_releases_session():
     sess = _RecordingSession()
     c = _client(["http://a"], session=sess)

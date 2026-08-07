@@ -74,6 +74,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
         cache_salt: Optional[str] = None,
+        attempt: int = 0,
     ) -> TrajectoryOutput:
         """Multi-turn VLM generation loop for a single trajectory.
         The conversation is treated as the source of truth and re-tokenized each step.
@@ -83,11 +84,17 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         The per-trajectory ``session_id`` is released via ``finish_session`` on
         completion, error, or cancellation so session-aware routing policies can
         free the replica capacity held by the trajectory.
+
+        ``attempt`` is the retry ordinal from ``_agent_loop_with_retry``; it only
+        salts the session id so a re-run does not inherit the failed attempt's
+        sticky routing.
         """
         agent_loop_start_time = time.monotonic()
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
+        if attempt:
+            session_id = f"{session_id}_retry{attempt}"
         try:
             # ── Setup ──────────────────────────────────────────────────────
             env_extras["max_turns"] = self.max_turns
