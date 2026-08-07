@@ -35,6 +35,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app = FastAPI()
     app.state.last_generate_features = None
     app.state.last_generate_model = None
+    app.state.last_generate_sampling_params = None
     app.state.last_chat_model = None
     app.state.last_completion_model = None
     app.state.last_render_model = None
@@ -62,6 +63,10 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.get("/test/last_generate_features")
     async def get_last_generate_features():
         return {"features": app.state.last_generate_features}
+
+    @app.get("/test/last_generate_sampling_params")
+    async def get_last_generate_sampling_params():
+        return app.state.last_generate_sampling_params
 
     @app.get("/test/last_models")
     async def get_last_models():
@@ -104,6 +109,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def generate(request: Request):
         body = await request.json()  # Consume body
         sp = body.get("sampling_params", {})
+        app.state.last_generate_sampling_params = sp
         input_token_ids = body.get("token_ids", [])
         app.state.last_generate_model = body.get("model")
         n = sp.get("n", 1)
@@ -438,8 +444,7 @@ class TestRemoteInferenceClientInit:
         assert restored.proxy_url == client.proxy_url
         assert restored.server_urls == client.server_urls
         assert restored.model_name == client.model_name
-        # Session should be None after unpickling
-        assert restored._session is None
+        assert restored._generate_client is None
 
 
 class TestDataPlane:
@@ -480,13 +485,16 @@ class TestDataPlane:
             enable_return_routed_experts=True,
         )
         try:
-            result = await client.generate({"prompt_token_ids": [[1, 2, 3]]})
+            result = await client.generate({"prompt_token_ids": [[1, 2, 3]], "routed_experts_prompt_starts": [1]})
+            async with httpx.AsyncClient() as http:
+                captured = (await http.get(f"{mock_servers['proxy_url']}/test/last_generate_sampling_params")).json()
         finally:
             await client.teardown()
 
         assert len(result["rollout_expert_indices"]) == 1
         assert result["rollout_expert_indices"][0].dtype == np.uint8
         assert np.array_equal(result["rollout_expert_indices"][0], np.arange(12).reshape(3, 2, 2))
+        assert captured["routed_experts_prompt_start"] == 1
 
     @pytest.mark.asyncio
     async def test_generate_rejects_list_routed_experts(self, monkeypatch):
@@ -508,7 +516,7 @@ class TestDataPlane:
                 ]
             }
 
-        monkeypatch.setattr(client, "_post", return_list_routes)
+        monkeypatch.setattr(client._get_generate_client(), "_post", return_list_routes)
         with pytest.raises(ValueError, match="must return packed"):
             await client._generate_single([1], {}, None, "model")
 
@@ -1025,8 +1033,7 @@ class TestContextManager:
             result = await client.resume()
             assert len(result) == 2
 
-        # Session should be closed after exiting context
-        assert client._session is None or client._session.closed
+        assert client._generate_client is None or client._generate_client._session is None
 
 
 async def _get_lora_registries(server_urls: List[str]) -> List[Dict[str, str]]:
