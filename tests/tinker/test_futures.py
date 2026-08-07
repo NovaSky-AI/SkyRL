@@ -1,6 +1,7 @@
-"""Tests for the shared future waiter and the completion write path."""
+"""Tests for waiting on asynchronous request results."""
 
 import asyncio
+from contextlib import suppress
 
 import pytest
 import pytest_asyncio
@@ -8,13 +9,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import Session, SQLModel, create_engine
 
 from skyrl.tinker import types
+from skyrl.tinker.api import poll_futures, wait_for_future
 from skyrl.tinker.db_models import (
     FutureDB,
     RequestStatus,
     enable_sqlite_wal,
     get_async_database_url,
 )
-from skyrl.tinker.futures import FutureResult, FutureWaiter
 
 
 @pytest.fixture()
@@ -75,16 +76,21 @@ def mark_completed(sync_engine, request_id: int, result_data: dict, status=Reque
 
 
 @pytest_asyncio.fixture()
-async def waiter(async_engine):
-    # Poll fast so tests do not have to wait on the production interval.
-    instance = FutureWaiter(async_engine, poll_interval_sec=0.01)
-    await instance.start()
-    yield instance
-    await instance.stop()
+async def waiters(async_engine):
+    """A waiters registry with a poller running against it.
+
+    Polls fast so tests do not have to wait on the production interval.
+    """
+    registry: dict[int, set[asyncio.Future]] = {}
+    poller = asyncio.create_task(poll_futures(async_engine, registry, poll_interval_sec=0.01))
+    yield registry
+    poller.cancel()
+    with suppress(asyncio.CancelledError):
+        await poller
 
 
 @pytest.mark.asyncio
-async def test_wait_returns_result_once_completed(waiter, sync_engine):
+async def test_resolves_once_the_request_completes(waiters, sync_engine):
     request_id = insert_pending(sync_engine)[0]
 
     async def complete_soon():
@@ -92,45 +98,76 @@ async def test_wait_returns_result_once_completed(waiter, sync_engine):
         mark_completed(sync_engine, request_id, {"sequences": []})
 
     asyncio.create_task(complete_soon())
-    result = await waiter.wait(request_id, timeout=5)
+    result = await wait_for_future(waiters, request_id, timeout=5)
 
-    assert result is not None
-    assert result.status == RequestStatus.COMPLETED
-    assert result.result_data == {"sequences": []}
+    assert result == (RequestStatus.COMPLETED, {"sequences": []})
 
 
 @pytest.mark.asyncio
-async def test_wait_surfaces_failed_status(waiter, sync_engine):
+async def test_surfaces_failed_status(waiters, sync_engine):
     request_id = insert_pending(sync_engine)[0]
     mark_completed(sync_engine, request_id, {"error": "boom"}, status=RequestStatus.FAILED)
 
-    result = await waiter.wait(request_id, timeout=5)
-
-    assert result.status == RequestStatus.FAILED
-    assert result.result_data == {"error": "boom"}
+    assert await wait_for_future(waiters, request_id, timeout=5) == (RequestStatus.FAILED, {"error": "boom"})
 
 
 @pytest.mark.asyncio
-async def test_wait_returns_none_on_timeout(waiter, sync_engine):
+async def test_returns_none_on_timeout(waiters, sync_engine):
     request_id = insert_pending(sync_engine)[0]
 
-    assert await waiter.wait(request_id, timeout=0.05) is None
+    assert await wait_for_future(waiters, request_id, timeout=0.05) is None
 
 
 @pytest.mark.asyncio
-async def test_many_waiters_share_one_query_per_poll(waiter, sync_engine):
-    """The whole point of the shared poller: load must not scale with waiters."""
-    request_ids = insert_pending(sync_engine, count=50)
+async def test_abandoned_request_leaves_no_entry_behind(waiters, sync_engine):
+    """A caller giving up must drop out of the poll set, or it grows without bound."""
+    request_id = insert_pending(sync_engine)[0]
 
-    statements = []
+    assert await wait_for_future(waiters, request_id, timeout=0.05) is None
+    assert request_id not in waiters
+
+
+@pytest.mark.asyncio
+async def test_one_waiter_giving_up_does_not_strand_the_others(waiters, sync_engine):
+    """Concurrent waiters on one id are routine, since the SDK retries a slow
+    retrieve_future against the same request_id. One timing out must not cancel
+    the rest."""
+    request_id = insert_pending(sync_engine)[0]
+
+    quick = asyncio.create_task(wait_for_future(waiters, request_id, timeout=0.05))
+    patient = asyncio.create_task(wait_for_future(waiters, request_id, timeout=5))
+
+    assert await quick is None
+    mark_completed(sync_engine, request_id, {"ok": True})
+
+    assert await patient == (RequestStatus.COMPLETED, {"ok": True})
+
+
+@pytest.mark.asyncio
+async def test_multiple_waiters_on_same_request_all_resolve(waiters, sync_engine):
+    request_id = insert_pending(sync_engine)[0]
+    mark_completed(sync_engine, request_id, {"ok": True})
+
+    results = await asyncio.gather(*(wait_for_future(waiters, request_id, timeout=5) for _ in range(3)))
+
+    assert results == [(RequestStatus.COMPLETED, {"ok": True})] * 3
+    assert request_id not in waiters
+
+
+@pytest.mark.asyncio
+async def test_query_count_does_not_scale_with_waiters(waiters, sync_engine, async_engine):
+    """The whole point of the shared poller: load must not scale with waiters."""
     from sqlalchemy import event
 
-    @event.listens_for(waiter._db_engine.sync_engine, "before_cursor_execute")
+    request_ids = insert_pending(sync_engine, count=50)
+    statements = []
+
+    @event.listens_for(async_engine.sync_engine, "before_cursor_execute")
     def _count(conn, cursor, statement, parameters, context, executemany):
         if statement.lstrip().upper().startswith("SELECT"):
             statements.append(statement)
 
-    tasks = [asyncio.create_task(waiter.wait(request_id, timeout=5)) for request_id in request_ids]
+    tasks = [asyncio.create_task(wait_for_future(waiters, request_id, timeout=5)) for request_id in request_ids]
     # Let several poll iterations run while every request is still pending.
     await asyncio.sleep(0.1)
     for task in tasks:
@@ -143,74 +180,73 @@ async def test_many_waiters_share_one_query_per_poll(waiter, sync_engine):
 
 
 @pytest.mark.asyncio
-async def test_multiple_waiters_on_same_request_all_resolve(waiter, sync_engine):
+async def test_poller_survives_a_failing_iteration(async_engine, sync_engine):
+    """A transient database error must not wedge every waiter permanently."""
+    registry: dict[int, set[asyncio.Future]] = {}
+    poller = asyncio.create_task(poll_futures(async_engine, registry, poll_interval_sec=0.01))
+    await async_engine.dispose()  # make the next iteration fail
+
     request_id = insert_pending(sync_engine)[0]
     mark_completed(sync_engine, request_id, {"ok": True})
-
-    results = await asyncio.gather(*(waiter.wait(request_id, timeout=5) for _ in range(3)))
-
-    assert all(result.result_data == {"ok": True} for result in results)
-
-
-class _RecordingWaiter:
-    """Stands in for FutureWaiter so tests can see whether the endpoint waited."""
-
-    def __init__(self, result=None):
-        self.calls = 0
-        self._result = result
-
-    async def wait(self, request_id: int, timeout: float):
-        self.calls += 1
-        return self._result
+    try:
+        assert await wait_for_future(registry, request_id, timeout=5) == (RequestStatus.COMPLETED, {"ok": True})
+    finally:
+        poller.cancel()
+        with suppress(asyncio.CancelledError):
+            await poller
 
 
-def _stub_request(async_engine, waiter):
+def _stub_request(async_engine, waiters):
     from types import SimpleNamespace
 
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db_engine=async_engine, future_waiter=waiter)))
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db_engine=async_engine, future_waiters=waiters)))
 
 
 @pytest.mark.asyncio
-async def test_retrieve_future_returns_terminal_result_without_waiting(async_engine, sync_engine):
+async def test_retrieve_future_returns_terminal_result_without_waiting(async_engine, sync_engine, monkeypatch):
     """A request that already finished is served by the lookup, not by a poll tick."""
-    from skyrl.tinker.api import RetrieveFutureRequest, retrieve_future
+    from skyrl.tinker import api
 
     request_id = insert_pending(sync_engine)[0]
     mark_completed(sync_engine, request_id, {"sequences": [1]})
-    waiter = _RecordingWaiter()
 
-    result = await retrieve_future(
-        RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiter)
+    async def _unexpected(*args, **kwargs):
+        raise AssertionError("should not wait for an already-terminal request")
+
+    monkeypatch.setattr(api, "wait_for_future", _unexpected)
+
+    result = await api.retrieve_future(
+        api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, {})
     )
 
     assert result == {"sequences": [1]}
-    assert waiter.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_retrieve_future_waits_only_while_pending(async_engine, sync_engine):
-    from skyrl.tinker.api import RetrieveFutureRequest, retrieve_future
+async def test_retrieve_future_waits_while_pending(waiters, async_engine, sync_engine):
+    from skyrl.tinker import api
 
     request_id = insert_pending(sync_engine)[0]
-    waiter = _RecordingWaiter(result=FutureResult(status=RequestStatus.COMPLETED, result_data={"late": True}))
 
-    result = await retrieve_future(
-        RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiter)
+    async def complete_soon():
+        await asyncio.sleep(0.05)
+        mark_completed(sync_engine, request_id, {"late": True})
+
+    asyncio.create_task(complete_soon())
+    result = await api.retrieve_future(
+        api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiters)
     )
 
     assert result == {"late": True}
-    assert waiter.calls == 1
 
 
 @pytest.mark.asyncio
 async def test_retrieve_future_404s_for_unknown_request(async_engine):
     from fastapi import HTTPException
 
-    from skyrl.tinker.api import RetrieveFutureRequest, retrieve_future
+    from skyrl.tinker import api
 
-    waiter = _RecordingWaiter()
     with pytest.raises(HTTPException) as excinfo:
-        await retrieve_future(RetrieveFutureRequest(request_id="123456"), _stub_request(async_engine, waiter))
+        await api.retrieve_future(api.RetrieveFutureRequest(request_id="123456"), _stub_request(async_engine, {}))
 
     assert excinfo.value.status_code == 404
-    assert waiter.calls == 0

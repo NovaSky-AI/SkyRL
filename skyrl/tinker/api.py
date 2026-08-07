@@ -44,7 +44,6 @@ from skyrl.tinker.extra import (
     ExternalInferenceClient,
     SkyRLTrainInferenceForwardingClient,
 )
-from skyrl.tinker.futures import FutureResult, FutureWaiter
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
 
@@ -59,6 +58,75 @@ SHUTDOWN_TIMEOUT_SECONDS = 10
 
 # How long retrieve_future waits for a result before returning 408
 RETRIEVE_FUTURE_TIMEOUT_SECONDS = 300
+
+# How often poll_futures looks for newly finished requests. A single query
+# covers every waiter, so this can stay tight without the load scaling up with
+# the number of in-flight requests.
+FUTURE_POLL_INTERVAL_SECONDS = 0.05
+
+# Statuses a request never moves out of, i.e. the ones a waiter resolves on.
+TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
+
+
+async def wait_for_future(
+    waiters: dict[int, set[asyncio.Future]], request_id: int, timeout: float
+) -> tuple[RequestStatus, dict | None] | None:
+    """Wait for ``request_id`` to finish, returning its ``(status, result_data)``.
+
+    Returns None if ``timeout`` elapses first.
+
+    Polling per caller would cost one query per in-flight request per tick. Under
+    a multi-LoRA RL workload -- hundreds of concurrent rollouts, each long-polling
+    its own future -- that is the dominant read load on the database, so callers
+    park a future in ``waiters`` for the one shared query in :func:`poll_futures`.
+
+    Each caller gets its own future rather than sharing one per id, so that a
+    caller giving up removes only its own entry. That matters because concurrent
+    waiters on one id are routine: the SDK times out a retrieve_future call after
+    45s and retries the same request_id, while this endpoint holds the request for
+    up to 300s, so anything slower than 45s accumulates overlapping waiters. It
+    also keeps an abandoned request from pinning an entry in ``waiters`` forever,
+    which would grow the poll query without bound.
+    """
+    waiter = asyncio.get_running_loop().create_future()
+    waiters.setdefault(request_id, set()).add(waiter)
+    try:
+        return await asyncio.wait_for(waiter, timeout)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        remaining = waiters.get(request_id)
+        if remaining is not None:
+            remaining.discard(waiter)
+            if not remaining:
+                del waiters[request_id]
+
+
+async def poll_futures(
+    db_engine, waiters: dict[int, set[asyncio.Future]], poll_interval_sec: float = FUTURE_POLL_INTERVAL_SECONDS
+) -> None:
+    """Resolve the requests awaited in ``waiters`` as they finish, until cancelled."""
+    while True:
+        try:
+            if waiters:
+                async with AsyncSession(db_engine) as session:
+                    # The awaited ids go in as bound parameters, capped at 32766
+                    # by SQLite (since 3.32) and 65535 by Postgres -- far above
+                    # any plausible number of in-flight requests.
+                    statement = select(FutureDB.request_id, FutureDB.status, FutureDB.result_data).where(
+                        FutureDB.request_id.in_(list(waiters)),
+                        FutureDB.status.in_(TERMINAL_STATUSES),
+                    )
+                    for request_id, status, result_data in (await session.exec(statement)).all():
+                        for waiter in waiters.pop(request_id, ()):
+                            if not waiter.done():
+                                waiter.set_result((status, result_data))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Keep the poller alive; waiters fall back on their own timeouts.
+            logger.exception("Future poller iteration failed")
+        await asyncio.sleep(poll_interval_sec)
 
 
 def _get_parent_uv_run_args(parent_cmd: list[str]) -> list[str]:
@@ -118,8 +186,8 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    app.state.future_waiter = FutureWaiter(app.state.db_engine)
-    await app.state.future_waiter.start()
+    app.state.future_waiters = {}
+    app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
 
     # Setup external inference client if configured.
     #
@@ -194,7 +262,9 @@ async def lifespan(app: FastAPI):
     shutting_down = True
     monitor_task.cancel()
 
-    await app.state.future_waiter.stop()
+    app.state.future_poller.cancel()
+    with suppress(asyncio.CancelledError):
+        await app.state.future_poller
 
     # Close the forwarding client's persistent httpx connection pool if we
     # installed one. Cheap no-op when external_inference_client doesn't own
@@ -1170,26 +1240,29 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     request_id = int(request.request_id)
 
     # Rows are created before their request_id is returned to the client and
-    # never deleted, so a missing row means the id never existed.
+    # never deleted, so a missing row means the id never existed. Reading the
+    # status here also answers an already-finished request without waiting on
+    # the poller's next tick.
     async with AsyncSession(req.app.state.db_engine) as session:
         statement = select(FutureDB.status, FutureDB.result_data).where(FutureDB.request_id == request_id)
         row = (await session.exec(statement)).first()
+
     if row is None:
         raise HTTPException(status_code=404, detail="Future not found")
 
     status, result_data = row
-    result = FutureResult(status=status, result_data=result_data)
-    if status == RequestStatus.PENDING:
-        result = await req.app.state.future_waiter.wait(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
-        if result is None:
+    if status not in TERMINAL_STATUSES:
+        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        if row is None:
             raise HTTPException(status_code=408, detail="Timeout waiting for result")
+        status, result_data = row
 
-    if result.status == RequestStatus.COMPLETED:
-        return result.result_data
+    if status == RequestStatus.COMPLETED:
+        return result_data
 
     # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-    if result.result_data and "error" in result.result_data:
-        raise HTTPException(status_code=400, detail=result.result_data["error"])
+    if result_data and "error" in result_data:
+        raise HTTPException(status_code=400, detail=result_data["error"])
     raise HTTPException(status_code=500, detail="Unknown error")
 
 
