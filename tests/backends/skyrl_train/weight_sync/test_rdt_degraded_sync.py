@@ -92,6 +92,69 @@ class TestLiveConsumerIds:
             s._live_consumer_ids([])
 
 
+class TestDegradationIsVisible:
+    """A degraded sync must announce itself somewhere an operator will actually look.
+
+    The vendored engine's ``[rdt-degraded]`` goes through vLLM's ``init_logger``,
+    which in a SkyRL policy worker reaches no log file and no console -- confirmed on
+    a GPU run where the degraded path provably ran (the two producers bound to the
+    dead consumer went to zero produce calls) while the line appeared in none of the
+    worker logs, infra logs, or driver output. loguru from the same process is
+    captured, so the announcement is made there too.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_sync_logs_through_loguru(self, monkeypatch):
+        import loguru
+
+        from skyrl.backends.skyrl_train.weight_sync import rdt_send as rs
+
+        seen = []
+        monkeypatch.setattr(rs, "_loguru", loguru.logger.bind())
+        sink_id = loguru.logger.add(lambda m: seen.append(str(m)), level="WARNING")
+        try:
+            s = _sender(["http://a", "http://b"], world_size=4)
+            s._engine = _StubEngine()
+            s._control_plane = None
+            await s.send(object(), ["http://a"])
+        finally:
+            loguru.logger.remove(sink_id)
+
+        assert any("rdt-degraded" in m for m in seen), seen
+        assert any("2/4 live consumers" in m for m in seen), seen
+
+    @pytest.mark.asyncio
+    async def test_a_whole_fleet_says_nothing(self, monkeypatch):
+        """Silence is the signal that nothing is degraded; a per-sync line on a
+        healthy run would train operators to ignore it."""
+        import loguru
+
+        from skyrl.backends.skyrl_train.weight_sync import rdt_send as rs
+
+        seen = []
+        monkeypatch.setattr(rs, "_loguru", loguru.logger.bind())
+        sink_id = loguru.logger.add(lambda m: seen.append(str(m)), level="WARNING")
+        try:
+            s = _sender(["http://a", "http://b"], world_size=4)
+            s._engine = _StubEngine()
+            s._control_plane = None
+            await s.send(object(), None)
+        finally:
+            loguru.logger.remove(sink_id)
+
+        assert not any("rdt-degraded" in m for m in seen), seen
+
+
+class _StubEngine:
+    """Just enough engine for ``send`` to run without Ray, torch or a GPU."""
+
+    def __init__(self):
+        self.live_cids = "unset"
+
+    def send_weights(self, live_consumer_ids=None):
+        self.live_cids = live_consumer_ids
+
+
 def _engine(num_consumers, world, rank, group_owners=None, num_groups=4):
     """An engine with just the routing state ``_live_consumers`` reads."""
     e = ShardedRDTTrainerWeightTransferEngine.__new__(ShardedRDTTrainerWeightTransferEngine)

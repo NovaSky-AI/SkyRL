@@ -675,14 +675,18 @@ class WorkerDispatch:
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
         self.ensure_active_adapter("policy", model_id)
-        # Resolved once, before pause_generation, and used for the whole sync: the
-        # membership must not move between the pause and the broadcast, or the ranks
-        # would disagree about who is being served.
-        live_server_urls = self._live_server_urls()
+        # The live set is captured as LATE as possible -- after wake_up / pause,
+        # never before. Those fan-outs are themselves detectors: when a kill lands
+        # outside a generation phase, the pause is the first call to touch the dead
+        # engine, and it reconciles. Reading the membership before it would hand the
+        # sync a set that still contains the dead consumer, and the producers would
+        # then wait out the stall watchdog for a `free_gather` that can never arrive.
+        # (Capturing it once per sync still matters -- every rank must be given the
+        # same value -- but one dispatch guarantees that regardless of when we read.)
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
             self._broadcast_to_inference_engines(
-                self._inference_engine_client, model_id=model_id, live_server_urls=live_server_urls
+                self._inference_engine_client, model_id=model_id, live_server_urls=self._live_server_urls()
             )
             self._finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
@@ -694,7 +698,7 @@ class WorkerDispatch:
             ):
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
                 self._broadcast_to_inference_engines(
-                    self._inference_engine_client, model_id=model_id, live_server_urls=live_server_urls
+                    self._inference_engine_client, model_id=model_id, live_server_urls=self._live_server_urls()
                 )
                 self._finish_weight_sync()
             else:
@@ -703,7 +707,7 @@ class WorkerDispatch:
                 await self._inference_engine_client.pause_generation()
                 try:
                     self._broadcast_to_inference_engines(
-                        self._inference_engine_client, model_id=model_id, live_server_urls=live_server_urls
+                        self._inference_engine_client, model_id=model_id, live_server_urls=self._live_server_urls()
                     )
                     self._finish_weight_sync()
                 finally:

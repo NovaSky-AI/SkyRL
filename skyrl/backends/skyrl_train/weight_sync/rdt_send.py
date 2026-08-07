@@ -1464,6 +1464,18 @@ class RdtWeightSyncSender:
         if self._engine is None:
             self._engine = await asyncio.to_thread(self._trainer_init_blocking, weight_extractor)
         live_cids = self._live_consumer_ids(live_server_urls)
+        if live_cids is not None:
+            # Emitted HERE, through loguru, and not only from the vendored engine's
+            # `[rdt-degraded]`: that one goes through vLLM's `init_logger`, which in a
+            # SkyRL policy worker reaches no log file and no console -- verified on a
+            # GPU run where the degraded sync provably ran (producers bound to the
+            # dead consumer went to zero produce calls) while the line appeared
+            # nowhere. A degradation nobody can see is a degradation nobody can debug.
+            _loguru.warning(
+                f"[rdt-degraded] weight sync serving {len(live_cids)}/{self._world_size} live consumers "
+                f"({len(live_server_urls or [])}/{len(self._server_urls)} inference servers alive); "
+                f"groups routed to dead consumers are gathered and dropped"
+            )
         if self._control_plane is not None:
             # Only rank 0 issues control-plane calls, but every rank holds a client
             # and setting this everywhere keeps the two views from drifting.

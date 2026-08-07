@@ -30,7 +30,7 @@ import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -373,10 +373,11 @@ class TestReconcileFleet:
 class _StatusServer:
     """A one-endpoint server that returns a scripted sequence of statuses."""
 
-    def __init__(self, statuses: List[int]):
+    def __init__(self, statuses: List[int], plain_text: bool = False):
         self.port = get_open_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.statuses = list(statuses)
+        self.plain_text = plain_text
         self.calls = 0
         app = FastAPI()
 
@@ -391,6 +392,9 @@ class _StatusServer:
             status = self.statuses[i]
             if status == 200:
                 return {"ok": True}
+            if self.plain_text:
+                # What vllm-router actually answers when its backend is gone.
+                return PlainTextResponse("No available workers", status_code=status)
             return JSONResponse({"error": {"message": "backend down"}}, status_code=status)
 
         config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="error")
@@ -415,8 +419,8 @@ class _StatusServer:
 def status_server():
     made: List[_StatusServer] = []
 
-    def _make(statuses):
-        made.append(_StatusServer(statuses).start())
+    def _make(statuses, plain_text=False):
+        made.append(_StatusServer(statuses, plain_text=plain_text).start())
         return made[-1]
 
     yield _make
@@ -449,6 +453,49 @@ class TestPostHardening:
                 await c._post(f"{srv.url}/echo", {})
             assert ei.value.status == 503
             assert srv.calls == 1
+        finally:
+            await c.teardown()
+
+    @pytest.mark.asyncio
+    async def test_a_plain_text_5xx_is_retried_and_reconciles(self, monkeypatch, backends, status_server):
+        """The router answers PLAIN TEXT, not JSON, when its backend is gone.
+
+        That body fails ``resp.json()``, which used to take a branch with its own
+        ``continue`` -- skipping the reconcile entirely. Measured on GPU: a killed
+        engine went undetected through all 30 retries, cost 33s of a 4s generation
+        phase, and surfaced as ``JSONDecodeError`` naming the parser rather than the
+        dead backend. So the exact shape of the real failure is pinned here."""
+        from skyrl.backends.skyrl_train.inference_servers import (
+            remote_inference_client as ric,
+        )
+
+        monkeypatch.setattr(ric, "_DATA_PLANE_RETRIES", 3)
+        b0 = backends(1)[0]
+        srv = status_server([503, 200], plain_text=True)
+        c = _client([b0.url], proxy=srv.url, ft=_ft())
+        try:
+            b0.health_calls = 0
+            body = await c._post(f"{srv.url}/echo", {})
+            assert body == {"ok": True}, "a plain-text 5xx must be retried, not raised"
+            assert srv.calls == 2
+            assert b0.health_calls >= 1, "the plain-text 5xx must have triggered a fleet probe"
+        finally:
+            await c.teardown()
+
+    @pytest.mark.asyncio
+    async def test_a_plain_text_5xx_reports_the_status_not_the_parser(self, monkeypatch, status_server):
+        """When it does exhaust, the error must name the dead backend."""
+        from skyrl.backends.skyrl_train.inference_servers import (
+            remote_inference_client as ric,
+        )
+
+        monkeypatch.setattr(ric, "_DATA_PLANE_RETRIES", 2)
+        srv = status_server([503], plain_text=True)
+        c = _client([srv.url], proxy=srv.url, ft=_ft())
+        try:
+            with pytest.raises(aiohttp.ClientResponseError) as ei:
+                await c._post(f"{srv.url}/echo", {})
+            assert ei.value.status == 503
         finally:
             await c.teardown()
 

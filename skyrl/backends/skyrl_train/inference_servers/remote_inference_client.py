@@ -625,6 +625,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
         reconciled = False
         generation = self._membership_generation
         for attempt in range(_DATA_PLANE_RETRIES):
+            # INVARIANT: exactly one place below decides "retryable", and exactly one
+            # tail reconciles + backs off. Do not add an early `continue` here.
             try:
                 async with session.post(url, json=json, headers=headers, **post_kwargs) as resp:
                     try:
@@ -641,12 +643,31 @@ class RemoteInferenceClient(InferenceEngineInterface):
                                 message=text or resp.reason,
                                 headers=resp.headers,
                             )
+                        # Non-JSON 5xx: retryable, as it always was. Under FT it is
+                        # re-raised carrying the STATUS so the classifier below sees a
+                        # dead backend, instead of a JSONDecodeError that names the
+                        # parser rather than the cause.
+                        #
+                        # This branch used to `continue` straight back to the top of
+                        # the loop, skipping the reconcile below -- and since the
+                        # router answers PLAIN TEXT 5xx when its backend is gone, that
+                        # made the dead-engine signature the one path through _post
+                        # that never triggered detection. Measured: 30 retries, no
+                        # probe, 33s lost, and a JSONDecodeError at the end. Every
+                        # retryable outcome now funnels through the single tail below.
+                        if self._ft_enabled:
+                            text = await resp.text()
+                            raise aiohttp.ClientResponseError(
+                                resp.request_info,
+                                resp.history,
+                                status=resp.status,
+                                message=text or resp.reason,
+                                headers=resp.headers,
+                            ) from e
                         last_exc = e
-                        logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
-                        await asyncio.sleep(1)
-                        continue
-                    raise_for_status(resp, body)
-                    return body
+                    else:
+                        raise_for_status(resp, body)
+                        return body
             except aiohttp.ClientResponseError as e:
                 if not (self._ft_enabled and e.status in _ROUTER_BACKEND_FAILURE_STATUSES):
                     raise
