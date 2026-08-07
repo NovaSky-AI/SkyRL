@@ -106,10 +106,10 @@ def gather_heads_scatter_seq(x: Tensor, head_dim: int, seq_dim: int, group: Proc
     return SeqAllToAll.apply(group, x, seq_dim, head_dim, False)
 
 
-def _pad_tensor(x: Tensor, dim: int, padding_size: int) -> Tensor:
+def _pad_tensor(x: Tensor, dim: int, padding_size: int, padding_value: int = 0) -> Tensor:
     shape = list(x.shape)
     shape[dim] = padding_size
-    pad = torch.zeros(shape, dtype=x.dtype, device=x.device)
+    pad = torch.full(shape, padding_value, dtype=x.dtype, device=x.device)
     return torch.cat([x, pad], dim=dim)
 
 
@@ -267,6 +267,7 @@ def ulysses_pad_and_slice_inputs(
     position_ids_rmpad: Optional[torch.Tensor] = None,
     attention_mask_rmpad: Optional[torch.Tensor] = None,
     sp_size: int = 1,
+    input_padding_value: int = 0,
 ):
     """
     Pad and slice input_ids to be divisible by sp_size
@@ -277,9 +278,11 @@ def ulysses_pad_and_slice_inputs(
     The is the utility of pre-forward for ulysses sequence parallelism
 
     Args:
-        input_ids_rmpad: shape of [bsz, seqlen]
+        input_ids_rmpad: shape of [bsz, seqlen, ...]. Trailing dimensions are
+            preserved so token-aligned metadata can use the same partition.
         position_ids_rmpad: shape of [bsz, seqlen]
         sp_size (int): ulysses sequence parallelism size
+        input_padding_value: Value for padded entries in ``input_ids_rmpad``.
 
     Returns:
         torch.Tensor: padded and sliced input_ids
@@ -294,10 +297,15 @@ def ulysses_pad_and_slice_inputs(
     group = get_ulysses_sequence_parallel_group()
     if group is None:
         raise ValueError("`sp_size` > 1 but no ulysses sequence parallel group set.")
-    _, total_seq_len = input_ids_rmpad.shape
+    total_seq_len = input_ids_rmpad.size(1)
     pad_size = (sp_size - total_seq_len % sp_size) % sp_size
     if pad_size > 0:
-        input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=0)
+        input_ids_rmpad = _pad_tensor(
+            input_ids_rmpad,
+            dim=1,
+            padding_size=pad_size,
+            padding_value=input_padding_value,
+        )
         if position_ids_rmpad is not None:
             pad_pos_ids = (
                 torch.arange(pad_size, device=position_ids_rmpad.device)
