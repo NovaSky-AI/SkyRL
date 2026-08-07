@@ -137,7 +137,7 @@ class FakeInt4QatConfig(BaseConfig):
     BF16 masters, enabling this fake-quantizes the frozen expert GEMMs onto the
     same INT4 grid in the forward pass (straight-through backward), removing the
     train/infer weight mismatch. See
-    ``skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat``.
+    ``skyrl.backends.skyrl_train.workers.megatron.quantization.fake_int4_qat``.
     """
 
     enabled: bool = False
@@ -250,6 +250,10 @@ class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
+    fp8_param_gather: bool = False
+    """Keep the DDP parameter all-gather in FP8.
+    Must be ``True`` when training with ``transformer_config_kwargs.fp8_param=true`` so persistent
+    FP8 params stay FP8 through the distributed-optimizer all-gather."""
     average_in_collective: bool = True
 
 
@@ -499,7 +503,16 @@ class MegatronConfig(BaseConfig):
     """Pass-through kwargs for Megatron's ``TransformerConfig``:
     https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py
     Also the place to put HuggingFace config overrides (e.g. ``rope_parameters``) for the Megatron
-    backend, where FSDP would use ``model_config_kwargs``."""
+    backend, where FSDP would use ``model_config_kwargs``.
+
+    FP8 training is configured here: ``fp8`` (TransformerEngine compute format, e.g. ``"e4m3"`` or
+    ``"hybrid"``), ``fp8_recipe`` (``"auto"`` resolves to the architecture-native recipe —
+    ``blockwise``/FP32 scales on Hopper, native MXFP8 on Blackwell/SM100+, where TE also requires
+    every weight dim to be divisible by 32), ``fp8_param`` (store Megatron params in FP8; supported
+    with ``fp8_recipe=blockwise`` + FP32 block scales only and requires
+    ``ddp_config.fp8_param_gather=true``), and ``fp8_amax_compute_algo``. The block-scale env
+    contract (``NVTE_FP8_BLOCK_SCALING_FP32_SCALES``, ``VLLM_USE_DEEP_GEMM_E8M0``) is defaulted and
+    validated per architecture at startup and forwarded to all Ray actors."""
     empty_cuda_cache: Optional[bool] = True
     """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
     This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer."""
@@ -1100,6 +1113,14 @@ class InferenceEngineConfig(BaseConfig):
     """Should match the dtype used by the inference engine.
     Also used during full-weight sync, where policy weights are cast to this dtype before being sent
     to the inference engine. The LoRA-adapter sync path exports fp32 instead."""
+    fp8_weight_sync_mode: Optional[str] = None
+    """Optional rollout weight format. ``"serialized_blockwise"`` sends FP8 checkpoint weights and
+    scales (one FP32 scale per 128x128 block) instead of ``model_dtype`` tensors, halving transfer
+    volume and letting vLLM serve FP8. Requires ``trainer.strategy="megatron"`` and a model with a
+    registered FP8 spec (see ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The
+    vLLM engine settings this needs (``quantization="fp8"``, ``load_format="dummy"``, and the
+    matching ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
+    automatically; the first weight sync supplies real weights before any generation."""
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
     When ``False``, point SkyRL at an external HTTP/vLLM deployment via ``external_proxy_url`` and/or
