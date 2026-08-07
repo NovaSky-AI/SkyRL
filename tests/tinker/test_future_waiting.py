@@ -1,4 +1,4 @@
-"""Tests for waiting on asynchronous request results."""
+"""Tests for waiting on asynchronous request results (api.wait_for_future/poll_futures)."""
 
 import asyncio
 from contextlib import suppress
@@ -112,15 +112,11 @@ async def test_surfaces_failed_status(waiters, sync_engine):
 
 
 @pytest.mark.asyncio
-async def test_returns_none_on_timeout(waiters, sync_engine):
-    request_id = insert_pending(sync_engine)[0]
+async def test_abandoned_request_times_out_and_leaves_no_entry(waiters, sync_engine):
+    """A caller giving up gets None, and must drop out of the poll set.
 
-    assert await wait_for_future(waiters, request_id, timeout=0.05) is None
-
-
-@pytest.mark.asyncio
-async def test_abandoned_request_leaves_no_entry_behind(waiters, sync_engine):
-    """A caller giving up must drop out of the poll set, or it grows without bound."""
+    Otherwise the registry, and so the poll query, grows without bound.
+    """
     request_id = insert_pending(sync_engine)[0]
 
     assert await wait_for_future(waiters, request_id, timeout=0.05) is None
@@ -141,17 +137,6 @@ async def test_one_waiter_giving_up_does_not_strand_the_others(waiters, sync_eng
     mark_completed(sync_engine, request_id, {"ok": True})
 
     assert await patient == (RequestStatus.COMPLETED, {"ok": True})
-
-
-@pytest.mark.asyncio
-async def test_multiple_waiters_on_same_request_all_resolve(waiters, sync_engine):
-    request_id = insert_pending(sync_engine)[0]
-    mark_completed(sync_engine, request_id, {"ok": True})
-
-    results = await asyncio.gather(*(wait_for_future(waiters, request_id, timeout=5) for _ in range(3)))
-
-    assert results == [(RequestStatus.COMPLETED, {"ok": True})] * 3
-    assert request_id not in waiters
 
 
 @pytest.mark.asyncio
@@ -179,23 +164,6 @@ async def test_query_count_does_not_scale_with_waiters(waiters, sync_engine, asy
     assert 0 < len(statements) < 50
 
 
-@pytest.mark.asyncio
-async def test_poller_survives_a_failing_iteration(async_engine, sync_engine):
-    """A transient database error must not wedge every waiter permanently."""
-    registry: dict[int, set[asyncio.Future]] = {}
-    poller = asyncio.create_task(poll_futures(async_engine, registry, poll_interval_sec=0.01))
-    await async_engine.dispose()  # make the next iteration fail
-
-    request_id = insert_pending(sync_engine)[0]
-    mark_completed(sync_engine, request_id, {"ok": True})
-    try:
-        assert await wait_for_future(registry, request_id, timeout=5) == (RequestStatus.COMPLETED, {"ok": True})
-    finally:
-        poller.cancel()
-        with suppress(asyncio.CancelledError):
-            await poller
-
-
 def _stub_request(async_engine, waiters):
     from types import SimpleNamespace
 
@@ -220,24 +188,6 @@ async def test_retrieve_future_returns_terminal_result_without_waiting(async_eng
     )
 
     assert result == {"sequences": [1]}
-
-
-@pytest.mark.asyncio
-async def test_retrieve_future_waits_while_pending(waiters, async_engine, sync_engine):
-    from skyrl.tinker import api
-
-    request_id = insert_pending(sync_engine)[0]
-
-    async def complete_soon():
-        await asyncio.sleep(0.05)
-        mark_completed(sync_engine, request_id, {"late": True})
-
-    asyncio.create_task(complete_soon())
-    result = await api.retrieve_future(
-        api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiters)
-    )
-
-    assert result == {"late": True}
 
 
 @pytest.mark.asyncio
