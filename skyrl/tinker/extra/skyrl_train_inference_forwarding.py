@@ -5,6 +5,8 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
+import os
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -94,20 +96,35 @@ class SkyRLTrainInferenceForwardingClient:
             await session.commit()
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.
-        # HTTP 4xx/5xx surfaces as RuntimeError below and is NOT retried.
-        try:
-            proxy_url = await self._resolve_proxy_url()
-            return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-        except httpx.RequestError as e:
+        # Retry missing/stale vLLM proxy discovery and httpx transport errors.
+        # Keep vLLM HTTP 4xx/5xx responses non-retryable.
+        timeout_sec = float(os.environ.get("SKYRL_PROXY_RETRY_TIMEOUT_SEC", "900"))
+        backoff_sec = float(os.environ.get("SKYRL_PROXY_RETRY_BACKOFF_SEC", "5"))
+        deadline = time.monotonic() + timeout_sec
+        attempt = 0
+        last_tried_url = None
+        while True:
+            attempt += 1
+            try:
+                force_refresh = attempt > 1 and (last_tried_url is None or last_tried_url == self._cached_proxy_url)
+                proxy_url = await self._resolve_proxy_url(force_refresh=force_refresh)
+                last_tried_url = proxy_url
+                return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+            except httpx.RequestError as e:
+                last = f"{type(e).__name__}: {e}"
+            except RuntimeError as e:
+                if "no proxy URL published" not in str(e):
+                    raise
+                last = str(e)
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"inference proxy unavailable after {attempt} attempts / {timeout_sec:.0f}s: {last}")
             logger.warning(
-                "Network error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
-                self._cached_proxy_url,
-                type(e).__name__,
-                e,
+                "vLLM proxy unavailable (attempt %d: %s) — re-reading proxy URL, retrying in %.0fs",
+                attempt,
+                last,
+                backoff_sec,
             )
-            proxy_url = await self._resolve_proxy_url(force_refresh=True)
-            return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+            await asyncio.sleep(backoff_sec)
 
     async def _forward(
         self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None
