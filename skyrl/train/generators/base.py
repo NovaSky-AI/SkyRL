@@ -52,6 +52,7 @@ class GeneratorOutput(TypedDict):
     # record its split.
     trajectory_time_splits: Optional[Dict[str, List[float]]]
     rollout_expert_indices: Optional[List[RoutedExpertIndices]]
+    rollout_sample_support: Optional[List[List[List[int]]]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
     # Per-row env metrics (one dict per row in the flattened batch). Used by

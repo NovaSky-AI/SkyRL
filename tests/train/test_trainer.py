@@ -114,6 +114,37 @@ def _get_test_data(trainer: RayPPOTrainer):
     return data
 
 
+def test_fwd_logprobs_preserves_sample_support_and_loss_mask(dummy_config):
+    dummy_config.trainer.critic.model.path = None
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.ref_model = None
+    trainer.dispatch = MagicMock()
+    trainer.all_metrics = {}
+    trainer._skip_policy_forward = MagicMock(return_value=False)
+    seen = {}
+
+    def execute_forward_pass(model, batch, **kwargs):
+        seen.update(batch)
+        return torch.zeros((2, 3))
+
+    trainer._execute_forward_pass = execute_forward_pass
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.ones((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+            "loss_mask": torch.ones((2, 3)),
+            "sample_support_ids": torch.tensor([[[1, -1]] * 4, [[2, -1]] * 4], dtype=torch.int32),
+        }
+    )
+    batch.metadata = {"response_length": 3}
+
+    trainer.fwd_logprobs_values_reward(batch)
+
+    assert torch.equal(seen["sample_support_ids"], batch["sample_support_ids"])
+    assert torch.equal(seen["loss_mask"], batch["loss_mask"])
+
+
 def test_calculate_kl_create_experience_batched(dummy_config):
     trainer = RayPPOTrainer(
         cfg=dummy_config,

@@ -395,6 +395,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
         "rollout_metrics": None,
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.25], [0.15, 0.25], [0.1, 0.2], [0.3, 0.4]],
         "rollout_expert_indices": [np.asarray([[[i, i + 1]]], dtype=np.uint8) for i in range(6)],
+        "rollout_sample_support": [[[i, i + 10], [i + 1, i + 11]] for i in range(6)],
     }
     uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
@@ -416,6 +417,11 @@ def test_handle_replace_sampling_sufficient_good_samples():
     }
     for response, routes in zip(result_output["response_ids"], result_output["rollout_expert_indices"]):
         assert np.array_equal(routes, route_by_response[tuple(response)])
+    support_by_response = dict(
+        zip(map(tuple, generator_output["response_ids"]), generator_output["rollout_sample_support"])
+    )
+    for response, support in zip(result_output["response_ids"], result_output["rollout_sample_support"]):
+        assert support == support_by_response[tuple(response)]
 
     # Check that bad uid2 samples were replaced with good samples
     uid2_indices = [i for i, uid in enumerate(result_uids) if uid == "uid2"]
@@ -654,6 +660,7 @@ def test_filter_generator_output():
         "rollout_metrics": {"metric": "value"},
         "rollout_logprobs": [[0.16, 0.4], [0.1, 0.2], [0.3, 0.4]],
         "rollout_expert_indices": routes,
+        "rollout_sample_support": [[[7, 70], [8, 80]], [[9, 90], [10, 100]], [[11, 110], [12, 120]]],
     }
     kept_indices = [0, 2]  # Keep first and third samples
 
@@ -668,6 +675,7 @@ def test_filter_generator_output():
     assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
     assert filtered["rollout_expert_indices"][0] is routes[0]
     assert filtered["rollout_expert_indices"][1] is routes[2]
+    assert filtered["rollout_sample_support"] == [[[7, 70], [8, 80]], [[11, 110], [12, 120]]]
 
 
 def test_zero_variance_filter_mixed_groups():

@@ -12,6 +12,7 @@ import torch
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
     build_logprobs_content,
+    clamp_sampled_logprobs,
     decode_packed_routed_experts,
     pack_routed_experts,
 )
@@ -183,3 +184,27 @@ def test_decode_rejects_noncanonical_dtype():
 
     with pytest.raises(ValueError, match="non-canonical dtype"):
         decode_packed_routed_experts(payload)
+
+
+@pytest.mark.parametrize("bad", [float("-inf"), float("inf"), float("nan")])
+def test_clamp_sampled_logprobs_floors_non_finite(bad):
+    content, num_clamped = clamp_sampled_logprobs(np.array([-0.5, bad, -1.25], dtype=np.float32))
+    assert [e["logprob"] for e in content] == [-0.5, CLAMPED_LOGPROB, -1.25]
+    assert num_clamped == 1
+
+
+def test_clamp_sampled_logprobs_leaves_finite_rows_alone():
+    sampled = np.array([-0.5, -1.25, -3.0], dtype=np.float64)
+    content, num_clamped = clamp_sampled_logprobs(sampled)
+    assert [e["logprob"] for e in content] == [-0.5, -1.25, -3.0]
+    assert num_clamped == 0
+
+
+def test_clamp_sampled_logprobs_output_is_json_serializable():
+    # NaN is the case an isneginf screen misses, and orjson would emit it as null.
+    content, _ = clamp_sampled_logprobs(np.array([float("nan"), float("-inf")], dtype=np.float32))
+    assert all(math.isfinite(e["logprob"]) for e in orjson.loads(orjson.dumps(content)))
+
+
+def test_clamp_sampled_logprobs_empty():
+    assert clamp_sampled_logprobs(np.array([], dtype=np.float32)) == ([], 0)
