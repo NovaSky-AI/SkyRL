@@ -90,6 +90,7 @@ from skyrl.train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     extract_step_from_path,
     finalize_minibatch_rollout_logprob_diff_std,
+    finalize_policy_entropy,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
@@ -1551,6 +1552,7 @@ class RayPPOTrainer:
         # Reduce metrics across all mini-batches and epochs
         reduced_metrics = reduce_metrics(all_metrics, sum_loss_metrics=False)
         finalize_minibatch_rollout_logprob_diff_std(reduced_metrics)
+        finalize_policy_entropy(reduced_metrics)
         return reduced_metrics
 
     def train_critic_and_policy(self, data: TrainingInputBatch):

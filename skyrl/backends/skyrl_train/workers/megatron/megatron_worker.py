@@ -64,6 +64,8 @@ from skyrl.backends.skyrl_train.workers.worker import (
     RefWorkerBase,
 )
 from skyrl.backends.skyrl_train.workers.worker_utils import (
+    LOSS_MASK_NNZ_KEY,
+    POLICY_ENTROPY_SUM_KEY,
     BaseBatchIterator,
     BatchIterator,
     TokenBasedBatchIterator,
@@ -1279,6 +1281,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)
+
+        # The entropy sum/count are now summed across micro-batches and DP ranks; divide once for
+        # the exact global entropy of this rank's mini-batch portion. The raw _sum/_nnz keys are
+        # kept so the trainer can sum them again across mini-batches and divide once more for the
+        # final global value.
+        if POLICY_ENTROPY_SUM_KEY in status and LOSS_MASK_NNZ_KEY in status:
+            status["policy_entropy"] = status[POLICY_ENTROPY_SUM_KEY] / max(status[LOSS_MASK_NNZ_KEY], 1.0)
 
         # Collect MoE aux metrics averaged across microbatches (all-reduced across ranks
         # inside get_moe_metrics) aggregating after per-microbatch scalar metrics.
