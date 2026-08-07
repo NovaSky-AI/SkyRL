@@ -53,7 +53,7 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
     setup_per_microbatch_replay_forward,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
-    compute_sample_support_logprobs,
+    compute_sample_support_scores,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -291,7 +291,7 @@ class MegatronModelWrapper:
 
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
             if self.cfg.algorithm.enable_sample_support_replay:
-                token_logprobs = compute_sample_support_logprobs(
+                token_logprobs = compute_sample_support_scores(
                     logits,
                     sequences,
                     data.get("loss_mask"),
@@ -307,7 +307,9 @@ class MegatronModelWrapper:
                     inference_only=True,
                     chunk_size=self.cfg.logprobs_chunk_size,
                     fused_backend=self._fused_lm_head_backend,
-                )
+                    compute_entropy=False,
+                    entropy_requires_grad=False,
+                ).logprobs
             elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
                     logits,  # decoder hidden states [1, T, H]
@@ -620,11 +622,6 @@ class MegatronModelWrapper:
             # grad are never materialized.
             fused_lm_head = self._fused_lm_head and data.get("lm_head_weight") is not None
             lm_head_weight = data.get("lm_head_weight")
-            if fused_lm_head and loss_config.use_entropy_loss:
-                raise NotImplementedError(
-                    "fused_lm_head_logprob does not support use_entropy_loss=True "
-                    "(the fused entropy is a no-grad metric)."
-                )
             if fused_lm_head:
                 _v_local = int(lm_head_weight.shape[0])
                 fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
@@ -634,8 +631,11 @@ class MegatronModelWrapper:
                 logits.div_(temperature)
 
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
+            support_entropy = None
+            support_entropy_mask = None
             if self.cfg.algorithm.enable_sample_support_replay:
-                token_logprobs = compute_sample_support_logprobs(
+                compute_support_entropy = resolved_loss_name != "cross_entropy"
+                support_scores = compute_sample_support_scores(
                     logits,
                     sequences,
                     loss_mask,
@@ -651,7 +651,12 @@ class MegatronModelWrapper:
                     inference_only=forward_only,
                     chunk_size=self.cfg.logprobs_chunk_size,
                     fused_backend=self._fused_lm_head_backend,
+                    compute_entropy=compute_support_entropy,
+                    entropy_requires_grad=compute_support_entropy and loss_config.use_entropy_loss,
                 )
+                token_logprobs = support_scores.logprobs
+                support_entropy = support_scores.entropy
+                support_entropy_mask = support_scores.valid_mask
             elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
                     logits,  # decoder hidden states [1, T, H]
@@ -857,7 +862,16 @@ class MegatronModelWrapper:
 
             # RL path: add optional KL/entropy terms
             with torch.set_grad_enabled(loss_config.use_entropy_loss):
-                if fused_lm_head and packed_seq_params is not None and packed_targets is not None:
+                if support_entropy is not None and support_entropy_mask is not None:
+                    action_entropy = support_entropy[:, -num_actions:]
+                    action_entropy_mask = support_entropy_mask[:, -num_actions:] & loss_mask.to(torch.bool)
+                    entropy = masked_mean(action_entropy, action_entropy_mask)
+                    entropy_for_loss = entropy
+                elif fused_lm_head and loss_config.use_entropy_loss:
+                    raise NotImplementedError(
+                        "Differentiable full-vocabulary entropy is not supported with the fused LM head"
+                    )
+                elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
                     entropy, entropy_for_loss = from_parallel_hidden_to_entropy_packed_sequences(
                         logits,  # decoder hidden states [1, T, H]
                         lm_head_weight,

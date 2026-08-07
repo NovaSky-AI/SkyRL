@@ -8,7 +8,8 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     TokenMetadataLayout,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
-    sample_support_logprobs,
+    aligned_sample_support_scores,
+    sample_support_scores,
     synthetic_eos_logprobs,
 )
 
@@ -30,6 +31,22 @@ def _reference(logits, sampled_ids, support_ids):
     return torch.stack(outputs).reshape(sampled_ids.shape)
 
 
+def _reference_entropy(logits, support_ids):
+    outputs = []
+    for row_logits, support in zip(
+        logits.reshape(-1, logits.shape[-1]),
+        support_ids.reshape(-1, support_ids.shape[-1]),
+        strict=True,
+    ):
+        members = support[support >= 0].long()
+        if members.numel() == 0:
+            outputs.append(row_logits.new_zeros(()))
+        else:
+            member_logprobs = torch.log_softmax(row_logits[members], dim=0)
+            outputs.append(-(member_logprobs.exp() * member_logprobs).sum())
+    return torch.stack(outputs).reshape(support_ids.shape[:-1])
+
+
 def test_support_logprobs_match_reference_values_and_gradients():
     logits = torch.randn(2, 3, 11, dtype=torch.float64, requires_grad=True)
     sampled_ids = torch.tensor([[2, 5, 1], [8, 3, 7]])
@@ -41,24 +58,118 @@ def test_support_logprobs_match_reference_values_and_gradients():
         dtype=torch.int32,
     )
 
-    actual, valid = sample_support_logprobs(
+    scores = sample_support_scores(
         logits,
         sampled_ids,
         support_ids,
         vocab_start_index=0,
         vocab_end_index=logits.shape[-1],
         tp_group=None,
+        compute_entropy=False,
+        entropy_requires_grad=False,
     )
     expected = _reference(logits, sampled_ids, support_ids)
 
-    assert valid.tolist() == [[True, True, False], [True, True, True]]
-    torch.testing.assert_close(actual, expected)
-    actual.sum().backward()
+    assert scores.valid_mask.tolist() == [[True, True, False], [True, True, True]]
+    torch.testing.assert_close(scores.logprobs, expected)
+    scores.logprobs.sum().backward()
     actual_grad = logits.grad.clone()
 
     reference_logits = logits.detach().clone().requires_grad_(True)
     _reference(reference_logits, sampled_ids, support_ids).sum().backward()
     torch.testing.assert_close(actual_grad, reference_logits.grad)
+
+
+def test_support_entropy_matches_reference_values_and_gradients():
+    logits = torch.randn(2, 3, 11, dtype=torch.float64, requires_grad=True)
+    sampled_ids = torch.tensor([[2, 5, 1], [8, 3, 7]])
+    support_ids = torch.tensor(
+        [
+            [[2, 4, 6, -1], [5, -1, -1, -1], [-1, -1, -1, -1]],
+            [[8, 0, 9, 4], [3, 2, -1, -1], [7, 1, 5, -1]],
+        ],
+        dtype=torch.int32,
+    )
+
+    scores = sample_support_scores(
+        logits,
+        sampled_ids,
+        support_ids,
+        vocab_start_index=0,
+        vocab_end_index=logits.shape[-1],
+        tp_group=None,
+        compute_entropy=True,
+        entropy_requires_grad=True,
+    )
+    expected_logprobs = _reference(logits, sampled_ids, support_ids)
+    expected_entropy = _reference_entropy(logits, support_ids)
+    assert scores.entropy is not None
+    torch.testing.assert_close(scores.logprobs, expected_logprobs)
+    torch.testing.assert_close(scores.entropy, expected_entropy)
+    assert scores.valid_mask.tolist() == [[True, True, False], [True, True, True]]
+
+    (scores.logprobs + scores.entropy).sum().backward()
+    actual_grad = logits.grad.clone()
+    reference_logits = logits.detach().clone().requires_grad_(True)
+    (
+        _reference(reference_logits, sampled_ids, support_ids) + _reference_entropy(reference_logits, support_ids)
+    ).sum().backward()
+    torch.testing.assert_close(actual_grad, reference_logits.grad)
+
+
+def test_support_entropy_metric_is_detached():
+    logits = torch.randn(1, 2, 7, dtype=torch.float64, requires_grad=True)
+    scores = sample_support_scores(
+        logits,
+        torch.tensor([[2, 5]]),
+        torch.tensor([[[2, 4], [5, 1]]], dtype=torch.int32),
+        vocab_start_index=0,
+        vocab_end_index=logits.shape[-1],
+        tp_group=None,
+        compute_entropy=True,
+        entropy_requires_grad=False,
+    )
+
+    assert scores.entropy is not None
+    assert not scores.entropy.requires_grad
+
+
+def test_entropy_gradients_require_entropy_computation():
+    with pytest.raises(ValueError, match="compute_entropy=True"):
+        sample_support_scores(
+            torch.randn(1, 5),
+            torch.tensor([1]),
+            torch.tensor([[1, 2]], dtype=torch.int32),
+            vocab_start_index=0,
+            vocab_end_index=5,
+            tp_group=None,
+            compute_entropy=False,
+            entropy_requires_grad=True,
+        )
+
+
+def test_support_entropy_excludes_synthetic_eos():
+    logits = torch.tensor([[[1.0, 0.0, 2.0, -1.0, 0.5], [0.0, 1.0, -1.0, 2.0, 0.5]]])
+    sampled_ids = torch.tensor([[2, 4]])
+    support = torch.tensor([[[2, 1], [-1, -1]]], dtype=torch.int32)
+
+    scores = aligned_sample_support_scores(
+        logits,
+        sampled_ids,
+        support,
+        loss_mask=torch.ones((1, 2), dtype=torch.bool),
+        vocab_start_index=0,
+        vocab_end_index=logits.shape[-1],
+        tp_group=None,
+        inference_only=False,
+        compute_entropy=True,
+        entropy_requires_grad=False,
+    )
+
+    assert scores.entropy is not None
+    assert torch.isfinite(scores.logprobs).all()
+    torch.testing.assert_close(scores.entropy, _reference_entropy(logits, support))
+    assert scores.valid_mask.tolist() == [[True, False]]
 
 
 def test_fused_selected_projection_matches_explicit_logits_with_pair_chunking():
@@ -74,7 +185,7 @@ def test_fused_selected_projection_matches_explicit_logits_with_pair_chunking():
         dtype=torch.int32,
     )
 
-    fused, _ = sample_support_logprobs(
+    fused = sample_support_scores(
         hidden,
         sampled_ids,
         support_ids,
@@ -84,38 +195,44 @@ def test_fused_selected_projection_matches_explicit_logits_with_pair_chunking():
         lm_head_weight=weight,
         temperature=temperature,
         chunk_size=4,
+        compute_entropy=False,
+        entropy_requires_grad=False,
     )
-    fused.sum().backward()
+    fused.logprobs.sum().backward()
     fused_hidden_grad = hidden.grad.clone()
     fused_weight_grad = weight.grad.clone()
 
     explicit_hidden = hidden.detach().clone().requires_grad_(True)
     explicit_weight = weight.detach().clone().requires_grad_(True)
     explicit_logits = (explicit_hidden @ explicit_weight.T) / temperature
-    explicit, _ = sample_support_logprobs(
+    explicit = sample_support_scores(
         explicit_logits,
         sampled_ids,
         support_ids,
         vocab_start_index=0,
         vocab_end_index=weight.shape[0],
         tp_group=None,
+        compute_entropy=False,
+        entropy_requires_grad=False,
     )
-    explicit.sum().backward()
+    explicit.logprobs.sum().backward()
 
-    torch.testing.assert_close(fused, explicit, check_dtype=False)
+    torch.testing.assert_close(fused.logprobs, explicit.logprobs, check_dtype=False)
     torch.testing.assert_close(fused_hidden_grad, explicit_hidden.grad, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(fused_weight_grad, explicit_weight.grad, rtol=1e-5, atol=1e-6)
 
 
 def test_support_ids_must_be_int32():
     with pytest.raises(ValueError, match="int32"):
-        sample_support_logprobs(
+        sample_support_scores(
             torch.randn(1, 5),
             torch.tensor([1]),
             torch.tensor([[1, 2]], dtype=torch.int64),
             vocab_start_index=0,
             vocab_end_index=5,
             tp_group=None,
+            compute_entropy=False,
+            entropy_requires_grad=False,
         )
 
 
