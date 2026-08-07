@@ -2,7 +2,7 @@ import torch
 
 from skyrl.backends.skyrl_train.distributed.ulysses import utils
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
-    aligned_sample_support_logprobs,
+    aligned_sample_support_scores,
 )
 
 
@@ -57,7 +57,7 @@ def test_ulysses_sample_support_matches_unsharded_values_and_gradients(monkeypat
         )
         local_loss_mask, _, _, _ = utils.ulysses_pad_and_slice_inputs(loss_mask, sp_size=2)
         sharded_logprobs.append(
-            aligned_sample_support_logprobs(
+            aligned_sample_support_scores(
                 local_logits,
                 local_sampled_ids,
                 local_support_ids,
@@ -66,7 +66,9 @@ def test_ulysses_sample_support_matches_unsharded_values_and_gradients(monkeypat
                 vocab_end_index=logits.shape[-1],
                 tp_group=None,
                 inference_only=False,
-            )
+                compute_entropy=False,
+                entropy_requires_grad=False,
+            ).logprobs
         )
 
     actual = torch.cat(sharded_logprobs, dim=1)[:, : logits.shape[1]]
@@ -74,7 +76,7 @@ def test_ulysses_sample_support_matches_unsharded_values_and_gradients(monkeypat
     actual_grad = logits.grad.clone()
 
     reference_logits = logits.detach().clone().requires_grad_(True)
-    expected = aligned_sample_support_logprobs(
+    expected = aligned_sample_support_scores(
         reference_logits,
         sampled_ids,
         support_ids,
@@ -83,7 +85,9 @@ def test_ulysses_sample_support_matches_unsharded_values_and_gradients(monkeypat
         vocab_end_index=logits.shape[-1],
         tp_group=None,
         inference_only=False,
-    )
+        compute_entropy=False,
+        entropy_requires_grad=False,
+    ).logprobs
     expected.sum().backward()
 
     torch.testing.assert_close(actual, expected)
@@ -114,7 +118,7 @@ def test_ulysses_synthetic_eos_uses_fixed_trajectory_capacity(monkeypatch):
             for tensor in (logits, sampled_ids, support_ids, loss_mask, trajectory_ids)
         ]
         sharded_logprobs.append(
-            aligned_sample_support_logprobs(
+            aligned_sample_support_scores(
                 *local[:4],
                 vocab_start_index=0,
                 vocab_end_index=logits.shape[-1],
@@ -122,7 +126,9 @@ def test_ulysses_synthetic_eos_uses_fixed_trajectory_capacity(monkeypatch):
                 inference_only=False,
                 trajectory_ids=local[4],
                 num_trajectories=2,
-            )
+                compute_entropy=False,
+                entropy_requires_grad=False,
+            ).logprobs
         )
 
     actual = torch.cat(sharded_logprobs, dim=1)
@@ -130,7 +136,7 @@ def test_ulysses_synthetic_eos_uses_fixed_trajectory_capacity(monkeypatch):
     actual_grad = logits.grad.clone()
 
     reference_logits = logits.detach().clone().requires_grad_(True)
-    expected = aligned_sample_support_logprobs(
+    expected = aligned_sample_support_scores(
         reference_logits,
         sampled_ids,
         support_ids,
@@ -141,7 +147,9 @@ def test_ulysses_synthetic_eos_uses_fixed_trajectory_capacity(monkeypatch):
         inference_only=False,
         trajectory_ids=trajectory_ids,
         num_trajectories=2,
-    )
+        compute_entropy=False,
+        entropy_requires_grad=False,
+    ).logprobs
     expected.sum().backward()
 
     torch.testing.assert_close(actual, expected)

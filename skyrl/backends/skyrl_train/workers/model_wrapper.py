@@ -28,7 +28,7 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
-    aligned_sample_support_logprobs,
+    aligned_sample_support_scores,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
@@ -266,6 +266,8 @@ class HFModelWrapper(nn.Module):
         support_ids_fwd = sample_support_ids if enable_sample_support_replay else None
         target_loss_mask_fwd = None
         support_trajectory_ids_fwd = None
+        support_entropy = None
+        support_entropy_mask = None
         if enable_sample_support_replay:
             # The loss mask is response-only. Place it in the full token layout so it
             # follows support IDs through the same unpadding, target shift, and SP slice.
@@ -395,7 +397,7 @@ class HFModelWrapper(nn.Module):
                 and target_loss_mask_rolled is not None
                 and support_trajectory_ids_rolled is not None
             )
-            log_probs = aligned_sample_support_logprobs(
+            support_scores = aligned_sample_support_scores(
                 logits_BSV,
                 sequences_rolled,
                 support_ids_rolled,
@@ -404,9 +406,14 @@ class HFModelWrapper(nn.Module):
                 vocab_end_index=logits_BSV.shape[-1],
                 tp_group=None,
                 inference_only=not torch.is_grad_enabled(),
+                compute_entropy=compute_entropy,
+                entropy_requires_grad=compute_entropy and entropy_requires_grad,
                 trajectory_ids=support_trajectory_ids_rolled,
                 num_trajectories=sequences.shape[0],
             )
+            log_probs = support_scores.logprobs
+            support_entropy = support_scores.entropy
+            support_entropy_mask = support_scores.valid_mask
         else:
             # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
             log_probs = logprobs_from_logits(logits_BSV, sequences_rolled, inplace_backward=True)
@@ -417,6 +424,13 @@ class HFModelWrapper(nn.Module):
             log_probs = gather_outputs_and_unpad(
                 log_probs, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
             )  # shape can be (1, nnz) - with packing or (B, S) - without packing
+            if support_entropy is not None and support_entropy_mask is not None:
+                support_entropy = gather_outputs_and_unpad(
+                    support_entropy, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
+                )
+                support_entropy_mask = gather_outputs_and_unpad(
+                    support_entropy_mask, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
+                )
 
         if self.remove_microbatch_padding:
             # add padding back - postprocess logprobs to be compatible with original tensor
@@ -425,36 +439,39 @@ class HFModelWrapper(nn.Module):
             log_probs = pad_input(
                 log_probs.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
             ).squeeze(-1)
+            if support_entropy is not None and support_entropy_mask is not None:
+                support_entropy = pad_input(
+                    support_entropy.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                ).squeeze(-1)
+                support_entropy_mask = pad_input(
+                    support_entropy_mask.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                ).squeeze(-1)
 
         if compute_entropy:
-            # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
-            # For non-sample packing: pass the attention mask to exclude padding tokens
-            entropy_mask = None
-            if not self.remove_microbatch_padding:
-                # Non-sample packing: pass attention mask to handle padding
-                # Use attention_mask_fwd which may be sliced (if sequence_parallel_size > 1) or full
-                entropy_mask = attention_mask_fwd
+            if support_entropy is not None and support_entropy_mask is not None:
+                output["entropy"] = support_entropy
+                output["entropy_mask"] = support_entropy_mask
+            else:
+                # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
+                # For non-sample packing: pass the attention mask to exclude padding tokens
+                entropy_mask = None if self.remove_microbatch_padding else attention_mask_fwd
+                entropy_BS = self.chunked_entropy_from_logits_fn(
+                    logits_BSV,
+                    requires_grad=entropy_requires_grad,
+                    attention_mask=entropy_mask,
+                    chunk_size=self.logprobs_chunk_size,
+                )
 
-            entropy_BS = self.chunked_entropy_from_logits_fn(
-                logits_BSV,
-                requires_grad=entropy_requires_grad,
-                attention_mask=entropy_mask,
-                chunk_size=self.logprobs_chunk_size,
-            )
-
-            if self.sequence_parallel_size > 1:
-                dim = entropy_BS.ndim - 1
-                entropy_BS = gather_outputs_and_unpad(
-                    entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
-                )  # shape can be (1, nnz) - with packing or (B,S) - without packing
-            if self.remove_microbatch_padding:
-                entropy_BS = pad_input(
-                    entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
-                ).squeeze(
-                    -1
-                )  # (1, nnz) -> (B, S)
-
-            output["entropy"] = entropy_BS
+                if self.sequence_parallel_size > 1:
+                    dim = entropy_BS.ndim - 1
+                    entropy_BS = gather_outputs_and_unpad(
+                        entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
+                    )
+                if self.remove_microbatch_padding:
+                    entropy_BS = pad_input(
+                        entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                    ).squeeze(-1)
+                output["entropy"] = entropy_BS
 
         if isinstance(num_actions, list):
             if len(num_actions) == 1:

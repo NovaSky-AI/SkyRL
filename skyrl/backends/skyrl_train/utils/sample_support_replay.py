@@ -1,5 +1,7 @@
 """Support-conditioned logprobs for bounded sampler replay."""
 
+from dataclasses import dataclass
+
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
@@ -8,6 +10,15 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     scatter_packed_token_values_to_batch,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
+
+
+@dataclass(frozen=True)
+class SampleSupportScores:
+    """Support-conditioned scores and the rows backed by recorded support."""
+
+    logprobs: torch.Tensor
+    entropy: torch.Tensor | None
+    valid_mask: torch.Tensor
 
 
 def _selected_hidden_projection(
@@ -40,7 +51,7 @@ def _selected_hidden_projection(
     return output.reshape(num_rows, width)
 
 
-def sample_support_logprobs(
+def sample_support_scores(
     logits_or_hidden: torch.Tensor,
     sampled_ids: torch.Tensor,
     support_ids: torch.Tensor,
@@ -51,8 +62,10 @@ def sample_support_logprobs(
     lm_head_weight: torch.Tensor | None = None,
     temperature: float = 1.0,
     chunk_size: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Renormalize sampled-token scores over each recorded support row."""
+    compute_entropy: bool,
+    entropy_requires_grad: bool,
+) -> SampleSupportScores:
+    """Compute sampled-token logprobs and optional entropy over recorded support."""
     if logits_or_hidden.shape[:-1] != sampled_ids.shape or support_ids.shape[:-1] != sampled_ids.shape:
         raise ValueError(
             "logits, sampled_ids, and support_ids must have matching prefix shapes, got "
@@ -62,6 +75,8 @@ def sample_support_logprobs(
         raise ValueError(f"sample support must use int32 vocab ids, got {support_ids.dtype}")
     if temperature <= 0:
         raise ValueError("temperature must be positive")
+    if entropy_requires_grad and not compute_entropy:
+        raise ValueError("entropy gradients require compute_entropy=True")
 
     flat_source = logits_or_hidden.reshape(-1, logits_or_hidden.shape[-1])
     flat_sampled = sampled_ids.reshape(-1).long()
@@ -109,17 +124,35 @@ def sample_support_logprobs(
         torch.distributed.all_reduce(global_max, op=torch.distributed.ReduceOp.MAX, group=tp_group)
     safe_max = torch.where(valid_rows, global_max, 0.0)
 
-    local_sum = torch.where(local_members, (local_values - safe_max.unsqueeze(1)).exp(), 0.0).sum(dim=-1)
-    # Numerator and denominator share one TP SUM collective.
-    local_stats = torch.stack((local_sum, local_sampled))
+    local_exp = torch.where(local_members, (local_values - safe_max.unsqueeze(1)).exp(), 0.0)
+    local_sum = local_exp.sum(dim=-1)
+    local_stats = [local_sum, local_sampled]
+    if compute_entropy:
+        entropy_values = local_values if entropy_requires_grad else local_values.detach()
+        entropy_exp = local_exp if entropy_requires_grad else local_exp.detach()
+        shifted_values = torch.where(local_members, entropy_values - safe_max.unsqueeze(1), 0.0)
+        local_stats.append((entropy_exp * shifted_values).sum(dim=-1))
+    # Numerator, denominator, and optional entropy statistic share one TP SUM collective.
+    local_stats = torch.stack(local_stats)
     global_stats = local_stats.detach().clone()
     if tp_group is not None and torch.distributed.get_world_size(tp_group) > 1:
         torch.distributed.all_reduce(global_stats, op=torch.distributed.ReduceOp.SUM, group=tp_group)
     global_stats = global_stats + local_stats - local_stats.detach()
-    denominator, sampled_score = global_stats
+    denominator, sampled_score = global_stats[:2]
     logprobs = sampled_score - safe_max - torch.where(valid_rows, denominator, 1.0).log()
     logprobs = torch.where(valid_rows, logprobs, 0.0)
-    return logprobs.reshape(sampled_ids.shape), valid_rows.reshape(sampled_ids.shape)
+    entropy = None
+    if compute_entropy:
+        entropy_denominator = denominator if entropy_requires_grad else denominator.detach()
+        shifted_score_sum = global_stats[2] if entropy_requires_grad else global_stats[2].detach()
+        safe_denominator = torch.where(valid_rows, entropy_denominator, 1.0)
+        entropy = safe_denominator.log() - shifted_score_sum / safe_denominator
+        entropy = torch.where(valid_rows, entropy, 0.0).reshape(sampled_ids.shape)
+    return SampleSupportScores(
+        logprobs=logprobs.reshape(sampled_ids.shape),
+        entropy=entropy,
+        valid_mask=valid_rows.reshape(sampled_ids.shape),
+    )
 
 
 def synthetic_eos_logprobs(
@@ -259,7 +292,7 @@ def synthetic_eos_logprobs(
     return output.reshape(sampled_ids.shape)
 
 
-def aligned_sample_support_logprobs(
+def aligned_sample_support_scores(
     logits_or_hidden: torch.Tensor,
     sampled_ids: torch.Tensor,
     support_ids: torch.Tensor,
@@ -269,6 +302,8 @@ def aligned_sample_support_logprobs(
     vocab_end_index: int,
     tp_group: torch.distributed.ProcessGroup | None,
     inference_only: bool,
+    compute_entropy: bool,
+    entropy_requires_grad: bool,
     lm_head_weight: torch.Tensor | None = None,
     temperature: float = 1.0,
     chunk_size: int | None = None,
@@ -276,22 +311,22 @@ def aligned_sample_support_logprobs(
     metadata_layout: TokenMetadataLayout | None = None,
     trajectory_ids: torch.Tensor | None = None,
     num_trajectories: int | None = None,
-) -> torch.Tensor:
-    """Apply bounded replay and the explicit synthetic-EOS exception to aligned tokens."""
-    support_logprobs, valid_support = sample_support_logprobs(
+) -> SampleSupportScores:
+    """Apply bounded replay and the synthetic-EOS exception to aligned tokens."""
+    scores = sample_support_scores(
         logits_or_hidden,
         sampled_ids,
         support_ids,
         vocab_start_index=vocab_start_index,
         vocab_end_index=vocab_end_index,
         tp_group=tp_group,
+        compute_entropy=compute_entropy,
+        entropy_requires_grad=entropy_requires_grad,
         lm_head_weight=lm_head_weight,
         temperature=temperature if lm_head_weight is not None else 1.0,
         chunk_size=chunk_size,
     )
-    # Preprocessing permits an empty loss-bearing row only for an EOS that SkyRL
-    # appended after generation. vLLM never supplied a support set for that token.
-    synthetic_eos_mask = loss_mask & ~valid_support
+    synthetic_eos_mask = loss_mask & ~scores.valid_mask
     eos_logprobs = synthetic_eos_logprobs(
         logits_or_hidden,
         sampled_ids,
@@ -308,10 +343,14 @@ def aligned_sample_support_logprobs(
         trajectory_ids=trajectory_ids,
         num_trajectories=num_trajectories,
     )
-    return torch.where(synthetic_eos_mask, eos_logprobs, support_logprobs)
+    return SampleSupportScores(
+        logprobs=torch.where(synthetic_eos_mask, eos_logprobs, scores.logprobs),
+        entropy=scores.entropy,
+        valid_mask=scores.valid_mask,
+    )
 
 
-def compute_sample_support_logprobs(
+def compute_sample_support_scores(
     logits_or_hidden: torch.Tensor,
     sequences: torch.Tensor,
     loss_mask: torch.Tensor | None,
@@ -322,14 +361,16 @@ def compute_sample_support_logprobs(
     metadata_layout: TokenMetadataLayout | None,
     vocab_start_index: int,
     vocab_end_index: int,
-    tp_group: torch.distributed.ProcessGroup,
+    tp_group: torch.distributed.ProcessGroup | None,
     inference_only: bool,
     lm_head_weight: torch.Tensor | None,
     temperature: float,
     chunk_size: int | None,
     fused_backend: str,
-) -> torch.Tensor:
-    """Compute support-conditioned logprobs in canonical trainer layout."""
+    compute_entropy: bool,
+    entropy_requires_grad: bool,
+) -> SampleSupportScores:
+    """Compute dense support-conditioned scores in canonical trainer layout."""
     if sample_support_ids is None:
         raise ValueError("sample-support replay is enabled but the microbatch has no recorded support")
     if loss_mask is None:
@@ -348,8 +389,9 @@ def compute_sample_support_logprobs(
         aligned_support_ids = sample_support_ids[:, 1:]
         aligned_loss_mask = target_loss_mask[:, 1:]
 
-    token_logprobs = aligned_sample_support_logprobs(
-        logits_or_hidden if packed else logits_or_hidden[:, :-1],
+    aligned_source = logits_or_hidden if packed else logits_or_hidden[:, :-1]
+    scores = aligned_sample_support_scores(
+        aligned_source,
         aligned_sampled_ids,
         aligned_support_ids,
         aligned_loss_mask,
@@ -357,10 +399,24 @@ def compute_sample_support_logprobs(
         vocab_end_index=vocab_end_index,
         tp_group=tp_group,
         inference_only=inference_only,
+        compute_entropy=compute_entropy,
+        entropy_requires_grad=entropy_requires_grad,
         lm_head_weight=lm_head_weight,
         temperature=temperature,
         chunk_size=chunk_size,
         fused_backend=fused_backend,
         metadata_layout=metadata_layout if packed else None,
     )
-    return scatter_packed_token_values_to_batch(token_logprobs, metadata_layout, 0) if packed else token_logprobs
+
+    if packed:
+        assert metadata_layout is not None
+        return SampleSupportScores(
+            logprobs=scatter_packed_token_values_to_batch(scores.logprobs, metadata_layout, 0),
+            entropy=(
+                scatter_packed_token_values_to_batch(scores.entropy, metadata_layout, 0)
+                if scores.entropy is not None
+                else None
+            ),
+            valid_mask=scatter_packed_token_values_to_batch(scores.valid_mask, metadata_layout, False),
+        )
+    return scores

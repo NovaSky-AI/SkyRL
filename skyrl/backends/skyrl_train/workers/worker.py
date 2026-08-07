@@ -1004,7 +1004,12 @@ class PolicyWorkerBase(Worker):
                 # batch_size, seqlen
                 entropy_BS = output["entropy"]
                 entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
-                entropy = masked_mean(entropy_BS, loss_mask)
+                entropy_loss_mask = loss_mask
+                if "entropy_mask" in output:
+                    entropy_loss_mask = entropy_loss_mask.to(torch.bool) & output["entropy_mask"][
+                        :, -num_actions - 1 : -1
+                    ].to(torch.bool)
+                entropy = masked_mean(entropy_BS, entropy_loss_mask)
 
             if self.cfg.algorithm.use_entropy_loss:
                 entropy_loss_term = entropy * self.cfg.algorithm.entropy_loss_coef

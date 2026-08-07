@@ -155,6 +155,44 @@ def test_fsdp_dense_support_skips_full_sequence_vocabulary_logprobs(monkeypatch,
     assert torch.isfinite(actual).all()
 
 
+def test_fsdp_replay_entropy_skips_full_vocabulary_entropy(monkeypatch, model_wrapper):
+    sequences = torch.tensor([[1, 2, 3, 4]])
+    support = torch.tensor(
+        [[[-1, -1, -1], [2, 5, -1], [3, -1, -1], [4, 0, 6]]],
+        dtype=torch.int32,
+    )
+    model = _FakeCausalLM(sequence_length=4, vocab_size=7)
+    wrapper = model_wrapper.HFModelWrapper(model, bf16=False)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("full-vocabulary entropy should not run during support replay")
+
+    monkeypatch.setattr(wrapper, "chunked_entropy_from_logits_fn", fail_if_called)
+    _, output = wrapper(
+        sequences,
+        num_actions=3,
+        attention_mask=torch.ones_like(sequences),
+        return_output=True,
+        compute_entropy=True,
+        entropy_requires_grad=True,
+        sample_support_ids=support,
+        loss_mask=torch.ones((1, 3), dtype=torch.bool),
+        enable_sample_support_replay=True,
+    )
+
+    expected = []
+    for position in range(3):
+        members = support[0, position + 1]
+        members = members[members >= 0].long()
+        member_logprobs = torch.log_softmax(model.logits[position, members], dim=0)
+        expected.append(-(member_logprobs.exp() * member_logprobs).sum())
+    expected = torch.stack(expected).unsqueeze(0)
+
+    torch.testing.assert_close(output["entropy"][:, :-1], expected)
+    assert output["entropy_mask"][:, :-1].all()
+    assert output["entropy"].requires_grad
+
+
 def test_fsdp_synthetic_eos_uses_full_vocabulary_logprob(model_wrapper):
     sequences = torch.tensor([[1, 2, 3]])
     support = torch.tensor([[[-1, -1], [2, 4], [-1, -1]]], dtype=torch.int32)
