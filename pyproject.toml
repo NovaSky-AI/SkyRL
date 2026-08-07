@@ -144,6 +144,7 @@ megatron = [
     "transformer-engine-cu12==2.11.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
+    "flash-mla; sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'",
     "causal-conv1d; sys_platform == 'linux'",
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
     "vllm==0.23.0; sys_platform == 'linux'",
@@ -293,6 +294,9 @@ explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
+# Megatron's cuDNN DSA backend imports this sparse-prefill kernel. Pin the
+# nv_dev revision that supports SM100 and Megatron's flash_mla_sparse_fwd API.
+flash-mla = { url = "https://github.com/j316chuck/FlashMLA/releases/download/v1.0.0-b7643bd-cu129-torch2.11/flash_mla-1.0.0%2Bb7643bd-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
 # Upstream v5.8.1 plus huggingface/transformers@31637182, which fixes GLM
 # MoE DSA's qk_rope_head_dim mapping. This is already fixed on upstream main.
 transformers = { url = "https://github.com/j316chuck/transformers/releases/download/v5.8.1-glm52-head-dim/transformers-5.8.1-py3-none-any.whl" }
