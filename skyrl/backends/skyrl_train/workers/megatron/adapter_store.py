@@ -37,8 +37,24 @@ def _iter_buffers(model_chunks) -> Iterable[Tuple[int, int, Any]]:
 
 
 def _new_pinned_like(t: torch.Tensor) -> torch.Tensor:
-    """Allocate a pinned-CPU tensor with the same shape/dtype as t."""
+    """Allocate a pinned-CPU tensor with the same shape/dtype as t.
+
+    Safe to call on an offloaded buffer: only shape/dtype metadata is read,
+    which survives ``storage().resize_(0)``.
+    """
     return torch.empty_like(t, device="cpu").pin_memory()
+
+
+def _is_resident(t: Optional[torch.Tensor]) -> bool:
+    """True when ``t`` still owns storage we can copy to/from.
+
+    Megatron's offload path frees GPU buffers with ``storage().resize_(0)``
+    (see ``_ParamAndGradBuffer.offload_to_cpu``) and leaves the tensor object
+    — full shape and all — pointing at a zero-sized storage. Copying from it
+    raises ``cudaErrorInvalidValue``, so every read/write of a DDP buffer has
+    to be gated on this.
+    """
+    return t is not None and t.untyped_storage().size() > 0
 
 
 def _expected_lora_param_check(model_chunks) -> None:
@@ -149,6 +165,10 @@ class AdapterStore:
         self._pristine: Optional[AdapterSlot] = None
         self._current_id: Optional[str] = None
         self._signature: Optional[LoraSignature] = None
+        # True while the DDP grad buffers are offloaded, i.e. each adapter's
+        # grads live only in its CPU slot. Set by park_grads, cleared by
+        # unpark_grads.
+        self._grads_parked: bool = False
 
     @property
     def current_id(self) -> Optional[str]:
@@ -223,12 +243,34 @@ class AdapterStore:
             slot.cpu_param_group_state.append(group_state)
         return slot
 
+    @staticmethod
+    def _require_param_residency(buf, mc_idx: int, buf_idx: int) -> None:
+        """Fail loudly when a swap is attempted with model params offloaded.
+
+        Callers must backload the model before swapping (the dispatch does
+        this via ``_ensure_on_gpu(..., need_model=True)``). Grads are allowed
+        to be offloaded — see :meth:`park_grads` — but params are not, because
+        the CPU mirror Megatron keeps for them (``param_data_cpu``) is not
+        per-adapter and would hand the next backload the wrong tenant's
+        weights.
+        """
+        if not _is_resident(buf.param_data):
+            raise RuntimeError(
+                f"AdapterStore: DDP buffer {mc_idx}/{buf_idx} param_data is offloaded; "
+                f"backload the model before swapping adapters."
+            )
+
     @torch.no_grad()
     def _snapshot(self, slot: AdapterSlot, model_chunks, optimizer) -> None:
         """Copy live GPU state into `slot` (CPU)."""
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            self._require_param_residency(buf, mc_idx, buf_idx)
             slot.cpu_param_data[mc_idx][buf_idx].copy_(buf.param_data, non_blocking=True)
-            slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
+            # Skip grads while the grad buffers are offloaded: their GPU
+            # storage is freed, and the slot's copy — parked by park_grads()
+            # just before the offload — is already the authoritative one.
+            if _is_resident(buf.grad_data):
+                slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
             groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
             for g, group in enumerate(groups):
@@ -254,8 +296,13 @@ class AdapterStore:
     def _restore(self, slot: AdapterSlot, model_chunks, optimizer) -> None:
         """Copy `slot` (CPU) into live GPU state."""
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            self._require_param_residency(buf, mc_idx, buf_idx)
             buf.param_data.copy_(slot.cpu_param_data[mc_idx][buf_idx], non_blocking=True)
-            buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
+            # Offloaded grad buffers have no storage to restore into; the
+            # incoming adapter's grads stay parked in its slot and are
+            # re-materialised by unpark_grads() on the next backload.
+            if _is_resident(buf.grad_data):
+                buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
             groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
             for g, group in enumerate(groups):
@@ -372,6 +419,66 @@ class AdapterStore:
                     else:
                         dst_pg[k] = v
 
+    # ------------------------------------------------------------------
+    # Grad parking across CPU offload
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def park_grads(self, model_chunks) -> None:
+        """Save the live adapter's grads into its slot before a grad offload.
+
+        Megatron frees ``grad_data`` on offload and zero-fills it on reload,
+        so grads accumulated by a ``forward_backward`` that hasn't reached its
+        ``optim_step`` yet are destroyed outright. Under colocation another
+        tenant's request (a sample, a forward) offloads in exactly that gap,
+        so the grads have to be parked per-adapter instead.
+
+        Call immediately before the strategy's offload. No-op when the grad
+        buffers are already offloaded or no adapter is live.
+        """
+        if self._current_id is None or self._current_id not in self._slots:
+            return
+        slot = self._slots[self._current_id]
+        parked = False
+        for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            if not _is_resident(buf.grad_data):
+                continue
+            slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
+            parked = True
+        if parked:
+            torch.cuda.current_stream().synchronize()
+            self._grads_parked = True
+
+    @torch.no_grad()
+    def unpark_grads(self, model_chunks) -> None:
+        """Re-materialise the live adapter's grads after a grad backload.
+
+        Mirror of :meth:`park_grads`. Restores the adapter that is live *now*,
+        which need not be the one that was live at park time — a swap in the
+        offload window only moves CPU slots around, and this is where the
+        result lands back on the GPU.
+
+        Call immediately after the strategy's backload. No-op unless grads
+        were parked and the buffers are resident again.
+        """
+        if not self._grads_parked:
+            return
+        if self._current_id is None or self._current_id not in self._slots:
+            # Live adapter was deleted while offloaded: nothing to restore,
+            # and the reloaded buffers are already zeroed.
+            self._grads_parked = False
+            return
+        slot = self._slots[self._current_id]
+        restored = False
+        for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            if not _is_resident(buf.grad_data):
+                continue
+            buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
+            restored = True
+        if restored:
+            torch.cuda.current_stream().synchronize()
+            self._grads_parked = False
+
     @torch.no_grad()
     def delete(self, model_id: str) -> None:
         """Drop the slot for `model_id`.
@@ -402,6 +509,11 @@ class AdapterStore:
         agree on the live adapter before the next collective. TP/PP/EP groups
         do not need barriers because the swap is identical-shape on all
         ranks within those groups (LoRA signature is fixed).
+
+        Model params must be GPU-resident; the DDP grad buffers and the
+        DistributedOptimizer state need not be (colocation offloads them
+        between requests). Offloaded grads are left parked in their slots —
+        see :meth:`park_grads`.
         """
         if model_id not in self._slots:
             raise KeyError(f"AdapterStore: unknown adapter '{model_id}'")
