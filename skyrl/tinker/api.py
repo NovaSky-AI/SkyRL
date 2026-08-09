@@ -37,6 +37,7 @@ from skyrl.tinker.db_models import (
     RequestStatus,
     SamplingSessionDB,
     SessionDB,
+    TrainingRequestDB,
     enable_sqlite_wal,
     get_async_database_url,
 )
@@ -330,17 +331,58 @@ async def create_future(
     request_type: types.RequestType,
     model_id: str | None,
     request_data: BaseModel,
+    seq_id: int | None = None,
 ) -> int:
-    """Create a FutureDB entry and return its auto-generated request_id."""
+    """Create a future, returning the original one when an SDK request is retried."""
+    serialized_request = request_data.model_dump(mode="json")
+
+    async def existing_request_id() -> int | None:
+        if model_id is None or seq_id is None:
+            return None
+        statement = select(TrainingRequestDB).where(
+            TrainingRequestDB.model_id == model_id,
+            TrainingRequestDB.request_type == request_type,
+            TrainingRequestDB.seq_id == seq_id,
+        )
+        existing = (await session.exec(statement)).first()
+        if existing is None:
+            return None
+        future = await session.get(FutureDB, existing.request_id)
+        if future is None or future.request_data != serialized_request:
+            raise HTTPException(status_code=409, detail="Training request sequence number was reused")
+        return existing.request_id
+
+    if request_id := await existing_request_id():
+        return request_id
+
     future_db = FutureDB(
         request_type=request_type,
         model_id=model_id,
-        request_data=request_data.model_dump(mode="json"),
+        request_data=serialized_request,
         status=RequestStatus.PENDING,
     )
     session.add(future_db)
     await session.flush()  # Flush to generate auto-increment request_id
     assert future_db.request_id
+
+    if model_id is not None and seq_id is not None:
+        session.add(
+            TrainingRequestDB(
+                model_id=model_id,
+                request_type=request_type,
+                seq_id=seq_id,
+                request_id=future_db.request_id,
+            )
+        )
+        try:
+            await session.flush()
+        except IntegrityError:
+            # A concurrent retry inserted the sequence mapping first.
+            await session.rollback()
+            request_id = await existing_request_id()
+            if request_id is None:
+                raise
+            return request_id
     return future_db.request_id
 
 
@@ -587,11 +629,13 @@ class ForwardBackwardInput(BaseModel):
 class ForwardBackwardRequest(BaseModel):
     model_id: str
     forward_backward_input: ForwardBackwardInput
+    seq_id: int | None = None
 
 
 class ForwardRequest(BaseModel):
     model_id: str
     forward_input: ForwardBackwardInput
+    seq_id: int | None = None
 
 
 class AdamParams(BaseModel):
@@ -614,6 +658,7 @@ class AdamParams(BaseModel):
 class OptimStepRequest(BaseModel):
     model_id: str
     adam_params: AdamParams
+    seq_id: int | None = None
 
 
 class SaveWeightsForSamplerRequest(BaseModel):
@@ -1026,6 +1071,7 @@ async def forward_backward(request: ForwardBackwardRequest, session: AsyncSessio
         request_type=types.RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
         request_data=request.forward_backward_input.to_types(),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1043,6 +1089,7 @@ async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_s
         request_type=types.RequestType.FORWARD,
         model_id=request.model_id,
         request_data=request.forward_input.to_types(),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1060,6 +1107,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
         request_type=types.RequestType.OPTIM_STEP,
         model_id=request.model_id,
         request_data=types.OptimStepInput(adam_params=request.adam_params.to_types()),
+        seq_id=request.seq_id,
     )
 
     await session.commit()

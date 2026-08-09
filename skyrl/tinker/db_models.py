@@ -100,6 +100,17 @@ class FutureDB(SQLModel, table=True):
     completed_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
 
 
+class TrainingRequestDB(SQLModel, table=True):
+    """Maps an SDK training sequence number to its single server-side future."""
+
+    __tablename__ = "training_requests"
+
+    model_id: str = Field(primary_key=True)
+    request_type: types.RequestType = Field(primary_key=True)
+    seq_id: int = Field(primary_key=True)
+    request_id: int = Field(foreign_key="futures.request_id", unique=True)
+
+
 class CheckpointDB(SQLModel, table=True):
     __tablename__ = "checkpoints"
 
