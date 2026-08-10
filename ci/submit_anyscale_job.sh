@@ -29,8 +29,12 @@ fi
 CONFIG_FILE="$1"
 JOB_NAME="$2"
 RUN_TIMEOUT_S="$3"
-# How long to wait for GPUs before writing the attempt off as a capacity failure.
-START_TIMEOUT_S="${4:-2700}"
+# Ceiling on time spent in STARTING. Defaults to the run timeout, i.e. no deadline
+# of its own, because the failure we retry for terminates the cluster by itself --
+# `job wait` sees the terminal state and returns immediately, well under any bound
+# set here. A job still in STARTING is instead waiting on an autoscaler node or an
+# image pull, and resubmitting neither conjures capacity nor un-restarts the pull.
+START_TIMEOUT_S="${4:-$RUN_TIMEOUT_S}"
 
 CLOUD="${ANYSCALE_CLOUD:-sky-anyscale-aws-us-east-1}"
 MAX_ATTEMPTS="${CAPACITY_MAX_ATTEMPTS:-10}"
@@ -80,6 +84,14 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
         fi
         echo "Job ${run_name} never reached RUNNING (state: ${state}) and the entrypoint never ran:" >&2
         echo "treating this as a GPU capacity failure." >&2
+        # A `job wait` timeout leaves the job running -- it only stops the client
+        # polling. Terminate before resubmitting so we never leave a second cluster
+        # competing for the same scarce instance type (or silently running tests
+        # whose result nobody reads).
+        case "$state" in
+            SUCCEEDED | FAILED | TERMINATED) ;;
+            *) anyscale job terminate --cloud "$CLOUD" --name "$run_name" || true ;;
+        esac
         if [[ "$attempt" -lt "$MAX_ATTEMPTS" ]]; then
             echo "Resubmitting in ${RETRY_DELAY_S}s ..." >&2
             sleep "$RETRY_DELAY_S"
