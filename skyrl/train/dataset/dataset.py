@@ -1,14 +1,18 @@
 import os
-from typing import List
+from typing import Any, List, Optional
 
 import datasets
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
 
-def _prompt_not_too_long(doc, tokenizer, prompt_key, max_length):
+def _prompt_not_too_long(doc, tokenizer, prompt_key, max_length, chat_template_kwargs):
     tokens = tokenizer.apply_chat_template(
-        doc[prompt_key], add_generation_prompt=True, return_dict=False, tokenize=True
+        doc[prompt_key],
+        add_generation_prompt=True,
+        return_dict=False,
+        tokenize=True,
+        **chat_template_kwargs,
     )
     return len(tokens) <= max_length
 
@@ -22,11 +26,13 @@ class PromptDataset:
         num_workers: int = 8,
         prompt_key: str = "prompt",
         env_class_key: str = "env_class",
+        chat_template_kwargs: Optional[dict[str, Any]] = None,
     ):
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
         self.prompt_key = prompt_key
         self.env_class_key = env_class_key
+        self.chat_template_kwargs = chat_template_kwargs or {}
         self.num_workers = num_workers
 
         self.datasets = datasets
@@ -76,6 +82,7 @@ class PromptDataset:
                 "tokenizer": self.tokenizer,
                 "prompt_key": self.prompt_key,
                 "max_length": self.max_prompt_length,
+                "chat_template_kwargs": self.chat_template_kwargs,
             },
             num_proc=self.num_workers,
             desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
