@@ -45,6 +45,5 @@ jobs:
           envsubst < ci/anyscale_gpu_e2e_test_fully_async.yaml > ci/anyscale_gpu_e2e_test_fully_async_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           JOB_NAME="skyrl-train-gpu-e2e-test-fully-async-${COMMIT_SHA:0:7}-${{ github.run_id }}"
-          anyscale job submit -f ci/anyscale_gpu_e2e_test_fully_async_envsubst.yaml --name "$JOB_NAME" --timeout 5000
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 5000
+          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_e2e_test_fully_async_envsubst.yaml "$JOB_NAME" 5000
           rm -f ci/anyscale_gpu_e2e_test_fully_async_envsubst.yaml
