@@ -44,6 +44,6 @@ jobs:
         run: |
           envsubst < ci/anyscale_gpu_e2e_test_megatron.yaml > ci/anyscale_gpu_e2e_test_megatron_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="skyrl-train-gpu-e2e-test-megatron-${COMMIT_SHA:0:7}-${{ github.run_id }}"
+          JOB_NAME="skyrl-train-gpu-e2e-test-megatron-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
           bash ci/submit_anyscale_job.sh ci/anyscale_gpu_e2e_test_megatron_envsubst.yaml "$JOB_NAME" 4500
           rm -f ci/anyscale_gpu_e2e_test_megatron_envsubst.yaml

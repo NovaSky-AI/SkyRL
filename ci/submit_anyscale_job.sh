@@ -14,6 +14,12 @@
 #
 # Usage: ci/submit_anyscale_job.sh <config-file> <job-name> <run-timeout-s> [start-timeout-s]
 #
+# <job-name> must be unique to the invocation. `job status` and `job wait` resolve a
+# name to the most recently created job carrying it, so a name shared with a
+# concurrent run would let the two poll each other's jobs. The CI workflows get this
+# from `github.run_id` plus `github.run_attempt`; anything else calling this script
+# is responsible for its own unique suffix.
+#
 # Env overrides:
 #   ANYSCALE_CLOUD           cloud to submit to (default sky-anyscale-aws-us-east-1)
 #   CAPACITY_MAX_ATTEMPTS    submissions before giving up (default 10)
@@ -56,7 +62,7 @@ entrypoint_produced_logs() {
     [[ -n "${logs//[[:space:]]/}" ]]
 }
 
-for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     run_name="$JOB_NAME"
     if [[ "$attempt" -gt 1 ]]; then
         run_name="${JOB_NAME}-retry${attempt}"
