@@ -285,9 +285,38 @@ class TestReconcile:
 
         monkeypatch.setattr(type(f.sup), "_reap_orphans_for", _reap, raising=True)
         f.actor(2).wedge()
-        await f.sup.reconcile()
+        await f.sup.reconcile()  # condemned + killed; relaunch deferred one pass
+        await f.sup.reconcile()  # relaunch -- and the reap that gates it
 
-        assert reaped == [(2, [5])], f"the reaper was not invoked for the dying slot: {reaped}"
+        assert reaped == [(2, [5])], f"the reaper was not invoked before the relaunch: {reaped}"
+
+    async def test_the_reaper_runs_before_every_attempt_not_just_the_first(self, monkeypatch):
+        """The reap is a PRECONDITION of the relaunch, not a one-shot on death.
+
+        Reaping only when the slot died gave it exactly one chance: the orphan may not
+        have been in nvidia-smi's snapshot at that instant, or the kill may have failed.
+        Since an occupied GPU deliberately does not consume the restart budget, a missed
+        reap meant retrying forever against memory nothing would ever release."""
+        f = _Fleet(
+            monkeypatch,
+            ft=InferenceFaultToleranceConfig(
+                enabled=True, restart_dead_engines=True, max_restarts_per_engine=3, health_failure_threshold=1
+            ),
+        )
+        f.groups[1].gpu_ids = [3]
+        f.groups[1].start_raises = RuntimeError(
+            "Free memory on device cuda:0 (16.38/79.18 GiB) on startup is less than "
+            "desired GPU memory utilization (0.7, 55.43 GiB)."
+        )
+        reaps = []
+        monkeypatch.setattr(
+            type(f.sup), "_reap_orphans_for", lambda _s, slot: reaps.append(slot.index), raising=True
+        )
+        f.actor(1).wedge()
+        for _ in range(4):
+            await f.sup.reconcile()
+
+        assert reaps.count(1) >= 2, f"only reaped once across repeated attempts: {reaps}"
 
     async def test_the_relaunch_waits_one_pass_after_we_kill_the_actor(self, monkeypatch):
         """`ray.kill` is not synchronous in its effect: the driver reclaims device

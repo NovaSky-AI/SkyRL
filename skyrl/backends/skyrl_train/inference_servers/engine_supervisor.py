@@ -321,9 +321,6 @@ class EngineSupervisor:
             # The URL is retired with the actor: nothing may address this slot until a
             # replacement reports its own.
             s.url = ""
-            # vLLM's EngineCore is a SEPARATE process, so killing (or losing) the actor
-            # does not free the device. Reap the orphan or the relaunch cannot fit.
-            self._reap_orphans_for(s)
             # Do not relaunch into this bundle in the SAME pass. `ray.kill` is not
             # synchronous in its effect and the driver reclaims device memory only once
             # a process is fully gone, so a replacement that starts allocating inside
@@ -408,6 +405,15 @@ class EngineSupervisor:
                         f"({s.restarts}/{budget}); leaving it permanently dead"
                     )
                 continue
+            # Reap before EVERY attempt, not once when the slot died. vLLM's EngineCore
+            # is a separate process, so killing (or losing) the server actor leaves it
+            # holding the device -- and it may not have appeared in nvidia-smi's snapshot
+            # at the moment we retired the slot, or a kill may have failed. Reaping here
+            # makes it a precondition of the relaunch rather than a one-shot best effort,
+            # which matters because an occupied GPU deliberately does not consume the
+            # restart budget: without this the slot would retry forever against memory
+            # nothing was ever going to release.
+            self._reap_orphans_for(s)
             try:
                 actor, start_ref = s.group.begin_restart(s.server_idx)
             except Exception as e:  # noqa: BLE001

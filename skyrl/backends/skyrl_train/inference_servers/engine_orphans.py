@@ -41,37 +41,67 @@ because the kernel truncates ``comm`` to 15 characters (``VLLM::EngineCor``)."""
 
 
 def select_orphans(
-    compute_apps: Sequence[Tuple[str, int, int]],
     process_info: Dict[int, Tuple[int, str]],
-    target_gpu_uuids: Iterable[str],
+    gpu_holders: Optional[Dict[int, Tuple[str, int]]] = None,
 ) -> List[int]:
     """Pick the pids that are safe to kill. PURE -- no side effects, no GPU, no /proc.
 
+    The rule is a conjunction of exactly two facts, and both come from ``/proc``:
+
+    * ``ppid == 1`` -- the process is ORPHANED. vLLM's subprocesses are spawned by the
+      server actor (or by its EngineCore), so while that parent lives they are parented
+      to it. A parent of 1 therefore *means* the owner died, which makes the child
+      garbage by definition. A healthy engine can never satisfy this.
+    * the name is one vLLM gives its own subprocesses -- so a trainer rank, a Ray
+      worker belonging to something else, or any other tenant is out of scope.
+
+    Deliberately NOT filtered by "holds memory on the GPU we want". An earlier version
+    was, and it made the reaper useless in the default configuration: with
+    ``distributed_executor_backend="ray"`` the model lives in ``ray::RayWorkerProc``
+    ACTORS, so the orphanable ``EngineCore`` may hold little or no device memory and
+    never appear in nvidia-smi at all -- meaning it was never even considered. Killing
+    it is what causes Ray to reclaim the worker actors it owned, which is where the
+    memory actually is.
+
+    Any orphaned vLLM subprocess is garbage regardless of which GPU it sat on, so
+    dropping the GPU scope loses no safety: it cannot select a process whose owner is
+    still alive.
+
     Args:
-        compute_apps: ``(gpu_uuid, pid, used_mib)`` as nvidia-smi reports them.
-        process_info: ``pid -> (ppid, comm)``.
-        target_gpu_uuids: the GPUs whose memory we intend to reclaim.
+        process_info: ``pid -> (ppid, comm)`` for candidate processes.
+        gpu_holders: optional ``pid -> (gpu_uuid, used_mib)``, used only to enrich the
+            log; it never affects selection.
 
     Returns:
-        Sorted pids satisfying ALL of: on a target GPU, orphaned (``ppid == 1``), and
-        named like a vLLM subprocess. A pid missing from ``process_info`` has already
-        exited and is skipped.
+        Sorted pids that are orphaned AND vLLM-named.
     """
-    targets = {u for u in target_gpu_uuids if u}
+    del gpu_holders  # logging only; see the docstring on why it must not gate selection
     chosen = set()
-    for gpu_uuid, pid, _used in compute_apps:
-        if gpu_uuid not in targets:
-            continue
-        info = process_info.get(pid)
-        if info is None:
-            continue  # already gone
-        ppid, comm = info
+    for pid, (ppid, comm) in process_info.items():
         if ppid != 1:
-            continue  # still parented -- a LIVE engine or trainer rank, never ours to kill
+            continue  # still parented -- its owner is alive, so it is not ours to kill
         if not any(comm.startswith(n[:15]) for n in VLLM_SUBPROCESS_NAMES):
             continue
         chosen.add(pid)
     return sorted(chosen)
+
+
+def scan_orphan_candidates() -> Dict[int, Tuple[int, str]]:
+    """``pid -> (ppid, comm)`` for every process on this node, from /proc.
+
+    Sourced from /proc rather than from nvidia-smi because the process we most need to
+    find -- an orphaned EngineCore under the Ray executor -- may hold no device memory
+    and so be absent from nvidia-smi entirely.
+    """
+    import os as _os
+
+    out: Dict[int, Tuple[int, str]] = {}
+    for entry in _os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        info = _read_process_info([int(entry)])
+        out.update(info)
+    return out
 
 
 def _read_compute_apps() -> List[Tuple[str, int, int]]:
@@ -119,24 +149,43 @@ def _read_process_info(pids: Iterable[int]) -> Dict[int, Tuple[int, str]]:
 
 
 def reap_orphaned_engines(target_gpu_uuids: Sequence[str]) -> List[int]:
-    """Find and SIGKILL orphaned vLLM engine processes on the target GPUs.
+    """Find and SIGKILL orphaned vLLM engine processes on this node.
 
-    Runs ON the node holding those GPUs. Returns the pids killed.
+    Runs ON the node whose GPUs we are reclaiming. ``target_gpu_uuids`` is used only to
+    report how much memory was held and whether it actually came back -- selection is
+    ownership-based (see ``select_orphans``), not memory-based.
+
+    Returns the pids killed.
     """
-    apps = _read_compute_apps()
-    if not apps:
-        return []
-    victims = select_orphans(apps, _read_process_info(p for _, p, _ in apps), target_gpu_uuids)
+    holders = {pid: (gpu, mib) for gpu, pid, mib in _read_compute_apps()}
+    victims = select_orphans(scan_orphan_candidates(), holders)
     killed = []
     for pid in victims:
+        held = holders.get(pid)
+        where = f" holding {held[1]} MiB on {held[0]}" if held else " (no device memory of its own)"
         try:
             os.kill(pid, signal.SIGKILL)
             killed.append(pid)
-            logger.warning(f"[ft] reaped orphaned vLLM engine process {pid} holding a target GPU")
+            logger.warning(f"[ft] reaped orphaned vLLM process {pid}{where}")
         except ProcessLookupError:
             pass  # exited between selection and kill; the goal is met either way
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[ft] could not kill orphaned process {pid}: {e}")
+
+    # Say plainly whether the GPUs actually came back. Without this the failure mode is
+    # silent: the reap "succeeds", the relaunch fails on free memory, and nothing
+    # connects the two. Ray reclaims a dead owner's actors asynchronously, so a
+    # still-occupied GPU here is informative rather than final.
+    if target_gpu_uuids:
+        wanted = {u for u in target_gpu_uuids if u}
+        still = [(g, p, m) for g, p, m in _read_compute_apps() if g in wanted]
+        if still:
+            logger.warning(
+                f"[ft] after reaping, these processes still hold the target GPU(s): "
+                f"{[(p, m) for _g, p, m in still]}. If this persists the relaunch will keep "
+                f"failing on free memory; distributed_executor_backend='mp' avoids the "
+                f"Ray-actor ownership chain entirely."
+            )
     return killed
 
 
