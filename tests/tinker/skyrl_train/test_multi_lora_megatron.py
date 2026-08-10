@@ -12,6 +12,8 @@ Coverage:
     is hard-rejected at the controller-level signature gate.
   - test_per_adapter_step_isolation: A's and B's pre-update losses are
     bit-exact when they were both pristine + saw identical data.
+  - test_forward_backward_accumulates_across_requests: two separate
+    forward_backward calls produce the same update as one combined call.
   - test_delete_then_train_remaining: deleting one of two adapters does
     not tear down the Ray runtime; the other adapter continues to train.
   - test_per_adapter_sample_isolation: pristine adapters following an
@@ -139,15 +141,15 @@ def _server_is_up(port: int) -> bool:
         return False
 
 
-def _make_datum(tokenizer, prompt: str, completion: str):
+def _make_datum(tokenizer, prompt: str, completion: str, completion_weight: float = 1.0):
     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
     completion_tokens = tokenizer.encode(f"{completion}\n\n", add_special_tokens=False)
     all_tokens = prompt_tokens + completion_tokens
     target_tokens = all_tokens[1:] + [tokenizer.eos_token_id]
-    weights = [0.0] * len(prompt_tokens) + [1.0] * len(completion_tokens)
+    weights = [0.0] * len(prompt_tokens) + [completion_weight] * len(completion_tokens)
     return tinker_types.Datum(
         model_input=tinker_types.ModelInput.from_ints(all_tokens),
-        loss_fn_inputs={"target_tokens": target_tokens, "weights": weights[1:] + [1.0]},
+        loss_fn_inputs={"target_tokens": target_tokens, "weights": weights[1:] + [completion_weight]},
     )
 
 
@@ -270,6 +272,35 @@ def test_per_adapter_step_isolation(service_client):
         f"Symmetric prediction of a shared global step counter (TE FusedAdam's "
         f"`param_groups[g]['step']`) advancing on every optim_step instead of being "
         f"held per-adapter."
+    )
+
+
+def test_forward_backward_accumulates_across_requests(service_client):
+    """Every call before optim_step must contribute, even when the last call has zero loss."""
+    split = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+    combined = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+    tok = split.get_tokenizer()
+    first = _make_datum(tok, "Question: 1+1?\nAnswer:", " 2")
+    second = _make_datum(tok, "Question: 2+2?\nAnswer:", " 4")
+    final_zero = _make_datum(tok, "Question: 0+0?\nAnswer:", " 0", completion_weight=0.0)
+    assert not any(final_zero.loss_fn_inputs["weights"].data)
+
+    split.forward_backward([first], "cross_entropy").result()
+    split.forward_backward([second], "cross_entropy").result()
+    split.forward_backward([final_zero], "cross_entropy").result()
+    split.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
+
+    combined.forward_backward([first, second, final_zero], "cross_entropy").result()
+    combined.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
+
+    probe = [_make_datum(tok, "Question: 3+3?\nAnswer:", " 6")]
+    split_out = split.forward_backward(probe, "cross_entropy").result()
+    combined_out = combined.forward_backward(probe, "cross_entropy").result()
+    split_loss = sum(sum(output["elementwise_loss"].data) for output in split_out.loss_fn_outputs)
+    combined_loss = sum(sum(output["elementwise_loss"].data) for output in combined_out.loss_fn_outputs)
+
+    assert split_loss == pytest.approx(combined_loss, abs=1e-6), (
+        f"separate requests produced a different update: split={split_loss}, combined={combined_loss}"
     )
 
 
