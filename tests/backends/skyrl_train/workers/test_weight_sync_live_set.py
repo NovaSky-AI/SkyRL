@@ -23,20 +23,22 @@ from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 class _RecordingClient:
     """Client whose control-plane calls append to a shared trace.
 
-    ``active_server_urls`` shrinks the first time ``pause_generation`` runs, which
-    is exactly the sequence a kill outside a generation phase produces.
+    ``live_url_slots`` shrinks the first time ``pause_generation`` runs, which is
+    exactly the sequence a kill outside a generation phase produces.
     """
 
     def __init__(self, trace, urls, die_on_pause=False):
         self._trace = trace
         self.server_urls = list(urls)
+        self.server_slots = list(range(len(urls)))
         self._active = list(urls)
         self._die_on_pause = die_on_pause
 
     @property
-    def active_server_urls(self):
+    def live_url_slots(self):
         self._trace.append(f"read_active->{len(self._active)}")
-        return list(self._active)
+        by_url = dict(zip(self.server_urls, self.server_slots))
+        return [(u, by_url[u]) for u in self._active]
 
     async def pause_generation(self, *a, **kw):
         self._trace.append("pause")
@@ -77,9 +79,9 @@ def _dispatch(client, trace, colocate_all=False, backend="sharded_rdt"):
 
     captured = {}
 
-    def _broadcast(_client, model_id=None, live_server_urls=None):
-        trace.append(f"broadcast(live={None if live_server_urls is None else len(live_server_urls)})")
-        captured["live"] = live_server_urls
+    def _broadcast(_client, model_id=None, live_url_slots=None):
+        trace.append(f"broadcast(live={None if live_url_slots is None else len(live_url_slots)})")
+        captured["live"] = live_url_slots
 
     d._broadcast_to_inference_engines = _broadcast
     return d, captured
@@ -112,7 +114,9 @@ async def test_a_death_detected_by_pause_reaches_the_same_sync():
 
     await d.save_weights_for_sampler()
 
-    assert captured["live"] == URLS[:3], f"sync ran against a stale live set: {captured['live']}"
+    assert captured["live"] == [
+        (u, i) for i, u in enumerate(URLS[:3])
+    ], f"sync ran against a stale live set: {captured['live']}"
     assert "read_active->3" in trace, trace
 
 
@@ -156,16 +160,17 @@ async def test_a_degraded_fleet_refuses_a_non_rdt_broadcast():
 
 @pytest.mark.asyncio
 async def test_a_client_without_the_ft_view_is_treated_as_whole():
-    """Other InferenceEngineInterface implementations have no active_server_urls."""
+    """Other InferenceEngineInterface implementations have no live_url_slots."""
     trace = []
     client = _RecordingClient(trace, URLS)
-    del type(client).active_server_urls  # type: ignore[attr-defined]
+    saved = type(client).live_url_slots
+    del type(client).live_url_slots  # type: ignore[attr-defined]
     try:
         d, captured = _dispatch(client, trace)
         await d.save_weights_for_sampler()
         assert captured["live"] is None
     finally:
-        type(client).active_server_urls = property(lambda self: list(self._active))  # type: ignore[attr-defined]
+        type(client).live_url_slots = saved  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

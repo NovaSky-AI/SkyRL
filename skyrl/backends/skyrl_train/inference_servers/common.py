@@ -26,6 +26,25 @@ class ServerInfo:
 
     ip: str
     port: int
+    slot: int = 0
+    """Deployment ordinal assigned at provision -- the server's STABLE identity.
+
+    ``ip``/``port`` are not identity: a restarted engine re-reserves its port
+    inside its own ``SERVER_PORT_STRIDE`` window and may land on a different one,
+    so its URL changes while the thing it *is* does not. Everything that must
+    survive a restart keys on the slot instead: RDT stamps it as ``replica_rank``
+    (which fixes the consumer-id block the engine owns), and the supervisor
+    relaunches a dead deployment with its old slot.
+
+    Data-parallel peers of one deployment SHARE a slot -- they share a parallel
+    config in which vLLM's own ``data_parallel_index`` already separates them, so
+    one ``replica_rank`` per deployment is exactly right (see
+    ``rdt_control_protocol.build_rdt_init_payloads``).
+
+    The default of 0 is only correct for a single deployment; slots are stamped
+    driver-side by ``ServerActorPool``, which is the layer that knows a group's
+    ordinal within the fleet. Actors never learn their own slot.
+    """
 
     @property
     def url(self) -> str:

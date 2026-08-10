@@ -197,14 +197,14 @@ class TestMembershipViews:
         driver hands it the answer. Local bookkeeping only — no HTTP at all."""
         urls = ["http://a", "http://b", "http://c"]
         c = _client(urls, ft=_ft())
-        c.sync_membership(["http://a", "http://c"])
+        c.sync_membership([("http://a", 0), ("http://c", 2)])
         assert c.active_server_urls == ["http://a", "http://c"]
         assert c.membership_generation == 1
 
     def test_sync_membership_none_means_the_whole_fleet(self):
         urls = ["http://a", "http://b"]
         c = _client(urls, ft=_ft())
-        c.sync_membership(["http://a"])
+        c.sync_membership([("http://a", 0)])
         c.sync_membership(None)
         assert c.active_server_urls == urls
         assert c.membership_generation == 2
@@ -213,15 +213,30 @@ class TestMembershipViews:
         """It runs on every sync; repeating the same view must not churn the
         generation, which other callers use to decide whether to re-probe."""
         c = _client(["http://a", "http://b"], ft=_ft())
-        c.sync_membership(["http://a"])
+        c.sync_membership([("http://a", 0)])
         gen = c.membership_generation
-        c.sync_membership(["http://a"])
+        c.sync_membership([("http://a", 0)])
         assert c.membership_generation == gen
 
-    def test_sync_membership_rejects_an_unprovisioned_url(self):
+    def test_sync_membership_rejects_an_unprovisioned_slot(self):
+        """An unknown slot means the fleet changed SHAPE. An unknown URL does not --
+        that is a restart, and the next test is what makes it work."""
         c = _client(["http://a", "http://b"], ft=_ft())
         with pytest.raises(ValueError, match="outside the provisioned set"):
-            c.sync_membership(["http://a", "http://zzz"])
+            c.sync_membership([("http://a", 0), ("http://zzz", 9)])
+
+    def test_sync_membership_adopts_a_restarted_engines_new_url(self):
+        """The reason the view is keyed on slots. A worker's copy still remembers the
+        address the dead engine answered on; the driver reports slot 1 at a new one.
+        A URL-keyed view would reject it as unprovisioned -- exactly backwards, since
+        this is the same engine and it still owns the same consumers."""
+        c = _client(["http://a", "http://b"], ft=_ft())
+        c.sync_membership([("http://a", 0), ("http://b2:8101", 1)])
+        assert c.server_urls == ["http://a", "http://b2:8101"]
+        assert c.active_server_urls == ["http://a", "http://b2:8101"]
+        assert c.slot_of("http://b2:8101") == 1
+        # The dead address is gone rather than lingering as "disabled".
+        assert c.disabled_server_urls == []
 
     def test_membership_survives_pickling_but_the_probe_task_does_not(self):
         """Worker copies carry a snapshot (they can never reconcile), so the live

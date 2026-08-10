@@ -979,6 +979,16 @@ class RayPPOTrainer:
             be awake (i.e. on GPU).
         - after calling this method, the same model placement still holds.
         """
+        # [FT Part 2] Reconcile the engine fleet before committing a batch to it, and
+        # refuse to generate below min_live_engines. This covers the deaths Part 1's
+        # reactive probe structurally cannot see -- an engine that dies during the
+        # synchronous training or weight-sync phases produces no data-plane failure to
+        # trigger a probe, so without a step boundary it would first be noticed as a
+        # burst of failed trajectories here. No-op unless engine restarts are enabled.
+        supervisor = getattr(self.inference_engine_client, "engine_supervisor", None)
+        if supervisor is not None:
+            await supervisor.before_generation()
+
         # NOTE: we assume that .generate returns samples in the same order as passed in
         generator_output: GeneratorOutput = await self.generator.generate(input_batch)
 

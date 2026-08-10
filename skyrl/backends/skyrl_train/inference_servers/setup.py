@@ -45,6 +45,13 @@ class InferenceServerSetup:
     server_groups: List[ServerGroup] = field(default_factory=list)
     prefill_server_groups: List[ServerGroup] = field(default_factory=list)
     decode_server_groups: List[ServerGroup] = field(default_factory=list)
+    server_slots: List[int] = field(default_factory=list)
+    """Stable deployment ordinal per entry of ``server_urls`` (see ``ServerInfo.slot``).
+
+    Empty for external fleets, where nothing here provisioned the servers and so
+    nothing here can restart them; the client then falls back to the positional
+    derivation, which is correct for a fleet that cannot change shape.
+    """
 
 
 def create_inference_servers(
@@ -114,6 +121,7 @@ def create_inference_servers(
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
                 use_expandable_segments=ie_cfg.use_expandable_segments,
+                slot=i,
             )
             for i in range(num_prefill)
         ]
@@ -134,6 +142,10 @@ def create_inference_servers(
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
                 use_expandable_segments=ie_cfg.use_expandable_segments,
+                # Decode deployments follow prefill in the flat `server_urls`, so
+                # their slots continue that numbering -- keeping slot == the
+                # positional `index // dp` a static fleet would have derived.
+                slot=num_prefill + i,
             )
             for i in range(num_decode)
         ]
@@ -150,10 +162,13 @@ def create_inference_servers(
         ray.get(all_refs)
 
         # Collect URLs — refs are already resolved so lazy property returns immediately
-        prefill_urls = [info.url for g in prefill_server_groups for info in g.server_infos]
-        decode_urls = [info.url for g in decode_server_groups for info in g.server_infos]
+        prefill_infos = [info for g in prefill_server_groups for info in g.server_infos]
+        decode_infos = [info for g in decode_server_groups for info in g.server_infos]
+        prefill_urls = [info.url for info in prefill_infos]
+        decode_urls = [info.url for info in decode_infos]
 
         server_urls = prefill_urls + decode_urls
+        server_slots = [info.slot for info in prefill_infos + decode_infos]
 
         router_args = build_router_args(ie_cfg, prefill_urls=prefill_urls, decode_urls=decode_urls)
         router = VLLMRouter(router_args, log_path=log_path)
@@ -169,6 +184,7 @@ def create_inference_servers(
             server_groups=prefill_server_groups + decode_server_groups,
             prefill_server_groups=prefill_server_groups,
             decode_server_groups=decode_server_groups,
+            server_slots=server_slots,
         )
     else:
         # When not colocated, create a shared PG for all engine groups so
@@ -191,6 +207,7 @@ def create_inference_servers(
                 placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
                 use_expandable_segments=ie_cfg.use_expandable_segments,
+                slot=i,
             )
             for i in range(ie_cfg.num_engines)
         ]
@@ -204,7 +221,9 @@ def create_inference_servers(
         ray.get(all_refs)
 
         # Collect URLs — refs are already resolved so lazy property returns immediately
-        server_urls = [info.url for g in server_groups for info in g.server_infos]
+        server_infos = [info for g in server_groups for info in g.server_infos]
+        server_urls = [info.url for info in server_infos]
+        server_slots = [info.slot for info in server_infos]
 
         router_args = build_router_args(ie_cfg, server_urls=server_urls)
         router = VLLMRouter(router_args, log_path=log_path)
@@ -215,6 +234,7 @@ def create_inference_servers(
             proxy_url=proxy_url,
             server_urls=server_urls,
             server_groups=server_groups,
+            server_slots=server_slots,
         )
 
 
@@ -297,6 +317,9 @@ def build_new_inference_client(
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,
         fault_tolerance=ie_cfg.fault_tolerance,
+        # Empty for external fleets -> the client derives slots positionally, which is
+        # the right answer for a fleet this process cannot restart.
+        server_slots=server_setup.server_slots or None,
     )
 
     return client, server_setup

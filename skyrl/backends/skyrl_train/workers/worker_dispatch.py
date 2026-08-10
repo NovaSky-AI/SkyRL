@@ -19,6 +19,9 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
     WorkerOutput,
 )
+from skyrl.backends.skyrl_train.inference_servers.rdt_control_protocol import (
+    WeightSyncAborted,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
@@ -37,6 +40,31 @@ class GPUState:
 
     model_on_gpu: bool = False
     optimizer_on_gpu: bool = False
+
+
+def _as_weight_sync_aborted(exc: BaseException):
+    """Find a ``WeightSyncAborted`` inside whatever Ray handed back, or ``None``.
+
+    Ray does not deliver the worker's exception directly: it arrives wrapped in a
+    ``RayTaskError`` (sometimes a ``RayError`` group), and the sender also chains the
+    original failure through ``raise ... from``. So an ``isinstance`` on the top-level
+    object misses the very case the retry exists for -- and missing it means a
+    recoverable engine death fails the run instead.
+
+    Walks the wrapper's ``cause``/``__cause__``/``__context__`` chain, depth-bounded so
+    a self-referential chain cannot spin.
+    """
+    seen = set()
+    todo = [exc]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, WeightSyncAborted):
+            return e
+        todo.extend([getattr(e, "cause", None), e.__cause__, e.__context__])
+    return None
 
 
 class WorkerDispatch:
@@ -573,12 +601,38 @@ class WorkerDispatch:
                 self.cfg.generator.inference_engine,
             )
         )
+        self._cache_rdt_worker_init(inference_engine_client)
+
+    def _cache_rdt_worker_init(self, inference_engine_client) -> None:
+        """Cache the payload a restarted inference engine needs to rejoin RDT.
+
+        Fetched here, once, because this is the first moment it exists (the producers
+        have rendezvoused) and it never changes afterwards. Caching it also means a
+        rejoin costs one HTTP POST at a sync boundary rather than a round trip into the
+        training ranks, which is what keeps the rejoin off the critical path.
+
+        Best-effort: a failure here loses the ability to REJOIN engines, not the ability
+        to survive losing them, so it warns rather than failing the run.
+        """
+        supervisor = getattr(inference_engine_client, "engine_supervisor", None)
+        if supervisor is None or not getattr(supervisor, "enabled", False):
+            return
+        try:
+            # Rank 0 specifically: it is the sender, and the payload describes the
+            # producer fleet rather than anything rank-local.
+            payload = ray.get(
+                self._actor_groups["policy"].async_run_ray_method("pass_through", "get_rdt_worker_init_info")
+            )[0]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ft] could not fetch the RDT worker-init payload; engines cannot rejoin: {e}")
+            return
+        supervisor.set_rdt_worker_init(payload)
 
     def _broadcast_to_inference_engines(
         self,
         inference_engine_client,
         model_id: Optional[str] = None,
-        live_server_urls: Optional[List[str]] = None,
+        live_url_slots: Optional[List[Tuple[str, int]]] = None,
     ) -> None:
         """Broadcast policy weights to inference engines. Helper for save_weights_for_sampler.
 
@@ -587,19 +641,23 @@ class WorkerDispatch:
         registered on vLLM under that name. None preserves single-tenant
         behavior (the legacy ``SKYRL_LORA_ADAPTER_NAME`` path).
 
-        ``live_server_urls`` is the driver's view of which inference servers are
-        alive, computed once here and dispatched to every rank in this one call —
-        which is what guarantees they all agree (they share gather collectives, so a
-        rank with a different live set would compute different free targets and hang
-        its peers). ``None`` means the full provisioned fleet.
+        ``live_url_slots`` is the driver's view of which inference servers are alive,
+        as ``(url, slot)`` pairs, computed once here and dispatched to every rank in
+        this one call — which is what guarantees they all agree (they share gather
+        collectives, so a rank with a different live set would compute different free
+        targets and hang its peers). ``None`` means the full provisioned fleet.
+
+        The slot rides along because it, not the URL, is what a rank can safely turn
+        into consumer ids: a restarted engine returns on a re-reserved port, and the
+        ranks' pickled client copies still remember the old address.
         """
         # Pass None for the client: workers cached it at init_weight_sync_state.
         # It carries the HF tokenizer (~10MB — 0.13s pickle driver-side, 0.34s
         # unpickle on EVERY worker), so shipping it per sync costs ~0.5s of the
         # sync wall even via ray.put (deref still deserializes per worker). The live
-        # URL list is a handful of strings, so it rides along for free -- and it has
-        # to, since the workers' cached client copies are snapshots from init and can
-        # never learn that an engine died.
+        # (url, slot) list is a handful of strings, so it rides along for free -- and
+        # it has to, since the workers' cached client copies are snapshots from init
+        # and can never learn that an engine died or came back somewhere else.
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
@@ -607,12 +665,12 @@ class WorkerDispatch:
                 None,
                 self.cfg.generator.inference_engine,
                 model_id=model_id,
-                live_server_urls=live_server_urls,
+                live_url_slots=live_url_slots,
             )
         )
 
-    def _live_server_urls(self) -> Optional[List[str]]:
-        """The active inference servers, or ``None`` when the fleet is whole.
+    def _live_url_slots(self) -> Optional[List[Tuple[str, int]]]:
+        """The active inference servers as ``(url, slot)``, or ``None`` when whole.
 
         ``None`` is not merely an optimization: it makes a non-degraded sync take the
         exact code path it took before fault tolerance existed, so an FT-enabled run
@@ -626,7 +684,9 @@ class WorkerDispatch:
                 rejects FT with those backends; this is the runtime backstop.
         """
         client = self._inference_engine_client
-        active = getattr(client, "active_server_urls", None)
+        # `live_url_slots`, not `active_server_urls`: the slot is what a rank turns
+        # into consumer ids, and it survives a restart's change of URL.
+        active = getattr(client, "live_url_slots", None)
         if active is None or len(active) == len(client.server_urls):
             return None
         backend = self.cfg.generator.inference_engine.weight_sync_backend
@@ -655,6 +715,52 @@ class WorkerDispatch:
             return
         self._offload("policy", offload_optimizer=True, offload_model=True)
 
+    async def _broadcast_with_retry(self, model_id: Optional[str], supervisor) -> None:
+        """Broadcast weights, retrying if an inference engine died INSIDE the sync.
+
+        Engine fault tolerance, Part 2 (§5.5). The retry lives here rather than in
+        ``_broadcast_to_inference_engines`` for one reason: between attempts the fleet
+        has to be RE-PROBED, and that is an await. Retrying against the same live set
+        would re-dispatch straight back into the corpse and burn every attempt on the
+        same failure -- which is exactly the bug this shape avoids.
+
+        Only ``WeightSyncAborted`` is retried; the sender classifies, so a gather bug or
+        an OOM still fails on the first attempt rather than being repeated twice more.
+
+        Re-entry is safe because a sync is not incremental: every rank rebuilds its
+        gather from ``source.iter_groups()`` each time, the surviving engines were told
+        to abandon their half-finished update (so ``skyrl_start_weight_update`` accepts
+        them again), and the producers' free ledger is idempotent per
+        ``(group, consumer)`` so a duplicate free from the abandoned attempt cannot
+        over-credit this one.
+        """
+        ft = getattr(self.cfg.generator.inference_engine, "fault_tolerance", None)
+        attempts = 1
+        if ft is not None and getattr(ft, "enabled", False):
+            attempts = 1 + max(0, int(getattr(ft, "max_sync_retries", 0) or 0))
+
+        for attempt in range(attempts):
+            live_url_slots = self._live_url_slots()
+            try:
+                self._broadcast_to_inference_engines(
+                    self._inference_engine_client, model_id=model_id, live_url_slots=live_url_slots
+                )
+                return
+            except Exception as e:
+                aborted = _as_weight_sync_aborted(e)
+                if aborted is None or attempt == attempts - 1:
+                    raise
+                logger.warning(f"[ft] weight sync aborted (attempt {attempt + 1}/{attempts}): {aborted.message}")
+                # Find out who actually died before trying again. The sender could only
+                # report "one of the slots this sync targeted"; the probe names it. This
+                # is also what makes the next `_live_url_slots()` exclude it.
+                if supervisor is not None:
+                    await supervisor.reconcile()
+                else:
+                    reconcile = getattr(self._inference_engine_client, "_reconcile_fleet", None)
+                    if reconcile is not None:
+                        await reconcile()
+
     async def save_weights_for_sampler(self, model_id: Optional[str] = None) -> None:
         """
         Tinker API method to prepare updated parameters for sampling.
@@ -675,6 +781,14 @@ class WorkerDispatch:
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
         self.ensure_active_adapter("policy", model_id)
+
+        # [FT Part 2] Reconcile the fleet and RDT-re-init anything that restarted, so
+        # this sync is the one that makes it current. Deliberately BEFORE the
+        # pause/wake_up below: re-init runs the consumer's bake, which is minutes at
+        # 235B, and the fleet must not sit paused through it. Deaths the pause itself
+        # discovers still land in the late `_live_url_slots()` read.
+        supervisor = getattr(self._inference_engine_client, "engine_supervisor", None)
+        admitted = await supervisor.before_weight_sync() if supervisor is not None else []
         # The live set is captured as LATE as possible -- after wake_up / pause,
         # never before. Those fan-outs are themselves detectors: when a kill lands
         # outside a generation phase, the pause is the first call to touch the dead
@@ -685,9 +799,7 @@ class WorkerDispatch:
         # same value -- but one dispatch guarantees that regardless of when we read.)
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
-            self._broadcast_to_inference_engines(
-                self._inference_engine_client, model_id=model_id, live_server_urls=self._live_server_urls()
-            )
+            await self._broadcast_with_retry(model_id, supervisor)
             self._finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
@@ -697,18 +809,14 @@ class WorkerDispatch:
                 strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
             ):
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
-                self._broadcast_to_inference_engines(
-                    self._inference_engine_client, model_id=model_id, live_server_urls=self._live_server_urls()
-                )
+                await self._broadcast_with_retry(model_id, supervisor)
                 self._finish_weight_sync()
             else:
                 # Non-colocated single tenant: pause generation to prevent in-flight requests from
                 # reading partially-updated weights during the NCCL broadcast.
                 await self._inference_engine_client.pause_generation()
                 try:
-                    self._broadcast_to_inference_engines(
-                        self._inference_engine_client, model_id=model_id, live_server_urls=self._live_server_urls()
-                    )
+                    await self._broadcast_with_retry(model_id, supervisor)
                     self._finish_weight_sync()
                 finally:
                     await self._inference_engine_client.resume_generation()
@@ -716,3 +824,10 @@ class WorkerDispatch:
         # Advance the policy version so prefix-cache salting isolates blocks from the previous weights
         # (see `GeneratorConfig.use_cache_salt`).
         self._inference_engine_client.increment_weight_version()
+
+        # [FT Part 2] The restarted engines that took part above now hold current
+        # weights, so this is where they re-enter the router -- the only place they do.
+        # Reached only if the broadcast succeeded: an exception above skips it, leaving
+        # them out of the router, which is the safe direction.
+        if supervisor is not None and admitted:
+            await supervisor.after_weight_sync(admitted)

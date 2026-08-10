@@ -1,6 +1,6 @@
 import io
 import os
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import ray
 import torch
@@ -278,7 +278,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         inference_engine_client,
         inference_engine_cfg,
         model_id: Optional[str] = None,
-        live_server_urls: Optional[List[str]] = None,
+        live_url_slots: Optional[List[Tuple[str, int]]] = None,
     ):
         if inference_engine_client is None:
             inference_engine_client = self._weight_sync_inference_client
@@ -286,8 +286,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # cannot learn that an engine died. Hand it the driver's view so the
         # rank-0 reset_prefix_cache fan-out below skips the dead server instead of
         # re-discovering it (another fleet probe + router removal) mid-sync.
-        if live_server_urls is not None and hasattr(inference_engine_client, "sync_membership"):
-            inference_engine_client.sync_membership(live_server_urls)
+        if live_url_slots is not None and hasattr(inference_engine_client, "sync_membership"):
+            inference_engine_client.sync_membership(live_url_slots)
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
@@ -326,7 +326,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # expandable_segments — the sidecar shares gathered tensors over CUDA
             # IPC on every run (not just colocate_all), so force the toggle.
             with self._expandable_segments_disabled_for_sync(force=True):
-                await self._rdt_sender.send(self.weight_extractor, live_server_urls)
+                await self._rdt_sender.send(self.weight_extractor, live_url_slots)
         else:
             # Extract and send weights using the sender created at init time.
             # Disable expandable_segments around the send: under colocate_all the

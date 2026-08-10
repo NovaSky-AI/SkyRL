@@ -789,6 +789,34 @@ class InferenceFaultToleranceConfig(BaseConfig):
     the producer fails the sync with a real error. Nominal inter-progress gaps are
     sub-second, so the default is a ~100x margin even at 235B."""
 
+    # --- Part 2: restore the fleet ---
+    restart_dead_engines: bool = False
+    """Relaunch a dead engine into its original placement-group bundle and rejoin it
+    at the next weight sync. ``False`` is Part 1 behaviour: the slot stays dead and
+    the run finishes at reduced capacity.
+
+    A replacement loads CHECKPOINT weights, which are stale the moment training
+    stepped, and the prefix-cache salt is keyed on the weight version -- so a
+    restarted engine that served rollouts would silently poison the batch. It
+    therefore stays out of the router until it has taken part in a full sync
+    (``PENDING_SYNC``). Syncs run every step, so the sit-out is about one step."""
+    max_restarts_per_engine: int = 3
+    """Restart budget per slot. Exhausted means a permanently dead slot, and the run
+    continues degraded while at least ``min_live_engines`` remain. Bounded because a
+    slot that dies repeatedly is usually a bad GPU or an OOM that a fourth restart
+    will not fix, and an unbounded loop would spend the run relaunching."""
+    restart_timeout_s: float = 600.0
+    """How long a replacement has to become healthy, matching the engine startup
+    health-wait. Exceeding it counts as a failed restart against the budget."""
+    health_failure_threshold: int = 3
+    """Consecutive ``/health`` failures before an engine that is ALIVE as a Ray actor
+    but unresponsive is treated as wedged, killed, and restarted. Normalizing a wedge
+    to a death is what keeps one code path downstream: it converts an unbounded-hang
+    engine into a connection-refused one, which Part 1 already handles."""
+    max_sync_retries: int = 2
+    """Retries for a weight sync aborted by an engine dying inside the sync window.
+    The sync is re-dispatched to every rank against the refreshed live set."""
+
 
 @dataclass
 class InferenceEngineConfig(BaseConfig):

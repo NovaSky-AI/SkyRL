@@ -2,11 +2,12 @@
 
 Two hops, each with its own way of going quietly wrong:
 
-  * ``RdtWeightSyncSender._live_consumer_ids`` maps live server URLs to the
-    consumer ids those servers own. Every index must come from the PROVISIONED
-    snapshot — re-deriving the geometry from a shrunken list would renumber every
-    surviving consumer, and each would then pull another consumer's slice with
-    nothing downstream to notice.
+  * ``RdtWeightSyncSender._live_consumer_ids`` maps the live servers' SLOTS to the
+    consumer ids those servers own. Both inputs must come from PROVISION —
+    re-deriving the geometry from a shrunken list would renumber every surviving
+    consumer, and each would then pull another consumer's slice with nothing
+    downstream to notice. Slots rather than URLs because a restarted engine returns
+    on a re-reserved port: the URL is an address, the slot is the identity.
   * ``ShardedRDTTrainerWeightTransferEngine._live_consumers`` recomputes this
     sync's free targets from that set and restores the provisioned ones after,
     so a degraded sync cannot leak into the next one.
@@ -29,13 +30,21 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer import (
 )
 
 
-def _sender(urls, world_size, dp=1) -> RdtWeightSyncSender:
+def _sender(urls, world_size, dp=1, slots=None) -> RdtWeightSyncSender:
     """A sender carrying only the provisioned snapshot the mapping reads."""
     s = RdtWeightSyncSender.__new__(RdtWeightSyncSender)
     s._server_urls = list(urls)
+    s._server_slots = list(slots) if slots is not None else [i // dp for i in range(len(urls))]
+    s._num_replicas = max(1, len(set(s._server_slots)))
     s._world_size = world_size
     s._data_parallel_size = dp
     return s
+
+
+def _live(sender, *urls):
+    """The driver's ``(url, slot)`` view restricted to ``urls``."""
+    by_url = dict(zip(sender._server_urls, sender._server_slots))
+    return [(u, by_url[u]) for u in urls]
 
 
 class TestLiveConsumerIds:
@@ -47,44 +56,53 @@ class TestLiveConsumerIds:
 
     def test_a_full_live_list_collapses_to_none(self):
         s = _sender(["http://a", "http://b"], world_size=4)
-        assert s._live_consumer_ids(["http://a", "http://b"]) is None
-        assert s._live_consumer_ids(["http://b", "http://a"]) is None
+        assert s._live_consumer_ids(_live(s, "http://a", "http://b")) is None
+        assert s._live_consumer_ids(_live(s, "http://b", "http://a")) is None
 
     def test_one_dead_engine_drops_exactly_its_block(self):
         """2 engines x TP2 = 4 consumers. Engine b owns 2 and 3."""
         s = _sender(["http://a", "http://b"], world_size=4)
-        assert s._live_consumer_ids(["http://a"]) == {0, 1}
-        assert s._live_consumer_ids(["http://b"]) == {2, 3}
+        assert s._live_consumer_ids(_live(s, "http://a")) == {0, 1}
+        assert s._live_consumer_ids(_live(s, "http://b")) == {2, 3}
 
     def test_the_surviving_blocks_keep_their_ids(self):
         """The invariant everything else rests on: a survivor's consumer ids are a
-        function of its position in the PROVISIONED list, not of how many engines
-        are still up. 4 engines x TP2; kill the middle two."""
+        function of its SLOT, not of how many engines are still up. 4 engines x TP2;
+        kill the middle two."""
         s = _sender([f"http://e{i}" for i in range(4)], world_size=8)
-        assert s._live_consumer_ids(["http://e0", "http://e3"]) == {0, 1, 6, 7}
+        assert s._live_consumer_ids(_live(s, "http://e0", "http://e3")) == {0, 1, 6, 7}
 
     def test_tp1_engines_map_one_to_one(self):
         s = _sender([f"http://e{i}" for i in range(4)], world_size=4)
-        assert s._live_consumer_ids(["http://e0", "http://e2"]) == {0, 2}
+        assert s._live_consumer_ids(_live(s, "http://e0", "http://e2")) == {0, 2}
 
     def test_data_parallel_servers_share_a_replica_block(self):
         """dp=2: the two servers of a deployment share one replica_rank, so the
         block is the deployment's, not the server's."""
         s = _sender([f"http://e{i}" for i in range(4)], world_size=4, dp=2)
         # e0/e1 are deployment 0 (consumers 0,1); e2/e3 are deployment 1 (2,3).
-        assert s._live_consumer_ids(["http://e0", "http://e1"]) == {0, 1}
-        assert s._live_consumer_ids(["http://e2", "http://e3"]) == {2, 3}
+        assert s._live_consumer_ids(_live(s, "http://e0", "http://e1")) == {0, 1}
+        assert s._live_consumer_ids(_live(s, "http://e2", "http://e3")) == {2, 3}
 
     def test_duplicates_are_harmless(self):
         s = _sender(["http://a", "http://b"], world_size=4)
-        assert s._live_consumer_ids(["http://a", "http://a"]) == {0, 1}
+        assert s._live_consumer_ids([("http://a", 0), ("http://a", 0)]) == {0, 1}
 
-    def test_an_unprovisioned_url_is_a_hard_error(self):
-        """A URL nobody provisioned means a server was re-created, which moves the
-        geometry — the one thing this path must never absorb silently."""
+    def test_an_unprovisioned_slot_is_a_hard_error(self):
+        """A slot nobody provisioned means the fleet changed SHAPE, not that one
+        engine moved — the one thing this path must never absorb silently."""
         s = _sender(["http://a", "http://b"], world_size=4)
         with pytest.raises(RuntimeError, match="outside the provisioned set"):
-            s._live_consumer_ids(["http://a", "http://new"])
+            s._live_consumer_ids([("http://a", 0), ("http://new", 7)])
+
+    def test_a_restarted_engine_keeps_its_block_under_a_new_url(self):
+        """The reason identity is the slot: a restart re-reserves a port, so the
+        driver reports slot 1 at an address the sender's snapshot has never seen.
+        That must be a normal live engine, not an error, and it must own exactly the
+        consumer ids it owned before it died."""
+        s = _sender(["http://a", "http://b"], world_size=4)
+        assert s._live_consumer_ids([("http://a", 0), ("http://b-restarted:8101", 1)]) is None
+        assert s._live_consumer_ids([("http://b-restarted:8101", 1)]) == {2, 3}
 
     def test_an_empty_live_set_is_a_hard_error(self):
         s = _sender(["http://a", "http://b"], world_size=4)
@@ -120,7 +138,7 @@ class TestDegradationIsVisible:
             s = _sender(["http://a", "http://b"], world_size=4)
             s._engine = _StubEngine()
             s._control_plane = None
-            await s.send(object(), ["http://a"])
+            await s.send(object(), [("http://a", 0)])
         finally:
             loguru.logger.remove(sink_id)
 

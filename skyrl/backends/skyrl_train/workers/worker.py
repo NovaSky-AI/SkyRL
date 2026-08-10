@@ -520,6 +520,23 @@ class Worker(DistributedTorchRayActor):
 
         torch.distributed.barrier()
 
+    async def get_rdt_worker_init_info(self):
+        """The consumer init payload a restarted inference engine needs to rejoin.
+
+        Driver-facing (engine fault tolerance, Part 2). Fetched once after
+        ``init_weight_sync_state`` and cached on the driver, because it is static for
+        the run: it describes the producers, and producers never restart. Pure — no
+        collective — so calling it does not require the other ranks to be at any
+        particular point.
+
+        Returns ``None`` on non-sender ranks and on non-RDT backends, which is why the
+        driver asks rank 0 specifically.
+        """
+        sender = getattr(self, "_rdt_sender", None)
+        if sender is None:
+            return None
+        return sender.get_worker_init_info()
+
     def forward(self, *args, **kwargs) -> WorkerOutput:
         """Run forward pass on the input batch.
 

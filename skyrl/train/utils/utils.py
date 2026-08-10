@@ -650,6 +650,33 @@ def _validate_inference_fault_tolerance_cfg(cfg: SkyRLTrainConfig):
             raise ValueError(
                 f"generator.inference_engine.fault_tolerance.{_field} must be > 0, " f"got {getattr(ft, _field)}."
             )
+    if ft.restart_dead_engines:
+        # Restarting relaunches an actor into the ORIGINAL placement-group bundle, so
+        # the bundle has to still be held by a group this process created. Everything
+        # else FT already requires (local engines, dp=1, no PD) happens to be exactly
+        # what makes a single-server restart well defined, so the only new gate is the
+        # budget arithmetic.
+        if ft.max_restarts_per_engine < 1:
+            raise ValueError(
+                f"generator.inference_engine.fault_tolerance.max_restarts_per_engine must be "
+                f">= 1 when restart_dead_engines=true, got {ft.max_restarts_per_engine}. Use "
+                "restart_dead_engines=false for degraded-only (Part 1) behaviour."
+            )
+        for _field in ("restart_timeout_s",):
+            if getattr(ft, _field) <= 0:
+                raise ValueError(
+                    f"generator.inference_engine.fault_tolerance.{_field} must be > 0, " f"got {getattr(ft, _field)}."
+                )
+        if ft.health_failure_threshold < 1:
+            raise ValueError(
+                f"generator.inference_engine.fault_tolerance.health_failure_threshold must be "
+                f">= 1, got {ft.health_failure_threshold}."
+            )
+        if ft.max_sync_retries < 0:
+            raise ValueError(
+                f"generator.inference_engine.fault_tolerance.max_sync_retries must be >= 0, "
+                f"got {ft.max_sync_retries}."
+            )
     if ft.request_timeout_s is not None and ft.request_timeout_s <= 0:
         raise ValueError(
             "generator.inference_engine.fault_tolerance.request_timeout_s must be > 0 "

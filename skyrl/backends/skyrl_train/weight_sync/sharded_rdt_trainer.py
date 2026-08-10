@@ -193,7 +193,17 @@ class _RDTProducerServer:
         # per server: with producers owning disjoint parts of the model, how many
         # consumers pull a group from here depends on who else owns it.
         self._free_targets: dict[tuple, int] = {}
-        self._free_counts: dict[tuple, int] = {}
+        # [RDT-FREE-LEDGER] group key -> the SET of consumer identities that have
+        # freed it. A count of calls was enough until mid-sync abort/retry existed:
+        # a retried sync can deliver a duplicate `free_gather` for a group a consumer
+        # already freed, and a counter would read that as two consumers and release
+        # the group while the other one is still pulling from it. Keying on identity
+        # makes the free idempotent per (group, consumer) instead.
+        self._freed_by: dict[tuple, set] = {}
+        # Fallback identity for a consumer that does not send its id (older
+        # consumers): a unique token per call, which reproduces the old
+        # count-the-calls behaviour exactly rather than silently deduplicating.
+        self._anon_frees = 0
 
         # [RDT-BACKPRESSURE] Published-but-not-yet-freed group keys. publish_group
         # blocks while len(...) >= gather_lookahead; free_gather (the consumer
@@ -338,7 +348,7 @@ class _RDTProducerServer:
         """
         with self._cache_cond:
             self._gather_error = None
-            self._free_counts.clear()
+            self._freed_by.clear()
             self._free_targets.clear()
             self._inflight_keys.clear()
             self._name_to_key.clear()
@@ -370,6 +380,18 @@ class _RDTProducerServer:
         storages, views = entries
         with self._cache_cond:
             self._wait_for(lambda: len(self._inflight_keys) >= self._lookahead, "a lookahead credit")
+            if self._gather_error is not None:
+                # [RDT-DISCARD-MODE] The sync is being aborted, but this rank's gather
+                # loop MUST still run to completion: the gathers are collectives, and a
+                # rank that returns early leaves its peers blocked in NCCL. So accept
+                # the call, rebuild nothing, cache nothing, and report the group
+                # immediately freed -- the loop keeps its shape and its memory stays
+                # bounded. Reporting it freed is safe precisely because nothing was
+                # cached, so no consumer can be mid-copy out of these IPC imports.
+                freed = self._freed_pending + [group_key]
+                self._freed_pending = []
+                self._note_progress_locked()
+                return freed
         _t_bp1 = time.perf_counter()
 
         rebuilt: dict[str, torch.Tensor] = {}
@@ -412,7 +434,7 @@ class _RDTProducerServer:
                 self._name_to_key[n] = group_key
             self._publish_time[group_key] = time.perf_counter()
             self._free_targets[group_key] = max(1, int(free_target))
-            if self._free_counts.get(group_key, 0) >= self._free_targets[group_key]:
+            if len(self._freed_by.get(group_key, ())) >= self._free_targets[group_key]:
                 self._release_group_locked(group_key)
             freed = self._freed_pending
             self._freed_pending = []
@@ -453,7 +475,7 @@ class _RDTProducerServer:
             self._cache.pop(name, None)
             self._cache_event.pop(name, None)
             self._name_to_key.pop(name, None)
-        self._free_counts.pop(key, None)
+        self._freed_by.pop(key, None)
         self._free_targets.pop(key, None)
         if key in self._inflight_keys:
             self._inflight_keys.remove(key)
@@ -468,7 +490,7 @@ class _RDTProducerServer:
             if _pt is not None:
                 self._publish_to_free_seconds += _now - _pt
 
-    def free_gather(self, names: list[str]) -> None:
+    def free_gather(self, names: list[str], consumer_id: int | None = None) -> None:
         """Consumer back-edge: one consumer finished pulling this group.
 
         The group key IS ``tuple(names)``: the consumer sends the whole group's
@@ -476,13 +498,24 @@ class _RDTProducerServer:
         Ref-counts to the group's ``free_target``; on the last free, drops the
         cache entries, releases one backpressure slot, and records the freed key
         for the engine. A free that arrives before its publish is only counted —
-        ``publish_group`` completes it."""
+        ``publish_group`` completes it.
+
+        IDEMPOTENT per ``(group, consumer_id)``. A sync that aborts and retries can
+        deliver the same free twice, and counting calls would then release a group
+        one consumer is still pulling from — a use-after-free of the CUDA-IPC import,
+        which shows up as corrupt weights rather than as an error. ``consumer_id=None``
+        (an older consumer) keeps the historical count-the-calls behaviour.
+        """
         key = tuple(names)
         with self._cache_cond:
-            count = self._free_counts.get(key, 0) + 1
-            self._free_counts[key] = count
+            if consumer_id is None:
+                self._anon_frees += 1
+                identity: object = ("anon", self._anon_frees)
+            else:
+                identity = int(consumer_id)
+            self._freed_by.setdefault(key, set()).add(identity)
             target = self._free_targets.get(key)
-            if target is not None and count >= target:
+            if target is not None and len(self._freed_by[key]) >= target:
                 self._release_group_locked(key)
             self._note_progress_locked()
             self._cache_cond.notify_all()
@@ -770,6 +803,12 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # group key. CUDA-IPC exports must outlive the importer, so we hold them
         # until the server reports the group freed. See send_weights.
         self._inflight: dict[tuple, dict[str, torch.Tensor]] = {}
+        # [RDT-ABORT] Refs carried over from a sync that ABORTED. A consumer may still
+        # have been mid-copy out of these CUDA-IPC imports when the abort fired, and
+        # the export must outlive the import, so they cannot be dropped on the way out.
+        # Released at the next `begin_sync`, by which point every consumer has either
+        # finished or been declared dead.
+        self._abandoned_inflight: dict[tuple, dict[str, torch.Tensor]] = {}
         self._sync_timing: dict[str, float] = {}
 
     def _rpc(self, method: str, *args: Any) -> Any:
@@ -836,11 +875,74 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # init calls reserve_serve_arena back on ALL producer servers). The
         # all-gather of server names doubles as that barrier.
         server_names = engine._all_gather_server_names(world, rank)
+        # Retained (rather than consumed and dropped) so a consumer that RESTARTS can
+        # be re-initialized later without another all-gather: see
+        # `get_worker_init_payload`. The names are uuid actor names that stay valid for
+        # the run, because producers never restart.
+        engine._server_names = server_names
 
         if engine.is_sender:
             worker_init = engine._build_worker_init_info(server_names)
             engine.client.init_weight_transfer_engine(asdict(worker_init))
         return engine
+
+    def abort_all(self, reason: str) -> int:
+        """Poison every producer's gather channel so the whole sync unwinds.
+
+        Called by rank 0 when the inference side has failed (see
+        ``_run_gather_loop``). Reaches EVERY rank's producer, not just this one,
+        because the thing that must unwind is the collective: each rank's gather loop
+        is blocked in ``publish_group`` waiting for a lookahead credit that a dead
+        consumer will never return, and only its own producer can wake it.
+
+        Fire-and-forget by design. Waiting on P Ray calls while P ranks sit inside
+        collectives is how a recoverable abort becomes a hang; and each producer's
+        ``set_gather_error`` is idempotent, so a lost call costs at worst the stall
+        watchdog. Returns how many producers were signalled, for the log.
+
+        Requires the cached ``_server_names`` (from ``trainer_init``); without them
+        there is nothing to address and this is a no-op.
+        """
+        names = getattr(self, "_server_names", None)
+        if not names:
+            logger.warning("[rdt-abort] no cached producer names; cannot broadcast the abort")
+            return 0
+        namespace = self._init_info.trainer_actor_namespace
+        signalled = 0
+        for name in names:
+            try:
+                actor = ray.get_actor(name, namespace=namespace)
+                actor.set_gather_error.remote(reason)
+                signalled += 1
+            except Exception as e:  # noqa: BLE001
+                # A producer whose rank has already died is exactly the case we are
+                # unwinding from; there is nothing to poison there.
+                logger.info("[rdt-abort] could not signal producer %s: %s", name, e)
+        logger.error("[rdt-abort] signalled %d/%d producers: %s", signalled, len(names), reason)
+        return signalled
+
+    def get_worker_init_payload(self) -> dict:
+        """The consumer-side init payload, rebuilt on demand. PURE — no collective.
+
+        This is what lets a restarted inference engine rejoin at a sync boundary
+        instead of failing the run: ``_build_worker_init_info`` reads only retained
+        state (``_meta``, ``_groups``, ``_group_owners``, ``_init_info`` and the cached
+        ``_server_names``), so the driver can ask any time — including mid-run, with
+        every rank sitting in its own training step — and hand the result to exactly
+        the one engine that came back.
+
+        A collective here would deadlock: the caller is the driver, and the ranks are
+        not at a matching collective.
+
+        Raises:
+            RuntimeError: called before ``trainer_init`` cached the server names.
+        """
+        if getattr(self, "_server_names", None) is None:
+            raise RuntimeError(
+                "get_worker_init_payload requires trainer_init to have run (the producer "
+                "server names are gathered there)."
+            )
+        return asdict(self._build_worker_init_info(self._server_names))
 
     def _world_and_rank(self) -> tuple[int, int]:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -1116,7 +1218,15 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         only the sender has an `update_future` to fail fast on."""
         gather0 = time.perf_counter()
         _t_next = _t_pub = _t_exp = 0.0
+        # Set when the inference side fails mid-loop; raised only after this rank's
+        # gather collectives have all run (see the probe below).
+        abort_exc: BaseException | None = None
         assert self.source is not None  # guaranteed by trainer_init
+        if self._abandoned_inflight:
+            # Safe now: the previous sync is over on every rank, so no consumer is
+            # still pulling from last round's exports.
+            logger.info("[rdt-abort] releasing %d group(s) held from an aborted sync", len(self._abandoned_inflight))
+            self._abandoned_inflight.clear()
         self._rpc("begin_sync")
         # [RDT-GROUP-SOURCE] One generator hop per GROUP, not per tensor:
         # `iter_groups` yields (names, tensors) for each group this rank owns, in
@@ -1194,19 +1304,38 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
                 while len(pending_publish) >= _PUBLISH_WINDOW:
                     self._drop_when_ready(pending_publish.pop(0))
                 _t_pub += time.perf_counter() - _tp
-                if update_future is not None and update_future.done():
-                    # update_weights returned/failed early — surface now instead
-                    # of blocking further publishes.
-                    update_future.result()
+                if abort_exc is None and update_future is not None and update_future.done():
+                    # The inference-side fan-out finished early, which for a
+                    # still-running gather loop means it FAILED (a consumer died).
+                    try:
+                        update_future.result()
+                    except BaseException as e:  # noqa: BLE001
+                        # Deliberately not raised here. Returning from the middle of
+                        # the loop would abandon the remaining gather collectives and
+                        # leave every peer rank blocked in NCCL -- turning one dead
+                        # consumer into a dead job. Instead poison every producer,
+                        # which puts all ranks' publishes into discard mode, and let
+                        # each loop run to completion before raising below.
+                        abort_exc = e
+                        self.abort_all(f"weight update failed: {e!r}")
             _tp = time.perf_counter()
             while pending_publish:
                 self._drop_when_ready(pending_publish.pop(0))
             freed = self._rpc("end_sync")
             _t_pub += time.perf_counter() - _tp
             self._drop_inflight(freed)
+            if abort_exc is not None:
+                # Every gather collective on this rank has now run, so raising is safe:
+                # no peer is left waiting on us.
+                raise abort_exc
         except BaseException as e:
             with contextlib.suppress(Exception):
                 self._rpc("set_gather_error", repr(e))
+            # NOT cleared. These are trainer-side refs to storage a consumer may still
+            # be mid-copy out of over CUDA IPC, and the export has to outlive the
+            # import. They are released at the next `begin_sync` instead, by which
+            # point every consumer has either finished or been declared dead.
+            self._abandoned_inflight.update(self._inflight)
             self._inflight.clear()
             raise
         finally:

@@ -240,6 +240,25 @@ class BasePPOExp:
         self._prefill_server_groups = server_setup.prefill_server_groups
         self._decode_server_groups = server_setup.decode_server_groups
 
+        # [FT Part 2] Restarting a dead engine needs the ServerGroup that owns its
+        # placement-group bundle, which exists only here. Built now and carried on the
+        # client so the trainer loop can reach it; inert unless
+        # fault_tolerance.restart_dead_engines is set, and skipped entirely for
+        # external fleets, which this process did not provision and cannot relaunch.
+        ft = self.cfg.generator.inference_engine.fault_tolerance
+        if ft is not None and ft.enabled and ft.restart_dead_engines and server_setup.server_groups:
+            from skyrl.backends.skyrl_train.inference_servers.engine_supervisor import (
+                EngineSupervisor,
+            )
+
+            client.attach_engine_supervisor(
+                EngineSupervisor(
+                    client,
+                    server_setup.server_groups,
+                    data_parallel_size=self.cfg.generator.inference_engine.data_parallel_size,
+                )
+            )
+
         if is_colocated:
             # Callers must invoke get_inference_client() from a sync context (no running event loop).
             asyncio.run(client.sleep())

@@ -65,6 +65,7 @@ from typing import (
     Literal,
     Optional,
     Required,
+    Sequence,
     Tuple,
     TypedDict,
     Union,
@@ -225,6 +226,19 @@ class RemoteInferenceClient(InferenceEngineInterface):
     server_urls contains num_engines * data_parallel_size entries, but vLLM already
     reports the full DP world size per server, so we divide by num_deployments."""
 
+    server_slots: Optional[List[int]] = None
+    """Stable deployment ordinal per entry of ``server_urls`` (see ``ServerInfo.slot``).
+
+    ``None`` (the default) derives them positionally as ``index // data_parallel_size``,
+    which is exactly what a static fleet means and what every pre-fault-tolerance
+    caller got implicitly. Passing them explicitly is what lets a URL *change* --
+    a restarted engine comes back on a re-reserved port -- without renumbering the
+    consumer-id blocks every surviving engine already owns.
+
+    Normalized to a concrete list in ``__post_init__``, so readers never handle
+    ``None``.
+    """
+
     model_name: str = "default"
     """The model identifier accepted by the inference server for the base model.
 
@@ -275,6 +289,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
     # to. Both are dropped on pickle.
     _reconcile_task: Optional[Any] = field(default=None, repr=False)
     _reconcile_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
+    # [FT Part 2] The driver's EngineSupervisor, when engine restarts are enabled.
+    # Carried here because this client is the one object already threaded to every
+    # driver-side consumer (trainer, dispatch, generator) -- the alternative was a new
+    # constructor argument on each. Driver-only: dropped on pickle like the session and
+    # the probe task, so no worker ever sees a ServerGroup or a placement group.
+    _engine_supervisor: Optional[Any] = field(default=None, repr=False)
 
     @property
     def weight_version(self) -> int:
@@ -312,11 +332,116 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return [u for u in self.server_urls if u in self._disabled_server_urls]
 
     @property
+    def num_provisioned_replicas(self) -> int:
+        """Distinct deployments provisioned for this run.
+
+        Counted from ``server_slots``, which is never compacted, so this stays at
+        the provisioned value however many engines are currently dead. RDT sizes
+        each consumer's id offset from it, so deriving it from a live URL count
+        instead would silently re-map survivors onto each other's slices.
+        """
+        return max(1, len(set(self.server_slots or [0])))
+
+    @property
+    def url_slots(self) -> List[Tuple[str, int]]:
+        """``(url, slot)`` for every provisioned server, in provisioned order."""
+        return list(zip(self.server_urls, self.server_slots or []))
+
+    @property
+    def live_url_slots(self) -> List[Tuple[str, int]]:
+        """``(url, slot)`` for the servers not currently marked dead.
+
+        The pair, rather than a bare URL list, is what the RDT sender needs: it maps
+        a server to the consumer ids it owns, and after a restart the URL is new
+        while the slot -- and therefore the consumer block -- is unchanged. A sender
+        that looked the URL up positionally would reject the restarted engine as
+        "outside the provisioned set".
+        """
+        if not self._disabled_server_urls:
+            return self.url_slots
+        return [(u, s) for u, s in self.url_slots if u not in self._disabled_server_urls]
+
+    def slot_of(self, url: str) -> int:
+        """The slot a provisioned URL currently occupies.
+
+        Raises:
+            KeyError: the URL is not in the provisioned set.
+        """
+        try:
+            return (self.server_slots or [])[self.server_urls.index(url)]
+        except ValueError as e:
+            raise KeyError(f"{url} is not a provisioned server URL ({self.server_urls}).") from e
+
+    @property
+    def engine_supervisor(self) -> Optional[Any]:
+        """The driver's ``EngineSupervisor``, or ``None`` (disabled, or a worker copy)."""
+        return self._engine_supervisor
+
+    def attach_engine_supervisor(self, supervisor: Optional[Any]) -> None:
+        """Install the supervisor. Called once, on the driver, at fleet construction."""
+        self._engine_supervisor = supervisor
+
+    def mark_dead(self, url: str) -> None:
+        """Record that a provisioned backend is unreachable. Local bookkeeping only.
+
+        For a caller that already knows — the engine supervisor, whose own ``/health``
+        probe just concluded it — so that the conclusion does not have to be
+        rediscovered by ``_reconcile_fleet``'s probe. Unknown or already-dead URLs are
+        no-ops, which is what keeps it safe to call once per reconcile.
+        """
+        if url not in self.server_urls or url in self._disabled_server_urls:
+            return
+        self._disabled_server_urls.add(url)
+        self._membership_generation += 1
+        logger.info(
+            f"[ft] marked {url} dead. Active {len(self.active_server_urls)}/{len(self.server_urls)} "
+            f"(membership generation {self._membership_generation})"
+        )
+
+    def replace_server_url(self, slot: int, new_url: str) -> None:
+        """Point ``slot`` at a restarted engine's new URL. Local bookkeeping only.
+
+        Called by the engine supervisor once a replacement is healthy. The slot keeps
+        its position in ``server_urls`` -- so ``num_provisioned_replicas`` and every
+        surviving engine's consumer block are untouched -- and the old URL is dropped
+        from the dead set, since the thing it named no longer exists.
+
+        The new engine is left OUT of the router by the supervisor until it has taken
+        part in a weight sync; it is deliberately *in* ``active_server_urls`` from
+        here, because that is the set the control plane and the weight sync fan out
+        over, and taking part in that sync is precisely what it is waiting to do.
+
+        Raises:
+            KeyError: no such slot.
+            ValueError: ``new_url`` already names a different provisioned slot.
+        """
+        slots = self.server_slots or []
+        try:
+            idx = slots.index(slot)
+        except ValueError as e:
+            raise KeyError(f"slot {slot} is not provisioned (slots={slots}).") from e
+        if new_url in self.server_urls and self.server_urls.index(new_url) != idx:
+            raise ValueError(
+                f"{new_url} is already registered for slot {slots[self.server_urls.index(new_url)]}; "
+                f"refusing to give slot {slot} a URL another slot answers on."
+            )
+        old_url = self.server_urls[idx]
+        self.server_urls[idx] = new_url
+        self._disabled_server_urls.discard(old_url)
+        self._disabled_server_urls.discard(new_url)
+        self._membership_generation += 1
+        logger.info(
+            f"[ft] slot {slot} moved {old_url} -> {new_url}. "
+            f"Active {len(self.active_server_urls)}/{len(self.server_urls)} "
+            f"(membership generation {self._membership_generation})"
+        )
+
+    @property
     def membership_generation(self) -> int:
         """Monotonic counter of membership changes; 0 until the first engine dies."""
         return self._membership_generation
 
-    def sync_membership(self, live_server_urls: Optional[List[str]]) -> None:
+    def sync_membership(self, live_url_slots: Optional[Sequence[Tuple[str, int]]]) -> None:
         """Adopt someone else's membership view. Local bookkeeping only, no I/O.
 
         For copies of this client that cannot reconcile for themselves: a worker's
@@ -327,22 +452,34 @@ class RemoteInferenceClient(InferenceEngineInterface):
         the worker, in the middle of the sync window, for a conclusion the driver
         already reached.
 
+        Keyed on ``(url, slot)`` rather than on URLs alone because a restarted engine
+        comes back on a re-reserved port. A pickled copy still holds the URL the dead
+        engine answered on, so a URL-only view would look like an unprovisioned
+        server and be rejected; the slot says "this is the same engine, at a new
+        address", and the copy adopts it.
+
         ``None`` means the whole provisioned fleet is live.
 
         Raises:
-            ValueError: a URL outside the provisioned set, which would mean the
-                geometry moved.
+            ValueError: a slot outside the provisioned set, which would mean the
+                fleet geometry moved rather than one engine relocating.
         """
-        if live_server_urls is None:
+        if live_url_slots is None:
             live = set(self.server_urls)
         else:
-            live = set(live_server_urls)
-            unknown = sorted(live - set(self.server_urls))
+            provisioned = set(self.server_slots or [])
+            unknown = sorted({s for _, s in live_url_slots} - provisioned)
             if unknown:
                 raise ValueError(
-                    f"sync_membership got URLs outside the provisioned set: {unknown}. "
-                    f"Provisioned: {self.server_urls}"
+                    f"sync_membership got slots outside the provisioned set: {unknown}. "
+                    f"Provisioned: {sorted(provisioned)}"
                 )
+            for url, slot in live_url_slots:
+                if self.server_urls[(self.server_slots or []).index(slot)] != url:
+                    # A restart moved this slot; adopt the new address. This also
+                    # clears the old URL from the dead set (see replace_server_url).
+                    self.replace_server_url(slot, url)
+            live = {u for u, _ in live_url_slots}
         disabled = {u for u in self.server_urls if u not in live}
         if disabled != self._disabled_server_urls:
             self._disabled_server_urls = disabled
@@ -536,6 +673,14 @@ class RemoteInferenceClient(InferenceEngineInterface):
         if len(self.server_urls) % self.data_parallel_size != 0:
             raise ValueError(
                 f"Expected number of servers to be divisible by data parallel size, got {self.server_urls} and {self.data_parallel_size}"
+            )
+
+        if self.server_slots is None:
+            self.server_slots = [i // self.data_parallel_size for i in range(len(self.server_urls))]
+        elif len(self.server_slots) != len(self.server_urls):
+            raise ValueError(
+                f"Expected one slot per server URL, got {len(self.server_slots)} slots "
+                f"for {len(self.server_urls)} URLs."
             )
 
     def get_endpoint_url(self) -> str:
@@ -1632,6 +1777,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
     async def init_weight_transfer_engine_rdt(
         self,
         init_info: Dict[str, Any],
+        targets: Optional[Sequence[Tuple[str, int]]] = None,
     ) -> Dict[str, Any]:
         """
         Initialize the sharded_rdt weight-transfer engine on all workers.
@@ -1664,6 +1810,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 name(s)/namespace, produce method name, M:N + ring knobs, and the
                 group-major names/dtype_names/shapes/group_lens the bake plans over.
                 ``num_consumers`` must already be the whole-fleet total.
+            targets: ``(url, slot)`` pairs to init instead of the whole fleet, for
+                re-initializing a RESTARTED engine. Its slot pins the
+                ``replica_rank``, so the replacement bakes a plan for the same
+                consumer ids the dead engine owned — which is what makes it a
+                rejoin rather than a second deployment 0. ``None`` inits the whole
+                provisioned fleet (the once-per-run path).
 
         Returns:
             Dict mapping server_url to response.
@@ -1674,11 +1826,28 @@ class RemoteInferenceClient(InferenceEngineInterface):
             build_rdt_init_payloads,
         )
 
-        # PROVISIONED, deliberately -- not `active_server_urls`. Position in this list
-        # is what `replica_rank = index // data_parallel_size` means, so handing it a
-        # degraded list would silently re-map every surviving consumer. Init runs once,
-        # before anything can have died, so the two are equal here anyway.
-        payloads = build_rdt_init_payloads(init_info, self.server_urls, self.data_parallel_size)
+        if targets is None:
+            # PROVISIONED, deliberately -- not `active_server_urls`. Position in this
+            # list is what `replica_rank = index // data_parallel_size` means, so
+            # handing it a degraded list would silently re-map every surviving
+            # consumer. Whole-fleet init runs once, before anything can have died, so
+            # the two are equal here anyway.
+            urls: Sequence[str] = self.server_urls
+            slots: Optional[Sequence[int]] = self.server_slots
+        else:
+            urls = [u for u, _ in targets]
+            slots = [s for _, s in targets]
+        # `num_replicas` always comes from the provisioned slot set, never from
+        # `len(urls)`: with `targets` naming one restarted engine, the derivation
+        # would collapse to 1 and that engine would bake a plan for consumer ids
+        # belonging to deployment 0.
+        payloads = build_rdt_init_payloads(
+            init_info,
+            urls,
+            self.data_parallel_size,
+            slots=slots,
+            num_replicas=self.num_provisioned_replicas,
+        )
         results = await asyncio.gather(
             *[self._call_server(url, "/collective_rpc", payload) for url, payload in payloads]
         )
@@ -1895,6 +2064,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
         state["_sem_loop"] = None
         state["_reconcile_task"] = None
         state["_reconcile_loop"] = None
+        # Holds ServerGroups (Ray actor handles, placement groups) and is meaningful
+        # only on the driver, which is the only writer of fleet membership.
+        state["_engine_supervisor"] = None
         return state
 
     def __setstate__(self, state: dict) -> None:
@@ -1906,6 +2078,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         self._sem_loop = None
         self._reconcile_task = None
         self._reconcile_loop = None
+        self._engine_supervisor = None
         # Older pickles (and hand-built states in tests) predate the FT fields.
         self._disabled_server_urls = set(state.get("_disabled_server_urls", ()))
         self._membership_generation = int(state.get("_membership_generation", 0))

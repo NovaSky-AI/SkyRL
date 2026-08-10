@@ -185,21 +185,30 @@ class TestSetLive:
 
     The split matters: start/update/finish are per-sync and must skip a dead
     server (a POST to it would fail the whole sync, and it has no consumers left to
-    pull anyway), while init is once-per-run and must keep the PROVISIONED list,
-    because ``build_rdt_init_payloads`` derives each server's ``replica_rank`` from
-    its position in it.
+    pull anyway), while init is once-per-run and must keep the PROVISIONED list, so
+    every server keeps the ``replica_rank`` its consumers were stamped with.
+
+    The argument is ``(url, slot)`` rather than a URL list because the URL is only an
+    address: a restarted engine returns on a re-reserved port, and ``set_live`` is
+    where that new address is adopted for the slot that already owns those consumers.
     """
 
     @staticmethod
     def _urls():
         return ["http://a", "http://b", "http://c"]
 
+    @staticmethod
+    def _live(*urls):
+        """``(url, slot)`` pairs under the default positional slot assignment."""
+        order = {"http://a": 0, "http://b": 1, "http://c": 2}
+        return [(u, order[u]) for u in urls]
+
     def test_uniform_calls_target_only_live_servers(self):
         urls = self._urls()
         sess = _RecordingSession()
         c = _client(urls, session=sess)
         try:
-            c.set_live(["http://a", "http://c"])
+            c.set_live(self._live("http://a", "http://c"))
             c.update_weights({"names": []})
         finally:
             c.close()
@@ -210,7 +219,7 @@ class TestSetLive:
         sess = _RecordingSession()
         c = _client(urls, session=sess)
         try:
-            c.set_live(["http://a"])
+            c.set_live(self._live("http://a"))
             c.set_live(None)
             c.start_weight_update()
         finally:
@@ -224,7 +233,7 @@ class TestSetLive:
         sess = _RecordingSession()
         c = _client(urls, session=sess)
         try:
-            c.set_live(["http://a", "http://c"])
+            c.set_live(self._live("http://a", "http://c"))
             c.init_weight_transfer_engine({"num_consumers": 3})
         finally:
             c.close()
@@ -233,18 +242,39 @@ class TestSetLive:
         assert [infos[u]["replica_rank"] for u in urls] == [0, 1, 2]
         assert all(i["num_replicas"] == 3 for i in infos.values())
 
-    def test_unprovisioned_url_is_rejected(self):
+    def test_unprovisioned_slot_is_rejected(self):
+        """An unknown SLOT means the fleet changed shape. An unknown URL does not --
+        see test_a_restarted_slot_adopts_its_new_url."""
         c = _client(self._urls(), session=_RecordingSession())
         try:
             with pytest.raises(ValueError, match="outside the provisioned set"):
-                c.set_live(["http://a", "http://zzz"])
+                c.set_live([("http://a", 0), ("http://zzz", 9)])
+        finally:
+            c.close()
+
+    def test_a_restarted_slot_adopts_its_new_url(self):
+        """Slot 1 comes back on a re-reserved port. The fan-out must follow it to the
+        new address, and the slot's position -- hence its consumers' replica_rank --
+        must not move."""
+        sess = _RecordingSession()
+        c = _client(self._urls(), session=sess)
+        try:
+            c.set_live([("http://a", 0), ("http://b2:8101", 1), ("http://c", 2)])
+            assert c._urls == ["http://a", "http://b2:8101", "http://c"]
+            c.update_weights({"names": []})
+            assert {u for u, _ in sess.calls} == {"http://a", "http://b2:8101", "http://c"}
+            sess.calls.clear()
+            c.init_weight_transfer_engine({"num_consumers": 3})
+            infos = _init_infos(sess)
+            assert infos["http://b2:8101"]["replica_rank"] == 1
+            assert all(i["num_replicas"] == 3 for i in infos.values())
         finally:
             c.close()
 
     def test_live_order_follows_the_provisioned_order(self):
         c = _client(self._urls(), session=_RecordingSession())
         try:
-            c.set_live(["http://c", "http://a", "http://c"])
+            c.set_live(self._live("http://c", "http://a", "http://c"))
             assert c._live_urls == ["http://a", "http://c"]
         finally:
             c.close()
@@ -254,7 +284,7 @@ class TestSetLive:
         sess = _RecordingSession()
         c = _client(urls, session=sess)
         try:
-            c.set_live(urls)
+            c.set_live(self._live(*urls))
             assert c._live_urls == urls
         finally:
             c.close()

@@ -4,7 +4,7 @@ Server Group - manages server actors with placement groups.
 
 import logging
 from argparse import Namespace
-from typing import Any, List, Optional, Type, Union
+from typing import Any, List, Optional, Tuple, Type, Union
 
 import ray
 from ray.util.placement_group import PlacementGroup, placement_group
@@ -56,6 +56,7 @@ class ServerGroup:
         nixl_side_channel_base: int = 5600,
         server_actor_cls: Optional[Type[ServerActorProtocol]] = None,
         use_expandable_segments: bool = False,
+        slot: int = 0,
         **server_actor_kwargs: Any,
     ):
         """
@@ -77,6 +78,11 @@ class ServerGroup:
                 server_idx.
             server_actor_cls: Server actor class implementing
                 ServerActorProtocol. Defaults to VLLMServerActor.
+            slot: This group's deployment ordinal within the whole fleet -- the
+                stable identity RDT stamps as ``replica_rank`` and the engine
+                supervisor restarts against. ALL of this group's servers share it
+                (they are DP peers of one deployment; see ``ServerInfo.slot``).
+                Defaults to 0, correct for a lone group.
             **server_actor_kwargs: Additional keyword arguments to pass to the server actor class.
         """
         from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
@@ -95,6 +101,7 @@ class ServerGroup:
         self._internal_pg: Optional[PlacementGroup] = None
         self._server_actor_kwargs = server_actor_kwargs
         self._use_expandable_segments = use_expandable_segments
+        self._slot = slot
         self._external_pg = placement_group
 
         # Extract the raw PG, reordered indices, and GPU IDs from ResolvedPlacementGroup.
@@ -171,6 +178,50 @@ class ServerGroup:
         logical_base = self._bundle_offset + server_idx * gpus
         return [self._bundle_gpu_ids[logical_base + k] for k in range(gpus)]
 
+    def _create_one_actor(
+        self,
+        server_idx: int,
+        pg: PlacementGroup,
+        dp_address: Optional[str] = None,
+        dp_rpc_port: Optional[int] = None,
+    ) -> Any:
+        """Construct the actor for one server index.
+
+        Every argument is derived from ``server_idx`` and immutable group state, so
+        this is re-callable for the SAME index later: a restart lands on the same PG
+        bundle (hence the same node and the same GPUs) and re-reserves a port inside
+        the same ``SERVER_PORT_STRIDE`` window. Only the DP rendezvous is
+        positional, which is why it is a parameter rather than group state -- see
+        ``restart_server`` for why that makes DP groups non-restartable.
+        """
+        bundle_indices = self._get_bundle_indices_for_server(server_idx)
+        start_bundle_idx = bundle_indices[0]
+
+        ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
+
+        gpu_ids = self._get_gpu_ids_for_server(server_idx)
+        server_kwargs = self._server_actor_cls.prepare_server_kwargs(
+            pg,
+            start_bundle_idx,
+            self._num_gpus_per_server,
+            _gpu_ids=gpu_ids,
+            **self._server_actor_kwargs,
+        )
+
+        return ServerActorClass.remote(
+            self._cli_args,
+            self._start_port + server_idx * SERVER_PORT_STRIDE,
+            server_idx=server_idx,
+            bundle_indices=bundle_indices,
+            dp_size=self._num_servers if self._enable_dp else -1,
+            dp_master_address=dp_address,
+            dp_rpc_port=dp_rpc_port,
+            enable_pd=self._enable_pd,
+            nixl_side_channel_base=self._nixl_side_channel_base,
+            colocated_training=self._external_pg is not None,
+            **server_kwargs,
+        )
+
     def _create_actors(self) -> List[Any]:
         """Create server actors with GPU resources."""
         pg = self._get_placement_group()
@@ -179,33 +230,7 @@ class ServerGroup:
         dp_address, dp_rpc_port = None, None
 
         for server_idx in range(self._num_servers):
-            bundle_indices = self._get_bundle_indices_for_server(server_idx)
-            start_bundle_idx = bundle_indices[0]
-
-            ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
-
-            gpu_ids = self._get_gpu_ids_for_server(server_idx)
-            server_kwargs = self._server_actor_cls.prepare_server_kwargs(
-                pg,
-                start_bundle_idx,
-                self._num_gpus_per_server,
-                _gpu_ids=gpu_ids,
-                **self._server_actor_kwargs,
-            )
-
-            actor = ServerActorClass.remote(
-                self._cli_args,
-                self._start_port + server_idx * SERVER_PORT_STRIDE,
-                server_idx=server_idx,
-                bundle_indices=bundle_indices,
-                dp_size=self._num_servers if self._enable_dp else -1,
-                dp_master_address=dp_address,
-                dp_rpc_port=dp_rpc_port,
-                enable_pd=self._enable_pd,
-                nixl_side_channel_base=self._nixl_side_channel_base,
-                colocated_training=self._external_pg is not None,
-                **server_kwargs,
-            )
+            actor = self._create_one_actor(server_idx, pg, dp_address, dp_rpc_port)
 
             # Get DP info from server 0 which is where DP0 will be
             if self._enable_dp and server_idx == 0:
@@ -215,6 +240,59 @@ class ServerGroup:
             actors.append(actor)
 
         return actors
+
+    def begin_restart(self, server_idx: int) -> Tuple[Any, ray.ObjectRef]:
+        """Respawn one dead server into its original placement-group bundle.
+
+        The bundle is still held by this group's PG, so the replacement lands on the
+        same node with the same GPUs. Its port is re-reserved within the slot's
+        ``SERVER_PORT_STRIDE`` window and may differ from the old one (the dead
+        process's socket can linger), so the URL is expected to CHANGE -- which is
+        the whole reason identity moved to ``ServerInfo.slot``.
+
+        The caller is responsible for having killed the old actor first: two actors
+        holding the same bundle would contend for the same GPUs.
+
+        Returns the new handle and its pending ``start()`` ref WITHOUT waiting, so
+        the supervisor can keep serving the surviving fleet while a replacement
+        loads a multi-GPU model. Pair it with ``finish_restart``; nothing is
+        installed into the pool until then, so a restart that never becomes healthy
+        leaves the group exactly as it was.
+
+        Raises:
+            RuntimeError: on a DP-enabled group. Restarting DP rank 0 would
+                invalidate the ``dp_master_address``/``dp_rpc_port`` rendezvous that
+                every peer in the group was constructed with, so the unit of restart
+                would have to be the whole deployment. Fault tolerance is gated to
+                ``data_parallel_size == 1`` for exactly this reason; failing loudly
+                here keeps that gate from being silently bypassed.
+        """
+        if self._enable_dp:
+            raise RuntimeError(
+                "restart_server is not supported on a data-parallel group: DP peers share a "
+                "rendezvous established by rank 0 at construction, so a single server cannot "
+                "be replaced in isolation. Restart the whole deployment instead."
+            )
+        if self._pool is None:
+            raise RuntimeError("begin_restart called before start(); there is nothing to replace.")
+
+        pg = self._get_placement_group()
+        actor = self._create_one_actor(server_idx, pg)
+        logger.info(f"Restarting server slot={self._slot} idx={server_idx} into its original bundle")
+        return actor, actor.start.remote()
+
+    def finish_restart(self, server_idx: int, actor: Any, info: ServerInfo) -> ServerInfo:
+        """Install a resolved ``begin_restart`` result, preserving the slot."""
+        if self._pool is None:
+            raise RuntimeError("finish_restart called before start().")
+        stamped = self._pool.replace_actor(server_idx, actor, info)
+        logger.info(f"Server slot={self._slot} idx={server_idx} restarted at {stamped.url}")
+        return stamped
+
+    def restart_server(self, server_idx: int) -> ServerInfo:
+        """Blocking ``begin_restart`` + ``finish_restart``, for tests and scripts."""
+        actor, start_ref = self.begin_restart(server_idx)
+        return self.finish_restart(server_idx, actor, ray.get(start_ref))
 
     def start(self, blocking: bool = True) -> Union[List[ServerInfo], List[ray.ObjectRef]]:
         """Create actors, start the pool, and return endpoints.
@@ -227,7 +305,9 @@ class ServerGroup:
         """
         logger.info(f"Starting {self._num_servers} server(s)...")
         actors = self._create_actors()
-        self._pool = ServerActorPool(actors)
+        # All of this group's servers are DP peers of ONE deployment, so they share
+        # this group's slot -- see ServerInfo.slot.
+        self._pool = ServerActorPool(actors, slots=[self._slot] * len(actors))
 
         if blocking:
             server_infos = self._pool.start(blocking=True)
@@ -243,6 +323,11 @@ class ServerGroup:
         if self._pool is None:
             return []
         return self._pool.server_infos
+
+    @property
+    def slot(self) -> int:
+        """This group's deployment ordinal within the fleet."""
+        return self._slot
 
     def get_pool(self) -> Optional[ServerActorPool]:
         """Get the underlying actor pool."""
