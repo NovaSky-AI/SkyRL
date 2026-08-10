@@ -366,6 +366,8 @@ def test_process_batch_requests_per_model_completes_incrementally(scheduling_eng
     assert processed_models == ["model_a", "model_b"]
     with Session(engine.db_engine) as session:
         assert all(f.status == RequestStatus.COMPLETED for f in session.exec(select(FutureDB)).all())
+
+
 def forward_backward_payload() -> dict:
     return types.ForwardBackwardInput(
         data=[
