@@ -101,12 +101,11 @@ class FutureDB(SQLModel, table=True):
 
 
 class TrainingRequestDB(SQLModel, table=True):
-    """Maps an SDK training sequence number to its single server-side future."""
+    """Maps a model-global SDK training sequence number to one future."""
 
     __tablename__ = "training_requests"
 
     model_id: str = Field(primary_key=True)
-    request_type: types.RequestType = Field(primary_key=True)
     seq_id: int = Field(primary_key=True)
     request_id: int = Field(foreign_key="futures.request_id", unique=True)
 

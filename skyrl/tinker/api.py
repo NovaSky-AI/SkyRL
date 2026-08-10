@@ -341,14 +341,13 @@ async def create_future(
             return None
         statement = select(TrainingRequestDB).where(
             TrainingRequestDB.model_id == model_id,
-            TrainingRequestDB.request_type == request_type,
             TrainingRequestDB.seq_id == seq_id,
         )
         existing = (await session.exec(statement)).first()
         if existing is None:
             return None
         future = await session.get(FutureDB, existing.request_id)
-        if future is None or future.request_data != serialized_request:
+        if future is None or future.request_type != request_type or future.request_data != serialized_request:
             raise HTTPException(status_code=409, detail="Training request sequence number was reused")
         return existing.request_id
 
@@ -369,7 +368,6 @@ async def create_future(
         session.add(
             TrainingRequestDB(
                 model_id=model_id,
-                request_type=request_type,
                 seq_id=seq_id,
                 request_id=future_db.request_id,
             )
