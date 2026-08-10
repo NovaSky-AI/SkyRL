@@ -1360,6 +1360,12 @@ class TrainerConfig(BaseConfig):
     See https://docs.skyrl.ai/docs/checkpointing-logging/checkpointing"""
     resume_path: Optional[str] = None
     """Checkpoint directory to resume from. Only used when ``resume_mode="from_path"``."""
+    resume_load_dataloader_state: bool = True
+    """Restore dataloader position when resuming. Disable when starting a new phase or using different data."""
+    resume_load_optimizer_states: bool = True
+    """Restore optimizer state when resuming. Disable to initialize a fresh optimizer from the current config."""
+    resume_load_lr_scheduler_states: bool = True
+    """Restore LR scheduler state when resuming. Disable to initialize a fresh scheduler from the current config."""
     log_path: str = "/tmp/skyrl-logs"
     """Path for infrastructure log files.
     vLLM engine startup, model loading, and worker initialization logs are written to

@@ -1794,8 +1794,10 @@ class RayPPOTrainer:
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
 
-        # 2. Load dataloader state if available
-        if io.exists(dataloader_state_path):
+        # 2. Load dataloader state if requested and available
+        if not self.cfg.trainer.resume_load_dataloader_state:
+            logger.info("Skipping dataloader state restore; dataloader will start from beginning")
+        elif io.exists(dataloader_state_path):
             try:
                 with io.open_file(dataloader_state_path, "rb") as f:
                     dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
@@ -1813,8 +1815,8 @@ class RayPPOTrainer:
         self.dispatch.load_checkpoint(
             "policy",
             policy_ckpt_dir,
-            load_optimizer_states=True,
-            load_lr_scheduler_states=True,
+            load_optimizer_states=self.cfg.trainer.resume_load_optimizer_states,
+            load_lr_scheduler_states=self.cfg.trainer.resume_load_lr_scheduler_states,
         )
         logger.info("Successfully loaded policy checkpoint")
 
@@ -1824,8 +1826,8 @@ class RayPPOTrainer:
             self.dispatch.load_checkpoint(
                 "critic",
                 critic_ckpt_dir,
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
+                load_optimizer_states=self.cfg.trainer.resume_load_optimizer_states,
+                load_lr_scheduler_states=self.cfg.trainer.resume_load_lr_scheduler_states,
             )
             logger.info("Successfully loaded critic checkpoint")
 

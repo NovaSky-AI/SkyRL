@@ -2,6 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -15,6 +16,7 @@ from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWo
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils.trainer_utils import ResumeMode
 from skyrl.train.utils.utils import validate_batch_sizes
 from tests.train.util import example_dummy_config
 
@@ -300,6 +302,38 @@ def test_flush_pending_metrics_swallows_tracker_errors(dummy_config):
 
     assert trainer.all_metrics == {}
     assert trainer.all_timings == {}
+
+
+def test_resume_can_skip_optimizer_and_scheduler_states(dummy_config, tmp_path: Path):
+    checkpoint_path = tmp_path / "global_step_7"
+    (checkpoint_path / "policy").mkdir(parents=True)
+    torch.save({"global_step": 7}, checkpoint_path / "trainer_state.pt")
+    torch.save({"position": 5}, checkpoint_path / "data.pt")
+
+    dummy_config.trainer.resume_mode = "from_path"
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.resume_load_dataloader_state = False
+    dummy_config.trainer.resume_load_optimizer_states = False
+    dummy_config.trainer.resume_load_lr_scheduler_states = False
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.train_dataloader = MagicMock()
+    trainer.dispatch = MagicMock()
+    trainer.critic_model = None
+
+    global_step, loaded_path = trainer.load_checkpoints()
+
+    assert global_step == 7
+    assert loaded_path == str(checkpoint_path)
+    trainer.train_dataloader.load_state_dict.assert_not_called()
+    trainer.dispatch.load_checkpoint.assert_called_once_with(
+        "policy",
+        str(checkpoint_path / "policy"),
+        load_optimizer_states=False,
+        load_lr_scheduler_states=False,
+    )
 
 
 def test_run_flushes_pending_metrics_before_logging_exception():
