@@ -366,9 +366,7 @@ class TestDriverRetry:
         d = WorkerDispatch.__new__(WorkerDispatch)
         d.cfg = SimpleNamespace(
             generator=SimpleNamespace(
-                inference_engine=SimpleNamespace(
-                    fault_tolerance=SimpleNamespace(enabled=True, max_sync_retries=2)
-                )
+                inference_engine=SimpleNamespace(fault_tolerance=SimpleNamespace(enabled=True, max_sync_retries=2))
             )
         )
         trace = []
@@ -417,9 +415,7 @@ class TestDriverRetry:
         assert len(reconciles) == 1, "retried without re-probing the fleet"
         assert len(state["seen"]) == 2
         assert state["seen"][0] == [("a", 0), ("b", 1)]
-        assert state["seen"][1] == [("a", 0)], (
-            f"the retry did not exclude the dead engine: {state['seen']}"
-        )
+        assert state["seen"][1] == [("a", 0)], f"the retry did not exclude the dead engine: {state['seen']}"
 
     @pytest.mark.asyncio
     async def test_it_gives_up_after_max_sync_retries(self):

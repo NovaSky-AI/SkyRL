@@ -48,12 +48,39 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import ray
 from loguru import logger
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
         RemoteInferenceClient,
     )
     from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+
+
+def _reap_on_node(gpu_ids: List[int]) -> List[int]:
+    """Body of the pinned reap task; runs on the node holding ``gpu_ids``."""
+    from skyrl.backends.skyrl_train.inference_servers.engine_orphans import (
+        gpu_uuids_for_ids,
+        reap_orphaned_engines,
+    )
+
+    return reap_orphaned_engines(gpu_uuids_for_ids(gpu_ids))
+
+
+def _is_gpu_still_occupied(exc: BaseException) -> bool:
+    """Whether a failed engine start was really "the GPU is not free yet".
+
+    vLLM raises a ValueError naming both numbers when the device has less free memory
+    than ``gpu_memory_utilization`` asks for, and wraps it several layers deep
+    (EngineCore -> AsyncLLMEngine -> the actor's health wait), so the whole chain is
+    flattened to text rather than matched by type.
+
+    Distinguished from a genuine restart failure because it is TRANSIENT in principle:
+    the memory is held by a process that may yet exit (or be reaped), so spending a
+    restart attempt on it condemns a slot for a condition that has not settled.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    return "less than desired GPU memory utilization" in text or ("Free memory on device" in text and "startup" in text)
 
 
 class SlotState(str, Enum):
@@ -87,6 +114,11 @@ class EngineSlot:
     state: SlotState = SlotState.LIVE
     restarts: int = 0
     health_failures: int = 0
+    budget_exhausted_logged: bool = False
+    """So the permanent-death notice is logged on the transition, not every reconcile."""
+    killed_this_pass: bool = False
+    """Set when THIS reconcile killed the actor, so the relaunch waits one pass for the
+    bundle's GPU memory to come back. See ``EngineSupervisor._retire_dead``."""
     _pending: Optional[Tuple[Any, Any, float]] = field(default=None, repr=False)
     """``(actor, start_ref, deadline)`` for an in-flight restart, or None."""
 
@@ -289,6 +321,56 @@ class EngineSupervisor:
             # The URL is retired with the actor: nothing may address this slot until a
             # replacement reports its own.
             s.url = ""
+            # vLLM's EngineCore is a SEPARATE process, so killing (or losing) the actor
+            # does not free the device. Reap the orphan or the relaunch cannot fit.
+            self._reap_orphans_for(s)
+            # Do not relaunch into this bundle in the SAME pass. `ray.kill` is not
+            # synchronous in its effect and the driver reclaims device memory only once
+            # a process is fully gone, so a replacement that starts allocating inside
+            # that window can OOM against memory the corpse still holds.
+            #
+            # Deliberately not a sleep: the next reconcile is a step boundary away,
+            # which is a real event rather than a guessed duration, and one step is
+            # nothing against reloading a model. Slots that were already dead on arrival
+            # restart immediately -- this only defers ones we just killed.
+            s.killed_this_pass = True
+
+    def _reap_orphans_for(self, s: EngineSlot) -> None:
+        """Free this slot's GPUs of engine processes that outlived their actor.
+
+        Without this, a restart into the original bundle cannot succeed after an ABRUPT
+        death: vLLM runs EngineCore as its own process, so when the server actor dies
+        the child is reparented and keeps its ``gpu_memory_utilization`` share.
+        Measured on an 8xH100 -- one engine killed left 62.8/79.2 GiB allocated, and all
+        three restart attempts failed on free memory until the orphan was reaped.
+
+        Pinned to the slot's own PG bundle, which is the authority on where those GPUs
+        are, rather than a guessed node id. Narrow by construction (see
+        ``engine_orphans.select_orphans``: orphaned AND vLLM-named AND on a target GPU)
+        and best-effort: failing to reap costs a restart attempt, not the run.
+        """
+        try:
+            gpu_ids = s.group._get_gpu_ids_for_server(s.server_idx)
+            if not gpu_ids:
+                # Without physical ids we cannot say which GPUs are ours, and a broader
+                # sweep is not worth the risk. Inside the try because the lookup reaches
+                # into ServerGroup internals: a group shape that does not expose them
+                # should cost us a reap, never an exception on the death path.
+                return
+            task = ray.remote(num_cpus=0)(_reap_on_node).options(
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=s.group._get_placement_group(),
+                    placement_group_bundle_index=s.group._get_bundle_indices_for_server(s.server_idx)[0],
+                )
+            )
+            killed = ray.get(task.remote(list(gpu_ids)), timeout=60)
+            if killed:
+                logger.warning(
+                    f"[ft] slot {s.index}: reaped {len(killed)} orphaned engine process(es) "
+                    f"{killed} still holding GPU(s) {list(gpu_ids)}"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ft] slot {s.index}: could not reap orphaned engine processes: {e}")
 
     def _actor_for(self, s: EngineSlot) -> Optional[Any]:
         actors = s.group.get_actors()
@@ -306,14 +388,25 @@ class EngineSupervisor:
         for s in self._in_state(SlotState.DEAD):
             if s._pending is not None:
                 continue
+            if s.killed_this_pass:
+                # Killed moments ago; let its GPU memory come back first (see
+                # _retire_dead). Cleared so the NEXT reconcile launches it.
+                s.killed_this_pass = False
+                logger.info(f"[ft] slot {s.index} restarts at the next reconcile (its bundle is still draining)")
+                continue
             if s.restarts >= budget:
                 # Deliberately not an error: a slot that keeps dying is usually a bad
-                # GPU, and the run can finish degraded. Logged at warning because it
-                # is a permanent capacity loss, not a transient one.
-                logger.warning(
-                    f"[ft] slot {s.index} has exhausted its restart budget "
-                    f"({s.restarts}/{budget}); leaving it permanently dead"
-                )
+                # GPU, and the run can finish degraded. Logged at warning because it is
+                # a permanent capacity loss, not a transient one -- but ONCE, on the
+                # transition. Every later reconcile re-visits this slot, and repeating
+                # the line each time buried the interesting events in the run log (the
+                # first GPU demo emitted it four times for one dead slot).
+                if not s.budget_exhausted_logged:
+                    s.budget_exhausted_logged = True
+                    logger.warning(
+                        f"[ft] slot {s.index} has exhausted its restart budget "
+                        f"({s.restarts}/{budget}); leaving it permanently dead"
+                    )
                 continue
             try:
                 actor, start_ref = s.group.begin_restart(s.server_idx)
@@ -348,7 +441,19 @@ class EngineSupervisor:
             try:
                 info = ray.get(start_ref)
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"[ft] slot {s.index} restart failed: {type(e).__name__}: {e}")
+                if _is_gpu_still_occupied(e):
+                    # This attempt was never going to succeed, so it must not count
+                    # against the budget -- otherwise three retries are spent on the
+                    # same wall and the slot is condemned for a condition that may
+                    # still clear (an orphan we have not managed to reap yet).
+                    s.restarts = max(0, s.restarts - 1)
+                    logger.warning(
+                        f"[ft] slot {s.index} cannot restart yet: its GPU is still held, most likely "
+                        f"by an orphaned vLLM EngineCore. Not counting this against the restart "
+                        f"budget; will retry at a later boundary. Detail: {e}"
+                    )
+                else:
+                    logger.warning(f"[ft] slot {s.index} restart failed: {type(e).__name__}: {e}")
                 self._abandon_restart(s, actor)
                 continue
             stamped = s.group.finish_restart(s.server_idx, actor, info)
@@ -391,13 +496,14 @@ class EngineSupervisor:
 
         deadline = time.monotonic() + float(self._ft.restart_timeout_s)
         while len(self._client.active_server_urls) < floor:
-            if not self._in_state(SlotState.RESTARTING):
-                break  # nothing pending, so waiting cannot help
+            recovering = self._recovering_slots()
+            if not recovering:
+                break  # nothing is coming back, so waiting cannot help
             if time.monotonic() > deadline:
                 break
             logger.warning(
                 f"[ft] only {len(self._client.active_server_urls)}/{floor} engines are live; "
-                f"waiting on {len(self._in_state(SlotState.RESTARTING))} restart(s)"
+                f"waiting on {len(recovering)} slot(s) still recovering"
             )
             await asyncio.sleep(5.0)
             await self.reconcile()
@@ -412,6 +518,21 @@ class EngineSupervisor:
                 f"only {live} inference engine(s) are live, below min_live_engines={floor}; "
                 f"fleet: {self.describe()}"
             )
+
+    def _recovering_slots(self) -> List[EngineSlot]:
+        """Slots expected to come back, so that waiting on them is meaningful.
+
+        Wider than "currently RESTARTING" on purpose: a slot we killed this pass has its
+        relaunch deferred by one reconcile, and a DEAD slot with budget left has one
+        coming. Counting only RESTARTING made ``before_generation`` give up on a fleet
+        that was seconds from recovering.
+        """
+        budget = max(0, int(self._ft.max_restarts_per_engine))
+        return [
+            s
+            for s in self._slots
+            if s.state is SlotState.RESTARTING or (s.state is SlotState.DEAD and s.restarts < budget)
+        ]
 
     async def before_weight_sync(self) -> List[EngineSlot]:
         """Reconcile and RDT-re-init anything that restarted, so this sync includes it.

@@ -76,9 +76,21 @@ class _FakeGroup:
         self._actors = [_FakeActor(start_port, trace, slot)]
         # Set by a test to make the pending start ref never resolve.
         self.hang_restart = False
+        # Set by a test to make the replacement's start() raise.
+        self.start_raises = None
+        # None = the reaper cannot scope itself and no-ops (see _get_gpu_ids_for_server).
+        self.gpu_ids = None
 
     def get_actors(self):
         return self._actors
+
+    def _get_gpu_ids_for_server(self, server_idx: int):
+        """Physical GPU ids, which the orphan reaper needs to scope its kill.
+
+        None here means "unresolvable", which makes the reaper a deliberate no-op --
+        these tests are about the supervisor's decisions, and reaping is covered
+        exhaustively (and without a GPU) in test_engine_orphans.py."""
+        return self.gpu_ids
 
     def begin_restart(self, server_idx: int):
         self._restart_count += 1
@@ -88,6 +100,8 @@ class _FakeGroup:
         # A restart re-reserves a port inside its own stride window, so the URL moves.
         port = self._start_port + self._restart_count
         actor = _FakeActor(port, self._trace, self.slot)
+        if self.start_raises is not None:
+            return actor, _Pending(self.start_raises)
         ref = _Pending(None if self.hang_restart else ServerInfo(ip="10.0.0.1", port=port))
         return actor, ref
 
@@ -232,9 +246,14 @@ class TestReconcile:
             assert f.states()[1] is SlotState.LIVE, "condemned too early"
             assert not any(t.startswith("begin_restart") for t in f.trace), f.trace
         await f.sup.reconcile()
-        # The fake replacement is healthy the instant it is asked for, so this single
-        # reconcile carries the slot through RESTARTING to PENDING_SYNC. A real engine
-        # sits in RESTARTING for however long the model load takes.
+        # Condemned and KILLED on this pass, but not yet relaunched: the bundle it was
+        # holding needs a pass to drain (see _retire_dead).
+        assert "kill(slot=1)" in f.trace
+        assert "begin_restart(slot=1)" not in f.trace
+        await f.sup.reconcile()
+        # The fake replacement is healthy the instant it is asked for, so this reconcile
+        # carries the slot through RESTARTING to PENDING_SYNC. A real engine sits in
+        # RESTARTING for however long the model load takes.
         assert "begin_restart(slot=1)" in f.trace
         assert f.states()[1] is SlotState.PENDING_SYNC
 
@@ -247,6 +266,51 @@ class TestReconcile:
         await f.sup.reconcile()
         assert f.sup.slot(1).health_failures == 0
         assert f.states()[1] is SlotState.LIVE
+
+    async def test_the_orphan_reaper_is_invoked_for_the_dying_slot(self, monkeypatch):
+        """Wiring, not policy. The reaper's SELECTION rule is tested exhaustively in
+        test_engine_orphans.py; what this pins is that a dying slot actually triggers it,
+        scoped to that slot's own GPUs. Without the call, a restart after an abrupt death
+        can never fit -- vLLM's EngineCore outlives its actor still holding the device."""
+        f = _Fleet(
+            monkeypatch,
+            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, health_failure_threshold=1),
+        )
+        f.groups[2].gpu_ids = [5]  # this slot's physical GPU
+
+        reaped = []
+
+        def _reap(self_inner, slot):
+            reaped.append((slot.index, slot.group.gpu_ids))
+
+        monkeypatch.setattr(type(f.sup), "_reap_orphans_for", _reap, raising=True)
+        f.actor(2).wedge()
+        await f.sup.reconcile()
+
+        assert reaped == [(2, [5])], f"the reaper was not invoked for the dying slot: {reaped}"
+
+    async def test_the_relaunch_waits_one_pass_after_we_kill_the_actor(self, monkeypatch):
+        """`ray.kill` is not synchronous in its effect: the driver reclaims device
+        memory only once the process is fully gone. Relaunching into the same bundle in
+        the same pass can therefore OOM against memory the corpse still holds -- and at
+        a high gpu_memory_utilization it reliably would, burning a restart attempt.
+
+        The wait is one RECONCILE, not a sleep: the next step boundary is a real event
+        rather than a guessed duration, and one step is nothing against a model load."""
+        f = _Fleet(
+            monkeypatch,
+            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, health_failure_threshold=1),
+        )
+        f.actor(2).wedge()
+
+        await f.sup.reconcile()
+        kills = [i for i, t in enumerate(f.trace) if t == "kill(slot=2)"]
+        starts = [i for i, t in enumerate(f.trace) if t == "begin_restart(slot=2)"]
+        assert kills and not starts, f"relaunched into a bundle we had just killed: {f.trace}"
+
+        await f.sup.reconcile()
+        assert "begin_restart(slot=2)" in f.trace
+        assert f.sup.slot(2).killed_this_pass is False
 
     async def test_a_wedged_engine_is_killed_so_its_bundle_is_free(self, monkeypatch):
         """The point of normalizing a wedge to a death: the actor is ALIVE and holds
@@ -266,11 +330,15 @@ class TestReconcile:
         f.actor(0).wedge()
         f.client.mark_dead(dead_url)
         await f.sup.reconcile()
-        # Restarted on the FIRST reconcile, without waiting out
+        # Condemned on the FIRST reconcile, without waiting out
         # health_failure_threshold -- the conclusion was already reached elsewhere.
+        # (The relaunch is then one pass behind, as for any slot we kill ourselves.)
+        assert f.states()[0] is SlotState.DEAD
+        assert "kill(slot=0)" in f.trace
+        assert f.sup.slot(0).health_failures == 0
+        await f.sup.reconcile()
         assert "begin_restart(slot=0)" in f.trace
         assert f.states()[0] is SlotState.PENDING_SYNC
-        assert f.sup.slot(0).health_failures == 0
 
 
 @pytest.mark.asyncio
@@ -394,6 +462,58 @@ class TestBudgetsAndFloors:
         assert f.sup.slot(1).restarts == 2
         assert f.sup.slot(1).state is SlotState.DEAD
         assert sum(t.startswith("begin_restart(slot=1)") for t in f.trace) == 2
+        # The permanent-death notice is a transition, not a per-reconcile refrain: the
+        # first GPU demo logged it four times for one slot, burying the real events.
+        assert f.sup.slot(1).budget_exhausted_logged is True
+
+    async def test_a_gpu_that_is_still_held_does_not_cost_budget(self, monkeypatch):
+        """Found on hardware. SIGKILLing an engine's server actor ORPHANS vLLM's
+        EngineCore child, which keeps its ~0.7x device allocation -- so every restart
+        into that bundle fails with "Free memory on device ... less than desired GPU
+        memory utilization" until something reaps the orphan.
+
+        Counting those as attempts condemned the slot after three back-to-back failures
+        against a wall that had not moved. The condition is transient in principle, so it
+        must not consume the budget; the run then keeps retrying cheaply at later
+        boundaries."""
+        f = _Fleet(
+            monkeypatch,
+            ft=InferenceFaultToleranceConfig(
+                enabled=True, restart_dead_engines=True, max_restarts_per_engine=3, health_failure_threshold=1
+            ),
+        )
+        f.groups[1].start_raises = RuntimeError(
+            "Free memory on device cuda:0 (16.38/79.18 GiB) on startup is less than "
+            "desired GPU memory utilization (0.7, 55.43 GiB)."
+        )
+        f.actor(1).wedge()
+        for _ in range(6):
+            await f.sup.reconcile()
+
+        assert f.sup.slot(1).restarts == 0, "an unavailable GPU consumed the restart budget"
+        assert f.sup.slot(1).state is SlotState.DEAD
+        assert "begin_restart(slot=1)" in f.trace, "stopped trying entirely"
+
+        # Once the orphan is gone, the very next boundary brings the slot back.
+        f.groups[1].start_raises = None
+        await f.sup.reconcile()
+        assert f.sup.slot(1).state is SlotState.PENDING_SYNC
+
+    async def test_a_real_start_failure_still_costs_budget(self, monkeypatch):
+        """The other side of that call: a replacement that fails for its own reasons
+        must still be bounded, or a genuinely broken slot relaunches forever."""
+        f = _Fleet(
+            monkeypatch,
+            ft=InferenceFaultToleranceConfig(
+                enabled=True, restart_dead_engines=True, max_restarts_per_engine=2, health_failure_threshold=1
+            ),
+        )
+        f.groups[1].start_raises = RuntimeError("CUDA error: device-side assert triggered")
+        f.actor(1).wedge()
+        for _ in range(6):
+            await f.sup.reconcile()
+        assert f.sup.slot(1).restarts == 2
+        assert f.sup.slot(1).state is SlotState.DEAD
 
     async def test_a_restart_that_cannot_launch_costs_budget(self, monkeypatch):
         """Otherwise an unschedulable bundle spins forever."""
@@ -410,9 +530,14 @@ class TestBudgetsAndFloors:
         assert f.sup.slot(0).restarts == 2
         assert f.sup.slot(0).state is SlotState.DEAD
 
-    async def test_before_generation_waits_on_an_in_flight_restart(self, monkeypatch):
+    async def test_before_generation_waits_for_a_recovering_slot(self, monkeypatch):
         """The Part 1/Part 2 difference: hitting the floor is fatal in Part 1 because
-        nothing can come back. Here a pending restart is a reason to wait."""
+        nothing can come back. Here a slot that is about to return is a reason to wait.
+
+        "About to return" deliberately includes a slot whose relaunch is still one
+        reconcile away -- the deferral after a kill. Counting only RESTARTING made this
+        give up on a fleet that was seconds from recovering, which is the regression
+        this test now pins."""
         ft = InferenceFaultToleranceConfig(
             enabled=True,
             restart_dead_engines=True,
@@ -421,23 +546,19 @@ class TestBudgetsAndFloors:
             restart_timeout_s=30.0,
         )
         f = _Fleet(monkeypatch, n=2, ft=ft)
-        f.groups[0].hang_restart = True
         f.actor(0).wedge()
 
         slept = []
 
         async def _sleep(sec):
+            # The wait itself is what lets the deferred relaunch happen on the next
+            # reconcile, which before_generation issues after this returns.
             slept.append(sec)
-            # Second time round, let the replacement come up.
-            f.groups[0].hang_restart = False
-            _, ref = f.groups[0].begin_restart(0)
-            pending = f.sup.slot(0)._pending
-            f.sup.slot(0)._pending = (pending[0], ref, pending[2])
 
         monkeypatch.setattr("asyncio.sleep", _sleep)
         await f.sup.before_generation()
 
-        assert slept, "did not wait for the restart"
+        assert slept, "raised instead of waiting for a slot that was about to recover"
         assert f.sup.slot(0).state is SlotState.PENDING_SYNC
         assert len(f.client.active_server_urls) == 2
 
