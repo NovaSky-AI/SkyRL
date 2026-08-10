@@ -1465,12 +1465,13 @@ class RdtWeightSyncSender:
             self._engine = await asyncio.to_thread(self._trainer_init_blocking, weight_extractor)
         live_cids = self._live_consumer_ids(live_server_urls)
         if live_cids is not None:
-            # Emitted HERE, through loguru, and not only from the vendored engine's
-            # `[rdt-degraded]`: that one goes through vLLM's `init_logger`, which in a
-            # SkyRL policy worker reaches no log file and no console -- verified on a
-            # GPU run where the degraded sync provably ran (producers bound to the
-            # dead consumer went to zero produce calls) while the line appeared
-            # nowhere. A degradation nobody can see is a degradation nobody can debug.
+            # A once-per-rank-per-sync summary alongside the vendored engine's
+            # per-group `[rdt-degraded]`. Both land in SkyRL's node-local infra log
+            # (/tmp/skyrl-logs/infra-*.log) -- NEITHER reaches the driver's stdout,
+            # which is the log an operator is usually watching, so a degraded run
+            # looks identical to a healthy one from there. Corrects an earlier note
+            # here claiming the engine's line reached no log at all: it does, just
+            # not where you would look first.
             _loguru.warning(
                 f"[rdt-degraded] weight sync serving {len(live_cids)}/{self._world_size} live consumers "
                 f"({len(live_server_urls or [])}/{len(self._server_urls)} inference servers alive); "

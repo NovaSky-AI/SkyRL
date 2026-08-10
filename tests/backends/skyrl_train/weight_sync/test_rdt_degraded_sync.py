@@ -95,12 +95,16 @@ class TestLiveConsumerIds:
 class TestDegradationIsVisible:
     """A degraded sync must announce itself somewhere an operator will actually look.
 
-    The vendored engine's ``[rdt-degraded]`` goes through vLLM's ``init_logger``,
-    which in a SkyRL policy worker reaches no log file and no console -- confirmed on
-    a GPU run where the degraded path provably ran (the two producers bound to the
-    dead consumer went to zero produce calls) while the line appeared in none of the
-    worker logs, infra logs, or driver output. loguru from the same process is
-    captured, so the announcement is made there too.
+    Both this sender-level summary and the vendored engine's per-group
+    ``[rdt-degraded]`` land in SkyRL's node-local infra log
+    (``/tmp/skyrl-logs/infra-*.log``); neither reaches the DRIVER's stdout, so a
+    degraded run reads as healthy from the log most people watch.
+
+    This test only pins that the sender emits at all -- an in-process sink cannot
+    tell you where the line ends up. Verified on GPU: 4 post-kill syncs x 4 ranks
+    produced 16 sender lines and 16 engine lines in the infra log, with rank 0
+    reporting 26/26 owned groups dropped and the rest 0/26 -- matching the per-rank
+    produce counters exactly.
     """
 
     @pytest.mark.asyncio
