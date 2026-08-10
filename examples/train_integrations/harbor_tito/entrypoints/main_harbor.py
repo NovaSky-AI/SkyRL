@@ -3,7 +3,7 @@
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, cast
+from typing import Any, Dict, Optional, cast
 
 import ray
 import yaml
@@ -28,6 +28,7 @@ class TITOHarborGeneratorConfig(HarborGeneratorConfig):
 
     tito_validate_rollout_details: bool = True
     tito_trace_log_dir: Optional[str] = None
+    tito_renderer_config: Optional[Dict[str, Any]] = None
 
 
 @dataclass

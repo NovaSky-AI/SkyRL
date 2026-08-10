@@ -88,6 +88,7 @@ class TITOProxy:
         if self._server_task is not None:
             raise RuntimeError("TITO proxy is already serving")
 
+        # Reserve the ephemeral port while uvicorn starts.
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self._config.host, self._config.port))
@@ -145,6 +146,7 @@ class TITOProxy:
             raise ValueError("model must be non-empty")
 
         token = uuid4().hex
+        # Isolate each registration with a random path token.
         registration = _Registration(
             trace=trace,
             router_session_id=router_session_id,
@@ -157,6 +159,7 @@ class TITOProxy:
         try:
             yield ProxyHandle(base_url=f"{self._base_url}/sessions/{token}")
         finally:
+            # Complete cleanup even if the caller is cancelled.
             cleanup_task = asyncio.create_task(
                 self._close_registration(
                     token,
@@ -258,6 +261,7 @@ class TITOProxy:
                 return copy.deepcopy(cached)
             future = registration.inflight.get(parsed.request_key)
             if future is None:
+                # The first handler runs inference; retries await its Future.
                 future = asyncio.get_running_loop().create_future()
                 registration.inflight[parsed.request_key] = future
                 leader = True
@@ -266,6 +270,7 @@ class TITOProxy:
             return copy.deepcopy(await future)
 
         try:
+            # Serialize turns within one registration.
             async with registration.turn_lock:
                 response = await self._execute_turn(registration, parsed)
             async with registration.dedupe_lock:
@@ -292,6 +297,7 @@ class TITOProxy:
         )
         rendered = None
         if pending.bridge_anchor is not None and pending.new_messages:
+            # Preserve prior sampled IDs when the renderer can bridge.
             rendered = await asyncio.to_thread(
                 self._renderer.bridge,
                 pending.bridge_anchor,
@@ -299,6 +305,7 @@ class TITOProxy:
                 tools=pending.tools,
             )
         if rendered is None:
+            # Fall back to a full render when bridging is unsafe.
             rendered = await asyncio.to_thread(
                 self._renderer.render,
                 pending.messages,
@@ -310,6 +317,7 @@ class TITOProxy:
             if pending.bridge_anchor is None:
                 raise RuntimeError("Renderer returned a reused prefix without a bridge anchor")
             offset = pending.bridge_anchor.matched_message_count
+            # Convert tail-relative attribution to full-message indices.
             for index in range(rendered.reused_prefix_length, len(prompt_message_indices)):
                 if prompt_message_indices[index] >= 0:
                     prompt_message_indices[index] += offset
@@ -355,6 +363,7 @@ class TITOProxy:
             model=parsed.model,
             sampling_params_json=json.dumps(parsed.sampling_params, sort_keys=True, separators=(",", ":")),
         )
+        # Commit before returning the successful response.
         registration.trace.commit(pending, result)
 
         return build_chat_response(

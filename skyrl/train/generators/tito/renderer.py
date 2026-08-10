@@ -9,7 +9,7 @@ import sys
 import threading
 import types
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol, Sequence, Tuple
+from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
 
 from .types import BridgeAnchor, Message, RoutedExperts, ToolSpec
 
@@ -94,18 +94,30 @@ def _normalize_tools(tools: Optional[Sequence[ToolSpec]]) -> Optional[list[ToolS
 
 
 class PrimeRendererAdapter:
-    """Thread-safe adapter around Prime Intellect's Qwen3 renderer."""
+    """Thread-safe adapter around an auto-resolved Prime renderer."""
 
-    def __init__(self, tokenizer) -> None:
+    def __init__(
+        self,
+        tokenizer,
+        *,
+        config: Any = None,
+        chat_template_kwargs: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         _ensure_transformers_tokenization_utils_compat()
-        from renderers import Qwen3RendererConfig, create_renderer
+        from renderers import AutoRendererConfig, create_renderer
 
         self._tokenizer = tokenizer
+        renderer_config = config or AutoRendererConfig(thinking_retention="all")
         self._renderer: Any = create_renderer(
             tokenizer,
-            Qwen3RendererConfig(thinking_retention="all"),
+            renderer_config,
+            chat_template_kwargs=chat_template_kwargs,
         )
         self._lock = threading.Lock()
+
+    @property
+    def renderer_name(self) -> str:
+        return str(self._renderer.config.name)
 
     def render(
         self,

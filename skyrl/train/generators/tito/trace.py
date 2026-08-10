@@ -127,6 +127,7 @@ class TransitionView:
         node = self._trace._nodes[self.assistant_node_id]
         if node.sampled_start is None:
             raise RuntimeError("Transition assistant node has no sampled boundary")
+        # Assistant nodes store generation scaffold before the sampled suffix.
         tokens = list(self._trace._tokens_for_nodes(self.node_ids[:-1]))
         tokens.extend(node.token_ids[: node.sampled_start])
         return tuple(tokens)
@@ -178,6 +179,7 @@ class BranchView:
 
     @property
     def transition_ids(self) -> Tuple[int, ...]:
+        # Only sampled assistant nodes terminate Transitions.
         return tuple(
             self._trace._transition_id_by_assistant_node[node_id]
             for node_id in self.node_ids
@@ -251,6 +253,7 @@ class Trace:
         return tuple(self._nodes)
 
     def branches(self) -> Tuple[BranchView, ...]:
+        # Graph leaves define the exact training branches.
         parents = {node.parent_id for node in self._nodes if node.parent_id is not None}
         return tuple(BranchView(self, node.node_id) for node in self._nodes if node.node_id not in parents)
 
@@ -333,6 +336,7 @@ class Trace:
             canonical_tools = tuple(normalized_tools)
         tools_hash = _stable_hash(canonical_tools or [])
 
+        # Match in message space before the renderer produces prompt IDs.
         matched_node_ids = self._longest_message_prefix(canonical_messages)
         bridge_anchor = self._find_bridge_anchor(matched_node_ids, tools_hash)
         matched_message_count = bridge_anchor.matched_message_count if bridge_anchor is not None else 0
@@ -361,6 +365,7 @@ class Trace:
             )
         self._validate_result(pending, result)
 
+        # Stage graph updates until all attribution checks pass.
         parent_id, message_chunks, assistant_scaffold = self._prepare_prompt_commit(pending, result)
         staged_nodes: List[MessageNode] = []
         routed_experts = result.routed_experts
@@ -369,6 +374,7 @@ class Trace:
         message_start = len(pending.messages) - len(message_chunks)
         for offset, token_ids in enumerate(message_chunks):
             message = pending.messages[message_start + offset]
+            # Reuse exact prompt nodes discovered by a full render.
             reusable = self._find_exact_child(parent_id, message, token_ids)
             if reusable is not None:
                 parent_id = reusable
@@ -397,6 +403,7 @@ class Trace:
             if routed_experts is not None
             else None
         )
+        # Keep one sampled assistant node per Transition.
         assistant_node = self._build_node(
             parent_id=parent_id,
             message=_canonical_message(result.assistant_message),
@@ -432,6 +439,7 @@ class Trace:
         return commit_result
 
     def _longest_message_prefix(self, messages: Sequence[Message]) -> Tuple[int, ...]:
+        # Preserve token-distinct candidates with identical messages.
         candidates: List[Tuple[Optional[int], Tuple[int, ...]]] = [(None, ())]
         best: Tuple[int, ...] = ()
         for message in messages:
@@ -454,6 +462,7 @@ class Trace:
         prompt_token_ids: Sequence[int],
     ) -> Tuple[int, ...]:
         """Find the longest semantic path whose node deltas exactly prefix the prompt."""
+        # Tighten semantic candidates using the rendered prompt IDs.
         candidates: List[Tuple[Optional[int], Tuple[int, ...], int]] = [(None, (), 0)]
         best: Tuple[int, ...] = ()
         for message in messages:
@@ -477,6 +486,7 @@ class Trace:
         return best
 
     def _find_bridge_anchor(self, matched_node_ids: Sequence[int], tools_hash: str) -> Optional[BridgeAnchor]:
+        # Renderer bridging starts from a completed model-call boundary.
         for message_index in range(len(matched_node_ids) - 1, -1, -1):
             node_id = matched_node_ids[message_index]
             transition_id = self._transition_id_by_assistant_node.get(node_id)
@@ -541,6 +551,7 @@ class Trace:
             )
             return parent_id, message_chunks, assistant_scaffold
 
+        # Full renders reuse the longest candidate matching the actual prompt.
         exact_prefix = self._longest_exact_prefix(pending.messages, result.prompt_token_ids)
         parent_id = exact_prefix[-1] if exact_prefix else None
         path_len = len(self._tokens_for_nodes(exact_prefix))
@@ -567,6 +578,7 @@ class Trace:
 
         owners: List[Optional[int]] = [None] * len(token_ids)
         next_owner: Optional[int] = None
+        # Assign leading scaffold to the following message.
         for position in range(len(token_ids) - 1, -1, -1):
             message_index = message_indices[position]
             if message_index >= 0:

@@ -125,7 +125,6 @@ def parse_chat_request(
     if stop_token_ids:
         sampling_params["stop_token_ids"] = list(dict.fromkeys(int(token_id) for token_id in stop_token_ids))
 
-    # SkyRL always needs selected-token rollout logprobs for training.
     sampling_params["logprobs"] = 1
     return ParsedChatRequest(
         model=model,

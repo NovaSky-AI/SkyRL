@@ -14,6 +14,7 @@ from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 from loguru import logger
 from omegaconf import DictConfig
+from pydantic import TypeAdapter
 from tqdm import tqdm
 
 from examples.train_integrations.harbor.harbor_generator import (
@@ -61,7 +62,16 @@ class TITOHarborGenerator(HarborGenerator):
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-        self.renderer = PrimeRendererAdapter(tokenizer)
+        renderer_config = None
+        if raw_renderer_config := getattr(generator_cfg, "tito_renderer_config", None):
+            from renderers import RendererConfig
+
+            renderer_config = TypeAdapter(RendererConfig).validate_python(raw_renderer_config)
+        self.renderer = PrimeRendererAdapter(
+            tokenizer,
+            config=renderer_config,
+            chat_template_kwargs=getattr(generator_cfg, "chat_template_kwargs", None),
+        )
         self._validate_rollout_details = getattr(generator_cfg, "tito_validate_rollout_details", True)
         trace_log_dir = getattr(generator_cfg, "tito_trace_log_dir", None)
         self._trace_log_dir = Path(trace_log_dir).expanduser() if trace_log_dir else None
