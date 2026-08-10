@@ -309,9 +309,7 @@ class TestReconcile:
             "desired GPU memory utilization (0.7, 55.43 GiB)."
         )
         reaps = []
-        monkeypatch.setattr(
-            type(f.sup), "_reap_orphans_for", lambda _s, slot: reaps.append(slot.index), raising=True
-        )
+        monkeypatch.setattr(type(f.sup), "_reap_orphans_for", lambda _s, slot: reaps.append(slot.index), raising=True)
         f.actor(1).wedge()
         for _ in range(4):
             await f.sup.reconcile()
