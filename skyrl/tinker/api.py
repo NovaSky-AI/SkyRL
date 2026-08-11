@@ -73,7 +73,8 @@ async def wait_for_future(
 ) -> tuple[RequestStatus, dict | None] | None:
     """Wait for ``request_id`` to finish, returning its ``(status, result_data)``.
 
-    Returns None if ``timeout`` elapses first.
+    Returns None if ``timeout`` elapses first, and raises KeyError if the request
+    does not exist -- :func:`poll_futures` reports both.
 
     Each caller gets its own future rather than sharing one per id, so that a
     caller giving up removes only its own entry. That matters because concurrent
@@ -100,22 +101,45 @@ async def wait_for_future(
 async def poll_futures(
     db_engine, waiters: dict[int, set[asyncio.Future]], poll_interval_sec: float = FUTURE_POLL_INTERVAL_SECONDS
 ) -> None:
-    """Resolve the requests awaited in ``waiters`` as they finish, until cancelled."""
+    """Resolve the requests awaited in ``waiters`` as they finish, until cancelled.
+
+    Also reports ids that do not exist. Rows are created before their request_id
+    reaches the client and are never deleted, so an awaited id this query does not
+    return never existed, and its waiters get a KeyError. Detecting that here
+    rather than from a dedicated lookup in the endpoint makes it free: it rides
+    the query already in flight instead of costing a connection checkout on every
+    call, which at a few thousand simultaneous calls is a burst the pool feels.
+    """
     while True:
         try:
             if waiters:
+                awaited = list(waiters)
                 async with AsyncSession(db_engine) as session:
                     # The awaited ids go in as bound parameters, capped at 32766
                     # by SQLite (since 3.32) and 65535 by Postgres -- far above
                     # any plausible number of in-flight requests.
                     statement = select(FutureDB.request_id, FutureDB.status, FutureDB.result_data).where(
-                        FutureDB.request_id.in_(list(waiters)),
-                        FutureDB.status.in_(TERMINAL_STATUSES),
+                        FutureDB.request_id.in_(awaited)
                     )
-                    for request_id, status, result_data in (await session.exec(statement)).all():
-                        for waiter in waiters.pop(request_id, ()):
-                            if not waiter.done():
-                                waiter.set_result((status, result_data))
+                    rows = (await session.exec(statement)).all()
+
+                # Pending requests are left alone to be picked up on a later tick.
+                outcomes: dict[int, tuple[RequestStatus, dict | None] | KeyError] = {
+                    request_id: (status, result_data)
+                    for request_id, status, result_data in rows
+                    if status in TERMINAL_STATUSES
+                }
+                for request_id in set(awaited) - {request_id for request_id, *_ in rows}:
+                    outcomes[request_id] = KeyError(request_id)
+
+                for request_id, outcome in outcomes.items():
+                    for waiter in waiters.pop(request_id, ()):
+                        if waiter.done():
+                            continue
+                        if isinstance(outcome, BaseException):
+                            waiter.set_exception(outcome)
+                        else:
+                            waiter.set_result(outcome)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1234,24 +1258,15 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     request_id = int(request.request_id)
 
-    # Rows are created before their request_id is returned to the client and
-    # never deleted, so a missing row means the id never existed. Reading the
-    # status here also answers an already-finished request without waiting on
-    # the poller's next tick.
-    async with AsyncSession(req.app.state.db_engine) as session:
-        statement = select(FutureDB.status, FutureDB.result_data).where(FutureDB.request_id == request_id)
-        row = (await session.exec(statement)).first()
-
-    if row is None:
+    try:
+        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+    except KeyError:
         raise HTTPException(status_code=404, detail="Future not found")
 
-    status, result_data = row
-    if status not in TERMINAL_STATUSES:
-        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
-        if row is None:
-            raise HTTPException(status_code=408, detail="Timeout waiting for result")
-        status, result_data = row
+    if row is None:
+        raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
+    status, result_data = row
     if status == RequestStatus.COMPLETED:
         return result_data
 

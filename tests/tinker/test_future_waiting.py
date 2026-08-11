@@ -171,32 +171,33 @@ def _stub_request(async_engine, waiters):
 
 
 @pytest.mark.asyncio
-async def test_retrieve_future_returns_terminal_result_without_waiting(async_engine, sync_engine, monkeypatch):
-    """A request that already finished is served by the lookup, not by a poll tick."""
+async def test_wait_raises_for_unknown_request(waiters):
+    """The poller reports ids with no row, since rows are never deleted."""
+    with pytest.raises(KeyError):
+        await wait_for_future(waiters, 123456, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_future_returns_completed_result(waiters, async_engine, sync_engine):
     from skyrl.tinker import api
 
     request_id = insert_pending(sync_engine)[0]
     mark_completed(sync_engine, request_id, {"sequences": [1]})
 
-    async def _unexpected(*args, **kwargs):
-        raise AssertionError("should not wait for an already-terminal request")
-
-    monkeypatch.setattr(api, "wait_for_future", _unexpected)
-
     result = await api.retrieve_future(
-        api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, {})
+        api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiters)
     )
 
     assert result == {"sequences": [1]}
 
 
 @pytest.mark.asyncio
-async def test_retrieve_future_404s_for_unknown_request(async_engine):
+async def test_retrieve_future_404s_for_unknown_request(waiters, async_engine):
     from fastapi import HTTPException
 
     from skyrl.tinker import api
 
     with pytest.raises(HTTPException) as excinfo:
-        await api.retrieve_future(api.RetrieveFutureRequest(request_id="123456"), _stub_request(async_engine, {}))
+        await api.retrieve_future(api.RetrieveFutureRequest(request_id="123456"), _stub_request(async_engine, waiters))
 
     assert excinfo.value.status_code == 404
