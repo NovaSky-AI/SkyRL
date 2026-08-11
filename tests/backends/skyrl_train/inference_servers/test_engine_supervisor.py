@@ -227,9 +227,9 @@ class TestReconcile:
         f = _Fleet(monkeypatch)
         dead_url = f.actor(2).url
         f.actor(2).wedge()
-        ft = f.client.fault_tolerance
-        for _ in range(ft.health_failure_threshold):
-            await f.sup.reconcile()
+        # One failed probe is now enough: a TCP connect that is refused is definitive,
+        # so there is no ladder of attempts to wait out.
+        await f.sup.reconcile()
 
         assert f.trace.index(f"router_remove({dead_url})") < f.trace.index("kill(slot=2)"), f.trace
         assert dead_url not in f.routed
@@ -274,8 +274,7 @@ class TestReconcile:
         f = _Fleet(monkeypatch)
         victim = f.actor(3)
         victim.wedge()
-        for _ in range(f.client.fault_tolerance.health_failure_threshold):
-            await f.sup.reconcile()
+        await f.sup.reconcile()
         assert victim.killed is True
 
     async def test_a_restarted_engine_still_does_re_init(self, monkeypatch):
@@ -283,7 +282,7 @@ class TestReconcile:
         MUST re-init or it cannot pull its slices."""
         f = _Fleet(
             monkeypatch,
-            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, health_failure_threshold=1),
+            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True),
         )
         f.actor(2).wedge()
         await f.sup.reconcile()
@@ -298,8 +297,7 @@ class TestReconcile:
 class TestRestartAndRejoin:
     async def _kill_and_restart(self, f, slot=2):
         f.actor(slot).wedge()
-        for _ in range(f.client.fault_tolerance.health_failure_threshold):
-            await f.sup.reconcile()
+        await f.sup.reconcile()
         await f.sup.reconcile()  # harvest
         return f
 
@@ -402,9 +400,7 @@ class TestBudgetsAndFloors:
         dead slot, not an error -- the run can still finish degraded."""
         f = _Fleet(
             monkeypatch,
-            ft=InferenceFaultToleranceConfig(
-                enabled=True, restart_dead_engines=True, max_restarts_per_engine=2, health_failure_threshold=1
-            ),
+            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, max_restarts_per_engine=2),
         )
         for _ in range(6):
             # Each replacement comes up wedged, so it dies again immediately.
@@ -431,9 +427,7 @@ class TestBudgetsAndFloors:
         was assumed to carry, and never fired once in a real run."""
         f = _Fleet(
             monkeypatch,
-            ft=InferenceFaultToleranceConfig(
-                enabled=True, restart_dead_engines=True, max_restarts_per_engine=3, health_failure_threshold=1
-            ),
+            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, max_restarts_per_engine=3),
         )
         f.groups[1].start_raises = RuntimeError("Engine core initialization failed. See root cause above.")
         # What the clean pass concludes when the bundle is still occupied.
@@ -466,9 +460,7 @@ class TestBudgetsAndFloors:
         must still be bounded, or a genuinely broken slot relaunches forever."""
         f = _Fleet(
             monkeypatch,
-            ft=InferenceFaultToleranceConfig(
-                enabled=True, restart_dead_engines=True, max_restarts_per_engine=2, health_failure_threshold=1
-            ),
+            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, max_restarts_per_engine=2),
         )
         f.groups[1].start_raises = RuntimeError("CUDA error: device-side assert triggered")
         monkeypatch.setattr(
@@ -487,9 +479,7 @@ class TestBudgetsAndFloors:
         """Otherwise an unschedulable bundle spins forever."""
         f = _Fleet(
             monkeypatch,
-            ft=InferenceFaultToleranceConfig(
-                enabled=True, restart_dead_engines=True, max_restarts_per_engine=2, health_failure_threshold=1
-            ),
+            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, max_restarts_per_engine=2),
             fail_restarts=99,
         )
         f.actor(0).wedge()
@@ -504,9 +494,7 @@ class TestBudgetsAndFloors:
         ``EngineFleetError`` the moment a probe takes the fleet below it). A second check
         here, with its own waiting loop, was a duplicate -- and its interaction with the
         one-pass relaunch deferral had already caused one regression."""
-        ft = InferenceFaultToleranceConfig(
-            enabled=True, restart_dead_engines=True, min_live_engines=2, health_failure_threshold=1
-        )
+        ft = InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, min_live_engines=2)
         f = _Fleet(monkeypatch, n=2, ft=ft, fail_restarts=99)
         f.actor(0).wedge()
 
@@ -523,9 +511,7 @@ class TestBudgetsAndFloors:
     async def test_a_reconcile_inside_the_sync_does_not_enforce_the_floor(self, monkeypatch):
         """A floor violation raised at the sync boundary would fail the sync -- turning
         a recoverable capacity problem into a dead run. It belongs to generation."""
-        ft = InferenceFaultToleranceConfig(
-            enabled=True, restart_dead_engines=True, min_live_engines=2, health_failure_threshold=1
-        )
+        ft = InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, min_live_engines=2)
         f = _Fleet(monkeypatch, n=2, ft=ft, fail_restarts=99)
         f.actor(0).wedge()
         assert await f.sup.before_weight_sync() == []  # no raise

@@ -24,6 +24,7 @@ import pickle
 import threading
 import time
 from typing import List, Optional
+from unittest.mock import patch
 
 import aiohttp
 import httpx
@@ -285,30 +286,41 @@ class TestReconcileFleet:
             await c.teardown()
 
     @pytest.mark.asyncio
-    async def test_an_unhealthy_but_reachable_backend_is_still_dead(self, backends):
-        """The probe reads ``/health``, not reachability: a backend whose engine has
-        fallen over while its HTTP server survives must not keep taking traffic."""
+    async def test_a_reachable_but_unhealthy_backend_is_NOT_condemned_by_the_probe(self, backends):
+        """A deliberate limitation of connect-based liveness, recorded so it is not
+        mistaken for a regression.
+
+        A backend self-reporting unwell over HTTP still accepts connections, so the probe
+        calls it alive. We gave that up knowingly: the HTTP probe that could see it also
+        condemned HEALTHY engines under load, three GPU experiments over, because
+        ``/health`` shares the engine's event loop. And it was never a reliable detector of
+        real breakage anyway -- vLLM issue #36960 documents a dead GPU behind a 200.
+
+        This class of failure is the DATA PLANE's to catch: a request that errors or
+        exceeds ``request_timeout_s`` takes the engine out through the retry path."""
         b0, b1 = backends(2)
         c = _client([b0.url, b1.url], ft=_ft())
         try:
             b1.sick()
             await c._reconcile_fleet()
-            assert c.active_server_urls == [b0.url]
+            assert c.active_server_urls == [b0.url, b1.url]
         finally:
             await c.teardown()
 
     @pytest.mark.asyncio
-    async def test_a_wedged_backend_is_dead_within_the_probe_timeout(self, backends):
-        """A backend that accepts and never answers is the case an unbounded client
-        cannot see at all. The probe must bound it."""
+    async def test_a_wedged_backend_is_NOT_condemned_by_the_probe(self, backends):
+        """The same trade as above, in its sharpest form. A wedged engine -- accepting,
+        answering nothing -- is indistinguishable from a saturated one to any liveness
+        check that waits for a reply, which is precisely why waiting stopped being the
+        mechanism. It stays in the fleet until the data plane bounds it."""
         b0, b1 = backends(2)
         c = _client([b0.url, b1.url], ft=_ft(health_probe_timeout_s=0.5))
         try:
             b1.wedge()
             t0 = time.monotonic()
             await c._reconcile_fleet()
-            assert time.monotonic() - t0 < 5.0
-            assert c.active_server_urls == [b0.url]
+            assert time.monotonic() - t0 < 5.0, "a connect probe must not wait on the app"
+            assert c.active_server_urls == [b0.url, b1.url]
         finally:
             await c.teardown()
 
@@ -325,15 +337,27 @@ class TestReconcileFleet:
 
     @pytest.mark.asyncio
     async def test_a_burst_of_callers_triggers_exactly_one_probe(self, backends):
-        """The debounce. A batch of 512 trajectories failing at once must cost one
-        fleet probe, not 512 — each backend answers /health once per probe, so the
-        health-call count is the probe count."""
+        """The debounce. A batch of 512 trajectories failing at once must cost one fleet
+        probe, not 512.
+
+        Counted by wrapping ``asyncio.open_connection`` rather than by counting /health
+        hits: the probe is a TCP connect now, so it never reaches application code and the
+        fake backend cannot see it."""
         b0, b1 = backends(2)
+        connects = []
+        real_open = asyncio.open_connection
+
+        async def _counting_open(host, port, *a, **kw):
+            connects.append((host, port))
+            return await real_open(host, port, *a, **kw)
+
         c = _client([b0.url, b1.url], ft=_ft())
         try:
             b1.kill()
-            await asyncio.gather(*[c._reconcile_fleet(seen_generation=0) for _ in range(32)])
-            assert b0.health_calls == 1, f"expected one probe, saw {b0.health_calls}"
+            with patch("asyncio.open_connection", _counting_open):
+                await asyncio.gather(*[c._reconcile_fleet(seen_generation=0) for _ in range(32)])
+            # Two backends x one probe. 32 callers, one sweep.
+            assert len(connects) == 2, f"expected one probe over two backends, saw {connects}"
             assert c.active_server_urls == [b0.url]
         finally:
             await c.teardown()
@@ -457,49 +481,47 @@ def status_server():
 
 
 class TestProbeAccuracy:
-    """``_probe_health`` is the ONLY place the fleet decides life or death.
+    """``_probe_health`` is a TCP CONNECT, not ``GET /health``.
 
-    It used to condemn on a single short timeout, and that killed a healthy engine on two
-    consecutive GPU runs: the reactive probe fires right after a data-plane failure, when
-    every survivor is serving hundreds of concurrent requests, and a few-second bound is
-    easy for a busy engine to miss. The fix is to distinguish the two failure kinds --
-    the tests below pin BOTH directions, because being patient with ambiguity is only
-    correct if it does not also slow down the definitive case.
+    The HTTP endpoint was the wrong signal, and three GPU experiments established why
+    rather than one. vLLM's handler does essentially no work -- it reads an ``errored``
+    flag -- so its latency under load is pure event-loop starvation: it shares the loop
+    with generation. Measured on an 8xH100 with ~2048 requests outstanding across three
+    survivors, HEALTHY engines did not answer within 1.6s, and an escalating ladder of six
+    probes (0.05s doubling to 1.6s) condemned all three. Waiting longer cannot fix a
+    starved loop; vLLM's own k8s manifests pair the endpoint with ``timeoutSeconds: 1``
+    and ``failureThreshold: 240`` -- sample cheaply for twenty minutes instead.
+
+    A connect answers the question we actually have (the router 502'd without naming a
+    backend -- which one is gone?) and cannot be starved: the kernel completes the
+    handshake into the accept backlog whatever the application loop is doing.
+
+    WHAT THIS GIVES UP, deliberately: a WEDGED engine -- accepting connections, answering
+    nothing -- now probes as ALIVE. That is honest rather than regressive, because
+    ``/health`` could not detect it either (it only reports a flag; vLLM issue #36960
+    documents a dead GPU behind a 200). A wedge is caught by the data plane instead:
+    ``request_timeout_s`` bounds the hung request, and the engine is then dropped by the
+    retry path rather than by a liveness probe.
     """
 
     @pytest.mark.asyncio
-    async def test_a_refused_connection_is_believed_immediately(self, backends):
-        """The common case -- the process is gone. Nothing is listening, so no amount of
-        waiting changes the answer, and a dead engine must still be caught in
-        milliseconds. If retries leaked into this path, every real death would pay the
-        ambiguity budget."""
+    async def test_a_dead_process_is_detected_immediately(self, backends):
+        """The case that matters and the common one: the process is gone, so the kernel
+        refuses the connect. Must be milliseconds -- a fleet probe runs while trajectories
+        are failing, so it cannot be slow."""
         (b0,) = backends(1)
         dead_url = b0.url
         b0.kill()
-        c = _client([dead_url], ft=_ft(health_probe_timeout_s=5.0, health_failure_threshold=3))
+        c = _client([dead_url], ft=_ft(health_probe_timeout_s=5.0))
         try:
             t0 = time.monotonic()
             assert await c._probe_health(dead_url) is False
-            assert time.monotonic() - t0 < 2.0, "a refused connection paid the retry budget"
+            assert time.monotonic() - t0 < 2.0, "a refused connect should be instant"
         finally:
             await c.teardown()
 
     @pytest.mark.asyncio
-    async def test_a_non_200_answer_is_believed_immediately(self, backends):
-        """It answered, so it is reachable and self-reporting unwell (e.g. the engine core
-        died behind a live HTTP server). Also definitive."""
-        (b0,) = backends(1)
-        b0.sick()
-        c = _client([b0.url], ft=_ft(health_probe_timeout_s=5.0, health_failure_threshold=3))
-        try:
-            t0 = time.monotonic()
-            assert await c._probe_health(b0.url) is False
-            assert time.monotonic() - t0 < 2.0
-        finally:
-            await c.teardown()
-
-    @pytest.mark.asyncio
-    async def test_a_healthy_engine_answers(self, backends):
+    async def test_a_live_process_is_alive(self, backends):
         (b0,) = backends(1)
         c = _client([b0.url], ft=_ft())
         try:
@@ -508,42 +530,35 @@ class TestProbeAccuracy:
             await c.teardown()
 
     @pytest.mark.asyncio
-    async def test_a_slow_engine_that_recovers_is_not_condemned(self, backends):
-        """THE regression. A saturated engine misses the first bound and answers on a
-        later, longer one. Condemning it on the first miss is what destroyed a healthy
-        engine in the GPU runs."""
+    async def test_a_saturated_engine_is_not_condemned(self, backends):
+        """THE regression, in the form that broke us. Whatever the application loop is
+        doing -- here, an endpoint that never answers -- a listening socket still
+        completes the handshake, so a busy engine is not mistaken for a dead one. The old
+        HTTP probe condemned exactly this case."""
         (b0,) = backends(1)
-        b0.slow_health(calls=1, seconds=10.0)  # first probe misses; later ones answer at once
-        c = _client([b0.url], ft=_ft(health_probe_timeout_s=0.2, health_failure_threshold=3))
+        b0.wedge()  # accepts connections, answers nothing: a maximally starved loop
+        c = _client([b0.url], ft=_ft(health_probe_timeout_s=0.5))
         try:
-            assert await c._probe_health(b0.url) is True, "condemned an engine that answered on retry"
+            assert await c._probe_health(b0.url) is True, "condemned an engine that was merely busy"
         finally:
             await c.teardown()
 
     @pytest.mark.asyncio
-    async def test_a_persistently_silent_engine_is_condemned(self, backends):
-        """The other direction: patience must be bounded, or a wedged engine is never
-        de-routed and every request keeps hashing onto it."""
-        (b0,) = backends(1)
-        b0.wedge()
-        c = _client([b0.url], ft=_ft(health_probe_timeout_s=0.2, health_failure_threshold=2))
+    async def test_an_unroutable_address_is_dead(self, backends):
+        """A port nothing ever listened on -- the shape a restarted engine's OLD url takes."""
+        c = _client(["http://127.0.0.1:1"], ft=_ft(health_probe_timeout_s=1.0))
         try:
-            assert await c._probe_health(b0.url) is False
+            assert await c._probe_health("http://127.0.0.1:1") is False
         finally:
             await c.teardown()
 
     @pytest.mark.asyncio
-    async def test_the_timeout_budget_escalates(self, backends):
-        """Retrying with the SAME bound would just re-measure the same spike. The bound
-        doubles so a load spike is outlived rather than re-hit."""
-        (b0,) = backends(1)
-        b0.wedge()
-        c = _client([b0.url], ft=_ft(health_probe_timeout_s=0.2, health_failure_threshold=3))
+    async def test_an_unparseable_url_is_treated_as_alive(self, backends):
+        """Fail SAFE: if we cannot find a port we cannot probe, and guessing "dead" would
+        evict an engine over a formatting problem."""
+        c = _client(["http://127.0.0.1:9"], ft=_ft())
         try:
-            t0 = time.monotonic()
-            assert await c._probe_health(b0.url) is False
-            # 0.2 + 0.4 + 0.8 = 1.4s of probing, plus two 0.5s pauses between attempts.
-            assert time.monotonic() - t0 > 1.3, "did not escalate the bound across attempts"
+            assert await c._probe_health("not-a-url") is True
         finally:
             await c.teardown()
 
@@ -593,12 +608,25 @@ class TestPostHardening:
         b0 = backends(1)[0]
         srv = status_server([503, 200], plain_text=True)
         c = _client([b0.url], proxy=srv.url, ft=_ft())
+
+        # Count the SWEEP, not its conclusion. The backend here is alive, so a correct
+        # sweep finds nothing and the membership generation stays 0 -- the thing under
+        # test is that the sweep was reached at all, which the plain-text branch used to
+        # skip. The probe is a TCP connect and invisible to the fake backend, so wrap
+        # `open_connection`.
+        probes = []
+        real_open = asyncio.open_connection
+
+        async def _counting_open(host, port, *a, **kw):
+            probes.append((host, port))
+            return await real_open(host, port, *a, **kw)
+
         try:
-            b0.health_calls = 0
-            body = await c._post(f"{srv.url}/echo", {})
+            with patch("asyncio.open_connection", _counting_open):
+                body = await c._post(f"{srv.url}/echo", {})
             assert body == {"ok": True}, "a plain-text 5xx must be retried, not raised"
             assert srv.calls == 2
-            assert b0.health_calls >= 1, "the plain-text 5xx must have triggered a fleet probe"
+            assert probes, "the plain-text 5xx must have triggered a fleet probe"
         finally:
             await c.teardown()
 
@@ -655,7 +683,7 @@ class TestPostHardening:
         c = _client(
             [b0.url, b1.url],
             proxy=b1.url,
-            ft=_ft(request_timeout_s=0.5, health_probe_timeout_s=0.2, health_failure_threshold=2),
+            ft=_ft(request_timeout_s=0.5, health_probe_timeout_s=0.2),
         )
         try:
             b1.wedge()
@@ -663,8 +691,13 @@ class TestPostHardening:
             with pytest.raises(asyncio.TimeoutError):
                 await c._post(f"{b1.url}/echo", {})
             assert time.monotonic() - t0 < 10
-            # The probe classified the wedged backend as dead on the way through.
-            assert c.active_server_urls == [b0.url]
+            # The wedged backend is NOT evicted: a connect probe sees a listening socket
+            # and says alive, because that is indistinguishable from a saturated engine
+            # (see TestProbeAccuracy for why waiting for a reply stopped being the
+            # mechanism). What this test pins is the BOUND -- request_timeout_s turns the
+            # hang into a failure the caller can act on, which is what stops it hanging
+            # the run.
+            assert c.active_server_urls == [b0.url, b1.url]
         finally:
             await c.teardown()
 
@@ -694,11 +727,12 @@ class TestPostHardening:
         c = _client([b0.url, b1.url], proxy=b0.url, ft=_ft())
         try:
             b1.kill()
-            b0.health_calls = 0
             with pytest.raises(Exception):
                 # b1 is dead: connecting to it fails, retries, and gives up.
                 await asyncio.wait_for(c._post(f"{b1.url}/echo", {}), timeout=15)
-            assert b0.health_calls >= 1, "the first retryable failure must reconcile"
+            # The probe is a TCP connect and invisible to the fake backend, so the proof
+            # a sweep ran is that it reached a conclusion: b1 disabled, generation moved.
+            assert c.membership_generation >= 1, "the first retryable failure must reconcile"
             assert c.active_server_urls == [b0.url]
         finally:
             await c.teardown()

@@ -667,11 +667,6 @@ def _validate_inference_fault_tolerance_cfg(cfg: SkyRLTrainConfig):
                 raise ValueError(
                     f"generator.inference_engine.fault_tolerance.{_field} must be > 0, " f"got {getattr(ft, _field)}."
                 )
-        if ft.health_failure_threshold < 1:
-            raise ValueError(
-                f"generator.inference_engine.fault_tolerance.health_failure_threshold must be "
-                f">= 1, got {ft.health_failure_threshold}."
-            )
     if ft.request_timeout_s is not None and ft.request_timeout_s <= 0:
         raise ValueError(
             "generator.inference_engine.fault_tolerance.request_timeout_s must be > 0 "

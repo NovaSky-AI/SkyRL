@@ -764,8 +764,21 @@ class InferenceFaultToleranceConfig(BaseConfig):
     sibling-task cancellation and the broadened transport-retry set, which apply
     unconditionally)."""
     health_probe_timeout_s: float = 5.0
-    """Per-URL timeout for the ``/health`` probe issued when reconciling the fleet.
-    A backend that cannot answer ``/health`` within this window counts as dead."""
+    """Per-URL TCP-CONNECT timeout for the liveness probe issued when reconciling.
+
+    A connect, not ``GET /health``, and the distinction is load-bearing. That endpoint is
+    served by the engine's own asyncio loop and its handler does almost nothing (it reads
+    an ``errored`` flag), so under load its latency measures event-loop STARVATION rather
+    than health. Measured on an 8xH100: with a kill landing while ~2048 requests were
+    outstanding across three survivors, healthy engines did not answer ``/health`` within
+    1.6s, and an escalating ladder of six probes condemned all three. vLLM's own k8s
+    manifests treat the endpoint the same way -- ``timeoutSeconds: 1`` with
+    ``failureThreshold: 240``, i.e. sample cheaply for twenty minutes rather than wait
+    longer once.
+
+    A listening socket completes the TCP handshake in the kernel regardless of what the
+    application loop is doing, so this bound is generous rather than marginal and a
+    timeout here really does mean "nothing is accepting"."""
     request_timeout_s: Optional[float] = 900.0
     """Total per-request timeout for data-plane calls. Turns a wedged engine (one
     that accepts the connection and never answers) into a bounded failure the retry
@@ -808,19 +821,6 @@ class InferenceFaultToleranceConfig(BaseConfig):
     restart_timeout_s: float = 600.0
     """How long a replacement has to become healthy, matching the engine startup
     health-wait. Exceeding it counts as a failed restart against the budget."""
-    health_failure_threshold: int = 3
-    """How many times a ``/health`` probe may time out before the engine is declared
-    dead. The bound doubles each attempt, starting at ``health_probe_timeout_s``.
-
-    Applies ONLY to timeouts, which are ambiguous -- a healthy but saturated engine
-    looks exactly like a hung one to a short probe. A definitive failure (connection
-    refused, or a non-200 answer) is believed immediately and costs no retries, so a
-    genuinely dead engine is still detected in milliseconds.
-
-    This budget lives inside ``RemoteInferenceClient._probe_health`` rather than being
-    counted by its callers. It used to be the latter, and the gap between the reactive
-    path's single-probe verdict and this threshold is where a healthy engine got killed:
-    the weaker evidence standard was reaching the more destructive action."""
 
 
 @dataclass

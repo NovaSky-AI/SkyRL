@@ -133,6 +133,14 @@ class EngineFleetError(RuntimeError):
     """
 
 
+def _split_host_port(url: str) -> Tuple[str, Optional[int]]:
+    """``http://host:port`` -> ``(host, port)``. ``(url, None)`` if there is no port."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url if "//" in url else f"//{url}")
+    return (parsed.hostname or url), parsed.port
+
+
 def _extract_session_id_and_body(
     request_payload: Dict[str, Any],
 ) -> Tuple[Optional[str], Dict[str, Any]]:
@@ -509,72 +517,72 @@ class RemoteInferenceClient(InferenceEngineInterface):
             self._membership_generation += 1
 
     async def _probe_health(self, url: str) -> bool:
-        """``GET /health`` against a backend. True iff it is alive.
+        """Is this backend's server process still there? A bare TCP connect.
 
-        This one function is the ONLY place the fleet decides whether an engine is dead,
-        and every caller -- the reactive path and the engine supervisor -- goes through
-        it. That is deliberate: the previous design had the reactive path condemn on a
-        single short probe while the supervisor required several, and the translation
-        layer between those two standards is where a healthy engine got killed.
+        Deliberately NOT ``GET /health``. That endpoint is served by the same asyncio
+        loop as generation, and its handler does essentially no work --
 
-        Accuracy comes from distinguishing the two failure kinds rather than retrying
-        blindly:
+            async def check_health(self):        # vllm/v1/engine/async_llm.py
+                if self.errored:
+                    raise self.dead_error
 
-        * **Definitive** -- connection refused, or an answer that is not 200. Nothing is
-          listening, or something is listening and says it is unwell. A dead engine is
-          therefore still detected in MILLISECONDS, with no added latency, which is what
-          the retry path must not spoil.
-        * **Ambiguous** -- a timeout. This is exactly what a healthy but SATURATED engine
-          looks like: the reactive probe fires right after a data-plane failure, when
-          every survivor is serving hundreds of concurrent requests, and a few-second
-          bound is easy to miss. Observed twice on consecutive GPU runs: one engine was
-          killed by the chaos script and a second, healthy one was condemned with it.
+        -- so its latency under load is pure event-loop STARVATION, not engine slowness.
+        Measured on an 8xH100: with a kill landing while ~2048 requests were outstanding
+        across three survivors, healthy engines did not answer ``/health`` within 1.6s,
+        and a six-rung escalating ladder (0.05s doubling to 1.6s, ~5.6s wall) condemned
+        all three. Waiting longer cannot fix that -- if the loop is busy for the whole
+        generation phase, every rung lands inside the same busy window. vLLM knows this
+        endpoint is starvation-prone; the upstream k8s manifests pair it with
+        ``timeoutSeconds: 1`` and ``failureThreshold: 240``, i.e. sample cheaply for
+        twenty minutes rather than wait longer once.
 
-        So only the ambiguous case is retried, with the bound doubling each attempt so a
-        transient load spike is outlived rather than mistaken for death.
-        ``health_failure_threshold`` is the attempt budget -- the same "N misses before I
-        believe it" intent it always had, moved into the probe where the evidence is,
-        instead of being counted by a caller after the fact.
+        A TCP connect answers the question we actually have -- the router returned a 502
+        without naming a backend, so WHICH one is gone? -- and it cannot be starved: the
+        kernel completes the handshake into the accept backlog whether or not the
+        application is looping, and refuses it immediately when nothing is listening.
+
+        So:
+
+        * connect refused / unreachable -> the process is gone. Definitive, milliseconds.
+        * connect succeeds -> the process is there. It may be wedged or its GPU may be
+          broken, and this deliberately does not claim otherwise: ``/health`` could not
+          tell us either (it only reports a flag, and vLLM issue #36960 documents a dead
+          GPU behind a 200), while the DATA PLANE can -- a request that returns proves
+          the engine works end to end, which is a stronger signal than any liveness
+          endpoint.
+        * connect times out -> treated as gone, but the bound is a CONNECT bound, which a
+          listening socket meets regardless of load.
+
+        ``health_probe_timeout_s`` is now a connect timeout, so its old value is
+        generous rather than marginal.
         """
         assert self.fault_tolerance is not None
-        attempts = max(1, int(getattr(self.fault_tolerance, "health_failure_threshold", 3)))
-        budget = float(self.fault_tolerance.health_probe_timeout_s)
-        session = await self._get_session()
-
-        for attempt in range(1, attempts + 1):
-            try:
-                async with session.get(f"{url}/health", timeout=aiohttp.ClientTimeout(total=budget)) as resp:
-                    await resp.read()  # drain so the keep-alive connection is reusable
-                    if resp.status == 200:
-                        return True
-                    # It answered, so it is reachable and self-reporting unwell (e.g. the
-                    # engine core died behind a live HTTP server). No amount of waiting
-                    # changes that.
-                    logger.info(f"[ft] health probe for {url} answered HTTP {resp.status}: treating as dead")
-                    return False
-            except asyncio.CancelledError:
-                raise
-            except (asyncio.TimeoutError, TimeoutError):
-                if attempt == attempts:
-                    logger.warning(
-                        f"[ft] health probe for {url} timed out {attempts}x "
-                        f"(last budget {budget:.0f}s): treating as dead"
-                    )
-                    return False
-                logger.info(
-                    f"[ft] health probe for {url} timed out after {budget:.0f}s "
-                    f"(attempt {attempt}/{attempts}); it may just be saturated -- retrying with a "
-                    "longer bound before condemning it"
-                )
-                budget *= 2
-                # A brief pause so a load spike can pass rather than being re-measured
-                # immediately.
-                await asyncio.sleep(0.5)
-            except Exception as e:  # noqa: BLE001
-                # Refused / DNS / reset: nothing is listening. Definitive.
-                logger.debug(f"[ft] health probe for {url} failed definitively: {type(e).__name__}: {e}")
-                return False
-        return False
+        host, port = _split_host_port(url)
+        if port is None:
+            logger.warning(f"[ft] cannot parse a host:port out of {url}; treating it as alive")
+            return True
+        timeout = float(self.fault_tolerance.health_probe_timeout_s)
+        writer = None
+        try:
+            _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionRefusedError, OSError) as e:
+            logger.info(f"[ft] {url} refused a TCP connect ({type(e).__name__}): its server process is gone")
+            return False
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                f"[ft] {url} did not accept a TCP connect within {timeout:.1f}s: treating it as gone. "
+                "A listening socket completes the handshake in the kernel even under load, so this is "
+                "not the event-loop starvation that made an HTTP /health probe unreliable here."
+            )
+            return False
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
 
     async def _probe_and_disable(self) -> None:
         """Probe every active backend once; disable and de-route the non-responders.
