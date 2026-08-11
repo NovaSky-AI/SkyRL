@@ -19,9 +19,6 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
     WorkerOutput,
 )
-from skyrl.backends.skyrl_train.inference_servers.rdt_control_protocol import (
-    WeightSyncAborted,
-)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
@@ -40,31 +37,6 @@ class GPUState:
 
     model_on_gpu: bool = False
     optimizer_on_gpu: bool = False
-
-
-def _as_weight_sync_aborted(exc: BaseException):
-    """Find a ``WeightSyncAborted`` inside whatever Ray handed back, or ``None``.
-
-    Ray does not deliver the worker's exception directly: it arrives wrapped in a
-    ``RayTaskError`` (sometimes a ``RayError`` group), and the sender also chains the
-    original failure through ``raise ... from``. So an ``isinstance`` on the top-level
-    object misses the very case the retry exists for -- and missing it means a
-    recoverable engine death fails the run instead.
-
-    Walks the wrapper's ``cause``/``__cause__``/``__context__`` chain, depth-bounded so
-    a self-referential chain cannot spin.
-    """
-    seen = set()
-    todo = [exc]
-    while todo:
-        e = todo.pop()
-        if e is None or id(e) in seen:
-            continue
-        seen.add(id(e))
-        if isinstance(e, WeightSyncAborted):
-            return e
-        todo.extend([getattr(e, "cause", None), e.__cause__, e.__context__])
-    return None
 
 
 class WorkerDispatch:
@@ -715,52 +687,6 @@ class WorkerDispatch:
             return
         self._offload("policy", offload_optimizer=True, offload_model=True)
 
-    async def _broadcast_with_retry(self, model_id: Optional[str], supervisor) -> None:
-        """Broadcast weights, retrying if an inference engine died INSIDE the sync.
-
-        Engine fault tolerance, Part 2 (§5.5). The retry lives here rather than in
-        ``_broadcast_to_inference_engines`` for one reason: between attempts the fleet
-        has to be RE-PROBED, and that is an await. Retrying against the same live set
-        would re-dispatch straight back into the corpse and burn every attempt on the
-        same failure -- which is exactly the bug this shape avoids.
-
-        Only ``WeightSyncAborted`` is retried; the sender classifies, so a gather bug or
-        an OOM still fails on the first attempt rather than being repeated twice more.
-
-        Re-entry is safe because a sync is not incremental: every rank rebuilds its
-        gather from ``source.iter_groups()`` each time, the surviving engines were told
-        to abandon their half-finished update (so ``skyrl_start_weight_update`` accepts
-        them again), and the producers' free ledger is idempotent per
-        ``(group, consumer)`` so a duplicate free from the abandoned attempt cannot
-        over-credit this one.
-        """
-        ft = getattr(self.cfg.generator.inference_engine, "fault_tolerance", None)
-        attempts = 1
-        if ft is not None and getattr(ft, "enabled", False):
-            attempts = 1 + max(0, int(getattr(ft, "max_sync_retries", 0) or 0))
-
-        for attempt in range(attempts):
-            live_url_slots = self._live_url_slots()
-            try:
-                self._broadcast_to_inference_engines(
-                    self._inference_engine_client, model_id=model_id, live_url_slots=live_url_slots
-                )
-                return
-            except Exception as e:
-                aborted = _as_weight_sync_aborted(e)
-                if aborted is None or attempt == attempts - 1:
-                    raise
-                logger.warning(f"[ft] weight sync aborted (attempt {attempt + 1}/{attempts}): {aborted.message}")
-                # Find out who actually died before trying again. The sender could only
-                # report "one of the slots this sync targeted"; the probe names it. This
-                # is also what makes the next `_live_url_slots()` exclude it.
-                if supervisor is not None:
-                    await supervisor.reconcile()
-                else:
-                    reconcile = getattr(self._inference_engine_client, "_reconcile_fleet", None)
-                    if reconcile is not None:
-                        await reconcile()
-
     async def save_weights_for_sampler(self, model_id: Optional[str] = None) -> None:
         """
         Tinker API method to prepare updated parameters for sampling.
@@ -799,7 +725,9 @@ class WorkerDispatch:
         # same value -- but one dispatch guarantees that regardless of when we read.)
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
-            await self._broadcast_with_retry(model_id, supervisor)
+            self._broadcast_to_inference_engines(
+                self._inference_engine_client, model_id=model_id, live_url_slots=self._live_url_slots()
+            )
             self._finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
@@ -809,14 +737,18 @@ class WorkerDispatch:
                 strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
             ):
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
-                await self._broadcast_with_retry(model_id, supervisor)
+                self._broadcast_to_inference_engines(
+                    self._inference_engine_client, model_id=model_id, live_url_slots=self._live_url_slots()
+                )
                 self._finish_weight_sync()
             else:
                 # Non-colocated single tenant: pause generation to prevent in-flight requests from
                 # reading partially-updated weights during the NCCL broadcast.
                 await self._inference_engine_client.pause_generation()
                 try:
-                    await self._broadcast_with_retry(model_id, supervisor)
+                    self._broadcast_to_inference_engines(
+                        self._inference_engine_client, model_id=model_id, live_url_slots=self._live_url_slots()
+                    )
                     self._finish_weight_sync()
                 finally:
                     await self._inference_engine_client.resume_generation()

@@ -39,9 +39,6 @@ from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Sequence, Tuple
 import torch
 from loguru import logger as _loguru
 
-from skyrl.backends.skyrl_train.inference_servers.rdt_control_protocol import (
-    WeightSyncAborted,
-)
 from skyrl.backends.skyrl_train.weight_sync.rdt_control_plane import (
     SyncRdtControlPlaneClient,
 )
@@ -1474,71 +1471,6 @@ class RdtWeightSyncSender:
         workers_per_replica = self._world_size // max(1, self._num_replicas)
         return {rr * workers_per_replica + w for rr in live_slots for w in range(workers_per_replica)}
 
-    def _classify_sync_failure(self, exc: Exception, live_url_slots: Optional[Sequence[Tuple[str, int]]]) -> Exception:
-        """Decide whether a failed sync is RETRYABLE, and unwind the survivors if so.
-
-        Engine fault tolerance, Part 2 (§5.5). A sync can fail two ways that look
-        alike from here and must not be treated alike:
-
-        * an inference engine DIED inside the sync window — recoverable, because the
-          survivors are intact and the same weights can be re-sent to them;
-        * something else broke (a gather error, a shape mismatch, an OOM) — not
-          recoverable by repeating it, and retrying would hide the real fault.
-
-        Only the first is converted to ``WeightSyncAborted``. Everything else is
-        returned unchanged so it propagates as it always did.
-
-        On the retryable path this also aborts the SURVIVING engines, which is what
-        makes the retry possible at all: each of them is sitting in a half-finished
-        ``skyrl_start_weight_update``, and the retry's start call would otherwise fail
-        with "already active".
-
-        Runs on the sender only. Other ranks return cleanly from their gather loops
-        (the discard-mode path), so re-entry is safe for them without any unwinding.
-        """
-        if self._control_plane is None:
-            return exc  # not the sender; nothing to unwind and nothing to classify
-        if isinstance(exc, WeightSyncAborted):
-            return exc
-
-        text = f"{type(exc).__name__}: {exc}"
-        # The signatures a dead engine produces, in order of how they arrive: the
-        # HTTP fan-out to a corpse (connection refused / router 5xx), and the
-        # producer-side watchdog that fires when a consumer stops pulling mid-sync.
-        looks_like_a_dead_engine = any(
-            marker in text
-            for marker in (
-                "ConnectionError",
-                "Connection refused",
-                "ConnectionRefused",
-                "RemoteDisconnected",
-                "ReadTimeout",
-                "rdt-stall",
-                "RDT stall",
-                "no progress for",
-            )
-        )
-        if not looks_like_a_dead_engine:
-            return exc
-
-        # Which slots to exclude from the retry. Probing is the driver's job; here we
-        # can only say "one of the ones this sync targeted", so the driver re-probes.
-        targeted = tuple(s for _, s in (live_url_slots or self.url_slots_or_provisioned()))
-        _loguru.error(f"[rdt-abort] weight sync failed in a way that looks like an engine death: {text}")
-        try:
-            self._control_plane.abort_weight_update()
-        except Exception as abort_exc:  # noqa: BLE001
-            _loguru.warning(f"[rdt-abort] could not abort the surviving engines: {abort_exc}")
-        return WeightSyncAborted(
-            f"weight sync aborted by an inference-engine failure ({text}); "
-            f"slots targeted this sync: {list(targeted)}",
-            targeted,
-        )
-
-    def url_slots_or_provisioned(self) -> Sequence[Tuple[str, int]]:
-        """This sync's ``(url, slot)`` pairs, defaulting to the provisioned fleet."""
-        return list(zip(self._server_urls, self._server_slots))
-
     async def send(self, weight_extractor: Any, live_url_slots: Optional[Sequence[Tuple[str, int]]] = None) -> None:
         """Sync weights once; every rank must call it (the gather is a
         collective). ``initialize()`` should already have run; the lazy fallback
@@ -1574,10 +1506,7 @@ class RdtWeightSyncSender:
             # Only rank 0 issues control-plane calls, but every rank holds a client
             # and setting this everywhere keeps the two views from drifting.
             self._control_plane.set_live(live_url_slots)
-        try:
-            await asyncio.to_thread(self._engine.send_weights, live_cids)
-        except Exception as e:
-            raise self._classify_sync_failure(e, live_url_slots) from e
+        await asyncio.to_thread(self._engine.send_weights, live_cids)
         try:
             import json as _json
             import os as _os

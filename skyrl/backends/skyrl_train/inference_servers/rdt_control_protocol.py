@@ -21,38 +21,6 @@ RDT_INIT_METHOD = "init_weight_transfer_engine_rdt"
 RDT_START_METHOD = "skyrl_start_weight_update"
 RDT_UPDATE_METHOD = "update_weights_rdt"
 RDT_FINISH_METHOD = "skyrl_finish_weight_update"
-RDT_ABORT_METHOD = "skyrl_abort_weight_update"
-"""Abandon a half-finished update so the SURVIVING engines can take a retry.
-Without it the retry's start call fails with "already active" (Part 2, §5.5)."""
-
-
-class WeightSyncAborted(RuntimeError):
-    """A weight sync was abandoned because an inference engine died inside it.
-
-    Raised on the trainer ranks and caught on the DRIVER, which is the only place a
-    retry can be issued from: the gather is a collective, so re-entering it means
-    re-dispatching to every rank, not retrying inside one.
-
-    Defined in this stdlib-only module on purpose. It crosses a Ray boundary, so the
-    class has to be importable on the driver and on every worker without dragging in
-    torch or vllm -- and it has to carry its payload in ``args`` so Ray's pickling of
-    the exception preserves it.
-
-    ``newly_dead_slots`` is what the driver acts on: the slots whose engines failed
-    this sync, so the retry's live set can exclude them without waiting for a probe.
-    """
-
-    def __init__(self, message: str, newly_dead_slots: Sequence[int] = ()) -> None:
-        # Through args, so the round trip through Ray's exception pickling keeps it.
-        super().__init__(message, tuple(int(s) for s in newly_dead_slots))
-
-    @property
-    def message(self) -> str:
-        return self.args[0] if self.args else ""
-
-    @property
-    def newly_dead_slots(self) -> Tuple[int, ...]:
-        return self.args[1] if len(self.args) > 1 else ()
 
 
 def build_rdt_init_payloads(

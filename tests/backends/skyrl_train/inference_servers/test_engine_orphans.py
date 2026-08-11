@@ -27,7 +27,11 @@ Run:
     uv run --extra dev pytest tests/backends/skyrl_train/inference_servers/test_engine_orphans.py
 """
 
-from skyrl.backends.skyrl_train.inference_servers.engine_orphans import select_orphans
+from skyrl.backends.skyrl_train.inference_servers.engine_orphans import (
+    bundle_resource_keys,
+    select_bundle_actors,
+    select_orphans,
+)
 
 
 def test_an_orphaned_engine_core_is_selected():
@@ -114,3 +118,105 @@ def test_zombies_are_excluded_by_the_proc_reader():
         assert _read_process_info([3577]) == {}
     with patch("builtins.open", mock_open(read_data=live)):
         assert _read_process_info([4001]) == {4001: (1, "VLLM::EngineCor")}
+
+
+# ---------------------------------------------------------------------------
+# Kill by BUNDLE -- the precise mechanism
+# ---------------------------------------------------------------------------
+#
+# Verified against a live Ray cluster: an actor scheduled into bundle i of placement
+# group P carries `bundle_group_{i}_{P}` in its required_resources. That makes a
+# replica's membership enumerable instead of guessable, and it reaches the process the
+# heuristics above cannot -- vLLM's model-holding RayWorkerWrapper, whose OS parent is
+# the raylet and whose name matches nothing of ours.
+#
+# Empirically this is the whole restart failure: the dead engine's worker kept ~62 of 79
+# GiB, the replacement needed 55.4 GiB, and all three attempts died on free memory.
+
+PG = "95a0d6d79655546184d58187354e1c000000"
+OTHER_PG = "728a714a62768f9998219303514a15000000"
+
+
+def _req(*keys):
+    return {k: 0.001 for k in keys}
+
+
+def test_the_key_names_one_bundle_of_one_group():
+    assert bundle_resource_keys(PG, [2]) == {f"bundle_group_2_{PG}"}
+    assert bundle_resource_keys(PG, [0, 1]) == {f"bundle_group_0_{PG}", f"bundle_group_1_{PG}"}
+
+
+def test_an_actor_in_the_target_bundle_is_selected():
+    rows = [(90678, "ALIVE", "VLLMServerActor", _req(f"bundle_group_2_{PG}", f"CPU_group_{PG}"))]
+    assert select_bundle_actors(rows, bundle_resource_keys(PG, [2])) == [(90678, "VLLMServerActor")]
+
+
+def test_the_vllm_worker_is_reached_even_though_no_heuristic_could():
+    """The process that actually holds the model. Its OS parent is the raylet (so ppid==1
+    never fires) and its class is vLLM's, not ours -- but it is in our bundle."""
+    rows = [(97729, "ALIVE", "RayWorkerWrapper", _req(f"bundle_group_1_{PG}"))]
+    assert select_bundle_actors(rows, bundle_resource_keys(PG, [1])) == [(97729, "RayWorkerWrapper")]
+
+
+def test_another_slots_actor_is_not_selected():
+    """Different bundle index, same placement group. This is what makes the mechanism
+    per-REPLICA rather than per-fleet -- killing the wrong bundle would take down a
+    serving engine to restart a different one."""
+    rows = [(90435, "ALIVE", "VLLMServerActor", _req(f"bundle_group_1_{PG}"))]
+    assert select_bundle_actors(rows, bundle_resource_keys(PG, [2])) == []
+
+
+def test_a_trainer_rank_in_a_different_group_is_not_selected():
+    """The policy actors live in their own placement group, so no key can collide."""
+    rows = [(2001, "ALIVE", "PolicyWorker", _req(f"bundle_group_0_{OTHER_PG}"))]
+    assert select_bundle_actors(rows, bundle_resource_keys(PG, [0])) == []
+
+
+def test_a_dead_actor_with_no_pid_is_skipped():
+    """`list_actors` reports pid=0 for a dead actor -- observed on a stale placement group
+    from an earlier run. There is nothing left to kill."""
+    rows = [(0, "DEAD", "VLLMServerActor", _req(f"bundle_group_0_{PG}"))]
+    assert select_bundle_actors(rows, bundle_resource_keys(PG, [0])) == []
+
+
+def test_a_dead_actor_that_still_carries_a_pid_is_skipped():
+    """The dangerous case, and the one a GPU run surfaced. `list_actors` returns DEAD
+    actors too, with pids attached: a long-dead `InfoActor` (killed at provisioning) and
+    the just-SIGKILLed `VLLMServerActor` both appeared in a live bundle listing. That pid
+    is stale at best -- and pids RECYCLE, so on a busy node it may already belong to
+    something unrelated. Killing it would be indiscriminate."""
+    rows = [
+        (168475, "DEAD", "InfoActor", _req(f"bundle_group_0_{PG}")),
+        (169452, "DEAD", "VLLMServerActor", _req(f"bundle_group_0_{PG}")),
+        (171290, "ALIVE", "RayWorkerProc", _req(f"bundle_group_0_{PG}")),
+    ]
+    picked = select_bundle_actors(rows, bundle_resource_keys(PG, [0]))
+    assert picked == [(171290, "RayWorkerProc")]
+
+
+def test_every_live_actor_in_our_bundle_is_selected_whatever_its_class():
+    """The bundle IS the replica. No class allowlist, deliberately: an allowlist would
+    silently stop matching the day vLLM renames its worker class, and restarts would start
+    failing on free memory again with nothing to notice."""
+    rows = [
+        (168475, "ALIVE", "InfoActor", _req(f"bundle_group_0_{PG}")),
+        (171290, "ALIVE", "SomeFutureVllmWorkerName", _req(f"bundle_group_0_{PG}")),
+    ]
+    assert select_bundle_actors(rows, bundle_resource_keys(PG, [0])) == [
+        (168475, "InfoActor"),
+        (171290, "SomeFutureVllmWorkerName"),
+    ]
+
+
+def test_the_realistic_multi_actor_bundle():
+    """A slot's bundle holds both the server actor and vLLM's worker; both must go."""
+    rows = [
+        (90020, "ALIVE", "VLLMServerActor", _req(f"bundle_group_0_{PG}")),
+        (97729, "ALIVE", "RayWorkerWrapper", _req(f"bundle_group_0_{PG}")),
+        (90435, "ALIVE", "VLLMServerActor", _req(f"bundle_group_1_{PG}")),  # another slot
+        (2001, "ALIVE", "PolicyWorker", _req(f"bundle_group_0_{OTHER_PG}")),  # trainer
+    ]
+    assert select_bundle_actors(rows, bundle_resource_keys(PG, [0])) == [
+        (90020, "VLLMServerActor"),
+        (97729, "RayWorkerWrapper"),
+    ]

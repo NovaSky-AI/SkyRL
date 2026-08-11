@@ -62,6 +62,11 @@ class _Backend:
         self.post_calls: List[str] = []
         self._wedged = False
         self._sick = False
+        # Delay the first N /health answers by `_slow_seconds`, then answer normally.
+        # This is the SATURATED engine: alive and correct, but too busy to answer inside
+        # a short bound. Distinct from wedge(), which never answers at all.
+        self._slow_remaining = 0
+        self._slow_seconds = 0.0
         self._server: Optional[uvicorn.Server] = None
         self._app = self._build_app()
 
@@ -75,6 +80,9 @@ class _Backend:
                 return JSONResponse({"status": "unhealthy"}, status_code=500)
             if self._wedged:
                 await asyncio.sleep(3600)
+            if self._slow_remaining > 0:
+                self._slow_remaining -= 1
+                await asyncio.sleep(self._slow_seconds)
             return {"status": "ok"}
 
         @app.post("/echo")
@@ -114,6 +122,11 @@ class _Backend:
 
     def sick(self) -> None:
         self._sick = True
+
+    def slow_health(self, calls: int, seconds: float) -> None:
+        """Answer /health late for the next ``calls`` probes -- a saturated engine."""
+        self._slow_remaining = calls
+        self._slow_seconds = seconds
 
     def kill(self) -> None:
         if self._server is not None:
@@ -443,6 +456,98 @@ def status_server():
         s.stop()
 
 
+class TestProbeAccuracy:
+    """``_probe_health`` is the ONLY place the fleet decides life or death.
+
+    It used to condemn on a single short timeout, and that killed a healthy engine on two
+    consecutive GPU runs: the reactive probe fires right after a data-plane failure, when
+    every survivor is serving hundreds of concurrent requests, and a few-second bound is
+    easy for a busy engine to miss. The fix is to distinguish the two failure kinds --
+    the tests below pin BOTH directions, because being patient with ambiguity is only
+    correct if it does not also slow down the definitive case.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_refused_connection_is_believed_immediately(self, backends):
+        """The common case -- the process is gone. Nothing is listening, so no amount of
+        waiting changes the answer, and a dead engine must still be caught in
+        milliseconds. If retries leaked into this path, every real death would pay the
+        ambiguity budget."""
+        (b0,) = backends(1)
+        dead_url = b0.url
+        b0.kill()
+        c = _client([dead_url], ft=_ft(health_probe_timeout_s=5.0, health_failure_threshold=3))
+        try:
+            t0 = time.monotonic()
+            assert await c._probe_health(dead_url) is False
+            assert time.monotonic() - t0 < 2.0, "a refused connection paid the retry budget"
+        finally:
+            await c.teardown()
+
+    @pytest.mark.asyncio
+    async def test_a_non_200_answer_is_believed_immediately(self, backends):
+        """It answered, so it is reachable and self-reporting unwell (e.g. the engine core
+        died behind a live HTTP server). Also definitive."""
+        (b0,) = backends(1)
+        b0.sick()
+        c = _client([b0.url], ft=_ft(health_probe_timeout_s=5.0, health_failure_threshold=3))
+        try:
+            t0 = time.monotonic()
+            assert await c._probe_health(b0.url) is False
+            assert time.monotonic() - t0 < 2.0
+        finally:
+            await c.teardown()
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_engine_answers(self, backends):
+        (b0,) = backends(1)
+        c = _client([b0.url], ft=_ft())
+        try:
+            assert await c._probe_health(b0.url) is True
+        finally:
+            await c.teardown()
+
+    @pytest.mark.asyncio
+    async def test_a_slow_engine_that_recovers_is_not_condemned(self, backends):
+        """THE regression. A saturated engine misses the first bound and answers on a
+        later, longer one. Condemning it on the first miss is what destroyed a healthy
+        engine in the GPU runs."""
+        (b0,) = backends(1)
+        b0.slow_health(calls=1, seconds=10.0)  # first probe misses; later ones answer at once
+        c = _client([b0.url], ft=_ft(health_probe_timeout_s=0.2, health_failure_threshold=3))
+        try:
+            assert await c._probe_health(b0.url) is True, "condemned an engine that answered on retry"
+        finally:
+            await c.teardown()
+
+    @pytest.mark.asyncio
+    async def test_a_persistently_silent_engine_is_condemned(self, backends):
+        """The other direction: patience must be bounded, or a wedged engine is never
+        de-routed and every request keeps hashing onto it."""
+        (b0,) = backends(1)
+        b0.wedge()
+        c = _client([b0.url], ft=_ft(health_probe_timeout_s=0.2, health_failure_threshold=2))
+        try:
+            assert await c._probe_health(b0.url) is False
+        finally:
+            await c.teardown()
+
+    @pytest.mark.asyncio
+    async def test_the_timeout_budget_escalates(self, backends):
+        """Retrying with the SAME bound would just re-measure the same spike. The bound
+        doubles so a load spike is outlived rather than re-hit."""
+        (b0,) = backends(1)
+        b0.wedge()
+        c = _client([b0.url], ft=_ft(health_probe_timeout_s=0.2, health_failure_threshold=3))
+        try:
+            t0 = time.monotonic()
+            assert await c._probe_health(b0.url) is False
+            # 0.2 + 0.4 + 0.8 = 1.4s of probing, plus two 0.5s pauses between attempts.
+            assert time.monotonic() - t0 > 1.3, "did not escalate the bound across attempts"
+        finally:
+            await c.teardown()
+
+
 class TestPostHardening:
     @pytest.mark.asyncio
     async def test_router_5xx_is_retried_under_ft(self, status_server):
@@ -533,14 +638,25 @@ class TestPostHardening:
         never returns. Bounded, it becomes a failure the retry path can act on.
 
         Retries are cut to 1 so the test is about the bound, not about waiting out
-        30 x (timeout + backoff)."""
+        30 x (timeout + backoff).
+
+        The wedged backend is condemned by the probe, but no longer QUICKLY: a timeout is
+        ambiguous (a saturated engine looks identical), so the probe retries with a
+        doubling bound before believing it. That is a deliberate trade -- slower to
+        de-route a wedge, in exchange for never executing a healthy engine that was merely
+        busy. `health_probe_timeout_s` is cut here so the test pays a small version of
+        that cost rather than the default ~35s."""
         from skyrl.backends.skyrl_train.inference_servers import (
             remote_inference_client as ric,
         )
 
         monkeypatch.setattr(ric, "_DATA_PLANE_RETRIES", 1)
         b0, b1 = backends(2)
-        c = _client([b0.url, b1.url], proxy=b1.url, ft=_ft(request_timeout_s=0.5))
+        c = _client(
+            [b0.url, b1.url],
+            proxy=b1.url,
+            ft=_ft(request_timeout_s=0.5, health_probe_timeout_s=0.2, health_failure_threshold=2),
+        )
         try:
             b1.wedge()
             t0 = time.monotonic()

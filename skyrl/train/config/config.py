@@ -809,13 +809,18 @@ class InferenceFaultToleranceConfig(BaseConfig):
     """How long a replacement has to become healthy, matching the engine startup
     health-wait. Exceeding it counts as a failed restart against the budget."""
     health_failure_threshold: int = 3
-    """Consecutive ``/health`` failures before an engine that is ALIVE as a Ray actor
-    but unresponsive is treated as wedged, killed, and restarted. Normalizing a wedge
-    to a death is what keeps one code path downstream: it converts an unbounded-hang
-    engine into a connection-refused one, which Part 1 already handles."""
-    max_sync_retries: int = 2
-    """Retries for a weight sync aborted by an engine dying inside the sync window.
-    The sync is re-dispatched to every rank against the refreshed live set."""
+    """How many times a ``/health`` probe may time out before the engine is declared
+    dead. The bound doubles each attempt, starting at ``health_probe_timeout_s``.
+
+    Applies ONLY to timeouts, which are ambiguous -- a healthy but saturated engine
+    looks exactly like a hung one to a short probe. A definitive failure (connection
+    refused, or a non-200 answer) is believed immediately and costs no retries, so a
+    genuinely dead engine is still detected in milliseconds.
+
+    This budget lives inside ``RemoteInferenceClient._probe_health`` rather than being
+    counted by its callers. It used to be the latter, and the gap between the reactive
+    path's single-probe verdict and this threshold is where a healthy engine got killed:
+    the weaker evidence standard was reaching the more destructive action."""
 
 
 @dataclass

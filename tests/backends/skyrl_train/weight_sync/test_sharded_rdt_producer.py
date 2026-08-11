@@ -209,7 +209,7 @@ class TestFreeRefCounting:
         _publish(server, GROUP_B)
         server.free_gather(list(GROUP_A))
         assert set(server._cache) == set(GROUP_B)
-        assert server._freed_by.get(GROUP_A) is None
+        assert server._free_counts.get(GROUP_A) is None
         assert server._free_targets.get(GROUP_A) is None
 
 
@@ -308,7 +308,7 @@ class TestBeginSync:
         server.begin_sync()
         assert server._inflight_keys == []
         assert server._freed_pending == []
-        assert server._freed_by == {}
+        assert server._free_counts == {}
         assert server._free_targets == {}
 
     def test_begin_sync_clears_a_previous_gather_error(self, server_factory):

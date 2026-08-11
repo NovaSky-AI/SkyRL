@@ -48,7 +48,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from skyrl.backends.skyrl_train.inference_servers.rdt_control_protocol import (
     COLLECTIVE_RPC_ENDPOINT,
-    RDT_ABORT_METHOD,
     RDT_FINISH_METHOD,
     RDT_START_METHOD,
     RDT_UPDATE_METHOD,
@@ -59,10 +58,6 @@ logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT_S = 10.0
 """TCP-connect bound for control-plane POSTs. The read side stays unbounded."""
-
-_ABORT_TIMEOUT_S = 120.0
-"""Bound on each abort POST. The abort exists to shorten an unwind, so it must not be
-able to extend it -- an engine that cannot answer within this is one we give up on."""
 
 
 class SyncRdtControlPlaneClient:
@@ -162,25 +157,6 @@ class SyncRdtControlPlaneClient:
 
     def finish_weight_update(self) -> None:
         self._fanout_uniform(RDT_FINISH_METHOD, None)
-
-    def abort_weight_update(self, urls: Optional[Sequence[str]] = None) -> None:
-        """Tell the given servers (default: the live set) to abandon this update.
-
-        Best-effort and never raises: it runs on a path that is already failing, and
-        the error worth surfacing is the trainer's. A server that cannot be reached is
-        one we are unwinding FROM, so its state does not matter -- but a surviving
-        server left mid-update would fail the retry's start call, which is exactly what
-        this prevents.
-        """
-        targets = list(urls) if urls is not None else list(self._live_urls)
-        payload: Dict[str, Any] = {"method": RDT_ABORT_METHOD}
-        futures = [self._pool.submit(self._post, url, payload) for url in targets]
-        for url, fut in zip(targets, futures):
-            try:
-                # Bounded: a hung abort must not extend the unwind it is shortening.
-                fut.result(timeout=_ABORT_TIMEOUT_S)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[rdt-abort] abort_weight_update on {url} failed: {exc}")
 
     def close(self) -> None:
         """Release the HTTP session + fan-out pool. Idempotent."""

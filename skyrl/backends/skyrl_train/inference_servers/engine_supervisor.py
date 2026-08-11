@@ -57,30 +57,34 @@ if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 
 
-def _reap_on_node(gpu_ids: List[int]) -> List[int]:
-    """Body of the pinned reap task; runs on the node holding ``gpu_ids``."""
+def _reap_on_node(gpu_ids: List[int], bundle_pids: List[int], need_bytes: int = 0) -> dict:
+    """Clean a replica's node: kill its bundle's processes, sweep orphans, report room.
+
+    Runs on the node holding ``gpu_ids``. ``bundle_pids`` are the pids the DRIVER
+    resolved from Ray's actor table for this slot's placement-group bundles -- the
+    precise membership. The orphan sweep stays as a second pass because it catches what
+    the bundle cannot: an mp-spawned ``EngineCore`` is not a Ray actor, so it appears in
+    no bundle, and under the Ray executor it is the OWNER of the worker rather than its
+    OS parent.
+
+    Returns the pids killed and the post-clean free memory, so the caller can say plainly
+    whether the bundle is actually usable again instead of inferring it from a later
+    failure message.
+    """
     from skyrl.backends.skyrl_train.inference_servers.engine_orphans import (
         gpu_uuids_for_ids,
+        kill_replica_processes,
         reap_orphaned_engines,
+        wait_for_gpu_room,
     )
 
-    return reap_orphaned_engines(gpu_uuids_for_ids(gpu_ids))
-
-
-def _is_gpu_still_occupied(exc: BaseException) -> bool:
-    """Whether a failed engine start was really "the GPU is not free yet".
-
-    vLLM raises a ValueError naming both numbers when the device has less free memory
-    than ``gpu_memory_utilization`` asks for, and wraps it several layers deep
-    (EngineCore -> AsyncLLMEngine -> the actor's health wait), so the whole chain is
-    flattened to text rather than matched by type.
-
-    Distinguished from a genuine restart failure because it is TRANSIENT in principle:
-    the memory is held by a process that may yet exit (or be reaped), so spending a
-    restart attempt on it condemns a slot for a condition that has not settled.
-    """
-    text = f"{type(exc).__name__}: {exc}"
-    return "less than desired GPU memory utilization" in text or ("Free memory on device" in text and "startup" in text)
+    uuids = gpu_uuids_for_ids(gpu_ids)
+    killed = list(kill_replica_processes(bundle_pids)) if bundle_pids else []
+    killed += list(reap_orphaned_engines(uuids))
+    # WAIT for the memory rather than sampling it: the kill is asynchronous, so an
+    # immediate reading says nothing (see wait_for_gpu_room).
+    free, waited = wait_for_gpu_room(uuids, need_bytes)
+    return {"killed": killed, "free": free, "waited_s": waited}
 
 
 class SlotState(str, Enum):
@@ -113,7 +117,14 @@ class EngineSlot:
     url: str
     state: SlotState = SlotState.LIVE
     restarts: int = 0
-    health_failures: int = 0
+    bundle_has_room: Optional[bool] = None
+    """Whether this slot's GPUs had room for an engine after the last clean.
+
+    ``None`` means unknown (no reading). Set from an actual memory measurement rather
+    than inferred from a failure message: vLLM reports "Engine core initialization
+    failed" and leaves the real "Free memory on device ..." in a subprocess log, so the
+    exception text can never be classified -- a string matcher on it was written, tested
+    against the text it was ASSUMED to carry, and never once fired in a real run."""
     budget_exhausted_logged: bool = False
     """So the permanent-death notice is logged on the transition, not every reconcile."""
     killed_this_pass: bool = False
@@ -263,37 +274,45 @@ class EngineSupervisor:
         await self._harvest_restarts()
 
     def _adopt_client_view(self) -> None:
-        """Fold Part 1's reactive conclusions into slot state."""
+        """Adopt the fleet detector's verdict. A plain read, deliberately.
+
+        ``RemoteInferenceClient._probe_health`` is the single place that decides life or
+        death, and it now distinguishes a definitive failure from an ambiguous timeout and
+        retries only the latter (see its docstring). So there is nothing to second-guess
+        here: no parallel counter, no corroborating probe, no rehabilitation path. An
+        earlier version of this method had all three, because the detector condemned on
+        one short probe and this layer tried to repair the resulting bad verdicts --
+        compensating downstream for weak evidence instead of strengthening it.
+        """
         dead_urls = set(self._client.disabled_server_urls)
-        for s in self._slots:
-            if s.state in (SlotState.LIVE, SlotState.PENDING_SYNC) and s.url in dead_urls:
-                logger.info(f"[ft] slot {s.index} ({s.url}) was found dead by the reactive probe")
-                s.state = SlotState.DEAD
+        for s_ in self._slots:
+            if s_.state in (SlotState.LIVE, SlotState.PENDING_SYNC) and s_.url in dead_urls:
+                logger.info(f"[ft] slot {s_.index} ({s_.url}) was found dead by the fleet probe")
+                s_.state = SlotState.DEAD
 
     async def _probe_reachable(self) -> None:
-        """``/health`` every slot we still believe in; count consecutive failures.
+        """Probe the slots we still believe in, covering the reactive path's blind spot.
 
-        A single failure is not a death sentence for an engine that is otherwise
-        answering: ``health_failure_threshold`` consecutive misses is, which is what
-        distinguishes a wedged engine from a slow one. An engine whose actor has
-        already vanished fails the probe immediately and every time, so it crosses the
-        threshold on its own without a special case.
+        The reactive detector can only fire when a data-plane or control-plane request
+        fails, so a death during the synchronous training phase produces no trigger. This
+        runs at step boundaries and finds those.
+
+        Uses the SAME ``_probe_health`` as everything else, which is why there is no
+        threshold here: the retry-on-ambiguity lives inside the probe, so one negative
+        answer from it is already "N misses with an escalating bound", not a single
+        impatient timeout.
         """
         candidates = self._in_state(SlotState.LIVE, SlotState.PENDING_SYNC)
         if not candidates:
             return
-        results = await asyncio.gather(*[self._client._probe_health(s.url) for s in candidates], return_exceptions=True)
-        threshold = max(1, int(self._ft.health_failure_threshold))
-        for s, ok in zip(candidates, results):
+        results = await asyncio.gather(
+            *[self._client._probe_health(s_.url) for s_ in candidates], return_exceptions=True
+        )
+        for s_, ok in zip(candidates, results):
             if ok is True:
-                s.health_failures = 0
                 continue
-            s.health_failures += 1
-            logger.warning(
-                f"[ft] slot {s.index} ({s.url}) failed /health " f"({s.health_failures}/{threshold} consecutive)"
-            )
-            if s.health_failures >= threshold:
-                s.state = SlotState.DEAD
+            logger.warning(f"[ft] slot {s_.index} ({s_.url}) failed the health probe; marking it dead")
+            s_.state = SlotState.DEAD
 
     async def _retire_dead(self) -> None:
         """De-route dead slots, then kill their actors so the bundle is free.
@@ -332,41 +351,100 @@ class EngineSupervisor:
             # restart immediately -- this only defers ones we just killed.
             s.killed_this_pass = True
 
-    def _reap_orphans_for(self, s: EngineSlot) -> None:
-        """Free this slot's GPUs of engine processes that outlived their actor.
+    def _bundle_pids(self, s: EngineSlot) -> List[int]:
+        """Pids of every Ray actor scheduled into this slot's placement-group bundles.
 
-        Without this, a restart into the original bundle cannot succeed after an ABRUPT
-        death: vLLM runs EngineCore as its own process, so when the server actor dies
-        the child is reparented and keeps its ``gpu_memory_utilization`` share.
-        Measured on an 8xH100 -- one engine killed left 62.8/79.2 GiB allocated, and all
-        three restart attempts failed on free memory until the orphan was reaped.
+        This is the precise answer to "what belongs to this replica", and it is the piece
+        that was missing: vLLM's model-holding worker is a Ray actor in OUR placement
+        group (its executor inherits it), so it is addressable by bundle even though it is
+        unreachable by process parentage -- its OS parent is the raylet -- and unreachable
+        by name.
 
-        Pinned to the slot's own PG bundle, which is the authority on where those GPUs
-        are, rather than a guessed node id. Narrow by construction (see
-        ``engine_orphans.select_orphans``: orphaned AND vLLM-named) and best-effort:
-        failing to reap costs a restart attempt, not the run.
-
-        The slot's physical GPU ids are passed along for the post-reap verification log
-        only. They are NOT required: selection is ownership-based, so an unresolvable id
-        list must still reap -- an earlier version returned early here, which silently
-        skipped the reap for any group that could not report its GPUs.
+        Empirically this is why restarts failed: the dead engine's worker kept ~62 of 79
+        GiB, so the replacement could not fit its 55.4 GiB, and all three attempts died on
+        free memory. Selecting by bundle addresses that process directly instead of hoping
+        something transitively reclaims it.
         """
         try:
+            import ray.util.state as ray_state
+
+            from skyrl.backends.skyrl_train.inference_servers.engine_orphans import (
+                bundle_resource_keys,
+                select_bundle_actors,
+            )
+
+            pg = s.group._get_placement_group()
+            keys = bundle_resource_keys(pg.id.hex(), s.group._get_bundle_indices_for_server(s.server_idx))
+            rows = [
+                (a.pid, a.state, a.class_name, a.required_resources or {})
+                for a in ray_state.list_actors(detail=True, limit=1000)
+            ]
+            # The bundle IS the replica -- no class allowlist. See select_bundle_actors
+            # for why adding one would trade a remote hazard for a silent regression the
+            # next time vLLM renames a worker class.
+            picked = select_bundle_actors(rows, keys)
+            if picked:
+                logger.info(f"[ft] slot {s.index} bundle holds actor(s): {picked}")
+            return [pid for pid, _cls in picked]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ft] slot {s.index}: could not resolve bundle membership: {e}")
+            return []
+
+    def _engine_gpu_bytes(self, s: EngineSlot) -> int:
+        """Bytes one engine will ask for on a device: ``gpu_memory_utilization x total``.
+
+        The total comes from the device itself on the node side; here we only know the
+        ratio, so this returns the ratio scaled by a nominal 80 GiB when the real total is
+        unknown. The node's own reading is authoritative for the verdict -- this value only
+        has to be close enough to be a useful WAIT target.
+        """
+        util = float(getattr(s.group._cli_args, "gpu_memory_utilization", 0.0) or 0.0)
+        if util <= 0:
+            return 0
+        return int(util * 80 * (2**30))
+
+    def _reap_orphans_for(self, s: EngineSlot) -> None:
+        """Leave this slot's bundle clean enough to relaunch into.
+
+        Two passes, because they cover disjoint things: the BUNDLE pass kills every Ray
+        actor Ray says is in this slot's bundles (plus their descendants, which is where
+        the model lives under the mp executor), and the ORPHAN pass sweeps vLLM
+        subprocesses whose owner died and which therefore belong to no bundle.
+
+        Then it reports the resulting free memory, which is the only honest way to know
+        whether the relaunch can succeed. Best-effort throughout: a failure here costs a
+        restart attempt, not the run.
+        """
+        s.bundle_has_room = None
+        try:
             gpu_ids = s.group._get_gpu_ids_for_server(s.server_idx) or []
+            pids = self._bundle_pids(s)
             task = ray.remote(num_cpus=0)(_reap_on_node).options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=s.group._get_placement_group(),
                     placement_group_bundle_index=s.group._get_bundle_indices_for_server(s.server_idx)[0],
                 )
             )
-            killed = ray.get(task.remote(list(gpu_ids)), timeout=60)
+            need = self._engine_gpu_bytes(s)
+            result = ray.get(task.remote(list(gpu_ids), pids, need), timeout=180)
+            killed, free = result.get("killed", []), result.get("free", {})
+            waited = result.get("waited_s", 0.0)
             if killed:
                 logger.warning(
-                    f"[ft] slot {s.index}: reaped {len(killed)} orphaned vLLM process(es) {killed} "
-                    f"before relaunching into GPU(s) {list(gpu_ids)}"
+                    f"[ft] slot {s.index}: cleaned {len(killed)} process(es) {killed} out of "
+                    f"GPU(s) {list(gpu_ids)} before relaunching"
+                )
+            if free:
+                worst = min(f for f, _t in free.values())
+                s.bundle_has_room = worst >= need if need else None
+                logger.info(
+                    f"[ft] slot {s.index}: after cleaning (+{waited:.0f}s for the device to "
+                    f"settle), least-free target GPU has {worst / 2**30:.1f} GiB "
+                    f"(engine needs {need / 2**30:.1f} GiB) -> "
+                    f"{'ROOM' if s.bundle_has_room else 'STILL OCCUPIED'}"
                 )
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[ft] slot {s.index}: could not reap orphaned engine processes: {e}")
+            logger.warning(f"[ft] slot {s.index}: could not clean the bundle: {e}")
 
     def _actor_for(self, s: EngineSlot) -> Optional[Any]:
         actors = s.group.get_actors()
@@ -446,16 +524,16 @@ class EngineSupervisor:
             try:
                 info = ray.get(start_ref)
             except Exception as e:  # noqa: BLE001
-                if _is_gpu_still_occupied(e):
+                if s.bundle_has_room is False:
                     # This attempt was never going to succeed, so it must not count
                     # against the budget -- otherwise three retries are spent on the
                     # same wall and the slot is condemned for a condition that may
                     # still clear (an orphan we have not managed to reap yet).
                     s.restarts = max(0, s.restarts - 1)
                     logger.warning(
-                        f"[ft] slot {s.index} cannot restart yet: its GPU is still held, most likely "
-                        f"by an orphaned vLLM EngineCore. Not counting this against the restart "
-                        f"budget; will retry at a later boundary. Detail: {e}"
+                        f"[ft] slot {s.index} cannot restart yet: its GPU was still occupied when we "
+                        f"launched, so this attempt was doomed before it started and is not charged. "
+                        f"Detail: {e}"
                     )
                 else:
                     logger.warning(f"[ft] slot {s.index} restart failed: {type(e).__name__}: {e}")
@@ -464,7 +542,6 @@ class EngineSupervisor:
             stamped = s.group.finish_restart(s.server_idx, actor, info)
             s.url = stamped.url
             s._pending = None
-            s.health_failures = 0
             # In the client's active set (so it joins the next sync) but NOT in the
             # router: its weights are the checkpoint's, and serving with those would
             # poison the batch under a weight-version-keyed prefix cache.

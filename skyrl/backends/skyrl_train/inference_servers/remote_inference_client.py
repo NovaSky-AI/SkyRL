@@ -398,6 +398,29 @@ class RemoteInferenceClient(InferenceEngineInterface):
             f"(membership generation {self._membership_generation})"
         )
 
+    def mark_alive(self, url: str) -> None:
+        """Undo a ``mark_dead``. Local bookkeeping only.
+
+        For a backend the reactive probe wrongly condemned: that probe fires once, with a
+        few-seconds bound, at the moment every surviving engine is saturated, so an engine
+        that is merely slow is indistinguishable from a dead one. When a later, calmer
+        probe disagrees, the eviction has to be reversible or a transient stall costs an
+        engine for the rest of the run.
+
+        The caller is responsible for the ROUTER half -- and specifically for not
+        re-admitting the engine until it has taken part in a weight sync, since while it
+        was disabled it was excluded from the sync fan-out and may be holding stale
+        weights (the supervisor returns it via PENDING_SYNC, never straight to LIVE).
+        """
+        if url not in self._disabled_server_urls:
+            return
+        self._disabled_server_urls.discard(url)
+        self._membership_generation += 1
+        logger.info(
+            f"[ft] marked {url} alive again. Active {len(self.active_server_urls)}/"
+            f"{len(self.server_urls)} (membership generation {self._membership_generation})"
+        )
+
     def replace_server_url(self, slot: int, new_url: str) -> None:
         """Point ``slot`` at a restarted engine's new URL. Local bookkeeping only.
 
@@ -486,26 +509,72 @@ class RemoteInferenceClient(InferenceEngineInterface):
             self._membership_generation += 1
 
     async def _probe_health(self, url: str) -> bool:
-        """One ``GET /health`` against a backend. True iff it answered 200.
+        """``GET /health`` against a backend. True iff it is alive.
 
-        ``/health`` is the same endpoint ``VLLMServerActor`` waits on at startup, so
-        a 200 here means the same thing it meant then. Any failure — refused,
-        timed out, non-200 — counts as dead: this runs only after something already
-        broke, so the cost of a false positive (one engine sits out the run) is far
-        below the cost of a false negative (every retry re-picks the dead backend).
+        This one function is the ONLY place the fleet decides whether an engine is dead,
+        and every caller -- the reactive path and the engine supervisor -- goes through
+        it. That is deliberate: the previous design had the reactive path condemn on a
+        single short probe while the supervisor required several, and the translation
+        layer between those two standards is where a healthy engine got killed.
+
+        Accuracy comes from distinguishing the two failure kinds rather than retrying
+        blindly:
+
+        * **Definitive** -- connection refused, or an answer that is not 200. Nothing is
+          listening, or something is listening and says it is unwell. A dead engine is
+          therefore still detected in MILLISECONDS, with no added latency, which is what
+          the retry path must not spoil.
+        * **Ambiguous** -- a timeout. This is exactly what a healthy but SATURATED engine
+          looks like: the reactive probe fires right after a data-plane failure, when
+          every survivor is serving hundreds of concurrent requests, and a few-second
+          bound is easy to miss. Observed twice on consecutive GPU runs: one engine was
+          killed by the chaos script and a second, healthy one was condemned with it.
+
+        So only the ambiguous case is retried, with the bound doubling each attempt so a
+        transient load spike is outlived rather than mistaken for death.
+        ``health_failure_threshold`` is the attempt budget -- the same "N misses before I
+        believe it" intent it always had, moved into the probe where the evidence is,
+        instead of being counted by a caller after the fact.
         """
         assert self.fault_tolerance is not None
-        timeout = aiohttp.ClientTimeout(total=self.fault_tolerance.health_probe_timeout_s)
-        try:
-            session = await self._get_session()
-            async with session.get(f"{url}/health", timeout=timeout) as resp:
-                await resp.read()  # drain so the keep-alive connection is reusable
-                return resp.status == 200
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # noqa: BLE001 - any failure to answer means dead
-            logger.debug(f"health probe for {url} failed: {type(e).__name__}: {e}")
-            return False
+        attempts = max(1, int(getattr(self.fault_tolerance, "health_failure_threshold", 3)))
+        budget = float(self.fault_tolerance.health_probe_timeout_s)
+        session = await self._get_session()
+
+        for attempt in range(1, attempts + 1):
+            try:
+                async with session.get(f"{url}/health", timeout=aiohttp.ClientTimeout(total=budget)) as resp:
+                    await resp.read()  # drain so the keep-alive connection is reusable
+                    if resp.status == 200:
+                        return True
+                    # It answered, so it is reachable and self-reporting unwell (e.g. the
+                    # engine core died behind a live HTTP server). No amount of waiting
+                    # changes that.
+                    logger.info(f"[ft] health probe for {url} answered HTTP {resp.status}: treating as dead")
+                    return False
+            except asyncio.CancelledError:
+                raise
+            except (asyncio.TimeoutError, TimeoutError):
+                if attempt == attempts:
+                    logger.warning(
+                        f"[ft] health probe for {url} timed out {attempts}x "
+                        f"(last budget {budget:.0f}s): treating as dead"
+                    )
+                    return False
+                logger.info(
+                    f"[ft] health probe for {url} timed out after {budget:.0f}s "
+                    f"(attempt {attempt}/{attempts}); it may just be saturated -- retrying with a "
+                    "longer bound before condemning it"
+                )
+                budget *= 2
+                # A brief pause so a load spike can pass rather than being re-measured
+                # immediately.
+                await asyncio.sleep(0.5)
+            except Exception as e:  # noqa: BLE001
+                # Refused / DNS / reset: nothing is listening. Definitive.
+                logger.debug(f"[ft] health probe for {url} failed definitively: {type(e).__name__}: {e}")
+                return False
+        return False
 
     async def _probe_and_disable(self) -> None:
         """Probe every active backend once; disable and de-route the non-responders.

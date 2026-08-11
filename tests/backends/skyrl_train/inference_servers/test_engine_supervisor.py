@@ -235,125 +235,39 @@ class TestReconcile:
         assert f.trace.index(f"router_remove({dead_url})") < f.trace.index("kill(slot=2)"), f.trace
         assert dead_url not in f.routed
 
-    async def test_a_wedged_engine_needs_the_threshold_before_it_is_condemned(self, monkeypatch):
-        """One missed probe is a slow engine; N consecutive is a wedge. Condemning on
-        the first would evict engines that are merely busy."""
-        f = _Fleet(monkeypatch)
-        f.actor(1).wedge()
-        threshold = f.client.fault_tolerance.health_failure_threshold
-        for _ in range(threshold - 1):
-            await f.sup.reconcile()
-            assert f.states()[1] is SlotState.LIVE, "condemned too early"
-            assert not any(t.startswith("begin_restart") for t in f.trace), f.trace
-        await f.sup.reconcile()
-        # Condemned and KILLED on this pass, but not yet relaunched: the bundle it was
-        # holding needs a pass to drain (see _retire_dead).
-        assert "kill(slot=1)" in f.trace
-        assert "begin_restart(slot=1)" not in f.trace
-        await f.sup.reconcile()
-        # The fake replacement is healthy the instant it is asked for, so this reconcile
-        # carries the slot through RESTARTING to PENDING_SYNC. A real engine sits in
-        # RESTARTING for however long the model load takes.
-        assert "begin_restart(slot=1)" in f.trace
-        assert f.states()[1] is SlotState.PENDING_SYNC
+    async def test_the_supervisor_trusts_the_fleet_probe(self, monkeypatch):
+        """One evidence standard, in one place.
 
-    async def test_a_recovering_engine_resets_its_failure_count(self, monkeypatch):
+        The supervisor used to keep its own consecutive-failure counter because the
+        reactive detector condemned on a single short probe, and this layer tried to
+        repair the resulting bad verdicts. The probe now distinguishes a definitive
+        failure from an ambiguous timeout and retries only the latter
+        (test_engine_fault_tolerance.TestProbeAccuracy), so a negative answer here is
+        already well-evidenced and is acted on directly."""
         f = _Fleet(monkeypatch)
         f.actor(1).wedge()
         await f.sup.reconcile()
-        assert f.sup.slot(1).health_failures == 1
-        f.actor(1).healthy = True
+        assert f.states()[1] is SlotState.DEAD or "kill(slot=1)" in f.trace
+        assert "probe(http://10.0.0.1:8100)->False" in f.trace
+
+    async def test_a_healthy_engine_is_left_alone(self, monkeypatch):
+        """The negative case: nothing may be condemned while it answers."""
+        f = _Fleet(monkeypatch)
         await f.sup.reconcile()
-        assert f.sup.slot(1).health_failures == 0
-        assert f.states()[1] is SlotState.LIVE
+        assert all(st is SlotState.LIVE for st in f.states().values())
+        assert not any(t.startswith("kill(") for t in f.trace)
+        assert not any(t.startswith("begin_restart") for t in f.trace)
 
-    async def test_the_orphan_reaper_is_invoked_for_the_dying_slot(self, monkeypatch):
-        """Wiring, not policy. The reaper's SELECTION rule is tested exhaustively in
-        test_engine_orphans.py; what this pins is that a dying slot actually triggers it,
-        scoped to that slot's own GPUs. Without the call, a restart after an abrupt death
-        can never fit -- vLLM's EngineCore outlives its actor still holding the device."""
-        f = _Fleet(
-            monkeypatch,
-            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, health_failure_threshold=1),
-        )
-        f.groups[2].gpu_ids = [5]  # this slot's physical GPU
-
-        reaped = []
-
-        def _reap(self_inner, slot):
-            reaped.append((slot.index, slot.group.gpu_ids))
-
-        monkeypatch.setattr(type(f.sup), "_reap_orphans_for", _reap, raising=True)
-        f.actor(2).wedge()
-        await f.sup.reconcile()  # condemned + killed; relaunch deferred one pass
-        await f.sup.reconcile()  # relaunch -- and the reap that gates it
-
-        assert reaped == [(2, [5])], f"the reaper was not invoked before the relaunch: {reaped}"
-
-    async def test_the_reaper_still_runs_when_gpu_ids_are_unresolvable(self, monkeypatch):
-        """The GPU ids only enrich the verification log; selection is ownership-based.
-        An earlier version returned early without them, silently skipping the reap for
-        any group that could not report its physical GPUs."""
-        f = _Fleet(
-            monkeypatch,
-            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, health_failure_threshold=1),
-        )
-        f.groups[1].gpu_ids = None  # unresolvable
-        reaps = []
-        monkeypatch.setattr(type(f.sup), "_reap_orphans_for", lambda _s, slot: reaps.append(slot.index), raising=True)
-        f.actor(1).wedge()
+    async def test_the_reactive_verdict_is_adopted_as_is(self, monkeypatch):
+        """A death the fleet probe already found during generation must not be
+        re-litigated here -- the supervisor reads the dead set and acts."""
+        f = _Fleet(monkeypatch)
+        dead_url = f.actor(0).url
+        f.actor(0).wedge()
+        f.client.mark_dead(dead_url)
         await f.sup.reconcile()
-        await f.sup.reconcile()
-        assert 1 in reaps, "skipped the reap because the GPU ids were unknown"
-
-    async def test_the_reaper_runs_before_every_attempt_not_just_the_first(self, monkeypatch):
-        """The reap is a PRECONDITION of the relaunch, not a one-shot on death.
-
-        Reaping only when the slot died gave it exactly one chance: the orphan may not
-        have been in nvidia-smi's snapshot at that instant, or the kill may have failed.
-        Since an occupied GPU deliberately does not consume the restart budget, a missed
-        reap meant retrying forever against memory nothing would ever release."""
-        f = _Fleet(
-            monkeypatch,
-            ft=InferenceFaultToleranceConfig(
-                enabled=True, restart_dead_engines=True, max_restarts_per_engine=3, health_failure_threshold=1
-            ),
-        )
-        f.groups[1].gpu_ids = [3]
-        f.groups[1].start_raises = RuntimeError(
-            "Free memory on device cuda:0 (16.38/79.18 GiB) on startup is less than "
-            "desired GPU memory utilization (0.7, 55.43 GiB)."
-        )
-        reaps = []
-        monkeypatch.setattr(type(f.sup), "_reap_orphans_for", lambda _s, slot: reaps.append(slot.index), raising=True)
-        f.actor(1).wedge()
-        for _ in range(4):
-            await f.sup.reconcile()
-
-        assert reaps.count(1) >= 2, f"only reaped once across repeated attempts: {reaps}"
-
-    async def test_the_relaunch_waits_one_pass_after_we_kill_the_actor(self, monkeypatch):
-        """`ray.kill` is not synchronous in its effect: the driver reclaims device
-        memory only once the process is fully gone. Relaunching into the same bundle in
-        the same pass can therefore OOM against memory the corpse still holds -- and at
-        a high gpu_memory_utilization it reliably would, burning a restart attempt.
-
-        The wait is one RECONCILE, not a sleep: the next step boundary is a real event
-        rather than a guessed duration, and one step is nothing against a model load."""
-        f = _Fleet(
-            monkeypatch,
-            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, health_failure_threshold=1),
-        )
-        f.actor(2).wedge()
-
-        await f.sup.reconcile()
-        kills = [i for i, t in enumerate(f.trace) if t == "kill(slot=2)"]
-        starts = [i for i, t in enumerate(f.trace) if t == "begin_restart(slot=2)"]
-        assert kills and not starts, f"relaunched into a bundle we had just killed: {f.trace}"
-
-        await f.sup.reconcile()
-        assert "begin_restart(slot=2)" in f.trace
-        assert f.sup.slot(2).killed_this_pass is False
+        assert f.states()[0] is SlotState.DEAD
+        assert "kill(slot=0)" in f.trace
 
     async def test_a_wedged_engine_is_killed_so_its_bundle_is_free(self, monkeypatch):
         """The point of normalizing a wedge to a death: the actor is ALIVE and holds
@@ -365,23 +279,20 @@ class TestReconcile:
             await f.sup.reconcile()
         assert victim.killed is True
 
-    async def test_the_reactive_probes_conclusion_is_adopted(self, monkeypatch):
-        """A death found during generation by Part 1's probe must not have to be
-        rediscovered here -- the supervisor picks it up from the client's dead set."""
-        f = _Fleet(monkeypatch)
-        dead_url = f.actor(0).url
-        f.actor(0).wedge()
-        f.client.mark_dead(dead_url)
+    async def test_a_restarted_engine_still_does_re_init(self, monkeypatch):
+        """The other side of that call: a genuine restart has nothing initialized, so it
+        MUST re-init or it cannot pull its slices."""
+        f = _Fleet(
+            monkeypatch,
+            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, health_failure_threshold=1),
+        )
+        f.actor(2).wedge()
         await f.sup.reconcile()
-        # Condemned on the FIRST reconcile, without waiting out
-        # health_failure_threshold -- the conclusion was already reached elsewhere.
-        # (The relaunch is then one pass behind, as for any slot we kill ourselves.)
-        assert f.states()[0] is SlotState.DEAD
-        assert "kill(slot=0)" in f.trace
-        assert f.sup.slot(0).health_failures == 0
         await f.sup.reconcile()
-        assert "begin_restart(slot=0)" in f.trace
-        assert f.states()[0] is SlotState.PENDING_SYNC
+        assert f.states()[2] is SlotState.PENDING_SYNC
+        admitted = await f.sup.before_weight_sync()
+        assert [x.index for x in admitted] == [2]
+        assert len(f.rdt_inits) == 1
 
 
 @pytest.mark.asyncio
@@ -510,34 +421,43 @@ class TestBudgetsAndFloors:
         assert f.sup.slot(1).budget_exhausted_logged is True
 
     async def test_a_gpu_that_is_still_held_does_not_cost_budget(self, monkeypatch):
-        """Found on hardware. SIGKILLing an engine's server actor ORPHANS vLLM's
-        EngineCore child, which keeps its ~0.7x device allocation -- so every restart
-        into that bundle fails with "Free memory on device ... less than desired GPU
-        memory utilization" until something reaps the orphan.
+        """Found on hardware. The dead engine's worker kept ~62 of 79 GiB, the replacement
+        needed 55.4, and all three attempts died on free memory -- condemning the slot for
+        a condition external to it.
 
-        Counting those as attempts condemned the slot after three back-to-back failures
-        against a wall that had not moved. The condition is transient in principle, so it
-        must not consume the budget; the run then keeps retrying cheaply at later
-        boundaries."""
+        The verdict now comes from a MEASUREMENT taken when we launched, not from the
+        exception text. That matters because vLLM raises a generic "Engine core
+        initialization failed" and leaves the real "Free memory on device ..." in a
+        subprocess log: the string matcher this replaces was tested against the text it
+        was assumed to carry, and never fired once in a real run."""
         f = _Fleet(
             monkeypatch,
             ft=InferenceFaultToleranceConfig(
                 enabled=True, restart_dead_engines=True, max_restarts_per_engine=3, health_failure_threshold=1
             ),
         )
-        f.groups[1].start_raises = RuntimeError(
-            "Free memory on device cuda:0 (16.38/79.18 GiB) on startup is less than "
-            "desired GPU memory utilization (0.7, 55.43 GiB)."
+        f.groups[1].start_raises = RuntimeError("Engine core initialization failed. See root cause above.")
+        # What the clean pass concludes when the bundle is still occupied.
+        monkeypatch.setattr(
+            type(f.sup),
+            "_reap_orphans_for",
+            lambda _self, slot: setattr(slot, "bundle_has_room", False),
+            raising=True,
         )
         f.actor(1).wedge()
         for _ in range(6):
             await f.sup.reconcile()
 
         assert f.sup.slot(1).restarts == 0, "an unavailable GPU consumed the restart budget"
-        assert f.sup.slot(1).state is SlotState.DEAD
         assert "begin_restart(slot=1)" in f.trace, "stopped trying entirely"
 
-        # Once the orphan is gone, the very next boundary brings the slot back.
+        # Once the bundle is genuinely clean, the very next boundary brings it back.
+        monkeypatch.setattr(
+            type(f.sup),
+            "_reap_orphans_for",
+            lambda _self, slot: setattr(slot, "bundle_has_room", True),
+            raising=True,
+        )
         f.groups[1].start_raises = None
         await f.sup.reconcile()
         assert f.sup.slot(1).state is SlotState.PENDING_SYNC
@@ -552,6 +472,12 @@ class TestBudgetsAndFloors:
             ),
         )
         f.groups[1].start_raises = RuntimeError("CUDA error: device-side assert triggered")
+        monkeypatch.setattr(
+            type(f.sup),
+            "_reap_orphans_for",
+            lambda _self, slot: setattr(slot, "bundle_has_room", True),
+            raising=True,
+        )
         f.actor(1).wedge()
         for _ in range(6):
             await f.sup.reconcile()
