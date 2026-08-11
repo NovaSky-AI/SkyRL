@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import fastapi
 import psutil
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import (
     Base64Bytes,
@@ -20,6 +20,7 @@ from pydantic import (
     Discriminator,
     Field,
     Tag,
+    ValidationError,
     model_validator,
 )
 from sqlalchemy.exc import IntegrityError
@@ -68,10 +69,27 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
 
 
+def raw_json_response(payload: str | None) -> Response:
+    """Return already-serialized JSON without routing it through FastAPI's encoder.
+
+    Returning a dict makes FastAPI walk the whole structure with
+    ``jsonable_encoder`` and then ``json.dumps`` it again. For a multi-MB
+    numeric payload that is ~300ms of event-loop time per request, which
+    serializes every other caller behind it. The stored text is already valid
+    JSON, so hand it back as-is.
+    """
+    # `null` keeps the response valid JSON when a completed future stored no
+    # result body, matching what encoding `None` would have produced.
+    return Response(content=payload if payload is not None else "null", media_type="application/json")
+
+
 async def wait_for_future(
     waiters: dict[int, set[asyncio.Future]], request_id: int, timeout: float
-) -> tuple[RequestStatus, dict | None] | None:
+) -> tuple[RequestStatus, str | None] | None:
     """Wait for ``request_id`` to finish, returning its ``(status, result_data)``.
+
+    ``result_data`` is the JSON text stored for the request, not a decoded
+    object -- see :class:`FutureDB`.
 
     Returns None if ``timeout`` elapses first, and raises KeyError if the request
     does not exist -- :func:`poll_futures` reports both.
@@ -109,6 +127,12 @@ async def poll_futures(
     rather than from a dedicated lookup in the endpoint makes it free: it rides
     the query already in flight instead of costing a connection checkout on every
     call, which at a few thousand simultaneous calls is a burst the pool feels.
+
+    ``result_data`` is stored as JSON text and handed to the waiters that way:
+    results may carry big numeric payloads (e.g. top-k prompt logprobs for every
+    prompt token, a few MB per request), and decoding them into Python objects
+    only to have FastAPI re-encode them would cost hundreds of milliseconds of
+    event-loop time per call. See :func:`raw_json_response`.
     """
     while True:
         try:
@@ -124,7 +148,7 @@ async def poll_futures(
                     rows = (await session.exec(statement)).all()
 
                 # Pending requests are left alone to be picked up on a later tick.
-                outcomes: dict[int, tuple[RequestStatus, dict | None] | KeyError] = {
+                outcomes: dict[int, tuple[RequestStatus, str | None] | KeyError] = {
                     request_id: (status, result_data)
                     for request_id, status, result_data in rows
                     if status in TERMINAL_STATUSES
@@ -1268,12 +1292,16 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
 
     status, result_data = row
     if status == RequestStatus.COMPLETED:
-        return result_data
+        return raw_json_response(result_data)
 
-    # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-    if result_data and "error" in result_data:
-        raise HTTPException(status_code=400, detail=result_data["error"])
-    raise HTTPException(status_code=500, detail="Unknown error")
+    # Return 400 for handled errors (validation, etc.), 500 for unexpected failures.
+    # Every writer of a FAILED row stores a types.ErrorResponse, so decode it as
+    # one; anything else is not an error we can report, and falls through to 500.
+    try:
+        error = types.ErrorResponse.model_validate_json(result_data)
+    except ValidationError:
+        raise HTTPException(status_code=500, detail="Unknown error")
+    raise HTTPException(status_code=400, detail=error.error)
 
 
 @app.post("/api/v1/telemetry", response_model=TelemetryResponse)

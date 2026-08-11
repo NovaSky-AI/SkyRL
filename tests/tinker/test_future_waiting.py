@@ -5,6 +5,7 @@ from contextlib import suppress
 
 import pytest
 import pytest_asyncio
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -67,10 +68,16 @@ def insert_pending(sync_engine, count: int = 1) -> list[int]:
         return [row.request_id for row in rows]
 
 
-def mark_completed(sync_engine, request_id: int, result_data: dict, status=RequestStatus.COMPLETED) -> None:
+# A completed sample request's payload. Stored and asserted on as the real type,
+# so these tests break if the round trip through the column stops preserving it.
+SAMPLE_RESULT = types.SampleOutput(sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1], logprobs=[-0.5])])
+
+
+def mark_completed(sync_engine, request_id: int, result: BaseModel, status=RequestStatus.COMPLETED) -> None:
+    """Complete a request the way the engine does: a model serialized to JSON text."""
     with Session(sync_engine) as session:
         row = session.get(FutureDB, request_id)
-        row.result_data = result_data
+        row.result_data = result.model_dump_json()
         row.status = status
         session.commit()
 
@@ -95,20 +102,25 @@ async def test_resolves_once_the_request_completes(waiters, sync_engine):
 
     async def complete_soon():
         await asyncio.sleep(0.05)
-        mark_completed(sync_engine, request_id, {"sequences": []})
+        mark_completed(sync_engine, request_id, SAMPLE_RESULT)
 
     asyncio.create_task(complete_soon())
-    result = await wait_for_future(waiters, request_id, timeout=5)
+    status, result_data = await wait_for_future(waiters, request_id, timeout=5)
 
-    assert result == (RequestStatus.COMPLETED, {"sequences": []})
+    # result_data is the stored JSON text, not a decoded object, so it takes a
+    # parse to compare against the result that was stored.
+    assert (status, types.SampleOutput.model_validate_json(result_data)) == (RequestStatus.COMPLETED, SAMPLE_RESULT)
 
 
 @pytest.mark.asyncio
 async def test_surfaces_failed_status(waiters, sync_engine):
     request_id = insert_pending(sync_engine)[0]
-    mark_completed(sync_engine, request_id, {"error": "boom"}, status=RequestStatus.FAILED)
+    error = types.ErrorResponse(error="boom", status="failed")
+    mark_completed(sync_engine, request_id, error, status=RequestStatus.FAILED)
 
-    assert await wait_for_future(waiters, request_id, timeout=5) == (RequestStatus.FAILED, {"error": "boom"})
+    status, result_data = await wait_for_future(waiters, request_id, timeout=5)
+
+    assert (status, types.ErrorResponse.model_validate_json(result_data)) == (RequestStatus.FAILED, error)
 
 
 @pytest.mark.asyncio
@@ -134,9 +146,12 @@ async def test_one_waiter_giving_up_does_not_strand_the_others(waiters, sync_eng
     patient = asyncio.create_task(wait_for_future(waiters, request_id, timeout=5))
 
     assert await quick is None
-    mark_completed(sync_engine, request_id, {"ok": True})
+    # Any request type's output can land here, not just a sample's.
+    result = types.OptimStepOutput(metrics={"loss": 1.5})
+    mark_completed(sync_engine, request_id, result)
 
-    assert await patient == (RequestStatus.COMPLETED, {"ok": True})
+    status, result_data = await patient
+    assert (status, types.OptimStepOutput.model_validate_json(result_data)) == (RequestStatus.COMPLETED, result)
 
 
 @pytest.mark.asyncio
@@ -182,13 +197,35 @@ async def test_retrieve_future_returns_completed_result(waiters, async_engine, s
     from skyrl.tinker import api
 
     request_id = insert_pending(sync_engine)[0]
-    mark_completed(sync_engine, request_id, {"sequences": [1]})
+    mark_completed(sync_engine, request_id, SAMPLE_RESULT)
 
-    result = await api.retrieve_future(
+    response = await api.retrieve_future(
         api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiters)
     )
 
-    assert result == {"sequences": [1]}
+    # The stored JSON text is returned as-is rather than re-encoded by FastAPI.
+    assert response.media_type == "application/json"
+    assert response.body == SAMPLE_RESULT.model_dump_json().encode()
+
+
+@pytest.mark.asyncio
+async def test_retrieve_future_400s_with_the_stored_error(waiters, async_engine, sync_engine):
+    """The failure path still decodes the payload, since it inspects the error."""
+    from fastapi import HTTPException
+
+    from skyrl.tinker import api
+
+    request_id = insert_pending(sync_engine)[0]
+    error = types.ErrorResponse(error="boom", status="failed")
+    mark_completed(sync_engine, request_id, error, status=RequestStatus.FAILED)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await api.retrieve_future(
+            api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiters)
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "boom"
 
 
 @pytest.mark.asyncio
