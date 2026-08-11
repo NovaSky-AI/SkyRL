@@ -35,7 +35,6 @@ from skyrl.backends.skyrl_train.inference_servers.engine_supervisor import (
     SlotState,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-    EngineFleetError,
     RemoteInferenceClient,
 )
 from skyrl.train.config.config import InferenceFaultToleranceConfig
@@ -499,52 +498,27 @@ class TestBudgetsAndFloors:
         assert f.sup.slot(0).restarts == 2
         assert f.sup.slot(0).state is SlotState.DEAD
 
-    async def test_before_generation_waits_for_a_recovering_slot(self, monkeypatch):
-        """The Part 1/Part 2 difference: hitting the floor is fatal in Part 1 because
-        nothing can come back. Here a slot that is about to return is a reason to wait.
-
-        "About to return" deliberately includes a slot whose relaunch is still one
-        reconcile away -- the deferral after a kill. Counting only RESTARTING made this
-        give up on a fleet that was seconds from recovering, which is the regression
-        this test now pins."""
+    async def test_before_generation_only_reconciles(self, monkeypatch):
+        """The floor-wait is gone deliberately. ``min_live_engines`` is enforced once,
+        in the fleet probe that produced the evidence (``_probe_and_disable`` raises
+        ``EngineFleetError`` the moment a probe takes the fleet below it). A second check
+        here, with its own waiting loop, was a duplicate -- and its interaction with the
+        one-pass relaunch deferral had already caused one regression."""
         ft = InferenceFaultToleranceConfig(
-            enabled=True,
-            restart_dead_engines=True,
-            min_live_engines=2,
-            health_failure_threshold=1,
-            restart_timeout_s=30.0,
-        )
-        f = _Fleet(monkeypatch, n=2, ft=ft)
-        f.actor(0).wedge()
-
-        slept = []
-
-        async def _sleep(sec):
-            # The wait itself is what lets the deferred relaunch happen on the next
-            # reconcile, which before_generation issues after this returns.
-            slept.append(sec)
-
-        monkeypatch.setattr("asyncio.sleep", _sleep)
-        await f.sup.before_generation()
-
-        assert slept, "raised instead of waiting for a slot that was about to recover"
-        assert f.sup.slot(0).state is SlotState.PENDING_SYNC
-        assert len(f.client.active_server_urls) == 2
-
-    async def test_before_generation_raises_once_nothing_can_recover(self, monkeypatch):
-        """No restart in flight and below the floor: waiting cannot help, so fail with
-        a real error rather than generating against nothing."""
-        ft = InferenceFaultToleranceConfig(
-            enabled=True,
-            restart_dead_engines=True,
-            min_live_engines=2,
-            max_restarts_per_engine=1,
-            health_failure_threshold=1,
+            enabled=True, restart_dead_engines=True, min_live_engines=2, health_failure_threshold=1
         )
         f = _Fleet(monkeypatch, n=2, ft=ft, fail_restarts=99)
         f.actor(0).wedge()
-        with pytest.raises(EngineFleetError, match="below min_live_engines=2"):
-            await f.sup.before_generation()
+
+        slept = []
+        monkeypatch.setattr("asyncio.sleep", lambda s_: slept.append(s_))
+
+        # Below the floor after the kill, and no restart can succeed -- yet this must
+        # neither wait nor raise; generating against a small fleet is the probe's call.
+        await f.sup.before_generation()
+
+        assert slept == [], "before_generation is still waiting on recovery"
+        assert "probe(http://10.0.0.1:8000)->False" in f.trace, "did not even reconcile"
 
     async def test_a_reconcile_inside_the_sync_does_not_enforce_the_floor(self, monkeypatch):
         """A floor violation raised at the sync boundary would fail the sync -- turning

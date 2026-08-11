@@ -144,7 +144,8 @@ class EngineSupervisor:
 
     Call sites in the training loop, all no-ops when disabled:
 
-    * ``before_generation()`` — reconcile, then enforce ``min_live_engines``.
+    * ``before_generation()`` — reconcile, so a death during training is found
+      before a batch is committed to the fleet.
     * ``before_weight_sync()`` — reconcile and RDT-re-init anything that restarted,
       so this sync includes it.
     * ``after_weight_sync()`` — the engines that took part are now current: re-admit
@@ -563,58 +564,22 @@ class EngineSupervisor:
     # ---- training-loop integration ----
 
     async def before_generation(self) -> None:
-        """Reconcile, then refuse to generate against too small a fleet.
+        """Reconcile the fleet before committing a batch to it.
 
-        Unlike Part 1 — where hitting the floor is terminal because nothing can bring
-        an engine back — a restart in flight is a reason to wait. So this blocks up to
-        ``restart_timeout_s`` for the fleet to recover, and only raises if it does not.
+        Covers what the reactive detector structurally cannot see: it only fires when a
+        request fails, so an engine that dies during the synchronous training phase
+        produces no trigger. Reconciling here finds those and starts the restart a step
+        earlier than the next failed request would.
+
+        Deliberately does NOT enforce ``min_live_engines`` or wait for a recovering slot.
+        The floor is already enforced where the evidence is -- ``_probe_and_disable``
+        raises ``EngineFleetError`` the moment a probe takes the fleet below it -- and a
+        second check here was a duplicate with its own waiting loop, which is complexity
+        for a case the probe already handles. No-op unless engine restarts are enabled.
         """
         if not self.enabled:
             return
         await self.reconcile()
-        floor = max(1, int(self._ft.min_live_engines))
-        if len(self._client.active_server_urls) >= floor:
-            return
-
-        deadline = time.monotonic() + float(self._ft.restart_timeout_s)
-        while len(self._client.active_server_urls) < floor:
-            recovering = self._recovering_slots()
-            if not recovering:
-                break  # nothing is coming back, so waiting cannot help
-            if time.monotonic() > deadline:
-                break
-            logger.warning(
-                f"[ft] only {len(self._client.active_server_urls)}/{floor} engines are live; "
-                f"waiting on {len(recovering)} slot(s) still recovering"
-            )
-            await asyncio.sleep(5.0)
-            await self.reconcile()
-
-        live = len(self._client.active_server_urls)
-        if live < floor:
-            from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-                EngineFleetError,
-            )
-
-            raise EngineFleetError(
-                f"only {live} inference engine(s) are live, below min_live_engines={floor}; "
-                f"fleet: {self.describe()}"
-            )
-
-    def _recovering_slots(self) -> List[EngineSlot]:
-        """Slots expected to come back, so that waiting on them is meaningful.
-
-        Wider than "currently RESTARTING" on purpose: a slot we killed this pass has its
-        relaunch deferred by one reconcile, and a DEAD slot with budget left has one
-        coming. Counting only RESTARTING made ``before_generation`` give up on a fleet
-        that was seconds from recovering.
-        """
-        budget = max(0, int(self._ft.max_restarts_per_engine))
-        return [
-            s
-            for s in self._slots
-            if s.state is SlotState.RESTARTING or (s.state is SlotState.DEAD and s.restarts < budget)
-        ]
 
     async def before_weight_sync(self) -> List[EngineSlot]:
         """Reconcile and RDT-re-init anything that restarted, so this sync includes it.
