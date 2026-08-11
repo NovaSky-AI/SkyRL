@@ -123,9 +123,9 @@ fsdp = [
     "causal-conv1d; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -154,14 +154,14 @@ megatron = [
     # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
     "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     # megatron-bridge requires Python 3.12+; pin megatron-core to the same
     # constraint so both packages are consistently available (or absent).
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
@@ -242,10 +242,19 @@ override-dependencies = [
     # so it doesn't pull the CUDA-13 stack and bump torch off the cu12 pin.
     "nixl-cu13; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our exact 0.6.12 pin (the version vLLM 5 requires). Override it to our version.
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # our pin. vLLM 0.26.0's metadata asks for 0.6.14, but flashinfer-cubin was
+    # never released at 0.6.14 and flashinfer hard-errors when cubin's version
+    # differs from its own, so all three are held at 0.6.13 -- the version vLLM
+    # 0.26.0 was developed against. It must be >=0.6.13: older flashinfer rejects
+    # the `layout_code` vLLM's allreduce+RMS fusion pass hands the MNNVL backend
+    # ("MNNVL AllReduce does not support quantization fusion").
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
+    # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
+    # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
+    "xgrammar==0.2.3",
 ]
 
 [tool.uv.extra-build-dependencies]

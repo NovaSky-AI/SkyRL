@@ -31,8 +31,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.inference_engine.num_engines=$NUM_GPUS \
-  generator.inference_engine.tensor_parallel_size=1 \
+  generator.inference_engine.num_engines=2 \
+  generator.inference_engine.tensor_parallel_size=2 \
   trainer.policy.torch_profiler_config.enable=$ENABLE_TORCH_PROFILER \
   trainer.policy.torch_profiler_config.ranks=$RANKS_TO_PROFILE \
   trainer.policy.torch_profiler_config.save_path=$SAVE_PATH \

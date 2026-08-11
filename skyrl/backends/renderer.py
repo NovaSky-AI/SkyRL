@@ -51,9 +51,16 @@ def decode_mm_kwargs(mm_kwargs: dict[str, list[str]] | None) -> MultiModalKwargs
     if not mm_kwargs or "image" not in mm_kwargs:
         return MultiModalKwargs(pixel_values=None, image_grid_thw=None)
 
-    from vllm.entrypoints.serve.disagg.mm_serde import (
-        decode_mm_kwargs_item as _vllm_decode,
-    )
+    # vLLM 0.26 moved this module from entrypoints.serve.disagg to
+    # entrypoints.scale_out.token_in_token_out; accept either location.
+    try:
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+            decode_mm_kwargs_item as _vllm_decode,
+        )
+    except ImportError:
+        from vllm.entrypoints.serve.disagg.mm_serde import (
+            decode_mm_kwargs_item as _vllm_decode,
+        )
 
     pv_parts: list[torch.Tensor] = []
     thw_parts: list[torch.Tensor] = []

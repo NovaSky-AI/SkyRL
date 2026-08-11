@@ -33,6 +33,7 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     ServerInfo,
     find_and_reserve_port,
     get_node_ip,
+    pick_free_port,
 )
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
@@ -477,6 +478,24 @@ class VLLMServerActor(ServerActorProtocol):
                 pass
 
 
+def _seed_dp_master_port() -> None:
+    """Give vLLM's ray executor a valid TCPStore port window.
+
+    vLLM 0.26's ``RayExecutorV2`` (the default for
+    ``distributed_executor_backend="ray"``) picks the port for the engine
+    workers' ``torch.distributed`` group as
+    ``VLLM_DP_MASTER_PORT + 100 + 32 * local_dp_rank``. With DP disabled,
+    ``ParallelConfig`` falls back to the env defaults, where
+    ``VLLM_DP_MASTER_PORT`` is 0 -- so the workers try to bind privileged port
+    100 and the engine dies with ``EADDRINUSE``. Seeding a free ephemeral port
+    gives each server its own valid window.
+
+    No-op when DP is enabled (vLLM assigns the master port itself on that path)
+    or when the caller already set the variable.
+    """
+    os.environ.setdefault("VLLM_DP_MASTER_PORT", str(pick_free_port()))
+
+
 async def _build_and_serve_vllm_server(
     cli_args: Namespace,
     *,
@@ -488,8 +507,12 @@ async def _build_and_serve_vllm_server(
     Shared by ``VLLMServerActor._run_server`` (Ray-actor deployment) and the
     standalone ``python -m`` entrypoint below.
     """
+    _seed_dp_master_port()
+
     sock_addr = (cli_args.host, cli_args.port)
-    sock = create_server_socket(sock_addr)
+    # One uvicorn per port (no api_server_count fan-out), matching vLLM's own
+    # single-server path, so SO_REUSEPORT stays off.
+    sock = create_server_socket(sock_addr, reuse_port=False)
     app = build_app(cli_args)
 
     # Initialize the engine (this loads the model - takes time)

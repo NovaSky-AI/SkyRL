@@ -12,6 +12,14 @@ from transformers import (
     set_seed,
 )
 
+# NOTE: vLLM >= 0.26 allowlists MLA head-dim triples in
+# vllm/v1/attention/backends/mla/prefill/selector.py, and on Hopper and older the
+# only prefill backend is FLASH_ATTN, which accepts exactly:
+#   (qk_nope, qk_rope, v) = (128, 64, 128) DeepSeek | (192, 64, 256) GLM | (64, 64, 128) Mistral-S4
+# The scaled-down 64/64/64 config below is NOT servable on vLLM >= 0.26 ("No valid
+# MLA prefill backend found"), which is why test_megatron_models.py now covers MLA
+# with the real zai-org/GLM-4.7-Flash checkpoint in the h100 job instead. If you
+# regenerate a tiny fixture for vLLM use, keep the GLM triple (192/64/256).
 source_model_id = "zai-org/GLM-4.7-Flash"
 save_folder = "/tmp/glm-4.7-flash-tiny-random"
 

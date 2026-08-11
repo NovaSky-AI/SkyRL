@@ -108,3 +108,15 @@ def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
         f"No available port found in [{start_port}, {end_port}). "
         f"Free up the port range or raise SERVER_PORT_STRIDE."
     )
+
+
+def pick_free_port() -> int:
+    """Return a free ephemeral port, without holding it.
+
+    Unlike :func:`find_and_reserve_port` this releases the port immediately, so
+    only use it where the port is a *hint* (e.g. the base of a port window that
+    another process probes) rather than something we bind ourselves.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return sock.getsockname()[1]

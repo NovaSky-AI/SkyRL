@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
 import torch
 
@@ -70,14 +70,65 @@ class DeltaWeightTransferEngine:
     init_info_cls = DeltaTransferInitInfo
     update_info_cls = DeltaTransferUpdateInfo
 
-    def __init__(self, config: Any, parallel_config: Any, model: torch.nn.Module) -> None:
+    # Read by vLLM's Worker._start_weight_update when updating a draft model.
+    # Delta sync reloads the full checkpoint for the target model only.
+    supports_draft_weight_update = False
+
+    def __init__(self, config: Any, vllm_config: Any, device: Any, model: torch.nn.Module) -> None:
+        # Signature mirrors vLLM's WeightTransferEngine base (0.26+):
+        # WeightTransferEngineFactory.create_engine calls
+        # engine_cls(config, vllm_config, device, model). Duck-typed rather than
+        # subclassed so this module stays importable without vLLM installed.
         self.config = config
-        self.parallel_config = parallel_config
+        self.vllm_config = vllm_config
+        self.parallel_config = getattr(vllm_config, "parallel_config", None)
+        self.model_config = getattr(vllm_config, "model_config", None)
+        self.device = device
         self.model = model
+        self._default_model = model
+        self._default_model_config = self.model_config
         self._store: LocalCheckpointStore | None = None
         self._checkpoint_load_format = "vllm_multi_thread_safetensors"
         self._multi_thread_safetensors_max_workers = 8
         self._cloud_download_workers = 4
+
+    def set_weight_update_target(self, model: Any, model_config: Any) -> None:
+        """Retarget the active weight update (see WeightTransferEngine base)."""
+        self.model = model
+        self.model_config = model_config
+
+    def reset_weight_update_target(self) -> None:
+        """Restore weight updates to the default target model."""
+        self.model = self._default_model
+        self.model_config = self._default_model_config
+
+    def start_weight_update(self) -> None:
+        """No-op: SkyRL drives the layerwise-reload lifecycle from the worker.
+
+        vLLM's ``Worker.start_weight_update`` delegates here, but SkyRL's delta
+        flow calls ``NewInferenceWorkerWrap.skyrl_start_weight_update`` instead
+        (see DeltaWeightTransferSender._apply_receiver_update), which is what
+        initializes layerwise reload. Doing it again here would double-initialize.
+        """
+
+    def finish_weight_update(self) -> None:
+        """No-op counterpart to :meth:`start_weight_update`.
+
+        SkyRL finalizes layerwise reload via
+        ``NewInferenceWorkerWrap.skyrl_finish_weight_update``.
+        """
+
+    def update_weights(self, update_info: dict[str, Any]) -> None:
+        """Load one update, as vLLM's native ``/update_weights`` endpoint expects.
+
+        Mirrors ``WeightTransferEngine.update_weights``: vLLM 0.26's
+        ``Worker.update_weights`` calls this (it used to hand ``receive_weights``
+        a ``load_weights`` callback directly), so a duck-typed engine has to
+        provide it or the endpoint fails with ``'DeltaWeightTransferEngine'
+        object has no attribute 'update_weights'``.
+        """
+        self.receive_weights(self.parse_update_info(update_info))
+        torch.accelerator.synchronize()
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> DeltaTransferInitInfo:
         try:
@@ -122,11 +173,11 @@ class DeltaWeightTransferEngine:
         print(message, flush=True)
         return {"status": "ok", "target_version": target_version, "stats": {**stats, "total_s": total_s}}
 
-    def receive_weights(
-        self,
-        update_info: DeltaTransferUpdateInfo,
-        load_weights: Callable[[Iterator[tuple[str, torch.Tensor]]], None],
-    ) -> None:
+    def receive_weights(self, update_info: DeltaTransferUpdateInfo) -> None:
+        # vLLM 0.26 dropped receive_weights' `load_weights` callback parameter;
+        # engines load through ``self.model.load_weights``, which callers can
+        # retarget via set_weight_update_target (SkyRL's worker extension points
+        # it at a proxy that also reloads the spec-decode drafter).
         if self._store is None:
             raise RuntimeError("DeltaWeightTransferEngine has not been initialized")
 
@@ -136,7 +187,7 @@ class DeltaWeightTransferEngine:
         prepare_s = time.perf_counter() - t0
         load_s = 0.0
         t1 = time.perf_counter()
-        load_weights(
+        self.model.load_weights(
             self._store.iter_tensors(
                 load_format=self._checkpoint_load_format,
                 multi_thread_safetensors_max_workers=self._multi_thread_safetensors_max_workers,
