@@ -256,9 +256,9 @@ class EngineSupervisor:
            engines dead while we were inside a synchronous phase);
         2. probe slots we still believe in, so a death during training — invisible to
            the reactive path, which only sees data-plane failures — is found here;
-        3. de-route and kill the newly dead, including engines that answer TCP but
-           never answer ``/health`` (a wedge is normalized to a death so exactly one
-           code path continues);
+        3. de-route and kill the newly dead — a refused connection, a self-reported
+           503, and silence for the whole probe budget all arrive here as one verdict,
+           so exactly one code path continues;
         4. start restarts within budget;
         5. harvest the restarts that have become healthy into ``PENDING_SYNC``.
 

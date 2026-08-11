@@ -227,8 +227,8 @@ class TestReconcile:
         f = _Fleet(monkeypatch)
         dead_url = f.actor(2).url
         f.actor(2).wedge()
-        # One failed probe is now enough: a TCP connect that is refused is definitive,
-        # so there is no ladder of attempts to wait out.
+        # One failed probe is enough: the probe's own generous bound is where ambiguity
+        # is resolved, so there is no ladder of attempts layered on top of it.
         await f.sup.reconcile()
 
         assert f.trace.index(f"router_remove({dead_url})") < f.trace.index("kill(slot=2)"), f.trace

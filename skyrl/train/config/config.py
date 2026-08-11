@@ -495,7 +495,6 @@ class RefConfig(BaseConfig):
 
 @dataclass
 class KLCtrlConfig(BaseConfig):
-
     type: str = "fixed"
     """``"fixed"`` or ``"adaptive"``."""
     kl_target: float = 0.1
@@ -522,7 +521,6 @@ class DynamicSamplingConfig(BaseConfig):
 
 @dataclass
 class ClipCovConfig(BaseConfig):
-
     clip_ratio: float = 0.0002
     """Fraction of tokens to clip based on covariance."""
     clip_cov_lb: float = 1.0
@@ -531,7 +529,6 @@ class ClipCovConfig(BaseConfig):
 
 @dataclass
 class KLCovConfig(BaseConfig):
-
     kl_cov_frac: float = 0.2
     """Fraction of tokens to apply KL regularization to."""
     ppo_kl_coef: float = 1.0
@@ -539,7 +536,6 @@ class KLCovConfig(BaseConfig):
 
 @dataclass
 class CISPOConfig(BaseConfig):
-
     cispo_eps_clip_low: float = 1.0
     """Offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping).
     
@@ -763,22 +759,22 @@ class InferenceFaultToleranceConfig(BaseConfig):
     byte-identical to a build without this feature (two strict improvements aside:
     sibling-task cancellation and the broadened transport-retry set, which apply
     unconditionally)."""
-    health_probe_timeout_s: float = 5.0
-    """Per-URL TCP-CONNECT timeout for the liveness probe issued when reconciling.
+    health_probe_timeout_s: float = 60.0
+    """How long the ``/health`` probe waits for an answer. Deliberately LARGE.
 
-    A connect, not ``GET /health``, and the distinction is load-bearing. That endpoint is
-    served by the engine's own asyncio loop and its handler does almost nothing (it reads
-    an ``errored`` flag), so under load its latency measures event-loop STARVATION rather
-    than health. Measured on an 8xH100: with a kill landing while ~2048 requests were
-    outstanding across three survivors, healthy engines did not answer ``/health`` within
-    1.6s, and an escalating ladder of six probes condemned all three. vLLM's own k8s
-    manifests treat the endpoint the same way -- ``timeoutSeconds: 1`` with
-    ``failureThreshold: 240``, i.e. sample cheaply for twenty minutes rather than wait
-    longer once.
+    This looks absurd for a handler that only reads a flag, and that is exactly the point:
+    ``/health`` is served by the engine's own asyncio loop, so under load its latency is
+    event-loop starvation rather than ill health. MEASURED on an 8xH100 with ~2048 requests
+    outstanding across three survivors of a kill: HEALTHY engines did not answer within
+    1.6s. Three runs with short bounds condemned every survivor and took the fleet to zero.
+    vLLM's own k8s manifests encode the same lesson differently -- ``timeoutSeconds: 1``
+    with ``failureThreshold: 240``, i.e. never conclude anything from one impatient probe.
 
-    A listening socket completes the TCP handshake in the kernel regardless of what the
-    application loop is doing, so this bound is generous rather than marginal and a
-    timeout here really does mean "nothing is accepting"."""
+    Being generous costs nothing in the cases that matter, because they do not wait:
+    a dead process is REFUSED by the kernel and raises at once (that path is not subject
+    to this bound), and an engine whose GPU worker died answers 503 at once. Only a truly
+    WEDGED engine -- socket open, loop hung, never answering -- pays the full wait, and
+    that is the one case where waiting is the right thing to do."""
     request_timeout_s: Optional[float] = 900.0
     """Total per-request timeout for data-plane calls. Turns a wedged engine (one
     that accepts the connection and never answers) into a bounded failure the retry
@@ -939,7 +935,6 @@ class GeneratorConfig(BaseConfig):
     to collapse multi-turn step-wise sequences into single sequences before training."""
 
     def __post_init__(self):
-
         if self.eval_sampling_params is None:
             self.eval_sampling_params = SamplingParams(
                 temperature=0.0, max_generate_length=self.sampling_params.max_generate_length
@@ -1295,7 +1290,6 @@ class SkyRLTrainConfig(BaseConfig):
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
     def __post_init__(self):
-
         # generator.max_input_length defaults to trainer.max_prompt_length
         if self.generator.max_input_length is None:
             self.generator.max_input_length = self.trainer.max_prompt_length

@@ -133,14 +133,6 @@ class EngineFleetError(RuntimeError):
     """
 
 
-def _split_host_port(url: str) -> Tuple[str, Optional[int]]:
-    """``http://host:port`` -> ``(host, port)``. ``(url, None)`` if there is no port."""
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url if "//" in url else f"//{url}")
-    return (parsed.hostname or url), parsed.port
-
-
 def _extract_session_id_and_body(
     request_payload: Dict[str, Any],
 ) -> Tuple[Optional[str], Dict[str, Any]]:
@@ -517,72 +509,68 @@ class RemoteInferenceClient(InferenceEngineInterface):
             self._membership_generation += 1
 
     async def _probe_health(self, url: str) -> bool:
-        """Is this backend's server process still there? A bare TCP connect.
+        """One ``GET /health`` with a GENEROUS timeout. True iff it answered 200.
 
-        Deliberately NOT ``GET /health``. That endpoint is served by the same asyncio
-        loop as generation, and its handler does essentially no work --
+        The timeout is the whole design, and it has to be large -- far larger than looks
+        reasonable -- because of what this endpoint actually is. vLLM's handler only reads
+        a flag:
 
             async def check_health(self):        # vllm/v1/engine/async_llm.py
                 if self.errored:
                     raise self.dead_error
 
-        -- so its latency under load is pure event-loop STARVATION, not engine slowness.
-        Measured on an 8xH100: with a kill landing while ~2048 requests were outstanding
-        across three survivors, healthy engines did not answer ``/health`` within 1.6s,
-        and a six-rung escalating ladder (0.05s doubling to 1.6s, ~5.6s wall) condemned
-        all three. Waiting longer cannot fix that -- if the loop is busy for the whole
-        generation phase, every rung lands inside the same busy window. vLLM knows this
-        endpoint is starvation-prone; the upstream k8s manifests pair it with
-        ``timeoutSeconds: 1`` and ``failureThreshold: 240``, i.e. sample cheaply for
-        twenty minutes rather than wait longer once.
+        but it is served by the same asyncio loop as generation, so under load its latency
+        is event-loop STARVATION, not ill health. Measured on an 8xH100 with ~2048 requests
+        outstanding across three survivors of a kill: HEALTHY engines did not answer within
+        1.6s. Three separate runs with short bounds condemned every survivor and took the
+        fleet to zero. vLLM's own k8s manifests say the same thing in their own way --
+        ``timeoutSeconds: 1`` paired with ``failureThreshold: 240``, i.e. never conclude
+        anything from one impatient probe.
 
-        A TCP connect answers the question we actually have -- the router returned a 502
-        without naming a backend, so WHICH one is gone? -- and it cannot be starved: the
-        kernel completes the handshake into the accept backlog whether or not the
-        application is looping, and refuses it immediately when nothing is listening.
+        A generous single bound gets every case right, and needs no retry ladder and no
+        second signal:
 
-        So:
+        * **process gone** -- the kernel refuses the connection and aiohttp raises at once.
+          That path is NOT subject to the total timeout, so a crashed engine is still
+          detected in milliseconds however large this is.
+        * **engine dead behind a live frontend** -- vLLM runs EngineCore (and the GPU
+          worker under it) as separate processes; a monitor thread in the frontend flips
+          ``engine_dead`` when they exit, so ``/health`` answers 503 while uvicorn keeps
+          its socket. An answer, so also immediate.
+        * **healthy but saturated** -- answers late, inside the budget: alive. This is the
+          case a short bound got wrong.
+        * **wedged** -- never answers, so the budget elapses and it is called dead. Slow,
+          but correct, and this is the only case that pays the full wait.
 
-        * connect refused / unreachable -> the process is gone. Definitive, milliseconds.
-        * connect succeeds -> the process is there. It may be wedged or its GPU may be
-          broken, and this deliberately does not claim otherwise: ``/health`` could not
-          tell us either (it only reports a flag, and vLLM issue #36960 documents a dead
-          GPU behind a 200), while the DATA PLANE can -- a request that returns proves
-          the engine works end to end, which is a stronger signal than any liveness
-          endpoint.
-        * connect times out -> treated as gone, but the bound is a CONNECT bound, which a
-          listening socket meets regardless of load.
-
-        ``health_probe_timeout_s`` is now a connect timeout, so its old value is
-        generous rather than marginal.
+        Cost of being generous: a wedged engine delays the sweep, and because the sweep
+        gathers all backends the genuinely dead one is de-routed only when the slowest
+        probe finishes. Acceptable while the data plane retries for far longer
+        (``request_timeout_s``, 900s); if that latency ever matters, act on each probe as
+        it completes rather than shortening this.
         """
         assert self.fault_tolerance is not None
-        host, port = _split_host_port(url)
-        if port is None:
-            logger.warning(f"[ft] cannot parse a host:port out of {url}; treating it as alive")
-            return True
-        timeout = float(self.fault_tolerance.health_probe_timeout_s)
-        writer = None
+        timeout = aiohttp.ClientTimeout(total=self.fault_tolerance.health_probe_timeout_s)
         try:
-            _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
-            return True
+            session = await self._get_session()
+            async with session.get(f"{url}/health", timeout=timeout) as resp:
+                await resp.read()  # drain so the keep-alive connection is reusable
+                if resp.status != 200:
+                    logger.info(f"[ft] {url} answered /health with HTTP {resp.status}: its engine reports itself dead")
+                return resp.status == 200
         except asyncio.CancelledError:
             raise
-        except (ConnectionRefusedError, OSError) as e:
-            logger.info(f"[ft] {url} refused a TCP connect ({type(e).__name__}): its server process is gone")
-            return False
-        except (asyncio.TimeoutError, TimeoutError):
+        except asyncio.TimeoutError:
+            # Silence for the WHOLE budget. Logged loudly and distinctly: this is the one
+            # verdict reached by waiting rather than by an answer, so if healthy engines
+            # are ever condemned again this line is where it will show.
             logger.warning(
-                f"[ft] {url} did not accept a TCP connect within {timeout:.1f}s: treating it as gone. "
-                "A listening socket completes the handshake in the kernel even under load, so this is "
-                "not the event-loop starvation that made an HTTP /health probe unreliable here."
+                f"[ft] {url} did not answer /health within "
+                f"{self.fault_tolerance.health_probe_timeout_s}s: treating it as wedged"
             )
             return False
-        finally:
-            if writer is not None:
-                writer.close()
-                with contextlib.suppress(Exception):
-                    await writer.wait_closed()
+        except Exception as e:  # noqa: BLE001 - refused, reset, DNS: all mean unusable
+            logger.info(f"[ft] {url} is unreachable ({type(e).__name__}: {e})")
+            return False
 
     async def _probe_and_disable(self) -> None:
         """Probe every active backend once; disable and de-route the non-responders.
