@@ -95,3 +95,22 @@ def test_an_empty_scan_selects_nothing():
 def test_a_comm_with_spaces_and_parens_does_not_confuse_the_matcher():
     """/proc comm can contain anything; only the prefix rule should decide."""
     assert select_orphans({9009: (1, "python (worker)"), 9010: (1, "VLLM::EngineCor")}) == [9010]
+
+
+def test_zombies_are_excluded_by_the_proc_reader():
+    """Killing a zombie frees nothing -- it has already exited and is only awaiting its
+    parent's wait(). The first reaping run logged 16 such "reaps", all stale zombies from
+    earlier runs, while the process actually holding the GPU was untouched. Excluded in
+    `_read_process_info` (state 'Z') so they never reach the selector at all."""
+    from unittest.mock import mock_open, patch
+
+    from skyrl.backends.skyrl_train.inference_servers.engine_orphans import (
+        _read_process_info,
+    )
+
+    zombie = "3577 (VLLM::Worker_TP) Z 1 3577 0 0 -1 0 0 0 0 0 0 0"
+    live = "4001 (VLLM::EngineCor) S 1 4001 0 0 -1 0 0 0 0 0 0 0"
+    with patch("builtins.open", mock_open(read_data=zombie)):
+        assert _read_process_info([3577]) == {}
+    with patch("builtins.open", mock_open(read_data=live)):
+        assert _read_process_info([4001]) == {4001: (1, "VLLM::EngineCor")}

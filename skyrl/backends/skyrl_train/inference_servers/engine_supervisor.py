@@ -343,17 +343,16 @@ class EngineSupervisor:
 
         Pinned to the slot's own PG bundle, which is the authority on where those GPUs
         are, rather than a guessed node id. Narrow by construction (see
-        ``engine_orphans.select_orphans``: orphaned AND vLLM-named AND on a target GPU)
-        and best-effort: failing to reap costs a restart attempt, not the run.
+        ``engine_orphans.select_orphans``: orphaned AND vLLM-named) and best-effort:
+        failing to reap costs a restart attempt, not the run.
+
+        The slot's physical GPU ids are passed along for the post-reap verification log
+        only. They are NOT required: selection is ownership-based, so an unresolvable id
+        list must still reap -- an earlier version returned early here, which silently
+        skipped the reap for any group that could not report its GPUs.
         """
         try:
-            gpu_ids = s.group._get_gpu_ids_for_server(s.server_idx)
-            if not gpu_ids:
-                # Without physical ids we cannot say which GPUs are ours, and a broader
-                # sweep is not worth the risk. Inside the try because the lookup reaches
-                # into ServerGroup internals: a group shape that does not expose them
-                # should cost us a reap, never an exception on the death path.
-                return
+            gpu_ids = s.group._get_gpu_ids_for_server(s.server_idx) or []
             task = ray.remote(num_cpus=0)(_reap_on_node).options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=s.group._get_placement_group(),
@@ -363,8 +362,8 @@ class EngineSupervisor:
             killed = ray.get(task.remote(list(gpu_ids)), timeout=60)
             if killed:
                 logger.warning(
-                    f"[ft] slot {s.index}: reaped {len(killed)} orphaned engine process(es) "
-                    f"{killed} still holding GPU(s) {list(gpu_ids)}"
+                    f"[ft] slot {s.index}: reaped {len(killed)} orphaned vLLM process(es) {killed} "
+                    f"before relaunching into GPU(s) {list(gpu_ids)}"
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[ft] slot {s.index}: could not reap orphaned engine processes: {e}")

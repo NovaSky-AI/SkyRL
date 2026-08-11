@@ -131,7 +131,14 @@ def _read_compute_apps() -> List[Tuple[str, int, int]]:
 
 
 def _read_process_info(pids: Iterable[int]) -> Dict[int, Tuple[int, str]]:
-    """``pid -> (ppid, comm)`` from /proc. Missing pids are simply absent."""
+    """``pid -> (ppid, comm)`` from /proc, skipping ZOMBIES. Missing pids are absent.
+
+    Zombies are excluded because killing one is a no-op -- it has already exited and is
+    only waiting to be reaped by its parent -- so selecting them produces a log full of
+    "reaped" lines that freed nothing. The first run with reaping enabled reported 16
+    such kills, every one of them a stale zombie, while the process actually holding the
+    GPU went untouched.
+    """
     info: Dict[int, Tuple[int, str]] = {}
     for pid in pids:
         try:
@@ -141,8 +148,11 @@ def _read_process_info(pids: Iterable[int]) -> Dict[int, Tuple[int, str]]:
             # the LAST ')': everything before is "pid (comm", after is the rest.
             head, _, tail = stat.rpartition(")")
             comm = head[head.index("(") + 1 :]
-            ppid = int(tail.split()[1])
+            fields = tail.split()
+            state, ppid = fields[0], int(fields[1])
         except Exception:  # noqa: BLE001
+            continue
+        if state == "Z":
             continue
         info[pid] = (ppid, comm)
     return info

@@ -290,6 +290,22 @@ class TestReconcile:
 
         assert reaped == [(2, [5])], f"the reaper was not invoked before the relaunch: {reaped}"
 
+    async def test_the_reaper_still_runs_when_gpu_ids_are_unresolvable(self, monkeypatch):
+        """The GPU ids only enrich the verification log; selection is ownership-based.
+        An earlier version returned early without them, silently skipping the reap for
+        any group that could not report its physical GPUs."""
+        f = _Fleet(
+            monkeypatch,
+            ft=InferenceFaultToleranceConfig(enabled=True, restart_dead_engines=True, health_failure_threshold=1),
+        )
+        f.groups[1].gpu_ids = None  # unresolvable
+        reaps = []
+        monkeypatch.setattr(type(f.sup), "_reap_orphans_for", lambda _s, slot: reaps.append(slot.index), raising=True)
+        f.actor(1).wedge()
+        await f.sup.reconcile()
+        await f.sup.reconcile()
+        assert 1 in reaps, "skipped the reap because the GPU ids were unknown"
+
     async def test_the_reaper_runs_before_every_attempt_not_just_the_first(self, monkeypatch):
         """The reap is a PRECONDITION of the relaunch, not a one-shot on death.
 
