@@ -98,7 +98,8 @@ def compute_approx_kl(
     Args:
         log_probs: Log probabilities of the new distribution.
         log_probs_base: Log probabilities of the base distribution.
-        action_mask: Mask for actions.
+        loss_mask: Optional mask over trainable response tokens.
+        kl_estimator_type: One of ``k1``, ``abs``, ``k2``, or ``k3``.
     """
     if kl_estimator_type == "k1":
         kld = log_probs - log_probs_base
@@ -1232,12 +1233,12 @@ def compute_reinforce_plus_plus_outcome_advantage(
     This implementation is based on the paper: https://arxiv.org/abs/2501.03262
 
     Args:
-        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
-        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - token_level_rewards: Float[torch.Tensor, "batch_size response_len"]
+        - response_mask: Float[torch.Tensor, "batch_size response_len"]
 
     Returns:
-        - advantages: Float[torch.Tensor, "batch_size seqlen"]
-        - returns: Float[torch.Tensor, "batch_size seqlen"]
+        - advantages: Float[torch.Tensor, "batch_size response_len"]
+        - returns: Float[torch.Tensor, "batch_size response_len"]
     """
     with torch.no_grad():
         returns = torch.zeros_like(token_level_rewards)
@@ -1270,13 +1271,13 @@ def compute_rloo_outcome_advantage(
     (https://openreview.net/pdf?id=r1lgTGL5DE).
 
     Args:
-        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
-        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - token_level_rewards: Float[torch.Tensor, "batch_size response_len"]
+        - response_mask: Float[torch.Tensor, "batch_size response_len"]
         - index: np.ndarray (batch_size)
 
     Returns:
-        - advantages: Float[torch.Tensor, "batch_size seqlen"]
-        - returns: Float[torch.Tensor, "batch_size seqlen"]
+        - advantages: Float[torch.Tensor, "batch_size response_len"]
+        - returns: Float[torch.Tensor, "batch_size response_len"]
     """
     from loguru import logger as logger_
 
@@ -1310,13 +1311,13 @@ def compute_rloo_outcome_advantage(
 
 @register_advantage_estimator(AdvantageEstimator.GAE)
 def compute_gae_advantage_return(
-    token_level_rewards: Float[torch.Tensor, "batch_size seqlen"],
-    values: Float[torch.Tensor, "batch_size seqlen"],
-    response_mask: Float[torch.Tensor, "batch_size seqlen"],
+    token_level_rewards: Float[torch.Tensor, "batch_size response_len"],
+    values: Float[torch.Tensor, "batch_size response_len"],
+    response_mask: Float[torch.Tensor, "batch_size response_len"],
     gamma: float,
     lambd: float,
     **kwargs,
-) -> Tuple[Float[torch.Tensor, "batch_size seqlen"], Float[torch.Tensor, "batch_size seqlen"]]:
+) -> Tuple[Float[torch.Tensor, "batch_size response_len"], Float[torch.Tensor, "batch_size response_len"]]:
     """
     Compute advantage and return for GAE.
 
@@ -1352,15 +1353,15 @@ def compute_grpo_outcome_advantage(
     Compute advantage for GRPO, operating only on Outcome reward (with only one scalar reward for each response).
 
     Expects:
-        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
-        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - token_level_rewards: Float[torch.Tensor, "batch_size response_len"]
+        - response_mask: Float[torch.Tensor, "batch_size response_len"]
         - index: np.ndarray (batch_size)
         - epsilon: float
         - grpo_norm_by_std: bool
 
     Returns:
-        - advantages: Float[torch.Tensor, "batch_size seqlen"]
-        - returns: Float[torch.Tensor, "batch_size seqlen"]
+        - advantages: Float[torch.Tensor, "batch_size response_len"]
+        - returns: Float[torch.Tensor, "batch_size response_len"]
     """
     # this assumes response-level rewards
     scores = token_level_rewards.sum(dim=-1)

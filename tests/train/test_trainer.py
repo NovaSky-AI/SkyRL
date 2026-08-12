@@ -81,10 +81,10 @@ def _get_test_data(trainer: RayPPOTrainer):
     action_log_probs: Float[torch.Tensor, "batch_size total_seq_len"] = torch.log(
         torch.tensor([[0.1, 0.3, 0.2, 0.2, 0.2], [0.3, 0.3, 0.2, 0.1, 0.1]])
     )
-    action_masks: Integer[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
+    response_masks: Integer[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
         [torch.tensor([1, 1, 1, 0, 0], dtype=torch.int32), torch.tensor([1, 1, 1, 1, 1], dtype=torch.int32)], dim=0
     )
-    actual_response_lengths: Float[torch.Tensor, "batch_size"] = action_masks.sum(dim=-1).to(float)
+    actual_response_lengths: Float[torch.Tensor, "batch_size"] = response_masks.sum(dim=-1).to(float)
     rewards_all: Float[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
         [torch.tensor([0.0, 1.0, 0.0, 0.0, 0.0]), torch.tensor([0.0, 0.0, 1.0, 0.0, 0.0])], dim=0
     )
@@ -99,7 +99,7 @@ def _get_test_data(trainer: RayPPOTrainer):
             "loss_mask": ret_loss_masks,
             "base_action_log_probs": base_log_probs,
             "action_log_probs": action_log_probs,
-            "response_mask": action_masks,
+            "response_mask": response_masks,
             "rewards": rewards_all,
             "values": values,
         },

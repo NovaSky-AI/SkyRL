@@ -743,7 +743,7 @@ class MegatronWorker:
     def _pad_microbatch_to_size(self, micro_dict: dict, target_batch_size: int) -> dict:
         """Pad a forward or forward_backward micro-batch dict to target_batch_size with dummy samples.
 
-        Padded samples have loss_mask/action_mask=0 so they don't contribute to the loss
+        Padded samples have loss_mask/response_mask=0 so they don't contribute to the loss
         (forward micro-batches carry neither key, so this is inert there). This is needed
         because Megatron's forward_backward_func requires uniform micro_batch_size across all
         microbatches (especially with PP > 1). Scalar keys (``num_actions``,
@@ -775,7 +775,7 @@ class MegatronWorker:
                     # Give each dummy row a single valid token, so the row is non-degenerate:
                     # it avoids a fully-masked row (NaN in dense attention's softmax) and a
                     # zero-length cu_seqlens segment (rejected by the packed/THD kernel).
-                    # The row is still excluded from the loss via loss_mask/action_mask=0.
+                    # The row is still excluded from the loss via loss_mask/response_mask=0.
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
                     pad_tensor[:, 0] = 1
                 elif key == "position_ids":
@@ -790,8 +790,8 @@ class MegatronWorker:
                         dtype=value.dtype,
                         device=device,
                     )
-                elif key == "action_mask":
-                    # action_mask should be zeros for padded samples
+                elif key == "response_mask":
+                    # response_mask should be zeros for padded samples
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
                 else:
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
@@ -1054,7 +1054,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "advantages": experience.advantages,
                     "loss_mask": experience.loss_mask,
                     "rollout_action_logprobs": experience.rollout_logprobs,
-                    "action_mask": experience.action_mask,
+                    "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
                     "sub_seq_lengths": experience.sub_seq_lengths,
@@ -1180,7 +1180,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "advantages": experience.advantages,
                     "loss_mask": experience.loss_mask,
                     "rollout_action_logprobs": experience.rollout_logprobs,
-                    "action_mask": experience.action_mask,
+                    "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
                     # used with global sequence packing (None when token-based batching is active)

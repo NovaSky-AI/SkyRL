@@ -109,7 +109,7 @@ def build_training_input_from_text_samples(
         loss_masks.append([1] * len(response_ids))
 
     sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer=tokenizer,
+        pad_token_id=tokenizer.pad_token_id,
         prompts=prompts,
         responses=responses,
         rewards=rewards,
@@ -129,7 +129,6 @@ def build_training_input_from_text_samples(
             "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
             "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
             "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "action_mask": response_mask.to(dtype=torch.int64),
         }
     )
     training_input.metadata = {"response_length": num_actions}
@@ -220,7 +219,7 @@ async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs):
             rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
         sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor = (
             convert_prompts_responses_to_batch_tensors(
-                tokenizer=tokenizer,
+                pad_token_id=tokenizer.pad_token_id,
                 prompts=generator_output["prompt_token_ids"],
                 responses=responses,
                 rewards=rewards,
@@ -251,7 +250,6 @@ async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs):
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "action_mask": response_mask.to(dtype=torch.int64),
             }
         )
         training_input.metadata = {"response_length": num_actions}
@@ -346,7 +344,7 @@ def test_forward_backward(tp, pp, cp, ep, etp, extra_tf_kwargs):
 
         sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = (
             convert_prompts_responses_to_batch_tensors(
-                tokenizer=tokenizer,
+                pad_token_id=tokenizer.pad_token_id,
                 prompts=prompts,
                 responses=responses,
                 rewards=rewards,
@@ -386,7 +384,6 @@ def test_forward_backward(tp, pp, cp, ep, etp, extra_tf_kwargs):
                 "action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "base_action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "advantages": torch.randn((batch_size, num_actions), generator=gen),
-                "action_mask": response_mask.to(dtype=torch.int64),
             }
         )
         training_input.metadata = {"response_length": num_actions}

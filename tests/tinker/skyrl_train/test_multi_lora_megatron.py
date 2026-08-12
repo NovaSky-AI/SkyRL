@@ -20,6 +20,9 @@ Coverage:
   - test_two_adapters_sample_independently: weight-sync of adapter B
     does not clobber adapter A's slot on vLLM; A's optimizer state
     survives B's intervention end-to-end through sampling.
+  - test_sample_prompt_logprobs: prompt logprobs and top-k prompt logprobs
+    come back populated from vLLM (the JAX generator cannot do top-k, so
+    tests/tinker/test_api.py only covers the flat field there).
 
 Run with:
   uv run --extra tinker --extra megatron --with pytest --with pytest-timeout \\
@@ -406,3 +409,72 @@ def test_two_adapters_sample_independently(service_client):
         f"A's continued sample matches B's sample: A={tokens_a_continued!r}, B={tokens_b!r}. "
         "B's adapter sync may have clobbered A's slot on vLLM."
     )
+
+
+def test_sample_prompt_logprobs(service_client):
+    """Full prompt-logprob contract on vLLM: flat per-token logprobs, top-k
+    distributions, and neither field invented when it wasn't asked for.
+
+    tests/tinker/test_api.py covers the same API surface on JAX, but that
+    generator only produces the prompt tokens' own logprobs and rejects
+    ``topk_prompt_logprobs``, so top-k is only reachable here.
+    """
+    tc = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+    tok = tc.get_tokenizer()
+    sampler = tc.save_weights_and_get_sampling_client(name="prompt_logprobs")
+    prompt_tokens = tok.encode("Question: what is 2+2?\nAnswer:", add_special_tokens=True)
+    prompt = tinker_types.ModelInput.from_ints(prompt_tokens)
+    params = tinker_types.SamplingParams(max_tokens=8, temperature=0.0, seed=0)
+    # vLLM's completions endpoint rejects n > 1 under greedy decoding ("n must
+    # be 1 when using greedy sampling"), so the multi-sample case below has to
+    # sample at a temperature. Prompt logprobs come off the prompt forward pass
+    # and don't depend on how the continuation is drawn, so this costs the
+    # assertions nothing; the seed keeps the run reproducible.
+    multi_params = tinker_types.SamplingParams(max_tokens=8, temperature=1.0, seed=0)
+
+    def _check_flat(prompt_logprobs):
+        # One entry per prompt token, flat (not a list of lists); position 0
+        # has no preceding context so vLLM computes no logprob for it.
+        assert prompt_logprobs is not None, "asked for prompt logprobs but the field came back unset"
+        assert len(prompt_logprobs) == len(prompt_tokens), (
+            f"expected {len(prompt_tokens)} prompt logprobs, got {len(prompt_logprobs)} — "
+            "a flat per-token list read as a list-of-lists looks exactly like this."
+        )
+        assert prompt_logprobs[0] is None
+        assert all(isinstance(lp, float) and lp <= 1e-6 for lp in prompt_logprobs[1:])
+
+    # num_samples=3: all three samples share one prompt, and only the first
+    # asks vLLM for prompt logprobs — that's also the one the result is read
+    # back from, so an off-by-one there returns None for the whole field.
+    result = sampler.sample(
+        prompt=prompt, sampling_params=multi_params, num_samples=3, include_prompt_logprobs=True
+    ).result()
+    assert len(result.sequences) == 3
+    _check_flat(result.prompt_logprobs)
+    assert result.topk_prompt_logprobs is None, "top-k was not requested"
+
+    # A positive top-k implies prompt logprobs: both come off the same prompt
+    # forward pass, so `include_prompt_logprobs` is deliberately left off.
+    topk = 4
+    result = sampler.sample(prompt=prompt, sampling_params=params, num_samples=1, topk_prompt_logprobs=topk).result()
+    _check_flat(result.prompt_logprobs)
+    per_position = result.topk_prompt_logprobs
+    assert per_position is not None, "topk_prompt_logprobs came back unset"
+    assert len(per_position) == len(prompt_tokens)
+    assert per_position[0] is None
+    for i, entries in enumerate(per_position[1:], start=1):
+        assert entries and len(entries) <= topk, f"position {i}: got {entries!r} for k={topk}"
+        logprobs = [lp for _, lp in entries]
+        assert all(isinstance(tid, int) for tid, _ in entries)
+        assert logprobs == sorted(logprobs, reverse=True), f"top-k at position {i} is not descending: {logprobs}"
+        # Where the prompt's own token is inside the top-k, its logprob must
+        # match the flat list — both are built from one vLLM per-position
+        # dict, so a mismatch means the two fields are off by a position.
+        own = dict(entries).get(prompt_tokens[i])
+        if own is not None:
+            assert own == pytest.approx(result.prompt_logprobs[i])
+
+    # Neither field is paid for (or invented) when unrequested.
+    result = sampler.sample(prompt=prompt, sampling_params=params, num_samples=1).result()
+    assert result.prompt_logprobs is None
+    assert result.topk_prompt_logprobs is None

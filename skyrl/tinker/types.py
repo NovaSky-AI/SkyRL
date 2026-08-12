@@ -255,6 +255,8 @@ class SampleInput(BaseModel):
     num_samples: int
     checkpoint_id: str
     prompt_logprobs: bool
+    # Number of top logprobs to return per prompt position (0 disables).
+    topk_prompt_logprobs: int = 0
     # See make_routing_session_id.
     seq_id: int | None = None
     sampling_session_id: str | None = None
@@ -268,7 +270,13 @@ class GeneratedSequence(BaseModel):
 
 class SampleOutput(BaseModel):
     sequences: list[GeneratedSequence]
-    prompt_logprobs: list[float] | None = None
+    # One entry per prompt token. Entries are None where the logprob is
+    # undefined (the first prompt token has no preceding context).
+    prompt_logprobs: list[float | None] | None = None
+    # One entry per prompt token, each a list of (token_id, logprob) pairs
+    # (None where logprobs are undefined). Only set when the request asked
+    # for topk_prompt_logprobs > 0.
+    topk_prompt_logprobs: list[list[tuple[int, float]] | None] | None = None
 
 
 # Metrics tracked in the engine
@@ -323,8 +331,9 @@ class PreparedSampleBatch(BaseModel):
     # Whether any request needs prompt logprobs
     needs_prompt_logprobs: bool
 
-    # Mapping from samples back to requests: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested)
-    request_batch_slices: list[tuple[str, str, int, int, bool]]
+    # Mapping from samples back to requests:
+    # (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested, topk_prompt_logprobs)
+    request_batch_slices: list[tuple[str, str, int, int, bool, int]]
 
 
 # All accepted loss functions across backends.

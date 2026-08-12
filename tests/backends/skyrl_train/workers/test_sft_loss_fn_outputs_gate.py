@@ -71,7 +71,7 @@ def _make_experience() -> Experience:
         advantages=torch.zeros(BATCH_SIZE, NUM_ACTIONS),
         attention_mask=torch.ones(BATCH_SIZE, SEQ_LEN, dtype=torch.long),
         loss_mask=torch.ones(BATCH_SIZE, NUM_ACTIONS, dtype=torch.long),
-        action_mask=None,
+        response_mask=None,
         rollout_expert_indices=None,
         num_actions=NUM_ACTIONS,
         info={},
