@@ -28,7 +28,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
     vocab_parallel_entropy_packed_sequences,
 )
-from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import is_fp8_enabled
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    is_fp8_enabled,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     build_token_metadata_layout,
 )
@@ -353,6 +355,7 @@ class MegatronModelWrapper:
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
+            fp8_recipe = getattr(model_config, "fp8_recipe", None)
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             router_padding_mask = batch.pop("router_padding_mask", None)
 
@@ -376,6 +379,7 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
+                    fp8_recipe=fp8_recipe,
                 )
                 batch["packed_seq_params"] = packed_seq_params
                 batch["packed_targets"] = _build_packed_targets(
@@ -390,6 +394,7 @@ class MegatronModelWrapper:
                     position_ids,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     fp8_enabled=fp8_enabled,
+                    fp8_recipe=fp8_recipe,
                 )
                 packed_seq_params = None
                 # Qwen-style VLMs recompute 3D mRoPE positions internally from
@@ -404,6 +409,7 @@ class MegatronModelWrapper:
                     attention_mask.device,
                     packed=packed_seq_params is not None,
                     fp8_enabled=fp8_enabled,
+                    fp8_recipe=fp8_recipe,
                 )
 
             model_replay_kwargs = {}
@@ -954,6 +960,7 @@ class MegatronModelWrapper:
 
             model_config = get_model_config(model)
             fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
+            fp8_recipe = getattr(model_config, "fp8_recipe", None)
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             router_padding_mask = batch.pop("router_padding_mask", None)
 
@@ -985,6 +992,7 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
+                    fp8_recipe=fp8_recipe,
                 )
                 batch["packed_seq_params"] = packed_seq_params
                 batch["packed_targets"] = _build_packed_targets(
@@ -1010,6 +1018,7 @@ class MegatronModelWrapper:
                     position_ids,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     fp8_enabled=fp8_enabled,
+                    fp8_recipe=fp8_recipe,
                 )
                 packed_seq_params = None
                 # Qwen-style VLMs recompute 3D mRoPE positions internally from
@@ -1026,6 +1035,7 @@ class MegatronModelWrapper:
                     attention_mask.device,
                     packed=packed_seq_params is not None,
                     fp8_enabled=fp8_enabled,
+                    fp8_recipe=fp8_recipe,
                 )
 
             model_replay_kwargs = {}

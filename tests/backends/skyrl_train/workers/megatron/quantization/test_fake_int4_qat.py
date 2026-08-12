@@ -13,7 +13,7 @@ compressed-tensors, megatron, or a GPU.
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat import (
+from skyrl.backends.skyrl_train.workers.megatron.quantization.fake_int4_qat import (
     _FakeInt4QuantizeSTE,
     fake_int4_quantize_ste,
 )
