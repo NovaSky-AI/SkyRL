@@ -105,11 +105,15 @@ async def test_resolves_once_the_request_completes(waiters, sync_engine):
         mark_completed(sync_engine, request_id, SAMPLE_RESULT)
 
     asyncio.create_task(complete_soon())
-    status, result_data = await wait_for_future(waiters, request_id, timeout=5)
+    status, request_type, result_data = await wait_for_future(waiters, request_id, timeout=5)
 
     # result_data is the stored JSON text, not a decoded object, so it takes a
     # parse to compare against the result that was stored.
-    assert (status, types.SampleOutput.model_validate_json(result_data)) == (RequestStatus.COMPLETED, SAMPLE_RESULT)
+    assert (status, request_type, types.SampleOutput.model_validate_json(result_data)) == (
+        RequestStatus.COMPLETED,
+        types.RequestType.SAMPLE,
+        SAMPLE_RESULT,
+    )
 
 
 @pytest.mark.asyncio
@@ -118,9 +122,13 @@ async def test_surfaces_failed_status(waiters, sync_engine):
     error = types.ErrorResponse(error="boom", status="failed")
     mark_completed(sync_engine, request_id, error, status=RequestStatus.FAILED)
 
-    status, result_data = await wait_for_future(waiters, request_id, timeout=5)
+    status, request_type, result_data = await wait_for_future(waiters, request_id, timeout=5)
 
-    assert (status, types.ErrorResponse.model_validate_json(result_data)) == (RequestStatus.FAILED, error)
+    assert (status, request_type, types.ErrorResponse.model_validate_json(result_data)) == (
+        RequestStatus.FAILED,
+        types.RequestType.SAMPLE,
+        error,
+    )
 
 
 @pytest.mark.asyncio
@@ -150,7 +158,7 @@ async def test_one_waiter_giving_up_does_not_strand_the_others(waiters, sync_eng
     result = types.OptimStepOutput(metrics={"loss": 1.5})
     mark_completed(sync_engine, request_id, result)
 
-    status, result_data = await patient
+    status, _, result_data = await patient
     assert (status, types.OptimStepOutput.model_validate_json(result_data)) == (RequestStatus.COMPLETED, result)
 
 
@@ -179,10 +187,13 @@ async def test_query_count_does_not_scale_with_waiters(waiters, sync_engine, asy
     assert 0 < len(statements) < 50
 
 
-def _stub_request(async_engine, waiters):
+def _stub_request(async_engine, waiters, headers: dict | None = None):
     from types import SimpleNamespace
 
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db_engine=async_engine, future_waiters=waiters)))
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(db_engine=async_engine, future_waiters=waiters)),
+        headers=headers or {},
+    )
 
 
 @pytest.mark.asyncio
@@ -226,6 +237,32 @@ async def test_retrieve_future_400s_with_the_stored_error(waiters, async_engine,
 
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "boom"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_future_serves_proto_when_accepted(waiters, async_engine, sync_engine):
+    """A completed sample future is served as proto bytes when the client's
+    Accept header asks for it (the JSON test above covers the default path)."""
+    from tinker import SampleResponse
+    from tinker.proto.response_conv import deserialize_proto_response
+
+    from skyrl.tinker import api
+
+    request_id = insert_pending(sync_engine)[0]
+    mark_completed(
+        sync_engine,
+        request_id,
+        types.SampleOutput(sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1, 2], logprobs=[-0.5, -1.0])]),
+    )
+
+    result = await api.retrieve_future(
+        api.RetrieveFutureRequest(request_id=str(request_id)),
+        _stub_request(async_engine, waiters, headers={"accept": "application/x-protobuf, application/json"}),
+    )
+
+    assert result.media_type == "application/x-protobuf"
+    response = deserialize_proto_response(result.body, SampleResponse)
+    assert response.sequences[0].tokens == [1, 2]
 
 
 @pytest.mark.asyncio
