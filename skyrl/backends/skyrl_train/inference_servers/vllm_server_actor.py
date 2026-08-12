@@ -481,9 +481,8 @@ class VLLMServerActor(ServerActorProtocol):
 def _seed_dp_master_port() -> None:
     """Give vLLM's ray executor a valid TCPStore port window.
 
-    vLLM 0.26's ``RayExecutorV2`` (the default for
-    ``distributed_executor_backend="ray"``) picks the port for the engine
-    workers' ``torch.distributed`` group as
+    ``RayExecutorV2`` (the default for``distributed_executor_backend="ray"``) 
+    picks the port for the engine's workers' ``torch.distributed`` group as
     ``VLLM_DP_MASTER_PORT + 100 + 32 * local_dp_rank``. With DP disabled,
     ``ParallelConfig`` falls back to the env defaults, where
     ``VLLM_DP_MASTER_PORT`` is 0 -- so the workers try to bind privileged port

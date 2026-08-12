@@ -119,14 +119,7 @@ class DeltaWeightTransferEngine:
         """
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
-        """Load one update, as vLLM's native ``/update_weights`` endpoint expects.
-
-        Mirrors ``WeightTransferEngine.update_weights``: vLLM 0.26's
-        ``Worker.update_weights`` calls this (it used to hand ``receive_weights``
-        a ``load_weights`` callback directly), so a duck-typed engine has to
-        provide it or the endpoint fails with ``'DeltaWeightTransferEngine'
-        object has no attribute 'update_weights'``.
-        """
+        """Load one update, as vLLM's native ``/update_weights`` endpoint expects."""
         self.receive_weights(self.parse_update_info(update_info))
         torch.accelerator.synchronize()
 
@@ -174,10 +167,6 @@ class DeltaWeightTransferEngine:
         return {"status": "ok", "target_version": target_version, "stats": {**stats, "total_s": total_s}}
 
     def receive_weights(self, update_info: DeltaTransferUpdateInfo) -> None:
-        # vLLM 0.26 dropped receive_weights' `load_weights` callback parameter;
-        # engines load through ``self.model.load_weights``, which callers can
-        # retarget via set_weight_update_target (SkyRL's worker extension points
-        # it at a proxy that also reloads the spec-decode drafter).
         if self._store is None:
             raise RuntimeError("DeltaWeightTransferEngine has not been initialized")
 

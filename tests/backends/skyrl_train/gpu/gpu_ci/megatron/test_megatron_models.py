@@ -201,12 +201,6 @@ async def construct_training_input_from_generator_output(generator_output, token
         # GLM-4.7-Flash (~31B MoE, MLA) on 4xH100-80G. Mesh: TP=4 EP=4 ETP=1
         # -> DP=1, vLLM TP=4 colocated on the same GPUs, same layout as the
         # other large-MoE entries below.
-        #
-        # This replaced a tiny random Glm4MoeLite fixture: vLLM 0.26's MLA
-        # prefill selector only accepts the DeepSeek (128/64/128), GLM
-        # (192/64/256) and Mistral-S4 (64/64/128) head-dim triples, and the
-        # scaled-down config had none of them. The real checkpoint uses the
-        # GLM triple, so MLA coverage now lives in the h100 job.
         pytest.param(
             4,
             1,
