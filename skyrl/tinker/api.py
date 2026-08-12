@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import random
 import re
@@ -12,8 +13,11 @@ from uuid import uuid4
 
 import fastapi
 import psutil
+import zstandard as zstd
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError as FastAPIRequestValidationError
 from fastapi.responses import RedirectResponse, StreamingResponse
+from google.protobuf.message import DecodeError
 from pydantic import (
     Base64Bytes,
     BaseModel,
@@ -46,6 +50,12 @@ from skyrl.tinker.extra import (
     InMemoryFutureStore,
     SkyRLTrainInferenceForwardingClient,
 )
+from skyrl.tinker.proto_serialization import (
+    PROTO_CONTENT_TYPE,
+    PROTO_SERIALIZABLE_REQUEST_TYPES,
+    parse_forward_backward_request,
+    serialize_result,
+)
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
 
@@ -69,6 +79,19 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 # Statuses a request never moves out of, i.e. the ones a waiter resolves on.
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
 
+# The SDK limits each uncompressed forward/backward chunk to roughly 5 MB.
+# Leave room for estimation error and future tensor fields while bounding
+# decompression so a malformed request cannot expand without limit.
+MAX_FORWARD_BACKWARD_BODY_BYTES = 64 * 1024 * 1024
+
+
+def _decompress_forward_backward_body(body: bytes) -> bytes:
+    with zstd.ZstdDecompressor().stream_reader(io.BytesIO(body)) as reader:
+        decompressed = reader.read(MAX_FORWARD_BACKWARD_BODY_BYTES + 1)
+    if len(decompressed) > MAX_FORWARD_BACKWARD_BODY_BYTES:
+        raise OverflowError
+    return decompressed
+
 
 def raw_json_response(payload: str | None) -> Response:
     """Return already-serialized JSON without routing it through FastAPI's encoder.
@@ -86,8 +109,8 @@ def raw_json_response(payload: str | None) -> Response:
 
 async def wait_for_future(
     waiters: dict[int, set[asyncio.Future]], request_id: int, timeout: float
-) -> tuple[RequestStatus, str | None] | None:
-    """Wait for ``request_id`` to finish, returning its ``(status, result_data)``.
+) -> tuple[RequestStatus, types.RequestType, str | None] | None:
+    """Wait for ``request_id`` to finish, returning its ``(status, request_type, result_data)``.
 
     ``result_data`` is the JSON text stored for the request, not a decoded
     object -- see :class:`FutureDB`.
@@ -143,15 +166,15 @@ async def poll_futures(
                     # The awaited ids go in as bound parameters, capped at 32766
                     # by SQLite (since 3.32) and 65535 by Postgres -- far above
                     # any plausible number of in-flight requests.
-                    statement = select(FutureDB.request_id, FutureDB.status, FutureDB.result_data).where(
-                        FutureDB.request_id.in_(awaited)
-                    )
+                    statement = select(
+                        FutureDB.request_id, FutureDB.status, FutureDB.request_type, FutureDB.result_data
+                    ).where(FutureDB.request_id.in_(awaited))
                     rows = (await session.exec(statement)).all()
 
                 # Pending requests are left alone to be picked up on a later tick.
-                outcomes: dict[int, tuple[RequestStatus, str | None] | KeyError] = {
-                    request_id: (status, result_data)
-                    for request_id, status, result_data in rows
+                outcomes: dict[int, tuple[RequestStatus, types.RequestType, str | None] | KeyError] = {
+                    request_id: (status, request_type, result_data)
+                    for request_id, status, request_type, result_data in rows
                     if status in TERMINAL_STATUSES
                 }
                 for request_id in set(awaited) - {request_id for request_id, *_ in rows}:
@@ -905,6 +928,8 @@ class WeightsInfoResponse(BaseModel):
 
 class ClientConfigResponse(BaseModel):
     pjwt_auth_enabled: bool = False
+    proto_write_fwdbwd: bool = True
+    proto_compress_fwdbwd: bool = True
 
 
 @app.post("/api/v1/client/config", response_model=ClientConfigResponse)
@@ -1097,14 +1122,51 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
     )
 
 
+async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardRequest, bool]:
+    """Read a forward_backward body in either wire format.
+
+    tinker SDK >= 0.25.0 submits the body as protobuf and routes forward-only
+    passes here via the proto's ``forward_only`` flag instead of calling
+    ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
+    """
+    body = await req.body()
+    content_type = req.headers.get("content-type", "").lower()
+    content_encoding = req.headers.get("content-encoding", "").lower().strip()
+    if content_encoding:
+        if content_encoding != "zstd" or PROTO_CONTENT_TYPE not in content_type:
+            raise HTTPException(status_code=415, detail=f"Unsupported content encoding: {content_encoding}")
+        try:
+            body = await asyncio.to_thread(_decompress_forward_backward_body, body)
+        except OverflowError:
+            raise HTTPException(status_code=413, detail="Decompressed forward_backward body is too large")
+        except zstd.ZstdError as e:
+            raise HTTPException(status_code=422, detail=f"Invalid zstd forward_backward body: {e}")
+
+    if PROTO_CONTENT_TYPE in content_type:
+        try:
+            request_dict, forward_only = parse_forward_backward_request(body)
+        except (DecodeError, ValueError) as e:
+            raise HTTPException(status_code=422, detail=f"Invalid proto forward_backward body: {e}")
+    else:
+        request_dict, forward_only = None, False
+    try:
+        if request_dict is not None:
+            return ForwardBackwardRequest.model_validate(request_dict), forward_only
+        return ForwardBackwardRequest.model_validate_json(body), forward_only
+    except ValidationError as e:
+        # Match FastAPI's native body validation error shape (422).
+        raise FastAPIRequestValidationError(e.errors())
+
+
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
-async def forward_backward(request: ForwardBackwardRequest, session: AsyncSession = Depends(get_session)):
-    """Compute and accumulate gradients."""
+async def forward_backward(req: Request, session: AsyncSession = Depends(get_session)):
+    """Compute and accumulate gradients (or run forward-only when the proto body asks for it)."""
+    request, forward_only = await _read_forward_backward_request(req)
     await get_model(session, request.model_id)
 
     request_id = await create_future(
         session=session,
-        request_type=types.RequestType.FORWARD_BACKWARD,
+        request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
         request_data=request.forward_backward_input.to_types(),
         seq_id=request.seq_id,
@@ -1348,7 +1410,10 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
 
     try:
         if request_id < 0:
-            row = await req.app.state.external_future_store.wait_for_future(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+            external_row = await req.app.state.external_future_store.wait_for_future(
+                request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS
+            )
+            row = None if external_row is None else (external_row[0], types.RequestType.SAMPLE, external_row[1])
         else:
             row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
     except KeyError:
@@ -1357,8 +1422,18 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     if row is None:
         raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
-    status, result_data = row
+    status, request_type, result_data = row
     if status == RequestStatus.COMPLETED:
+        # The SDK retrieves sample/forward/forward_backward results in proto
+        # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
+        # for these types. Errors and other result types stay JSON.
+        if request_type in PROTO_SERIALIZABLE_REQUEST_TYPES and PROTO_CONTENT_TYPE in req.headers.get(
+            "accept", ""
+        ).lower():
+            return Response(
+                content=serialize_result(request_type, result_data),
+                media_type=PROTO_CONTENT_TYPE,
+            )
         return raw_json_response(result_data)
 
     # Return 400 for handled errors (validation, etc.), 500 for unexpected failures.
