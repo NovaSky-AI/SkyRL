@@ -211,7 +211,14 @@ class FSDPStrategy(DistributedStrategy):
             reduce_dtype = torch.float32
 
         assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
-        mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True)
+        # Params4bit uses BF16 tensors as opaque packed storage. FSDP parameter
+        # casting canonicalizes NaN payloads in those bytes and corrupts weights.
+        fsdp_param_dtype = None if self.is_4bit else param_dtype
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=fsdp_param_dtype,
+            reduce_dtype=reduce_dtype,
+            cast_forward_inputs=True,
+        )
 
         cpu_offload = CPUOffloadPolicy(pin_memory=True) if self.fsdp_config.cpu_offload else None
 
