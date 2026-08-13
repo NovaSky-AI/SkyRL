@@ -1304,6 +1304,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         Note: Unlike FSDP workers, Megatron doesn't need manual gradient scaling here
         because Megatron Core's forward_backward_func handles loss scaling internally.
+        However, we do need to manually trigger the call to `finalize_model_grads` to
+        reduce gradients that have been accumulated across multiple forward_backward calls.
 
         This is the end of a gradient accumulation window: gradients from every
         ``forward_backward`` call since the last step are reduced once, applied, and
