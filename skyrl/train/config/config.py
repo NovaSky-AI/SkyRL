@@ -793,7 +793,7 @@ class InferenceFaultToleranceConfig(BaseConfig):
     """Producer-side watchdog for the weight-sync window (``SKYRL_RDT_STALL_TIMEOUT_S``
     overrides it in the sidecar). Detection is generation-driven and no generation is
     in flight during a sync, so a death that lands inside the sync window has no
-    detector; without this the producer blocks forever on a ``free_gather`` that will
+    detector; without this the producer blocks forever on a ``free_group`` signal that will
     never arrive and wedges every trainer rank in NCCL. On no progress for this long
     the producer fails the sync with a real error. Nominal inter-progress gaps are
     sub-second, so the default is a ~100x margin even at 235B."""

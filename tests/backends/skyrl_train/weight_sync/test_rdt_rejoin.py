@@ -47,6 +47,8 @@ def _engine(server_names=("srv-a", "srv-b"), num_consumers=4):
     ]
     e._groups = [["model.embed_tokens.weight"], ["model.layers.0.mlp.w.weight"], ["lm_head.weight"]]
     e._group_owners = [[0], [1], [0]]
+    e._name_ep_rank = None
+    e._producer_ep_ranks = None
     # rank 0 IS the sender (`is_sender` is derived from rank on the base class, not a
     # constructor field), so this engine is the one that drives the control plane.
     e._init_info = ShardedRDTTrainerInitInfo(

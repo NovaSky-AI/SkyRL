@@ -158,14 +158,11 @@ def _reserve_all_but_one_gpu_node():
         pytest.param("nccl", True, 4, 2, 2, 1, None, False, id="nccl_colocate_all"),
         pytest.param("nccl", False, 2, 2, 1, 1, None, False, id="nccl_non_colocated"),
         pytest.param("nccl", True, 4, 2, 2, 1, None, True, id="nccl_colocate_all_lora"),
-        # sharded_rdt (NIXL pull): non-colocated only. PP=2 exercises the default
-        # gather-to-all layout, where the bridge broadcasts across pipeline stages
-        # so every producer rank streams whole-model tensors (the trainer engine's
-        # group-contiguity check catches any break). PP-LOCAL gather is the other
-        # layout — each stage serves only its own layers — and is covered by the
-        # source_bench A/B and the 235B run, both of which reach the workers with
-        # SKYRL_RDT_PP_LOCAL=1 through prepare_runtime_environment; this harness
-        # builds its actors without a runtime_env, so the env var would not arrive.
+        # sharded_rdt (NIXL pull): non-colocated only. PP=2 exercises the
+        # stacked source's single mode: each stage declares and serves only its
+        # own layers, and on MoE models each rank serves only its own EP
+        # coordinate's experts. The naive whole-model extraction (plain bridge
+        # source, SKYRL_RDT_STACKED_EXPERTS=0) is covered by the source_bench A/B.
         # The harness sets policy world = num_gpus_per_node = inference_tp, so
         # inference_tp must equal megatron_tp*megatron_pp (=4): 4 dedicated policy
         # GPUs + 4 inference GPUs = 8, genuinely non-colocated.

@@ -4,7 +4,7 @@
 when an engine dies outside a generation phase, that pause is the first call to
 touch the corpse and it reconciles the fleet. Reading membership *before* it hands
 the weight sync a set that still contains the dead consumer -- the producers then
-block on a ``free_gather`` that can never arrive and the run dies at the stall
+block on a ``free_group`` signal that can never arrive and the run dies at the stall
 watchdog instead of degrading.
 
 This is a pure ordering property, so it is tested by ordering: a recording stand-in

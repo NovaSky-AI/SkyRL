@@ -58,28 +58,5 @@ def ensure_ray_rdt_libfabric() -> None:
         return self._nixl_agent
 
     cls.get_nixl_agent = get_nixl_agent
-    if os.environ.get("SKYRL_RDT_NOSYNC") == "1":
-        # Ray's extract path runs a device-wide torch.cuda.synchronize before
-        # every NIXL registration (nixl_tensor_transport.py, "we have to
-        # synchronize before memory registration"), serializing the whole
-        # gather/serve/pull pipeline once per produce call. The engine's nosync
-        # mode already orders serve-buffer writes with events, and the consumer
-        # pull happens an RPC round-trip later; skipping the device sync was
-        # validated byte-identical (pack_check) in the multi_node_rdt.md runs.
-
-        orig_extract = cls.extract_tensor_transport_metadata
-
-        def extract_tensor_transport_metadata(self, *a, **k):
-            import torch
-
-            orig_sync = torch.cuda.synchronize
-            torch.cuda.synchronize = lambda *args, **kw: None
-            try:
-                return orig_extract(self, *a, **k)
-            finally:
-                torch.cuda.synchronize = orig_sync
-
-        cls.extract_tensor_transport_metadata = extract_tensor_transport_metadata
-        logger.info("[rdt-libfabric-shim] RDT nosync: device-wide sync skipped in extract")
     cls._skyrl_libfabric_shim = True
     logger.info("[rdt-libfabric-shim] patched Ray RDT NIXL backend to LIBFABRIC (EFA)")

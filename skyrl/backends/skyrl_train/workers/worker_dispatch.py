@@ -720,7 +720,7 @@ class WorkerDispatch:
         # outside a generation phase, the pause is the first call to touch the dead
         # engine, and it reconciles. Reading the membership before it would hand the
         # sync a set that still contains the dead consumer, and the producers would
-        # then wait out the stall watchdog for a `free_gather` that can never arrive.
+        # then wait out the stall watchdog for a `free_group` signal that can never arrive.
         # (Capturing it once per sync still matters -- every rank must be given the
         # same value -- but one dispatch guarantees that regardless of when we read.)
         if self.colocate_all:

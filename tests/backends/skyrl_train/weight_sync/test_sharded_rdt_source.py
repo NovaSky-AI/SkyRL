@@ -119,3 +119,14 @@ class TestWeightSourceGroupContract:
         source = _Batched(["model.layers.0.a", "model.layers.0.b"])
         assert [ns for ns, _ in source.iter_groups()] == [["model.layers.0.a", "model.layers.0.b"]]
         assert calls == [2]
+
+
+class TestExpertOwnershipDefault:
+    """`expert_ownership()` is a declaration with a safe default, like
+    `owned_groups()`: a source that never overrides it declares no name-level
+    sharding, which the engine treats as every stamp -1."""
+
+    def test_the_default_is_none(self):
+        names = ["embed.w", "model.layers.0.a"]
+        src = TestWeightSourceGroupContract._Source(names)
+        assert src.expert_ownership() is None

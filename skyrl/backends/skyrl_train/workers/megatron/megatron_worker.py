@@ -1490,17 +1490,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         return out
 
     def rdt_pp_local_bench(self, iters: int = 2):
-        """A/B PP-local vs gather-to-all gather for the RDT weight source.
+        """A/B shard-aware (stacked) vs naive (plain bridge) RDT weight source.
 
-        Runs the stacked source twice in one process — ``SKYRL_RDT_PP_LOCAL`` off
-        then on — with no engine and no consumers, so the delta is exactly what
-        not gathering across pipeline stages buys. Both legs are timed the same way
+        Runs make_weight_source twice in one process — ``SKYRL_RDT_STACKED_EXPERTS``
+        off then on — with no engine and no consumers, so the delta is exactly
+        what serving only locally-held weights buys (no cross-stage gathers, no
+        expert all-gather) against the plain whole-model bridge extraction. Both legs are timed the same way
         as ``rdt_source_bench`` (CPU wall and device-synchronized wall, since the
         gathers are issued async).
 
         It is also the correctness gate for the mode, before any engine is
-        involved: every NAME the PP-local leg produces must carry a byte-identical
-        tensor to the gather-to-all leg's. The comparison is per name, not per
+        involved: every tensor the shard-aware leg MATERIALIZES (foreign experts
+        yield None and are skipped) must be byte-identical to the naive leg's. The comparison is per name, not per
         group, because the two layouts legitimately partition differently — the
         non-layer names form one leading group when every stage sees them and split
         per stage when they do not — and a partition difference is not a weight
@@ -1537,12 +1538,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bucket_size_threshold_GB=1.0,
             training_dtype=torch.bfloat16,
         )
-        prev = _os.environ.get("SKYRL_RDT_PP_LOCAL")
+        prev = _os.environ.get("SKYRL_RDT_STACKED_EXPERTS")
         out: dict = {}
         digests: dict = {}
         try:
             for label, flag in (("gather_to_all", "0"), ("pp_local", "1")):
-                _os.environ["SKYRL_RDT_PP_LOCAL"] = flag
+                _os.environ["SKYRL_RDT_STACKED_EXPERTS"] = flag
                 src = make_weight_source(extractor, torch.bfloat16)
                 r: dict = {"class": type(src).__name__}
                 if hasattr(src, "pop_phase_timing"):
@@ -1563,7 +1564,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         if i == 0:
                             order.append(tuple(names))
                             for nm, t in zip(names, tensors):
-                                per_name[nm] = _digest(t)
+                                if t is not None:  # foreign expert (shard-aware): no data
+                                    per_name[nm] = _digest(t)
                         del tensors
                     cpu = _t.perf_counter() - t0
                     torch.cuda.synchronize()
@@ -1587,9 +1589,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 del src
         finally:
             if prev is None:
-                _os.environ.pop("SKYRL_RDT_PP_LOCAL", None)
+                _os.environ.pop("SKYRL_RDT_STACKED_EXPERTS", None)
             else:
-                _os.environ["SKYRL_RDT_PP_LOCAL"] = prev
+                _os.environ["SKYRL_RDT_STACKED_EXPERTS"] = prev
 
         ref, got = digests["gather_to_all"], digests["pp_local"]
         missing = [n for n in got if n not in ref]

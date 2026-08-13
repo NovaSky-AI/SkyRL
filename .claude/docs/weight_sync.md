@@ -37,7 +37,10 @@ else: NCCL and cuda_ipc broadcast over a communicator fixed at provision, so los
 member hangs the broadcast rather than degrading it. `_live_server_urls` in
 `worker_dispatch.py` is the runtime backstop that refuses a partial broadcast.
 
-The mechanism is small because the routing already carried it:
+The mechanism is small because freeing is a per-group barrier: each consumer signals
+`free_group(gi)` at every owner of the group exactly once per sync, and each producer
+counts signals against one uniform target — the live consumer count passed at
+`begin_sync`.
 
 ```
 [driver]   save_weights_for_sampler: live = client.active_server_urls (None if whole)
@@ -47,24 +50,24 @@ The mechanism is small because the routing already carried it:
              live_cids = urls -> PROVISIONED indices -> replica ranks -> consumer ids
              control_plane.set_live(live)          # start/update/finish only; init keeps the
                                                    # provisioned list (replica_rank is a position)
-[producer] send_weights(live_consumer_ids) -> _live_consumers recomputes this sync's
-             _free_targets from RdtRouter.free_target(rank, g, live), restoring them after
-           groups whose live target hits 0 are gathered and DROPPED (pre-existing path)
+[producer] send_weights(live_consumer_ids) -> begin_sync(len(live)): every group's
+             free barrier counts to the live total instead of the provisioned one
 [consumer] unchanged — a consumer's plan depends only on its own consumer_id
 ```
 
 Invariants worth not breaking: provisioned geometry (`num_consumers`, the router,
-ownership, `served_names`) is frozen for the run and liveness is only ever a *filter*
-over it; every rank must get the same live set; and the gather loop still iterates every
-owned group on every rank, because the gather is a collective.
+ownership, `served_names`) is frozen for the run and liveness is only ever a lower
+barrier *target* over it; every rank must get the same live set; and the gather loop
+still iterates every owned group on every rank, because the non-expert gather is a
+collective.
 
 `_RDTProducerServer` also carries a **stall watchdog** (`stall_timeout_s`, default 300s).
 Detection is generation-driven and no generation is in flight during a sync, so a death
-inside the sync window has no detector — the dead consumer never sends `free_gather`, the
-three waits block forever, and every trainer rank wedges in NCCL with no exception
-anywhere. On no publish/serve/free progress for the timeout, the producer fires the
-existing `set_gather_error` channel and the run fails with a real error. Part 1 does not
-recover from this; it only makes it diagnosable.
+inside the sync window has no detector — the dead consumer never sends its `free_group`
+signals, the three waits block forever, and every trainer rank wedges in NCCL with no
+exception anywhere. On no publish/serve/free progress for the timeout, the producer fires
+the existing `set_gather_error` channel and the run fails with a real error. Part 1 does
+not recover from this; it only makes it diagnosable.
 
 Vendored files (`sharded_rdt_*.py`) mirror `~/default/vllm-rdt-weight-sync`; keep both in
 sync. Design doc: `~/default/rdt_fault_tolerance.md`.
