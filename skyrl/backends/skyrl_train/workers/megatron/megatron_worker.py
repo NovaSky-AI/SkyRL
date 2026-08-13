@@ -39,6 +39,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.patches.megatron_mla_thd_v_pad import (
+    apply_megatron_mla_thd_v_pad_patch,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -75,6 +78,8 @@ from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
+
+apply_megatron_mla_thd_v_pad_patch()
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.base import (
