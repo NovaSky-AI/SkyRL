@@ -242,8 +242,49 @@ class DistributedTorchRayActor:
                 continue
         if not cpu_nodes:
             cpu_nodes = [0]
-        num_gpu_per_numa_node = max(1, torch.cuda.device_count() // len(cpu_nodes))
-        target_nid = cpu_nodes[min(len(cpu_nodes) - 1, self._local_rank // num_gpu_per_numa_node)]
+
+        def gpu_numa_node():
+            """NUMA node of the GPU this worker owns, or None if it can't be determined.
+
+            Ray masks CUDA_VISIBLE_DEVICES down to this worker's single GPU, so cuda:0 is
+            that GPU and its PCI affinity is the exact answer -- no rank-to-socket heuristic
+            needed (and none works: with one visible device, GPU-count-based sharding sends
+            every rank but 0 to the last node).
+            """
+            try:
+                props = torch.cuda.get_device_properties(0)
+                bdf = f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:{props.pci_device_id:02x}.0"
+            except Exception:
+                return None
+            pci_dev = f"/sys/bus/pci/devices/{bdf}"
+            try:
+                with open(f"{pci_dev}/numa_node") as f:
+                    nid = int(f.read().strip())
+                if nid in cpu_nodes:
+                    return nid
+            except (OSError, ValueError):
+                pass
+            # `numa_node` is -1 on single-socket hosts and can name a CPU-less HBM node on
+            # GB200; `local_cpulist` still points at the CPUs closest to the device.
+            try:
+                with open(f"{pci_dev}/local_cpulist") as f:
+                    cpulist = f.read().strip()
+                if not cpulist:
+                    return None
+                first_cpu = int(cpulist.split(",")[0].split("-")[0])
+                for entry in os.listdir(f"/sys/devices/system/cpu/cpu{first_cpu}"):
+                    if entry.startswith("node") and entry[4:].isdigit():
+                        nid = int(entry[4:])
+                        return nid if nid in cpu_nodes else None
+            except (OSError, ValueError):
+                return None
+            return None
+
+        target_nid = gpu_numa_node()
+        if target_nid is None:
+            # Fall back to spreading local ranks evenly over the CPU-bearing nodes.
+            num_gpu_per_numa_node = max(1, 8 // len(cpu_nodes))
+            target_nid = cpu_nodes[min(len(cpu_nodes) - 1, self._local_rank // num_gpu_per_numa_node)]
         numa_bind(target_nid)
         _SET_AFFINITY = True
 
