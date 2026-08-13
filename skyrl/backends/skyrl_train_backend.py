@@ -425,7 +425,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # then OOMs. Offload the trainer before bringing the engines up --
         # the same order the build path uses (build -> offload -> engines).
         if self._dispatch is not None:
-            self._dispatch.offload_for_sampling("policy")
+            self._dispatch.offload_for_sampling()
 
         self._create_new_inference_client()
 
@@ -820,7 +820,7 @@ class SkyRLTrainBackend(AbstractBackend):
             return
         if not self._engines_asleep:
             return
-        self._dispatch.offload_for_sampling("policy")
+        self._dispatch.offload_for_sampling()
         asyncio.run(self._inference_engine_client.wake_up(tags=["weights"]))
         asyncio.run(self._inference_engine_client.wake_up(tags=["kv_cache"]))
         self._engines_asleep = False
