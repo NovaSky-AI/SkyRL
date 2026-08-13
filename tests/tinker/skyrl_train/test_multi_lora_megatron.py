@@ -5,26 +5,6 @@ the test process. The server starts a real Megatron policy worker at DP=2 plus a
 vLLM engine, so tests in this module need at least 3 GPUs and the ``tinker`` +
 ``megatron`` extras installed.
 
-Everything runs against one module-scoped server at DP=2 (2 policy GPUs, TP=PP=1).
-DP > 1 is what makes the cross-request accumulation tests below meaningful: the
-gradient sync is not idempotent, so a per-``forward_backward`` sync silently
-corrupts a logical batch that spans several requests. A topology sweep during
-review of PR #2008 measured ``|split - combined|`` on that comparison:
-
-    topology   |split - combined|
-    dp1        0.00e+00
-    dp2        1.18e-02
-    tp2        0.00e+00
-    pp2        0.00e+00
-
-DP1 coming out bit-exact even though the split and combined paths have different
-chunk counts and microbatch groupings establishes that the comparison has no
-floating-point noise floor -- any non-zero delta at DP2 is a real gradient error,
-not reassociation. TP/PP are clean only because LoRA trains no layernorm or
-embedding parameters, so the ReduceOp.SUM all-reduces in ``finalize_model_grads``
-have nothing to touch; a full fine-tune at TP/PP > 1 double-counts them the same
-way, so those topologies are worth re-adding if this ever covers FFT.
-
 Coverage:
   - test_two_adapters_train_independently: A's optimizer state survives a
     swap-out, B-training, swap-in cycle (loss continues to improve on A).
@@ -144,9 +124,7 @@ def _api_server(port: int, backend_config: dict | None = None):
         with open(log_path, "w") as log_file:
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
             try:
-                # Wait for server to come up. 300s rather than 120s: bringing up
-                # two Megatron ranks plus vLLM is meaningfully slower than the
-                # single-GPU config this used to run.
+                # Wait for server to come up.
                 ok = wait_for_condition(
                     lambda: _server_is_up(port),
                     timeout_sec=300,
