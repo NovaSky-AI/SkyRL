@@ -25,6 +25,13 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 uv venv "$VENV" --python 3.12 --allow-existing
 PY="$VENV/bin/python"
 
+# A reused venv (--allow-existing) may hold CUDA-12 leftovers from a prior
+# `uv sync`. The pinned set below never mentions them, so they would survive
+# every install step -- and they are exactly the packages this stack must not
+# have: flash-attn (CUDA-less stub crashes TE), transformer-engine-cu12
+# (collides with the cu13 core on libtransformer_engine.so), nixl-cu12.
+uv pip uninstall --python "$PY" flash-attn transformer-engine-cu12 nixl-cu12 2>/dev/null || true
+
 # All uv pip invocations run from a neutral directory: uv pip picks up
 # tool.uv build settings from a pyproject in the working directory, and the
 # root project's settings (match-runtime build dependencies) only apply to
@@ -39,9 +46,10 @@ uv pip install --python "$PY" torch==2.11.0 ninja packaging setuptools pybind11
 # `build_tools` helper package that only resolves when building from the
 # extracted source tree, so install it from a checkout of the sdist.
 TE_TORCH_VERSION="$(sed -n 's/^transformer-engine-torch==\([0-9.]*\).*/\1/p' "$REQ" | head -1)"
-SDIST_URL="$(curl -sL "https://pypi.org/pypi/transformer-engine-torch/$TE_TORCH_VERSION/json" \
+[ -n "$TE_TORCH_VERSION" ] || { echo "could not extract transformer-engine-torch pin from $REQ" >&2; exit 1; }
+SDIST_URL="$(curl -sfSL "https://pypi.org/pypi/transformer-engine-torch/$TE_TORCH_VERSION/json" \
     | "$PY" -c "import json,sys; print([u['url'] for u in json.load(sys.stdin)['urls'] if u['packagetype']=='sdist'][0])")"
-curl -sL "$SDIST_URL" | tar xz
+curl -sfSL "$SDIST_URL" | tar xz
 uv pip install --python "$PY" --no-build-isolation \
     --override "$ROOT/deploy/cuda13/overrides.txt" \
     "./transformer_engine_torch-$TE_TORCH_VERSION"

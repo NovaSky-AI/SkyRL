@@ -12,7 +12,7 @@ python3 - "$REQ" <<'EOF'
 import sys
 
 path = sys.argv[1]
-lines = open(path).read().splitlines(True)
+lines = open(path, encoding="utf-8").read().splitlines(True)
 out, skip_via = [], False
 for line in lines:
     # Only the flashinfer cu130 index is used by these pins; other emitted
@@ -29,7 +29,7 @@ for line in lines:
         continue
     skip_via = False
     out.append(line)
-open(path, "w").writelines(out)
+open(path, "w", encoding="utf-8").writelines(out)
 EOF
 
 echo "regenerated $REQ"
