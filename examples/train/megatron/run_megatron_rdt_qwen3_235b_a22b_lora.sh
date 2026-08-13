@@ -33,11 +33,14 @@ set -x
 # costs ~5GiB/GPU of communicator buffers on the engine; 0.95 then fails
 # vLLM's startup free-memory check.)
 #
-# Optional RDT tuning (defaults shown): SKYRL_RDT_NUM_BUFFERS=2 (publish ring
-# depth), SKYRL_RDT_LOOKAHEAD=2 (gather lookahead credits),
-# SKYRL_RDT_PP_LOCAL=1 (each pipeline stage gathers and serves only its own
-# layers; engages at pp>1 and reverts to gather-to-all on its own if a group
-# spans two stages -- set 0 to force the old path).
+# Optional RDT tuning (defaults shown): SKYRL_RDT_NUM_BUFFERS=2 (receive/serve
+# ring depth) and SKYRL_RDT_LOOKAHEAD=1 (gathered-but-unfreed groups the
+# trainer's gather loop runs ahead by; a gathered group is served immediately
+# and trainer-resident memory is bounded at lookahead + 1 groups). PP-local +
+# EP-local serving is always on: each pipeline stage gathers only its own
+# layers and each expert-parallel rank serves only its own experts (a source
+# with shared groups, e.g. tied embeddings, demotes itself to the full gather;
+# SKYRL_RDT_STACKED_EXPERTS=0 forces the plain source).
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
