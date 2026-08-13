@@ -1721,8 +1721,8 @@ class RayPPOTrainer:
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """
-        Load complete checkpoint state and return the global_step to resume from.
-        Returns 0 if no checkpoint is loaded.
+        Load checkpoint state and return the configured starting global step.
+        Returns 0 if no checkpoint is loaded or global-step restore is disabled.
 
         If colocate_all is True, assumes that the policy model is currently on GPU.
 
@@ -1771,10 +1771,14 @@ class RayPPOTrainer:
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
         # Extract global step from checkpoint path
-        global_step = extract_step_from_path(Path(checkpoint_path))
-        if global_step == -1:
+        checkpoint_global_step = extract_step_from_path(Path(checkpoint_path))
+        if checkpoint_global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
-        logger.info(f"Resuming from global_step: {global_step}")
+        global_step = checkpoint_global_step if self.cfg.trainer.resume_load_global_step else 0
+        if self.cfg.trainer.resume_load_global_step:
+            logger.info(f"Resuming from global_step: {global_step}")
+        else:
+            logger.info(f"Loading checkpoint weights from global_step_{checkpoint_global_step}; global step reset to 0")
 
         # Define paths for different checkpoint components
         policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
@@ -1789,10 +1793,12 @@ class RayPPOTrainer:
         # 1. Load and validate trainer state
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
-        saved_global_step = trainer_state.get("global_step", global_step)
-        logger.info("Successfully loaded trainer state")
-        if saved_global_step != global_step:
-            logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
+        saved_global_step = trainer_state.get("global_step", checkpoint_global_step)
+        logger.info("Successfully loaded trainer metadata")
+        if saved_global_step != checkpoint_global_step:
+            logger.warning(
+                f"Global step mismatch: path={checkpoint_global_step}, saved={saved_global_step}. Using path value."
+            )
 
         # 2. Load dataloader state if requested and available
         if not self.cfg.trainer.resume_load_dataloader_state:
@@ -1831,7 +1837,7 @@ class RayPPOTrainer:
             )
             logger.info("Successfully loaded critic checkpoint")
 
-        logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
+        logger.info(f"Successfully loaded checkpoint state from global_step_{checkpoint_global_step}")
         return global_step, str(checkpoint_path)
 
     def save_models(self):

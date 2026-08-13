@@ -1360,6 +1360,8 @@ class TrainerConfig(BaseConfig):
     See https://docs.skyrl.ai/docs/checkpointing-logging/checkpointing"""
     resume_path: Optional[str] = None
     """Checkpoint directory to resume from. Only used when ``resume_mode="from_path"``."""
+    resume_load_global_step: bool = True
+    """Restore the global step when resuming. Disable to start a new training phase at step zero."""
     resume_load_dataloader_state: bool = True
     """Restore dataloader position when resuming. Disable when starting a new phase or using different data."""
     resume_load_optimizer_states: bool = True
