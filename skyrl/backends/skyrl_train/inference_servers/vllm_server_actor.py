@@ -489,7 +489,9 @@ async def _build_and_serve_vllm_server(
     standalone ``python -m`` entrypoint below.
     """
     sock_addr = (cli_args.host, cli_args.port)
-    sock = create_server_socket(sock_addr)
+    # vLLM 0.23 makes the reuse policy explicit. Each SkyRL actor owns a
+    # unique port, so sharing a listening socket is neither needed nor safe.
+    sock = create_server_socket(sock_addr, reuse_port=False)
     app = build_app(cli_args)
 
     # Initialize the engine (this loads the model - takes time)
