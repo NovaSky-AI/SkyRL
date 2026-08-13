@@ -250,6 +250,7 @@ override-dependencies = [
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
+fast-hadamard-transform = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 
