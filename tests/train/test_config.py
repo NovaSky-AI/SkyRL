@@ -600,6 +600,18 @@ class TestCliOverridesFromDict:
         assert ie_cfg.engine_init_kwargs == {"a": 1, "b": "x"}
         assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
 
+    def test_lora_preserves_explicit_enforce_eager(self):
+        with pytest.warns(UserWarning, match="LoRA is enabled"):
+            cfg = SkyRLTrainConfig.from_cli_overrides(
+                {
+                    "generator.inference_engine.enforce_eager": True,
+                    "generator.inference_engine.weight_sync_backend": "nccl",
+                    "trainer.policy.model.lora.rank": 8,
+                }
+            )
+
+        assert cfg.generator.inference_engine.enforce_eager is True
+
     def test_non_json_serializable_values_fall_back_to_str(self):
         """Values ``json.dumps`` cannot handle serialize via ``str()``."""
         cfg = SkyRLTrainConfig.from_cli_overrides({"trainer.export_path": pathlib.Path("/tmp/export")})
