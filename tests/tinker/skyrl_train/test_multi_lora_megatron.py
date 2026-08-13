@@ -318,9 +318,9 @@ def test_forward_backward_accumulates_across_requests(service_client):
     split_loss = sum(sum(output["elementwise_loss"].data) for output in split_out.loss_fn_outputs)
     combined_loss = sum(sum(output["elementwise_loss"].data) for output in combined_out.loss_fn_outputs)
 
-    assert split_loss == pytest.approx(combined_loss, abs=1e-6), (
-        f"separate requests produced a different update: split={split_loss}, combined={combined_loss}"
-    )
+    assert split_loss == pytest.approx(
+        combined_loss, abs=1e-6
+    ), f"separate requests produced a different update: split={split_loss}, combined={combined_loss}"
 
 
 def test_forward_backward_accumulates_with_every_rank_fed(service_client):
