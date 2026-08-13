@@ -13,6 +13,8 @@ try:
         MegatronMappingRegistry,
     )
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
+    from megatron.bridge.models.conversion.param_mapping import AutoMapping
+    from megatron.bridge.models.deepseek.common import get_common_mapping_list
     from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
     from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
     from megatron.bridge.models.qwen.qwen35_bridge import Qwen35Bridge, Qwen35MoEBridge
@@ -139,6 +141,67 @@ try:
             return MegatronMappingRegistry(
                 *self._get_dense_lm_mappings(hf_prefix="model.language_model.", megatron_prefix="")
             )
+
+    # Kimi K2.5-family (KimiK25ForConditionalGeneration, e.g. Kimi-K2.7-Code):
+    # a unified VL checkpoint whose language model is DeepSeek-V3 architecture
+    # (MLA + MoE; ``text_config`` is a DeepseekV3Config with model_type
+    # "kimi_k2") and whose text weights live under a ``language_model.`` prefix
+    # (language_model.model.layers.* / language_model.lm_head.weight).
+    #
+    # Trained text-only: the vision tower and mm projector are never built on
+    # the Megatron side (they stay frozen in the inference engine), so
+    # ``MegatronWorker`` requires ``language_model_only=True`` for these
+    # checkpoints. Unlike Qwen3.5 there is no upstream VL bridge to bypass, so
+    # the real architecture name is registered directly: AutoBridge dispatches
+    # remote-code checkpoints via ``config.auto_map["AutoModelForCausalLM"]``
+    # (-> "KimiK25ForConditionalGeneration") and its ``from_hf_pretrained``
+    # validation requires an implementation registered under that exact name.
+
+    def _prefix_hf_param(hf_param, prefix: str):
+        """Re-root a mapping's HF-side name(s) (str or compound dict) under ``prefix``."""
+        if isinstance(hf_param, str):
+            return prefix + hf_param
+        return {key: prefix + value for key, value in hf_param.items()}
+
+    @MegatronModelBridge.register_bridge(
+        source="KimiK25ForConditionalGeneration",
+        target=GPTModel,
+        model_type="kimi_k25",
+    )
+    class KimiK25TextBridge(DeepSeekV3Bridge):
+        """Kimi K2.5-family language model (``language_model.*``) -> GPTModel."""
+
+        def build_conversion_tasks(self, hf_pretrained, megatron_model):
+            """Filter out None tasks (same megatron-bridge quirk as GLM47FlashBridge)."""
+            tasks = super().build_conversion_tasks(hf_pretrained, megatron_model)
+            return [t for t in tasks if t is not None]
+
+        def provider_bridge(self, hf_pretrained):
+            hf_config = hf_pretrained.config
+            text_config = hf_config.text_config
+            # tie_word_embeddings lives on the top-level VL config, not text_config.
+            if not hasattr(text_config, "tie_word_embeddings"):
+                text_config.tie_word_embeddings = getattr(hf_config, "tie_word_embeddings", False)
+            return super().provider_bridge(_TextConfigShim(hf_pretrained, text_config))
+
+        def mapping_registry(self) -> MegatronMappingRegistry:
+            # DeepSeekV3Bridge's mappings with the HF side re-rooted under the
+            # unified checkpoint's prefix (model.* -> language_model.model.*,
+            # lm_head.* -> language_model.lm_head.*). Mutating hf_param on the
+            # freshly-built mapping objects is safe: beyond pattern validation
+            # (which a literal prefix cannot invalidate -- it adds no
+            # wildcards), mappings derive no state from hf_param at
+            # construction time.
+            mapping_list = get_common_mapping_list(hf_config=self.hf_config)
+            mapping_list.append(
+                AutoMapping(
+                    megatron_param="decoder.layers.*.mlp.router.expert_bias",
+                    hf_param="model.layers.*.mlp.gate.e_score_correction_bias",
+                )
+            )
+            for mapping in mapping_list:
+                mapping.hf_param = _prefix_hf_param(mapping.hf_param, "language_model.")
+            return MegatronMappingRegistry(*mapping_list)
 
     # VL arch -> sentinel ...ForCausalLM key registered above. The ForCausalLM
     # suffix passes AutoBridge's filter; not being a real transformers class makes

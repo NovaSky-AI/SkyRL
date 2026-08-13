@@ -822,6 +822,13 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "UV_LINK_MODE",
         "UV_PYTHON",
         "UV_OFFLINE",
+        # HuggingFace cache/auth: model paths resolve against HF_HOME, so a
+        # driver-only setting (e.g. from a local `.env` pointing at a big data
+        # volume) must reach the worker actors or they re-download to ~/.cache.
+        "HF_HOME",
+        "HF_TOKEN",
+        "HF_HUB_OFFLINE",
+        "HF_ENDPOINT",
         "PYTORCH_CUDA_ALLOC_CONF",
         # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
         "CUDA_LAUNCH_BLOCKING",

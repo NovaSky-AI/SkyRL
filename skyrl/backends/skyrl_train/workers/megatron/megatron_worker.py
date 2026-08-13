@@ -405,6 +405,16 @@ class MegatronWorker:
         else:
             self.is_vlm = False
 
+        if self.is_vlm and getattr(hf_config_original, "model_type", None) == "kimi_k25":
+            # The KimiK25TextBridge (model_bridges.py) only builds the language model,
+            # so a full-VLM training request cannot be honored on this backend.
+            raise ValueError(
+                "Kimi K2.5-family checkpoints are supported text-only on the Megatron backend: "
+                "set trainer.policy.language_model_only=true and "
+                "generator.inference_engine.language_model_only=true "
+                "(the vision tower stays frozen in the inference engine)."
+            )
+
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
             "eos_token_id": tokenizer.eos_token_id,
@@ -438,6 +448,13 @@ class MegatronWorker:
             logger.info(
                 "language_model_only=True: forcing Qwen3.5 text->GPTModel bridge "
                 "(native GDN thd packing path; vision tower dropped)"
+            )
+        if language_model_only and getattr(hf_config_original, "model_type", None) == "kimi_k25":
+            # Dispatch is automatic (KimiK25TextBridge registers the real architecture
+            # name); this log only makes the text-only load explicit.
+            logger.info(
+                "language_model_only=True: Kimi K2.5-family checkpoint -> text-only "
+                "DeepSeek-V3 bridge (vision tower + mm projector dropped)"
             )
 
         provider = bridge.to_megatron_provider()
