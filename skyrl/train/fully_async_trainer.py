@@ -429,6 +429,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
         logger.info(f"Total training steps: {self.total_training_steps}")
 
+    def _restore_async_training_state(
+        self,
+        consumed_data_uids: Optional[Set[str]],
+        filtered_data_uids: Optional[Set[str]],
+        epoch: Optional[int],
+    ) -> Optional[int]:
+        self._staleness_manager.load_state_from_checkpoint(self.global_step + 1)
+        if consumed_data_uids is None:
+            return self.global_step // self.num_steps_per_epoch
+
+        filtered_data_uids = filtered_data_uids or set()
+        self.async_train_dataloader.load_state_from_checkpoint(consumed_data_uids, filtered_data_uids)
+        # Only trained UIDs map to completed steps (filtered UIDs are extra consumption),
+        # so validate the trained count is a whole number of steps.
+        num_trained_loaded = len(consumed_data_uids) - len(filtered_data_uids)
+        assert num_trained_loaded % self.mini_batch_size == 0, (
+            "Loaded trained (consumed minus filtered) data UIDs must be a multiple of "
+            f"mini_batch_size={self.mini_batch_size}. Got: {num_trained_loaded}"
+        )
+        # Fall back to deriving the epoch for checkpoints that predate epoch tracking.
+        return epoch if epoch is not None else self.global_step // self.num_steps_per_epoch
+
     async def train(self):
         """
         Main fully async training loop for PPO
@@ -449,24 +471,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 ) = self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
                 if self.global_step > 0:
-                    # Set async dataloader manager and staleness manager to the loaded state.
-                    self.async_train_dataloader.load_state_from_checkpoint(
-                        loaded_consumed_data_uids_set, loaded_filtered_data_uids_set
-                    )
-                    self._staleness_manager.load_state_from_checkpoint(
-                        self.global_step + 1
-                    )  # +1 due to we haven't incremented yet
-                    # Only trained UIDs map to completed steps (filtered UIDs are extra consumption),
-                    # so validate the trained count is a whole number of steps.
-                    num_trained_loaded = len(loaded_consumed_data_uids_set) - len(loaded_filtered_data_uids_set)
-                    assert num_trained_loaded % self.mini_batch_size == 0, (
-                        "Loaded trained (consumed minus filtered) data UIDs must be a multiple of "
-                        f"mini_batch_size={self.mini_batch_size}. Got: {num_trained_loaded}"
-                    )
-                    # Use the persisted epoch; fall back to deriving it for pre-sample_full_batch
-                    # checkpoints (where global_step stays aligned to epoch boundaries).
-                    resumed_start_epoch = (
-                        loaded_epoch if loaded_epoch is not None else self.global_step // self.num_steps_per_epoch
+                    resumed_start_epoch = self._restore_async_training_state(
+                        loaded_consumed_data_uids_set,
+                        loaded_filtered_data_uids_set,
+                        loaded_epoch,
                     )
 
         # Initialize weight sync state
@@ -1184,8 +1192,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         checkpoint predates epoch tracking, in which case the caller derives it from global_step).
         """
         global_step, checkpoint_path = super().load_checkpoints()
-        if global_step == 0:
-            return 0, checkpoint_path, None, None, None
+        if global_step == 0 or not self.cfg.trainer.resume_load_dataloader_state:
+            return global_step, checkpoint_path, None, None, None
         fully_async_state_path = os.path.join(checkpoint_path, "fully_async_state.pt")
         assert io.exists(fully_async_state_path), f"Fully-async state file not found at {fully_async_state_path}"
         with io.open_file(fully_async_state_path, "rb") as f:

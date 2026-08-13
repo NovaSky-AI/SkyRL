@@ -1801,7 +1801,9 @@ class RayPPOTrainer:
             )
 
         # 2. Load dataloader state if requested and available
-        if not self.cfg.trainer.resume_load_dataloader_state:
+        if self.train_dataloader is None:
+            logger.info("No train dataloader initialized; skipping dataloader state restore")
+        elif not self.cfg.trainer.resume_load_dataloader_state:
             logger.info("Skipping dataloader state restore; dataloader will start from beginning")
         elif io.exists(dataloader_state_path):
             try:
