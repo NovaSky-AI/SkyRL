@@ -608,6 +608,9 @@ class ForwardRequest(BaseModel):
 
 _PROTO_CONTENT_TYPE = "application/x-protobuf"
 
+# Cap for decompressed request bodies (zstd Content-Encoding).
+_MAX_FWDBWD_BODY_BYTES = 1 << 30
+
 
 def _proto_module():
     try:
@@ -635,7 +638,10 @@ def _decode_tensor_pb(tensor, public_pb) -> TensorData:
     np_dtype = dtype_map.get(tensor.dtype)
     if np_dtype is None:
         raise HTTPException(status_code=422, detail=f"unsupported tensor dtype enum {tensor.dtype}")
-    values = np.frombuffer(tensor.dense, dtype=np_dtype)
+    try:
+        values = np.frombuffer(tensor.dense, dtype=np_dtype)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"malformed tensor data: {exc}") from exc
     return TensorData(data=values.tolist())
 
 
@@ -647,7 +653,10 @@ def _decode_chunk_pb(chunk) -> EncodedTextChunk:
         # Image/audio chunks additionally require the server-side asset upload
         # path the managed service uses; reject clearly rather than mangle.
         raise HTTPException(status_code=422, detail=f"unsupported model-input chunk type {which!r} on the proto path")
-    tokens = np.frombuffer(chunk.encoded_text.tokens, dtype=np.int32)
+    try:
+        tokens = np.frombuffer(chunk.encoded_text.tokens, dtype=np.int32)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"malformed chunk tokens: {exc}") from exc
     return EncodedTextChunk(tokens=tokens.tolist())
 
 
@@ -726,7 +735,7 @@ def _encode_forward_backward_output_pb(result: dict) -> bytes:
         flats = []
         for datum in outputs:
             td = datum.get(name)
-            data = td.get("data", []) if isinstance(td, dict) else (td or [])
+            data = (td.get("data") if isinstance(td, dict) else td) or []
             flats.append(np.asarray(data, dtype=np_dtype).reshape(-1))
         offsets = np.zeros(len(flats) + 1, dtype=np.int64)
         for i, arr in enumerate(flats):
@@ -807,7 +816,10 @@ async def _parse_forward_backward_body(raw_request: Request) -> tuple[ForwardBac
         import zstandard
 
         try:
-            body = zstandard.ZstdDecompressor().decompress(body)
+            # Bounded like delta_payload.decompress_bytes: a small crafted body
+            # must not balloon into an arbitrarily large allocation. 1 GiB is
+            # far above any legitimate forward_backward payload.
+            body = zstandard.ZstdDecompressor().decompress(body, max_output_size=_MAX_FWDBWD_BODY_BYTES)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"failed to zstd-decompress request body: {exc}") from exc
 
@@ -1528,7 +1540,7 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
             encoder is not None
             and result_data is not None
             and "error" not in result_data
-            and _PROTO_CONTENT_TYPE in req.headers.get("accept", "")
+            and _PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
         ):
             return fastapi.Response(
                 content=encoder(result_data),
