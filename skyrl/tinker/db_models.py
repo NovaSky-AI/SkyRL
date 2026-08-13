@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import DateTime, Text, event
+from sqlalchemy import DateTime, Text, UniqueConstraint, event
 from sqlalchemy.engine import url as sqlalchemy_url
 from sqlmodel import JSON, Field, SQLModel
 
@@ -90,9 +90,17 @@ class ModelDB(SQLModel, table=True):
 class FutureDB(SQLModel, table=True):
     __tablename__ = "futures"
 
+    # The SDK stamps each training request with a model-global sequence number, so
+    # (model_id, seq_id) identifies one logical request and a retry of it carries the
+    # same pair. The constraint is what makes the dedup in `create_future` safe under
+    # concurrent retries. SQL treats NULLs as distinct, so requests that carry no
+    # seq_id are unconstrained and still get a fresh future each time.
+    __table_args__ = (UniqueConstraint("model_id", "seq_id", name="uq_futures_model_id_seq_id"),)
+
     request_id: int | None = Field(default=None, primary_key=True, sa_column_kwargs={"autoincrement": True})
     request_type: types.RequestType
     model_id: str | None = Field(default=None, index=True)
+    seq_id: int | None = Field(default=None)
     request_data: dict = Field(sa_type=JSON)  # this is of type types.{request_type}Input
     # Pre-serialized JSON text for a types.{request_type}Output. Deliberately not a
     # JSON column: results may carry big numeric payloads (top-k logprobs for
