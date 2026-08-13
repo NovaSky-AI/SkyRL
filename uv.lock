@@ -8904,8 +8904,8 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'" },
     { name = "typer", specifier = ">=0.17.4" },
     { name = "uvicorn", marker = "extra == 'skyrl-train'" },
-    { name = "vllm", marker = "sys_platform == 'linux' and extra == 'fsdp'", git = "https://github.com/j316chuck/vllm?rev=94e964d1204e3119849957ea17b7db8c3c4503bf" },
-    { name = "vllm", marker = "sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/j316chuck/vllm?rev=94e964d1204e3119849957ea17b7db8c3c4503bf" },
+    { name = "vllm", marker = "sys_platform == 'linux' and extra == 'fsdp'", git = "https://github.com/j316chuck/vllm?rev=dab991476c4f8eed8943c0e74f249bf79fb02cf8" },
+    { name = "vllm", marker = "sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/j316chuck/vllm?rev=dab991476c4f8eed8943c0e74f249bf79fb02cf8" },
     { name = "vllm-router", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'fsdp'", url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl" },
     { name = "vllm-router", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl" },
     { name = "vllm-router", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'skyrl-train'", url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl" },
@@ -10148,8 +10148,8 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.23.1rc1.dev1406+g94e964d12"
-source = { git = "https://github.com/j316chuck/vllm?rev=94e964d1204e3119849957ea17b7db8c3c4503bf#94e964d1204e3119849957ea17b7db8c3c4503bf" }
+version = "0.23.1rc1.dev1407+gdab991476"
+source = { git = "https://github.com/j316chuck/vllm?rev=dab991476c4f8eed8943c0e74f249bf79fb02cf8#dab991476c4f8eed8943c0e74f249bf79fb02cf8" }
 dependencies = [
     { name = "aiohttp", marker = "(sys_platform == 'linux' and extra == 'extra-5-skyrl-fsdp') or (sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
     { name = "anthropic", marker = "(sys_platform == 'linux' and extra == 'extra-5-skyrl-fsdp') or (sys_platform == 'linux' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
