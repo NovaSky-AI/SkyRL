@@ -112,7 +112,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.23.1rc1.dev1403+g4080263bb; sys_platform == 'linux'",
+    "vllm==0.23.1rc1.dev1404+g275054ec7; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
@@ -146,7 +146,7 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
     "mamba-ssm>=2.3.0; sys_platform == 'linux'",
-    "vllm==0.23.1rc1.dev1403+g4080263bb; sys_platform == 'linux'",
+    "vllm==0.23.1rc1.dev1404+g275054ec7; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
@@ -256,7 +256,7 @@ transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "buil
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
-vllm = { MAX_JOBS = "16" }
+vllm = { MAX_JOBS = "16", VLLM_VERSION_OVERRIDE = "0.23.1rc1.dev1404+g275054ec7" }
 
 
 [[tool.uv.index]]
@@ -292,10 +292,11 @@ explicit = true
 skyrl-gym = { path = "./skyrl-gym", editable = true }
 # Match torch's CUDA variant (cu128).
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
-# Pin after vLLM's Qwen3.5 GDN speculative-decoding correctness fixes.
+# Pin after vLLM's Qwen3.5 GDN speculative-decoding correctness fixes. The
+# follow-up commit keeps CUDA-13-only cooperative top-k out of CUDA 12.8 builds.
 # Build from source because the corresponding x86_64 nightly needs CUDA 13,
 # while SkyRL's torch stack uses CUDA 12.8.
-vllm = { git = "https://github.com/vllm-project/vllm", rev = "4080263bb2c5d10deac17aaeb88e0823bc35bca9", marker = "sys_platform == 'linux'" }
+vllm = { git = "https://github.com/j316chuck/vllm", rev = "275054ec75e58a3d1f902e800bafc3d224624f79", marker = "sys_platform == 'linux'" }
 # torch-2.11 wheels for these three aren't published upstream; built locally
 # on erictang000 forks (cu128 / cxx11abiTRUE / py3.12). flash-attn has its
 # +cu12torch2.11cxx11abiTRUE local-version stripped from METADATA — PEP 440
