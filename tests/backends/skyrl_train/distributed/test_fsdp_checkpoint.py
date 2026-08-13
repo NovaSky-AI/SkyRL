@@ -6,10 +6,21 @@ from skyrl.backends.skyrl_train.distributed.fsdp_strategy import (
 )
 
 
-def test_strict_load_allows_bitsandbytes_quantization_metadata() -> None:
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        ".absmax",
+        ".quant_map",
+        ".nested_absmax",
+        ".nested_quant_map",
+        ".quant_state.bitsandbytes__fp4",
+        ".quant_state.bitsandbytes__nf4",
+    ],
+)
+def test_strict_load_allows_bitsandbytes_quantization_metadata(suffix: str) -> None:
     model = torch.nn.Linear(2, 2)
     state_dict = model.state_dict()
-    state_dict["weight.quant_state.bitsandbytes__nf4"] = torch.tensor(0)
+    state_dict[f"weight{suffix}"] = torch.tensor(0)
 
     _load_model_state_dict(model, state_dict, strict=True)
 
