@@ -67,9 +67,12 @@ _BNB_QUANTIZATION_STATE_SUFFIXES = (
 
 
 def _is_bnb_quantization_state_key(key: str, loaded_keys: set[str]) -> bool:
-    return any(
-        key.endswith(suffix) and key[: -len(suffix)] in loaded_keys for suffix in _BNB_QUANTIZATION_STATE_SUFFIXES
-    )
+    if not key.endswith(_BNB_QUANTIZATION_STATE_SUFFIXES):
+        return False
+    for suffix in _BNB_QUANTIZATION_STATE_SUFFIXES:
+        if key.endswith(suffix):
+            return key[: -len(suffix)] in loaded_keys
+    return False
 
 
 def _load_model_state_dict(model: nn.Module, state_dict, *, strict: bool) -> None:
@@ -78,7 +81,7 @@ def _load_model_state_dict(model: nn.Module, state_dict, *, strict: bool) -> Non
         return
 
     incompatible = model.load_state_dict(state_dict, strict=False)
-    loaded_keys = set(state_dict).difference(incompatible.unexpected_keys)
+    loaded_keys = state_dict.keys() - incompatible.unexpected_keys
     unexpected = [key for key in incompatible.unexpected_keys if not _is_bnb_quantization_state_key(key, loaded_keys)]
     if incompatible.missing_keys or unexpected:
         errors = []
