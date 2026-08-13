@@ -32,15 +32,11 @@ async def test_training_request_retry_returns_original_future(tmp_path):
         await connection.run_sync(SQLModel.metadata.create_all)
 
     async with AsyncSession(engine) as session:
-        original_id = await create_future(
-            session, types.RequestType.OPTIM_STEP, "model_1", optim_input(), seq_id=7
-        )
+        original_id = await create_future(session, types.RequestType.OPTIM_STEP, "model_1", optim_input(), seq_id=7)
         await session.commit()
 
     async with AsyncSession(engine) as session:
-        retry_id = await create_future(
-            session, types.RequestType.OPTIM_STEP, "model_1", optim_input(), seq_id=7
-        )
+        retry_id = await create_future(session, types.RequestType.OPTIM_STEP, "model_1", optim_input(), seq_id=7)
         await session.commit()
         futures = (await session.exec(select(FutureDB))).all()
 
@@ -56,16 +52,12 @@ async def test_training_request_sequence_reuse_with_new_payload_fails(tmp_path):
         await connection.run_sync(SQLModel.metadata.create_all)
 
     async with AsyncSession(engine) as session:
-        await create_future(
-            session, types.RequestType.OPTIM_STEP, "model_1", optim_input(), seq_id=7
-        )
+        await create_future(session, types.RequestType.OPTIM_STEP, "model_1", optim_input(), seq_id=7)
         await session.commit()
 
     async with AsyncSession(engine) as session:
         with pytest.raises(HTTPException, match="sequence number was reused") as error:
-            await create_future(
-                session, types.RequestType.OPTIM_STEP, "model_1", optim_input(2e-4), seq_id=7
-            )
+            await create_future(session, types.RequestType.OPTIM_STEP, "model_1", optim_input(2e-4), seq_id=7)
 
     assert error.value.status_code == 409
     await engine.dispose()
