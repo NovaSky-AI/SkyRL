@@ -256,9 +256,6 @@ override-dependencies = [
     # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
     "xgrammar==0.2.3",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 while vLLM pins ==0.1.9.
-    # 0.1.9 is what the environment already resolved to before mamba-ssm moved to
-    # the Astral wheel, so this only relaxes mamba-ssm's pin — no other package's
-    # resolved version changes.
     "tilelang==0.1.9; sys_platform == 'linux'",
 ]
 
