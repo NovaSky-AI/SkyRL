@@ -112,7 +112,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.23.0; sys_platform == 'linux'",
+    "vllm==0.26.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
@@ -123,9 +123,9 @@ fsdp = [
     "causal-conv1d==1.6.2.post1+cu.12.8.torch.2.11; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -146,7 +146,7 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1+cu.12.8.torch.2.11; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1+cu.12.8.torch.2.11; sys_platform == 'linux'",
-    "vllm==0.23.0; sys_platform == 'linux'",
+    "vllm==0.26.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
@@ -154,14 +154,14 @@ megatron = [
     # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
     "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     # megatron-bridge requires Python 3.12+; pin megatron-core to the same
     # constraint so both packages are consistently available (or absent).
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
@@ -242,11 +242,20 @@ override-dependencies = [
     # so it doesn't pull the CUDA-13 stack and bump torch off the cu12 pin.
     "nixl-cu13; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our exact 0.6.12 pin (the version vLLM 0.23.0 requires). Override it to our version.
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 while vLLM 0.23.0 pins ==0.1.9.
+    # our pin. vLLM 0.26.0's metadata asks for 0.6.14, but flashinfer-cubin was
+    # never released at 0.6.14 and flashinfer hard-errors when cubin's version
+    # differs from its own, so all three are held at 0.6.13 -- the version vLLM
+    # 0.26.0 was developed against. It must be >=0.6.13: older flashinfer rejects
+    # the `layout_code` vLLM's allreduce+RMS fusion pass hands the MNNVL backend
+    # ("MNNVL AllReduce does not support quantization fusion").
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
+    # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
+    # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
+    "xgrammar==0.2.3",
+    # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 while vLLM pins ==0.1.9.
     # 0.1.9 is what the environment already resolved to before mamba-ssm moved to
     # the Astral wheel, so this only relaxes mamba-ssm's pin — no other package's
     # resolved version changes.
@@ -293,7 +302,7 @@ explicit = true
 
 [[tool.uv.index]]
 name = "vllm-cu129"
-url = "https://wheels.vllm.ai/0.23.0/cu129"
+url = "https://wheels.vllm.ai/0.26.0/cu129"
 explicit = true
 
 # Astral's prebuilt GPU wheels (https://wheels.astral.sh). cu128 to match torch's
@@ -309,7 +318,7 @@ explicit = true
 skyrl-gym = { path = "./skyrl-gym", editable = true }
 # Match torch's CUDA variant (cu128).
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
-# vllm 0.23.0's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
+# vllm 0.26.0's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
 # links libcudart.so.12, which torch+cu128 supplies.
 vllm = [
     { index = "vllm-cu129", marker = "sys_platform == 'linux'" },
