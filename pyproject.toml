@@ -131,6 +131,9 @@ fsdp = [
 
 megatron = [
     "skyrl[skyrl-train]",
+    # flash-attn 2.8.3 still references cute.core.ThrMma, removed in CUTLASS
+    # DSL 4.6. Keep the compatible DSL until flash-attn drops that API.
+    "nvidia-cutlass-dsl==4.5.3; sys_platform == 'linux'",
     "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
     # Declared directly (not just via transformer-engine[pytorch]) so the
     # [tool.uv.sources] URL below is honored — uv ignores sources for
@@ -234,6 +237,7 @@ no-build-isolation-package = [
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "fast-hadamard-transform; sys_platform == 'never'",
+    "nvidia-cutlass-dsl==4.5.3; sys_platform == 'linux'",
     "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
