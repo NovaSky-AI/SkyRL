@@ -302,11 +302,6 @@ class TinkerEngine:
             row.updated_at = datetime.now(timezone.utc)
             session.add(row)
             session.commit()
-        if proxy_url is not None:
-            logger.info(
-                'SKYRL_DEPLOYMENT_EVENT {"event":"inference_proxy_published","model":"%s"}',
-                self.config.base_model,
-            )
 
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):

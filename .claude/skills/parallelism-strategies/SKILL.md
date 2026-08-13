@@ -123,22 +123,8 @@ cfg.model.sequence_parallel = True
 DP size is always implicit:
 
 ```
-data_parallel_size = world_size / (TP * PP * CP)         # dense path
-expert_data_parallel_size = world_size / (PP * EP * ETP) # MoE path
+data_parallel_size = world_size / (TP * PP * CP)
 ```
-
-## Minimum GPU Count
-
-The dense `TP * CP` mesh and MoE `EP * ETP` mesh share the same GPUs within each pipeline stage.
-Only pipeline stages multiply, so the minimum GPU count at DP=1 and EDP=1 is:
-
-```
-min_gpus = PP * max(TP * CP, EP * ETP)
-```
-
-Do not use `PP * TP * CP * EP * ETP`; it incorrectly treats the overlapping dense and expert
-meshes as disjoint. For example, TP=2, CP=1, EP=8, ETP=1, PP=1 needs eight GPUs, with dense DP=4
-and expert DP=1. Scale above the minimum with a world size that satisfies both DP equations.
 
 ## Memory Estimation
 
@@ -201,5 +187,3 @@ parallel_state.initialize_model_parallel(
 5. **EP is only for MoE models.** Setting `expert_model_parallel_size` on a dense model is a no-op or error.
 6. The model-size-to-parallelism table is a starting heuristic. Always profile the first iteration to check memory and communication.
 7. `CUDA_DEVICE_MAX_CONNECTIONS` and related env vars interact with overlap settings.
-8. The minimum GPU count for MoE is `PP * max(TP * CP, EP * ETP)`, not the product of every
-   parallelism dimension.

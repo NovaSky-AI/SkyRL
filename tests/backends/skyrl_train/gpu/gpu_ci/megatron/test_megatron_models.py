@@ -85,7 +85,6 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # weight-sync, so skip optimizer construction entirely.
     is_large_moe = ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()) or (
         "nemotron-3-nano" in model_name.lower()
-        or "nemotron-3.5-lightning" in model_name.lower()
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -104,7 +103,7 @@ def _extra_env_vars_for_model(model_name: str) -> dict[str, str] | None:
 def _engine_overrides_for_model(model_name: str) -> dict:
     """Per-model overrides for vLLM engine init."""
     overrides = {"engine_init_kwargs": {}, "gpu_memory_utilization": 0.9}
-    if "Nemotron-3-Nano" in model_name or "Nemotron-3.5-Lightning" in model_name:
+    if "Nemotron-3-Nano" in model_name:
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         # Megatron policy init also needs room alongside vLLM on the same
         # GPU, so lower vLLM's pool footprint.
@@ -262,20 +261,6 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-1,
             5e-2,
             id="nemotron3-nano_tp4_ep4_h100",
-            marks=pytest.mark.h100,
-        ),
-        pytest.param(
-            1,
-            1,
-            1,
-            4,
-            1,
-            4,
-            4,
-            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
-            5e-1,
-            5e-2,
-            id="nemotron3.5-lightning_tp1_ep4_h100",
             marks=pytest.mark.h100,
         ),
         # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. Mesh:

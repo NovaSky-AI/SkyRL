@@ -435,7 +435,6 @@ class SkyRLTrainBackend(AbstractBackend):
             return
         self._cfg = _build_skyrl_train_config(self.base_model, self.config)
         if not ray.is_initialized():
-            logger.info("Initializing Ray for base-model inference")
             initialize_ray(self._cfg)
         self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
         self._create_new_inference_client()
