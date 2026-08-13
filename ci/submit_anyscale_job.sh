@@ -88,9 +88,9 @@ entrypoint_ran() {
     runs="$(job_run_count "$1")"
     if [[ "$runs" == "unknown" ]]; then
         entrypoint_produced_logs "$1"
-        return
+    else
+        [[ "$runs" -gt 0 ]]
     fi
-    [[ "$runs" -gt 0 ]]
 }
 
 for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
