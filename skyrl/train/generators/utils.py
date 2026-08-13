@@ -17,6 +17,7 @@ from skyrl.train.generators.base import (
     TrainingPhase,
     TrajectoryID,
 )
+from skyrl.utils.chat_template import apply_chat_template
 from skyrl_gym.metrics import aggregate_for_environment
 
 
@@ -165,15 +166,21 @@ def get_generation_prompt_ids(tokenizer, tokenizer_kwargs: Optional[dict] = None
         tokenizer_kwargs or {}
     ), "enable_thinking is not supported in get_generation_prompt_ids; use encode_messages_subset instead"
     kwargs = tokenizer_kwargs.copy() if tokenizer_kwargs else {}
-    empty_user = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], tokenize=True, return_dict=False, **kwargs
-    )
-    empty_user_with_generation_prompt = tokenizer.apply_chat_template(
+    empty_user = apply_chat_template(
+        tokenizer,
         [{"role": "user", "content": ""}],
+        chat_template_kwargs=kwargs,
+        add_generation_prompt=False,
+        tokenize=True,
+        return_dict=False,
+    )
+    empty_user_with_generation_prompt = apply_chat_template(
+        tokenizer,
+        [{"role": "user", "content": ""}],
+        chat_template_kwargs=kwargs,
         add_generation_prompt=True,
         tokenize=True,
         return_dict=False,
-        **kwargs,
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
@@ -605,21 +612,23 @@ def encode_messages_subset(messages: ConversationType, tokenizer, tokenizer_kwar
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "I am a user."},
     ]
-    base_conversation_token_ids = tokenizer.apply_chat_template(
+    base_conversation_token_ids = apply_chat_template(
+        tokenizer,
         base_conversation,
+        chat_template_kwargs=kwargs,
         add_generation_prompt=False,
         tokenize=True,
         return_dict=False,
-        **kwargs,
     )
 
     full_conversation = base_conversation + messages
-    full_conversation_token_ids = tokenizer.apply_chat_template(
+    full_conversation_token_ids = apply_chat_template(
+        tokenizer,
         full_conversation,
+        chat_template_kwargs=kwargs,
         add_generation_prompt=False,
         tokenize=True,
         return_dict=False,
-        **kwargs,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids

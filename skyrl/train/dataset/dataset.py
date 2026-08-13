@@ -5,14 +5,17 @@ import datasets
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
+from skyrl.utils.chat_template import apply_chat_template
+
 
 def _prompt_not_too_long(doc, tokenizer, prompt_key, max_length, chat_template_kwargs):
-    tokens = tokenizer.apply_chat_template(
+    tokens = apply_chat_template(
+        tokenizer,
         doc[prompt_key],
+        chat_template_kwargs=chat_template_kwargs,
         add_generation_prompt=True,
         return_dict=False,
         tokenize=True,
-        **chat_template_kwargs,
     )
     return len(tokens) <= max_length
 
