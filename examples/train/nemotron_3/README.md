@@ -1,5 +1,18 @@
 # Nemotron 3 Training with Megatron
 
+## Nemotron 3.5 Lightning 30B-A3B-BF16
+
+This recipe trains
+[NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16)
+on GSM8K with four Megatron workers and a four-GPU vLLM engine:
+
+```bash
+bash examples/train/nemotron_3/run_nemotron_3p5_lightning_30b_gsm8k.sh
+```
+
+The one-node recipe uses TP=1 and EP=4 for LoRA training, TP=4 for inference, and disables the
+checkpoint's MTP layer on the trainer side.
+
 ## Nemotron-3-Nano-4B-BF16
 
 This example trains [NVIDIA-Nemotron-3-Nano-4B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16) on GSM8K using GRPO with the Megatron backend.
