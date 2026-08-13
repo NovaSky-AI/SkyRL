@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import DateTime, event
+from sqlalchemy import DateTime, UniqueConstraint, event
 from sqlalchemy.engine import url as sqlalchemy_url
 from sqlmodel import JSON, Field, SQLModel
 
@@ -90,24 +90,22 @@ class ModelDB(SQLModel, table=True):
 class FutureDB(SQLModel, table=True):
     __tablename__ = "futures"
 
+    # The SDK stamps each training request with a model-global sequence number, so
+    # (model_id, seq_id) identifies one logical request and a retry of it carries the
+    # same pair. The constraint is what makes the dedup in `create_future` safe under
+    # concurrent retries. SQL treats NULLs as distinct, so requests that carry no
+    # seq_id are unconstrained and still get a fresh future each time.
+    __table_args__ = (UniqueConstraint("model_id", "seq_id", name="uq_futures_model_id_seq_id"),)
+
     request_id: int | None = Field(default=None, primary_key=True, sa_column_kwargs={"autoincrement": True})
     request_type: types.RequestType
     model_id: str | None = Field(default=None, index=True)
+    seq_id: int | None = Field(default=None)
     request_data: dict = Field(sa_type=JSON)  # this is of type types.{request_type}Input
     result_data: dict | None = Field(default=None, sa_type=JSON)  # this is of type types.{request_type}Output
     status: RequestStatus = Field(default=RequestStatus.PENDING, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
     completed_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
-
-
-class TrainingRequestDB(SQLModel, table=True):
-    """Maps a model-global SDK training sequence number to one future."""
-
-    __tablename__ = "training_requests"
-
-    model_id: str = Field(primary_key=True)
-    seq_id: int = Field(primary_key=True)
-    request_id: int = Field(foreign_key="futures.request_id", unique=True)
 
 
 class CheckpointDB(SQLModel, table=True):

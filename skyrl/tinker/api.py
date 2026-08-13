@@ -37,7 +37,6 @@ from skyrl.tinker.db_models import (
     RequestStatus,
     SamplingSessionDB,
     SessionDB,
-    TrainingRequestDB,
     enable_sqlite_wal,
     get_async_database_url,
 )
@@ -337,50 +336,41 @@ async def create_future(
     serialized_request = request_data.model_dump(mode="json")
 
     async def existing_request_id() -> int | None:
+        """The request_id already recorded for this (model_id, seq_id), if there is one."""
         if model_id is None or seq_id is None:
             return None
-        statement = select(TrainingRequestDB).where(
-            TrainingRequestDB.model_id == model_id,
-            TrainingRequestDB.seq_id == seq_id,
-        )
+        statement = select(FutureDB).where(FutureDB.model_id == model_id, FutureDB.seq_id == seq_id)
         existing = (await session.exec(statement)).first()
         if existing is None:
             return None
-        future = await session.get(FutureDB, existing.request_id)
-        if future is None or future.request_type != request_type or future.request_data != serialized_request:
+        if existing.request_type != request_type or existing.request_data != serialized_request:
             raise HTTPException(status_code=409, detail="Training request sequence number was reused")
         return existing.request_id
 
-    if request_id := await existing_request_id():
+    if (request_id := await existing_request_id()) is not None:
         return request_id
 
     future_db = FutureDB(
         request_type=request_type,
         model_id=model_id,
+        seq_id=seq_id,
         request_data=serialized_request,
         status=RequestStatus.PENDING,
     )
-    session.add(future_db)
-    await session.flush()  # Flush to generate auto-increment request_id
+    try:
+        # Savepoint rather than a plain flush: losing the insert race must roll back
+        # only this row. Callers stage other writes before getting here (save_weights
+        # adds a pending checkpoint), and a session-wide rollback would discard them.
+        async with session.begin_nested():
+            session.add(future_db)
+            await session.flush()  # Flush to generate auto-increment request_id
+    except IntegrityError:
+        # A concurrent retry inserted the same (model_id, seq_id) first; return its future.
+        request_id = await existing_request_id()
+        if request_id is None:
+            raise
+        return request_id
     assert future_db.request_id
-
-    if model_id is not None and seq_id is not None:
-        session.add(
-            TrainingRequestDB(
-                model_id=model_id,
-                seq_id=seq_id,
-                request_id=future_db.request_id,
-            )
-        )
-        try:
-            await session.flush()
-        except IntegrityError:
-            # A concurrent retry inserted the sequence mapping first.
-            await session.rollback()
-            request_id = await existing_request_id()
-            if request_id is None:
-                raise
-            return request_id
     return future_db.request_id
 
 

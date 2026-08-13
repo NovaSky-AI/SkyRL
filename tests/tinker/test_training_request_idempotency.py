@@ -10,7 +10,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import types
 from skyrl.tinker.api import create_future
-from skyrl.tinker.db_models import FutureDB, TrainingRequestDB, enable_sqlite_wal
+from skyrl.tinker.db_models import FutureDB, enable_sqlite_wal
 
 
 def optim_input(learning_rate: float = 1e-4) -> types.OptimStepInput:
@@ -42,6 +42,7 @@ async def test_training_request_retry_returns_original_future(tmp_path):
 
     assert retry_id == original_id
     assert len(futures) == 1
+    assert futures[0].seq_id == 7
     await engine.dispose()
 
 
@@ -103,10 +104,9 @@ async def test_concurrent_training_request_types_cannot_reuse_sequence(tmp_path)
 
     async with AsyncSession(engine) as session:
         futures = (await session.exec(select(FutureDB))).all()
-        mappings = (await session.exec(select(TrainingRequestDB))).all()
     assert len(futures) == 1
-    assert len(mappings) == 1
-    assert futures[0].request_id == successes[0] == mappings[0].request_id
+    assert futures[0].request_id == successes[0]
+    assert futures[0].seq_id == 7
     await engine.dispose()
 
 
@@ -120,6 +120,12 @@ async def test_training_requests_without_sequence_numbers_remain_distinct(tmp_pa
         first_id = await create_future(session, types.RequestType.OPTIM_STEP, "model_1", optim_input())
         second_id = await create_future(session, types.RequestType.OPTIM_STEP, "model_1", optim_input())
         await session.commit()
+        futures = (await session.exec(select(FutureDB))).all()
 
+    # Two identical requests for one model, both with seq_id NULL, must not collide on
+    # the futures (model_id, seq_id) constraint: SQL counts NULLs as distinct. That is
+    # what keeps clients which send no seq_id on the pre-idempotency behaviour.
     assert second_id != first_id
+    assert len(futures) == 2
+    assert [future.seq_id for future in futures] == [None, None]
     await engine.dispose()
