@@ -27,6 +27,7 @@ from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
     get_metrics_from_generator_output,
+    slice_generator_output,
 )
 
 BasicType = Union[int, float, str, bool, type(None)]
@@ -489,20 +490,11 @@ def handle_replace_sampling(
         for uid in bad_uids:
             bad_indices.extend(uid2indices[uid])
 
-        # Replace bad samples with good ones (modify in place because replacement_idx and bad_idx should not overlap)
+        source_indices = list(range(len(uids)))
         for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
-            generator_output["prompt_token_ids"][bad_idx] = generator_output["prompt_token_ids"][replacement_idx].copy()
-            generator_output["response_ids"][bad_idx] = generator_output["response_ids"][replacement_idx].copy()
-            replacement_reward = generator_output["rewards"][replacement_idx]
-            generator_output["rewards"][bad_idx] = (
-                replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
-            )
-            generator_output["loss_masks"][bad_idx] = generator_output["loss_masks"][replacement_idx].copy()
-            if generator_output["stop_reasons"]:
-                generator_output["stop_reasons"][bad_idx] = generator_output["stop_reasons"][replacement_idx]
-
-            if generator_output["rollout_logprobs"]:
-                generator_output["rollout_logprobs"][bad_idx] = generator_output["rollout_logprobs"][replacement_idx]
+            source_indices[bad_idx] = replacement_idx
+        if bad_indices:
+            generator_output = slice_generator_output(generator_output, source_indices)
 
         # Update UIDs accordingly
         replaced_uids = uids.copy()
@@ -631,22 +623,7 @@ def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> Li
 
 def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) -> GeneratorOutput:
     """Filter GeneratorOutput based on kept indices."""
-    filtered = {
-        "prompt_token_ids": [output["prompt_token_ids"][i] for i in kept_indices],
-        "response_ids": [output["response_ids"][i] for i in kept_indices],
-        "rewards": [output["rewards"][i] for i in kept_indices],
-        "loss_masks": [output["loss_masks"][i] for i in kept_indices],
-        "stop_reasons": None,
-        "rollout_metrics": output.get("rollout_metrics"),
-        "rollout_logprobs": (
-            [output["rollout_logprobs"][i] for i in kept_indices] if output["rollout_logprobs"] else None
-        ),
-    }
-
-    if output.get("stop_reasons"):
-        filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
-
-    return filtered
+    return slice_generator_output(output, kept_indices)
 
 
 def zero_variance_filter(

@@ -30,6 +30,7 @@ from skyrl.train.utils.callbacks import (
     CallbackInput,
     TrainingCallback,
 )
+from tests.train.sft.util import attach_mock_sft_deps
 
 _FAKE_CKPT_PATH = "/fake/sft-callback-test/global_step_2"
 
@@ -160,7 +161,7 @@ def _dummy_tokenized() -> list[dict]:
     return [example, example]
 
 
-def test_callbacks_fire_during_sft_training(monkeypatch):
+def test_callbacks_fire_during_sft_training(monkeypatch, mock_dispatch):
     """A 2-step SFT run fires every relevant event, in order, with the right payloads."""
     cfg = _build_test_sft_config()
     skyrl_cfg = build_skyrl_config_for_sft(cfg)
@@ -170,29 +171,9 @@ def test_callbacks_fire_during_sft_training(monkeypatch):
     force_save = ForceSaveAtStep(step=2)
     trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg, callbacks=[recorder, force_eval, force_save])
 
-    # Skip setup() (which would load the model + spin up workers). Replace
-    # what setup() would have set with mocks.
-    tokenizer = MagicMock()
-    tokenizer.pad_token_id = 0
-    trainer.tokenizer = tokenizer
-    # setup() also builds the collator once the tokenizer is available.
-    trainer.collator = trainer._build_collator(tokenizer)
+    # Skip setup() by wiring the deps it normally creates.
+    attach_mock_sft_deps(trainer, mock_dispatch)
     trainer.tracker = MagicMock()
-
-    # Mock the worker dispatch — the only thing train_step / run_eval touch
-    # that requires real GPU workers. forward_backward returns an object with
-    # ``.metrics`` (loss); optim_step returns a grad_norm; forward (eval path)
-    # returns ``.metrics`` with a per-batch loss.
-    step_output = MagicMock()
-    step_output.metrics = {"loss": 0.42, "final_loss": 0.42}
-    eval_output = MagicMock()
-    eval_output.metrics = {"loss": 0.31}
-    dispatch_mock = MagicMock()
-    dispatch_mock.forward_backward = MagicMock(return_value=step_output)
-    dispatch_mock.optim_step = MagicMock(return_value=1.0)
-    dispatch_mock.forward = MagicMock(return_value=eval_output)
-    dispatch_mock.dp_size = MagicMock(return_value=1)
-    trainer.dispatch = dispatch_mock
 
     # Bypass HF network fetch + tokenization: both load_dataset() and
     # load_eval_dataset() funnel through _load_and_tokenize.

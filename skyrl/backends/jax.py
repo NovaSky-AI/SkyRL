@@ -911,7 +911,15 @@ class JaxBackendImpl(AbstractBackend):
                 if needs_prompt_logprobs and result.prompt_logprobs:
                     all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
 
-        for request_id, _, start_idx, end_idx, prompt_logprobs_requested in request_batch_slices:
+        for request_id, _, start_idx, end_idx, prompt_logprobs_requested, topk_prompt_logprobs in request_batch_slices:
+            if topk_prompt_logprobs > 0:
+                # tx's generator only returns the sampled token's logprob per
+                # prompt position, so there is nothing to build top-k from.
+                results[request_id] = types.ErrorResponse(
+                    error="topk_prompt_logprobs is not supported by the JAX backend",
+                    status="error",
+                )
+                continue
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
             # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
             prompt_logprobs = (

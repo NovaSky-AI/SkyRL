@@ -112,6 +112,8 @@ def _make_policy_cfg(model_name: str) -> SkyRLTrainConfig:
     # This test only round-trips MTP head weights; packing is irrelevant and Qwen3.5's GDN layers
     # cannot sample-pack anyway (the wrapper rejects it -- see the 9B recipe's remove_microbatch_padding=false).
     cfg.trainer.remove_microbatch_padding = False
+    # Skip optimizer init for weight sync test
+    cfg.trainer.policy.inference_only_init = True
     # Enable MTP via the high-level knob, exactly as the training run does. The trained head count
     # stays None on purpose: the draft DEPTH (num_speculative_tokens) is inference-only, and the head
     # count is inferred from the checkpoint's HF config by the bridge. (_apply_mtp_config only forces
