@@ -44,6 +44,7 @@ def apply_megatron_mla_thd_v_pad_patch() -> None:
             and packed_seq_params is not None
             and getattr(packed_seq_params, "qkv_format", None) == "thd"
             and query.shape[-1] != value.shape[-1]
+            and torch.cuda.is_available()
             and torch.cuda.get_device_capability() >= (10, 0)
         ):
             orig_v_dim = value.shape[-1]
