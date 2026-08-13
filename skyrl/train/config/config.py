@@ -413,6 +413,14 @@ class MegatronLoraConfig(BaseConfig):
     See https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html"""
     merge_lora: bool = True
     """Merge LoRA weights into the base weights during weight sync."""
+    normalize_moe_lora: bool = False
+    """When True, grouped MoE expert linears use ``rank // moe_router_topk`` as
+    their LoRA rank (non-expert layers keep the full rank), normalizing total
+    adapter capacity to be comparable to a dense model. Strongly recommended for
+    large expert counts with ``merge_lora=False``: the exported PEFT adapter
+    stores per-expert tensors, so at full rank a 384-expert model produces a
+    multi-GB adapter that is re-gathered, written, and re-read by every
+    inference engine on every weight sync."""
 
 
 DEFAULT_MEGATRON_OPTIMIZER_KWARGS = {
