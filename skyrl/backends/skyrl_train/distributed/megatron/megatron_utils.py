@@ -20,6 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -562,6 +563,14 @@ def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -
         if any(isinstance(m, Qwen3VLModel) for m in unwrapped_list):
             return True
     return False
+
+
+def model_supports_output_processor(model: nn.Module) -> bool:
+    """Whether the underlying MCore model exposes the fused LM-head hook."""
+    unwrapped = unwrap_model(model)
+    while hasattr(unwrapped, "module"):
+        unwrapped = unwrapped.module
+    return "output_processor" in inspect.signature(unwrapped.forward).parameters
 
 
 def remove_left_padding(
