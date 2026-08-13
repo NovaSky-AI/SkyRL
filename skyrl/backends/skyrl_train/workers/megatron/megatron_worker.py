@@ -596,6 +596,7 @@ class MegatronWorker:
                 lora_A_init_method=lora_config.init_method,
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
+                normalize_moe_lora=self.cfg.policy.megatron_config.lora_config.normalize_moe_lora,
             )
 
     def make_megatron_module(
