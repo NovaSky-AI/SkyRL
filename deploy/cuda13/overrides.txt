@@ -1,0 +1,23 @@
+# Mirror of the root project's [tool.uv] override-dependencies with the CUDA
+# variant flipped to 13, for `uv pip install --override` (the pip interface
+# does not read the project table). Keep in sync with the root pyproject.
+nvidia-resiliency-ext; sys_platform == 'never'
+transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'
+transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'
+# Megatron-Bridge pins megatron-core to its 3rdparty submodule URL; use the
+# same Megatron-LM revision the root project pins.
+megatron-core @ git+https://github.com/NVIDIA/Megatron-LM@71e418ea7d7b3a6c9a53238c543c3e0b43e11026 ; sys_platform == 'linux' and python_version >= '3.12'
+ml_dtypes>=0.5.0; sys_platform == 'linux'
+# transformer-engine-torch hard-depends on the cu12 core; both cores ship the
+# same libtransformer_engine.so path and collide, so only cu13 may install.
+transformer-engine-cu12; sys_platform == 'never'
+# The nixl shim hard-depends on both backend variants; it dispatches by
+# torch's CUDA major at import, so the cu12 backend is dead weight here.
+nixl-cu12; sys_platform == 'never'
+# No torch-2.11/cu13 flash-attn exists; a CUDA-less stub crashes TE.
+flash-attn; sys_platform == 'never'
+# Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
+# the exact 0.6.12 pin (the version vLLM 0.23.0 requires).
+flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'
+flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'
+flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'
