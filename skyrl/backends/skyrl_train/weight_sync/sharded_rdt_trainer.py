@@ -66,14 +66,22 @@ ensure_ray_rdt_libfabric()
 
 logger = init_logger(__name__)
 
-# How many gathered groups may be resident (and served) at once before the
-# gather loop blocks. Bounds resident gathered groups on the trainer.
-# 2, measured: at 1, every group boundary drains the consumers' pull pipeline
-# while the fleet-wide free barrier closes — worth ~2.5-3s of the 235B sync
-# wall (9.6 -> 6.5s warm when raised to 2). The bubble hides inside the
-# consumers' blocked gets, NOT in one producer counter, so trust the A/B over
-# publish_bp_wait. 2 groups resident is ~1.2 GiB/rank at 235B post-EP-local.
-DEFAULT_GATHER_LOOKAHEAD = 2
+# How many gathered-but-unfreed groups the gather loop may run AHEAD of the
+# consumers before it stops gathering. A gathered group is published (made
+# serveable) IMMEDIATELY — publish_group never blocks — and the loop gates
+# before gathering further while more than this many groups are unfreed, so at
+# most ``lookahead + 1`` groups are ever resident on the trainer (~0.6
+# GiB/group/rank at 235B post-EP-local). That +1 bound is the contract larger
+# models rely on; the tests pin it.
+# 1: while the consumers pull group N, group N+1 is already gathered AND
+# published, so the boundary's free-barrier latency chain hides behind live
+# pulls. (The old publish-gated pipeline at lookahead=1 kept N+1 gathered but
+# UNSERVEABLE until N freed — every boundary drained the consumers' pull
+# pipeline, ~2.5-3s of 235B sync wall — while still holding ~3 groups through
+# the parked publish + its window. This credits the gather instead: old
+# lookahead=2 overlap at 2 groups resident.) Raise it only if one group's
+# gather is slower than its pulls.
+DEFAULT_GATHER_LOOKAHEAD = 1
 
 # [RDT-STALL-WATCHDOG] Seconds of no progress at all — no publish, no produce, no
 # free — before the producer declares the sync dead. Overridden per run by
@@ -134,7 +142,8 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     pack_check: bool = False
     """Emit per-blob checksums to /tmp/rdt_profile for offline diffing."""
     gather_lookahead: int = DEFAULT_GATHER_LOOKAHEAD
-    """Resident gathered groups before the gather loop blocks."""
+    """Gathered-but-unfreed groups the gather loop may run ahead by. Bounds
+    trainer-resident memory at ``gather_lookahead + 1`` groups."""
     stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S
     """Seconds of no publish/serve/free progress before the producer fails the sync
     (see ``DEFAULT_STALL_TIMEOUT_S``). Resolved worker-side so the env override
@@ -197,11 +206,16 @@ class _RDTProducerServer:
         # gi -> the names this producer published for it (what release drops).
         self._group_names: dict[int, list[str]] = {}
 
-        # [RDT-BACKPRESSURE] Published-but-not-yet-freed group indices.
-        # publish_group blocks while len(...) >= gather_lookahead; free_group
-        # (the consumer back-edge) drains it. Freed group indices are handed
-        # back to the engine so it drops its trainer-side refs to the shared
-        # storage.
+        # [RDT-GATHER-CREDIT] Published-but-not-yet-freed group indices, plus
+        # the freed indices not yet handed back to the engine. The memory gate
+        # lives in the ENGINE's gather loop — it stops GATHERING (never
+        # publishing; publish_group does not block) while more than
+        # gather_lookahead groups are unfreed. This side only accounts:
+        # free_group (the consumer back-edge) moves a group from
+        # _inflight_groups to _freed_pending, and the engine collects
+        # _freed_pending through wait_freed / end_sync to drop its refs to the
+        # shared storage. _lookahead is engine-enforced; kept here only for the
+        # cfg echo in get_produce_timing.
         self._lookahead = max(1, gather_lookahead)
         self._inflight_groups: list[int] = []
         self._name_to_group: dict[str, int] = {}
@@ -232,7 +246,8 @@ class _RDTProducerServer:
         # into non-overlapping links so the slow one can be named (see
         # multi_node_rdt.md Part X.8). All wall-clock, this process only.
         self._publish_calls = 0
-        self._publish_bp_wait_seconds = 0.0  # publish blocked on lookahead credit
+        self._credit_wait_seconds = 0.0  # engine's wait_freed blocked on a credit
+        self._credit_wait_calls = 0
         self._publish_rebuild_seconds = 0.0  # CUDA-IPC rebuild_cuda_tensor loop
         self._publish_open_seconds = 0.0  # first-encounter storage opens
         self._publish_open_count = 0
@@ -352,12 +367,13 @@ class _RDTProducerServer:
             self._serve_done.clear()
             self._note_progress_locked()
 
-    def publish_group(self, group_idx: int, entries: tuple) -> list[int]:
+    def publish_group(self, group_idx: int, entries: tuple) -> None:
         """Rebuild one gather group's CUDA-IPC tensors and publish to the serve
-        cache. Blocks while `gather_lookahead` groups are already in flight so
-        trainer memory stays bounded (the consumers' `free_group` barrier drains
-        it). Returns the group indices freed since the last call so the engine
-        can drop its refs to the shared storage.
+        cache. NEVER blocks: a gathered group is serveable immediately, so the
+        consumers can start on it the moment they finish the previous one. The
+        memory bound lives in the engine's gather loop, which stops GATHERING
+        (not publishing) while more than ``gather_lookahead`` groups are
+        unfreed — see [RDT-GATHER-CREDIT].
 
         ``entries`` is ``(storages, views)``: ``storages`` maps a storage id to
         the ``reduce_tensor`` args of a whole-storage uint8 view (ONE CUDA-IPC
@@ -370,12 +386,12 @@ class _RDTProducerServer:
         Signals can arrive before the publish they belong to — a consumer that
         pulls nothing of a group signals it as soon as its plan starts — so a
         group whose barrier is already satisfied is released here rather than
-        waiting for a signal that will never come."""
-        _t_bp0 = time.perf_counter()
+        waiting for a signal that will never come. Freed groups reach the
+        engine ONLY through ``wait_freed`` / ``end_sync``, never a publish
+        return: a freed notice riding an unharvested async publish result
+        while the engine blocks in ``wait_freed`` would wedge the loop."""
+        _t_p0 = time.perf_counter()
         storages, views = entries
-        with self._cache_cond:
-            self._wait_for(lambda: len(self._inflight_groups) >= self._lookahead, "a lookahead credit")
-        _t_bp1 = time.perf_counter()
 
         rebuilt: dict[str, torch.Tensor] = {}
         # [RDT-STORAGE-PUBLISH] One rebuild_cuda_tensor per unique STORAGE (the
@@ -412,20 +428,41 @@ class _RDTProducerServer:
             self._publish_time[group_idx] = time.perf_counter()
             if self._free_counts.get(group_idx, 0) >= self._live_count:
                 self._release_group_locked(group_idx)
-            freed = self._freed_pending
-            self._freed_pending = []
             self._note_progress_locked()
             self._cache_cond.notify_all()
         with self._timing_lock:
             self._publish_calls += 1
-            self._publish_bp_wait_seconds += _t_bp1 - _t_bp0
-            self._publish_rebuild_seconds += _t_rb - _t_bp1
+            self._publish_rebuild_seconds += _t_rb - _t_p0
             self._publish_open_seconds += _open_s
             self._publish_open_count += _opens
             self._publish_view_seconds += _view_s
+
+    def wait_freed(self) -> list[int]:
+        """Block until at least one published group has been freed; return and
+        clear the freed-group backlog. The engine's gather-credit gate calls
+        this when its loop is ``gather_lookahead`` gathered groups ahead of the
+        consumers — so THIS wait is where the trainer paces to the consumers'
+        pull rate (the old pipeline parked publish_group on the same credit,
+        which kept the next group gathered but unserveable across every
+        boundary).
+
+        Raises — rather than returning empty — when the sync errors or stalls
+        out (watchdog-covered): the engine is blocked on this call inside its
+        gather loop, and an empty return would only spin it straight back in.
+        """
+        _t0 = time.perf_counter()
+        with self._cache_cond:
+            self._wait_for(lambda: not self._freed_pending, "a freed-group credit")
+            if not self._freed_pending:
+                raise RuntimeError(f"gather errored while waiting for a freed-group credit: {self._gather_error!r}")
+            freed = self._freed_pending
+            self._freed_pending = []
+        with self._timing_lock:
+            self._credit_wait_seconds += time.perf_counter() - _t0
+            self._credit_wait_calls += 1
         return freed
 
-    def end_sync(self) -> list[tuple]:
+    def end_sync(self) -> list[int]:
         """Block until every published group has been freed by its consumers;
         return the remaining freed keys so the engine drops its last refs."""
         with self._cache_cond:
@@ -444,9 +481,10 @@ class _RDTProducerServer:
     # ---------------- consumer-facing (called by name over Ray) ----------------
 
     def _release_group_locked(self, group_idx: int) -> None:
-        """Drop one group's cache entries, release its backpressure slot, and
-        record it for the engine. Caller holds ``_cache_cond``; shared by the last
-        ``free_group`` and by ``publish_group`` completing an early-signaled group."""
+        """Drop one group's cache entries and queue it for the engine (whose
+        gather-credit gate blocks in ``wait_freed`` on exactly this). Caller
+        holds ``_cache_cond``; shared by the last ``free_group`` and by
+        ``publish_group`` completing an early-signaled group."""
         for name in self._group_names.pop(group_idx, ()):
             self._cache.pop(name, None)
             self._name_to_group.pop(name, None)
@@ -472,9 +510,10 @@ class _RDTProducerServer:
         The per-group barrier: counts one signal per live consumer against the
         ``begin_sync`` live count (every consumer signals EVERY owner of the
         group, so the target is the same uniform integer on all owners). On the
-        last signal, drops the cache entries, releases one backpressure slot,
-        and records the freed group for the engine. A signal that arrives before
-        its publish is only counted — ``publish_group`` completes it."""
+        last signal, drops the cache entries and queues the freed group for the
+        engine — the gather credit its loop may be blocked on in ``wait_freed``.
+        A signal that arrives before its publish is only counted —
+        ``publish_group`` completes it."""
         gi = int(group_idx)
         with self._cache_cond:
             count = self._free_counts.get(gi, 0) + 1
@@ -665,7 +704,8 @@ class _RDTProducerServer:
                 bytes=self._produce_bytes,
                 method_seconds=self._produce_method_seconds,
                 publish_calls=self._publish_calls,
-                publish_bp_wait_seconds=self._publish_bp_wait_seconds,
+                credit_wait_seconds=self._credit_wait_seconds,
+                credit_wait_calls=self._credit_wait_calls,
                 publish_rebuild_seconds=self._publish_rebuild_seconds,
                 publish_open_seconds=self._publish_open_seconds,
                 publish_open_count=self._publish_open_count,
@@ -689,7 +729,8 @@ class _RDTProducerServer:
             self._produce_wait_seconds = self._produce_slice_seconds = 0.0
             self._produce_method_seconds = 0.0
             self._publish_calls = 0
-            self._publish_bp_wait_seconds = self._publish_rebuild_seconds = 0.0
+            self._credit_wait_seconds = self._publish_rebuild_seconds = 0.0
+            self._credit_wait_calls = 0
             self._publish_open_seconds = self._publish_view_seconds = 0.0
             self._publish_open_count = 0
             self._serve_lag_waited_seconds = self._serve_lag_ready_seconds = 0.0
@@ -771,21 +812,25 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         return ray.get(getattr(self._server, method).remote(*args))
 
     def _publish_async(self, group_idx: int, entries):
-        """Fire publish_group WITHOUT blocking (the gather loop overlaps the
-        publish with the next group's gather) and return a handle that
-        ``_drop_when_ready`` resolves. Ray actor handle in production; a plain
-        (non-Ray) fake server runs inline and returns its result directly."""
+        """Fire publish_group WITHOUT waiting on the RPC (the gather loop
+        overlaps the publish's server-side rebuild with the next group's
+        gather) and return a handle that ``_await_publish`` resolves. Ray actor
+        handle in production; a plain (non-Ray) fake server runs inline."""
         method = self._server.publish_group
         remote = getattr(method, "remote", None)
         if remote is not None:
             return remote(group_idx, entries)
         return method(group_idx, entries)
 
-    def _drop_when_ready(self, ref) -> None:
+    def _await_publish(self, ref) -> None:
+        """Resolve one async publish so a server-side rebuild error surfaces at
+        window depth instead of at end_sync. Publishes carry nothing back —
+        freed groups flow only through wait_freed/end_sync (one channel; see
+        publish_group)."""
         import ray
 
-        freed = ray.get(ref) if isinstance(ref, ray.ObjectRef) else ref
-        self._drop_inflight(freed)
+        if isinstance(ref, ray.ObjectRef):
+            ray.get(ref)
 
     # ---------------- construction ----------------
 
@@ -1076,12 +1121,13 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             # Thread budget: under EP-local routing EVERY consumer pulls from
             # every producer, and with issue-ahead each consumer can park up to
             # K produce calls in this actor's cache-wait — C*K blocked calls.
-            # publish_group / free_group / begin/end_sync queue BEHIND them if
-            # the pool is smaller, which is a guaranteed deadlock: the parked
-            # produces wait for a publish that can never get a thread (observed
-            # as the sync-2 wedge at 235B tp8: 16 parked produces vs 8 threads,
-            # "0 groups published"). Size the pool to the worst case plus slack
-            # for the control plane.
+            # publish_group / free_group / wait_freed / begin/end_sync queue
+            # BEHIND them if the pool is smaller, which is a guaranteed
+            # deadlock: the parked produces wait for a publish that can never
+            # get a thread (observed as the sync-2 wedge at 235B tp8: 16 parked
+            # produces vs 8 threads, "0 groups published"). Size the pool to
+            # the worst case plus slack for the control plane (at most one
+            # parked wait_freed + two async publishes + one begin/end at once).
             max_concurrency=ii.num_consumers * ii.num_rdt_buffers + 4,
             enable_tensor_transport=True,
             scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
@@ -1190,13 +1236,15 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
 
     def _run_gather_loop(self, update_future, live_count: int) -> None:
         """Gather this rank's weights group-by-group and publish each into the
-        server over CUDA IPC. `publish_group` blocks when the lookahead is full,
-        so the loop self-paces to the consumers' pull rate (the per-group free
-        barrier: a credit releases when every live consumer has signaled the
-        group). Runs on every rank; only the sender has an `update_future` to
-        fail fast on."""
+        server over CUDA IPC. A gathered group is published — serveable —
+        immediately; the loop gates BEFORE the next gather while more than
+        `gather_lookahead` groups are unfreed (the per-group free barrier: a
+        credit releases when every live consumer has signaled the group). So
+        the loop self-paces to the consumers' pull rate with at most
+        `gather_lookahead + 1` groups resident. Runs on every rank; only the
+        sender has an `update_future` to fail fast on."""
         gather0 = time.perf_counter()
-        _t_next = _t_pub = _t_exp = 0.0
+        _t_next = _t_pub = _t_exp = _t_credit = 0.0
         assert self.source is not None  # guaranteed by trainer_init
         self._rpc("begin_sync", live_count)
 
@@ -1212,16 +1260,32 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # [RDT-ASYNC-PUBLISH] Publishes are fired without an inline ray.get and
         # harvested this window deep, so the publish RPC + server-side rebuild
         # overlap the NEXT group's gather/export instead of serializing the
-        # loop. The server's lookahead backpressure still bounds resident
-        # groups (a queued publish blocks server-side; worst case
-        # lookahead + window - 1 groups are live at once).
+        # loop. publish_group never blocks (memory is bounded by the gather
+        # credit gate below, not by parking publishes), so a harvest costs only
+        # the rebuild; the window is about overlapping that and surfacing a
+        # server-side error at depth 2 instead of at end_sync.
         _PUBLISH_WINDOW = 2
         pending_publish: list = []
+        # [RDT-GATHER-CREDIT] The memory bound: gate BEFORE gathering while
+        # more than `bound` groups are gathered-but-unfreed, so at most
+        # bound + 1 groups are ever resident — `_inflight` gains its entry
+        # right after each gather and only wait_freed/end_sync returns shrink
+        # it, so the count here is exact (a group freed server-side but not yet
+        # collected still holds its refs, and still counts). The publish window
+        # is drained before blocking so every resident group's publish has
+        # LANDED — the consumers can be pulling all of them while we wait.
+        bound = max(1, self._init_info.gather_lookahead)
 
         try:
             for gi in self._owned_idx:
                 group = self._groups[gi]
+                _tc = time.perf_counter()
+                while len(self._inflight) > bound:
+                    while pending_publish:
+                        self._await_publish(pending_publish.pop(0))
+                    self._drop_inflight(self._rpc("wait_freed"))
                 _tn = time.perf_counter()
+                _t_credit += _tn - _tc
                 names, tensors = next(groups)
                 if list(names) != list(group):
                     raise RuntimeError(
@@ -1278,15 +1342,15 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
                 _tp = time.perf_counter()
                 pending_publish.append(self._publish_async(gi, (storages, views)))
                 while len(pending_publish) >= _PUBLISH_WINDOW:
-                    self._drop_when_ready(pending_publish.pop(0))
+                    self._await_publish(pending_publish.pop(0))
                 _t_pub += time.perf_counter() - _tp
                 if update_future is not None and update_future.done():
                     # update_weights returned/failed early -- surface now instead of
-                    # blocking further publishes.
+                    # blocking further gathers.
                     update_future.result()
             _tp = time.perf_counter()
             while pending_publish:
-                self._drop_when_ready(pending_publish.pop(0))
+                self._await_publish(pending_publish.pop(0))
             freed = self._rpc("end_sync")
             _t_pub += time.perf_counter() - _tp
             self._drop_inflight(freed)
@@ -1300,6 +1364,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             self._sync_timing["source_next_seconds"] = _t_next
             self._sync_timing["publish_rpc_seconds"] = _t_pub
             self._sync_timing["export_seconds"] = _t_exp
+            self._sync_timing["credit_wait_seconds"] = _t_credit
 
     def _drop_inflight(self, freed_keys: list) -> None:
         for k in freed_keys:

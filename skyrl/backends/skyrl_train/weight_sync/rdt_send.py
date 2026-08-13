@@ -60,9 +60,11 @@ logger = logging.getLogger(__name__)
 # Defaults for the must-agree wire knobs (mirror the vLLM sharded_rdt defaults).
 _DEFAULT_NUM_RDT_BUFFERS = 2
 _DEFAULT_ARENA_PRESIZE_GB = 0.0
-# Max gathered-but-not-yet-freed groups the producer holds at once (backpressure).
-# 1 = the steady state "NIXL-serve group N while gathering group N+1"; raise via
-# SKYRL_RDT_LOOKAHEAD if the per-group free barrier ever paces the sync wall.
+# Gathered-but-unfreed groups the trainer's gather loop runs ahead by; bounds
+# trainer-resident memory at lookahead + 1 groups (see sharded_rdt_trainer.
+# DEFAULT_GATHER_LOOKAHEAD). 1 = while the consumers pull group N, group N+1 is
+# already gathered AND published; raise via SKYRL_RDT_LOOKAHEAD only if one
+# group's gather is slower than its pulls.
 _DEFAULT_GATHER_LOOKAHEAD = 1
 # Producer stall watchdog (seconds). Mirrors sharded_rdt_trainer.DEFAULT_STALL_TIMEOUT_S
 # and InferenceFaultToleranceConfig.stall_timeout_s; duplicated rather than imported so
