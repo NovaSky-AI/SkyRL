@@ -333,7 +333,7 @@ async def create_future(
     request_data: BaseModel,
     seq_id: int | None = None,
 ) -> int:
-    """Create a future, returning the original one when an SDK request is retried."""
+    """Create a future, returning the original request_id when an SDK request is retried."""
     serialized_request = request_data.model_dump(mode="json")
 
     async def existing_request_id() -> int | None:
