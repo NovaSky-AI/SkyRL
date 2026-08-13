@@ -9129,7 +9129,7 @@ requires-dist = [
     { name = "sqlmodel", marker = "extra == 'tinker'" },
     { name = "tensorboard", marker = "extra == 'skyrl-train'" },
     { name = "tensordict", marker = "extra == 'skyrl-train'" },
-    { name = "tinker", marker = "extra == 'tinker'", specifier = ">=0.3.0" },
+    { name = "tinker", marker = "extra == 'tinker'", specifier = ">=0.3.0,<=0.24.1" },
     { name = "tokenizers", specifier = ">=0.21.2" },
     { name = "torch", marker = "sys_platform == 'darwin' and extra == 'dev'", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'dev'" },
