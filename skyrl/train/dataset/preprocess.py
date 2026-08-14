@@ -1,17 +1,25 @@
 import logging
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 from jaxtyping import Bool, Float, Integer
 
-from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices_np
+from skyrl.backends.skyrl_train.utils.replay_utils import replay_padding_row
 from skyrl.backends.skyrl_train.utils.routed_experts import (
+    ROUTED_EXPERT_DTYPES,
     RoutedExpertIndices,
-    compact_routed_expert_indices,
 )
+from skyrl.train.dataset.parallel_fill import fill_batch_rows
 
 logger = logging.getLogger(__name__)
+
+# Torch counterparts of the canonical routed-expert dtypes.
+ROUTED_EXPERT_TORCH_DTYPES: Dict[np.dtype, torch.dtype] = {
+    np.dtype(np.uint8): torch.uint8,
+    np.dtype(np.int16): torch.int16,
+    np.dtype(np.int32): torch.int32,
+}
 
 
 def make_router_padding_mask(
@@ -85,6 +93,87 @@ def _reward_to_numpy(custom_reward: Union[List[float], torch.Tensor]) -> np.ndar
     if reward_arr.ndim != 1:
         raise ValueError(f"Expected a 1D per-token reward sequence, got shape {reward_arr.shape}")
     return reward_arr
+
+
+def _collate_rollout_expert_indices(
+    rollout_expert_indices: List[RoutedExpertIndices],
+    pad_lens: np.ndarray,
+    max_total: int,
+) -> Integer[torch.Tensor, "batch seq_len layer_num topk"]:
+    """Pack per-trajectory routes into one left-padded ``[batch, seq_len, layers, topk]`` buffer.
+
+    ``pack_routed_experts`` establishes the canonical dtype on the sending side, so entries are
+    validated rather than rescanned here. Every region of the buffer is written exactly once, from
+    a locally sized thread pool: this fill runs on the whole global batch before DP sharding, on
+    every training step, and is bound by first-touch page faults on a fresh multi-GiB mapping.
+    """
+    num_samples = len(rollout_expert_indices)
+    for sample_index, sample_indices in enumerate(rollout_expert_indices):
+        if not isinstance(sample_indices, np.ndarray):
+            raise TypeError(
+                f"rollout_expert_indices entries must be NumPy arrays, got {type(sample_indices).__name__} "
+                f"at sample {sample_index}"
+            )
+        if sample_indices.dtype not in ROUTED_EXPERT_DTYPES:
+            supported = ", ".join(
+                dtype.name for dtype in sorted(ROUTED_EXPERT_DTYPES, key=lambda dtype: dtype.itemsize)
+            )
+            raise ValueError(
+                f"rollout_expert_indices entries must use a canonical routed-expert dtype ({supported}), "
+                f"got {sample_indices.dtype} at sample {sample_index}"
+            )
+
+    first_shape = rollout_expert_indices[0].shape
+    if len(first_shape) != 3 or first_shape[0] == 0:
+        raise ValueError("rollout_expert_indices must contain routes for every trajectory")
+    num_layers, topk = first_shape[1:]
+    if topk < 1:
+        raise ValueError("rollout_expert_indices must contain at least one expert per layer")
+
+    # Validate serially so an invalid trajectory raises deterministically rather than from a worker.
+    route_ends = []
+    for sample_index, sample_indices in enumerate(rollout_expert_indices):
+        if sample_indices.ndim != 3 or sample_indices.shape[1:] != (num_layers, topk):
+            raise ValueError(
+                "rollout_expert_indices entries must share [layers, topk], "
+                f"got shape {sample_indices.shape} at sample {sample_index}"
+            )
+        left_pad = int(pad_lens[sample_index])
+        available = max_total - left_pad
+        if sample_indices.shape[0] == 0 or sample_indices.shape[0] > available:
+            raise ValueError(
+                f"Trajectory {sample_index} has {sample_indices.shape[0]} route rows for {available} tokens"
+            )
+        route_ends.append(left_pad + sample_indices.shape[0])
+
+    batch_dtype = max((indices.dtype for indices in rollout_expert_indices), key=lambda dtype: dtype.itemsize)
+    if batch_dtype == np.dtype(np.int32):
+        logger.warning(
+            "Collating rollout_expert_indices as int32, which doubles this buffer. No supported expert count "
+            "needs more than int16, so the inference server is not compacting its routes."
+        )
+    padded = torch.empty(
+        (num_samples, max_total, num_layers, topk),
+        dtype=ROUTED_EXPERT_TORCH_DTYPES[batch_dtype],
+    )
+    # Distinct experts per padding row, as Megatron's dropless dispatcher requires.
+    padding_row = replay_padding_row(topk, dtype=padded.dtype)
+
+    def fill_sample(sample_index: int) -> None:
+        sample_indices = rollout_expert_indices[sample_index]
+        flags = sample_indices.flags
+        # torch.from_numpy refuses a non-writeable buffer, and decoded wire routes may be read-only.
+        if not flags.c_contiguous or not flags.writeable:
+            sample_indices = sample_indices.copy(order="C")
+        left_pad = int(pad_lens[sample_index])
+        route_end = route_ends[sample_index]
+        sample_rows = padded[sample_index]
+        sample_rows[:left_pad] = padding_row
+        sample_rows[left_pad:route_end] = torch.from_numpy(sample_indices)
+        sample_rows[route_end:] = padding_row
+
+    fill_batch_rows(fill_sample, num_samples)
+    return padded
 
 
 def convert_prompts_responses_to_batch_tensors(
@@ -235,42 +324,11 @@ def convert_prompts_responses_to_batch_tensors(
         if len(rollout_expert_indices) != num_samples:
             raise ValueError("rollout_expert_indices must contain routes for every trajectory")
 
-        canonical_indices = []
-        for sample_index, sample_indices in enumerate(rollout_expert_indices):
-            if not isinstance(sample_indices, np.ndarray):
-                raise TypeError(
-                    f"rollout_expert_indices entries must be NumPy arrays, got {type(sample_indices).__name__} "
-                    f"at sample {sample_index}"
-                )
-            canonical_indices.append(compact_routed_expert_indices(sample_indices))
-
-        first_shape = canonical_indices[0].shape
-        if len(first_shape) != 3 or first_shape[0] == 0:
-            raise ValueError("rollout_expert_indices must contain routes for every trajectory")
-        num_layers, topk = first_shape[1:]
-        if topk < 1:
-            raise ValueError("rollout_expert_indices must contain at least one expert per layer")
-
-        batch_dtype = max((indices.dtype for indices in canonical_indices), key=lambda dtype: dtype.itemsize)
-        padded = make_replay_padding_indices_np(
-            (num_samples, max_total, num_layers, topk),
-            dtype=batch_dtype,
+        rollout_expert_indices_tensor = _collate_rollout_expert_indices(
+            rollout_expert_indices,
+            pad_lens,
+            max_total,
         )
-        for sample_index, sample_indices in enumerate(canonical_indices):
-            if sample_indices.ndim != 3 or sample_indices.shape[1:] != (num_layers, topk):
-                raise ValueError(
-                    "rollout_expert_indices entries must share [layers, topk], "
-                    f"got shape {sample_indices.shape} at sample {sample_index}"
-                )
-            left_pad = max_total - (prompt_token_lens[sample_index] + response_token_lens[sample_index])
-            available = max_total - left_pad
-            if sample_indices.shape[0] == 0 or sample_indices.shape[0] > available:
-                raise ValueError(
-                    f"Trajectory {sample_index} has {sample_indices.shape[0]} route rows for {available} tokens"
-                )
-            route_end = left_pad + sample_indices.shape[0]
-            padded[sample_index, left_pad:route_end] = sample_indices
-        rollout_expert_indices_tensor = torch.from_numpy(padded)
 
     return (
         sequences,
