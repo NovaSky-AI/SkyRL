@@ -57,6 +57,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     get_transfer_strategy,
@@ -376,6 +377,7 @@ class MegatronWorker:
         self.strategy.hf_config = hf_config_original
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
+        self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
         normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
@@ -543,6 +545,11 @@ class MegatronWorker:
                     "num_actions": micro.metadata["response_length"],
                     "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
                     "router_padding_mask": micro.get("router_padding_mask") if self.enable_router_replay else None,
+                    SAMPLE_SUPPORT_FIELD: (
+                        micro.get(SAMPLE_SUPPORT_FIELD) if self.enable_sample_support_replay else None
+                    ),
+                    # The support scorer needs the loss mask to find the appended EOS.
+                    "loss_mask": micro.get("loss_mask") if self.enable_sample_support_replay else None,
                     "sub_seq_lengths": micro.get("sub_seq_lengths"),
                     **vlm_inputs,
                 }
@@ -930,6 +937,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
+                    SAMPLE_SUPPORT_FIELD: (
+                        experience.rollout_sample_support if self.enable_sample_support_replay else None
+                    ),
                     "sub_seq_lengths": experience.sub_seq_lengths,
                     **vlm_inputs,
                 }
@@ -1055,6 +1065,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
+                    SAMPLE_SUPPORT_FIELD: (
+                        experience.rollout_sample_support if self.enable_sample_support_replay else None
+                    ),
                     # used with global sequence packing (None when token-based batching is active)
                     "sub_seq_lengths": experience.sub_seq_lengths,
                     "is_padding_batch": (
