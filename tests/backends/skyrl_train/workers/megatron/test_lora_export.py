@@ -14,6 +14,39 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 
 
+def test_all_linear_targets_hybrid_mamba_projections(monkeypatch):
+    captured = {}
+
+    class FakeLoRA:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(worker_module, "LoRA", FakeLoRA)
+    worker = worker_module.MegatronPolicyWorkerBase.__new__(
+        worker_module.MegatronPolicyWorkerBase
+    )
+    worker.cfg = SimpleNamespace(bf16=True)
+    config = SimpleNamespace(
+        target_modules="all-linear",
+        rank=32,
+        alpha=32,
+        dropout=0.0,
+        init_method="xavier",
+        exclude_modules=None,
+    )
+
+    worker.configure_lora(config)
+
+    assert captured["target_modules"] == [
+        "linear_qkv",
+        "linear_proj",
+        "linear_fc1",
+        "linear_fc2",
+        "in_proj",
+        "out_proj",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_conditional_generation_lora_export_matches_vllm_names(
     monkeypatch, tmp_path

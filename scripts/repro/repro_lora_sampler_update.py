@@ -6,6 +6,7 @@ update 2. Equality at either boundary isolates a no-op export or stale reload.
 
 import argparse
 import asyncio
+import math
 
 import tinker
 from tinker import types
@@ -52,22 +53,31 @@ async def main() -> int:
     prompt_tokens = tokenizer.encode(PROBE_TEXT)
 
     series = []
+    losses = []
     sampler = await training.save_weights_and_get_sampling_client_async()
     series.append(await greedy_logprobs(sampler, prompt_tokens))
     for update in (1, 2):
-        await training.forward_backward([datum], loss_fn="cross_entropy").result_async(
-            timeout=1800
-        )
+        backward = await training.forward_backward(
+            [datum], loss_fn="cross_entropy"
+        ).result_async(timeout=1800)
+        loss = float(backward.metrics.get("total_loss:sum", float("nan")))
+        losses.append(loss)
         step = await training.optim_step(
             types.AdamParams(learning_rate=args.lr)
         ).result_async(timeout=600)
         sampler = await training.save_weights_and_get_sampling_client_async()
         series.append(await greedy_logprobs(sampler, prompt_tokens))
-        print(f"update={update} grad_norm={step.metrics.get('skyrl.ai/grad_norm')}")
+        print(
+            f"update={update} loss={loss} "
+            f"grad_norm={step.metrics.get('skyrl.ai/grad_norm')}"
+        )
 
     print("initial:", series[0][:8])
     print("update1:", series[1][:8])
     print("update2:", series[2][:8])
+    if not all(math.isfinite(loss) and loss > 0.0 for loss in losses):
+        print("FAIL: cross-entropy produced no finite positive loss")
+        return 1
     if series[0] == series[1]:
         print("FAIL: first exported adapter had no effect on sampling")
         return 1

@@ -545,7 +545,7 @@ class MegatronWorker:
         if lora_type == "lora":
             self.lora_cls = LoRA(
                 target_modules=(
-                    ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]
+                    ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
                     if lora_config.target_modules == "all-linear"
                     else lora_config.target_modules
                 ),
