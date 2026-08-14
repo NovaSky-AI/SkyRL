@@ -7,6 +7,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_DTYPE
 from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import (
     compute_turn_token_counts,
@@ -54,7 +55,9 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
-        "rollout_expert_indices": [np.zeros((2, 1, 2), dtype=np.uint8), np.ones((2, 1, 2), dtype=np.uint8)],
+        # Routes cover every token the loss trains: one row short of the sequence, since the last
+        # sampled token has no subsequent forward to record a route for.
+        "rollout_expert_indices": [np.zeros((3, 1, 2), dtype=np.uint8), np.ones((3, 1, 2), dtype=np.uint8)],
         "rollout_sample_support": [[[1, 2], [1, 2]], [[3, 4], [3, 4]]],
     }
 
@@ -65,7 +68,7 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1, 1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
-        "rollout_expert_indices": [np.full((3, 1, 2), 2, dtype=np.uint8), np.full((1, 1, 2), 3, dtype=np.uint8)],
+        "rollout_expert_indices": [np.full((5, 1, 2), 2, dtype=np.uint8), np.full((1, 1, 2), 3, dtype=np.uint8)],
         "rollout_sample_support": [[[5, 6], [5, 6], [5, 6]], [[7, 8]]],
     }
 
@@ -592,7 +595,10 @@ class TestMergeStepwiseOutput:
             "stop_reasons": ["continue", "eos"],
             "rollout_metrics": None,
             "rollout_logprobs": None,
-            "rollout_sample_support": [[[20, 21, -1]], [[40, 44, -1], [41, 45, 46]]],
+            "rollout_sample_support": [
+                np.array([[20, 21, -1]], dtype=SAMPLE_SUPPORT_DTYPE),
+                np.array([[40, 44, -1], [41, 45, 46]], dtype=SAMPLE_SUPPORT_DTYPE),
+            ],
             "trajectory_ids": [tid, tid],
             "rollout_expert_indices": None,
             "is_last_step": [False, True],
@@ -601,9 +607,11 @@ class TestMergeStepwiseOutput:
         merged = merge_stepwise_output(gen_out)
 
         support = merged["rollout_sample_support"][0]
-        assert support == [[20, 21, -1], [-1, -1, -1], [40, 44, -1], [41, 45, 46]]
-        assert len(support) == len(merged["response_ids"][0])
-        assert {len(row) for row in support} == {3}
+        expected = [[20, 21, -1], [-1, -1, -1], [40, 44, -1], [41, 45, 46]]
+        np.testing.assert_array_equal(support, np.array(expected, dtype=SAMPLE_SUPPORT_DTYPE))
+        # One dense ndarray, so the trainer can pack it without a nested-list round trip.
+        assert support.shape == (len(merged["response_ids"][0]), 3)
+        assert support.dtype == SAMPLE_SUPPORT_DTYPE
 
     def test_native_output_carrying_dict_valued_time_splits(self):
         tid = _make_tid("timed")
