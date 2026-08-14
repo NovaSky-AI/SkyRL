@@ -136,13 +136,19 @@ def test_routed_expert_trace_tracks_multiturn_suffix_and_terminal_gap() -> None:
     assert trace.prompt_start == 4
     trace.record_generation(prompt_token_count=7, generated_token_count=2, routed_experts=routes(4))
 
+    # `finalize` returns only the rows the engine actually captured -- `prompt_start`, one short
+    # of `token_count`, because the last sampled token has no subsequent decode forward. The
+    # trailing dummy row is built during collation instead, where `make_router_padding_mask` can
+    # mark it so Megatron excludes it from router accounting.
     result = trace.finalize(token_count=9, loss_mask=[0, 0, 0, 1, 1, 0, 0, 1, 1])
-    assert result.shape == (9, 2, 2) and result.dtype == np.uint8
-    assert np.array_equal(result[-1, 0], [0, 1])
+    assert trace.prompt_start == 8
+    assert result.shape == (8, 2, 2) and result.dtype == np.uint8
+    # The last row is a real captured route now, not a dummy `arange(topk)` pad row.
+    assert np.array_equal(result[-1, 0], [4, 5])
 
 
 @pytest.mark.parametrize("active", [False, True])
-def test_routed_expert_trace_only_pads_masked_suffix(active: bool) -> None:
+def test_routed_expert_trace_refuses_a_loss_active_target_without_a_row(active: bool) -> None:
     trace = RoutedExpertTrace()
     trace.record_generation(prompt_token_count=3, generated_token_count=1, routed_experts=routes(3))
     mask = [0, 0, 0, 0, int(active)]
@@ -150,8 +156,11 @@ def test_routed_expert_trace_only_pads_masked_suffix(active: bool) -> None:
         with pytest.raises(ValueError, match="loss-active target"):
             trace.finalize(token_count=5, loss_mask=mask)
     else:
+        # A masked suffix is no longer dummy-padded up to `token_count`: the captured rows are
+        # returned verbatim and the gap is filled during collation.
         result = trace.finalize(token_count=5, loss_mask=mask)
-        assert np.array_equal(result[-2:, 0], [[0, 1], [0, 1]])
+        assert result.shape == (3, 2, 2)
+        assert np.array_equal(result, routes(3).astype(result.dtype))
 
 
 @pytest.mark.parametrize("packed", [False, True])

@@ -15,6 +15,11 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
     ROUTED_EXPERT_DTYPES,
     RoutedExpertIndices,
 )
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_DTYPES,
+    SAMPLE_SUPPORT_TORCH_DTYPE,
+    SampleSupport,
+)
 from skyrl.train.dataset.parallel_fill import fill_batch_rows
 
 logger = logging.getLogger(__name__)
@@ -180,6 +185,79 @@ def _collate_rollout_expert_indices(
     return PackedTensor(packed, cu_seqlens)
 
 
+def _fill_sample_support_segment(
+    packed: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    rollout_sample_support: List[SampleSupport],
+    sample_index: int,
+) -> None:
+    """Write one trajectory's segment of the packed sample-support buffer."""
+    rows = rollout_sample_support[sample_index]
+    # torch.from_numpy refuses a non-writeable buffer, and decoded wire support may be read-only.
+    if not rows.flags.c_contiguous or not rows.flags.writeable:
+        rows = rows.copy(order="C")
+    packed[int(cu_seqlens[sample_index]) : int(cu_seqlens[sample_index + 1])] = torch.from_numpy(rows)
+
+
+def build_sample_support(
+    rollout_sample_support: List[SampleSupport],
+    response_lens: np.ndarray,
+) -> PackedTensor:
+    """Pack per-trajectory sampler support into one ``[sum(response_len_i), top_k]`` buffer.
+
+    Support describes generated tokens only, so it packs to the response tokens rather than to
+    a ``[batch, seq_len, top_k]`` rectangle whose whole prompt region would be padding written
+    on the driver and read back only to be discarded. The outer ragged level is one segment per
+    trajectory, exactly as for packed routes, so the trainer indexes both by segment.
+
+    The wire side establishes the canonical dtype and the trailing-padding invariant, so entries
+    are validated rather than rescanned here. The fill runs from a locally sized thread pool for
+    the same reason route collation does: it touches the whole global batch before DP sharding,
+    on every training step, and is bound by first-touch page faults on a fresh mapping.
+    """
+    num_samples = len(rollout_sample_support)
+    for sample_index, rows in enumerate(rollout_sample_support):
+        if not isinstance(rows, np.ndarray):
+            raise TypeError(
+                f"rollout_sample_support entries must be NumPy arrays, got {type(rows).__name__} "
+                f"at sample {sample_index}"
+            )
+        if rows.dtype not in SAMPLE_SUPPORT_DTYPES:
+            supported = ", ".join(dtype.name for dtype in SAMPLE_SUPPORT_DTYPES)
+            raise ValueError(
+                f"rollout_sample_support entries must use a canonical sample-support dtype ({supported}), "
+                f"got {rows.dtype} at sample {sample_index}"
+            )
+
+    first_shape = rollout_sample_support[0].shape
+    if len(first_shape) != 2 or first_shape[1] < 1:
+        raise ValueError(
+            f"rollout_sample_support must be [response_tokens, top_k] arrays, got shape {first_shape} at sample 0"
+        )
+    top_k = first_shape[1]
+
+    # Validate serially so an invalid trajectory raises deterministically rather than from a worker.
+    for sample_index, rows in enumerate(rollout_sample_support):
+        if rows.ndim != 2 or rows.shape[1] != top_k:
+            raise ValueError(
+                f"rollout_sample_support entries must share top_k {top_k}, "
+                f"got shape {rows.shape} at sample {sample_index}"
+            )
+        expected = int(response_lens[sample_index])
+        if rows.shape[0] != expected:
+            raise ValueError(
+                f"Trajectory {sample_index} has {rows.shape[0]} support rows for {expected} response tokens"
+            )
+
+    cu_seqlens = cu_seqlens_from_lengths(response_lens)
+    packed = torch.empty((int(response_lens.sum()), top_k), dtype=SAMPLE_SUPPORT_TORCH_DTYPE)
+    fill_batch_rows(
+        functools.partial(_fill_sample_support_segment, packed, cu_seqlens, rollout_sample_support),
+        num_samples,
+    )
+    return PackedTensor(packed, cu_seqlens)
+
+
 def convert_prompts_responses_to_batch_tensors(
     pad_token_id: int,
     prompts: List[List[int]],
@@ -188,6 +266,7 @@ def convert_prompts_responses_to_batch_tensors(
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
     rollout_expert_indices: Optional[List[RoutedExpertIndices]] = None,
+    rollout_sample_support: Optional[List[SampleSupport]] = None,
     max_seq_len: Optional[int] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
@@ -196,6 +275,7 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
+    Optional[PackedTensor],
     Optional[PackedTensor],
 ]:
     """
@@ -256,6 +336,9 @@ def convert_prompts_responses_to_batch_tensors(
         rollout_expert_indices: ``PackedTensor`` whose values are
             ``(sum(prompt_i + response_i), layers, topk)`` in canonical batch order, with
             ``cu_seqlens`` naming each trajectory's segment, or ``None``.
+        rollout_sample_support: ``PackedTensor`` whose values are
+            ``(sum(response_i), top_k)`` in canonical batch order, with ``cu_seqlens`` naming
+            each trajectory's segment, or ``None``.
     """
     _verify_inputs(prompts, responses, rewards, loss_masks)
 
@@ -333,6 +416,15 @@ def convert_prompts_responses_to_batch_tensors(
 
         rollout_expert_indices_tensor = _collate_rollout_expert_indices(rollout_expert_indices, total_real)
 
+    sample_support_tensor = None
+    if rollout_sample_support is not None:
+        if not isinstance(rollout_sample_support, list):
+            raise TypeError("rollout_sample_support must be a list of NumPy arrays")
+        if len(rollout_sample_support) != num_samples:
+            raise ValueError("rollout_sample_support must contain support for every trajectory")
+
+        sample_support_tensor = build_sample_support(rollout_sample_support, response_lens)
+
     return (
         sequences,
         attention_mask,
@@ -341,6 +433,7 @@ def convert_prompts_responses_to_batch_tensors(
         ret_loss_masks,
         logprobs_tensor,
         rollout_expert_indices_tensor,
+        sample_support_tensor,
     )
 
 

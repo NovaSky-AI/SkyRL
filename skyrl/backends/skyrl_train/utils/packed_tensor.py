@@ -169,3 +169,22 @@ class PackedTensor:
             torch.cat([batch.values for batch in batches], dim=0),
             cu_seqlens_from_lengths(lengths, device=batches[0].device),
         )
+
+
+def packed_padding_segments(
+    reference: PackedTensor,
+    *,
+    segment_lengths: Sequence[int],
+    fill: torch.Tensor | int | float | bool,
+) -> PackedTensor:
+    """Return ``fill``-valued segments in ``reference``'s row shape, dtype and device.
+
+    ``fill`` broadcasts over the row shape, so it may be a scalar or one whole row.
+    """
+    values = torch.empty(
+        (sum(segment_lengths), *reference.row_shape),
+        dtype=reference.dtype,
+        device=reference.device,
+    )
+    values[...] = fill
+    return PackedTensor(values, cu_seqlens_from_lengths(segment_lengths, device=reference.device))

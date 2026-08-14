@@ -3,6 +3,8 @@
 import copy
 import io
 import pickle
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Dict, Generic, List, Optional, TypedDict, TypeVar, Union
 
@@ -10,8 +12,15 @@ import numpy as np
 import torch
 from jaxtyping import Bool, Float, Integer
 
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
-from skyrl.backends.skyrl_train.utils.replay_utils import append_packed_replay_padding
+from skyrl.backends.skyrl_train.utils.packed_tensor import (
+    PackedTensor,
+    packed_padding_segments,
+)
+from skyrl.backends.skyrl_train.utils.replay_utils import replay_padding_row
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_PADDING,
+)
 
 DictType = TypeVar("DictType")
 
@@ -162,7 +171,7 @@ class TensorBatch(dict, Generic[DictType]):
     metadata: Optional[Dict[str, Any]] = None
 
     # These fields may be backed by read-only shared memory after deserialization.
-    ZERO_COPY_KEYS: frozenset[str] = frozenset({"rollout_expert_indices"})
+    ZERO_COPY_KEYS: frozenset[str] = frozenset({"rollout_expert_indices", SAMPLE_SUPPORT_FIELD})
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -531,6 +540,8 @@ class TrainingInput(TypedDict, total=False):
     # MoE router replay, packed to real tokens: values [sum(seq_len_i), layer_num, topk] + cu_seqlens
     rollout_expert_indices: Optional[PackedTensor]
     router_padding_mask: Optional[Bool[torch.Tensor, "batch_size seq_len"]]  # True = no captured route (skip in replay)
+    # Sampler support, packed to RESPONSE tokens: values [sum(response_len_i), top_k] + cu_seqlens
+    rollout_sample_support: Optional[PackedTensor]
     pixel_values: Optional[TensorList]  # list of `batch_size` [num_patches_i, dim] tensors
     image_grid_thw: Optional[TensorList]  # list of `batch_size` [num_images_i, 3] tensors
 
@@ -545,6 +556,57 @@ class TrainingOutputBatch(TensorBatch[Dict[str, torch.Tensor]]):
     """Training output data"""
 
     pass
+
+
+@dataclass(frozen=True)
+class PackedFieldPadding:
+    """How one packed ``TrainingInput`` field fills the segments batch padding appends.
+
+    ``dummy_row_length`` is the segment length for a synthetic batch row, which carries a
+    single attended token: a field indexed over every real token needs one row for it, a
+    field indexed over response tokens needs none.
+    """
+
+    fill: Callable[[PackedTensor], Union[torch.Tensor, int]]
+    dummy_row_length: int
+
+
+# Every packed batch field needs an entry here: the three batch padding sites look its rule
+# up by name, so a field without one raises instead of reaching the trainer short a segment
+# (or, in `_pad_microbatch_to_size`, being skipped as a non-Tensor).
+PACKED_FIELD_PADDING: Dict[str, PackedFieldPadding] = {
+    "rollout_expert_indices": PackedFieldPadding(
+        # Megatron's dropless `tokens * topk` dispatcher needs topk distinct experts per row.
+        fill=lambda field: replay_padding_row(field.row_shape[-1], dtype=field.dtype, device=field.device),
+        dummy_row_length=1,
+    ),
+    SAMPLE_SUPPORT_FIELD: PackedFieldPadding(
+        fill=lambda field: SAMPLE_SUPPORT_PADDING,
+        dummy_row_length=0,
+    ),
+}
+
+
+def _packed_field_padding_rule(key: str) -> PackedFieldPadding:
+    if key not in PACKED_FIELD_PADDING:
+        raise ValueError(f"Packed batch field {key!r} has no padding rule")
+    return PACKED_FIELD_PADDING[key]
+
+
+def make_packed_field_padding(key: str, field: PackedTensor, *, segment_lengths: Sequence[int]) -> PackedTensor:
+    """Return padding segments for one packed batch field, filled by that field's own rule."""
+    rule = _packed_field_padding_rule(key)
+    return packed_padding_segments(field, segment_lengths=segment_lengths, fill=rule.fill(field))
+
+
+def append_packed_field_padding(key: str, field: PackedTensor, *, segment_lengths: Sequence[int]) -> PackedTensor:
+    """Extend ``field`` with one padding segment per appended batch row."""
+    return PackedTensor.cat([field, make_packed_field_padding(key, field, segment_lengths=segment_lengths)])
+
+
+def packed_dummy_row_segments(key: str, count: int) -> List[int]:
+    """Segment lengths for ``count`` synthetic batch rows, each carrying one attended token."""
+    return [_packed_field_padding_rule(key).dummy_row_length] * count
 
 
 def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) -> TrainingInputBatch:
@@ -574,15 +636,17 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
             assert len(tensor) > 0, f"Cannot pad empty TensorList field {key!r}"
             padding = TensorList([tensor[0].clone() for _ in range(pad_size)])
             new_tensors[key] = TensorList.cat([tensor, padding])
+        elif isinstance(tensor, PackedTensor):
+            # Every other field copies row 0 into the padding rows, so each padded row spans as
+            # many tokens as row 0 and needs a segment of row 0's length.
+            new_tensors[key] = append_packed_field_padding(
+                key, tensor, segment_lengths=[len(tensor.segment(0))] * pad_size
+            )
         elif key == "loss_mask":
             # Ensures that padding tensors don't count towards the loss
             additional_dims = tensor.shape[1:]
             padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
             new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
-        elif key == "rollout_expert_indices":
-            # Every other field copies row 0 into the padding rows, so each padded row holds
-            # as many real tokens as row 0 and needs a route segment of that length.
-            new_tensors[key] = append_packed_replay_padding(tensor, segment_lengths=[len(tensor.segment(0))] * pad_size)
         elif key == "router_padding_mask":
             additional_dims = tensor.shape[1:]
             padding_tensor = torch.ones(pad_size, *additional_dims, dtype=torch.bool, device=tensor.device)

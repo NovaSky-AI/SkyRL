@@ -65,7 +65,7 @@ class TrajectoryOutput:
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     rollout_expert_indices: Optional[RoutedExpertIndices] = None
-    rollout_sample_support: Optional[List[List[int]]] = None
+    rollout_sample_support: Optional[SampleSupport] = None
     pixel_values: Optional[torch.Tensor] = None
     image_grid_thw: Optional[torch.Tensor] = None
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
@@ -598,9 +598,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                         rollout_logprobs=turn_response_logprobs,
                         stop_reason=stop_reason,
                         env_metrics=env.get_metrics() if agent_loop_state.done else {},
-                        rollout_sample_support=(
-                            turn_sample_support.tolist() if turn_sample_support is not None else None
-                        ),
+                        rollout_sample_support=turn_sample_support,
                     )
                     agent_loop_output.step_outputs.append(per_step_output)
 
@@ -709,7 +707,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rollout_sample_support_out = agent_loop_state.sample_support_trace.finalize(
                     token_count=len(response_ids),
                     extra_rows=final_observation_token_count,
-                ).tolist()
+                )
 
             if self.generator_cfg.step_wise_trajectories:
                 for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):
@@ -919,9 +917,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
         truncated_indices: Optional[List[RoutedExpertIndices]] = [] if raw_rollout_expert_indices is not None else None
-        truncated_sample_support: Optional[List[List[List[int]]]] = (
-            [] if raw_rollout_sample_support is not None else None
-        )
+        truncated_sample_support: Optional[List[SampleSupport]] = [] if raw_rollout_sample_support is not None else None
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
@@ -941,7 +937,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 prompt_len = len(prompt_token_ids[i])
                 truncated_indices.append(sample_indices[: prompt_len + len(response)])
             if raw_rollout_sample_support is not None:
-                truncated_sample_support.append(raw_rollout_sample_support[i][: len(response)].tolist())
+                truncated_sample_support.append(raw_rollout_sample_support[i][: len(response)])
 
             # Get environment-specific metrics
             env_metrics.append(env.get_metrics())

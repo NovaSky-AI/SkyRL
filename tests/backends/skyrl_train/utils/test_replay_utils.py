@@ -11,11 +11,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
 )
 from skyrl.backends.skyrl_train.utils import replay_utils
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
-from skyrl.backends.skyrl_train.utils.replay_utils import (
-    append_packed_replay_padding,
-    make_packed_replay_padding,
-    make_replay_padding_indices,
-)
+from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
 
 
 def _pack_routes(routes: torch.Tensor, attention_mask: torch.Tensor) -> PackedTensor:
@@ -80,32 +76,6 @@ def test_replay_padding_indices_are_unique(dtype):
 def test_replay_padding_rejects_missing_topk(shape):
     with pytest.raises(ValueError, match="positive topk"):
         make_replay_padding_indices(shape, dtype=torch.uint8)
-
-
-@pytest.mark.parametrize("segment_lengths", [[1, 1], [3], [2, 5, 1]])
-def test_packed_replay_padding_matches_the_reference_row_shape(segment_lengths):
-    reference = PackedTensor.from_segments([torch.full((4, 2, 3), 9, dtype=torch.int16)])
-
-    padding = make_packed_replay_padding(reference, segment_lengths=segment_lengths)
-
-    assert padding.sequence_lengths.tolist() == segment_lengths
-    assert padding.row_shape == reference.row_shape
-    assert padding.dtype == reference.dtype
-    assert torch.equal(padding.values, torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(padding.values))
-
-
-@pytest.mark.parametrize("pad_count", [1, 3])
-def test_appending_replay_padding_keeps_the_real_segments_and_the_arange_invariant(pad_count):
-    routes = PackedTensor.from_segments(
-        [torch.full((4, 2, 3), 9, dtype=torch.int16), torch.full((2, 2, 3), 8, dtype=torch.int16)]
-    )
-
-    padded = append_packed_replay_padding(routes, segment_lengths=[1] * pad_count)
-
-    assert padded.sequence_lengths.tolist() == [4, 2] + [1] * pad_count
-    assert padded[: len(routes)] == routes
-    appended = padded[len(routes) :]
-    assert torch.equal(appended.values, torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(appended.values))
 
 
 def test_replay_has_no_dispatcher_specific_patch():

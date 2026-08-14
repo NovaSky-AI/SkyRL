@@ -6,6 +6,7 @@ import torch
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
+from skyrl.backends.skyrl_train.utils.sample_support import SampleSupport
 
 TrainingPhase = Literal["train", "eval"]
 TRAINING_PHASE_TRAIN: TrainingPhase = "train"
@@ -53,11 +54,17 @@ class GeneratorOutput(TypedDict):
     # e.g. {"llm": [...], "env": [...]}. trajectory_time_splits is None if any trajectory did not
     # record its split.
     trajectory_time_splits: Optional[Dict[str, List[float]]]
+    # Per trajectory, one ``[tokens, layers, topk]`` array of the routes the rollout took over a
+    # prefix of its ``prompt + response`` tokens: no decode forward follows the last sampled token,
+    # and a multi-turn trace ends further short of a synthetic EOS. Collation
+    # dummy-fills the uncovered tail and the router padding mask keeps it out of router accounting,
+    # so the row count is what states where the capture stops.
     rollout_expert_indices: Optional[List[RoutedExpertIndices]]
-    # Per trajectory, one dense ``[response_tokens, top_k]`` row block of the sampler support each
+    # Per trajectory, one dense ``[response_tokens, top_k]`` array of the sampler support each
     # response token was drawn from, right-padded with ``SAMPLE_SUPPORT_PADDING``. Tokens with no
-    # captured support (observations, a synthetic EOS) are all-padding rows.
-    rollout_sample_support: Optional[List[List[List[int]]]]
+    # captured support (observations, a synthetic EOS) are all-padding rows. Stays an ndarray from
+    # the wire to the packed trainer field: nested lists of it cost ~50x the int32 buffer.
+    rollout_sample_support: Optional[List[SampleSupport]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
     # Per-row env metrics (one dict per row in the flattened batch). Used by
