@@ -2,13 +2,17 @@
 uv run --isolated --extra dev pytest tests/train/dataset/test_preprocess.py
 """
 
+import logging
+from typing import List
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.utils.routed_experts import ROUTED_EXPERT_DTYPES
 from skyrl.train.dataset.preprocess import (
+    ROUTED_EXPERT_TORCH_DTYPES,
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
@@ -156,15 +160,11 @@ def test_routed_expert_tensor_rejects_nested_lists(tokenizer):
         )
 
 
-@pytest.mark.parametrize("dtype", [np.uint16, np.int64])
-def test_routed_expert_tensor_narrows_wide_dtypes(tokenizer, dtype):
-    """Wide dtypes are compacted, not rejected.
-
-    The wire decoder already restricts routes to uint8/int16/int32, so this path
-    only sees a wide dtype from a hand-built generator -- narrowing it is more
-    useful than refusing it.
-    """
-    routes = np.asarray([[[1, 2]], [[3, 4]]], dtype=dtype)
+def test_routed_expert_tensor_accepts_non_contiguous_arrays(tokenizer):
+    # Every other expert column, which leaves a non-contiguous view.
+    base = np.asarray([[[1, 9, 2, 9]], [[3, 9, 4, 9]]], dtype=np.uint8)
+    routes = base[:, :, ::2]
+    assert not routes.flags.c_contiguous
 
     *_, routed = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
@@ -179,8 +179,24 @@ def test_routed_expert_tensor_narrows_wide_dtypes(tokenizer, dtype):
     assert routed.tolist() == [[[[1, 2]], [[3, 4]]]]
 
 
-def test_routed_expert_tensor_retightens_after_truncation(tokenizer):
-    """A truncated array can fit a narrower dtype than the wire declared."""
+@pytest.mark.parametrize("dtype", [np.uint16, np.int64])
+def test_routed_expert_tensor_rejects_non_canonical_dtypes(tokenizer, dtype):
+    """The sender compacts to the canonical dtype, so collation validates instead of rescanning."""
+    routes = np.asarray([[[1, 2]], [[3, 4]]], dtype=dtype)
+
+    with pytest.raises(ValueError, match="canonical routed-expert dtype"):
+        convert_prompts_responses_to_batch_tensors(
+            tokenizer.pad_token_id,
+            prompts=[[10]],
+            responses=[[11]],
+            rewards=[[0.0]],
+            loss_masks=[[1]],
+            rollout_expert_indices=[routes],
+        )
+
+
+def test_routed_expert_tensor_keeps_the_sender_dtype_after_truncation(tokenizer):
+    """A truncated array keeps the dtype the wire declared; nothing rescans it to retighten."""
     # int16 on the wire because of the trailing 300, which truncation then drops.
     routes = np.asarray([[[1, 2]], [[3, 4]], [[300, 5]]], dtype=np.int16)
 
@@ -193,8 +209,80 @@ def test_routed_expert_tensor_retightens_after_truncation(tokenizer):
         rollout_expert_indices=[routes[:2]],
     )
 
-    assert routed.dtype == torch.uint8
+    assert routed.dtype == torch.int16
     assert routed.tolist() == [[[[1, 2]], [[3, 4]]]]
+
+
+@pytest.mark.parametrize(
+    ("dtype", "expert_id", "expect_warning"),
+    [(np.int16, 300, False), (np.int32, 2**16, True)],
+)
+def test_routed_expert_tensor_warns_only_on_an_int32_batch(tokenizer, caplog, dtype, expert_id, expect_warning):
+    routes = np.asarray([[[expert_id, expert_id + 1]]], dtype=dtype)
+
+    with caplog.at_level(logging.WARNING, logger="skyrl.train.dataset.preprocess"):
+        *_, routed = convert_prompts_responses_to_batch_tensors(
+            tokenizer.pad_token_id,
+            prompts=[[10]],
+            responses=[[11]],
+            rewards=[[0.0]],
+            loss_masks=[[1]],
+            rollout_expert_indices=[routes],
+        )
+
+    assert routed.dtype == ROUTED_EXPERT_TORCH_DTYPES[np.dtype(dtype)]
+    assert ("not compacting its routes" in caplog.text) is expect_warning
+
+
+def test_routed_expert_torch_dtype_map_covers_the_canonical_dtypes():
+    assert set(ROUTED_EXPERT_TORCH_DTYPES) == set(ROUTED_EXPERT_DTYPES)
+
+
+def _numpy_padded_routes(
+    routes: List[np.ndarray],
+    prompts: List[List[int]],
+    responses: List[List[int]],
+) -> np.ndarray:
+    """The route collation as NumPy expressed it: broadcast ``arange(topk)``, then write each sample."""
+    max_total = max(len(prompt) + len(response) for prompt, response in zip(prompts, responses))
+    num_layers, topk = routes[0].shape[1:]
+    batch_dtype = max((sample.dtype for sample in routes), key=lambda dtype: dtype.itemsize)
+    padded = np.empty((len(routes), max_total, num_layers, topk), dtype=batch_dtype)
+    padded[...] = np.arange(topk, dtype=batch_dtype)
+    for index, sample in enumerate(routes):
+        left_pad = max_total - (len(prompts[index]) + len(responses[index]))
+        padded[index, left_pad : left_pad + sample.shape[0]] = sample
+    return padded
+
+
+def test_routed_expert_tensor_is_bit_identical_to_numpy_collation(tokenizer):
+    """Left padding, a short route prefix and trailing padding, across a mixed-dtype batch."""
+    prompts = [[1, 2], [3, 4, 5, 6]]
+    responses = [[10, 11, 12], [20, 21]]
+    num_layers, topk = 2, 3
+    # Sample 0 has 5 tokens but only 4 captured route rows, so it pads on both sides.
+    routes = [
+        np.arange(4 * num_layers * topk, dtype=np.uint8).reshape(4, num_layers, topk),
+        (np.arange(6 * num_layers * topk, dtype=np.int16) + 300).reshape(6, num_layers, topk),
+    ]
+
+    *_, routed = convert_prompts_responses_to_batch_tensors(
+        tokenizer.pad_token_id,
+        prompts,
+        responses,
+        rewards=[[0.0] * 3, [0.0] * 2],
+        loss_masks=[[1] * 3, [1] * 2],
+        rollout_expert_indices=routes,
+    )
+
+    assert routed.dtype == torch.int16
+    assert torch.equal(routed, torch.from_numpy(_numpy_padded_routes(routes, prompts, responses)))
+    # Padding routes are topk distinct experts, which Megatron's dropless dispatcher requires;
+    # zeros would collapse them onto one expert.
+    padding_row = [[0, 1, 2]] * num_layers
+    assert routed[0, 0].tolist() == padding_row
+    assert routed[0, 5].tolist() == padding_row
+    assert not torch.equal(routed[0, 0], torch.zeros_like(routed[0, 0]))
 
 
 def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):

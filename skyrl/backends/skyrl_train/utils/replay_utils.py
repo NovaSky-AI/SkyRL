@@ -4,7 +4,6 @@ Utility functions for MoE Router Replay.
 
 from contextlib import contextmanager
 
-import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
@@ -13,7 +12,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
 )
 
 
-def _replay_padding_row(
+def replay_padding_row(
     topk: int,
     *,
     dtype: torch.dtype,
@@ -40,25 +39,8 @@ def make_replay_padding_indices(
     """Return dummy routes with ``topk`` distinct experts in every row."""
     if not shape:
         raise ValueError(f"Replay route padding requires a positive topk dimension, got {shape}")
-    padding_row = _replay_padding_row(shape[-1], dtype=dtype, device=device)
+    padding_row = replay_padding_row(shape[-1], dtype=dtype, device=device)
     return padding_row.expand(shape).clone()
-
-
-def make_replay_padding_indices_np(shape: tuple[int, ...], *, dtype: np.dtype) -> np.ndarray:
-    """NumPy sibling of :func:`make_replay_padding_indices`.
-
-    Preprocessing builds the padded route array in NumPy before handing it to
-    ``torch.from_numpy``, so it needs the same distinct-expert padding rows
-    without a round trip through torch.
-    """
-    if not shape:
-        raise ValueError(f"Replay route padding requires a positive topk dimension, got {shape}")
-    topk = shape[-1]
-    if topk < 1:
-        raise ValueError(f"Replay route padding requires a positive topk dimension, got {topk}")
-    padded = np.empty(shape, dtype=dtype)
-    padded[...] = np.arange(topk, dtype=dtype)
-    return padded
 
 
 def patch_topk_router_layer_number():
@@ -255,7 +237,7 @@ def setup_per_microbatch_replay_forward(
     if (metadata_layout.padded_sequence_lengths is not None) != remove_microbatch_padding:
         raise ValueError("Shared token metadata layout does not match the model packing mode")
     aligned_router_padding_mask = align_token_metadata(router_padding_mask.to(torch.bool), metadata_layout, True)
-    route_padding = _replay_padding_row(
+    route_padding = replay_padding_row(
         rollout_expert_indices.shape[-1],
         dtype=rollout_expert_indices.dtype,
         device=local_rollout_expert_indices.device,
