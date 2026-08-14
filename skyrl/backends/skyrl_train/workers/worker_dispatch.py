@@ -8,6 +8,7 @@ Automatically handles GPU placement:
 The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -60,6 +61,10 @@ class WorkerDispatch:
 
         # Inference engine client for weight sync (optional)
         self._inference_engine_client = inference_engine_client
+
+        # Seconds the last save_weights_for_sampler spent on the transfer itself,
+        # excluding the pause/resume bracket. None until the first sync.
+        self.last_weight_sync_seconds: Optional[float] = None
 
         # Actor groups by name.
         # TODO: Remove these role-specific identifiers. We will move to using model IDs and add support for generic models beyond these.
@@ -723,12 +728,24 @@ class WorkerDispatch:
         # then wait out the stall watchdog for a `free_group` signal that can never arrive.
         # (Capturing it once per sync still matters -- every rank must be given the
         # same value -- but one dispatch guarantees that regardless of when we read.)
-        if self.colocate_all:
-            await self._inference_engine_client.wake_up(tags=["weights"])
+        def _broadcast_and_finish() -> None:
+            """The weight transfer proper, timed on its own.
+
+            ``last_weight_sync_seconds`` is what the trainer reports as
+            ``timing/sync_weights``: the enclosing call also pauses and resumes
+            generation, which under vLLM DP costs seconds of coordinator quiesce
+            that has nothing to do with moving weights.
+            """
+            start = time.perf_counter()
             self._broadcast_to_inference_engines(
                 self._inference_engine_client, model_id=model_id, live_url_slots=self._live_url_slots()
             )
             self._finish_weight_sync()
+            self.last_weight_sync_seconds = time.perf_counter() - start
+
+        if self.colocate_all:
+            await self._inference_engine_client.wake_up(tags=["weights"])
+            _broadcast_and_finish()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
             strategy = self.cfg.trainer.strategy
@@ -737,19 +754,13 @@ class WorkerDispatch:
                 strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
             ):
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
-                self._broadcast_to_inference_engines(
-                    self._inference_engine_client, model_id=model_id, live_url_slots=self._live_url_slots()
-                )
-                self._finish_weight_sync()
+                _broadcast_and_finish()
             else:
                 # Non-colocated single tenant: pause generation to prevent in-flight requests from
                 # reading partially-updated weights during the NCCL broadcast.
                 await self._inference_engine_client.pause_generation()
                 try:
-                    self._broadcast_to_inference_engines(
-                        self._inference_engine_client, model_id=model_id, live_url_slots=self._live_url_slots()
-                    )
-                    self._finish_weight_sync()
+                    _broadcast_and_finish()
                 finally:
                     await self._inference_engine_client.resume_generation()
 
