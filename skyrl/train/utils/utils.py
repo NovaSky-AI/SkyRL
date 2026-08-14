@@ -375,6 +375,16 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "`token_mean_legacy` loss reduction is not supported with step-wise training. Use `token_mean` instead."
         )
 
+    if cfg.generator.step_wise_trajectories and cfg.generator.inference_engine.enable_return_routed_experts:
+        raise ValueError(
+            "`generator.inference_engine.enable_return_routed_experts=True` is not supported with "
+            "`generator.step_wise_trajectories=True`. Each step-wise row's prompt is the whole history so "
+            "far, while routes are recorded for that step's generated tokens only. The trainer aligns "
+            "routes from the start of the sequence, so a step's routes would replay onto the first N prompt "
+            "tokens of its row with no length mismatch to assert on, silently training against routing that "
+            "does not match the rollout."
+        )
+
     if cfg.generator.merge_stepwise_output and not cfg.generator.step_wise_trajectories:
         raise ValueError(
             "`generator.merge_stepwise_output=True` requires `generator.step_wise_trajectories=True`. "

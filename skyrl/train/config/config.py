@@ -1142,6 +1142,10 @@ class InferenceEngineConfig(BaseConfig):
     enable_return_routed_experts: bool = False
     """Return per-layer expert routing indices, for rollout router replay (R3) when training an MoE model.
     Used together with ``trainer.policy.megatron_config.moe_enable_routing_replay``."""
+    enable_return_sample_support_set: bool = False
+    """Return the bounded post-filter sampler support for each generated token, so the trainer can
+    renormalize logprobs over the same support the rollout sampler drew from. Constrains
+    ``generator.sampling_params``; eval requests opt out per-request instead."""
     max_num_batched_tokens: int = 8192
     """vLLM continuous-batching parameter: maximum number of tokens to pack into a batch."""
     enforce_eager: bool = False
@@ -1736,6 +1740,27 @@ class SkyRLTrainConfig(BaseConfig):
         # so workers can access it without needing the generator config
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
+        # Capture guards apply to generator.sampling_params only. generator.eval_sampling_params is
+        # greedy with top_k=-1 by default and cannot satisfy them, so the generator opts eval
+        # requests out of capture instead.
+        if self.generator.inference_engine.enable_return_sample_support_set:
+            sampling_params = self.generator.sampling_params
+            if sampling_params.temperature <= 0:
+                raise ValueError("sample-support capture requires generator.sampling_params.temperature > 0")
+            if sampling_params.top_k <= 1:
+                raise ValueError("sample-support capture requires generator.sampling_params.top_k > 1")
+            if sampling_params.repetition_penalty != 1.0:
+                raise ValueError("sample-support capture requires repetition_penalty=1.0")
+            if sampling_params.additional_kwargs:
+                raise ValueError("sample-support capture does not support sampling_params.additional_kwargs")
+            if self.generator.vision_language_generator:
+                raise ValueError("sample-support capture does not support vision_language_generator")
+
+        # The VLM generator re-renders the conversation each turn and never populates
+        # ``rollout_expert_indices``, so the pair would generate a full batch and then fail collation.
+        if self.generator.inference_engine.enable_return_routed_experts and self.generator.vision_language_generator:
+            raise ValueError("rollout router replay (r3) does not support vision_language_generator")
 
         if self.data.dataloader.num_workers is None:
             self.data.dataloader.num_workers = 8

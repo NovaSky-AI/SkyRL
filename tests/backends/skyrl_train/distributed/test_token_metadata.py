@@ -222,3 +222,29 @@ def test_align_packed_token_metadata_rejects_segments_that_leave_the_trajectory(
         token_metadata.align_packed_token_metadata(suffix, layout, -1, segment_starts=[2])
     with pytest.raises(ValueError, match="do not match"):
         token_metadata.align_packed_token_metadata(suffix, layout, -1)
+
+
+def test_append_padding_extends_the_established_schema():
+    trace = token_metadata.TokenMetadataTrace()
+    trace.append(np.array([[7, 8], [9, 10]], dtype=np.int32), expected_rows=2)
+
+    trace.append_padding(0)
+    assert trace.num_rows == 2
+
+    trace.append_padding(2)
+    padded = trace.finalize(expected_rows=4)
+
+    assert padded.dtype == np.int32
+    assert padded.flags.c_contiguous
+    assert padded.tolist() == [[7, 8], [9, 10], [-1, -1], [-1, -1]]
+
+
+def test_append_padding_needs_a_schema_and_a_valid_count():
+    with pytest.raises(ValueError, match="before any rows are captured"):
+        token_metadata.TokenMetadataTrace().append_padding(1)
+
+    trace = token_metadata.TokenMetadataTrace()
+    trace.append(np.zeros((1, 2), dtype=np.int32), expected_rows=1)
+    for count in (-1, True, 1.0):
+        with pytest.raises(ValueError, match="padding count"):
+            trace.append_padding(count)

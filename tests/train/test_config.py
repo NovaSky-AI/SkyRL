@@ -158,6 +158,66 @@ def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value
         TrainerConfig(**{field_name: value})
 
 
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("generator.sampling_params.temperature=0", "temperature > 0"),
+        ("generator.sampling_params.top_k=1", "top_k > 1"),
+        ("generator.sampling_params.repetition_penalty=1.1", "repetition_penalty=1.0"),
+        ("generator.sampling_params.additional_kwargs.foo=bar", "additional_kwargs"),
+        ("generator.vision_language_generator=true", "vision_language_generator"),
+    ],
+)
+def test_sample_support_capture_rejects_unsupported_sampling_modifiers(override, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+                override,
+            ]
+        )
+
+
+def test_routed_expert_capture_rejects_the_vision_language_generator():
+    """The VLM generator never populates ``rollout_expert_indices``, so without this guard the pair
+    generates a whole batch and then dies in collation on a None route array."""
+    with pytest.raises(ValueError, match="vision_language_generator"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_routed_experts=true",
+                "generator.vision_language_generator=true",
+            ]
+        )
+
+
+def test_sample_support_capture_accepts_top_k_top_p_and_min_p():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            "generator.sampling_params.top_p=0.9",
+            "generator.sampling_params.min_p=0.05",
+        ]
+    )
+
+    assert cfg.generator.inference_engine.enable_return_sample_support_set
+
+
+def test_sample_support_capture_leaves_greedy_eval_sampling_params_alone():
+    # The five guards deliberately do not reach eval_sampling_params: forcing
+    # temperature > 0 there would change eval semantics. Capture is opted out per request.
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+        ]
+    )
+
+    assert cfg.generator.eval_sampling_params.temperature == 0.0
+    assert cfg.generator.eval_sampling_params.top_k == -1
+
+
 def test_cli_overrides_plus_prefix_rejected():
     with pytest.raises(ValueError, match="The '\\+' prefix"):
         SkyRLTrainConfig.from_cli_overrides(["+new_field=value"])

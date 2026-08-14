@@ -325,6 +325,18 @@ class TokenMetadataTrace:
         self._chunks.append(rows)
         self._num_rows += expected_rows
 
+    def append_padding(self, count: int, *, fill: int = -1) -> None:
+        """Append ``count`` rows of ``fill`` in the schema already established by ``append``."""
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError(f"padding count must be a non-negative integer, got {count!r}")
+        if count == 0:
+            return
+        if self._schema is None:
+            raise ValueError("cannot pad token metadata before any rows are captured")
+
+        row_shape, dtype = self._schema
+        self.append(np.full((count, *row_shape), fill, dtype=dtype, order="C"), expected_rows=count)
+
     def finalize(self, *, expected_rows: int) -> np.ndarray:
         if self._finalized:
             raise RuntimeError("token metadata trace is already finalized")
