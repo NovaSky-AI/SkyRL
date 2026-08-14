@@ -14,6 +14,7 @@ from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
     get_rollout_metrics,
     merge_stepwise_output,
+    slice_generator_output,
 )
 from skyrl.train.utils.utils import validate_cfg
 from tests.train.util import example_dummy_config
@@ -30,6 +31,7 @@ def test_generator_output_concatenation():
         "rollout_metrics",
         "rollout_logprobs",
         "rollout_expert_indices",
+        "rollout_sample_support",
         # optional but present in the signature
         "trajectory_ids",
         "trajectory_generation_times",
@@ -52,6 +54,8 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
+        "rollout_expert_indices": [np.zeros((2, 1, 2), dtype=np.uint8), np.ones((2, 1, 2), dtype=np.uint8)],
+        "rollout_sample_support": [[[1, 2], [1, 2]], [[3, 4], [3, 4]]],
     }
 
     generator_output_2: GeneratorOutput = {
@@ -61,6 +65,8 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1, 1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
+        "rollout_expert_indices": [np.full((3, 1, 2), 2, dtype=np.uint8), np.full((1, 1, 2), 3, dtype=np.uint8)],
+        "rollout_sample_support": [[[5, 6], [5, 6], [5, 6]], [[7, 8]]],
     }
 
     generator_outputs = [generator_output_1, generator_output_2]
@@ -72,6 +78,13 @@ def test_generator_output_concatenation():
     assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1]]
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
     assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
+    # Both per-token side channels are named fields, so the input order cannot decide whether they
+    # survive concatenation.
+    assert [rows[0] for rows in concatenated_output["rollout_sample_support"]] == [[1, 2], [3, 4], [5, 6], [7, 8]]
+    assert [int(routes.flat[0]) for routes in concatenated_output["rollout_expert_indices"]] == [0, 1, 2, 3]
+    reversed_output = concatenate_generator_outputs([generator_output_2, generator_output_1])
+    assert [rows[0] for rows in reversed_output["rollout_sample_support"]] == [[5, 6], [7, 8], [1, 2], [3, 4]]
+    assert [int(routes.flat[0]) for routes in reversed_output["rollout_expert_indices"]] == [2, 3, 0, 1]
 
     # Validate rollout metrics
     expected_rollout_metrics = {
@@ -93,6 +106,53 @@ def test_generator_output_concatenation():
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():
         np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
+
+
+@pytest.mark.parametrize("side_channel", ["rollout_expert_indices", "rollout_sample_support"])
+def test_side_channel_concatenation_rejects_a_mix(side_channel):
+    """A batch that captured a side channel cannot be concatenated with one that did not: the
+    consumer packs the field for every trajectory in the batch or for none of them."""
+
+    def make_output(value) -> GeneratorOutput:
+        return {
+            "prompt_token_ids": [[1]],
+            "response_ids": [[10]],
+            "rewards": [1.0],
+            "loss_masks": [[1]],
+            "stop_reasons": ["stop"],
+            "rollout_logprobs": None,
+            side_channel: value,
+        }
+
+    populated = make_output([[[1, 2]]] if side_channel == "rollout_sample_support" else [np.zeros((1, 1, 2), np.uint8)])
+    missing = make_output(None)
+    for outputs in ([populated, missing], [missing, populated]):
+        with pytest.raises(ValueError, match=f"all have null {side_channel}"):
+            concatenate_generator_outputs(outputs)
+
+
+def test_slice_generator_output_slices_each_component_of_a_dict_field():
+    """``trajectory_time_splits`` is a dict of per-entry lists rather than a per-entry list."""
+    generator_output: GeneratorOutput = {
+        "prompt_token_ids": [[1], [2], [3]],
+        "response_ids": [[10], [20], [30]],
+        "rewards": [1.0, 2.0, 3.0],
+        "loss_masks": [[1], [1], [1]],
+        "stop_reasons": ["stop", "stop", "length"],
+        "rollout_metrics": {"generate/avg_num_tokens": 1.0},
+        "rollout_logprobs": None,
+        "trajectory_generation_times": [10.0, 20.0, 30.0],
+        "trajectory_time_splits": {"llm": [1.0, 2.0, 3.0], "env": [4.0, 5.0, 6.0]},
+    }
+
+    sliced = slice_generator_output(generator_output, [2, 0])
+
+    assert sliced["trajectory_time_splits"] == {"llm": [3.0, 1.0], "env": [6.0, 4.0]}
+    assert sliced["response_ids"] == [[30], [10]]
+    assert sliced["trajectory_generation_times"] == [30.0, 10.0]
+    assert sliced["rollout_logprobs"] is None
+    assert sliced["rollout_metrics"] == {"generate/avg_num_tokens": 1.0}
+    assert "rollout_metrics" not in slice_generator_output(generator_output, [1], preserve_metrics=False)
 
 
 def test_time_split_rollout_metrics():
@@ -528,6 +588,61 @@ class TestMergeStepwiseOutput:
             else:
                 assert merged["loss_masks"] == [[1, 0, 1]]
 
+    def test_sample_support_observation_deltas_keep_full_width_padding_rows(self):
+        """Every other producer emits dense width-``top_k`` rows, so an observation delta
+        must too -- an empty row here would make the trajectory ragged."""
+        tid = _make_tid("support")
+        gen_out: GeneratorOutput = {
+            "prompt_token_ids": [[10], [10, 20, 30]],
+            "response_ids": [[20], [40, 41]],
+            "rewards": [[1.0], [0.0, 5.0]],
+            "loss_masks": [[1], [1, 1]],
+            "stop_reasons": ["continue", "eos"],
+            "rollout_metrics": None,
+            "rollout_logprobs": None,
+            "rollout_sample_support": [[[20, 21, -1]], [[40, 44, -1], [41, 45, 46]]],
+            "trajectory_ids": [tid, tid],
+            "rollout_expert_indices": None,
+            "is_last_step": [False, True],
+        }
+
+        merged = merge_stepwise_output(gen_out)
+
+        support = merged["rollout_sample_support"][0]
+        assert support == [[20, 21, -1], [-1, -1, -1], [40, 44, -1], [41, 45, 46]]
+        assert len(support) == len(merged["response_ids"][0])
+        assert {len(row) for row in support} == {3}
+
+    def test_native_output_carrying_dict_valued_time_splits(self):
+        """The native step-wise ``GeneratorOutput`` carries ``trajectory_time_splits`` as a dict of
+        per-entry lists; the other fixtures in this file omit the key entirely."""
+        tid = _make_tid("timed")
+        gen_out: GeneratorOutput = {
+            "prompt_token_ids": [[10], [10, 20, 30]],
+            "response_ids": [[20], [40]],
+            "rewards": [[0.0], [1.0]],
+            "loss_masks": [[1], [1]],
+            "stop_reasons": ["continue", "eos"],
+            "rollout_metrics": None,
+            "rollout_logprobs": None,
+            "trajectory_ids": [tid, tid],
+            "trajectory_generation_times": [5.0, 5.0],
+            "trajectory_time_splits": {"llm": [1.0, 2.0], "env": [3.0, 4.0]},
+            "rollout_expert_indices": None,
+            "rollout_sample_support": None,
+            "is_last_step": [False, True],
+            "env_metrics": [{}, {}],
+        }
+
+        merged = merge_stepwise_output(gen_out)
+
+        # `_merge_single_trajectory` returns a fixed key set that drops the timing fields, so only the
+        # merge itself is asserted here.
+        assert merged["response_ids"] == [[20, 30, 40]]
+        assert merged["loss_masks"] == [[1, 0, 1]]
+        assert merged["rewards"] == [[0.0, 0.0, 1.0]]
+        assert merged["is_last_step"] == [True]
+
     def test_no_logprobs_no_stop_reasons(self):
         """Works correctly when rollout_logprobs and stop_reasons are None."""
         tid = _make_tid("no_lp")
@@ -743,6 +858,17 @@ class TestMergeStepwiseOutput:
         cfg.generator.merge_stepwise_output = True
         cfg.generator.step_wise_trajectories = False
         with pytest.raises(ValueError, match="merge_stepwise_output.*requires.*step_wise_trajectories"):
+            validate_cfg(cfg)
+
+    @patch("skyrl.train.utils.utils.validate_batch_sizes", new=lambda cfg: None)
+    @patch("skyrl.train.utils.utils.validate_generator_cfg", new=lambda cfg: None)
+    def test_validate_cfg_refuses_step_wise_with_routed_expert_capture(self):
+        """Refused in `validate_cfg`, which runs before Ray and the engines start, and the message
+        must state why: a step's routes would replay onto the first N prompt tokens of its row."""
+        cfg = example_dummy_config()
+        cfg.generator.step_wise_trajectories = True
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+        with pytest.raises(ValueError, match="first N prompt tokens"):
             validate_cfg(cfg)
 
 
