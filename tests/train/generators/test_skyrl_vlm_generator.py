@@ -134,6 +134,32 @@ def _make_mock_llm(tokenizer, response_text: str):
 # ---------------------------------------------------------------------------
 
 
+def test_vlm_validate_cfg_still_applies_the_base_refusals():
+    """``SkyRLVLMGymGenerator._validate_cfg`` replaces the base method, so it must chain to it;
+    otherwise every base refusal is silently void for this generator."""
+    tokenizer = MagicMock()
+    tokenizer.apply_chat_template.side_effect = lambda messages, **kwargs: [1, 2, 3, 4]
+    tokenizer.eos_token_id = 4
+    generator_cfg = GeneratorConfig(
+        sampling_params=SamplingParams(max_generate_length=200, logprobs=None),
+        max_input_length=4096,
+        batched=False,
+        max_turns=3,
+        use_conversation_multi_turn=True,
+        chat_template=ChatTemplateConfig(source="name", name_or_path="qwen3_without_thinking"),
+        step_wise_trajectories=False,
+    )
+    generator_cfg.inference_engine.enable_return_sample_support_set = True
+
+    with pytest.raises(ValueError, match="custom chat template"):
+        SkyRLVLMGymGenerator(
+            generator_cfg=generator_cfg,
+            skyrl_gym_cfg=SkyRLGymConfig(max_env_workers=0),
+            inference_engine_client=MagicMock(),
+            tokenizer=tokenizer,
+        )
+
+
 @pytest.mark.asyncio
 @patch("skyrl.train.generators.skyrl_vlm_generator.decode_mm_kwargs")
 async def test_vlm_obs_offset(mock_decode):
