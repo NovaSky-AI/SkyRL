@@ -128,3 +128,25 @@ def test_engine_init_invalidates_cpu_render_state():
     assert fake_self._renderer is None
     assert render_server.shutdown_called
     assert fake_self._render_server is None
+
+
+def test_base_inference_initializes_without_training_dispatch(monkeypatch):
+    cfg = SimpleNamespace(trainer=SimpleNamespace(placement=SimpleNamespace(colocate_all=False)))
+    calls = []
+    fake_self = SimpleNamespace(
+        _inference_engines_initialized=False,
+        base_model="model_test",
+        config=object(),
+        _cfg=None,
+        _colocate_pg=None,
+        _create_new_inference_client=lambda: calls.append("inference"),
+    )
+    monkeypatch.setattr(skyrl_train_backend, "_build_skyrl_train_config", lambda *_args: cfg)
+    monkeypatch.setattr(skyrl_train_backend.ray, "is_initialized", lambda: True)
+
+    skyrl_train_backend.SkyRLTrainBackend.initialize_base_inference(fake_self)
+
+    assert fake_self._cfg is cfg
+    assert not hasattr(fake_self, "_dispatch")
+    assert fake_self._inference_engines_initialized
+    assert calls == ["inference"]
