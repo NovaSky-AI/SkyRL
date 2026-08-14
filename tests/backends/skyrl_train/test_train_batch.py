@@ -1,4 +1,5 @@
 import pickle
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -6,17 +7,21 @@ import ray
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import (
+    BatchField,
     TensorBatch,
     TensorFormat,
     TensorList,
     TrainingInput,
     TrainingInputBatch,
+    _deserialize_tensor,
+    _serialize_tensor,
     pad_training_input_batch,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
     PackedTensor,
     cu_seqlens_from_lengths,
 )
+from skyrl.backends.skyrl_train.utils.routed_experts import ROUTED_EXPERT_DTYPES
 
 
 def test_train_batch_initialization():
@@ -767,3 +772,104 @@ def test_serialized_field_formats_are_stable():
     assert state["bf16_logprobs"]["format"] == TensorFormat.TORCH
     assert state["pixel_values"]["format"] == TensorFormat.TENSOR_LIST
     assert state["rollout_expert_indices"]["format"] == TensorFormat.PACKED_TENSOR
+# ── zero-copy field transport ────────────────────────────────────────────────
+
+ROUTE_KEY = "rollout_expert_indices"
+_ZERO_COPY_SEGMENT_LENGTHS = [512, 256, 256]
+_ZERO_COPY_BATCH_SIZE = len(_ZERO_COPY_SEGMENT_LENGTHS)
+
+# One payload per opted-in field, each holding `_ZERO_COPY_BATCH_SIZE` batch entries, so the
+# mechanism tests cover whatever `ZERO_COPY_KEYS` holds. A key without an entry fails
+# `test_zero_copy_keys_are_live_and_exclude_mutated_fields`.
+_ZERO_COPY_PAYLOADS: dict[str, Callable[[], BatchField]] = {
+    ROUTE_KEY: lambda: PackedTensor(
+        torch.randint(0, 64, (sum(_ZERO_COPY_SEGMENT_LENGTHS), 2, 3), dtype=torch.int16),
+        cu_seqlens_from_lengths(_ZERO_COPY_SEGMENT_LENGTHS),
+    ),
+}
+
+
+def _zero_copy_buffer(value: BatchField) -> torch.Tensor:
+    """The one buffer a zero-copy field ships out of band."""
+    return value.values if isinstance(value, PackedTensor) else value
+
+
+def test_zero_copy_keys_are_live_and_exclude_mutated_fields():
+    """A key that silently stops naming a field makes the path inert, with nothing failing."""
+    assert TensorBatch.ZERO_COPY_KEYS <= set(TrainingInput.__annotations__), "stale key would be inert"
+    assert set(_ZERO_COPY_PAYLOADS) == TensorBatch.ZERO_COPY_KEYS, "every zero-copy field needs a test payload"
+    # The trainer writes through these: `collators.py` scales `loss_mask` in place, and the
+    # advantage pipeline normalizes its own tensors.
+    for mutated in ("sequences", "attention_mask", "loss_mask", "response_mask", "advantages", "returns", "values"):
+        assert mutated not in TensorBatch.ZERO_COPY_KEYS
+
+
+@pytest.mark.parametrize("key", sorted(TensorBatch.ZERO_COPY_KEYS))
+def test_zero_copy_field_travels_out_of_band(key, oob_round_trip):
+    """An opted-in field reaches Ray's plasma path as a buffer; every other field does not."""
+    field = _ZERO_COPY_PAYLOADS[key]()
+    sequences = torch.randint(0, 100, (_ZERO_COPY_BATCH_SIZE, 4))
+    batch = TrainingInputBatch({"sequences": sequences, key: field})
+    batch.metadata = {"info": "zero-copy"}
+    buffer = _zero_copy_buffer(field)
+
+    unpickled, payload, views = oob_round_trip(batch)
+
+    assert [view.nbytes for view in views] == [buffer.nbytes], f"{key} is the only out-of-band field"
+    assert len(payload) < buffer.nbytes, f"{key} must not ALSO sit in the pickle stream"
+    assert np.shares_memory(_zero_copy_buffer(unpickled[key]).numpy(), buffer.numpy())
+    assert not np.shares_memory(unpickled["sequences"].numpy(), sequences.numpy())
+    assert unpickled == batch
+
+
+@pytest.mark.parametrize("key", sorted(TensorBatch.ZERO_COPY_KEYS))
+def test_zero_copy_field_tolerates_read_only_plasma_buffer(key, oob_round_trip):
+    """Plasma is read-only in the reader, so an opted-in field must not copy -- while a field
+    the trainer writes through must stay off that path and stay writable."""
+    field = _ZERO_COPY_PAYLOADS[key]()
+    advantages = torch.randn(_ZERO_COPY_BATCH_SIZE, 256)
+    batch = TrainingInputBatch({"advantages": advantages, key: field})
+    batch.metadata = {}
+
+    unpickled, _, views = oob_round_trip(batch, read_only=True)
+
+    assert [view.readonly for view in views] == [True], f"{key} is the only out-of-band field"
+    restored = _zero_copy_buffer(unpickled[key]).numpy()
+    assert np.shares_memory(restored, np.frombuffer(views[0], dtype=restored.dtype)), "read-only buffer was copied"
+    assert unpickled[key] == field
+
+    got = unpickled["advantages"]
+    assert got.numpy().flags.writeable
+    got.add_(1.0)
+    assert torch.allclose(got, advantages + 1.0)
+    assert torch.allclose(batch["advantages"], advantages), "source must not be aliased"
+
+
+def test_packed_zero_copy_field_ships_only_its_values_buffer():
+    """A packed field's offsets are a `[batch + 1]` array; only its token buffer earns plasma."""
+    batch = TrainingInputBatch({ROUTE_KEY: _ZERO_COPY_PAYLOADS[ROUTE_KEY]()})
+
+    state = batch.__getstate__()["batch_dict"][ROUTE_KEY]
+
+    assert state["format"] == TensorFormat.PACKED_TENSOR
+    assert state["values"]["format"] == TensorFormat.NUMPY_VIEW
+    assert state["cu_seqlens"]["format"] == TensorFormat.NUMPY
+
+
+@pytest.mark.parametrize("dtype", sorted(ROUTED_EXPERT_DTYPES, key=str))
+def test_zero_copy_envelope_round_trips_every_route_dtype(dtype):
+    values = torch.from_numpy(np.arange(48, dtype=dtype).reshape(8, 2, 3))
+
+    envelope = _serialize_tensor(values, zero_copy=True)
+    restored = _deserialize_tensor(envelope)
+
+    assert envelope["format"] == TensorFormat.NUMPY_VIEW
+    assert restored.dtype == values.dtype
+    assert torch.equal(restored, values)
+
+
+def test_zero_copy_falls_back_for_bfloat16():
+    """The numpy TypeError guard must still run before the zero-copy branch."""
+    values = torch.randn(3, 4, dtype=torch.bfloat16)
+
+    assert _serialize_tensor(values, zero_copy=True)["format"] == TensorFormat.TORCH
