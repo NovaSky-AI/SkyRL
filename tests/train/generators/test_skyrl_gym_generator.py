@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from skyrl.backends.skyrl_train.utils.sample_support import SampleSupportTrace
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_DTYPE,
+    SAMPLE_SUPPORT_PADDING,
+    SampleSupportTrace,
+)
 from skyrl.train.config import ChatTemplateConfig, GeneratorConfig
 from skyrl.train.generators.base import (
     TRAINING_PHASE_EVAL,
@@ -485,9 +489,12 @@ async def test_agent_loop_uses_incremental_replay_metadata_traces(
     )
 
     assert prompt_starts == [0, 5]
-    assert output.rollout_sample_support[:2] == [[10, 100], [11, 110]]
-    assert output.rollout_sample_support[-2:] == [[10, 101], [11, 111]]
-    assert all(row == [-1, -1] for row in output.rollout_sample_support[2:-2])
+    # One dense int32 block, never a nested list: the payload stays an ndarray to the trainer.
+    support = output.rollout_sample_support
+    assert support.dtype == SAMPLE_SUPPORT_DTYPE
+    np.testing.assert_array_equal(support[:2], np.array([[10, 100], [11, 110]], dtype=SAMPLE_SUPPORT_DTYPE))
+    np.testing.assert_array_equal(support[-2:], np.array([[10, 101], [11, 111]], dtype=SAMPLE_SUPPORT_DTYPE))
+    assert np.all(support[2:-2] == SAMPLE_SUPPORT_PADDING)
 
 
 @pytest.mark.asyncio
@@ -757,7 +764,10 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
 
     assert output.response_ids == [10, 11, 4]
     assert output.loss_mask == [1, 1, 1]
-    assert output.rollout_sample_support == [[10, 110], [11, 111], eos_support_row]
+    np.testing.assert_array_equal(
+        output.rollout_sample_support,
+        np.array([[10, 110], [11, 111], eos_support_row], dtype=SAMPLE_SUPPORT_DTYPE),
+    )
 
 
 @pytest.mark.asyncio
@@ -807,7 +817,11 @@ async def test_agent_loop_pads_a_stop_string_eos_support_row_in_single_turn_mode
     )
 
     assert output.response_ids == [10, 11, 4]
-    assert output.rollout_sample_support == [[10, 110], [11, 111], [-1, -1]]
+    padding_row = [SAMPLE_SUPPORT_PADDING, SAMPLE_SUPPORT_PADDING]
+    np.testing.assert_array_equal(
+        output.rollout_sample_support,
+        np.array([[10, 110], [11, 111], padding_row], dtype=SAMPLE_SUPPORT_DTYPE),
+    )
 
 
 @pytest.mark.asyncio

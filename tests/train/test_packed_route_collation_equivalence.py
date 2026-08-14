@@ -180,6 +180,7 @@ def _run_both_paths(
         loss_mask,
         _logprobs,
         packed_routes,
+        _sample_support,
     ) = convert_prompts_responses_to_batch_tensors(
         PAD_TOKEN_ID,
         prompts,
@@ -332,3 +333,23 @@ def test_packed_routes_match_under_context_parallelism(monkeypatch, parallel_sta
             router_replay=router_replay,
         )
         _assert_bit_identical(new_data, reference)
+
+
+@pytest.mark.parametrize("distribution", sorted(LENGTH_DISTRIBUTIONS))
+def test_packed_collation_allocates_no_padded_rectangle(distribution):
+    """The packed buffer must hold exactly the batch's real tokens."""
+    prompts, responses, rewards, loss_masks, routes = _make_batch(LENGTH_DISTRIBUTIONS[distribution])
+    *_, packed_routes, _ = convert_prompts_responses_to_batch_tensors(
+        PAD_TOKEN_ID,
+        prompts,
+        responses,
+        rewards,
+        loss_masks,
+        rollout_expert_indices=routes,
+    )
+
+    total_real = sum(len(p) + len(r) for p, r in zip(prompts, responses))
+    max_total = max(len(p) + len(r) for p, r in zip(prompts, responses))
+    assert packed_routes.values.shape == (total_real, NUM_LAYERS, TOPK)
+    assert packed_routes.values.numel() <= len(prompts) * max_total * NUM_LAYERS * TOPK
+    assert packed_routes.cu_seqlens.tolist()[-1] == total_real

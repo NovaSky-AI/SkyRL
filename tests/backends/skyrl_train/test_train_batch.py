@@ -1,5 +1,6 @@
 import pickle
 from collections.abc import Callable
+from typing import get_args
 
 import numpy as np
 import pytest
@@ -7,6 +8,7 @@ import ray
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import (
+    PACKED_FIELD_PADDING,
     BatchField,
     TensorBatch,
     TensorFormat,
@@ -15,6 +17,9 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     _deserialize_tensor,
     _serialize_tensor,
+    append_packed_field_padding,
+    make_packed_field_padding,
+    packed_dummy_row_segments,
     pad_training_input_batch,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
@@ -22,6 +27,11 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
     cu_seqlens_from_lengths,
 )
 from skyrl.backends.skyrl_train.utils.routed_experts import ROUTED_EXPERT_DTYPES
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_PADDING,
+    SAMPLE_SUPPORT_TORCH_DTYPE,
+)
 
 
 def test_train_batch_initialization():
@@ -562,6 +572,7 @@ EXPECTED_TRAINING_INPUT_FIELDS = {
     "rollout_logprobs",
     "rollout_expert_indices",
     "router_padding_mask",
+    SAMPLE_SUPPORT_FIELD,
     "pixel_values",
     "image_grid_thw",
 }
@@ -592,6 +603,11 @@ def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> Training
             cu_seqlens_from_lengths([seq_len] * batch_size),
         ),
         "router_padding_mask": torch.zeros((batch_size, seq_len), dtype=torch.bool),
+        # Support packs to response tokens; this fixture's response spans the whole row.
+        SAMPLE_SUPPORT_FIELD: PackedTensor(
+            torch.randint(0, 1000, (batch_size * seq_len, 4), dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
+            cu_seqlens_from_lengths([seq_len] * batch_size),
+        ),
         "pixel_values": TensorList([torch.randn(i + 1, 3) for i in range(batch_size)]),  # batch_size * (i + 1) * 3
         "image_grid_thw": TensorList([torch.tensor([[1, 2, 3]]) for _ in range(batch_size)]),  # batch_size * 1 * 3
     }
@@ -660,10 +676,17 @@ def test_pad_batch_all_fields():
     expected_routes = torch.tensor([0, 1, 2]).expand_as(padded_routes.values)
     assert torch.equal(padded_routes.values, expected_routes)
 
+    padded_support = padded[SAMPLE_SUPPORT_FIELD][batch_size:]
+    assert padded[SAMPLE_SUPPORT_FIELD][:batch_size] == batch[SAMPLE_SUPPORT_FIELD]
+    # Support is indexed over response tokens, and a padded row copies row 0's response.
+    assert padded_support.sequence_lengths.tolist() == [seq_len] * pad_size
+    assert torch.all(padded_support.values == SAMPLE_SUPPORT_PADDING)
+
     regular_tensor_keys = EXPECTED_TRAINING_INPUT_FIELDS - {
         "loss_mask",
         "rollout_expert_indices",
         "router_padding_mask",
+        SAMPLE_SUPPORT_FIELD,
         "pixel_values",
         "image_grid_thw",
     }
@@ -784,6 +807,10 @@ _ZERO_COPY_PAYLOADS: dict[str, Callable[[], BatchField]] = {
         torch.randint(0, 64, (sum(_ZERO_COPY_SEGMENT_LENGTHS), 2, 3), dtype=torch.int16),
         cu_seqlens_from_lengths(_ZERO_COPY_SEGMENT_LENGTHS),
     ),
+    SAMPLE_SUPPORT_FIELD: lambda: PackedTensor(
+        torch.randint(0, 32_000, (sum(_ZERO_COPY_SEGMENT_LENGTHS), 20), dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
+        cu_seqlens_from_lengths(_ZERO_COPY_SEGMENT_LENGTHS),
+    ),
 }
 
 
@@ -865,3 +892,68 @@ def test_zero_copy_falls_back_for_bfloat16():
     values = torch.randn(3, 4, dtype=torch.bfloat16)
 
     assert _serialize_tensor(values, zero_copy=True)["format"] == TensorFormat.TORCH
+
+
+# ── packed field padding ─────────────────────────────────────────────────────
+
+# The row each field's padding segments must carry, stated independently of the production
+# rule: distinct experts for Megatron's dropless dispatcher, "no support" for the sampler
+# support. Padding a field with the other's fill would mis-train silently.
+_PACKED_PADDING_EXPECTED_ROW: dict[str, Callable[[PackedTensor], torch.Tensor]] = {
+    ROUTE_KEY: lambda field: torch.arange(field.row_shape[-1], dtype=field.dtype),
+    SAMPLE_SUPPORT_FIELD: lambda field: torch.full(field.row_shape, SAMPLE_SUPPORT_PADDING, dtype=field.dtype),
+}
+
+
+def test_every_packed_training_input_field_has_a_padding_rule():
+    """A packed field with no rule cannot be padded, and would raise mid-training-step."""
+    packed_fields = {
+        name for name, annotation in TrainingInput.__annotations__.items() if PackedTensor in get_args(annotation)
+    }
+    assert packed_fields == set(PACKED_FIELD_PADDING)
+
+
+@pytest.mark.parametrize("key", sorted(PACKED_FIELD_PADDING))
+def test_packed_field_padding_carries_that_fields_own_fill(key):
+    field = _ZERO_COPY_PAYLOADS[key]()
+    segment_lengths = [1, 3]
+
+    padding = make_packed_field_padding(key, field, segment_lengths=segment_lengths)
+
+    assert padding.sequence_lengths.tolist() == segment_lengths
+    assert padding.row_shape == field.row_shape
+    assert padding.dtype == field.dtype
+    assert torch.equal(padding.values, _PACKED_PADDING_EXPECTED_ROW[key](field).expand_as(padding.values))
+
+
+@pytest.mark.parametrize("key", sorted(PACKED_FIELD_PADDING))
+@pytest.mark.parametrize("pad_count", [1, 3])
+def test_appending_packed_field_padding_keeps_the_real_segments(key, pad_count):
+    """All three batch padding sites append through here, so the round trip is asserted once."""
+    field = _ZERO_COPY_PAYLOADS[key]()
+
+    padded = append_packed_field_padding(key, field, segment_lengths=[2] * pad_count)
+
+    assert padded.sequence_lengths.tolist() == _ZERO_COPY_SEGMENT_LENGTHS + [2] * pad_count
+    assert padded[: len(field)] == field
+    appended = padded[len(field) :]
+    assert torch.equal(appended.values, _PACKED_PADDING_EXPECTED_ROW[key](field).expand_as(appended.values))
+
+
+@pytest.mark.parametrize(("key", "rows_per_dummy_row"), [(ROUTE_KEY, 1), (SAMPLE_SUPPORT_FIELD, 0)])
+def test_dummy_row_segments_cover_the_single_attended_token(key, rows_per_dummy_row):
+    """A synthetic batch row attends one token: a per-token field needs one row for it, a
+    response-token field needs none."""
+    field = _ZERO_COPY_PAYLOADS[key]()
+
+    segments = packed_dummy_row_segments(key, 3)
+
+    assert segments == [rows_per_dummy_row] * 3
+    padding = make_packed_field_padding(key, field, segment_lengths=segments)
+    assert len(padding) == 3
+    assert padding.values.shape[0] == rows_per_dummy_row * 3
+
+
+def test_packed_field_padding_refuses_an_unregistered_field():
+    with pytest.raises(ValueError, match="no padding rule"):
+        make_packed_field_padding("unregistered", _ZERO_COPY_PAYLOADS[ROUTE_KEY](), segment_lengths=[1])

@@ -10,9 +10,19 @@ import numpy as np
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.utils.routed_experts import ROUTED_EXPERT_DTYPES
+from skyrl.backends.skyrl_train.utils.routed_experts import (
+    ROUTED_EXPERT_DTYPES,
+    RoutedExpertTrace,
+)
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_DTYPE,
+    SAMPLE_SUPPORT_PADDING,
+    SAMPLE_SUPPORT_TORCH_DTYPE,
+)
+from skyrl.train.dataset import parallel_fill
 from skyrl.train.dataset.preprocess import (
     ROUTED_EXPERT_TORCH_DTYPES,
+    build_sample_support,
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
@@ -70,6 +80,43 @@ def test_router_padding_mask_marks_left_padding_and_uncaptured_suffix():
     assert mask.tolist() == [[True, False, False, True], [False, False, False, False]]
 
 
+def test_router_padding_mask_marks_the_tail_a_multi_turn_trace_never_captured():
+    """A trace reports only the rows it captured, so the mask covers exactly the tail that
+    collation dummy-fills. Two turns over a 3-token prompt and a 2-token observation capture
+    8 rows of a 10-token sequence: no decode forward followed the last sampled token, and the
+    synthetic EOS was never evaluated at all.
+    """
+    trace = RoutedExpertTrace()
+    trace.record_generation(
+        prompt_token_count=3,
+        generated_token_count=2,
+        routed_experts=np.zeros((4, 2, 2), dtype=np.int16),
+    )
+    trace.record_generation(
+        prompt_token_count=7,
+        generated_token_count=2,
+        routed_experts=np.zeros((4, 2, 2), dtype=np.int16),
+    )
+    # The last two tokens are loss-masked, which is what the trace's own guard enforces.
+    routes = trace.finalize(token_count=10, loss_mask=[0, 0, 0, 1, 1, 0, 0, 1, 1, 0])
+    assert routes.shape[0] == 8
+
+    attention_mask = torch.tensor([[0, 0] + [1] * 10])
+
+    mask = make_router_padding_mask(attention_mask, [routes.shape[0]])
+
+    assert mask.tolist() == [[True, True] + [False] * 8 + [True, True]]
+
+
+def test_router_padding_mask_marks_the_last_token_for_batched_routes():
+    """``generate_batched`` returns ``seq_len - 1`` rows, one short of its sequence."""
+    attention_mask = torch.tensor([[0, 0, 1, 1, 1, 1, 1]])
+
+    mask = make_router_padding_mask(attention_mask, [4])
+
+    assert mask.tolist() == [[True, True, False, False, False, False, True]]
+
+
 def test_routed_expert_tensor_uses_unique_dummy_routes(tokenizer):
     routes = [
         np.asarray(
@@ -89,7 +136,7 @@ def test_routed_expert_tensor_uses_unique_dummy_routes(tokenizer):
         ),
     ]
 
-    *_, routed = convert_prompts_responses_to_batch_tensors(
+    *_, routed, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts=[[10], [20]],
         responses=[[11, 12], [21, 22]],
@@ -119,7 +166,7 @@ def test_routed_expert_tensor_promotes_mixed_batch_dtype(
         np.asarray([[[max_expert_id, max_expert_id + 1]]], dtype=source_dtype),
     ]
 
-    *_, routed = convert_prompts_responses_to_batch_tensors(
+    *_, routed, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts=[[10], [20]],
         responses=[[11], [21]],
@@ -136,7 +183,7 @@ def test_routed_expert_tensor_accepts_read_only_arrays(tokenizer):
     routes = np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)
     routes.flags.writeable = False
 
-    *_, routed = convert_prompts_responses_to_batch_tensors(
+    *_, routed, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts=[[10]],
         responses=[[11]],
@@ -167,7 +214,7 @@ def test_routed_expert_tensor_accepts_non_contiguous_arrays(tokenizer):
     routes = base[:, :, ::2]
     assert not routes.flags.c_contiguous
 
-    *_, routed = convert_prompts_responses_to_batch_tensors(
+    *_, routed, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts=[[10]],
         responses=[[11]],
@@ -200,7 +247,7 @@ def test_routed_expert_tensor_keeps_the_sender_dtype_after_truncation(tokenizer)
     # The dropped trailing value required int16 on the sender.
     routes = np.asarray([[[1, 2]], [[3, 4]], [[300, 5]]], dtype=np.int16)
 
-    *_, routed = convert_prompts_responses_to_batch_tensors(
+    *_, routed, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts=[[10]],
         responses=[[11]],
@@ -221,7 +268,7 @@ def test_routed_expert_tensor_warns_only_on_an_int32_batch(tokenizer, caplog, dt
     routes = np.asarray([[[expert_id, expert_id + 1]]], dtype=dtype)
 
     with caplog.at_level(logging.WARNING, logger="skyrl.train.dataset.preprocess"):
-        *_, routed = convert_prompts_responses_to_batch_tensors(
+        *_, routed, _ = convert_prompts_responses_to_batch_tensors(
             tokenizer.pad_token_id,
             prompts=[[10]],
             responses=[[11]],
@@ -266,7 +313,7 @@ def test_routed_expert_tensor_is_bit_identical_to_numpy_collation(tokenizer):
         (np.arange(6 * num_layers * topk, dtype=np.int16) + 300).reshape(6, num_layers, topk),
     ]
 
-    *_, routed = convert_prompts_responses_to_batch_tensors(
+    *_, routed, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts,
         responses,
@@ -309,7 +356,7 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):
     loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
     rewards = [torch.tensor([0, 1, 0]), torch.tensor([1, 0, 0, 0, 0])]
 
-    sequences, attention_mask, response_mask, ret_rewards, ret_loss_masks, ret_log_probs, _ = (
+    sequences, attention_mask, response_mask, ret_rewards, ret_loss_masks, ret_log_probs, _, _ = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer.pad_token_id,
             prompts,
@@ -345,7 +392,7 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(tokenizer)
     rewards = [torch.tensor([1.0, 0.5, 0.3]), torch.tensor([0.8])]
     loss_masks = [[1, 1, 1], [1]]
 
-    sequences, attention_mask, response_mask, ret_rewards, ret_loss_masks, ret_log_probs, _ = (
+    sequences, attention_mask, response_mask, ret_rewards, ret_loss_masks, ret_log_probs, _, _ = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer.pad_token_id,
             prompts,
@@ -426,7 +473,7 @@ def test_unified_left_padding_layout(tokenizer):
     rewards = [[0.0] * 3, [0.0] * 2]
     loss_masks = [[1] * 3, [1] * 2]
 
-    seq, attn, action, rew, lm, _, _ = convert_prompts_responses_to_batch_tensors(
+    seq, attn, action, rew, lm, _, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts,
         responses,
@@ -456,7 +503,7 @@ def test_right_aligned_response_data(tokenizer):
     prompts_copy = [p[:] for p in prompts]
     responses_copy = [r[:] for r in responses]
 
-    seq, attn, action, rew, lm, lp, _ = convert_prompts_responses_to_batch_tensors(
+    seq, attn, action, rew, lm, lp, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts,
         responses,
@@ -491,7 +538,7 @@ def test_max_seq_len_warns_but_does_not_truncate(tokenizer):
     rewards = [[0.0] * 10, [0.0] * 50]
     loss_masks = [[1] * 10, [1] * 50]
 
-    seq, _, action, _, _, _, _ = convert_prompts_responses_to_batch_tensors(
+    seq, _, action, _, _, _, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts,
         responses,
@@ -517,7 +564,7 @@ def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
     rei_0 = np.asarray([[[1, 2]] * num_layers for _ in range(5)], dtype=np.uint8)
     rei_1 = np.asarray([[[3, 4]] * num_layers for _ in range(6)], dtype=np.uint8)
 
-    seq, attn, action, rew, lm, lp, rei_tensor = convert_prompts_responses_to_batch_tensors(
+    seq, attn, action, rew, lm, lp, rei_tensor, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts,
         responses,
@@ -541,7 +588,7 @@ def test_rollout_expert_indices_none_when_not_provided(tokenizer):
     rewards = [[0.0], [0.0]]
     loss_masks = [[1], [1]]
 
-    *_, rei_tensor = convert_prompts_responses_to_batch_tensors(
+    *_, rei_tensor, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts,
         responses,
@@ -561,7 +608,7 @@ def test_stepwise_anti_correlation_no_inflation(tokenizer):
     rewards = [[0.0] * 90, [0.0] * 10]
     loss_masks = [[1] * 90, [1] * 10]
 
-    seq, attn, action, rew, lm, _, _ = convert_prompts_responses_to_batch_tensors(
+    seq, attn, action, rew, lm, _, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
         prompts,
         responses,
@@ -578,3 +625,156 @@ def test_stepwise_anti_correlation_no_inflation(tokenizer):
 
     # Response data right-aligned: sample 1 has 10 tokens -> [0]*80 + [1]*10
     assert action[1].tolist() == [0] * 80 + [1] * 10
+
+
+# ---------------------------------------------------------------------------
+# Sample support — packed to response tokens
+# ---------------------------------------------------------------------------
+
+SAMPLE_SUPPORT_TOP_K = 3
+# Anti-correlated prompt/response lengths, so a prompt-region rectangle would be mostly filler.
+SAMPLE_SUPPORT_LENGTHS = [(2, 3), (9, 2), (5, 5), (1, 1)]
+
+
+def _make_sample_support(lengths: List[tuple], *, seed: int = 0) -> List[np.ndarray]:
+    """One dense ``[response_len, top_k]`` support block per trajectory, some rows padded."""
+    rng = np.random.default_rng(seed)
+    support = []
+    for _, response_len in lengths:
+        rows = rng.integers(0, 32_000, size=(response_len, SAMPLE_SUPPORT_TOP_K), dtype=np.int64)
+        # A padded row (nothing captured) and a partially-filled row, as the sampler emits.
+        rows[0] = SAMPLE_SUPPORT_PADDING
+        rows[-1, -1] = SAMPLE_SUPPORT_PADDING
+        support.append(rows.astype(SAMPLE_SUPPORT_DTYPE))
+    return support
+
+
+def _convert_with_support(tokenizer, lengths: List[tuple], support: List[np.ndarray]):
+    prompts = [list(range(1, prompt_len + 1)) for prompt_len, _ in lengths]
+    responses = [list(range(100, 100 + response_len)) for _, response_len in lengths]
+    return convert_prompts_responses_to_batch_tensors(
+        tokenizer.pad_token_id,
+        prompts,
+        responses,
+        rewards=[[0.0] * len(response) for response in responses],
+        loss_masks=[[1] * len(response) for response in responses],
+        rollout_sample_support=support,
+    )
+
+
+def test_sample_support_packs_to_the_response_tokens(tokenizer):
+    """One segment per trajectory, holding exactly its response tokens."""
+    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
+
+    *_, packed = _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+
+    response_lens = [response_len for _, response_len in SAMPLE_SUPPORT_LENGTHS]
+    assert packed.values.shape == (sum(response_lens), SAMPLE_SUPPORT_TOP_K)
+    assert packed.dtype == SAMPLE_SUPPORT_TORCH_DTYPE
+    assert packed.sequence_lengths.tolist() == response_lens
+    for index, rows in enumerate(support):
+        assert torch.equal(packed.segment(index), torch.from_numpy(rows))
+
+
+def test_sample_support_allocates_no_prompt_region_rectangle(tokenizer):
+    """A ``[batch, seq_len, top_k]`` rectangle would be mostly prompt-region filler."""
+    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
+
+    *_, packed = _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+
+    max_total = max(prompt_len + response_len for prompt_len, response_len in SAMPLE_SUPPORT_LENGTHS)
+    rectangle_rows = len(SAMPLE_SUPPORT_LENGTHS) * max_total
+    assert packed.values.shape[0] == sum(response_len for _, response_len in SAMPLE_SUPPORT_LENGTHS)
+    assert packed.values.shape[0] < rectangle_rows
+    assert packed.values.numel() == packed.values.shape[0] * SAMPLE_SUPPORT_TOP_K
+
+
+def test_sample_support_preserves_padding_rows(tokenizer):
+    """Padding stays ``-1``: not zeros, and not the route field's ``arange(topk)``."""
+    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
+
+    *_, packed = _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+
+    first_rows = torch.stack([packed.segment(index)[0] for index in range(len(support))])
+    assert torch.all(first_rows == SAMPLE_SUPPORT_PADDING)
+    assert not torch.any(packed.values[packed.values >= 0] == SAMPLE_SUPPORT_PADDING)
+
+
+def test_sample_support_pooled_fill_equals_serial_fill(monkeypatch, tokenizer):
+    """The pooled fill writes disjoint segments, so it must be bit-identical to a serial one."""
+    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
+
+    monkeypatch.setattr(parallel_fill, "default_fill_workers", lambda: len(SAMPLE_SUPPORT_LENGTHS))
+    *_, pooled = _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+    monkeypatch.setattr(parallel_fill, "default_fill_workers", lambda: 1)
+    *_, serial = _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+
+    assert pooled == serial
+    assert torch.equal(pooled.values, torch.from_numpy(np.concatenate(support, axis=0)))
+
+
+def test_sample_support_accepts_read_only_and_sliced_arrays(tokenizer):
+    """Wire arrays arrive read-only, and the single-turn path hands over a row slice."""
+    lengths = [(2, 2)]
+    rows = np.asarray([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=SAMPLE_SUPPORT_DTYPE)
+    rows.flags.writeable = False
+
+    *_, packed = _convert_with_support(tokenizer, lengths, [rows[:2]])
+
+    assert packed.segment(0).tolist() == [[1, 2, 3], [4, 5, 6]]
+
+
+def test_sample_support_rejects_a_row_count_that_is_not_the_response_length(tokenizer):
+    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
+    support[1] = support[1][:1]
+
+    with pytest.raises(ValueError, match="support rows for"):
+        _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+
+
+def test_sample_support_rejects_a_ragged_width(tokenizer):
+    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
+    support[2] = support[2][:, :-1]
+
+    with pytest.raises(ValueError, match="must share top_k"):
+        _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+
+
+def test_sample_support_rejects_nested_lists(tokenizer):
+    support = [rows.tolist() for rows in _make_sample_support(SAMPLE_SUPPORT_LENGTHS)]
+
+    with pytest.raises(TypeError, match="NumPy arrays"):
+        _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+
+
+@pytest.mark.parametrize("dtype", [np.int16, np.int64])
+def test_sample_support_rejects_non_canonical_dtypes(tokenizer, dtype):
+    """The sender establishes int32, so collation validates instead of rescanning."""
+    support = [rows.astype(dtype) for rows in _make_sample_support(SAMPLE_SUPPORT_LENGTHS)]
+
+    with pytest.raises(ValueError, match="canonical sample-support dtype"):
+        _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+
+
+def test_sample_support_rejects_a_batch_size_mismatch(tokenizer):
+    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)[:-1]
+
+    with pytest.raises(ValueError, match="support for every trajectory"):
+        _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+
+
+def test_sample_support_none_when_not_provided(tokenizer):
+    *_, packed = convert_prompts_responses_to_batch_tensors(
+        tokenizer.pad_token_id,
+        prompts=[[1, 2]],
+        responses=[[10]],
+        rewards=[[0.0]],
+        loss_masks=[[1]],
+    )
+    assert packed is None
+
+
+def test_build_sample_support_torch_dtype_matches_the_wire_dtype():
+    assert torch.empty(0, dtype=SAMPLE_SUPPORT_TORCH_DTYPE).numpy().dtype == SAMPLE_SUPPORT_DTYPE
+    packed = build_sample_support([np.zeros((2, 3), dtype=SAMPLE_SUPPORT_DTYPE)], np.asarray([2]))
+    assert packed.dtype == SAMPLE_SUPPORT_TORCH_DTYPE

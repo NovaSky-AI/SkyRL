@@ -45,10 +45,11 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
+    append_packed_field_padding,
+    packed_dummy_row_segments,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
-from skyrl.backends.skyrl_train.utils.replay_utils import append_packed_replay_padding
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
@@ -784,13 +785,14 @@ class MegatronWorker:
             if value is None:
                 padded[key] = None
                 continue
-            if key == "rollout_expert_indices":
-                # The dummy attention_mask row below marks one valid token, so each padded
-                # row's route segment holds one row.
-                padded[key] = append_packed_replay_padding(value, segment_lengths=[1] * pad_count)
-                continue
             if isinstance(value, PackedTensor):
-                raise ValueError(f"Micro-batch field {key!r} is packed and has no padding rule")
+                # The dummy attention_mask row below marks one valid token, so a per-token field
+                # gets one dummy row for it while a response-token field gets none. A packed field
+                # with no rule raises here rather than falling through as a non-Tensor.
+                padded[key] = append_packed_field_padding(
+                    key, value, segment_lengths=packed_dummy_row_segments(key, pad_count)
+                )
+                continue
             if isinstance(value, torch.Tensor):
                 if key == "loss_mask":
                     # Pad with zeros so padded samples don't contribute to loss

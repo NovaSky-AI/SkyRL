@@ -15,6 +15,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
@@ -748,8 +749,74 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             not isinstance(reward, list) for reward in rewards
         ), "rewards must be `List[float]` or `List[List[float]]`"
 
+    _validate_per_token_side_channels(generator_output, step_wise)
+
     if step_wise:
         _validate_step_wise_fields(generator_output, num_responses)
+
+
+def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wise: bool):
+    """Validate the per-generated-token side channels against what the trainer consumes.
+
+    The outer length checks above cover only the per-trajectory list; a ``None`` entry or a
+    row count the trainer cannot place still reaches ``convert_prompts_responses_to_batch_tensors``
+    (or, for routes, ``make_router_padding_mask`` one step earlier) as an opaque ``TypeError``.
+
+    Routes cover a non-empty *prefix* of a trajectory's ``prompt + response`` tokens: vLLM
+    records no route for the last sampled token, and a multi-turn trace ends further short of
+    a synthetic EOS. Collation dummy-fills the uncovered tail and the router padding mask
+    excludes it, so the row count is bounded, not fixed -- bounded above by the sequence and
+    below by the last token the loss trains. Sample support is dense over the response, so its
+    row count is exact.
+    """
+    rollout_expert_indices = generator_output.get("rollout_expert_indices")
+    rollout_sample_support = generator_output.get(SAMPLE_SUPPORT_FIELD)
+    prompt_token_ids = generator_output["prompt_token_ids"]
+    response_ids = generator_output["response_ids"]
+
+    # Route rows are aligned to one contiguous prompt+response token sequence, while step-wise
+    # splits that trajectory into per-turn samples whose prompts re-cover earlier turns. The
+    # trajectory-aligned rows would land on the wrong tokens of every step but the first, which
+    # the row-count bounds below cannot see: they check coverage, not which token a row describes.
+    assert not (step_wise and rollout_expert_indices is not None), (
+        "rollout router replay (r3) is not supported with step-wise training: a route trace is "
+        "accumulated over one contiguous prompt+response token sequence, so replaying it against "
+        "per-turn samples would silently route trained tokens by another token's rollout routes"
+    )
+
+    if rollout_expert_indices is not None:
+        loss_masks = generator_output["loss_masks"]
+        for i, sample_indices in enumerate(rollout_expert_indices):
+            assert sample_indices is not None, f"rollout_expert_indices[{i}] is None, expected captured routes"
+            prompt_length = len(prompt_token_ids[i])
+            sequence_length = prompt_length + len(response_ids[i])
+            captured_rows = len(sample_indices)
+            assert 0 < captured_rows <= sequence_length, (
+                f"rollout_expert_indices[{i}] has {captured_rows} route rows for a "
+                f"{sequence_length}-token trajectory, expected a non-empty prefix of it"
+            )
+            # The row at source position ``t`` holds the route that produced token ``t + 1``, so
+            # ``captured_rows`` rows cover targets ``[1, captured_rows]``. Beyond that the trainer
+            # replays dummy routes, and the router padding mask only keeps those out of router
+            # accounting -- it cannot stop a trained token from being replayed on a route the
+            # rollout never took. ``RoutedExpertTrace.finalize`` proves the same bound for traces
+            # it builds; this is the boundary check for routes from any other producer.
+            trained_positions = np.flatnonzero(np.asarray(loss_masks[i]))
+            if trained_positions.size:
+                last_trained_token = prompt_length + int(trained_positions[-1])
+                assert captured_rows >= last_trained_token, (
+                    f"rollout_expert_indices[{i}] captured {captured_rows} route rows, which stops "
+                    f"short of loss-active token {last_trained_token}: replaying that token on a "
+                    "dummy route trains it on a route the rollout never took"
+                )
+
+    if rollout_sample_support is not None:
+        for i, sample_support in enumerate(rollout_sample_support):
+            assert sample_support is not None, f"{SAMPLE_SUPPORT_FIELD}[{i}] is None, expected captured support"
+            assert len(sample_support) == len(response_ids[i]), (
+                f"{SAMPLE_SUPPORT_FIELD}[{i}] has {len(sample_support)} support rows for "
+                f"{len(response_ids[i])} response tokens, expected one row per response token"
+            )
 
 
 def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses: int):
