@@ -46,9 +46,10 @@ def _engine(server_names=("srv-a", "srv-b"), num_consumers=4):
         ParamMeta(name="lm_head.weight", dtype=torch.bfloat16, shape=(8, 4)),
     ]
     e._groups = [["model.embed_tokens.weight"], ["model.layers.0.mlp.w.weight"], ["lm_head.weight"]]
-    e._group_owners = [[0], [1], [0]]
-    e._name_ep_rank = None
-    e._producer_ep_ranks = None
+    # Per-name ownership: names of groups 0 and 2 on producer 0, group 1 on
+    # producer 1 (owner class per name, indexing the distinct owner sets).
+    e._owner_sets = [[0], [1]]
+    e._name_owner_class = [0, 1, 0]
     # rank 0 IS the sender (`is_sender` is derived from rank on the base class, not a
     # constructor field), so this engine is the one that drives the control plane.
     e._init_info = ShardedRDTTrainerInitInfo(
@@ -75,7 +76,8 @@ class TestWorkerInitPayload:
         payload = e.get_worker_init_payload()
         assert payload["num_consumers"] == 4
         assert payload["group_lens"] == [1, 1, 1]
-        assert payload["group_owners"] == [[0], [1], [0]]
+        assert payload["owner_sets"] == [[0], [1]]
+        assert payload["name_owner_class"] == [0, 1, 0]
         assert payload["names"] == [m.name for m in e._meta]
         assert payload["dtype_names"] == ["bfloat16"] * 3
         assert payload["shapes"] == [[8, 4], [4, 4], [8, 4]]
@@ -176,11 +178,20 @@ class TestConsumerInitIdempotency:
             "init_transfer_engine no longer delegates producer binding to _resolve_producers; "
             "re-point this test at whatever does the binding now."
         )
-        src = inspect.getsource(cls._resolve_producers)
-        reset = src.index("self._producer_actors = []")
-        append = src.index("self._producer_actors.append(")
-        assert reset < append, "the producer lists must be cleared BEFORE they are re-bound"
-        assert "self._produce_methods = []" in src
+        # The binding lives on the router now, and the invariant is structural:
+        # bind() ASSIGNS fresh lists rather than appending, so a rejoining engine
+        # that re-inits cannot shift the owner indices that address them.
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
+
+        bind_src = inspect.getsource(RdtRouter.bind)
+        assert "self._actors = list(actors)" in bind_src
+        assert "self._produce_methods = list(produce_methods)" in bind_src
+        assert ".append(" not in bind_src, "bind must rebuild the lists wholesale"
+
+        r = RdtRouter(2, 1, None, None, ["a"], [1])
+        r.bind(["A0", "A1"], ["m0", "m1"], 0)
+        r.bind(["B0", "B1"], ["n0", "n1"], 0)
+        assert r._actors == ["B0", "B1"] and r._produce_methods == ["n0", "n1"]
 
 
 def test_the_driver_caches_the_payload_at_init_weight_sync_state(monkeypatch):

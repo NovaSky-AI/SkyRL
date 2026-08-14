@@ -43,8 +43,6 @@ from skyrl.backends.skyrl_train.weight_sync.rdt_control_plane import (
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
     ParamMeta,
     WeightSource,
-)
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
     layerwise_groups,
 )
 from skyrl.train.utils.utils import str_to_torch_dtype
@@ -369,9 +367,9 @@ class MegatronStackedWeightSource(WeightSource):
     This source is single-mode — serve only what this rank holds — with two
     grains that engage independently but demote together: at pp>1 the source
     never gathers across pipeline stages (each stage yields only its own
-    layers, declared through ``owned_groups()``), and at ep>1 it never
+    layers, declared through ``held_names()``), and at ep>1 it never
     all-gathers experts (only this coordinate's experts are materialized,
-    declared through ``expert_ownership()``; foreign experts yield ``None``).
+    also declared through ``held_names()``; foreign experts yield ``None``).
     The RDT consumers route every pull to a rank that holds the data. Layouts
     this cannot serve (a gather group produced by two stages: tied embeddings,
     MTP) demote the source, and ``make_weight_source`` delegates to the plain
@@ -391,13 +389,13 @@ class MegatronStackedWeightSource(WeightSource):
         self._expert_names: dict = {}
         # This source is SINGLE-MODE: serve only what this rank holds. Two
         # grains that engage independently: PP-local (pp>1) — this stage
-        # exports only its own parameters (owned_groups); EP-local (ep>1) —
+        # exports only its own parameters; EP-local (ep>1) —
         # only this coordinate's experts are materialized, foreign experts
-        # yield None (expert_ownership). The escape hatch to naive whole-model
+        # yield None. Both are declared through held_names(). The escape hatch to naive whole-model
         # extraction is the plain MegatronWeightSource
         # (SKYRL_RDT_STACKED_EXPERTS=0), which make_weight_source also
         # delegates to automatically when a gather group spans pipeline stages
-        # (tied embeddings, MTP) — see owned_groups / make_weight_source.
+        # (tied embeddings, MTP) — see held_names / make_weight_source.
         etp = self._etp_size()
         if etp > 1:
             # Defense in depth: make_weight_source falls back to the plain
@@ -414,7 +412,7 @@ class MegatronStackedWeightSource(WeightSource):
         # and stamp 0 (!= -1) would only split each group into a pointless
         # second chunk on the consumer.
         self._ep_local = self._ep_size > 1
-        # Set by owned_groups when a gather group spans pipeline stages: this
+        # Set by held_names when a gather group spans pipeline stages: this
         # source cannot serve that layout, and make_weight_source delegates to
         # the plain MegatronWeightSource instead. Iteration refuses to run.
         self._demoted = False
@@ -886,7 +884,7 @@ class MegatronStackedWeightSource(WeightSource):
         The exchange doubles as the ownership probe: a PP-local export yields
         exactly the names its stage holds, so this is ownership at HF-NAME
         granularity — the only granularity that can tell whether one gather group
-        is produced by two stages (tied embeddings, MTP). ``owned_groups`` acts on
+        is produced by two stages (tied embeddings, MTP). ``held_names`` acts on
         that.
         """
         _pp_size, my_pp = self._pp_geometry()
@@ -912,7 +910,7 @@ class MegatronStackedWeightSource(WeightSource):
         The bridge streams a stage's tasks in ITS order, which need not agree with
         the partition: at 235B the last stage exports the output block before its
         layers, while ``layerwise_groups`` places that block last. The gather loop
-        walks ``owned_groups()`` ascending and holds the source to it, so a group
+        walks the held groups ascending and holds the source to it, so a group
         that arrives early is held back until its turn.
 
         Only the non-layer block is ever out of order, so at most a couple of
@@ -951,18 +949,36 @@ class MegatronStackedWeightSource(WeightSource):
         torch.distributed.all_gather_object(gathered, mine, group=parallel_state.get_pipeline_model_parallel_group())
         return gathered
 
-    def owned_groups(self) -> Optional[List[int]]:
-        """The gather groups this stage holds, or None to own everything.
+    def held_names(self) -> Optional[List[str]]:
+        """The parameter names this rank holds — see the ABC.
 
-        None (gather-to-all) unless PP-local mode is on AND every group turns out
-        to be produced by exactly one stage. A group whose names come from two
-        stages cannot be served PP-locally: each owner would publish only its half
-        while the consumers' plan expects the whole group. Rather than truncate it,
-        the whole sync reverts to gather-to-all — the layouts that do this (tied
-        embeddings, MTP) are small models where the gather is not the bottleneck.
-        Splitting the export per group instead would need a Megatron-task -> HF-group
-        map the bridge does not expose.
+        Two narrowings compose into one per-name answer:
+
+        * PP-local: only this stage's gather groups. A group whose names come
+          from two stages cannot be served per-stage (each owner would publish
+          half while the consumers' plan expects the whole), so discovering one
+          DEMOTES the source to gather-to-all — the layouts that do this (tied
+          embeddings, MTP) are small models where the gather is not the
+          bottleneck.
+        * EP-local: within those groups, the replicated names plus this rank's
+          own experts. Ownership derives from the assembled names alone (per-
+          layer E off the expert indices, ``n_local = E // ep_size``, owner
+          ``e // n_local``), so every rank computes the identical answer for
+          names it does not hold — which is what lets the consumers route from
+          the sender's copy alone.
+
+        ``None`` (holds everything) when neither narrowing applies: naive mode,
+        pp==1 with ep==1, or after a demotion.
         """
+        if self._demoted:
+            return None
+        if not self._pp_local and not self._ep_local:
+            return None
+        return self._held_names_impl()
+
+    def _owned_group_indices(self) -> Optional[List[int]]:
+        """This stage's gather groups, or None for all of them; demotes the
+        source when a group spans two pipeline stages (see ``held_names``)."""
         if not self._pp_local:
             return None
         self.metadata()  # populates _group_stages / _owned_group_idx
@@ -975,9 +991,9 @@ class MegatronStackedWeightSource(WeightSource):
                 "(naive whole-model extraction, correct but slower).",
                 shared[:4],
             )
-            # Both shard-aware declarations flip TOGETHER: a stamped name a
-            # rank no longer serves per-stage would misroute pulls. A demoted
-            # source refuses to iterate (see _iter_groups_impl).
+            # Both narrowings flip TOGETHER: a name a rank no longer serves
+            # per-stage would misroute pulls. A demoted source refuses to
+            # iterate (see _iter_groups_impl).
             self._demoted = True
             self._pp_local = False
             self._ep_local = False
@@ -994,24 +1010,10 @@ class MegatronStackedWeightSource(WeightSource):
         except (IndexError, ValueError):
             return None
 
-    def expert_ownership(self) -> Optional[tuple]:
-        """``(name_ep_rank, my_ep_rank)`` for EP-local serving — see the ABC.
-
-        Resolves AFTER ``owned_groups()``: the shared-group discovery there can
-        demote the whole source to the naive path, and the two declarations must
-        flip together (a stamped name a rank no longer serves would misroute
-        pulls). Stamps derive from the assembled names alone — per-layer E off
-        the expert indices, ``n_local = E // ep_size``, stamp ``e // n_local`` —
-        so every rank produces the identical list even for layers it does not
-        hold. ``None`` when EP-local is off: ``ep_size == 1`` (stamping would
-        only split each group into a pointless second chunk), naive mode, or a
-        demotion.
-        """
-        if self._demoted or not self._ep_local:
-            return None
-        self.owned_groups()  # runs the shared-group demotion check at pp>1
-        if self._demoted:
-            return None
+    def _name_owner(self) -> List[int]:
+        """Per-metadata-name EP owner: the expert-parallel rank holding it, or
+        ``-1`` for names every EP rank replicates. Pure function of the names,
+        so every rank derives the same list."""
         meta = self.metadata()
         e_max: dict = {}
         parsed: list = []
@@ -1021,19 +1023,34 @@ class MegatronStackedWeightSource(WeightSource):
             parsed.append((e, layer))
             if e is not None:
                 e_max[layer] = max(e, e_max.get(layer, -1))
-        stamps: List[int] = []
+        owners: List[int] = []
         for e, layer in parsed:
             if e is None:
-                stamps.append(-1)
+                owners.append(-1)
                 continue
             n_experts = e_max[layer] + 1
             if n_experts % self._ep_size:
                 raise RuntimeError(
                     f"[stacked-source] layer {layer} has {n_experts} experts, not divisible "
-                    f"by ep_size={self._ep_size}; cannot stamp expert ownership"
+                    f"by ep_size={self._ep_size}; cannot derive expert ownership"
                 )
-            stamps.append(e // (n_experts // self._ep_size))
-        return stamps, self._my_ep_rank
+            owners.append(e // (n_experts // self._ep_size))
+        return owners
+
+    def _held_names_impl(self) -> Optional[List[str]]:
+        """``held_names`` proper: this stage's groups (PP-local) narrowed to the
+        replicated names plus this rank's own experts (EP-local)."""
+        owned = self._owned_group_indices()  # may demote at pp>1
+        if self._demoted:
+            return None
+        meta = self.metadata()
+        names = [m.name for m in meta]
+        groups = layerwise_groups(names)
+        gis = range(len(groups)) if owned is None else owned
+        if not self._ep_local:
+            return [n for gi in gis for n in groups[gi]]
+        owner_of = dict(zip(names, self._name_owner()))
+        return [n for gi in gis for n in groups[gi] if owner_of[n] in (-1, self._my_ep_rank)]
 
     def _maybe_verify(self) -> None:
         if not self._verified:
@@ -1151,7 +1168,7 @@ def make_weight_source(weight_extractor: Any, dtype: torch.dtype) -> WeightSourc
                     # walk, rank-identical on every rank) so a tied-embeddings/
                     # MTP layout delegates to the plain source here instead of
                     # failing mid-init. At pp==1 this returns without work.
-                    src.owned_groups()
+                    src.held_names()
                     if src._demoted:
                         logger.warning(
                             "[rdt] a gather group spans pipeline stages; delegating to the "

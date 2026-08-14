@@ -102,7 +102,7 @@ class TestRdtSend:
         import torch
 
         from skyrl.backends.skyrl_train.weight_sync.rdt_send import MegatronWeightSource
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
             layerwise_groups,
         )
 
@@ -202,9 +202,10 @@ class TestRdtReplicaConsumerMapping:
         # Each consumer binds its own producer; each producer serves exactly one.
         assert assign_producer_indices(num_producers, num_consumers, cids[0]) == [0]
         assert assign_producer_indices(num_producers, num_consumers, cids[1]) == [1]
-        router = RdtRouter(num_producers, num_consumers, None, num_groups=3)
-        assert router.producer_for(cids[0], 0) == 0
-        assert router.producer_for(cids[1], 0) == 1
+        names = ["g0.w", "g1.w", "g2.w"]
+        router = RdtRouter(num_producers, num_consumers, None, None, names, [1, 1, 1])
+        assert router.producer_for(cids[0], "g0.w") == 0
+        assert router.producer_for(cids[1], "g0.w") == 1
 
     def test_single_replica_offset_is_zero(self):
         # num_replicas=1 (default / single deployment) => offset 0, id == local index.
@@ -215,122 +216,6 @@ class TestRdtReplicaConsumerMapping:
         num_consumers, num_replicas = 4, 2
         ids = [self._consumer_id(r, num_replicas, num_consumers, local) for r in range(2) for local in range(2)]
         assert sorted(ids) == [0, 1, 2, 3]
-
-
-class TestRdtRouter:
-    """Who serves each (gather group, ep_rank) pull unit.
-
-    A wrong answer here is not a wrong number but a hang or a loud misroute: a
-    consumer pulling from a producer that never gathered the name trips its
-    served-names guard. Freeing does NOT route through the router — every
-    consumer signals every owner of a group, and the producers count to the
-    live total — so these tests pin PULL routing only."""
-
-    def test_identity_when_fleets_match(self):
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        r = RdtRouter(8, 8, None, num_groups=6)
-        assert all(r.producer_for(3, g) == 3 for g in range(6))
-        assert all(r.producer_for(c, 0) == c for c in range(8))
-
-    def test_gather_to_all_keeps_the_historical_binding(self):
-        """16 producers / 8 consumers: the block rule spreads each consumer's
-        pulls over its block, alternating by group, and every producer NIC
-        still carries traffic."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
-            RdtRouter,
-            assign_producer_indices,
-        )
-
-        r = RdtRouter(16, 8, None, num_groups=95)
-        for c in range(8):
-            block = assign_producer_indices(16, 8, c)
-            assert {r.producer_for(c, g) for g in range(95)} == set(block)
-        assert [r.producer_for(0, g) for g in range(4)] == [0, 1, 0, 1]
-        # No producer is left out of the pull traffic entirely.
-        assert {r.producer_for(c, g) for c in range(8) for g in range(95)} == set(range(16))
-
-    def test_fan_in_shares_one_producer(self):
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        r = RdtRouter(2, 8, None, num_groups=5)
-        assert [{r.producer_for(c, g) for g in range(5)} for c in range(8)] == [{c // 4} for c in range(8)]
-
-    def test_pipeline_stages_route_to_the_owning_stage(self):
-        """2 stages x 8 ranks (the 235B tp4/pp2 -> TP8 shape): groups 0-2 on
-        stage 0, 3-5 on stage 1. Each consumer must reach both stages, pulling
-        each group from an owner."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        owners = [list(range(8))] * 3 + [list(range(8, 16))] * 3
-        r = RdtRouter(16, 8, owners)
-        for c in range(8):
-            assert [r.producer_for(c, g) for g in range(6)] == [c] * 3 + [c + 8] * 3
-        assert r.owned_groups(0) == [0, 1, 2]
-        assert r.owned_groups(8) == [3, 4, 5]
-        r.validate()
-
-    def test_expert_units_route_to_the_matching_coordinate(self):
-        """The two stamp lists must match: a pull for a name stamped k goes to a
-        group owner whose producer_ep_ranks entry is k; -1 keeps the full owner
-        set (the historical routing)."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        # 2 stages x (tp2 x ep2): coords repeat per stage.
-        owners = [[0, 1, 2, 3]] * 2 + [[4, 5, 6, 7]] * 2
-        coords = [0, 0, 1, 1, 0, 0, 1, 1]
-        r = RdtRouter(8, 4, owners, producer_ep_ranks=coords)
-        r.validate()
-        assert r.owners(0, 1) == [2, 3]
-        assert r.owners(2, 1) == [6, 7]
-        assert r.owners(2) == [4, 5, 6, 7]  # -1: unchanged
-        for c in range(4):
-            assert r.producer_for(c, 0, 1) in (2, 3)
-            assert r.producer_for(c, 2, 0) in (4, 5)
-
-    def test_consumers_spread_over_a_coordinates_owner_set(self):
-        """Several ranks share a coordinate (its TP peers); the block rule must
-        spread consumers across them, not funnel through one."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        r = RdtRouter(4, 4, None, num_groups=6, producer_ep_ranks=[0, 0, 1, 1])
-        served = {r.producer_for(c, g, 0) for c in range(4) for g in range(6)}
-        assert served == {0, 1}
-
-    def test_an_empty_pull_unit_raises(self):
-        """A stamped name whose coordinate has no rank in the group's owner set
-        is a routing impossibility and must raise, not hang."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        r = RdtRouter(2, 2, None, num_groups=2, producer_ep_ranks=[0, 0])
-        with pytest.raises(ValueError, match="has no owner"):
-            r.producer_for(0, 0, 1)
-
-    def test_stamped_routing_without_coords_raises(self):
-        """name stamps and producer stamps must ship together."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        r = RdtRouter(2, 2, None, num_groups=2)
-        with pytest.raises(ValueError, match="producer_ep_ranks"):
-            r.owners(0, 1)
-
-    def test_validate_rejects_an_unowned_group(self):
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        with pytest.raises(ValueError, match="no owner"):
-            RdtRouter(4, 2, [[0, 1], [], [2, 3]]).validate()
-
-    def test_validate_rejects_an_out_of_range_owner(self):
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        with pytest.raises(ValueError, match="out of range"):
-            RdtRouter(2, 2, [[0, 5]]).validate()
-
-    def test_validate_rejects_a_short_coordinate_list(self):
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import RdtRouter
-
-        with pytest.raises(ValueError, match="producer_ep_ranks"):
-            RdtRouter(4, 2, None, num_groups=2, producer_ep_ranks=[0, 1]).validate()
 
 
 class TestPpLocalOwnership:
@@ -350,7 +235,7 @@ class TestPpLocalOwnership:
 
         ``metadata()`` is pre-populated the way the real one does it (the walk's
         local result handed to ``_assemble_pp_metadata``), so the assembly and
-        ``owned_groups`` can be exercised without Megatron or a GPU."""
+        ``held_names`` can be exercised without Megatron or a GPU."""
         import torch
 
         from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
@@ -361,6 +246,8 @@ class TestPpLocalOwnership:
         src._dtype = torch.bfloat16
         src._pp_local = True
         src._ep_local = True  # demotion must flip BOTH shard-aware grains
+        src._ep_size = 1
+        src._my_ep_rank = 0
         src._demoted = False
         src._verified = True
         src._group_stages = []
@@ -387,9 +274,15 @@ class TestPpLocalOwnership:
             meta = self._source(2, my_pp, [stage0, stage1]).metadata()
             assert [m.name for m in meta] == expected
             assert [tuple(m.shape) for m in meta] == [(8, 4), (4, 4), (4, 4), (4,)]
-        # ... and each stage claims exactly the groups it produced.
-        assert self._source(2, 0, [stage0, stage1]).owned_groups() == [0, 1]
-        assert self._source(2, 1, [stage0, stage1]).owned_groups() == [2, 3]
+        # ... and each stage claims exactly the names it produced.
+        assert self._source(2, 0, [stage0, stage1]).held_names() == [
+            "model.embed_tokens.weight",
+            "model.layers.0.w",
+        ]
+        assert self._source(2, 1, [stage0, stage1]).held_names() == [
+            "model.layers.1.w",
+            "model.norm.weight",
+        ]
 
     def test_metadata_is_group_contiguous_even_when_a_stage_holds_both_ends(self):
         """The assembled order must satisfy the engine's group-contiguity check —
@@ -402,7 +295,7 @@ class TestPpLocalOwnership:
         than a pre and a post block. That is still a valid partition — ownership
         follows it, and both sides derive it from the same list — which is why the
         invariant to hold is contiguity, not a canonical pre/layers/post shape."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
             layerwise_groups,
         )
 
@@ -417,7 +310,7 @@ class TestPpLocalOwnership:
         assert per_stage[0] == per_stage[1]
         # Stage 0 produced both names of the leading group; stage 1 the layer.
         src = self._source(2, 1, [stage0, stage1])
-        assert src.owned_groups() == [1]
+        assert src.held_names() == ["model.layers.0.w"]
         assert src._group_stages == [{0}, {1}]
 
     def test_a_group_produced_by_two_stages_disables_pp_local(self):
@@ -429,13 +322,14 @@ class TestPpLocalOwnership:
         stage1 = [("model.layers.1.w", [4, 4]), ("model.norm.weight", [4])]
         stage0 = stage0 + [("model.lm_head.weight", [8, 4])]
         src = self._source(2, 0, [stage0, stage1])
-        assert src.owned_groups() is None
+        assert src.held_names() is None
         assert src._demoted is True
         assert src._pp_local is False
         # BOTH shard-aware grains demote together: a stamped name a rank no
         # longer serves per-stage would misroute pulls.
         assert src._ep_local is False
-        assert src.expert_ownership() is None
+        # Re-asking is still None: a demoted source holds everything.
+        assert src.held_names() is None
         # Metadata is still the whole model, so the digest check still passes.
         assert [m.name for m in src.metadata()] == [
             "model.embed_tokens.weight",
@@ -453,19 +347,20 @@ class TestPpLocalOwnership:
         src = self._source(2, 0, [[tied, ("model.layers.0.w", [4, 4])], [tied]])
         assert [m.name for m in src.metadata()] == ["model.embed_tokens.weight", "model.layers.0.w"]
         assert src._group_stages[0] == {0, 1}
-        assert src.owned_groups() is None
+        assert src.held_names() is None
 
     def test_walk_is_reordered_into_partition_order(self):
         """The bridge streams a stage's tasks in ITS order, which need not match the
         partition: at 235B the last stage exports the output block BEFORE its layers,
-        while layerwise_groups places that block last. The gather loop walks
-        owned_groups() ascending and raises on anything else, so the walk has to be
+        while layerwise_groups places that block last. The gather loop walks the
+        held groups ascending and raises on anything else, so the walk has to be
         reordered — this is the bug the 235B bench caught (48+48 groups against a
         95-group reference) before it could fail mid-sync."""
         stage0 = [("model.embed_tokens.weight", [8, 4]), ("model.layers.0.w", [4, 4])]
         stage1 = [("model.norm.weight", [4]), ("model.layers.1.w", [4, 4])]
         src = self._source(2, 1, [stage0, stage1])
-        assert src.owned_groups() == [2, 3]  # layer 1, then post
+        # layer 1 and the post block, in partition order
+        assert src.held_names() == ["model.layers.1.w", "model.norm.weight"]
 
         # Stage 1's walk emits the post block first, as the real bridge does.
         walk = iter([(["model.norm.weight"], ["N"]), (["model.layers.1.w"], ["L1"])])
@@ -480,7 +375,7 @@ class TestPpLocalOwnership:
         memory."""
         gathered = [[(f"model.layers.{i}.w", [4, 4]) for i in range(5)], []]
         src = self._source(2, 0, gathered)
-        assert src.owned_groups() == [0, 1, 2, 3, 4]
+        assert src.held_names() == [f"model.layers.{i}.w" for i in range(5)]
         # Every group arrives in reverse: nothing can be released.
         walk = iter([([f"model.layers.{i}.w"], [i]) for i in (4, 3, 2, 1, 0)])
         with pytest.raises(RuntimeError, match="groups ahead of the partition order"):
@@ -498,14 +393,14 @@ class TestPpLocalOwnership:
         it is a wiring bug — make_weight_source should have delegated to the
         plain MegatronWeightSource."""
         src = self._source(2, 0, [[("a.weight", [2])], [("a.weight", [2])]])
-        assert src.owned_groups() is None  # tied name on both stages -> demoted
+        assert src.held_names() is None  # tied name on both stages -> demoted
         assert src._demoted is True
         with pytest.raises(RuntimeError, match="demoted"):
             list(src.iter_groups())
 
 
 class TestExpertOwnership:
-    """The EP grain of shard-aware serving: `expert_ownership()` stamps + the
+    """The EP grain of shard-aware serving: `held_names()` + the
     walk's real-vs-None emission must agree (the stamps are what the consumers
     route by, the Nones are what the trainer drops before publishing)."""
 
@@ -545,20 +440,21 @@ class TestExpertOwnership:
             + [f"model.layers.0.mlp.experts.{e}.gate_proj.weight" for e in range(4)]
             + ["model.layers.0.input_layernorm.weight", "lm_head.weight"]
         )
-        stamps, my = src.expert_ownership()
-        assert my == 1
-        assert stamps == [-1, 0, 0, 1, 1, -1, -1]
+        owners = src._name_owner()
+        assert src._my_ep_rank == 1
+        assert owners == [-1, 0, 0, 1, 1, -1, -1]
 
     def test_an_expert_count_not_divisible_by_ep_size_raises(self):
         src = self._stub(ep_size=2)
         src._meta = self._meta_of([f"model.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(3)])
         with pytest.raises(RuntimeError, match="not divisible"):
-            src.expert_ownership()
+            src._name_owner()
 
     def test_ep_local_off_returns_none(self):
         src = self._stub()
         src._ep_local = False
-        assert src.expert_ownership() is None
+        src._pp_local = False
+        assert src.held_names() is None
 
     def test_the_walk_materializes_exactly_the_stamped_experts(self):
         """The truthfulness clause of the ABC contract: within an owned layer, a
@@ -625,43 +521,65 @@ class TestExpertOwnership:
         assert src._foreign_expert_shape("model.layers.7.mlp.experts.1.down_proj.weight") == (H, F)
 
 
-class TestServedNames:
-    """`served_names` is the misroute guard: exactly the names this rank
-    publishes — its owned groups' replicated names plus its own coordinate's
-    experts."""
+class TestHeldNamesComposition:
+    """``held_names`` is the misroute guard's source of truth: exactly the names
+    this rank publishes — its stage's groups, narrowed to the replicated names
+    plus its own coordinate's experts. The trainer copies it verbatim into the
+    ``served_names`` it hands the sidecar."""
 
     @staticmethod
-    def _engine(name_ep_rank, my_ep_rank, owned_idx, groups, names):
+    def _source(ep_size, my_ep_rank, names, *, pp_local=False, owned=None):
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import ParamMeta
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer import (
-            ShardedRDTTrainerWeightTransferEngine,
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+            MegatronStackedWeightSource,
         )
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import ParamMeta
 
-        e = ShardedRDTTrainerWeightTransferEngine.__new__(ShardedRDTTrainerWeightTransferEngine)
-        e._meta = [ParamMeta(n, torch.bfloat16, (2,)) for n in names]
-        e._groups = groups
-        e._owned_idx = owned_idx
-        e._name_ep_rank = name_ep_rank
-        e._my_ep_rank = my_ep_rank
-        return e
+        src = MegatronStackedWeightSource.__new__(MegatronStackedWeightSource)
+        src._dtype = torch.bfloat16
+        src._pp_local = pp_local
+        src._ep_local = ep_size > 1
+        src._ep_size = ep_size
+        src._my_ep_rank = my_ep_rank
+        src._demoted = False
+        src._expert_names = {}
+        src._layer_geom = {}
+        src._phase = {}
+        src._phase_prefix = ""
+        src._meta = [ParamMeta(n, torch.bfloat16, (2, 2)) for n in names]
+        if owned is not None:
+            src._owned_group_idx = owned
+            src._group_stages = []
+        return src
 
-    def test_unstamped_serves_every_owned_name(self):
-        names = ["a", "b", "c"]
-        e = self._engine(None, -1, [0, 1], [["a"], ["b"], ["c"]], names)
-        assert e._served_names() == ["a", "b"]
+    def test_ep_local_holds_replicated_names_plus_its_own_experts(self):
+        names = [
+            "model.layers.0.input_layernorm.weight",
+            "model.layers.0.mlp.experts.0.gate_proj.weight",
+            "model.layers.0.mlp.experts.1.gate_proj.weight",
+            "model.norm.weight",
+        ]
+        src = self._source(2, 1, names)
+        assert src.held_names() == [
+            "model.layers.0.input_layernorm.weight",
+            "model.layers.0.mlp.experts.1.gate_proj.weight",
+            "model.norm.weight",
+        ]
 
-    def test_stamped_serves_replicated_plus_own_coordinate(self):
-        names = ["norm", "e0", "e1", "post"]
-        groups = [["norm", "e0", "e1"], ["post"]]
-        e = self._engine([-1, 0, 1, -1], 1, [0, 1], groups, names)
-        assert e._served_names() == ["norm", "e1", "post"]
+    def test_the_other_coordinate_holds_the_complement(self):
+        names = [
+            "model.layers.0.mlp.experts.0.gate_proj.weight",
+            "model.layers.0.mlp.experts.1.gate_proj.weight",
+        ]
+        held0 = self._source(2, 0, names).held_names()
+        held1 = self._source(2, 1, names).held_names()
+        assert held0 == [names[0]] and held1 == [names[1]]
+        assert sorted(held0 + held1) == sorted(names)
 
-    def test_unowned_groups_never_contribute(self):
-        names = ["a", "b"]
-        e = self._engine(None, -1, [1], [["a"], ["b"]], names)
-        assert e._served_names() == ["b"]
+    def test_neither_grain_holds_everything(self):
+        names = ["a", "model.layers.0.w", "b"]
+        assert self._source(1, 0, names).held_names() is None
 
 
 class TestStampedYieldValidation:
@@ -684,7 +602,7 @@ class TestStampedYieldValidation:
         import torch
 
         e = self._engine({"norm", "e1"})
-        e._validate_stamped_yields(0, ["norm", "e0", "e1"], [torch.zeros(1), None, torch.zeros(1)])
+        e._validate_held_yields(0, ["norm", "e0", "e1"], [torch.zeros(1), None, torch.zeros(1)])
 
     def test_a_held_name_yielding_none_raises(self):
         """The dangerous direction: served_names advertises the name, consumers
@@ -692,19 +610,19 @@ class TestStampedYieldValidation:
         import torch
 
         e = self._engine({"norm", "e0"})
-        with pytest.raises(RuntimeError, match="stamps disagree"):
-            e._validate_stamped_yields(0, ["norm", "e0"], [torch.zeros(1), None])
+        with pytest.raises(RuntimeError, match="disagrees with the yielded tensors"):
+            e._validate_held_yields(0, ["norm", "e0"], [torch.zeros(1), None])
 
     def test_a_foreign_name_yielding_a_tensor_raises(self):
         import torch
 
         e = self._engine({"norm"})
-        with pytest.raises(RuntimeError, match="stamps disagree"):
-            e._validate_stamped_yields(0, ["norm", "e0"], [torch.zeros(1), torch.zeros(1)])
+        with pytest.raises(RuntimeError, match="disagrees with the yielded tensors"):
+            e._validate_held_yields(0, ["norm", "e0"], [torch.zeros(1), torch.zeros(1)])
 
     def test_unstamped_sources_are_never_checked(self):
         e = self._engine(None)
-        e._validate_stamped_yields(0, ["anything"], [None])
+        e._validate_held_yields(0, ["anything"], [None])
 
 
 class TestQkvIndexDeviceCtx:

@@ -1550,8 +1550,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     src.pop_phase_timing()  # discard construction-time buckets
                 meta = src.metadata()
                 r["meta_names"] = len(meta)
-                owned = src.owned_groups()
-                r["owned_groups"] = None if owned is None else len(owned)
+                held = src.held_names()
+                r["held_names"] = None if held is None else len(held)
                 r["pp_local_active"] = getattr(src, "_pp_local", False)
                 per_name: dict = {}
                 order: list = []
@@ -1578,7 +1578,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     if hasattr(src, "pop_phase_timing"):
                         r[f"iter{i}"]["phases"] = {k: round(v, 3) for k, v in src.pop_phase_timing().items()}
                 digests[label] = per_name
-                # The gather loop walks owned_groups() ascending and holds the
+                # The gather loop walks the held groups ascending and holds the
                 # source to that order, so check it here rather than discovering it
                 # as a RuntimeError mid-sync.
                 if owned is not None:

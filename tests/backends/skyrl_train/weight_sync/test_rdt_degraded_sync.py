@@ -183,7 +183,8 @@ def _engine(num_consumers, world=2, rank=0):
     count, its downstream stubbed to record what it received."""
     e = ShardedRDTTrainerWeightTransferEngine.__new__(ShardedRDTTrainerWeightTransferEngine)
     e._init_info = ShardedRDTTrainerInitInfo(rank=rank, num_consumers=num_consumers)
-    e._router = RdtRouter(world, num_consumers, None, num_groups=4)
+    names = [f"g{i}.w" for i in range(4)]
+    e._router = RdtRouter(world, num_consumers, None, None, names, [1, 1, 1, 1])
     e.source = object()  # send_weights asserts a source is present
     received: list = []
     e._send_weights_inner = received.append

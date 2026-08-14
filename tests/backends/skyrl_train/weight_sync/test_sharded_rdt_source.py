@@ -24,8 +24,8 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
 
 class TestWeightSourceGroupContract:
     """`groups()` / `iter_groups()` on the WeightSource ABC. Group indices are
-    what `owned_groups()` names and what backends gather and free by, so the
-    default must agree with `layerwise_groups` over `metadata()`."""
+    what backends gather and free by, and `held_names()` is what narrows them,
+    so the default must agree with `layerwise_groups` over `metadata()`."""
 
     class _Source(WeightSource):
         """Minimal source over an ordered (name, tensor) list, optionally owning
@@ -35,12 +35,16 @@ class TestWeightSourceGroupContract:
             self._pairs = [(n, torch.full((2,), float(i))) for i, n in enumerate(names)]
             self._owned = owned
             self._reverse = reverse
+            self._held = None
+            if owned is not None:
+                all_groups = layerwise_groups(names)
+                self._held = [n for i in sorted(set(owned)) for n in all_groups[i]]
 
         def metadata(self):
             return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
 
-        def owned_groups(self):
-            return self._owned
+        def held_names(self):
+            return self._held
 
         def __iter__(self):
             pairs = self._pairs
@@ -64,10 +68,9 @@ class TestWeightSourceGroupContract:
             ["model.layers.1.a"],
         ]
 
-    def test_groups_normalizes_owned_indices(self):
-        """A trainer engine normalizes ``owned_groups()`` to sorted-unique before
-        walking it, so this must too -- otherwise a source that reports its groups
-        out of order pairs each group with the wrong batch of ``iter_groups()``."""
+    def test_groups_follows_the_partition_order_not_the_declaration_order(self):
+        """``groups()`` filters the partition, so held names declared in any order
+        still pair with the right batch of ``iter_groups()``."""
         names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
         source = self._source(names, owned=[2, 1, 2])
         assert source.groups() == [["model.layers.0.a"], ["model.layers.1.a"]]
@@ -121,12 +124,12 @@ class TestWeightSourceGroupContract:
         assert calls == [2]
 
 
-class TestExpertOwnershipDefault:
-    """`expert_ownership()` is a declaration with a safe default, like
-    `owned_groups()`: a source that never overrides it declares no name-level
-    sharding, which the engine treats as every stamp -1."""
+class TestHeldNamesDefault:
+    """`held_names()` is a declaration with a safe default: a source that never
+    overrides it holds the whole model, which the engine reads as every producer
+    owning every name."""
 
     def test_the_default_is_none(self):
         names = ["embed.w", "model.layers.0.a"]
         src = TestWeightSourceGroupContract._Source(names)
-        assert src.expert_ownership() is None
+        assert src.held_names() is None
