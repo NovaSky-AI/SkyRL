@@ -98,9 +98,10 @@ def test_routed_expert_tensor_uses_unique_dummy_routes(tokenizer):
         rollout_expert_indices=routes,
     )
 
-    assert routed.shape == (2, 3, 2, 2)
+    assert routed.values.shape == (6, 2, 2)
+    assert routed.cu_seqlens.tolist() == [0, 3, 6]
     assert routed.dtype == torch.uint8
-    assert routed[0, 2].tolist() == [[0, 1], [0, 1]]
+    assert routed.segment(0)[2].tolist() == [[0, 1], [0, 1]]
 
 
 @pytest.mark.parametrize(
@@ -128,7 +129,7 @@ def test_routed_expert_tensor_promotes_mixed_batch_dtype(
     )
 
     assert routed.dtype == expected_dtype
-    assert routed[1, 0].tolist() == [[max_expert_id, max_expert_id + 1]]
+    assert routed.segment(1)[0].tolist() == [[max_expert_id, max_expert_id + 1]]
 
 
 def test_routed_expert_tensor_accepts_read_only_arrays(tokenizer):
@@ -145,7 +146,7 @@ def test_routed_expert_tensor_accepts_read_only_arrays(tokenizer):
     )
 
     assert routed.dtype == torch.uint8
-    assert routed.tolist() == [[[[1, 2]], [[3, 4]]]]
+    assert routed.segment(0).tolist() == [[[1, 2]], [[3, 4]]]
 
 
 def test_routed_expert_tensor_rejects_nested_lists(tokenizer):
@@ -176,7 +177,7 @@ def test_routed_expert_tensor_accepts_non_contiguous_arrays(tokenizer):
     )
 
     assert routed.dtype == torch.uint8
-    assert routed.tolist() == [[[[1, 2]], [[3, 4]]]]
+    assert routed.segment(0).tolist() == [[[1, 2]], [[3, 4]]]
 
 
 @pytest.mark.parametrize("dtype", [np.uint16, np.int64])
@@ -209,7 +210,7 @@ def test_routed_expert_tensor_keeps_the_sender_dtype_after_truncation(tokenizer)
     )
 
     assert routed.dtype == torch.int16
-    assert routed.tolist() == [[[[1, 2]], [[3, 4]]]]
+    assert routed.segment(0).tolist() == [[[1, 2]], [[3, 4]]]
 
 
 @pytest.mark.parametrize(
@@ -255,10 +256,15 @@ def _numpy_padded_routes(
 
 
 def test_routed_expert_tensor_is_bit_identical_to_numpy_collation(tokenizer):
+    """A short route prefix and trailing padding, across a mixed-dtype batch.
+
+    The packed buffer must hold exactly the real-token rows of the rectangle NumPy built,
+    left padding dropped rather than written and read back.
+    """
     prompts = [[1, 2], [3, 4, 5, 6]]
     responses = [[10, 11, 12], [20, 21]]
     num_layers, topk = 2, 3
-    # Sample 0 has fewer route rows than tokens and needs padding on both sides.
+    # Sample 0 has 5 tokens but only 4 captured route rows, so its segment pads at the end.
     routes = [
         np.arange(4 * num_layers * topk, dtype=np.uint8).reshape(4, num_layers, topk),
         (np.arange(6 * num_layers * topk, dtype=np.int16) + 300).reshape(6, num_layers, topk),
@@ -273,12 +279,21 @@ def test_routed_expert_tensor_is_bit_identical_to_numpy_collation(tokenizer):
         rollout_expert_indices=routes,
     )
 
+    padded = _numpy_padded_routes(routes, prompts, responses)
+    real_rows = np.concatenate(
+        [
+            padded[index, padded.shape[1] - (len(prompt) + len(response)) :]
+            for index, (prompt, response) in enumerate(zip(prompts, responses))
+        ]
+    )
     assert routed.dtype == torch.int16
-    assert torch.equal(routed, torch.from_numpy(_numpy_padded_routes(routes, prompts, responses)))
-    # Padding routes must select distinct experts for the dropless dispatcher.
+    assert routed.cu_seqlens.tolist() == [0, 5, 11]
+    assert torch.equal(routed.values, torch.from_numpy(real_rows))
+    # Padding routes are topk distinct experts, which Megatron's dropless dispatcher requires;
+    # zeros would collapse them onto one expert.
     padding_row = [[0, 1, 2]] * num_layers
-    assert routed[0, 0].tolist() == padding_row
-    assert routed[0, 5].tolist() == padding_row
+    assert routed.segment(0)[4].tolist() == padding_row
+    assert not torch.equal(routed.segment(0)[4], torch.zeros_like(routed.segment(0)[4]))
 
 
 def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):
@@ -496,16 +511,14 @@ def test_max_seq_len_warns_but_does_not_truncate(tokenizer):
 
 
 # ---------------------------------------------------------------------------
-# R3 (Router Replay) — rollout_expert_indices padding tests
+# R3 (Router Replay) — packed rollout_expert_indices tests
 # ---------------------------------------------------------------------------
 
 
 def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
-    """rollout_expert_indices tensor should have shape [batch, max_total, layers, topk]
-    with left-padding aligned to the attention_mask."""
+    """Routes pack to [sum(seq_len), layers, topk] with one cu_seqlens segment per trajectory."""
     # Sample 0: prompt=2, response=3  → total=5
     # Sample 1: prompt=4, response=2  → total=6
-    # max_total=6
     prompts = [[1, 2], [3, 4, 5, 6]]
     responses = [[10, 11, 12], [20, 21]]
     rewards = [[0.0] * 3, [0.0] * 2]
@@ -514,7 +527,6 @@ def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
     num_layers = 2
     topk = 2
     # rollout_expert_indices[i] has shape [prompt_len_i + response_len_i, num_layers, topk]
-    # Sample 0: 5 tokens, sample 1: 6 tokens
     rei_0 = np.asarray([[[1, 2]] * num_layers for _ in range(5)], dtype=np.uint8)  # 5 tokens
     rei_1 = np.asarray([[[3, 4]] * num_layers for _ in range(6)], dtype=np.uint8)  # 6 tokens
 
@@ -528,24 +540,14 @@ def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
     )
 
     assert rei_tensor is not None
-    # Shape: [batch=2, max_total=6, layers=2, topk=2]
-    assert rei_tensor.shape == (2, 6, num_layers, topk)
+    # Packed to the batch's real tokens: 5 + 6, never the 2 x 6 rectangle.
+    assert rei_tensor.values.shape == (11, num_layers, topk)
+    assert rei_tensor.cu_seqlens.tolist() == [0, 5, 11]
 
-    dummy_routes = [[0, 1]] * num_layers
-    # Sample 0 has total=5, so the first position uses unique dummy routes.
-    assert rei_tensor[0, 0].tolist() == dummy_routes
-    assert rei_tensor[0, 1].tolist() == [[1, 2]] * num_layers  # first real token
-
-    # Sample 1 has total=6, no padding
-    assert rei_tensor[1, 0].tolist() == [[3, 4]] * num_layers  # first real token
-
-    # Dummy positions in rei_tensor align exactly with attention_mask==0.
-    for i in range(2):
-        for pos in range(6):
-            if attn[i, pos] == 0:
-                assert rei_tensor[i, pos].tolist() == dummy_routes
-            else:
-                assert rei_tensor[i, pos].tolist() != dummy_routes
+    # Segment lengths match each trajectory's real-token count in the attention mask.
+    assert rei_tensor.sequence_lengths.tolist() == attn.sum(dim=1).tolist()
+    assert rei_tensor.segment(0).tolist() == [[[1, 2]] * num_layers] * 5
+    assert rei_tensor.segment(1).tolist() == [[[3, 4]] * num_layers] * 6
 
 
 def test_rollout_expert_indices_none_when_not_provided(tokenizer):
