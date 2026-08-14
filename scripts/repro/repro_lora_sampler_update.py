@@ -29,17 +29,13 @@ async def greedy_logprobs(client, prompt_tokens: list[int]) -> list[float]:
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", required=True)
-    parser.add_argument(
-        "--base-model", default="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
-    )
+    parser.add_argument("--base-model", default="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
     parser.add_argument("--rank", type=int, default=32)
     parser.add_argument("--lr", type=float, default=0.01)
     args = parser.parse_args()
 
     service = tinker.ServiceClient(base_url=args.base_url)
-    training = await service.create_lora_training_client_async(
-        base_model=args.base_model, rank=args.rank
-    )
+    training = await service.create_lora_training_client_async(base_model=args.base_model, rank=args.rank)
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     tokens = tokenizer.encode(TRAIN_TEXT)[:512]
     n = len(tokens) - 1
@@ -57,20 +53,13 @@ async def main() -> int:
     sampler = await training.save_weights_and_get_sampling_client_async()
     series.append(await greedy_logprobs(sampler, prompt_tokens))
     for update in (1, 2):
-        backward = await training.forward_backward(
-            [datum], loss_fn="cross_entropy"
-        ).result_async(timeout=1800)
+        backward = await training.forward_backward([datum], loss_fn="cross_entropy").result_async(timeout=1800)
         loss = float(backward.metrics.get("total_loss:sum", float("nan")))
         losses.append(loss)
-        step = await training.optim_step(
-            types.AdamParams(learning_rate=args.lr)
-        ).result_async(timeout=600)
+        step = await training.optim_step(types.AdamParams(learning_rate=args.lr)).result_async(timeout=600)
         sampler = await training.save_weights_and_get_sampling_client_async()
         series.append(await greedy_logprobs(sampler, prompt_tokens))
-        print(
-            f"update={update} loss={loss} "
-            f"grad_norm={step.metrics.get('skyrl.ai/grad_norm')}"
-        )
+        print(f"update={update} loss={loss} " f"grad_norm={step.metrics.get('skyrl.ai/grad_norm')}")
 
     print("initial:", series[0][:8])
     print("update1:", series[1][:8])

@@ -22,9 +22,7 @@ def test_all_linear_targets_hybrid_mamba_projections(monkeypatch):
             captured.update(kwargs)
 
     monkeypatch.setattr(worker_module, "LoRA", FakeLoRA)
-    worker = worker_module.MegatronPolicyWorkerBase.__new__(
-        worker_module.MegatronPolicyWorkerBase
-    )
+    worker = worker_module.MegatronPolicyWorkerBase.__new__(worker_module.MegatronPolicyWorkerBase)
     worker.cfg = SimpleNamespace(bf16=True)
     config = SimpleNamespace(
         target_modules="all-linear",
@@ -48,13 +46,9 @@ def test_all_linear_targets_hybrid_mamba_projections(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_conditional_generation_lora_export_matches_vllm_names(
-    monkeypatch, tmp_path
-):
+async def test_conditional_generation_lora_export_matches_vllm_names(monkeypatch, tmp_path):
     exported = torch.ones((2, 2), dtype=torch.bfloat16)
-    worker = worker_module.MegatronPolicyWorkerBase.__new__(
-        worker_module.MegatronPolicyWorkerBase
-    )
+    worker = worker_module.MegatronPolicyWorkerBase.__new__(worker_module.MegatronPolicyWorkerBase)
     worker.actor_module = []
     worker.bridge = SimpleNamespace(
         export_adapter_weights=lambda *args, **kwargs: iter(
@@ -68,20 +62,14 @@ async def test_conditional_generation_lora_export_matches_vllm_names(
     saved_state = {}
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
-    monkeypatch.setattr(
-        worker_module, "_convert_moe_experts_lora_to_vllm", lambda state: state
-    )
+    monkeypatch.setattr(worker_module, "_convert_moe_experts_lora_to_vllm", lambda state: state)
     monkeypatch.setattr(
         peft_bridge,
         "infer_target_modules_from_adapter_weights",
         lambda keys: {"q_proj"},
     )
-    monkeypatch.setattr(
-        peft_bridge, "build_adapter_config_dict", lambda *args, **kwargs: {}
-    )
-    monkeypatch.setattr(
-        safetensors.torch, "save_file", lambda state, path: saved_state.update(state)
-    )
+    monkeypatch.setattr(peft_bridge, "build_adapter_config_dict", lambda *args, **kwargs: {})
+    monkeypatch.setattr(safetensors.torch, "save_file", lambda state, path: saved_state.update(state))
 
     client = RemoteInferenceClient(
         proxy_url="http://router",
@@ -92,9 +80,7 @@ async def test_conditional_generation_lora_export_matches_vllm_names(
 
     await worker._save_lora_adapters_and_sync(tmp_path, client)
 
-    key = (
-        "base_model.model.language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
-    )
+    key = "base_model.model.language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
     assert set(saved_state) == {key}
     assert saved_state[key].dtype == torch.bfloat16
     client.load_lora_adapter.assert_awaited_once()

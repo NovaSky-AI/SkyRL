@@ -19,9 +19,7 @@ def test_grad_sync_is_deferred_and_combines_token_counts(monkeypatch):
         lambda model, tokens: calls.append((model, tokens)),
     )
 
-    wrapper = wrapper_module.MegatronModelWrapper.__new__(
-        wrapper_module.MegatronModelWrapper
-    )
+    wrapper = wrapper_module.MegatronModelWrapper.__new__(wrapper_module.MegatronModelWrapper)
     wrapper.actor_module = [object()]
     wrapper._pending_grad_sync = None
 
@@ -41,9 +39,7 @@ def test_optimizer_syncs_then_steps_then_clears_ddp_grad_buffer():
     chunk = SimpleNamespace(zero_grad_buffer=lambda: events.append("clear"))
     model = SimpleNamespace(run_pending_grad_sync=lambda: events.append("sync"))
     strategy = SimpleNamespace(
-        optimizer_step=lambda optimizer, model, scheduler, name: (
-            events.append("step") or torch.tensor(2.5)
-        )
+        optimizer_step=lambda optimizer, model, scheduler, name: (events.append("step") or torch.tensor(2.5))
     )
 
     worker = MegatronPolicyWorkerBase.__new__(MegatronPolicyWorkerBase)
