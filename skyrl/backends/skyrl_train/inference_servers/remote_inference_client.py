@@ -74,7 +74,9 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     MultiModalFeatures,
 )
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
+    PackedField,
     decode_packed_routed_experts,
+    load_packed_body,
 )
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
@@ -201,15 +203,28 @@ class RemoteGenerateClient:
             )
         return self._session
 
-    async def _post(self, url: str, json: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
-        """POST JSON with retry on transient connection and response-decoding failures."""
+    async def _post(
+        self,
+        url: str,
+        json: Dict[str, Any],
+        headers: Optional[Dict[str, str]] = None,
+        *,
+        packed_side_channels: bool = False,
+    ) -> Any:
+        """POST JSON with retry on transient connection and response-decoding failures.
+
+        ``packed_side_channels`` splices packed arrays out of the raw bytes before
+        parsing; only ``/skyrl/v1/generate`` returns them, and no other caller
+        should pay for the scan.
+        """
         session = await self._get_session()
         last_exc: Optional[Exception] = None
         for attempt in range(_DATA_PLANE_RETRIES):
             try:
                 async with session.post(url, json=json, headers=headers) as resp:
                     try:
-                        body = orjson.loads(await resp.read())
+                        raw = await resp.read()
+                        body = load_packed_body(raw) if packed_side_channels else orjson.loads(raw)
                     except orjson.JSONDecodeError as exc:
                         if 400 <= resp.status < 500:
                             text = await resp.text()
@@ -277,7 +292,12 @@ class RemoteGenerateClient:
         if session_id:
             headers["X-Session-ID"] = str(session_id)
 
-        response = await self._post(f"{self.proxy_url}{path}", json=payload, headers=headers)
+        response = await self._post(
+            f"{self.proxy_url}{path}",
+            json=payload,
+            headers=headers,
+            packed_side_channels=return_routed_experts,
+        )
         choice = response["choices"][0]
         token_ids = choice["token_ids"]
         logprobs = choice.get("logprobs")
@@ -289,7 +309,7 @@ class RemoteGenerateClient:
 
         routed_experts = None
         if return_routed_experts:
-            packed_routed_experts = choice.get("routed_experts")
+            packed_routed_experts = choice.get(PackedField.ROUTED_EXPERTS)
             if not isinstance(packed_routed_experts, dict):
                 raise ValueError("/skyrl/v1/generate must return packed routed_experts")
             routed_experts = decode_packed_routed_experts(packed_routed_experts)
