@@ -36,7 +36,7 @@ tpu = [
 ]
 
 tinker = [
-    "tinker>=0.3.0",
+    "tinker>=0.3.0,<=0.24.1",
     "fastapi[standard]",
     "sqlmodel",
     "sqlalchemy[asyncio]",
@@ -261,6 +261,11 @@ override-dependencies = [
     # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
     # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
     "xgrammar==0.2.3",
+    # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 while vLLM pins ==0.1.9.
+    "tilelang==0.1.9; sys_platform == 'linux'",
+    # mamba-ssm 2.3.2.post1 caps apache-tvm-ffi at <=0.1.9 while vLLM 0.26.0 pins ==0.1.10. 
+    # Without this, resolution fails outright (the py>=3.14 split has no preferences to fall back on)
+    "apache-tvm-ffi==0.1.10; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -324,8 +329,9 @@ vllm = [
 ]
 # torch-2.11 builds of these aren't published on PyPI, so they come from Astral's
 # prebuilt GPU index instead of wheels built by hand on personal forks. Astral
-# publishes cp310-cp314 for both x86_64 and aarch64, so unlike the py3.12/x86_64-only
-# fork wheels these replace, no python/arch marker is needed beyond the platform.
+# publishes cp310-cp314 for both x86_64 and aarch64, so no python/arch marker is
+# needed beyond the platform — this covers aarch64/GB200 with the same official
+# wheels, retiring the separate hand-built aarch64 artifacts these replace.
 #
 # Astral versions each wheel with the (CUDA, torch) pair it was built against, in a
 # PEP 440 local segment (`+cu.12.8.torch.2.11`), so the exact build is pinned in the

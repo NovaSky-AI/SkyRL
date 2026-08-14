@@ -50,7 +50,9 @@ COOKBOOK_COMMIT="016468b0f214f30492f9f8eb001f9094970b3ad5"
 cd "$COOKBOOK_DIR"
 git fetch --depth 1 origin "$COOKBOOK_COMMIT"
 git checkout --detach "$COOKBOOK_COMMIT"
-TINKER_API_KEY=tml-dummy uv run --extra math-rl --extra wandb --with tinker --with datasets --with torch \
+# Run the client from SkyRL's project so the tinker SDK resolves from SkyRL's uv.lock.
+cd "$SKYRL_REPO_ROOT"
+TINKER_API_KEY=tml-dummy uv run --extra tinker --with-editable "$COOKBOOK_DIR[math-rl,wandb]" --with datasets --with torch \
   python -m tinker_cookbook.recipes.math_rl.train \
   base_url=http://localhost:8000 \
   model_name="Qwen/Qwen3-0.6B" \
