@@ -84,11 +84,19 @@ async def main() -> int:
     split_loss = await loss(split, probe)
     combined_loss = await loss(combined, probe)
     delta = abs(split_loss - combined_loss)
-    print(f"split_grad_norm={split_step.metrics.get('skyrl.ai/grad_norm')}")
-    print(f"combined_grad_norm={combined_step.metrics.get('skyrl.ai/grad_norm')}")
+    split_grad_norm = float(split_step.metrics.get("skyrl.ai/grad_norm") or 0.0)
+    combined_grad_norm = float(combined_step.metrics.get("skyrl.ai/grad_norm") or 0.0)
+    print(f"split_grad_norm={split_grad_norm}")
+    print(f"combined_grad_norm={combined_grad_norm}")
     print(
         f"split_loss={split_loss:.9f} combined_loss={combined_loss:.9f} delta={delta:.9e}"
     )
+    if combined_grad_norm <= 0.0:
+        print("FAIL: the combined request produced no trainable gradients")
+        return 1
+    if split_grad_norm <= 0.0:
+        print("FAIL: split requests lost all trainable gradients")
+        return 1
     if delta > 1e-5:
         print("FAIL: split requests did not produce the combined update")
         return 1

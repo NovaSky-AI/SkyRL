@@ -46,8 +46,7 @@ async def main() -> int:
         model_input=types.ModelInput.from_ints(tokens[:-1]),
         loss_fn_inputs={
             "target_tokens": TensorData(data=tokens[1:], dtype="int64", shape=[n]),
-            "logprobs": TensorData(data=[0.0] * n, dtype="float32", shape=[n]),
-            "advantages": TensorData(data=[1.0] * n, dtype="float32", shape=[n]),
+            "weights": TensorData(data=[1.0] * n, dtype="float32", shape=[n]),
         },
     )
     prompt_tokens = tokenizer.encode(PROBE_TEXT)
@@ -56,9 +55,9 @@ async def main() -> int:
     sampler = await training.save_weights_and_get_sampling_client_async()
     series.append(await greedy_logprobs(sampler, prompt_tokens))
     for update in (1, 2):
-        await training.forward_backward(
-            [datum], loss_fn="importance_sampling"
-        ).result_async(timeout=1800)
+        await training.forward_backward([datum], loss_fn="cross_entropy").result_async(
+            timeout=1800
+        )
         step = await training.optim_step(
             types.AdamParams(learning_rate=args.lr)
         ).result_async(timeout=600)
