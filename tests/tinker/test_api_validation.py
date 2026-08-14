@@ -1,4 +1,5 @@
 import base64
+from types import SimpleNamespace
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -43,6 +44,16 @@ def test_forward_backward_input_accepts_gspo_threshold_keys():
 def test_forward_backward_input_rejects_incomplete_or_invalid_gspo_thresholds(loss_fn_config):
     with pytest.raises(ValidationError, match="loss_fn='gspo'"):
         api.ForwardBackwardInput(data=[_make_datum()], loss_fn="gspo", loss_fn_config=loss_fn_config)
+
+
+@pytest.mark.asyncio
+async def test_server_capabilities_advertise_native_gspo():
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(engine_config=SimpleNamespace(base_model="test-model")))
+    )
+    capabilities = await api.get_server_capabilities(request)
+
+    assert "gspo" in capabilities.supported_loss_fns
 
 
 def test_forward_backward_input_accepts_ppo_value_clip():

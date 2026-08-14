@@ -152,6 +152,8 @@ The following loss functions are validated through the Tinker API:
 
 Native GSPO requires both `clip_low_threshold` and `clip_high_threshold` in `loss_fn_config`. The API normalizes raw advantages over the complete request batch before data-parallel sharding, matching Tinker's sequence-mean custom-loss semantics while executing a single forward-backward pass.
 
+Clients can discover this support from `supported_loss_fns` in `GET /api/v1/get_server_capabilities`; this allows clients to retain their custom-loss fallback against older SkyRL services.
+
 SkyRL-Train's `PolicyLossRegistry` also contains additional loss functions that are not yet part of the Tinker-compatible API.
 
 ## Concurrency Model

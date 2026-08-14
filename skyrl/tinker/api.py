@@ -864,6 +864,7 @@ class SupportedModel(BaseModel):
 
 class GetServerCapabilitiesResponse(BaseModel):
     supported_models: list[SupportedModel]
+    supported_loss_fns: list[str]
 
 
 class ListCheckpointsResponse(BaseModel):
@@ -1321,7 +1322,10 @@ async def get_server_capabilities(request: Request):
     supported_models = [
         SupportedModel(model_name=request.app.state.engine_config.base_model),
     ]
-    return GetServerCapabilitiesResponse(supported_models=supported_models)
+    return GetServerCapabilitiesResponse(
+        supported_models=supported_models,
+        supported_loss_fns=sorted(types.SUPPORTED_LOSS_FNS),
+    )
 
 
 class RetrieveFutureRequest(BaseModel):
