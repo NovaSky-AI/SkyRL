@@ -7,10 +7,15 @@ import torch
 
 from skyrl.backends.skyrl_train.training_batch import (
     TensorBatch,
+    TensorFormat,
     TensorList,
     TrainingInput,
     TrainingInputBatch,
     pad_training_input_batch,
+)
+from skyrl.backends.skyrl_train.utils.packed_tensor import (
+    PackedTensor,
+    cu_seqlens_from_lengths,
 )
 
 
@@ -576,7 +581,12 @@ def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> Training
         "kl": torch.randn(batch_size, seq_len),
         "rewards": torch.randn(batch_size, seq_len),
         "rollout_logprobs": torch.randn(batch_size, seq_len),
-        "rollout_expert_indices": torch.randint(0, 8, (batch_size, seq_len, 2, 3), dtype=torch.long),
+        # Routes arrive packed to real tokens; this fixture is fully attended, so every
+        # segment holds seq_len rows.
+        "rollout_expert_indices": PackedTensor(
+            torch.randint(0, 8, (batch_size * seq_len, 2, 3), dtype=torch.long),
+            cu_seqlens_from_lengths([seq_len] * batch_size),
+        ),
         "router_padding_mask": torch.zeros((batch_size, seq_len), dtype=torch.bool),
         "pixel_values": TensorList([torch.randn(i + 1, 3) for i in range(batch_size)]),  # batch_size * (i + 1) * 3
         "image_grid_thw": TensorList([torch.tensor([[1, 2, 3]]) for _ in range(batch_size)]),  # batch_size * 1 * 3
@@ -640,9 +650,12 @@ def test_pad_batch_all_fields():
     # padding rows are copies of row 0.
     assert torch.equal(padded["router_padding_mask"][:batch_size], batch["router_padding_mask"])
     assert torch.all(padded["router_padding_mask"][batch_size:])
-    assert torch.equal(padded["rollout_expert_indices"][:batch_size], batch["rollout_expert_indices"])
-    expected_routes = torch.tensor([0, 1, 2]).expand_as(padded["rollout_expert_indices"][batch_size:])
-    assert torch.equal(padded["rollout_expert_indices"][batch_size:], expected_routes)
+    assert padded["rollout_expert_indices"][:batch_size] == batch["rollout_expert_indices"]
+    padded_routes = padded["rollout_expert_indices"][batch_size:]
+    # Each padded row copies row 0, so its route segment matches row 0's length.
+    assert padded_routes.sequence_lengths.tolist() == [seq_len] * pad_size
+    expected_routes = torch.tensor([0, 1, 2]).expand_as(padded_routes.values)
+    assert torch.equal(padded_routes.values, expected_routes)
 
     regular_tensor_keys = EXPECTED_TRAINING_INPUT_FIELDS - {
         "loss_mask",
@@ -711,3 +724,51 @@ def test_pad_batch_preserves_none_fields():
     padded = pad_training_input_batch(batch, pad_size=1)
     assert padded["values"] is None
     assert padded.batch_size == 4
+
+
+def test_packed_tensor_field_survives_the_ray_pickle_round_trip():
+    """Packed route buffers cross to the workers via TensorBatch's custom pickle path."""
+    segment_lengths = [3, 1, 4]
+    routes = PackedTensor(
+        torch.randint(0, 128, (sum(segment_lengths), 2, 3), dtype=torch.int16),
+        cu_seqlens_from_lengths(segment_lengths),
+    )
+    data = TensorBatch(
+        {
+            "sequences": torch.randn(len(segment_lengths), 4),
+            "rollout_expert_indices": routes,
+        }
+    )
+    data.metadata = {"response_length": 4}
+
+    unpickled = pickle.loads(pickle.dumps(data))
+
+    restored = unpickled["rollout_expert_indices"]
+    assert isinstance(restored, PackedTensor)
+    assert restored.values.dtype == torch.int16
+    assert restored.cu_seqlens.dtype == routes.cu_seqlens.dtype
+    assert restored == routes
+    assert unpickled == data
+
+
+def test_serialized_field_formats_are_named_by_the_tensor_format_enum():
+    """Every branch of ``__setstate__`` keys off a ``TensorFormat`` member, not a bare string."""
+    data = TensorBatch(
+        {
+            "sequences": torch.randn(2, 4),
+            "pixel_values": TensorList([torch.randn(1, 3), torch.randn(2, 3)]),
+            "rollout_expert_indices": PackedTensor(
+                torch.zeros((3, 2, 3), dtype=torch.int16), cu_seqlens_from_lengths([2, 1])
+            ),
+            "bf16_logprobs": torch.randn(2, 4, dtype=torch.bfloat16),
+        }
+    )
+
+    state = data.__getstate__()["batch_dict"]
+
+    assert state["sequences"]["format"] == TensorFormat.NUMPY
+    assert state["bf16_logprobs"]["format"] == TensorFormat.TORCH
+    assert state["pixel_values"]["format"] == TensorFormat.TENSOR_LIST
+    assert state["rollout_expert_indices"]["format"] == TensorFormat.PACKED_TENSOR
+    # Legacy pickles carry the plain strings; StrEnum members must keep matching them.
+    assert [format.value for format in TensorFormat] == ["numpy", "torch", "tensor_list", "packed_tensor"]

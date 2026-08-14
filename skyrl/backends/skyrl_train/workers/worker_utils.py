@@ -6,7 +6,7 @@ import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import TensorBatch, TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
+from skyrl.backends.skyrl_train.utils.replay_utils import make_packed_replay_padding
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
@@ -326,11 +326,10 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             ref_tensor = self.data["rollout_logprobs"]
             data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
         if self.data.get("rollout_expert_indices") is not None:
-            ref_tensor = self.data["rollout_expert_indices"]
-            data["rollout_expert_indices"] = make_replay_padding_indices(
-                (batch_size, *ref_tensor.shape[1:]),
-                dtype=ref_tensor.dtype,
-                device=device,
+            # The dummy attention_mask row marks one valid token, so its route segment holds one row.
+            data["rollout_expert_indices"] = make_packed_replay_padding(
+                self.data["rollout_expert_indices"],
+                segment_lengths=[1] * batch_size,
             )
         if self.data.get("router_padding_mask") is not None:
             data["router_padding_mask"] = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
