@@ -141,7 +141,8 @@ class SFTConfig(BaseConfig):
     """Pass-through kwargs for the HuggingFace model config (FSDP backends).
     For Megatron, use ``megatron_config.transformer_config_kwargs`` instead."""
     flash_attn: bool = True
-    """Use FlashAttention 2 for FSDP models. Disable for models with unsupported head dimensions."""
+    """Use FlashAttention 2 for FSDP models. Disable for models with unsupported head dimensions.
+    SDPA requires ``remove_microbatch_padding=False``."""
     use_torch_compile: bool = False
     """Apply torch.compile to logits calculation."""
     record_memory: bool = False
@@ -560,6 +561,8 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             raise ValueError(f"num_epochs must be > 0, got {cfg.num_epochs}")
     if not cfg.model.path:
         raise ValueError("model.path must be set")
+    if cfg.strategy == "fsdp" and cfg.remove_microbatch_padding and not cfg.flash_attn:
+        raise ValueError("remove_microbatch_padding=True requires flash_attn=True with strategy='fsdp'.")
     if cfg.model.bitsandbytes_4bit.enabled:
         if cfg.strategy != "fsdp":
             raise ValueError("model.bitsandbytes_4bit.enabled=True is only supported with strategy='fsdp'.")

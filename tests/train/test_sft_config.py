@@ -148,9 +148,16 @@ class TestTopLevelOverrides:
         assert skyrl_cfg_on.trainer.remove_microbatch_padding is True
 
     def test_flash_attention_propagates(self):
-        cfg = _sft_cfg_from_overrides(["flash_attn=false"])
+        cfg = _sft_cfg_from_overrides(["flash_attn=false", "remove_microbatch_padding=false"])
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         assert skyrl_cfg.trainer.flash_attn is False
+        assert skyrl_cfg.trainer.remove_microbatch_padding is False
+
+    def test_flash_attention_disabled_requires_padding_removal(self):
+        cfg = _sft_cfg_from_overrides(["strategy=fsdp", "flash_attn=false"])
+
+        with pytest.raises(ValueError, match="remove_microbatch_padding=True requires flash_attn=True"):
+            validate_sft_cfg(cfg)
 
 
 class TestQLoRAConfig:
