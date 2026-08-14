@@ -257,10 +257,8 @@ override-dependencies = [
     "xgrammar==0.2.3",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 while vLLM pins ==0.1.9.
     "tilelang==0.1.9; sys_platform == 'linux'",
-    # Same story for the tvm runtime: mamba-ssm 2.3.2.post1 caps apache-tvm-ffi at
-    # <=0.1.9 while vLLM 0.26.0 pins ==0.1.10. Without this, resolution fails outright
-    # (the py>=3.14 split has no preferences to fall back on). 0.1.10 is what the
-    # lockfile already resolved to, so this only makes the existing choice explicit.
+    # mamba-ssm 2.3.2.post1 caps apache-tvm-ffi at <=0.1.9 while vLLM 0.26.0 pins ==0.1.10. 
+    # Without this, resolution fails outright (the py>=3.14 split has no preferences to fall back on)
     "apache-tvm-ffi==0.1.10; sys_platform == 'linux'",
 ]
 

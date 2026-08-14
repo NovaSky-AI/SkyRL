@@ -221,9 +221,7 @@ class DistributedTorchRayActor:
 
         # Only bind to NUMA nodes that actually have CPUs. On Grace-Blackwell (GB200),
         # GPU HBM is exposed as additional CPU-less NUMA nodes (e.g. 34 nodes total, only
-        # nodes 0-1 have CPUs). The old `min(numa_nodes-1, local_rank)` selection could pick
-        # a CPU-less node, which makes numa_run_on_node_mask bind to an empty CPU set
-        # (EINVAL) or an out-of-range node (SIGSEGV), silently killing the worker.
+        # nodes 0-1 have CPUs).
         cpu_nodes = []
         node_root = "/sys/devices/system/node"
         try:
