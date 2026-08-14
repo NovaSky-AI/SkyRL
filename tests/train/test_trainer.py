@@ -415,7 +415,7 @@ def test_fully_async_resume_skips_async_state_without_dataloader_cursor(dummy_co
     trainer.train_dataloader.load_state_dict.assert_not_called()
 
 
-def test_fully_async_resume_without_data_state_derives_progress_from_step(dummy_config):
+def test_fully_async_resume_without_data_state_restores_epoch_progress(dummy_config):
     trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
     trainer.cfg = dummy_config
     trainer.global_step = 7
@@ -423,9 +423,11 @@ def test_fully_async_resume_without_data_state_derives_progress_from_step(dummy_
     trainer._staleness_manager = MagicMock()
     trainer.num_steps_per_epoch = 4
 
-    start_epoch = trainer._restore_async_training_state(None, None, None)
+    start_epoch, steps_into_epoch = trainer._restore_async_training_state(None, None, None)
 
     assert start_epoch == 1
+    assert steps_into_epoch == 3
+    assert steps_into_epoch + 1 == trainer.num_steps_per_epoch
     trainer.async_train_dataloader.load_state_from_checkpoint.assert_not_called()
     trainer._staleness_manager.load_state_from_checkpoint.assert_called_once_with(8)
 
