@@ -24,6 +24,8 @@ here. Keep edits in sync with the fork -- the only intended differences are the
 import paths, the LIBFABRIC shim, and the vLLM 0.23.0 ``__init__`` shim below.
 """
 
+import collections
+import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -1145,8 +1147,9 @@ class ShardedRDTWeightTransferEngine(
             _get_original_loader,
         )
         from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-        def _make_stamp(layer, name, inner):
+        def _make_stamp(layer, name, inner, added=False):
             @functools.wraps(inner)  # keep ``inner``'s signature (incl. ``param``)
             def stamp(*args, **kwargs):
                 recorder.current = (layer, name)
@@ -1158,11 +1161,20 @@ class ShardedRDTWeightTransferEngine(
             # Tag so _restore_after_dry_run can detect and unwrap leaked stamps,
             # and so a second bake doesn't double-wrap.
             stamp._rdt_stamp_inner = inner  # type: ignore[attr-defined]
+            stamp._rdt_stamp_added = added  # type: ignore[attr-defined]
             return stamp
 
         for module in model.modules():
             for name, tensor in get_layer_tensors(module).items():
                 if getattr(tensor, "weight_loader", None) is None:
+                    # A param with NO loader (e.g. GLM's router bias, a plain
+                    # nn.Parameter) is still loaded by the model's load_weights
+                    # through the getattr(param, "weight_loader",
+                    # default_weight_loader) fallback — unstamped, its bake copy
+                    # would be unattributable, making the name residual (a hard
+                    # error on stamped models). Stamp the same default loader
+                    # the fallback would pick; the restore deletes it again.
+                    tensor.weight_loader = _make_stamp(module, name, default_weight_loader, added=True)
                     continue
                 # Bypass online_process_loader: stamp the *original* loader.
                 original = _get_original_loader(tensor)
@@ -1193,9 +1205,15 @@ class ShardedRDTWeightTransferEngine(
         for module in model.modules():
             for _name, tensor in get_layer_tensors(module).items():
                 loader = getattr(tensor, "weight_loader", None)
+                added = False
                 while loader is not None and hasattr(loader, "_rdt_stamp_inner"):
+                    added = added or getattr(loader, "_rdt_stamp_added", False)
                     loader = loader._rdt_stamp_inner
                     tensor.weight_loader = loader
+                if added:
+                    # The stamp was ATTACHED to a param that had no loader
+                    # (see _install_recording_stamps); leave none behind.
+                    del tensor.weight_loader
         if hasattr(model, "_original_do_torchao_reload"):
             model._do_torchao_reload = model._original_do_torchao_reload
 
@@ -1219,14 +1237,41 @@ class ShardedRDTWeightTransferEngine(
         self._slot_queued = [0] * self._ring_depth
         self._slot_done = [0] * self._ring_depth
         self._slot_cv = threading.Condition()
+        # [RDT-DIAG] Opt-in allocator history so an OOM's snapshot attributes
+        # every live block to its allocation stack (dumped by
+        # _log_proc_oom_state). Debug-only: recording costs CPU per alloc.
+        if os.environ.get("SKYRL_RDT_MEM_HISTORY") == "1":
+            torch.cuda.memory._record_memory_history(max_entries=200000)
         self._proc_stream = torch.cuda.Stream(device=self.device)
         self._proc_queue = queue.Queue()
         self._proc_error = None
         t = threading.Thread(target=self._proc_worker_loop, name="rdt-postprocess", daemon=True)
         self._proc_thread = t
         t.start()
-        self._quant_stream = torch.cuda.Stream(device=self.device)
-        self._quant_queue = queue.Queue()
+        # [RDT-ONE-CHURN-POOL] The quant thread shares the process stream ON
+        # PURPOSE. Each CUDA stream owns a caching-allocator pool, and the
+        # sync's big transients — ~0.8 GiB/group materializations here, ~0.7
+        # GiB/layer kernel-format shuffles in pass 2 — cannot reuse each
+        # other's freed blocks across pools. With separate streams each pool
+        # grows to its own high-water mark of split segments (measured 5-7 GiB
+        # reserved-but-unallocated at GLM-4.5-Air's first sync, OOMing a card
+        # that had ~zero net live growth; expandable_segments would fix it but
+        # NIXL cannot register VMM-backed arenas). One stream = one churn pool.
+        # The dedicated quant THREAD is kept: it exists for host-side
+        # pipelining (pass 2's Python never delays pass 1), and two threads
+        # submitting to one stream is safe — the ready-event chain already
+        # orders the GPU work.
+        self._quant_stream = self._proc_stream
+        # [RDT-RETIRE-BOUND] Bounded: each queued entry is a set of modules
+        # whose params exist TWICE until retired (freshly materialized + the
+        # original kernel storage), so an unbounded backlog grows one full
+        # layer copy per entry — measured at GLM-4.5-Air as ~0.8 GiB/group
+        # climbing until the allocator fragmented and OOMed mid-sync (the
+        # trainer's lookahead bounds its side to 2 groups; this is the
+        # consumer-side analogue). A full queue blocks the proc thread's put,
+        # which stalls the slot handshake and ultimately the pulls —
+        # backpressure, not deadlock: the quant thread drains independently.
+        self._quant_queue = queue.Queue(maxsize=4)
         qt = threading.Thread(target=self._quant_worker_loop, name="rdt-quant", daemon=True)
         self._quant_thread = qt
         qt.start()
@@ -1252,8 +1297,44 @@ class ShardedRDTWeightTransferEngine(
             except BaseException as e:  # noqa: BLE001 - surfaced on the RPC thread
                 self._proc_error = e
                 logger.exception("RDT background post-processing failed")
+                self._log_proc_oom_state()
             finally:
                 q.task_done()
+
+    def _log_proc_oom_state(self) -> None:
+        """[RDT-DIAG] On a background-processing failure, log how many layerwise
+        modules are still set up (materialized-but-unretired) and the CUDA
+        allocator state — the data an OOM here needs (a retirement backlog holds
+        one full extra copy of every un-reset layer). With
+        SKYRL_RDT_MEM_HISTORY=1 (see _ensure_proc_worker) also dump the full
+        allocator snapshot, which attributes every live block to its allocation
+        stack."""
+        try:
+            if os.environ.get("SKYRL_RDT_MEM_HISTORY") == "1" and not getattr(self, "_oom_snapshot_dumped", False):
+                self._oom_snapshot_dumped = True
+                os.makedirs("/tmp/rdt_profile", exist_ok=True)
+                torch.cuda.memory._dump_snapshot(f"/tmp/rdt_profile/oom_snapshot_{os.getpid()}.pickle")
+        except Exception:  # noqa: BLE001
+            logger.exception("[rdt-diag] snapshot dump failed")
+        try:
+            from vllm.model_executor.model_loader.reload.layerwise import (
+                LAYERWISE_INFO,
+            )
+
+            live = [layer for layer, info in LAYERWISE_INFO.items() if info.can_load()]
+            names = collections.Counter(type(m).__name__ for m in live)
+            alloc = torch.cuda.memory_allocated(self.device) / (1 << 30)
+            reserved = torch.cuda.memory_reserved(self.device) / (1 << 30)
+            logger.error(
+                "[rdt-diag] un-reset layerwise modules at failure: %d (%s); "
+                "cuda allocated=%.2f GiB reserved=%.2f GiB",
+                len(live),
+                dict(names.most_common(6)),
+                alloc,
+                reserved,
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must never mask the error
+            logger.exception("[rdt-diag] failed to collect OOM state")
 
     def _mark_slot_done(self, slot: int) -> None:
         """Publish that a queued item's read-done event has been recorded (or the
@@ -1604,7 +1685,11 @@ class ShardedRDTWeightTransferEngine(
                     with ph.phase("scatter_seconds"):
                         for sc in chunk.scatters:
                             param = getattr(sc.layer, sc.param_name)
-                            dst = param.as_strided(sc.shape, sc.stride, sc.offset)
+                            # Through .data, exactly like default_weight_loader:
+                            # params that keep requires_grad=True (plain
+                            # nn.Parameters like GLM's router bias) reject an
+                            # in-place copy through an autograd view of the leaf.
+                            dst = param.data.as_strided(sc.shape, sc.stride, sc.offset)
                             with torch._C.DisableTorchFunctionSubclass():
                                 dst.copy_(results[sc.src])
                 # All reads of this slot's arena are now enqueued on the process

@@ -579,8 +579,28 @@ class MegatronStackedWeightSource(WeightSource):
         same point. Empty dict when the model has no adapters."""
         from megatron.bridge.models.conversion.utils import unwrap_model
 
-        mb = self._bridge._model_bridge
+        mb = self._prepared_model_bridge()
         return mb, mb.build_adapter_conversion_tasks(unwrap_model(self._module))
+
+    def _prepared_model_bridge(self):
+        """A fresh ``_model_bridge`` with the AutoBridge's weights-backed
+        ``hf_pretrained`` installed.
+
+        The ``_model_bridge`` property hands each fresh bridge only the raw HF
+        CONFIG, and ``build_conversion_tasks`` — the one call that installs the
+        real ``hf_pretrained`` — is skipped on every path that supplies
+        precomputed conversion tasks (ours all do) or builds adapter tasks.
+        Architecture bridges whose ``mapping_registry`` inspects the CHECKPOINT
+        then break: GLM-4.5's fused-expert probe reads
+        ``hf_pretrained.state.source``, which a raw config lacks
+        ("'Glm4MoeConfig' object has no attribute 'state'") — and its
+        config-only fallback would guess fused=True, wrong for the per-expert
+        zai-org checkpoints. Installing the wrapper up front reproduces what
+        ``build_conversion_tasks`` does internally; bridges that never read it
+        (Qwen, DeepSeek) are unaffected."""
+        mb = self._bridge._model_bridge
+        mb.hf_pretrained = self._bridge.hf_pretrained
+        return mb
 
     def _expert_names_for(self, layer: int, E: int) -> list:
         """Per-layer expert HF names in yield order (gate/up/down per expert),
@@ -760,7 +780,22 @@ class MegatronStackedWeightSource(WeightSource):
         # Independent of PP-local, and the reason the megatron-bridge fork is no
         # longer needed for performance either (see _qkv_index_device_ctx).
         _ctx.enter_context(_qkv_index_device_ctx())
-        _stream = self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=non_expert)
+        # Not export_hf_weights: with precomputed conversion_tasks it hands the
+        # stream to a fresh CONFIG-ONLY model bridge (see _prepared_model_bridge)
+        # whose adapter-merge pass re-derives the mapping registry.
+        # cpu=False is REQUIRED and is why this cannot be defaulted: the
+        # AutoBridge wrapper's default is False, but the underlying
+        # stream_weights_megatron_to_hf defaults to cpu=True, which D2H-copies
+        # every exported tensor and then forces our own .cuda() to copy it
+        # straight back (measured at GLM-4.5-Air: ~9s/sync of pure PCIe
+        # round-trip on the sync critical path).
+        _stream = self._prepared_model_bridge().stream_weights_megatron_to_hf(
+            self._module,
+            self._bridge.hf_pretrained,
+            cpu=False,
+            show_progress=False,
+            conversion_tasks=non_expert,
+        )
         # Manual next() so time INSIDE the bridge export ("ne_bridge": TP/PP
         # gathers, transforms, adapter merge — not our code) is split from our
         # dtype/device conversion ("ne_convert"). CPU-side wall time: kernel
@@ -1037,8 +1072,12 @@ class MegatronStackedWeightSource(WeightSource):
         for layer in sample:
             mine = dict(self._yield_layer_experts(layers[layer], adapter_ctx))
             expert_tasks = layers[layer].fc1 + layers[layer].fc2
-            for name, tensor in self._bridge.export_hf_weights(
-                self._module, show_progress=False, conversion_tasks=expert_tasks
+            for name, tensor in self._prepared_model_bridge().stream_weights_megatron_to_hf(
+                self._module,
+                self._bridge.hf_pretrained,
+                cpu=False,  # see _walk_groups: the raw stream defaults to cpu=True
+                show_progress=False,
+                conversion_tasks=expert_tasks,
             ):
                 ref = tensor.to(dtype=self._dtype)
                 if name not in mine:
