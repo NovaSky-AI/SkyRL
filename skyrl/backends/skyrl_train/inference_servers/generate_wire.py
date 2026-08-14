@@ -3,14 +3,23 @@
 ``VLLMServerActor`` writes these payloads and ``RemoteInferenceClient`` reads
 them; nothing else depends on the encoding. Both sides serialize with orjson,
 which rejects non-finite floats and has no notion of NumPy arrays, so the
-helpers here exist to get sampled logprobs and routed-expert IDs across that
+helpers here exist to get sampled logprobs and NumPy side channels across that
 boundary intact.
+
+A side-channel array travels as a ``{data: <base64>, shape: [...], dtype:
+<name>}`` envelope plus any sidecar fields. ``data`` is emitted first so
+``load_packed_body`` can cut the base64 straight out of the raw response bytes
+and hand the decoder a ``memoryview``, sparing orjson the cost of materializing
+a multi-hundred-megabyte Python ``str``.
 """
 
 import math
-from typing import Any, Iterable, Mapping, Optional, Tuple
+from collections import deque
+from enum import StrEnum
+from typing import Any, Collection, Iterable, Mapping, Optional, Tuple
 
 import numpy as np
+import orjson
 import pybase64
 
 from skyrl.backends.skyrl_train.utils.routed_experts import (
@@ -22,7 +31,38 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
 # Matches the floor vLLM applies at its own serving boundaries.
 CLAMPED_LOGPROB = -9999.0
 
-_DTYPES = {dtype.name: dtype for dtype in ROUTED_EXPERT_DTYPES}
+
+class PackedArrayKey(StrEnum):
+    """Envelope keys of a packed NumPy array.
+
+    ``DATA`` is emitted first: ``load_packed_body`` locates a blob by byte
+    prefix, so any other order defeats the splice.
+    """
+
+    DATA = "data"
+    SHAPE = "shape"
+    DTYPE = "dtype"
+
+
+class PackedField(StrEnum):
+    """Response-body fields whose value is a packed-array envelope."""
+
+    ROUTED_EXPERTS = "routed_experts"
+    ROLLOUT_SAMPLE_SUPPORT = "rollout_sample_support"
+
+
+PACKED_SIDE_CHANNEL_FIELDS: tuple[str, ...] = tuple(PackedField)
+"""Fields ``load_packed_body`` splices out of a raw response body."""
+
+_ENVELOPE_KEYS = frozenset(PackedArrayKey)
+
+_ROUTED_EXPERTS_NDIM = 3
+
+_QUOTE = b'"'
+
+# Bytes shared by every envelope, and the anchor for the single scan in
+# ``load_packed_body``: base64 contains none of them, so the search skips blobs.
+_PACKED_DATA_ANCHOR = f':{{"{PackedArrayKey.DATA}":"'.encode()
 
 
 def build_logprobs_content(
@@ -72,35 +112,162 @@ def _to_host_array(routed_experts: Any) -> Any:
     return routed_experts
 
 
+def pack_ndarray(
+    arr: np.ndarray,
+    *,
+    allowed_dtypes: Collection[np.dtype],
+    extra: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    """Encode ``arr`` as a base64 envelope carrying ``extra`` as sidecar fields."""
+    if not isinstance(arr, np.ndarray):
+        raise TypeError("packed array must be a NumPy array")
+    if arr.dtype not in allowed_dtypes:
+        allowed = sorted(dtype.name for dtype in allowed_dtypes)
+        raise ValueError(f"packed array {PackedArrayKey.DTYPE} {arr.dtype.name!r} is not one of {allowed}")
+    if extra is not None:
+        collisions = sorted(set(extra) & _ENVELOPE_KEYS)
+        if collisions:
+            raise ValueError(f"sidecar fields collide with envelope keys: {collisions}")
+
+    contiguous = np.ascontiguousarray(arr)
+    # `.value` keys: orjson rejects str subclasses as dict keys.
+    payload = {
+        PackedArrayKey.DATA.value: pybase64.b64encode(memoryview(contiguous)).decode("ascii"),
+        PackedArrayKey.SHAPE.value: list(contiguous.shape),
+        PackedArrayKey.DTYPE.value: contiguous.dtype.name,
+    }
+    if extra is not None:
+        payload.update(extra)
+    return payload
+
+
+def unpack_ndarray(
+    payload: Mapping[str, Any],
+    *,
+    allowed_dtypes: Collection[np.dtype],
+    ndim: int,
+) -> Tuple[np.ndarray, dict[str, Any]]:
+    """Decode a packed envelope into its array and its sidecar fields.
+
+    ``data`` may be base64 in a ``str`` or in any buffer, so ``load_packed_body``
+    can pass a ``memoryview`` into the raw response body.
+    """
+    if not isinstance(payload, Mapping):
+        raise TypeError("packed array payload must be an object")
+    try:
+        dtype_name = payload[PackedArrayKey.DTYPE]
+        shape = tuple(payload[PackedArrayKey.SHAPE])
+        data = pybase64.b64decode_as_bytearray(payload[PackedArrayKey.DATA], validate=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid packed array envelope: {exc}") from exc
+
+    dtypes = {dtype.name: dtype for dtype in allowed_dtypes}
+    if not isinstance(dtype_name, str) or dtype_name not in dtypes:
+        raise ValueError(f"packed array {PackedArrayKey.DTYPE} {dtype_name!r} is not one of {sorted(dtypes)}")
+    dtype = dtypes[dtype_name]
+    # bool is a subclass of int, so it needs an explicit rejection; np.integer is
+    # accepted for in-process callers, since orjson only ever yields plain ints.
+    if len(shape) != ndim or any(
+        not isinstance(dim, (int, np.integer)) or isinstance(dim, bool) or dim < 0 for dim in shape
+    ):
+        raise ValueError(f"packed array {PackedArrayKey.SHAPE} {shape} is not {ndim} non-negative dimensions")
+    expected_size = math.prod(shape) * dtype.itemsize
+    if len(data) != expected_size:
+        raise ValueError(
+            f"packed array {PackedArrayKey.DATA} has {len(data)} bytes, "
+            f"expected {expected_size} for {dtype_name}{list(shape)}"
+        )
+
+    array = np.frombuffer(data, dtype=dtype).reshape(shape)
+    sidecar = {key: value for key, value in payload.items() if key not in _ENVELOPE_KEYS}
+    return array, sidecar
+
+
 def pack_routed_experts(routed_experts: RoutedExpertIndices) -> dict[str, Any]:
     compact = compact_routed_expert_indices(_to_host_array(routed_experts))
-    return {
-        "data": pybase64.b64encode(memoryview(compact)).decode("ascii"),
-        "shape": list(compact.shape),
-        "dtype": compact.dtype.name,
-    }
+    return pack_ndarray(compact, allowed_dtypes=ROUTED_EXPERT_DTYPES)
 
 
 def decode_packed_routed_experts(payload: dict[str, Any]) -> RoutedExpertIndices:
-    if not isinstance(payload, dict):
-        raise TypeError("packed routed expert indices must be an object")
-    try:
-        dtype = _DTYPES[payload["dtype"]]
-        shape = tuple(payload["shape"])
-        data = pybase64.b64decode_as_bytearray(payload["data"], validate=True)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("invalid packed routed_experts payload") from exc
-    # bool is a subclass of int, so it needs an explicit rejection; np.integer is
-    # accepted for in-process callers, since orjson only ever yields plain ints.
-    if len(shape) != 3 or any(
-        not isinstance(dim, (int, np.integer)) or isinstance(dim, bool) or dim < 0 for dim in shape
-    ):
-        raise ValueError(f"invalid packed routed_experts shape: {shape}")
-    expected_size = math.prod(shape) * dtype.itemsize
-    if len(data) != expected_size:
-        raise ValueError(f"packed routed_experts has {len(data)} bytes, expected {expected_size}")
-    decoded = np.frombuffer(data, dtype=dtype).reshape(shape)
+    decoded, _ = unpack_ndarray(payload, allowed_dtypes=ROUTED_EXPERT_DTYPES, ndim=_ROUTED_EXPERTS_NDIM)
     compact = compact_routed_expert_indices(decoded)
-    if compact.dtype != dtype:
-        raise ValueError(f"packed routed_experts uses non-canonical dtype {dtype.name}; expected {compact.dtype.name}")
+    if compact.dtype != decoded.dtype:
+        raise ValueError(
+            f"packed routed_experts uses non-canonical dtype {decoded.dtype.name}; expected {compact.dtype.name}"
+        )
     return compact
+
+
+def _data_prefix(field: str) -> bytes:
+    """The bytes an orjson-serialized packed ``field`` opens with."""
+    return f'"{field}"'.encode() + _PACKED_DATA_ANCHOR
+
+
+def load_packed_body(raw: bytes, *, fields: tuple[str, ...] = PACKED_SIDE_CHANNEL_FIELDS) -> dict[str, Any]:
+    """Parse a response body, cutting every registered packed blob out first.
+
+    One scan of ``raw`` finds each envelope, replaces its base64 with an empty
+    string for orjson, and keeps the blob as a ``memoryview`` that
+    ``unpack_ndarray`` decodes in place of a Python ``str``.
+
+    A ``null`` field passes through -- the server sends that when a request
+    captured nothing. Any other layout the scan cannot cut, such as a body
+    re-serialized with a different key order or spacing, raises: parsing the
+    blob as a ``str`` would silently forfeit the whole point of the splice.
+    """
+    prefixes = {field: _data_prefix(field) for field in fields}
+    blobs: dict[str, deque[memoryview]] = {field: deque() for field in fields}
+    view = memoryview(raw)
+    pieces: list[memoryview] = []
+    copied = 0
+    scan = 0
+    while (anchor := raw.find(_PACKED_DATA_ANCHOR, scan)) >= 0:
+        field = _match_packed_field(raw, anchor, prefixes)
+        if field is None:
+            scan = anchor + len(_PACKED_DATA_ANCHOR)
+            continue
+        start = anchor + len(_PACKED_DATA_ANCHOR)
+        end = raw.find(_QUOTE, start)
+        if end < 0:
+            raise ValueError(f"unterminated base64 {PackedArrayKey.DATA} for {field} in the response body")
+        pieces.append(view[copied:start])
+        blobs[field].append(view[start:end])
+        copied = scan = end
+
+    if pieces:
+        pieces.append(view[copied:])
+        body = orjson.loads(b"".join(pieces))
+    else:
+        body = orjson.loads(raw)
+    _restore_packed_data(body, blobs)
+
+    unplaced = {field: len(queue) for field, queue in blobs.items() if queue}
+    if unplaced:
+        raise ValueError(f"spliced packed blobs found no envelope in the response body: {unplaced}")
+    return body
+
+
+def _match_packed_field(raw: bytes, anchor: int, prefixes: Mapping[str, bytes]) -> Optional[str]:
+    """Name the registered field whose prefix ends at ``anchor``, if any."""
+    for field, prefix in prefixes.items():
+        begin = anchor + len(_PACKED_DATA_ANCHOR) - len(prefix)
+        if begin >= 0 and raw.startswith(prefix, begin):
+            return field
+    return None
+
+
+def _restore_packed_data(node: Any, blobs: Mapping[str, deque[memoryview]]) -> None:
+    """Put each blob back on its envelope's ``data`` key, in document order."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            queue = blobs.get(key)
+            if queue is not None and isinstance(value, dict) and PackedArrayKey.DATA in value:
+                if not queue:
+                    raise ValueError(f"packed {key} survived the scan unspliced; the response-body layout drifted")
+                value[PackedArrayKey.DATA.value] = queue.popleft()
+            elif isinstance(value, (dict, list)):
+                _restore_packed_data(value, blobs)
+    elif isinstance(node, list):
+        for item in node:
+            if isinstance(item, (dict, list)):
+                _restore_packed_data(item, blobs)
