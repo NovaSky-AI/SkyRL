@@ -817,7 +817,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 normalized_config["dppo"] = dppo_overrides
             return loss_fn, normalized_config or None
 
-        if loss_fn != "ppo":
+        if loss_fn not in {"ppo", "gspo"}:
             return loss_fn, loss_fn_config
 
         normalized_config = dict(loss_fn_config or {})
@@ -827,7 +827,7 @@ class SkyRLTrainBackend(AbstractBackend):
             normalized_config["eps_clip_low"] = 1.0 - clip_low_threshold
         if clip_high_threshold is not None:
             normalized_config["eps_clip_high"] = clip_high_threshold - 1.0
-        return "regular", normalized_config or None
+        return ("regular" if loss_fn == "ppo" else "gspo"), normalized_config or None
 
     def forward_backward(
         self,
