@@ -189,6 +189,37 @@ def test_routed_expert_capture_rejects_the_vision_language_generator():
         )
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (["trainer.strategy=megatron"], "enable_return_sample_support_set"),
+        (
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+            ],
+            "trainer.strategy=megatron",
+        ),
+    ],
+)
+def test_sample_support_replay_requires_capture_and_megatron(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.enable_sample_support_replay=true", *overrides])
+
+
+def test_sample_support_replay_accepts_capture_on_megatron():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.enable_sample_support_replay=true",
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            "trainer.strategy=megatron",
+        ]
+    )
+
+    assert cfg.trainer.algorithm.enable_sample_support_replay
+
+
 def test_sample_support_capture_accepts_top_k_top_p_and_min_p():
     cfg = SkyRLTrainConfig.from_cli_overrides(
         [

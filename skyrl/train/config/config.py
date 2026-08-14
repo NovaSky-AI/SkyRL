@@ -916,6 +916,9 @@ class AlgorithmConfig(BaseConfig):
     Enabled Truncated Importance Sampling (TIS) as proposed in https://fengyao.notion.site/off-policy-rl."""
     off_policy_correction: OffPolicyCorrectionConfig = field(default_factory=OffPolicyCorrectionConfig)
     """See https://docs.skyrl.ai/docs/algorithms/off_policy_correction for a full guide."""
+    enable_sample_support_replay: bool = False
+    """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
+    ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     """Only used when ``policy_loss_type="sapo"``."""
     value_clip: float = 0.2
@@ -1738,6 +1741,17 @@ class SkyRLTrainConfig(BaseConfig):
         # so workers can access it without needing the generator config
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
+        if self.trainer.algorithm.enable_sample_support_replay:
+            if not self.generator.inference_engine.enable_return_sample_support_set:
+                raise ValueError(
+                    "trainer.algorithm.enable_sample_support_replay requires "
+                    "generator.inference_engine.enable_return_sample_support_set"
+                )
+            if self.trainer.strategy != "megatron":
+                raise ValueError(
+                    "sample-support replay requires trainer.strategy=megatron, got " f"{self.trainer.strategy}"
+                )
 
         # Eval requests opt out of capture and do not use these constraints.
         if self.generator.inference_engine.enable_return_sample_support_set:

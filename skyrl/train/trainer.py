@@ -1334,7 +1334,9 @@ class RayPPOTrainer:
         if training_input.get("router_padding_mask") is not None:
             fwd_keys.append("router_padding_mask")
         if training_input.get(SAMPLE_SUPPORT_FIELD) is not None:
-            fwd_keys.append(SAMPLE_SUPPORT_FIELD)
+            # The support scorer needs the loss mask to find the appended EOS it must score over
+            # the full vocabulary, so the forward-only pass carries it too.
+            fwd_keys.extend([SAMPLE_SUPPORT_FIELD, "loss_mask"])
         if training_input.get("pixel_values") is not None:
             fwd_keys.append("pixel_values")
         if training_input.get("image_grid_thw") is not None:
