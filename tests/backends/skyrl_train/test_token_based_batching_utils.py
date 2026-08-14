@@ -12,6 +12,10 @@ from typing import List
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.packed_tensor import (
+    PackedTensor,
+    cu_seqlens_from_lengths,
+)
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     TokenBasedBatchIterator,
     get_microbatch_iterator,
@@ -201,15 +205,34 @@ class TestTokenBasedBatchIterator:
 
     def test_padding_microbatch_uses_unique_dummy_routes(self):
         batch = self._make_batch([4, 4], num_actions=2)
-        batch["rollout_expert_indices"] = torch.full((2, 4, 2, 3), 7, dtype=torch.int16)
+        batch["rollout_expert_indices"] = PackedTensor(
+            torch.full((8, 2, 3), 7, dtype=torch.int16),
+            cu_seqlens_from_lengths([4, 4]),
+        )
         batch["router_padding_mask"] = torch.zeros((2, 4), dtype=torch.bool)
         iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)
 
         padding = iterator._create_padding_microbatch()
 
-        expected = torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(padding["rollout_expert_indices"])
-        assert torch.equal(padding["rollout_expert_indices"], expected)
+        padded_routes = padding["rollout_expert_indices"]
+        # The dummy attention_mask row marks one valid token, so one dummy route per row.
+        assert padded_routes.sequence_lengths.tolist() == [1]
+        expected = torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(padded_routes.values)
+        assert torch.equal(padded_routes.values, expected)
         assert torch.all(padding["router_padding_mask"])
+
+    def test_microbatch_selection_gathers_packed_route_segments(self):
+        """Token-based microbatching must select route segments alongside the dense rows."""
+        batch = self._make_batch([4, 2], num_actions=2)
+        batch["rollout_expert_indices"] = PackedTensor.from_segments(
+            [torch.full((4, 2, 3), 1, dtype=torch.int16), torch.full((2, 2, 3), 2, dtype=torch.int16)]
+        )
+
+        microbatch = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)._create_microbatch_from_indices([1])
+
+        routes = microbatch["rollout_expert_indices"]
+        assert routes.sequence_lengths.tolist() == [2]
+        assert torch.equal(routes.segment(0), torch.full((2, 2, 3), 2, dtype=torch.int16))
 
     def test_multimodal_tensorlist_microbatching(self):
         """Token-based microbatching must gather TensorList fields (multi-modal pixel_values /

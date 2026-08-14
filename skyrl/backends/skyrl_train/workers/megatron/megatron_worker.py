@@ -46,8 +46,9 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
-from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
+from skyrl.backends.skyrl_train.utils.replay_utils import append_packed_replay_padding
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
@@ -783,6 +784,13 @@ class MegatronWorker:
             if value is None:
                 padded[key] = None
                 continue
+            if key == "rollout_expert_indices":
+                # The dummy attention_mask row below marks one valid token, so each padded
+                # row's route segment holds one row.
+                padded[key] = append_packed_replay_padding(value, segment_lengths=[1] * pad_count)
+                continue
+            if isinstance(value, PackedTensor):
+                raise ValueError(f"Micro-batch field {key!r} is packed and has no padding rule")
             if isinstance(value, torch.Tensor):
                 if key == "loss_mask":
                     # Pad with zeros so padded samples don't contribute to loss
@@ -800,12 +808,6 @@ class MegatronWorker:
                     pad_tensor = torch.arange(seq_len, device=device).unsqueeze(0).expand(pad_count, -1)
                 elif key == "router_padding_mask":
                     pad_tensor = torch.ones((pad_count, *value.shape[1:]), dtype=torch.bool, device=device)
-                elif key == "rollout_expert_indices":
-                    pad_tensor = make_replay_padding_indices(
-                        (pad_count, *value.shape[1:]),
-                        dtype=value.dtype,
-                        device=device,
-                    )
                 elif key == "response_mask":
                     # response_mask should be zeros for padded samples
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
