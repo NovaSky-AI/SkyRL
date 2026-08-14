@@ -27,6 +27,24 @@ def test_forward_backward_input_accepts_ppo_threshold_keys():
     assert req.loss_fn_config == {"clip_low_threshold": 0.9, "clip_high_threshold": 1.1}
 
 
+def test_forward_backward_input_accepts_gspo_threshold_keys():
+    req = api.ForwardBackwardInput(
+        data=[_make_datum()],
+        loss_fn="gspo",
+        loss_fn_config={"clip_low_threshold": 0.98, "clip_high_threshold": 1.03},
+    )
+    assert req.to_types().loss_fn == "gspo"
+
+
+@pytest.mark.parametrize(
+    "loss_fn_config",
+    [None, {"clip_low_threshold": 0.98}, {"clip_low_threshold": 1.01, "clip_high_threshold": 1.03}],
+)
+def test_forward_backward_input_rejects_incomplete_or_invalid_gspo_thresholds(loss_fn_config):
+    with pytest.raises(ValidationError, match="loss_fn='gspo'"):
+        api.ForwardBackwardInput(data=[_make_datum()], loss_fn="gspo", loss_fn_config=loss_fn_config)
+
+
 def test_forward_backward_input_accepts_ppo_value_clip():
     req = api.ForwardBackwardInput(
         data=[_make_datum()],

@@ -109,6 +109,15 @@ def test_cleanup_stale_sessions():
             [],
             id="cispo",
         ),
+        pytest.param(
+            "gspo",
+            {"clip_low_threshold": 0.98, "clip_high_threshold": 1.03},
+            [0.1, 0.2, 0.3],
+            [-1.1, -1.0, -0.9],
+            [],
+            [],
+            id="gspo",
+        ),
         pytest.param("ppo_critic", {"value_clip": 0.2}, [], [], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9], id="ppo_critic"),
         pytest.param(
             "dppo",

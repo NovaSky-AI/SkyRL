@@ -805,6 +805,21 @@ class SkyRLTrainBackend(AbstractBackend):
         if role == "critic":
             return loss_fn, loss_fn_config
 
+        if loss_fn == "gspo":
+            normalized_config = dict(loss_fn_config or {})
+            clip_low_threshold = normalized_config.pop("clip_low_threshold", None)
+            clip_high_threshold = normalized_config.pop("clip_high_threshold", None)
+            if clip_low_threshold is None or clip_high_threshold is None:
+                raise ValueError("loss_fn='gspo' requires clip_low_threshold and clip_high_threshold")
+            normalized_config.update(
+                eps_clip_low=1.0 - clip_low_threshold,
+                eps_clip_high=clip_high_threshold - 1.0,
+                loss_reduction="sequence_mean",
+                use_entropy_loss=False,
+                use_kl_loss=False,
+            )
+            return loss_fn, normalized_config
+
         if loss_fn == "dppo":
             # DPPO thresholds live in the nested `algorithm.dppo` sub-config, but
             # Tinker's loss_fn_config is a flat float dict. Re-nest so the
@@ -828,6 +843,28 @@ class SkyRLTrainBackend(AbstractBackend):
         if clip_high_threshold is not None:
             normalized_config["eps_clip_high"] = clip_high_threshold - 1.0
         return "regular", normalized_config or None
+
+    @staticmethod
+    def _normalize_gspo_batch(batch: TrainingInputBatch) -> None:
+        """Match Tinker's sequence-mean GSPO reduction before DP sharding.
+
+        The Tinker API receives raw per-token advantages. SkyRL's native RL
+        trainer normally pre-scales those advantages before dispatch, but the
+        API backend bypasses that trainer. Normalize once over the complete
+        request batch so each trainable sequence has equal weight and each of
+        its trainable tokens shares that sequence's weight.
+
+        A zero advantage is the Tinker custom-GSPO mask convention. Excluding
+        those tokens here also makes the sequence importance ratio identical
+        to the custom-loss path being replaced.
+        """
+        advantages = batch["advantages"]
+        loss_mask = advantages.ne(0).to(batch["loss_mask"].dtype)
+        token_counts = loss_mask.sum(dim=-1, keepdim=True)
+        trainable_sequences = token_counts.squeeze(-1).gt(0)
+        num_trainable_sequences = trainable_sequences.sum().clamp(min=1)
+        batch["advantages"] = advantages / token_counts.clamp(min=1) / num_trainable_sequences
+        batch["loss_mask"] = loss_mask
 
     def forward_backward(
         self,
@@ -857,6 +894,8 @@ class SkyRLTrainBackend(AbstractBackend):
         ):
             raise ValueError("Critic forward_backward requires values and returns for every response token")
         batch = self._to_training_batch(prepared_batch, role)
+        if loss_fn == "gspo":
+            self._normalize_gspo_batch(batch)
         micro_bs = (
             self._cfg.trainer.micro_train_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )

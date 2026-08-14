@@ -602,19 +602,22 @@ class ForwardBackwardInput(BaseModel):
         "cross_entropy": set(),
         "importance_sampling": set(),
         "ppo": {"clip_low_threshold", "clip_high_threshold", "value_clip"},
+        "gspo": {"clip_low_threshold", "clip_high_threshold"},
         "cispo": {"clip_low_threshold", "clip_high_threshold"},
         "ppo_critic": {"value_clip"},
         "dppo": {"delta_low", "delta_high"},
     }
 
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic", "dppo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "gspo", "cispo", "ppo_critic", "dppo"]
     loss_fn_config: dict[str, float] | None = None
 
     @model_validator(mode="after")
     def validate_loss_fn_config_keys(self):
         """Validate loss_fn_config keys based on the selected loss function."""
         if self.loss_fn_config is None:
+            if self.loss_fn == "gspo":
+                raise ValueError("loss_fn='gspo' requires clip_low_threshold and clip_high_threshold.")
             return self
 
         allowed_keys = self._ALLOWED_KEYS_BY_LOSS_FN[self.loss_fn]
@@ -628,6 +631,18 @@ class ForwardBackwardInput(BaseModel):
             raise ValueError(
                 f"loss_fn='{self.loss_fn}' does not accept loss_fn_config keys. " f"Received: {invalid_keys}."
             )
+        if self.loss_fn == "gspo":
+            required_keys = {"clip_low_threshold", "clip_high_threshold"}
+            missing_keys = sorted(required_keys - self.loss_fn_config.keys())
+            if missing_keys:
+                raise ValueError(f"loss_fn='gspo' is missing required loss_fn_config keys: {missing_keys}.")
+            clip_low = self.loss_fn_config["clip_low_threshold"]
+            clip_high = self.loss_fn_config["clip_high_threshold"]
+            if not 0.0 <= clip_low <= 1.0 <= clip_high:
+                raise ValueError(
+                    "loss_fn='gspo' requires 0 <= clip_low_threshold <= 1 <= clip_high_threshold; "
+                    f"got {clip_low=} and {clip_high=}."
+                )
         return self
 
     def to_types(self) -> types.ForwardBackwardInput:
