@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-pytest.importorskip("megatron")
+pytest.importorskip("megatron.core.parallel_state", exc_type=ImportError)
 
 import skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper as wrapper_module
 from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (

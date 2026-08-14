@@ -5,7 +5,7 @@ import pytest
 import safetensors.torch
 import torch
 
-pytest.importorskip("megatron")
+pytest.importorskip("megatron.bridge.models.conversion.peft_bridge", exc_type=ImportError)
 from megatron.bridge.models.conversion import peft_bridge
 
 import skyrl.backends.skyrl_train.workers.megatron.megatron_worker as worker_module
