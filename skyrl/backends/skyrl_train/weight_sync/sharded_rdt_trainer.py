@@ -806,8 +806,8 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         if flat != names:
             raise ValueError(
                 "Sharded RDT requires a WeightSource whose metadata order is "
-                "group-contiguous (pre / per-decoder-layer / post). Reorder the "
-                "source so each model.layers.<N>.* block is contiguous."
+                "group-contiguous. Reorder the source so all names sharing a "
+                "layer index are adjacent."
             )
 
         world, rank = engine._world_and_rank()
