@@ -6,15 +6,25 @@ Rows contain top-k vocabulary IDs and use trailing ``SAMPLE_SUPPORT_PADDING``.
 from typing import TypeAlias
 
 import numpy as np
+import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    TokenMetadataLayout,
     TokenMetadataTrace,
+    align_packed_token_metadata,
 )
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 
 SampleSupport: TypeAlias = np.ndarray
 SAMPLE_SUPPORT_DTYPE = np.dtype(np.int32)
+SAMPLE_SUPPORT_TORCH_DTYPE = torch.int32
 SAMPLE_SUPPORT_DTYPES = frozenset({SAMPLE_SUPPORT_DTYPE})
 SAMPLE_SUPPORT_PADDING = -1
+# Names the support field in ``GeneratorOutput``, ``TrainingInput`` and ``Experience``.
+SAMPLE_SUPPORT_FIELD = "rollout_sample_support"
+# Row-id channel value for a model position no support row scores. Out of range for any
+# packed row index, so a gather by id cannot silently pick up a real row.
+SAMPLE_SUPPORT_NO_ROW = -1
 
 
 def validate_sample_support(sample_support: SampleSupport) -> SampleSupport:
@@ -31,6 +41,54 @@ def validate_sample_support(sample_support: SampleSupport) -> SampleSupport:
     if np.any((sample_support[:, :-1] == SAMPLE_SUPPORT_PADDING) & (sample_support[:, 1:] >= 0)):
         raise ValueError(f"sample support padding must be trailing {SAMPLE_SUPPORT_PADDING} values")
     return sample_support
+
+
+def align_sample_support_row_ids(
+    sample_support: PackedTensor,
+    layout: TokenMetadataLayout,
+) -> torch.Tensor:
+    """Return the per-token channel naming which packed support row scores each model position.
+
+    The payload itself must not go through ``align_packed_token_metadata``: that places a
+    segment at a fixed offset inside its trajectory's padded region, while support scoring
+    happens one position to the left of the token it describes -- the logit at position ``t``
+    predicts token ``t + 1``. A trajectory's support therefore covers real tokens
+    ``[p_i - 1, p_i + r_i - 1)``, which includes the last prompt token and excludes the last
+    response token. Aligning only these int64 row ids keeps that placement in one place, and
+    the scorer gathers ``[top_k]`` rows by id.
+
+    Row ids index ``sample_support.values``, so they must be derived per micro-batch:
+    ``chunk``, ``slice`` and batch padding all rebase the packed row space.
+    """
+    segment_lengths = sample_support.sequence_lengths.to(torch.long)
+    if segment_lengths.numel() != len(layout.sequence_lengths):
+        raise ValueError(
+            f"Sample support holds {segment_lengths.numel()} segments for "
+            f"{len(layout.sequence_lengths)} trajectories"
+        )
+    trajectory_lengths = torch.as_tensor(
+        layout.sequence_lengths,
+        dtype=torch.long,
+        device=segment_lengths.device,
+    )
+    # p_i = L_i - r_i, and the position predicting the first response token is p_i - 1.
+    segment_starts = trajectory_lengths - segment_lengths - 1
+    if segment_lengths.numel() and int(segment_starts.min()) < 0:
+        raise ValueError(
+            "A trajectory whose support covers all of its real tokens has no position that "
+            f"predicts its first response token, got lengths {segment_lengths.tolist()} for "
+            f"trajectories {trajectory_lengths.tolist()}"
+        )
+    row_ids = PackedTensor(
+        torch.arange(sample_support.values.shape[0], dtype=torch.long, device=sample_support.device),
+        sample_support.cu_seqlens,
+    )
+    return align_packed_token_metadata(
+        row_ids,
+        layout,
+        SAMPLE_SUPPORT_NO_ROW,
+        segment_starts=segment_starts.tolist(),
+    )
 
 
 class SampleSupportTrace:

@@ -45,6 +45,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     get_kl_controller,
 )
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -890,6 +891,7 @@ class RayPPOTrainer:
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
         rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
+        rollout_sample_support = generator_output.get("rollout_sample_support", None)
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
@@ -912,6 +914,7 @@ class RayPPOTrainer:
             loss_masks_tensor,
             rollout_logprobs_tensor,
             rollout_expert_indices_tensor,
+            rollout_sample_support_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer.pad_token_id,
             prompt_ids,
@@ -920,6 +923,7 @@ class RayPPOTrainer:
             loss_masks,
             logprobs,
             rollout_expert_indices,
+            rollout_sample_support,
             max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
         )
         router_padding_mask = None
@@ -950,6 +954,7 @@ class RayPPOTrainer:
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
                 "router_padding_mask": router_padding_mask,
+                SAMPLE_SUPPORT_FIELD: rollout_sample_support_tensor,
                 "pixel_values": pixel_values,
                 "image_grid_thw": image_grid_thw,
             },
@@ -1345,6 +1350,8 @@ class RayPPOTrainer:
             fwd_keys.append("rollout_expert_indices")
         if training_input.get("router_padding_mask") is not None:
             fwd_keys.append("router_padding_mask")
+        if training_input.get(SAMPLE_SUPPORT_FIELD) is not None:
+            fwd_keys.append(SAMPLE_SUPPORT_FIELD)
         if training_input.get("pixel_values") is not None:
             fwd_keys.append("pixel_values")
         if training_input.get("image_grid_thw") is not None:

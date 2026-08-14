@@ -8,7 +8,11 @@ import torch
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_PADDING
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_DTYPE,
+    SAMPLE_SUPPORT_PADDING,
+    SampleSupport,
+)
 from skyrl.train.config import ChatTemplateConfig
 from skyrl.train.generators.base import (
     BatchMetadata,
@@ -806,6 +810,11 @@ def slice_generator_output(
     return sliced
 
 
+def _concat_sample_support(blocks: List[SampleSupport]) -> SampleSupport:
+    """Join one trajectory's per-turn support blocks, without copying an unmerged turn."""
+    return blocks[0] if len(blocks) == 1 else np.concatenate(blocks, axis=0)
+
+
 def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     """Greedily merge turns of a single trajectory using prefix matching.
 
@@ -827,9 +836,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     has_stop_reasons = gen_out.get("stop_reasons") is not None
     has_sample_support = gen_out.get("rollout_sample_support") is not None
     # Support rows are dense, so an observation delta contributes full-width padding rows.
-    sample_support_width = (
-        next((len(row) for rows in gen_out["rollout_sample_support"] for row in rows), 0) if has_sample_support else 0
-    )
+    sample_support_width = gen_out["rollout_sample_support"][0].shape[1] if has_sample_support else 0
 
     # Per-field output accumulators.
     # Fields that we take from all the entries in the merge group
@@ -837,7 +844,8 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     out_response_ids: List[List[int]] = []
     out_loss_masks: List[List[int]] = []
     out_logprobs: Optional[List[List[float]]] = [] if has_logprobs else None
-    out_sample_support: Optional[List[List[List[int]]]] = [] if has_sample_support else None
+    # One row block per merged turn; concatenated at flush rather than extended row by row.
+    out_sample_support: Optional[List[SampleSupport]] = [] if has_sample_support else None
     # If per-token rewards, we keep appending. If per-turn rewards, we only take from the last turn.
     out_rewards: list = []
 
@@ -851,8 +859,8 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     acc_response: List[int] = list(gen_out["response_ids"][0])
     acc_loss_mask: List[int] = list(gen_out["loss_masks"][0])
     acc_logprobs: Optional[List[float]] = list(gen_out["rollout_logprobs"][0]) if has_logprobs else None
-    acc_sample_support: Optional[List[List[int]]] = (
-        [list(row) for row in gen_out["rollout_sample_support"][0]] if has_sample_support else None
+    acc_sample_support: Optional[List[SampleSupport]] = (
+        [gen_out["rollout_sample_support"][0]] if has_sample_support else None
     )
     acc_rewards_tokens: Optional[List[float]] = list(gen_out["rewards"][0]) if is_token_level_rewards else None
     last = 0
@@ -865,7 +873,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         if has_logprobs:
             out_logprobs.append(acc_logprobs)
         if has_sample_support:
-            out_sample_support.append(acc_sample_support)
+            out_sample_support.append(_concat_sample_support(acc_sample_support))
         out_rewards.append(acc_rewards_tokens if is_token_level_rewards else gen_out["rewards"][last])
         if has_stop_reasons:
             out_stop_reasons.append(gen_out["stop_reasons"][last])
@@ -883,9 +891,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
             acc_response = list(gen_out["response_ids"][i])
             acc_loss_mask = list(gen_out["loss_masks"][i])
             acc_logprobs = list(gen_out["rollout_logprobs"][i]) if has_logprobs else None
-            acc_sample_support = (
-                [list(row) for row in gen_out["rollout_sample_support"][i]] if has_sample_support else None
-            )
+            acc_sample_support = [gen_out["rollout_sample_support"][i]] if has_sample_support else None
             acc_rewards_tokens = list(gen_out["rewards"][i]) if is_token_level_rewards else None
             last = i
             continue
@@ -901,7 +907,9 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         if acc_logprobs is not None:
             acc_logprobs.extend([0.0] * len(obs_delta))
         if acc_sample_support is not None:
-            acc_sample_support.extend([SAMPLE_SUPPORT_PADDING] * sample_support_width for _ in obs_delta)
+            acc_sample_support.append(
+                np.full((len(obs_delta), sample_support_width), SAMPLE_SUPPORT_PADDING, dtype=SAMPLE_SUPPORT_DTYPE)
+            )
         if acc_rewards_tokens is not None:
             acc_rewards_tokens.extend([0.0] * len(obs_delta))
 
@@ -911,7 +919,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         if acc_logprobs is not None:
             acc_logprobs.extend(gen_out["rollout_logprobs"][i])
         if acc_sample_support is not None:
-            acc_sample_support.extend(gen_out["rollout_sample_support"][i])
+            acc_sample_support.append(gen_out["rollout_sample_support"][i])
         if acc_rewards_tokens is not None:
             acc_rewards_tokens.extend(gen_out["rewards"][i])
 

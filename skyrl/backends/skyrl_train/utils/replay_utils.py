@@ -2,7 +2,6 @@
 Utility functions for MoE Router Replay.
 """
 
-from collections.abc import Sequence
 from contextlib import contextmanager
 
 import torch
@@ -12,10 +11,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     align_packed_token_metadata,
     align_token_metadata,
 )
-from skyrl.backends.skyrl_train.utils.packed_tensor import (
-    PackedTensor,
-    cu_seqlens_from_lengths,
-)
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 
 
 def replay_padding_row(
@@ -47,33 +43,6 @@ def make_replay_padding_indices(
         raise ValueError(f"Replay route padding requires a positive topk dimension, got {shape}")
     padding_row = replay_padding_row(shape[-1], dtype=dtype, device=device)
     return padding_row.expand(shape).clone()
-
-
-def make_packed_replay_padding(
-    reference: PackedTensor,
-    *,
-    segment_lengths: Sequence[int],
-) -> PackedTensor:
-    """Return dummy-route segments matching ``reference``'s row shape and dtype.
-
-    Batch padding rows exist only to give Megatron a uniform micro-batch size; their
-    tokens are loss-masked, so one dummy route per token is all they need.
-    """
-    padding = make_replay_padding_indices(
-        (sum(segment_lengths), *reference.row_shape),
-        dtype=reference.dtype,
-        device=reference.device,
-    )
-    return PackedTensor(padding, cu_seqlens_from_lengths(segment_lengths, device=reference.device))
-
-
-def append_packed_replay_padding(
-    routes: PackedTensor,
-    *,
-    segment_lengths: Sequence[int],
-) -> PackedTensor:
-    """Extend ``routes`` with one dummy-route segment per batch padding row."""
-    return PackedTensor.cat([routes, make_packed_replay_padding(routes, segment_lengths=segment_lengths)])
 
 
 def patch_topk_router_layer_number():
