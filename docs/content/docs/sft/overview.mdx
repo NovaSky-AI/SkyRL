@@ -45,9 +45,9 @@ Hugging Face before running it. The `qlora` extra installs bitsandbytes.
 QLoRA is available only with FSDP and requires `model.lora.rank > 0`. Configure
 it through `model.bitsandbytes_4bit`; `quant_type` accepts `nf4` or `fp4`, and
 `use_double_quant` controls nested quantization. Gemma 4 uses SDPA because its
-attention layout is incompatible with this FlashAttention 2 path. Multi-GPU
-FSDP keeps packed 4-bit weights uncast during all-gathers while using BF16 for
-computation.
+attention layout is incompatible with this FlashAttention 2 path. SDPA requires
+`remove_microbatch_padding=false`, as set in the example. Multi-GPU FSDP keeps
+packed 4-bit weights uncast during all-gathers while using BF16 for computation.
 
 ### Megatron (multi-GPU with TP/PP)
 
