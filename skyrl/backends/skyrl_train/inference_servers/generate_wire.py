@@ -25,6 +25,11 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
     RoutedExpertIndices,
     compact_routed_expert_indices,
 )
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_DTYPES,
+    SampleSupport,
+    validate_sample_support,
+)
 
 # Matches the floor vLLM applies at its own serving boundaries.
 CLAMPED_LOGPROB = -9999.0
@@ -50,6 +55,7 @@ PACKED_SIDE_CHANNEL_FIELDS: tuple[str, ...] = tuple(PackedField)
 _ENVELOPE_KEYS = frozenset(PackedArrayKey)
 
 _ROUTED_EXPERTS_NDIM = 3
+_SAMPLE_SUPPORT_NDIM = 2
 
 _QUOTE = b'"'
 
@@ -183,6 +189,15 @@ def decode_packed_routed_experts(payload: dict[str, Any]) -> RoutedExpertIndices
             f"packed routed_experts uses non-canonical dtype {decoded.dtype.name}; expected {compact.dtype.name}"
         )
     return compact
+
+
+def pack_sample_support(sample_support: SampleSupport) -> dict[str, Any]:
+    return pack_ndarray(validate_sample_support(sample_support), allowed_dtypes=SAMPLE_SUPPORT_DTYPES)
+
+
+def decode_packed_sample_support(payload: dict[str, Any]) -> SampleSupport:
+    decoded, _ = unpack_ndarray(payload, allowed_dtypes=SAMPLE_SUPPORT_DTYPES, ndim=_SAMPLE_SUPPORT_NDIM)
+    return validate_sample_support(decoded)
 
 
 def _data_prefix(field: str) -> bytes:

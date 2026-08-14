@@ -27,11 +27,13 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     decode_packed_routed_experts,
     pack_ndarray,
     pack_routed_experts,
+    pack_sample_support,
     unpack_ndarray,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
     PauseMode,
+    RemoteGenerateClient,
     RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.inference_servers.setup import (
@@ -41,6 +43,12 @@ from skyrl.train.config import SkyRLTrainConfig
 
 _SUPPORT_DTYPES = frozenset({np.dtype(np.float32)})
 _ROUTES = np.arange(12).reshape(3, 2, 2)
+
+
+async def _fake_detokenize(token_id_lists: List[List[int]]) -> List[str]:
+    return ["text"] * len(token_id_lists)
+
+
 _SUPPORT = np.arange(6, dtype=np.float32).reshape(2, 3)
 
 
@@ -554,6 +562,99 @@ class TestDataPlane:
         assert result["rollout_expert_indices"][0].dtype == np.uint8
         assert np.array_equal(result["rollout_expert_indices"][0], np.arange(12).reshape(3, 2, 2))
         assert captured["routed_experts_prompt_start"] == 1
+
+    @pytest.mark.asyncio
+    async def test_external_generator_requests_sample_support(self, monkeypatch):
+        generate_client = RemoteGenerateClient(proxy_url="http://unused")
+        captured = {}
+
+        async def fake_post(url, json, headers, *, packed_side_channels=False):
+            captured.update(url=url, json=json, headers=headers, packed_side_channels=packed_side_channels)
+            return {
+                "choices": [
+                    {
+                        "token_ids": [7],
+                        "finish_reason": "stop",
+                        "logprobs": {"content": [{"logprob": -0.1}]},
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(
+                            np.array([[7, 8]], dtype=np.int32)
+                        ),
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(generate_client, "_post", fake_post)
+        result = await generate_client.generate(
+            prompt_token_ids=[1, 2],
+            sampling_params={},
+            session_id=None,
+            model="default",
+            return_sample_support=True,
+        )
+
+        assert captured["url"].endswith("/skyrl/v1/generate")
+        assert captured["json"]["return_sample_support"] is True
+        assert captured["packed_side_channels"] is True
+        assert np.array_equal(result.sample_support, np.array([[7, 8]], dtype=np.int32))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("input_batch_opts", [{}, {"return_sample_support": False}])
+    async def test_sample_support_capture_is_opt_in_per_request(self, monkeypatch, input_batch_opts):
+        """A request that does not ask for support must not pay for it: callers that never consume it
+        (in-agent tool calls, eval batches) omit the key, and eval's `top_k=-1` would make the server
+        request negative logprobs."""
+        client = RemoteInferenceClient(
+            proxy_url="http://unused",
+            server_urls=["http://unused"],
+            data_parallel_size=1,
+            enable_return_sample_support_set=True,
+        )
+        captured = {}
+
+        async def fake_post(url, json, headers, *, packed_side_channels=False):
+            captured.update(url=url, json=json)
+            return {"choices": [{"token_ids": [1], "finish_reason": "stop"}]}
+
+        monkeypatch.setattr(client._get_generate_client(), "_post", fake_post)
+        monkeypatch.setattr(client, "detokenize", _fake_detokenize)
+
+        result = await client.generate({"prompt_token_ids": [[1, 2]], **input_batch_opts})
+
+        assert "return_sample_support" not in captured["json"]
+        assert captured["url"].endswith("/inference/v1/generate")
+        assert result["rollout_sample_support"] is None
+
+    @pytest.mark.asyncio
+    async def test_sample_support_capture_honours_an_explicit_opt_in(self, monkeypatch):
+        client = RemoteInferenceClient(
+            proxy_url="http://unused",
+            server_urls=["http://unused"],
+            data_parallel_size=1,
+            enable_return_sample_support_set=True,
+        )
+        captured = {}
+
+        async def fake_post(url, json, headers, *, packed_side_channels=False):
+            captured.update(url=url, json=json)
+            return {
+                "choices": [
+                    {
+                        "token_ids": [7],
+                        "finish_reason": "stop",
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(
+                            np.array([[7, 8]], dtype=np.int32)
+                        ),
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(client._get_generate_client(), "_post", fake_post)
+        monkeypatch.setattr(client, "detokenize", _fake_detokenize)
+
+        result = await client.generate({"prompt_token_ids": [[1, 2]], "return_sample_support": True})
+
+        assert captured["json"]["return_sample_support"] is True
+        assert np.array_equal(result["rollout_sample_support"][0], np.array([[7, 8]], dtype=np.int32))
 
     @pytest.mark.asyncio
     async def test_generate_rejects_list_routed_experts(self, monkeypatch):

@@ -16,9 +16,11 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedField,
     build_logprobs_content,
     decode_packed_routed_experts,
+    decode_packed_sample_support,
     load_packed_body,
     pack_ndarray,
     pack_routed_experts,
+    pack_sample_support,
     unpack_ndarray,
 )
 
@@ -200,6 +202,32 @@ def test_decode_rejects_noncanonical_dtype():
 
     with pytest.raises(ValueError, match="non-canonical dtype"):
         decode_packed_routed_experts(payload)
+
+
+def test_packed_sample_support_round_trip():
+    support = np.array([[7, 152064, -1, -1], [9, 10, 11, -1], [12, -1, -1, -1]], dtype=np.int32)
+
+    decoded = decode_packed_sample_support(orjson.loads(orjson.dumps(pack_sample_support(support))))
+
+    assert decoded.dtype == np.int32
+    assert decoded.flags.c_contiguous
+    assert np.array_equal(decoded, support)
+
+
+# Shape, base64, byte-size and dtype allow-listing are covered generically by the
+# pack_ndarray/unpack_ndarray tests; these two semantic invariants are not.
+@pytest.mark.parametrize(
+    "support,message",
+    [
+        (np.array([[-2, 1]], dtype=np.int32), "-1 padding"),
+        (np.array([[1, -1, 2]], dtype=np.int32), "trailing"),
+    ],
+)
+def test_sample_support_wire_rejects_bad_padding(support, message):
+    with pytest.raises(ValueError, match=message):
+        pack_sample_support(support)
+    with pytest.raises(ValueError, match=message):
+        decode_packed_sample_support(pack_ndarray(support, allowed_dtypes=frozenset({np.dtype(np.int32)})))
 
 
 @pytest.mark.parametrize(
