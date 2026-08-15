@@ -244,8 +244,25 @@ def sample_support_scores(
 def _trajectory_ids_for_fallback(
     synthetic_eos_mask: torch.Tensor,
     metadata_layout: TokenMetadataLayout | None,
+    trajectory_ids: torch.Tensor | None,
+    num_trajectories: int | None,
 ) -> tuple[torch.Tensor, int]:
-    """Return each model position's trajectory id and the number of fallback slots to reserve."""
+    """Return each model position's trajectory id and the number of fallback slots to reserve.
+
+    A backend that shards or repacks the sequence axis knows the segmentation and states it
+    outright; the two layouts derivable here -- a padded Megatron pack, and a plain
+    ``[trajectory, position]`` rectangle -- are derived instead.
+    """
+    if trajectory_ids is not None:
+        if trajectory_ids.shape != synthetic_eos_mask.shape:
+            raise ValueError(
+                f"trajectory_ids shape {trajectory_ids.shape} does not match the synthetic EOS mask "
+                f"{synthetic_eos_mask.shape}"
+            )
+        if num_trajectories is None or num_trajectories <= 0:
+            raise ValueError(f"num_trajectories must be positive alongside trajectory_ids, got {num_trajectories}")
+        return trajectory_ids.reshape(-1).to(torch.long), num_trajectories
+
     if metadata_layout is None or metadata_layout.padded_sequence_lengths is None:
         if synthetic_eos_mask.shape[0] == 0 or synthetic_eos_mask.shape[1] == 0:
             raise ValueError(f"Synthetic EOS fallback requires non-empty segments, got {synthetic_eos_mask.shape}")
@@ -295,6 +312,8 @@ def synthetic_eos_logprobs(
     chunk_size: int | None = None,
     fused_backend: str = "torch",
     metadata_layout: TokenMetadataLayout | None = None,
+    trajectory_ids: torch.Tensor | None = None,
+    num_trajectories: int | None = None,
 ) -> torch.Tensor:
     """Score an EOS appended after generation over the full vocabulary."""
     if synthetic_eos_mask.shape != sampled_ids.shape:
@@ -302,7 +321,13 @@ def synthetic_eos_logprobs(
             f"synthetic_eos_mask shape {synthetic_eos_mask.shape} does not match sampled ids {sampled_ids.shape}"
         )
 
-    trajectory_ids, capacity = _trajectory_ids_for_fallback(synthetic_eos_mask, metadata_layout)
+    trajectory_ids, capacity = _trajectory_ids_for_fallback(
+        synthetic_eos_mask, metadata_layout, trajectory_ids, num_trajectories
+    )
+    # A sequence-parallel shard is padded up to its slice width, and those positions belong to no
+    # trajectory. They are never loss-bearing, so clamping their id into range is enough to keep
+    # the scatters valid without letting them claim a slot.
+    trajectory_ids = trajectory_ids.clamp(0, capacity - 1)
     flat_mask = synthetic_eos_mask.reshape(-1)
     # Replay permits only the single appended EOS to lack recorded support.
     per_trajectory_count = torch.zeros(capacity, dtype=torch.long, device=flat_mask.device).scatter_add_(
@@ -374,8 +399,12 @@ def synthetic_eos_logprobs(
     return output.scatter_add(0, selected_indices, selected).reshape(sampled_ids.shape)
 
 
-def _row_ids_in_canonical_positions(row_ids: torch.Tensor, layout: TokenMetadataLayout) -> torch.Tensor:
-    """Restore left padding to row ids aligned in Megatron's real-token layout."""
+def sample_support_row_ids_in_batch_positions(
+    sample_support: PackedTensor,
+    layout: TokenMetadataLayout,
+) -> torch.Tensor:
+    """Map support rows into canonical left-padded batch coordinates."""
+    row_ids = align_sample_support_row_ids(sample_support, layout)
     sequence_length = layout.attention_mask.shape[1]
     padding_widths = sequence_length - layout.attention_mask.sum(dim=1).to(torch.long)
     positions = torch.arange(sequence_length, device=row_ids.device).unsqueeze(0) - padding_widths.unsqueeze(1)
@@ -396,6 +425,70 @@ def _gather_support_rows(support: PackedTensor, row_ids: torch.Tensor) -> torch.
     gathered = support.values.index_select(0, flat_row_ids.clamp(min=0))
     gathered = gathered.masked_fill((flat_row_ids < 0).unsqueeze(1), SAMPLE_SUPPORT_PADDING)
     return gathered.reshape(*row_ids.shape, top_k)
+
+
+def score_aligned_sample_support(
+    aligned_source: torch.Tensor,
+    aligned_sampled_ids: torch.Tensor,
+    aligned_row_ids: torch.Tensor,
+    aligned_loss_mask: torch.Tensor,
+    sample_support: PackedTensor,
+    *,
+    vocab_start_index: int,
+    vocab_end_index: int,
+    tp_group: torch.distributed.ProcessGroup | None,
+    inference_only: bool,
+    lm_head_weight: torch.Tensor | None = None,
+    temperature: float = 1.0,
+    chunk_size: int | None = None,
+    fused_backend: str = "torch",
+    metadata_layout: TokenMetadataLayout | None = None,
+    trajectory_ids: torch.Tensor | None = None,
+    num_trajectories: int | None = None,
+) -> SampleSupportScores:
+    """Score positions already in one model layout: the seam every backend enters through.
+
+    Every argument addresses the same model positions, whatever layout the backend's forward
+    produced -- a Megatron microbatch, a packed FSDP microbatch, or one Ulysses shard of either.
+    Nothing here consults that layout except to segment trajectories for the fixed-capacity
+    fallback, which the caller states rather than this function inferring.
+
+    ``temperature`` divides the fused projection, so it is applied only when the source is hidden
+    states; a caller holding logits has already scaled them.
+    """
+    scores = sample_support_scores(
+        aligned_source,
+        aligned_sampled_ids,
+        _gather_support_rows(sample_support, aligned_row_ids),
+        vocab_start_index=vocab_start_index,
+        vocab_end_index=vocab_end_index,
+        tp_group=tp_group,
+        lm_head_weight=lm_head_weight,
+        temperature=temperature if lm_head_weight is not None else 1.0,
+        chunk_size=chunk_size,
+    )
+    synthetic_eos_mask = aligned_loss_mask & ~scores.valid_mask
+    eos_logprobs = synthetic_eos_logprobs(
+        aligned_source,
+        aligned_sampled_ids,
+        synthetic_eos_mask,
+        vocab_start_index=vocab_start_index,
+        vocab_end_index=vocab_end_index,
+        tp_group=tp_group,
+        inference_only=inference_only,
+        lm_head_weight=lm_head_weight,
+        temperature=temperature if lm_head_weight is not None else 1.0,
+        chunk_size=chunk_size,
+        fused_backend=fused_backend,
+        metadata_layout=metadata_layout,
+        trajectory_ids=trajectory_ids,
+        num_trajectories=num_trajectories,
+    )
+    return SampleSupportScores(
+        logprobs=torch.where(synthetic_eos_mask, eos_logprobs, scores.logprobs),
+        entropy=None,
+        valid_mask=scores.valid_mask,
+    )
 
 
 def compute_sample_support_scores(
@@ -426,49 +519,38 @@ def compute_sample_support_scores(
 
     target_loss_mask = torch.zeros_like(sequences, dtype=torch.bool)
     target_loss_mask[:, -num_actions:] = loss_mask.to(torch.bool)
-    row_ids = align_sample_support_row_ids(sample_support, metadata_layout)
     if packed:
+        row_ids = align_sample_support_row_ids(sample_support, metadata_layout)
         aligned_sampled_ids = align_token_metadata(sequences, metadata_layout, 0, next_token=True)
         aligned_loss_mask = align_token_metadata(target_loss_mask, metadata_layout, False, next_token=True)
         aligned_source = logits_or_hidden
     else:
         # The domain ends at real token L_i - 2, so dropping the last column loses no row.
-        row_ids = _row_ids_in_canonical_positions(row_ids, metadata_layout)[:, :-1]
+        row_ids = sample_support_row_ids_in_batch_positions(sample_support, metadata_layout)[:, :-1]
         aligned_sampled_ids = sequences[:, 1:]
         aligned_loss_mask = target_loss_mask[:, 1:]
         aligned_source = logits_or_hidden[:, :-1]
 
-    scores = sample_support_scores(
+    scores = score_aligned_sample_support(
         aligned_source,
         aligned_sampled_ids,
-        _gather_support_rows(sample_support, row_ids),
-        vocab_start_index=vocab_start_index,
-        vocab_end_index=vocab_end_index,
-        tp_group=tp_group,
-        lm_head_weight=lm_head_weight,
-        temperature=temperature if lm_head_weight is not None else 1.0,
-        chunk_size=chunk_size,
-    )
-    synthetic_eos_mask = aligned_loss_mask & ~scores.valid_mask
-    eos_logprobs = synthetic_eos_logprobs(
-        aligned_source,
-        aligned_sampled_ids,
-        synthetic_eos_mask,
+        row_ids,
+        aligned_loss_mask,
+        sample_support,
         vocab_start_index=vocab_start_index,
         vocab_end_index=vocab_end_index,
         tp_group=tp_group,
         inference_only=inference_only,
         lm_head_weight=lm_head_weight,
-        temperature=temperature if lm_head_weight is not None else 1.0,
+        temperature=temperature,
         chunk_size=chunk_size,
         fused_backend=fused_backend,
         metadata_layout=metadata_layout if packed else None,
     )
-    logprobs = torch.where(synthetic_eos_mask, eos_logprobs, scores.logprobs)
     if not packed:
-        return SampleSupportScores(logprobs=logprobs, entropy=None, valid_mask=scores.valid_mask)
+        return scores
     return SampleSupportScores(
-        logprobs=scatter_packed_token_values_to_batch(logprobs, metadata_layout, 0),
+        logprobs=scatter_packed_token_values_to_batch(scores.logprobs, metadata_layout, 0),
         entropy=None,
         valid_mask=scatter_packed_token_values_to_batch(scores.valid_mask, metadata_layout, False),
     )

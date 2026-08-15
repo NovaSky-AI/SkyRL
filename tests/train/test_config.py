@@ -189,31 +189,37 @@ def test_routed_expert_capture_rejects_the_vision_language_generator():
         )
 
 
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        (["trainer.strategy=megatron"], "enable_return_sample_support_set"),
-        (
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
+def test_sample_support_replay_requires_capture(strategy):
+    with pytest.raises(ValueError, match="enable_return_sample_support_set"):
+        SkyRLTrainConfig.from_cli_overrides(
             [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                f"trainer.strategy={strategy}",
+            ]
+        )
+
+
+def test_sample_support_replay_rejects_a_backend_without_a_scorer():
+    with pytest.raises(ValueError, match="requires trainer.strategy=megatron or fsdp"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                "trainer.strategy=jax",
                 "generator.inference_engine.enable_return_sample_support_set=true",
                 "generator.sampling_params.top_k=8",
-            ],
-            "trainer.strategy=megatron",
-        ),
-    ],
-)
-def test_sample_support_replay_requires_capture_and_megatron(overrides, message):
-    with pytest.raises(ValueError, match=message):
-        SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.enable_sample_support_replay=true", *overrides])
+            ]
+        )
 
 
-def test_sample_support_replay_accepts_capture_on_megatron():
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
+def test_sample_support_replay_accepts_capture_on_either_backend(strategy):
     cfg = SkyRLTrainConfig.from_cli_overrides(
         [
             "trainer.algorithm.enable_sample_support_replay=true",
             "generator.inference_engine.enable_return_sample_support_set=true",
             "generator.sampling_params.top_k=8",
-            "trainer.strategy=megatron",
+            f"trainer.strategy={strategy}",
         ]
     )
 
