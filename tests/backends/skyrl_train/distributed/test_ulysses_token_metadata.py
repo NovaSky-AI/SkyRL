@@ -127,3 +127,46 @@ def test_sharded_support_scores_match_the_unsharded_pass(sharded):
 
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(logits.grad, reference_logits.grad)
+
+
+def test_sharded_support_entropy_matches_the_unsharded_pass(sharded):
+    logits = torch.randn(1, 5, VOCAB, dtype=torch.float64, requires_grad=True)
+    sampled_ids = torch.tensor([[2, 3, 4, 5, 6]])
+    row_ids = torch.tensor([[0, 1, 2, 3, 4]])
+    loss_mask = torch.ones((1, 5), dtype=torch.bool)
+    support = _support([[2, 0], [3, 1], [4, 2], [5, 3], [6, 4]], [5])
+
+    shards = []
+    for rank in range(SP_SIZE):
+        sharded["rank"] = rank
+        local = [
+            utils.ulysses_pad_and_slice_inputs(tensor, sp_size=SP_SIZE, input_padding_value=fill)[0]
+            for tensor, fill in (
+                (logits, 0),
+                (sampled_ids, 0),
+                (row_ids, SAMPLE_SUPPORT_NO_ROW),
+                (loss_mask, 0),
+            )
+        ]
+        entropy = _score(*local, support, compute_entropy=True, entropy_requires_grad=True).entropy
+        assert entropy is not None
+        shards.append(entropy)
+
+    actual = torch.cat(shards, dim=1)[:, : logits.shape[1]]
+    actual.sum().backward()
+
+    reference_logits = logits.detach().clone().requires_grad_(True)
+    expected = _score(
+        reference_logits,
+        sampled_ids,
+        row_ids,
+        loss_mask,
+        support,
+        compute_entropy=True,
+        entropy_requires_grad=True,
+    ).entropy
+    assert expected is not None
+    expected.sum().backward()
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(logits.grad, reference_logits.grad)

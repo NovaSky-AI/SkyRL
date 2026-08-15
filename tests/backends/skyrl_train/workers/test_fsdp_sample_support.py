@@ -72,6 +72,20 @@ def _reference(table, sequences, support: PackedTensor, num_actions: int) -> tor
     return expected
 
 
+def _reference_entropy(table, sequences, support: PackedTensor, num_actions: int) -> torch.Tensor:
+    """Compute entropy over each response token's recorded support."""
+    sequence_length = sequences.shape[1]
+    expected = torch.zeros((sequences.shape[0], num_actions), dtype=table.dtype)
+    for row in range(sequences.shape[0]):
+        segment = support.segment(row)
+        for offset in range(segment.shape[0]):
+            position = sequence_length - segment.shape[0] + offset - 1
+            members = segment[offset][segment[offset] >= 0].long()
+            member_logprobs = torch.log_softmax(table[sequences[row, position]][members], dim=0)
+            expected[row, num_actions - segment.shape[0] + offset] = -(member_logprobs.exp() * member_logprobs).sum()
+    return expected
+
+
 def _wrapper(model: nn.Module, *, packed: bool = False) -> HFModelWrapper:
     return HFModelWrapper(
         model,
@@ -90,6 +104,21 @@ def _forward(wrapper, sequences, attention_mask, support, response_lengths, num_
         loss_mask=_loss_mask(response_lengths, num_actions),
         enable_sample_support_replay=True,
     )
+
+
+def _forward_entropy(wrapper, sequences, attention_mask, support, response_lengths, num_actions, **kwargs):
+    _, output = wrapper(
+        sequences,
+        num_actions,
+        attention_mask=attention_mask,
+        sample_support=support,
+        loss_mask=_loss_mask(response_lengths, num_actions),
+        enable_sample_support_replay=True,
+        return_output=True,
+        compute_entropy=True,
+        **kwargs,
+    )
+    return output["entropy"][:, -num_actions - 1 : -1]
 
 
 # (prompt_len, response_len) per trajectory. Row 1 is shorter in both, so it carries left
@@ -170,6 +199,47 @@ def test_packed_microbatch_matches_the_padded_rectangle():
 
     torch.testing.assert_close(packed, unpacked)
     torch.testing.assert_close(packed_model.table.grad, model.table.grad)
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_entropy_comes_from_the_recorded_support_not_the_vocabulary(monkeypatch, packed):
+    sequences, attention_mask = _ragged_batch()
+    support = _ragged_support(sequences)
+    model = _TokenIndexedLM()
+    wrapper = _wrapper(model, packed=packed)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("full-vocabulary entropy should not run during support replay")
+
+    monkeypatch.setattr(wrapper, "chunked_entropy_from_logits_fn", fail_if_called)
+    entropy = _forward_entropy(wrapper, sequences, attention_mask, support, [2, 1], 2)
+
+    torch.testing.assert_close(entropy, _reference_entropy(model.table.detach(), sequences, support, 2))
+
+
+@pytest.mark.parametrize("entropy_requires_grad", [False, True])
+def test_entropy_carries_gradients_only_when_asked(entropy_requires_grad):
+    sequences = torch.tensor([[1, 2, 3, 4]])
+    support = _support([[[3, 8], [4, 0]]])
+    model = _TokenIndexedLM()
+
+    entropy = _forward_entropy(
+        _wrapper(model),
+        sequences,
+        torch.ones_like(sequences),
+        support,
+        [2],
+        2,
+        entropy_requires_grad=entropy_requires_grad,
+    )
+
+    assert entropy.requires_grad == entropy_requires_grad
+    if not entropy_requires_grad:
+        return
+    entropy.sum().backward()
+    reference_table = model.table.detach().clone().requires_grad_(True)
+    _reference_entropy(reference_table, sequences, support, 2).sum().backward()
+    torch.testing.assert_close(model.table.grad, reference_table.grad)
 
 
 def test_replay_never_scores_every_position_over_the_full_vocabulary(monkeypatch):
