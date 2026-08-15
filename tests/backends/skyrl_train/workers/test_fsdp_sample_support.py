@@ -1,5 +1,9 @@
 """Sample-support replay through the FSDP forward."""
 
+from contextlib import nullcontext
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 from torch import nn
@@ -10,6 +14,7 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
     cu_seqlens_from_lengths,
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_ENTROPY_MASK_KEY,
     SAMPLE_SUPPORT_FIELD,
     SAMPLE_SUPPORT_NO_ROW,
     SAMPLE_SUPPORT_PADDING,
@@ -20,6 +25,9 @@ from skyrl.backends.skyrl_train.workers.model_wrapper import (
     HFModelWrapper,
     _SampleSupportChannels,
 )
+from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.dataset.replay_buffer import Experience
 
 VOCAB = 12
 
@@ -51,6 +59,23 @@ def _loss_mask(response_lengths: list[int], num_actions: int) -> torch.Tensor:
     return mask
 
 
+def _reference_entropy(table, sequences, support: PackedTensor, num_actions: int) -> torch.Tensor:
+    """Entropy over each response token's support at the logit that predicts it."""
+    sequence_length = sequences.shape[1]
+    expected = torch.zeros((sequences.shape[0], num_actions), dtype=table.dtype)
+    for row in range(sequences.shape[0]):
+        segment = support.segment(row)
+        for offset in range(segment.shape[0]):
+            members = segment[offset]
+            members = members[members >= 0].long()
+            if members.numel() == 0:
+                continue
+            position = sequence_length - segment.shape[0] + offset - 1
+            member_logprobs = torch.log_softmax(table[sequences[row, position]][members], dim=0)
+            expected[row, num_actions - segment.shape[0] + offset] = -(member_logprobs.exp() * member_logprobs).sum()
+    return expected
+
+
 def _reference(table, sequences, support: PackedTensor, num_actions: int) -> torch.Tensor:
     """Compute dense support-conditioned log probabilities."""
     sequence_length = sequences.shape[1]
@@ -78,7 +103,7 @@ def _wrapper(model: nn.Module, *, packed: bool = False) -> HFModelWrapper:
     )
 
 
-def _forward(wrapper, sequences, attention_mask, support, response_lengths, num_actions):
+def _forward(wrapper, sequences, attention_mask, support, response_lengths, num_actions, **kwargs):
     return wrapper(
         sequences,
         num_actions,
@@ -86,7 +111,25 @@ def _forward(wrapper, sequences, attention_mask, support, response_lengths, num_
         sample_support=support,
         loss_mask=_loss_mask(response_lengths, num_actions),
         enable_sample_support_replay=True,
+        **kwargs,
     )
+
+
+def _forward_entropy(wrapper, sequences, attention_mask, support, response_lengths, num_actions, **kwargs):
+    """Return entropy and its mask over response slots."""
+    _, output = _forward(
+        wrapper,
+        sequences,
+        attention_mask,
+        support,
+        response_lengths,
+        num_actions,
+        return_output=True,
+        compute_entropy=True,
+        **kwargs,
+    )
+    response = slice(-num_actions - 1, -1)
+    return output["entropy"][:, response], output[SAMPLE_SUPPORT_ENTROPY_MASK_KEY][:, response]
 
 
 # (prompt length, response length) for a ragged pair of trajectories.
@@ -183,6 +226,137 @@ def test_the_appended_eos_falls_back_to_the_full_vocabulary(packed):
     expected = _reference(model.table.detach(), sequences, support, 2)
     torch.testing.assert_close(actual, expected)
     assert (actual != 0).sum() == 3
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_entropy_comes_from_the_recorded_support_not_the_vocabulary(monkeypatch, packed):
+    """The support is already gathered and scored, so no full-vocabulary entropy pass runs.
+
+    ``packed=True`` also covers routing both new channels back through ``nnz_indices``.
+    """
+    sequences, attention_mask = _ragged_batch()
+    support = _ragged_support(sequences)
+    model = _TokenIndexedLM()
+    wrapper = _wrapper(model, packed=packed)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("full-vocabulary entropy should not run during support replay")
+
+    monkeypatch.setattr(wrapper, "chunked_entropy_from_logits_fn", fail_if_called)
+    entropy, mask = _forward_entropy(wrapper, sequences, attention_mask, support, [2, 1], 2)
+
+    torch.testing.assert_close(entropy, _reference_entropy(model.table.detach(), sequences, support, 2))
+    # Row 1 generated one token, so its first response slot has no support row and no entropy.
+    assert mask.tolist() == [[True, True], [False, True]]
+
+
+def test_the_appended_eos_position_is_outside_the_entropy_mask():
+    """It is scored over the whole vocabulary, so averaging its 0.0 in would understate entropy."""
+    sequences, attention_mask = _ragged_batch()
+    support = _ragged_support(sequences, unsupported_rows=(1,))
+    model = _TokenIndexedLM()
+
+    entropy, mask = _forward_entropy(_wrapper(model), sequences, attention_mask, support, [2, 1], 2)
+
+    torch.testing.assert_close(entropy, _reference_entropy(model.table.detach(), sequences, support, 2))
+    assert mask.tolist() == [[True, False], [False, True]]
+    assert entropy[0, 1] == 0
+
+
+@pytest.mark.parametrize("entropy_requires_grad", [False, True])
+def test_entropy_carries_gradients_only_when_asked(entropy_requires_grad):
+    """A metric must stay out of the backward graph; a loss term must reach the parameters."""
+    sequences = torch.tensor([[1, 2, 3, 4]])
+    support = _support([[[3, 8], [4, 0]]])
+    model = _TokenIndexedLM()
+
+    entropy, _ = _forward_entropy(
+        _wrapper(model),
+        sequences,
+        torch.ones_like(sequences),
+        support,
+        [2],
+        2,
+        entropy_requires_grad=entropy_requires_grad,
+    )
+
+    assert entropy.requires_grad == entropy_requires_grad
+    if not entropy_requires_grad:
+        return
+    entropy.sum().backward()
+    reference_table = model.table.detach().clone().requires_grad_(True)
+    _reference_entropy(reference_table, sequences, support, 2).sum().backward()
+    torch.testing.assert_close(model.table.grad, reference_table.grad)
+
+
+def test_the_policy_entropy_metric_excludes_the_unsupported_row():
+    """``PolicyWorkerBase`` must intersect the entropy mask with the loss mask, not ignore it."""
+    entropy = torch.tensor([[0.5, 1.5], [2.5, 3.5]])
+    entropy_mask = torch.tensor([[True, False], [True, True]])
+    loss_mask = torch.ones((2, 2))
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.micro_train_batch_size_per_gpu = 2
+    cfg.trainer.remove_microbatch_padding = False
+    cfg.trainer.algorithm.policy_loss_type = "dual_clip"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_entropy_loss = False
+    cfg.trainer.algorithm.enable_sample_support_replay = True
+
+    worker = PolicyWorkerBase(
+        cfg=cfg.trainer,
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        master_addr="localhost",
+        master_port=12345,
+        sequence_parallel_size=1,
+    )
+    worker.strategy = MagicMock()
+    worker.device_mesh = MagicMock()
+    worker.mesh_rank = SimpleNamespace(dp_size=1)
+    worker.optimizer = None
+    worker.scheduler = MagicMock(get_last_lr=MagicMock(return_value=[0.0]))
+    # Both channels leave the forward in (B, S) = (2, 3) positions, which the worker slices with
+    # [-num_actions - 1 : -1] -- so the mask has to be that wide too or it broadcasts to all-True.
+    trailing = torch.zeros((2, 1))
+    worker.model = MagicMock(
+        return_value=(
+            torch.zeros((2, 2), requires_grad=True),
+            {
+                "entropy": torch.cat([entropy, trailing], dim=1),
+                SAMPLE_SUPPORT_ENTROPY_MASK_KEY: torch.cat([entropy_mask, trailing.bool()], dim=1),
+            },
+        )
+    )
+
+    experience = Experience(
+        sequences=torch.zeros((2, 3), dtype=torch.long),
+        action_log_probs=torch.zeros((2, 2)),
+        base_action_log_probs=None,
+        values=None,
+        returns=None,
+        advantages=torch.zeros((2, 2)),
+        attention_mask=torch.ones((2, 3), dtype=torch.long),
+        loss_mask=loss_mask,
+        response_mask=torch.ones((2, 2)),
+        rollout_logprobs=None,
+        rollout_expert_indices=None,
+        num_actions=2,
+        info=None,
+        rollout_sample_support=_support([[[1, 2], [3, 4]], [[5, 6], [7, 8]]]),
+    )
+
+    with (
+        patch("torch.cuda.current_device", return_value=torch.device("cpu")),
+        patch("torch.autocast", side_effect=lambda *args, **kwargs: nullcontext()),
+    ):
+        status = worker._forward_backward_micro(experience, microbatch_weight=1.0)
+
+    expected = float((entropy * entropy_mask).sum() / entropy_mask.sum())
+    assert status["policy_entropy"] == pytest.approx(expected)
+    # Averaging over the loss mask alone would divide the same sum by one more slot.
+    assert status["policy_entropy"] != pytest.approx(float(entropy[entropy_mask].sum() / loss_mask.sum()))
 
 
 def test_replay_never_scores_every_position_over_the_full_vocabulary(monkeypatch):

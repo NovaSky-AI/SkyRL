@@ -1,7 +1,9 @@
 """Tests for support-conditioned scoring and synthetic-EOS fallback."""
 
 import sys
+import threading
 import types
+from collections import Counter
 from typing import List, Tuple
 
 import pytest
@@ -20,6 +22,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_TORCH_DTYPE,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    SampleSupportScores,
     compute_sample_support_scores,
     reject_unsupported_sample_support_packing,
     sample_support_scores,
@@ -37,6 +40,8 @@ DENSE_SCORER_KWARGS = dict(
     temperature=1.0,
     chunk_size=None,
     fused_backend="torch",
+    compute_entropy=False,
+    entropy_requires_grad=False,
 )
 
 
@@ -76,6 +81,8 @@ def test_support_scores_match_a_dense_reference_in_value_and_gradient():
         vocab_start_index=0,
         vocab_end_index=VOCAB,
         tp_group=None,
+        compute_entropy=False,
+        entropy_requires_grad=False,
     )
 
     assert scores.entropy is None
@@ -86,6 +93,236 @@ def test_support_scores_match_a_dense_reference_in_value_and_gradient():
     reference_logits = logits.detach().clone().requires_grad_(True)
     _reference_support_logprobs(reference_logits, sampled_ids, support_ids).sum().backward()
     torch.testing.assert_close(logits.grad, reference_logits.grad)
+
+
+def _reference_support_entropy(logits, support_ids):
+    """Entropy of the policy restricted to each row's recorded members, densely."""
+    outputs = []
+    for row_logits, support in zip(
+        logits.reshape(-1, logits.shape[-1]),
+        support_ids.reshape(-1, support_ids.shape[-1]),
+        strict=True,
+    ):
+        members = support[support >= 0].long()
+        if members.numel() == 0:
+            outputs.append(row_logits.new_zeros(()))
+        else:
+            member_logprobs = torch.log_softmax(row_logits[members], dim=0)
+            outputs.append(-(member_logprobs.exp() * member_logprobs).sum())
+    return torch.stack(outputs).reshape(support_ids.shape[:-1])
+
+
+def test_support_entropy_matches_a_dense_reference_in_value_and_gradient():
+    logits = torch.randn(2, 3, VOCAB, dtype=torch.float64, requires_grad=True)
+    sampled_ids = torch.tensor([[2, 5, 1], [8, 3, 7]])
+    support_ids = torch.tensor(
+        [
+            [[2, 4, 6, -1], [5, -1, -1, -1], [-1, -1, -1, -1]],
+            [[8, 0, 9, 4], [3, 2, -1, -1], [7, 1, 5, -1]],
+        ],
+        dtype=SAMPLE_SUPPORT_TORCH_DTYPE,
+    )
+
+    scores = sample_support_scores(
+        logits,
+        sampled_ids,
+        support_ids,
+        vocab_start_index=0,
+        vocab_end_index=VOCAB,
+        tp_group=None,
+        compute_entropy=True,
+        entropy_requires_grad=True,
+    )
+
+    assert scores.entropy is not None
+    torch.testing.assert_close(scores.entropy, _reference_support_entropy(logits, support_ids))
+    # A support-conditioned entropy is bounded by log(top_k), well under the full-vocab entropy.
+    assert float(scores.entropy.detach().max()) <= torch.log(torch.tensor(float(TOP_K)))
+
+    (scores.logprobs + scores.entropy).sum().backward()
+    reference_logits = logits.detach().clone().requires_grad_(True)
+    (
+        _reference_support_logprobs(reference_logits, sampled_ids, support_ids)
+        + _reference_support_entropy(reference_logits, support_ids)
+    ).sum().backward()
+    torch.testing.assert_close(logits.grad, reference_logits.grad)
+
+
+def test_the_entropy_metric_is_detached_and_leaves_the_logprob_gradient_alone():
+    """``entropy_requires_grad=False`` must not put the extra statistic in the backward graph."""
+    logits = torch.randn(1, 2, VOCAB, dtype=torch.float64, requires_grad=True)
+    sampled_ids = torch.tensor([[2, 5]])
+    support_ids = torch.tensor([[[2, 4, -1, -1], [5, 1, 8, -1]]], dtype=SAMPLE_SUPPORT_TORCH_DTYPE)
+    scorer_kwargs = dict(
+        vocab_start_index=0,
+        vocab_end_index=VOCAB,
+        tp_group=None,
+    )
+
+    metric = sample_support_scores(
+        logits,
+        sampled_ids,
+        support_ids,
+        compute_entropy=True,
+        entropy_requires_grad=False,
+        **scorer_kwargs,
+    )
+    assert metric.entropy is not None and not metric.entropy.requires_grad
+    metric.logprobs.sum().backward()
+
+    without_entropy_logits = logits.detach().clone().requires_grad_(True)
+    sample_support_scores(
+        without_entropy_logits,
+        sampled_ids,
+        support_ids,
+        compute_entropy=False,
+        entropy_requires_grad=False,
+        **scorer_kwargs,
+    ).logprobs.sum().backward()
+    torch.testing.assert_close(logits.grad, without_entropy_logits.grad)
+
+
+def test_entropy_gradients_require_computing_the_entropy():
+    with pytest.raises(ValueError, match="compute_entropy=True"):
+        sample_support_scores(
+            torch.randn(1, VOCAB),
+            torch.tensor([1]),
+            torch.tensor([[1, 2]], dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
+            vocab_start_index=0,
+            vocab_end_index=VOCAB,
+            tp_group=None,
+            compute_entropy=False,
+            entropy_requires_grad=True,
+        )
+
+
+TP_SIZE = 2
+
+
+class _FakeTensorParallel:
+    """Both vocabulary shards, run concurrently, reducing at a barrier.
+
+    Ranks must agree on the shift before either can build its statistics, so a replay that runs
+    one rank to completion and then the other gives the first one a stale maximum. One thread per
+    rank keeps the two reductions in the order the real group imposes. The barrier has a timeout,
+    so a rank that stops reducing in step fails rather than hanging the suite.
+    """
+
+    def __init__(self, world_size: int = TP_SIZE):
+        self.world_size = world_size
+        self.calls: List[Tuple[object, Tuple[int, ...]]] = []
+        self._barrier = threading.Barrier(world_size, timeout=60)
+        self._slots: List[torch.Tensor | None] = [None] * world_size
+        self._lock = threading.Lock()
+        self._local = threading.local()
+
+    def set_rank(self, rank: int) -> None:
+        self._local.rank = rank
+
+    def all_reduce(self, tensor, op=None, group=None):
+        with self._lock:
+            self.calls.append((op, tuple(tensor.shape)))
+        self._slots[self._local.rank] = tensor.clone()
+        self._barrier.wait()
+        combined = self._slots[0]
+        for other in self._slots[1:]:
+            combined = torch.maximum(combined, other) if op == torch.distributed.ReduceOp.MAX else combined + other
+        self._barrier.wait()
+        tensor.copy_(combined)
+
+
+@pytest.fixture
+def tensor_parallel(monkeypatch):
+    fake = _FakeTensorParallel()
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: fake.world_size)
+    monkeypatch.setattr(torch.distributed, "all_reduce", fake.all_reduce)
+    return fake
+
+
+def _tensor_parallel_scores(fake, logits, sampled_ids, support_ids, **entropy_kwargs):
+    """Score the same rows on every vocabulary shard and return rank 0's result."""
+    width = VOCAB // fake.world_size
+    results: List[SampleSupportScores | None] = [None] * fake.world_size
+    errors: List[BaseException] = []
+
+    def run(rank: int) -> None:
+        fake.set_rank(rank)
+        start = rank * width
+        end = VOCAB if rank == fake.world_size - 1 else start + width
+        try:
+            results[rank] = sample_support_scores(
+                logits[..., start:end],
+                sampled_ids,
+                support_ids,
+                vocab_start_index=start,
+                vocab_end_index=end,
+                tp_group=object(),
+                **entropy_kwargs,
+            )
+        except BaseException as error:  # surface it instead of deadlocking the peers
+            errors.append(error)
+            fake._barrier.abort()
+
+    threads = [threading.Thread(target=run, args=(rank,)) for rank in range(fake.world_size)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    scores = results[0]
+    assert scores is not None
+    return scores
+
+
+TP_SAMPLED_IDS = torch.tensor([[2, 8, 1], [9, 3, 6]])
+# Every row straddles the shard boundary at VOCAB // 2, so no rank holds a whole support set.
+TP_SUPPORT_IDS = torch.tensor(
+    [
+        [[2, 7, 9, -1], [8, 1, -1, -1], [1, 6, 10, 4]],
+        [[9, 0, 5, 3], [3, 8, -1, -1], [6, 2, -1, -1]],
+    ],
+    dtype=SAMPLE_SUPPORT_TORCH_DTYPE,
+)
+
+
+def test_entropy_rides_the_existing_tensor_parallel_reduction(tensor_parallel):
+    """The design point: entropy adds a row to a collective, never a collective.
+
+    Two reductions per rank either way -- one MAX for the shift, one SUM for the statistics --
+    and enabling entropy only widens the SUM's payload from two rows to three.
+    """
+    logits = torch.randn(2, 3, VOCAB, dtype=torch.float64)
+    rows = TP_SAMPLED_IDS.numel()
+
+    _tensor_parallel_scores(
+        tensor_parallel, logits, TP_SAMPLED_IDS, TP_SUPPORT_IDS, compute_entropy=False, entropy_requires_grad=False
+    )
+    without_entropy = list(tensor_parallel.calls)
+    tensor_parallel.calls.clear()
+    _tensor_parallel_scores(
+        tensor_parallel, logits, TP_SAMPLED_IDS, TP_SUPPORT_IDS, compute_entropy=True, entropy_requires_grad=True
+    )
+    with_entropy = list(tensor_parallel.calls)
+
+    max_op, sum_op = torch.distributed.ReduceOp.MAX, torch.distributed.ReduceOp.SUM
+    assert len(with_entropy) == len(without_entropy) == 2 * TP_SIZE
+    assert Counter(op for op, _ in with_entropy) == Counter(op for op, _ in without_entropy)
+    assert Counter(without_entropy) == Counter({(max_op, (rows,)): TP_SIZE, (sum_op, (2, rows)): TP_SIZE})
+    assert Counter(with_entropy) == Counter({(max_op, (rows,)): TP_SIZE, (sum_op, (3, rows)): TP_SIZE})
+
+
+def test_tensor_parallel_shards_reduce_to_the_unsharded_entropy(tensor_parallel):
+    """The third row is a sum over support members, so it decomposes across shards like the rest."""
+    logits = torch.randn(2, 3, VOCAB, dtype=torch.float64)
+
+    sharded = _tensor_parallel_scores(
+        tensor_parallel, logits, TP_SAMPLED_IDS, TP_SUPPORT_IDS, compute_entropy=True, entropy_requires_grad=False
+    )
+
+    assert sharded.entropy is not None
+    torch.testing.assert_close(sharded.entropy, _reference_support_entropy(logits, TP_SUPPORT_IDS))
+    torch.testing.assert_close(sharded.logprobs, _reference_support_logprobs(logits, TP_SAMPLED_IDS, TP_SUPPORT_IDS))
 
 
 def test_support_scores_renormalize_over_the_support_not_the_vocabulary():
@@ -99,6 +336,8 @@ def test_support_scores_renormalize_over_the_support_not_the_vocabulary():
         vocab_start_index=0,
         vocab_end_index=VOCAB,
         tp_group=None,
+        compute_entropy=False,
+        entropy_requires_grad=False,
     )
 
     expected = logits[0, 0, 3] - torch.logsumexp(logits[0, 0, [3, 7]], dim=0)
@@ -129,6 +368,8 @@ def test_fused_projection_matches_explicit_logits_in_value_and_gradient():
         lm_head_weight=weight,
         temperature=temperature,
         chunk_size=4,
+        compute_entropy=False,
+        entropy_requires_grad=False,
     ).logprobs
     fused.sum().backward()
 
@@ -141,6 +382,8 @@ def test_fused_projection_matches_explicit_logits_in_value_and_gradient():
         vocab_start_index=0,
         vocab_end_index=weight.shape[0],
         tp_group=None,
+        compute_entropy=False,
+        entropy_requires_grad=False,
     ).logprobs
     explicit.sum().backward()
 
@@ -172,6 +415,8 @@ def test_fused_projection_bounds_the_candidate_pair_temporary(monkeypatch):
         tp_group=None,
         lm_head_weight=weight,
         chunk_size=chunk_size,
+        compute_entropy=False,
+        entropy_requires_grad=False,
     )
     scores.logprobs.sum().backward()
 
@@ -191,6 +436,8 @@ def test_support_ids_must_use_the_canonical_dtype():
             vocab_start_index=0,
             vocab_end_index=VOCAB,
             tp_group=None,
+            compute_entropy=False,
+            entropy_requires_grad=False,
         )
 
 
@@ -436,7 +683,7 @@ def _reference_from_canonical_positions(logits, sequences, lengths, support: Pac
     return expected
 
 
-def _dense_scores(lengths, *, packed=False, support=None):
+def _dense_scores(lengths, *, packed=False, support=None, **overrides):
     sequences, mask, loss_mask, num_actions, logits = _batch_tensors(lengths)
     if packed:
         logits = torch.cat([logits[row, mask[row]] for row in range(logits.shape[0])], dim=0).unsqueeze(0)
@@ -448,7 +695,7 @@ def _dense_scores(lengths, *, packed=False, support=None):
         num_actions,
         packed=packed,
         metadata_layout=_layout(lengths, packed=packed),
-        **DENSE_SCORER_KWARGS,
+        **{**DENSE_SCORER_KWARGS, **overrides},
     )
 
 
@@ -468,6 +715,35 @@ def test_packed_and_unpacked_joins_score_the_same_tokens(megatron_parallel_state
     packed = _dense_scores(lengths, packed=True).logprobs
 
     torch.testing.assert_close(packed, unpacked)
+
+
+def test_packed_and_unpacked_entropy_land_in_the_same_canonical_positions(megatron_parallel_state):
+    """Entropy takes the same scatter back to ``[batch, seq_len - 1]`` that the logprobs take."""
+    lengths = [(3, 3), (4, 2)]
+    entropy_kwargs = dict(compute_entropy=True, entropy_requires_grad=False)
+
+    unpacked = _dense_scores(lengths, **entropy_kwargs)
+    packed = _dense_scores(lengths, packed=True, **entropy_kwargs)
+
+    assert unpacked.entropy is not None and packed.entropy is not None
+    torch.testing.assert_close(packed.entropy, unpacked.entropy)
+    # Entropy is nonzero exactly where a support row was joined, so the scatter is observable.
+    assert torch.equal(unpacked.entropy != 0, unpacked.valid_mask)
+
+
+def test_the_appended_eos_carries_no_support_entropy():
+    """Its logprob comes from the whole vocabulary, so there is no support to be conditioned on."""
+    lengths = [(3, 3)]
+    support = _support(lengths)
+    support.values[-1] = SAMPLE_SUPPORT_PADDING
+
+    scores = _dense_scores(lengths, support=support, compute_entropy=True, entropy_requires_grad=False)
+
+    eos_position = _attention_mask(lengths).shape[1] - 2
+    assert scores.entropy is not None
+    assert not scores.valid_mask[0, eos_position]
+    assert scores.entropy[0, eos_position] == 0
+    assert scores.logprobs[0, eos_position] != 0
 
 
 def test_appended_eos_falls_back_to_the_full_vocabulary():

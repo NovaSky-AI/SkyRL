@@ -32,7 +32,10 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_ENTROPY_MASK_KEY,
+    SAMPLE_SUPPORT_NO_ROW,
+)
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     missing_sample_support_message,
     sample_support_row_ids_in_batch_positions,
@@ -422,9 +425,11 @@ class HFModelWrapper(nn.Module):
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
 
+        support_entropy = None
+        support_entropy_mask = None
         if support_channels is not None:
             # FSDP supplies unsharded, temperature-scaled logits.
-            log_probs = score_aligned_sample_support(
+            support_scores = score_aligned_sample_support(
                 logits_BSV,
                 sequences_rolled,
                 support_channels.row_ids,
@@ -434,9 +439,14 @@ class HFModelWrapper(nn.Module):
                 vocab_end_index=logits_BSV.shape[-1],
                 tp_group=None,
                 inference_only=not torch.is_grad_enabled(),
+                compute_entropy=compute_entropy,
+                entropy_requires_grad=compute_entropy and entropy_requires_grad,
                 trajectory_ids=support_channels.trajectory_ids,
                 num_trajectories=sequences.shape[0],
-            ).logprobs
+            )
+            log_probs = support_scores.logprobs
+            support_entropy = support_scores.entropy
+            support_entropy_mask = support_scores.valid_mask
         else:
             # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
             log_probs = logprobs_from_logits(
@@ -445,50 +455,47 @@ class HFModelWrapper(nn.Module):
                 inplace_backward=True,
             )
 
-        # gather output if sp > 1
-        if self.sequence_parallel_size > 1:
-            dim = log_probs.ndim - 1
-            log_probs = gather_outputs_and_unpad(
-                log_probs, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
-            )  # shape can be (1, nnz) - with packing or (B, S) - without packing
+        batch_size, seqlen = attention_mask.shape
 
-        if self.remove_microbatch_padding:
-            # add padding back - postprocess logprobs to be compatible with original tensor
-            batch_size, seqlen = attention_mask.shape
-            # (1, nnz-1) -> (batch_size, seqlen). Pad token ID used by flash attention is 0.
-            log_probs = pad_input(
-                log_probs.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
-            ).squeeze(-1)
+        def to_canonical_batch_positions(values: torch.Tensor) -> torch.Tensor:
+            """Undo the Ulysses slice and then the microbatch unpadding, as ``log_probs`` takes.
+
+            Result is (1, nnz) with packing and no SP, else (B, S).
+            """
+            if self.sequence_parallel_size > 1:
+                dim = values.ndim - 1
+                values = gather_outputs_and_unpad(values, gather_dim=dim, unpad_dim=dim, padding_size=pad_size)
+            if self.remove_microbatch_padding:
+                # Pad token ID used by flash attention is 0.
+                values = pad_input(
+                    values.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                ).squeeze(-1)
+            return values
+
+        log_probs = to_canonical_batch_positions(log_probs)
 
         if compute_entropy:
-            # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
-            # For non-sample packing: pass the attention mask to exclude padding tokens
-            entropy_mask = None
-            if not self.remove_microbatch_padding:
-                # Non-sample packing: pass attention mask to handle padding
-                # Use attention_mask_fwd which may be sliced (if sequence_parallel_size > 1) or full
-                entropy_mask = attention_mask_fwd
-
-            entropy_BS = self.chunked_entropy_from_logits_fn(
-                logits_BSV,
-                requires_grad=entropy_requires_grad,
-                attention_mask=entropy_mask,
-                chunk_size=self.logprobs_chunk_size,
-            )
-
-            if self.sequence_parallel_size > 1:
-                dim = entropy_BS.ndim - 1
-                entropy_BS = gather_outputs_and_unpad(
-                    entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
-                )  # shape can be (1, nnz) - with packing or (B,S) - without packing
-            if self.remove_microbatch_padding:
-                entropy_BS = pad_input(
-                    entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
-                ).squeeze(
-                    -1
-                )  # (1, nnz) -> (B, S)
-
-            output["entropy"] = entropy_BS
+            if support_entropy is not None:
+                assert support_entropy_mask is not None
+                output["entropy"] = to_canonical_batch_positions(support_entropy)
+                # The gather and the unpad both carry a float payload, so the mask rides as one.
+                # Padding positions score no support row, which is what a zero fill means here.
+                output[SAMPLE_SUPPORT_ENTROPY_MASK_KEY] = (
+                    to_canonical_batch_positions(support_entropy_mask.to(support_entropy.dtype)) > 0
+                )
+            else:
+                # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
+                # For non-sample packing: pass the attention mask to exclude padding tokens.
+                # attention_mask_fwd may be sliced (if sequence_parallel_size > 1) or full.
+                padding_mask = None if self.remove_microbatch_padding else attention_mask_fwd
+                output["entropy"] = to_canonical_batch_positions(
+                    self.chunked_entropy_from_logits_fn(
+                        logits_BSV,
+                        requires_grad=entropy_requires_grad,
+                        attention_mask=padding_mask,
+                        chunk_size=self.logprobs_chunk_size,
+                    )
+                )
 
         if isinstance(num_actions, list):
             if len(num_actions) == 1:
