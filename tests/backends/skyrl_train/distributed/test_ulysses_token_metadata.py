@@ -40,7 +40,7 @@ def _support(rows: list[list[int]], segment_lengths: list[int]) -> PackedTensor:
     )
 
 
-def _score(logits, sampled_ids, row_ids, loss_mask, support, **kwargs):
+def _score(logits, sampled_ids, row_ids, loss_mask, support, *, compute_entropy=False, **kwargs):
     return score_aligned_sample_support(
         logits,
         sampled_ids,
@@ -51,6 +51,8 @@ def _score(logits, sampled_ids, row_ids, loss_mask, support, **kwargs):
         vocab_end_index=logits.shape[-1],
         tp_group=None,
         inference_only=False,
+        compute_entropy=compute_entropy,
+        entropy_requires_grad=compute_entropy,
         **kwargs,
     )
 
@@ -133,6 +135,60 @@ def test_sharded_support_scores_match_the_unsharded_pass(sharded):
 
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(logits.grad, reference_logits.grad)
+
+
+def test_sharded_support_entropy_matches_the_unsharded_pass(sharded):
+    """Entropy is a per-position statistic over the row's own support, so it shards like the rest.
+
+    The sequence pad is the trap: a padded position has no support row and must contribute no
+    entropy, and the gather that follows drops it rather than averaging its zero in.
+    """
+    logits = torch.randn(1, 5, VOCAB, dtype=torch.float64, requires_grad=True)
+    sampled_ids = torch.tensor([[2, 3, 4, 5, 6]])
+    row_ids = torch.tensor([[0, 1, 2, 3, SAMPLE_SUPPORT_NO_ROW]])
+    loss_mask = torch.ones((1, 5), dtype=torch.bool)
+    trajectory_ids = torch.zeros((1, 5), dtype=torch.long)
+    support = _support([[2, 0], [3, 1], [4, 2], [5, 3]], [4])
+
+    shards = []
+    for rank in range(SP_SIZE):
+        sharded["rank"] = rank
+        local = [
+            utils.ulysses_pad_and_slice_inputs(tensor, sp_size=SP_SIZE, input_padding_value=fill)[0]
+            for tensor, fill in (
+                (logits, 0),
+                (sampled_ids, 0),
+                (row_ids, SAMPLE_SUPPORT_NO_ROW),
+                (loss_mask, 0),
+                (trajectory_ids, -1),
+            )
+        ]
+        shards.append(
+            _score(*local[:4], support, trajectory_ids=local[4], num_trajectories=1, compute_entropy=True).entropy
+        )
+
+    actual = torch.cat(shards, dim=1)[:, : logits.shape[1]]
+    actual.sum().backward()
+
+    reference_logits = logits.detach().clone().requires_grad_(True)
+    expected = _score(
+        reference_logits,
+        sampled_ids,
+        row_ids,
+        loss_mask,
+        support,
+        trajectory_ids=trajectory_ids,
+        num_trajectories=1,
+        compute_entropy=True,
+    ).entropy
+    expected.sum().backward()
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(logits.grad, reference_logits.grad)
+    # The appended-EOS position renormalizes over the whole vocabulary, so it has no support
+    # entropy: a suite that only compared two identical zeros would prove nothing.
+    assert expected[0, -1] == 0
+    assert (expected[0, :-1] > 0).all()
 
 
 def test_explicit_trajectory_ids_give_a_packed_row_its_own_fallback_slots(sharded):
