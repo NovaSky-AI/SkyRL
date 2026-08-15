@@ -3,6 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
+from dataclasses import dataclass
 from typing import Optional, Union
 
 import numpy as np
@@ -22,15 +23,100 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    canonical_token_metadata_layout,
+)
 from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     gather_outputs_and_unpad,
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
+from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    missing_sample_support_message,
+    sample_support_row_ids_in_batch_positions,
+    score_aligned_sample_support,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
 )
+
+# Trajectory id for a sequence-parallel padding position, which belongs to no trajectory.
+_NO_TRAJECTORY = -1
+
+
+@dataclass(frozen=True)
+class _SampleSupportChannels:
+    """Per-token channels that must follow the tokens through every layout transform.
+
+    Replay joins by row id, so the only support payload travelling with the tokens is the
+    int64 channel naming which packed row scores each position -- never the ``[top_k]`` rows
+    themselves. ``loss_mask`` locates the appended EOS the fallback scores densely and
+    ``trajectory_ids`` gives that fallback its per-trajectory capacity, which a packed or
+    sequence-parallel layout can no longer read off the batch dimension.
+    """
+
+    row_ids: torch.Tensor
+    loss_mask: torch.Tensor
+    trajectory_ids: torch.Tensor
+
+    @classmethod
+    def build(
+        cls,
+        sequences: torch.Tensor,
+        attention_mask: torch.Tensor,
+        sample_support: PackedTensor,
+        loss_mask: torch.Tensor,
+    ) -> "_SampleSupportChannels":
+        """Place every channel in canonical ``[batch, seq_len]`` positions.
+
+        ``row_ids`` already addresses logit positions -- the row scoring the token a position
+        predicts -- while ``loss_mask`` and ``trajectory_ids`` are properties of the token and
+        the position respectively, so only the loss mask is rolled later.
+        """
+        layout = canonical_token_metadata_layout(attention_mask)
+        target_loss_mask = torch.zeros_like(sequences, dtype=torch.bool)
+        target_loss_mask[:, sequences.shape[1] - loss_mask.shape[1] :] = loss_mask.to(torch.bool)
+        trajectory_ids = torch.arange(sequences.shape[0], device=sequences.device).unsqueeze(1)
+        return cls(
+            row_ids=sample_support_row_ids_in_batch_positions(sample_support, layout),
+            loss_mask=target_loss_mask,
+            trajectory_ids=trajectory_ids.expand_as(sequences),
+        )
+
+    def unpad(self, nnz_indices: torch.Tensor) -> "_SampleSupportChannels":
+        """Drop padding positions exactly as ``unpad_input`` does for the tokens."""
+
+        def gather(channel: torch.Tensor) -> torch.Tensor:
+            return channel.reshape(-1).index_select(0, nnz_indices).unsqueeze(0)
+
+        return _SampleSupportChannels(
+            row_ids=gather(self.row_ids),
+            loss_mask=gather(self.loss_mask),
+            trajectory_ids=gather(self.trajectory_ids),
+        )
+
+    def roll_to_logit_positions(self) -> "_SampleSupportChannels":
+        """Shift the loss mask onto the logit that predicts each token, like ``sequences_rolled``."""
+        return _SampleSupportChannels(
+            row_ids=self.row_ids,
+            loss_mask=torch.roll(self.loss_mask, shifts=-1, dims=1),
+            trajectory_ids=self.trajectory_ids,
+        )
+
+    def slice_for_sequence_parallel(self, sp_size: int) -> "_SampleSupportChannels":
+        """Take this rank's Ulysses shard, padding with each channel's own sentinel."""
+        return _SampleSupportChannels(
+            row_ids=ulysses_pad_and_slice_inputs(
+                self.row_ids, sp_size=sp_size, input_padding_value=SAMPLE_SUPPORT_NO_ROW
+            )[0],
+            loss_mask=ulysses_pad_and_slice_inputs(self.loss_mask, sp_size=sp_size)[0],
+            trajectory_ids=ulysses_pad_and_slice_inputs(
+                self.trajectory_ids, sp_size=sp_size, input_padding_value=_NO_TRAJECTORY
+            )[0],
+        )
 
 
 class HFModelWrapper(nn.Module):
@@ -250,9 +336,19 @@ class HFModelWrapper(nn.Module):
         pixel_values: Optional[TensorList] = None,
         image_grid_thw: Optional[TensorList] = None,
         mm_token_type_ids: Optional[torch.Tensor] = None,
+        sample_support: Optional[PackedTensor] = None,
+        loss_mask: Optional[torch.Tensor] = None,
+        enable_sample_support_replay: bool = False,
     ) -> torch.Tensor:
         """Returns action log probs"""
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
+        support_channels = None
+        if enable_sample_support_replay:
+            if sample_support is None:
+                raise ValueError(missing_sample_support_message("FSDP"))
+            if loss_mask is None:
+                raise ValueError("sample-support replay is enabled but the microbatch has no loss mask")
+            support_channels = _SampleSupportChannels.build(sequences, attention_mask, sample_support, loss_mask)
         if self.is_vlm:
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
             # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
@@ -286,9 +382,13 @@ class HFModelWrapper(nn.Module):
                 position_ids_fwd, _, _, _, _ = unpad_input(position_ids.unsqueeze(-1), attention_mask)
                 # (nnz, 1) -> (1, nnz)
                 position_ids_fwd = position_ids_fwd.transpose(0, 1)
+                if support_channels is not None:
+                    support_channels = support_channels.unpad(nnz_indices)
                 attention_mask_fwd = None  # no attention mask with FA 2
 
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
+        if support_channels is not None:
+            support_channels = support_channels.roll_to_logit_positions()
         if self.sequence_parallel_size > 1:
             # NOTE: don't pass any attn mask with sample packing
             attention_mask_fwd = None if self.remove_microbatch_padding else attention_mask_fwd
@@ -301,6 +401,8 @@ class HFModelWrapper(nn.Module):
             sequences_rolled, _, _, _ = ulysses_pad_and_slice_inputs(
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
+            if support_channels is not None:
+                support_channels = support_channels.slice_for_sequence_parallel(self.sequence_parallel_size)
 
         if self.is_vlm:
             # NOTE: transformers v5 introduced `mm_token_type_ids` to distinguish text
@@ -333,12 +435,30 @@ class HFModelWrapper(nn.Module):
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
 
-        # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
-        log_probs = logprobs_from_logits(
-            logits_BSV,
-            sequences_rolled,
-            inplace_backward=True,
-        )
+        if support_channels is not None:
+            # Unsharded full-vocabulary logits, so the scorer's two null-object escapes both
+            # apply: no tensor-parallel collectives (``tp_group=None``) and no fused LM-head
+            # projection (``lm_head_weight=None``). ``logits_BSV`` is already temperature-scaled.
+            log_probs = score_aligned_sample_support(
+                logits_BSV,
+                sequences_rolled,
+                support_channels.row_ids,
+                support_channels.loss_mask,
+                sample_support,
+                vocab_start_index=0,
+                vocab_end_index=logits_BSV.shape[-1],
+                tp_group=None,
+                inference_only=not torch.is_grad_enabled(),
+                trajectory_ids=support_channels.trajectory_ids,
+                num_trajectories=sequences.shape[0],
+            ).logprobs
+        else:
+            # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
+            log_probs = logprobs_from_logits(
+                logits_BSV,
+                sequences_rolled,
+                inplace_backward=True,
+            )
 
         # gather output if sp > 1
         if self.sequence_parallel_size > 1:
