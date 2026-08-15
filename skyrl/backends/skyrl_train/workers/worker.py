@@ -46,7 +46,10 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     ppo_critic_loss,
 )
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_ENTROPY_MASK_KEY,
+    SAMPLE_SUPPORT_FIELD,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -1064,7 +1067,14 @@ class PolicyWorkerBase(Worker):
                 # batch_size, seqlen
                 entropy_BS = output["entropy"]
                 entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
-                entropy = masked_mean(entropy_BS, loss_mask)
+                entropy_mask = loss_mask
+                if SAMPLE_SUPPORT_ENTROPY_MASK_KEY in output:
+                    # Support-conditioned entropy: the appended EOS has no recorded support, so
+                    # it carries no entropy and the metric must not average a zero in for it.
+                    entropy_mask = (
+                        loss_mask.to(torch.bool) & output[SAMPLE_SUPPORT_ENTROPY_MASK_KEY][:, -num_actions - 1 : -1]
+                    )
+                entropy = masked_mean(entropy_BS, entropy_mask)
 
             if self.cfg.algorithm.use_entropy_loss:
                 entropy_loss_term = entropy * self.cfg.algorithm.entropy_loss_coef

@@ -31,7 +31,12 @@ def missing_sample_support_message(backend: str) -> str:
 
 @dataclass(frozen=True)
 class SampleSupportScores:
-    """Support-conditioned scores and the rows a recorded support row backs."""
+    """Support-conditioned scores and the rows a recorded support row backs.
+
+    ``entropy`` is ``None`` unless the caller asked for it. ``valid_mask`` is the mask both
+    channels need: it is the loss mask for the logprobs' synthetic-EOS exception and, for the
+    entropy, the set of rows the statistic is defined on at all.
+    """
 
     logprobs: torch.Tensor
     entropy: torch.Tensor | None
@@ -161,11 +166,13 @@ def sample_support_scores(
     vocab_start_index: int,
     vocab_end_index: int,
     tp_group: torch.distributed.ProcessGroup | None,
+    compute_entropy: bool,
+    entropy_requires_grad: bool,
     lm_head_weight: torch.Tensor | None = None,
     temperature: float = 1.0,
     chunk_size: int | None = None,
 ) -> SampleSupportScores:
-    """Renormalize each sampled token's score over its recorded support row."""
+    """Renormalize scores and optionally compute entropy over each recorded support row."""
     if logits_or_hidden.shape[:-1] != sampled_ids.shape or support_ids.shape[:-1] != sampled_ids.shape:
         raise ValueError(
             "logits, sampled_ids, and support_ids must have matching prefix shapes, got "
@@ -175,6 +182,8 @@ def sample_support_scores(
         raise ValueError(f"sample support must use {SAMPLE_SUPPORT_TORCH_DTYPE} vocab ids, got {support_ids.dtype}")
     if temperature <= 0:
         raise ValueError(f"temperature must be positive, got {temperature}")
+    if entropy_requires_grad and not compute_entropy:
+        raise ValueError("entropy gradients require compute_entropy=True")
 
     flat_source = logits_or_hidden.reshape(-1, logits_or_hidden.shape[-1])
     flat_sampled = sampled_ids.reshape(-1).long()
@@ -225,18 +234,34 @@ def sample_support_scores(
         torch.distributed.all_reduce(global_max, op=torch.distributed.ReduceOp.MAX, group=tp_group)
     safe_max = torch.where(valid_rows, global_max, 0.0)
 
-    local_sum = torch.where(local_members, (local_values - safe_max.unsqueeze(1)).exp(), 0.0).sum(dim=-1)
-    # Denominator and numerator share one SUM collective, so a TP scorer costs two reductions.
-    local_stats = torch.stack((local_sum, local_sampled))
+    local_exp = torch.where(local_members, (local_values - safe_max.unsqueeze(1)).exp(), 0.0)
+    local_rows = [local_exp.sum(dim=-1), local_sampled]
+    if compute_entropy:
+        # H = log(Z) - E_p[l - max] over the support, and both terms are sums over the same
+        # members that Z is. So the second one is one more row of the reduction below, never a
+        # reduction of its own.
+        shifted_values = local_values if entropy_requires_grad else local_values.detach()
+        weights = local_exp if entropy_requires_grad else local_exp.detach()
+        local_rows.append((weights * torch.where(local_members, shifted_values - safe_max.unsqueeze(1), 0.0)).sum(-1))
+    # Denominator, numerator and the entropy statistic share one SUM collective, so a TP scorer
+    # costs two reductions whether or not entropy is asked for.
+    local_stats = torch.stack(local_rows)
     global_stats = local_stats.detach().clone()
     if tp_group is not None and torch.distributed.get_world_size(tp_group) > 1:
         torch.distributed.all_reduce(global_stats, op=torch.distributed.ReduceOp.SUM, group=tp_group)
     global_stats = global_stats + local_stats - local_stats.detach()
-    denominator, sampled_score = global_stats
+    denominator, sampled_score = global_stats[0], global_stats[1]
     logprobs = sampled_score - safe_max - torch.where(valid_rows, denominator, 1.0).log()
+
+    entropy = None
+    if compute_entropy:
+        weighted_sum = global_stats[2] if entropy_requires_grad else global_stats[2].detach()
+        safe_denominator = torch.where(valid_rows, denominator if entropy_requires_grad else denominator.detach(), 1.0)
+        entropy = torch.where(valid_rows, safe_denominator.log() - weighted_sum / safe_denominator, 0.0)
+        entropy = entropy.reshape(sampled_ids.shape)
     return SampleSupportScores(
         logprobs=torch.where(valid_rows, logprobs, 0.0).reshape(sampled_ids.shape),
-        entropy=None,
+        entropy=entropy,
         valid_mask=valid_rows.reshape(sampled_ids.shape),
     )
 
@@ -431,6 +456,8 @@ def score_aligned_sample_support(
     vocab_end_index: int,
     tp_group: torch.distributed.ProcessGroup | None,
     inference_only: bool,
+    compute_entropy: bool,
+    entropy_requires_grad: bool,
     lm_head_weight: torch.Tensor | None = None,
     temperature: float = 1.0,
     chunk_size: int | None = None,
@@ -442,6 +469,7 @@ def score_aligned_sample_support(
     """Score token-aligned support rows and full-vocabulary EOS fallbacks.
 
     ``temperature`` applies only when ``aligned_source`` contains hidden states.
+    Synthetic-EOS rows use full-vocabulary logprobs and remain outside the support-entropy mask.
     """
     scores = sample_support_scores(
         aligned_source,
@@ -450,6 +478,8 @@ def score_aligned_sample_support(
         vocab_start_index=vocab_start_index,
         vocab_end_index=vocab_end_index,
         tp_group=tp_group,
+        compute_entropy=compute_entropy,
+        entropy_requires_grad=entropy_requires_grad,
         lm_head_weight=lm_head_weight,
         temperature=temperature if lm_head_weight is not None else 1.0,
         chunk_size=chunk_size,
@@ -473,7 +503,7 @@ def score_aligned_sample_support(
     )
     return SampleSupportScores(
         logprobs=torch.where(synthetic_eos_mask, eos_logprobs, scores.logprobs),
-        entropy=None,
+        entropy=scores.entropy,
         valid_mask=scores.valid_mask,
     )
 
@@ -495,6 +525,8 @@ def compute_sample_support_scores(
     temperature: float,
     chunk_size: int | None,
     fused_backend: str,
+    compute_entropy: bool,
+    entropy_requires_grad: bool,
 ) -> SampleSupportScores:
     """Score support-conditioned logprobs in canonical trainer layout."""
     if sample_support is None:
@@ -528,6 +560,8 @@ def compute_sample_support_scores(
         vocab_end_index=vocab_end_index,
         tp_group=tp_group,
         inference_only=inference_only,
+        compute_entropy=compute_entropy,
+        entropy_requires_grad=entropy_requires_grad,
         lm_head_weight=lm_head_weight,
         temperature=temperature,
         chunk_size=chunk_size,
@@ -538,6 +572,8 @@ def compute_sample_support_scores(
         return scores
     return SampleSupportScores(
         logprobs=scatter_packed_token_values_to_batch(scores.logprobs, metadata_layout, 0),
-        entropy=None,
+        entropy=(
+            None if scores.entropy is None else scatter_packed_token_values_to_batch(scores.entropy, metadata_layout, 0)
+        ),
         valid_mask=scatter_packed_token_values_to_batch(scores.valid_mask, metadata_layout, False),
     )
