@@ -54,15 +54,14 @@ class SkyRLTrainInferenceForwardingClient:
             return row.inference_proxy_url
 
     async def _resolve_proxy_url(self, *, force_refresh: bool = False) -> str:
-        # Skip the lock when the cache is warm so concurrent samples don't serialize.
-        if not force_refresh and self._cached_proxy_url is not None:
-            return self._cached_proxy_url
+        # SkyRL-Train can recreate vLLM during weight synchronization and publish
+        # a new router URL. Re-read the singleton so requests never target the
+        # stale port left in this API process's cache.
         async with self._cache_lock:
-            if force_refresh or self._cached_proxy_url is None:
-                url = await self._read_proxy_url_from_db()
-                if url is None:
-                    raise RuntimeError("inference engine not ready: no proxy URL published to EngineStateDB")
-                self._cached_proxy_url = url
+            url = await self._read_proxy_url_from_db()
+            if url is None:
+                raise RuntimeError("inference engine not ready: no proxy URL published to EngineStateDB")
+            self._cached_proxy_url = url
             return self._cached_proxy_url
 
     async def call_and_store_result(
