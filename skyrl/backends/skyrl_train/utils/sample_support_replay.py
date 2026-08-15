@@ -241,8 +241,12 @@ def sample_support_scores(
     )
 
 
-def _row_ids_in_canonical_positions(row_ids: torch.Tensor, layout: TokenMetadataLayout) -> torch.Tensor:
-    """Restore left padding to row ids aligned in Megatron's real-token layout."""
+def sample_support_row_ids_in_batch_positions(
+    sample_support: PackedTensor,
+    layout: TokenMetadataLayout,
+) -> torch.Tensor:
+    """Map support rows into canonical left-padded batch coordinates."""
+    row_ids = align_sample_support_row_ids(sample_support, layout)
     sequence_length = layout.attention_mask.shape[1]
     padding_widths = sequence_length - layout.attention_mask.sum(dim=1).to(torch.long)
     positions = torch.arange(sequence_length, device=row_ids.device).unsqueeze(0) - padding_widths.unsqueeze(1)
@@ -263,6 +267,38 @@ def _gather_support_rows(support: PackedTensor, row_ids: torch.Tensor) -> torch.
     gathered = support.values.index_select(0, flat_row_ids.clamp(min=0))
     gathered = gathered.masked_fill((flat_row_ids < 0).unsqueeze(1), SAMPLE_SUPPORT_PADDING)
     return gathered.reshape(*row_ids.shape, top_k)
+
+
+def score_aligned_sample_support(
+    aligned_source: torch.Tensor,
+    aligned_sampled_ids: torch.Tensor,
+    aligned_row_ids: torch.Tensor,
+    aligned_loss_mask: torch.Tensor,
+    sample_support: PackedTensor,
+    *,
+    vocab_start_index: int,
+    vocab_end_index: int,
+    tp_group: torch.distributed.ProcessGroup | None,
+    lm_head_weight: torch.Tensor | None = None,
+    temperature: float = 1.0,
+    chunk_size: int | None = None,
+) -> SampleSupportScores:
+    """Score token-aligned recorded support rows."""
+    scores = sample_support_scores(
+        aligned_source,
+        aligned_sampled_ids,
+        _gather_support_rows(sample_support, aligned_row_ids),
+        vocab_start_index=vocab_start_index,
+        vocab_end_index=vocab_end_index,
+        tp_group=tp_group,
+        lm_head_weight=lm_head_weight,
+        temperature=temperature if lm_head_weight is not None else 1.0,
+        chunk_size=chunk_size,
+    )
+    unsupported_loss_active = aligned_loss_mask & ~scores.valid_mask
+    if unsupported_loss_active.any():
+        raise ValueError("sample-support replay requires captured support for every loss-active token")
+    return scores
 
 
 def compute_sample_support_scores(
@@ -291,32 +327,31 @@ def compute_sample_support_scores(
 
     target_loss_mask = torch.zeros_like(sequences, dtype=torch.bool)
     target_loss_mask[:, -num_actions:] = loss_mask.to(torch.bool)
-    row_ids = align_sample_support_row_ids(sample_support, metadata_layout)
     if packed:
+        row_ids = align_sample_support_row_ids(sample_support, metadata_layout)
         aligned_sampled_ids = align_token_metadata(sequences, metadata_layout, 0, next_token=True)
         aligned_loss_mask = align_token_metadata(target_loss_mask, metadata_layout, False, next_token=True)
         aligned_source = logits_or_hidden
     else:
         # The domain ends at real token L_i - 2, so dropping the last column loses no row.
-        row_ids = _row_ids_in_canonical_positions(row_ids, metadata_layout)[:, :-1]
+        row_ids = sample_support_row_ids_in_batch_positions(sample_support, metadata_layout)[:, :-1]
         aligned_sampled_ids = sequences[:, 1:]
         aligned_loss_mask = target_loss_mask[:, 1:]
         aligned_source = logits_or_hidden[:, :-1]
 
-    scores = sample_support_scores(
+    scores = score_aligned_sample_support(
         aligned_source,
         aligned_sampled_ids,
-        _gather_support_rows(sample_support, row_ids),
+        row_ids,
+        aligned_loss_mask,
+        sample_support,
         vocab_start_index=vocab_start_index,
         vocab_end_index=vocab_end_index,
         tp_group=tp_group,
         lm_head_weight=lm_head_weight,
-        temperature=temperature if lm_head_weight is not None else 1.0,
+        temperature=temperature,
         chunk_size=chunk_size,
     )
-    unsupported_loss_active = aligned_loss_mask & ~scores.valid_mask
-    if unsupported_loss_active.any():
-        raise ValueError("sample-support replay requires captured support for every loss-active token")
     if not packed:
         return scores
     return SampleSupportScores(

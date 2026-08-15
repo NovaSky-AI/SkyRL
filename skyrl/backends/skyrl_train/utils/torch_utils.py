@@ -133,7 +133,9 @@ def logprobs_from_logits(
     Returns:
         Tensor: Log-probabilities of the target labels, shape logits.shape[:-1].
     """
-    if FLASH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE:
+    # The flash-attn kernel is a Triton CUDA kernel: it is importable on a CPU host but
+    # cannot run there, so availability alone is not enough to select it.
+    if FLASH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE and logits.is_cuda:
         batch_dim = logits.shape[:-1]
         last_dim = logits.shape[-1]
         logits = logits.reshape(-1, last_dim)

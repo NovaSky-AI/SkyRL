@@ -1840,9 +1840,9 @@ class SkyRLTrainConfig(BaseConfig):
                     "trainer.algorithm.enable_sample_support_replay requires "
                     "generator.inference_engine.enable_return_sample_support_set"
                 )
-            if self.trainer.strategy != "megatron":
+            if self.trainer.strategy not in ("megatron", "fsdp"):
                 raise ValueError(
-                    "sample-support replay requires trainer.strategy=megatron, got " f"{self.trainer.strategy}"
+                    "sample-support replay requires trainer.strategy=megatron or fsdp, got " f"{self.trainer.strategy}"
                 )
             if not self.generator.use_conversation_multi_turn:
                 raise ValueError(
