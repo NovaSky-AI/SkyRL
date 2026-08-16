@@ -16,6 +16,8 @@
 # limitations under the License.
 
 from collections import OrderedDict
+from dataclasses import asdict
+from enum import Enum
 from typing import Union
 
 import torch
@@ -28,6 +30,24 @@ from torch.distributed import DeviceMesh
 from torch.distributed.device_mesh import init_device_mesh
 
 from skyrl.train.config import FSDPConfig
+
+
+def serialize_peft_config(config) -> dict:
+    """Convert a PEFT config into a JSON-serializable dictionary."""
+
+    def serialize(value):
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, dict):
+            return {key: serialize(item) for key, item in value.items()}
+        if isinstance(value, set):
+            return [serialize(item) for item in sorted(value)]
+        if isinstance(value, (list, tuple)):
+            return [serialize(item) for item in value]
+        return value
+
+    return serialize(asdict(config))
+
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import (
