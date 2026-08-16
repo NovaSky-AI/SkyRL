@@ -29,3 +29,22 @@ The JAX backend supports the following models:
 - Deepseek-V3
 - Llama-3
 - Qwen3 Dense/MoE
+
+### Apple Silicon (experimental)
+
+On macOS 14 or newer, the JAX backend can use Apple Silicon GPUs through the experimental
+[`jax-mps`](https://github.com/tillahoffmann/jax-mps) PJRT plugin. Install the
+JAX and MPS extras together and select the backend explicitly:
+
+```bash
+JAX_PLATFORMS=mps uv run --isolated --extra jax --extra mps --extra tinker \
+  -m skyrl.tinker.api \
+  --base-model trl-internal-testing/tiny-Qwen3ForCausalLM \
+  --backend jax \
+  --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 8, "train_micro_batch_size": 1, "sample_max_num_sequences": 1}'
+```
+
+This path supports the JAX backend's LoRA training and sampling API. It does
+not enable the FSDP or Megatron backends on macOS. `jax-mps` currently supports
+one Apple GPU and does not implement every JAX operation, so start with a small
+dense model and single-device parallelism (`fsdp=ep=tp=1`).
