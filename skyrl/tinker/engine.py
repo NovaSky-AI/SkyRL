@@ -685,7 +685,10 @@ class TinkerEngine:
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
             self.backend.save_sampler_checkpoint(output_path, model_id, persist=persist)
-            logger.info(f"Saved sampler checkpoint for model {model_id} to {output_path}")
+            if persist:
+                logger.info(f"Saved sampler checkpoint for model {model_id} to {output_path}")
+            else:
+                logger.info(f"Prepared ephemeral sampler weights for model {model_id}")
 
         # Return path=None when using sampling_session_seq_id and seq_id (SDK expects this)
         if request_data.sampling_session_seq_id is not None and request_data.seq_id is not None:
