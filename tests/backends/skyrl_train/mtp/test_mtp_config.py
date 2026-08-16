@@ -1,6 +1,6 @@
 """CPU unit tests for the MTP config knobs.
 
-uv run --isolated --extra dev pytest tests/train/test_mtp_config.py
+uv run --isolated --extra dev --extra skyrl-train pytest tests/backends/skyrl_train/mtp/test_mtp_config.py
 """
 
 import pytest
@@ -12,7 +12,11 @@ from skyrl.train.config import (
     SkyRLTrainConfig,
 )
 from skyrl.train.config.config import build_nested_dataclass
-from skyrl.train.utils.utils import _apply_mtp_config
+from skyrl.train.utils.utils import (
+    _apply_mtp_config,
+    _validate_mtp_prefix_caching,
+    validate_cfg,
+)
 
 
 def test_megatron_config_mtp_defaults():
@@ -109,3 +113,86 @@ def test_apply_mtp_config_does_not_clobber_explicit_speculative_config():
     cfg.generator.inference_engine.speculative_config = {"method": "mtp", "num_speculative_tokens": 5}
     _apply_mtp_config(cfg)
     assert cfg.generator.inference_engine.speculative_config["num_speculative_tokens"] == 5
+
+
+@pytest.mark.parametrize(
+    ("enable_prefix_caching", "engine_init_kwargs", "should_raise"),
+    [
+        (True, {}, True),
+        (False, {}, False),
+        (False, {"enable_prefix_caching": True}, True),
+        (True, {"enable_prefix_caching": False}, False),
+    ],
+)
+def test_validate_mtp_prefix_caching_for_linear_attention_model(
+    tmp_path, enable_prefix_caching, engine_init_kwargs, should_raise
+):
+    from transformers import Qwen3_5TextConfig
+
+    Qwen3_5TextConfig(
+        num_hidden_layers=4,
+        layer_types=["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+    ).save_pretrained(tmp_path)
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = str(tmp_path)
+    cfg.trainer.mtp.enabled = True
+    cfg.generator.inference_engine.enable_prefix_caching = enable_prefix_caching
+    cfg.generator.inference_engine.engine_init_kwargs = engine_init_kwargs
+    _apply_mtp_config(cfg)
+
+    if should_raise:
+        with pytest.raises(ValueError, match="enable_prefix_caching=false"):
+            _validate_mtp_prefix_caching(cfg)
+    else:
+        _validate_mtp_prefix_caching(cfg)
+
+
+def test_validate_mtp_prefix_caching_allows_full_attention_model(tmp_path):
+    from transformers import Qwen3_5TextConfig
+
+    Qwen3_5TextConfig(num_hidden_layers=2, layer_types=["full_attention", "full_attention"]).save_pretrained(tmp_path)
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = str(tmp_path)
+    cfg.trainer.mtp.enabled = True
+    _apply_mtp_config(cfg)
+
+    _validate_mtp_prefix_caching(cfg)
+
+
+def test_validate_mtp_prefix_caching_allows_effective_non_mtp_override():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = "unresolved-linear-attention-model"
+    cfg.trainer.mtp.enabled = True
+    cfg.generator.inference_engine.engine_init_kwargs = {
+        "speculative_config": {
+            "method": "eagle",
+            "num_speculative_tokens": 1,
+        }
+    }
+    _apply_mtp_config(cfg)
+
+    _validate_mtp_prefix_caching(cfg)
+
+
+def test_validate_cfg_rejects_mtp_prefix_caching_after_mtp_propagation(tmp_path):
+    from transformers import Qwen3_5TextConfig
+
+    Qwen3_5TextConfig(
+        num_hidden_layers=2,
+        layer_types=["linear_attention", "full_attention"],
+    ).save_pretrained(tmp_path)
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = str(tmp_path)
+    cfg.trainer.mtp.enabled = True
+    cfg.trainer.logger = "console"
+
+    with pytest.raises(ValueError, match="MTP speculative decoding with prefix caching"):
+        validate_cfg(cfg)
+
+    assert cfg.generator.inference_engine.speculative_config == {
+        "method": "mtp",
+        "num_speculative_tokens": 1,
+    }

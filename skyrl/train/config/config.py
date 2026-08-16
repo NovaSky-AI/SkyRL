@@ -1134,7 +1134,8 @@ class InferenceEngineConfig(BaseConfig):
     enable_prefix_caching: bool = True
     """Enable vLLM prefix caching.
     Can be left at the default in most cases. With remote inference servers, this must match the setting the remote
-    servers were initialized with."""
+    servers were initialized with. Must be disabled when using MTP speculative decoding with recurrent
+    linear-attention models."""
     enable_chunked_prefill: bool = True
     """Enable vLLM chunked prefill.
     Currently not plumbed through to the engine; set ``engine_init_kwargs.enable_chunked_prefill``
