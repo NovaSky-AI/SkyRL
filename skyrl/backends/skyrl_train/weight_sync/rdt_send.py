@@ -387,6 +387,13 @@ class MegatronStackedWeightSource(WeightSource):
         self._verified = False
         # Per-layer expert HF name lists, built once (see _expert_names_for).
         self._expert_names: dict = {}
+        # [RDT-EXPORT-RING] Reused expert-stack buffers (see _stack_into_ring).
+        # Depth reads the same knob as the trainer's gather_lookahead, so the
+        # ring can never be shallower than the residency the credit gate allows.
+        self._stack_ring: dict = {}
+        self._stack_ring_pos = 0
+        self._stack_ring_depth = max(1, int(os.environ.get("SKYRL_RDT_LOOKAHEAD", _DEFAULT_GATHER_LOOKAHEAD))) + 1
+        self._stack_ring_on = os.environ.get("SKYRL_RDT_EXPORT_RING", "1") not in ("0", "false", "False")
         # This source is SINGLE-MODE: serve only what this rank holds. Two
         # grains that engage independently: PP-local (pp>1) — this stage
         # exports only its own parameters; EP-local (ep>1) —
@@ -614,6 +621,26 @@ class MegatronStackedWeightSource(WeightSource):
             self._expert_names[layer] = names
         return names
 
+    def _stack_into_ring(self, kind: str, src: list) -> torch.Tensor:
+        """``torch.stack(src)`` into a reused buffer instead of a fresh one.
+
+        Every decoder layer has identical stack shapes, so a ring of
+        ``lookahead + 1`` buffers serves the whole walk: the trainer then exports
+        ONE CUDA-IPC handle per buffer rather than two per layer. Memory-neutral
+        — ``torch.stack`` was allocating this tensor anyway. Falls back to a
+        plain stack on any mismatch: correct-and-slower, never wrong bytes.
+        """
+        if not getattr(self, "_stack_ring_on", False) or not src:
+            return torch.stack(src)
+        shape = (len(src),) + tuple(src[0].shape)
+        key = (kind, getattr(self, "_stack_ring_pos", 0) % max(1, getattr(self, "_stack_ring_depth", 2)))
+        buf = self._stack_ring.get(key)
+        if buf is None or tuple(buf.shape) != shape or buf.dtype != src[0].dtype or buf.device != src[0].device:
+            buf = torch.empty(shape, dtype=src[0].dtype, device=src[0].device)
+            self._stack_ring[key] = buf
+        torch.stack(src, out=buf)
+        return buf
+
     def _local_layer_stacks(self, lay: _ExpertLayer, adapter_ctx: Optional[tuple]) -> tuple:
         """This rank's LOCAL expert stacks (fc1 [n_local,2F,H], fc2 [n_local,H,F]),
         LoRA already merged — the shard-aware expert step. ZERO collectives: the
@@ -622,8 +649,9 @@ class MegatronStackedWeightSource(WeightSource):
         never materialized at all. Shard-aware walks only owned layers (pp-local
         at pp>1, everything at pp==1), so ``lay`` is always locally held."""
         assert lay.owned, "shard-aware walk reached a layer this stage does not hold"
-        fc1_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in lay.fc1])
-        fc2_local = torch.stack([t.param_weight.detach().to(self._dtype) for t in lay.fc2])
+        fc1_local = self._stack_into_ring("fc1", [t.param_weight.detach().to(self._dtype) for t in lay.fc1])
+        fc2_local = self._stack_into_ring("fc2", [t.param_weight.detach().to(self._dtype) for t in lay.fc2])
+        self._stack_ring_pos = getattr(self, "_stack_ring_pos", 0) + 1
         if adapter_ctx is not None:
             _mb, tasks_by_base = adapter_ctx
             self._merge_lora_into_local_shards(lay.layer, fc1_local, fc2_local, tasks_by_base)
@@ -841,6 +869,12 @@ class MegatronStackedWeightSource(WeightSource):
                 names, tensors = [], []
                 self._extend_layer_experts(pending.pop(layer), adapter_ctx, names, tensors)
                 yield names, tensors
+        # [RDT-EXPORT-RING] Drop our refs so the buffers (a layer's experts each,
+        # hundreds of MB) do not survive into the training step. The consumer of
+        # this generator still holds the last groups' views, so nothing in flight
+        # is freed here.
+        self._stack_ring = {}
+        self._stack_ring_pos = 0
 
     def _iter_impl(self, collect_meta: bool) -> Iterator[tuple]:
         """Flattened per-(name, tensor) view of the group walk — used by
@@ -1429,11 +1463,24 @@ class RdtWeightSyncSender:
                 or _DEFAULT_STALL_TIMEOUT_S
             ),
         )
-        return ShardedRDTTrainerWeightTransferEngine.trainer_init(
+        engine = ShardedRDTTrainerWeightTransferEngine.trainer_init(
             init_info,
             client=self._control_plane,
             source=source,
         )
+        # The producer sidecar already freezes its object graph "so gen-2 GC
+        # never stops the world mid-serve". The trainer needs it more: it
+        # rebuilds the whole conversion-task graph every sync on top of a 235B
+        # heap, and a gen-2 pass costs up to 1.2s on a rank -- which the sync's
+        # PP all_gather_object then propagates to that rank's partner, so the
+        # slowest pair sets the sync. Freezing leaves gen-0/1 untouched and makes
+        # gen-2 ~40x cheaper by skipping the static graph.
+        if os.environ.get("SKYRL_RDT_GC_FREEZE", "1") not in ("0", "false", "False"):
+            import gc
+
+            gc.collect()
+            gc.freeze()
+        return engine
 
     def teardown(self) -> None:
         engine = self._engine
