@@ -48,8 +48,10 @@ def dot_product_attention(
             implementation="cudnn",
         )
 
-    # jax-mps fused SDPA cannot combine causal attention with a padding mask.
-    implementation = "xla" if jax.default_backend() == "mps" and is_causal else None
+    # jax-mps patches this function for every JAX platform, but its fused path
+    # cannot combine causal attention with a padding mask.
+    mps_sdpa_patched = getattr(jax.nn.dot_product_attention, "_mps_patched", False)
+    implementation = "xla" if mps_sdpa_patched and is_causal else None
     return jax.nn.dot_product_attention(
         q,
         k,
