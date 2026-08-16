@@ -32,6 +32,7 @@
 #   ANYSCALE_CLOUD           cloud to submit to (default sky-anyscale-aws-us-east-1)
 #   CAPACITY_MAX_ATTEMPTS    submissions before giving up (default 10)
 #   CAPACITY_RETRY_DELAY_S   sleep between attempts (default 300)
+#   ANYSCALE_LOG_TAIL_LINES  remote log lines to print on real failure (default 100)
 
 set -euo pipefail
 
@@ -53,6 +54,11 @@ START_TIMEOUT_S="${4:-$RUN_TIMEOUT_S}"
 CLOUD="${ANYSCALE_CLOUD:-sky-anyscale-aws-us-east-1}"
 MAX_ATTEMPTS="${CAPACITY_MAX_ATTEMPTS:-5}"
 RETRY_DELAY_S="${CAPACITY_RETRY_DELAY_S:-300}"
+LOG_TAIL_LINES="${ANYSCALE_LOG_TAIL_LINES:-100}"
+if [[ ! "$LOG_TAIL_LINES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ANYSCALE_LOG_TAIL_LINES must be a positive integer; using 100." >&2
+    LOG_TAIL_LINES=100
+fi
 
 # Current state of a job by name. `job status` resolves the most recently created
 # job with that name, which is why each attempt gets a unique name below.
@@ -93,6 +99,26 @@ entrypoint_ran() {
     fi
 }
 
+# Best-effort diagnostics for failures after the entrypoint started. Keep this
+# bounded because the CI log should show the failure context without replacing
+# the job's own output. Do not let a log-fetch failure change the job result.
+print_remote_log_tail() {
+    local job_name="$1"
+    local logs
+
+    echo "--- Anyscale log tail for ${job_name} (last ${LOG_TAIL_LINES} lines) ---" >&2
+    if ! logs="$(anyscale job logs --cloud "$CLOUD" --name "$job_name" --tail --max-lines "$LOG_TAIL_LINES" 2>/dev/null)"; then
+        echo "Unable to fetch Anyscale logs for ${job_name}." >&2
+        return 0
+    fi
+
+    if [[ -n "${logs//[[:space:]]/}" ]]; then
+        printf '%s\n' "$logs" >&2
+    else
+        echo "(no remote logs available)" >&2
+    fi
+}
+
 for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     run_name="$JOB_NAME"
     if [[ "$attempt" -gt 1 ]]; then
@@ -126,6 +152,7 @@ for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
 
     if entrypoint_ran "$run_name"; then
         echo "Job ${run_name} failed (state: ${state}) but the entrypoint ran -- real failure, not retrying." >&2
+        print_remote_log_tail "$run_name" || true
         exit 1
     fi
 
