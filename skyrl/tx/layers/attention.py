@@ -48,7 +48,14 @@ def dot_product_attention(
             implementation="cudnn",
         )
 
-    # CPU/TPU fallback
+    # jax-mps fused SDPA cannot combine causal attention with a padding mask.
+    implementation = "xla" if jax.default_backend() == "mps" and is_causal else None
     return jax.nn.dot_product_attention(
-        q, k, v, scale=scale, mask=attention_mask[:, None, None, :].astype(bool), is_causal=is_causal
+        q,
+        k,
+        v,
+        scale=scale,
+        mask=attention_mask[:, None, None, :].astype(bool),
+        is_causal=is_causal,
+        implementation=implementation,
     )
