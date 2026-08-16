@@ -237,7 +237,8 @@ class FSDPConfig(BaseConfig):
     https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html
     Enabling this replaces SkyRL's manual colocation offload (and makes
     ``optimizer_config.offload_after_step`` inert) rather than stacking with it; see
-    https://docs.skyrl.ai/docs/tutorials/placement for the difference."""
+    https://docs.skyrl.ai/docs/tutorials/placement for the difference. Single-rank 4-bit models are not
+    FSDP-wrapped and must leave this disabled to use manual phase offload."""
     reshard_after_forward: Union[bool, int] = True
     """FSDP2 only.
     Accepts True, False, or an int between 1 and ``fsdp_size``. See
