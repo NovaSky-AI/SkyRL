@@ -183,7 +183,7 @@ class _RDTProducerServer:
         # side only accounts — free_group moves a group from _inflight_groups to
         # _freed_pending, which the engine collects via wait_freed / end_sync to
         # drop its storage refs. _lookahead is engine-enforced, unused here.
-        self._lookahead = max(1, gather_lookahead)
+        self._lookahead = max(0, gather_lookahead)
         self._inflight_groups: list[int] = []
         self._name_to_group: dict[str, int] = {}
         self._freed_pending: list[int] = []
@@ -757,6 +757,15 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # enough to grow reserved memory ~1.5 GB per sync.
         self._export_ring: list[torch.Tensor | None] = []
         self._export_ring_args: list[tuple | None] = []
+        # [RDT-EXPORT-RING] Which LIVE group holds which slot, plus the slots
+        # free to hand out. A modular counter is NOT safe here: the credit gate
+        # bounds the NUMBER of unfreed groups, not their ORDER, and `wait_freed`
+        # returns groups in barrier-completion order. If group N+1 frees before
+        # group N, a counter hands group N+2 the slot group N is still being
+        # served from, and the consumer silently receives the wrong bytes.
+        # Tie each slot to its group and return it only when that group frees.
+        self._slot_of_group: dict[int, int] = {}
+        self._free_slots: list[int] = []
 
     def _rpc(self, method: str, *args: Any) -> Any:
         """Call one of the server actor's methods and block for the result.
@@ -781,9 +790,17 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         storage. Views are built exactly as ``publish_group`` rebuilds them, so
         the two sides cannot disagree about layout.
 
-        Slot safety is the existing credit invariant: the gather loop blocks
-        while ``len(_inflight) > gather_lookahead``, so group N's slot is reused
-        only by N+lookahead+1, which cannot start until N is freed everywhere.
+        Slot safety is NOT the credit gate on its own. That gate bounds how MANY
+        groups are unfreed, not the order they free in, and barriers complete out
+        of order (``pre_free`` fires at plan start; a light group can finish
+        before an earlier heavy one). Reusing slots by a modular counter
+        therefore hands a live group's buffer to a later group and silently
+        serves the wrong bytes — which is exactly what it did, see
+        ``~/default/rdt_reward_collapse_investigation.md``.
+
+        The caller instead takes ``slot_idx`` from a pool keyed by LIVE group
+        (``_slot_of_group`` / ``_free_slots``), and ``_drop_inflight`` returns a
+        slot only when its group is actually freed everywhere.
         """
         offsets: list[int] = []
         cur = 0
@@ -818,6 +835,22 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             dst.copy_(t)
             refs[name] = dst
             views[name] = (sid, str(t.dtype).split(".")[-1], list(shape), list(stride), off // esz)
+
+        # [RDT-EXPORT-RING] The bytes must be ON THE DEVICE before publish_group
+        # announces them. These `copy_`s are enqueued on THIS rank's stream, but
+        # the sidecar reads the slot from ANOTHER PROCESS over CUDA IPC, and
+        # there is no ordering between our stream and that process's. Without
+        # this sync the producer packs whatever happens to be in the slot when it
+        # gets there -- silently, and only for ring-packed tensors, since the
+        # direct path ships tensors the source produced long before.
+        #
+        # This is the bug that collapsed training: partially-stale small weights
+        # (k/v projections, norms, router) left generation plausible while the
+        # rollout/train logprob gap blew up ~50x, which produced a huge first
+        # gradient and destroyed the policy in one step. See
+        # ~/default/rdt_reward_collapse_investigation.md.
+        if slot.is_cuda:
+            torch.cuda.current_stream(slot.device).synchronize()
         return {sid: reduce_args}, views, refs
 
     def _publish_async(self, group_idx: int, entries):
@@ -1231,7 +1264,13 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # only wait_freed/end_sync shrinks it, so a group freed server-side but not
         # yet collected still holds its refs and still counts. The publish window
         # drains first, so every resident group is pullable while we wait.
-        bound = max(1, self._init_info.gather_lookahead)
+        # 0 is legal and means NO pipelining: the loop waits for group N to be
+        # freed by every live consumer before gathering N+1, so exactly one
+        # group is resident and gather/publish/pull never overlap. It is a
+        # deliberate ablation baseline, not a production setting -- the sync
+        # then costs the full serialized (gather + publish + pull + free) RTT
+        # per group. 1 (the default) overlaps N+1's gather with N's pulls.
+        bound = max(0, self._init_info.gather_lookahead)
 
         # [RDT-EXPORT-RING] `bound + 1` slots is exactly the residency the credit
         # gate enforces. Small storages are packed into a slot and exported once
@@ -1239,7 +1278,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         # calls per rank per sync at 235B, each 0.5-1.5ms).
         use_ring = os.environ.get("SKYRL_RDT_EXPORT_RING", "1") not in ("0", "false", "False")
         ring_max_bytes = int(float(os.environ.get("SKYRL_RDT_EXPORT_RING_MAX_MB", "64")) * (1 << 20))
-        nslots, ring_pos = bound + 1, 0
+        nslots = bound + 1
         # data_ptr -> (storage weakref, reduce_args), this sync only. `storages`
         # is per-group, so a source that reuses a buffer across groups (the
         # expert-stack ring does) would otherwise re-export it every group. The
@@ -1250,6 +1289,11 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         if use_ring and len(getattr(self, "_export_ring", [])) != nslots:
             self._export_ring = [None] * nslots
             self._export_ring_args = [None] * nslots
+        # Slots are handed out per group and returned by _drop_inflight, so this
+        # pool must start full every sync (the previous sync ended with every
+        # group freed).
+        self._slot_of_group = {}
+        self._free_slots = list(range(nslots))
 
         try:
             for gi in self._owned_idx:
@@ -1315,11 +1359,21 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
                         tensor.storage_offset(),
                     )
                 if small:
-                    st, vw, rf = self._pack_group_for_export(small, ring_pos % nslots)
+                    # Take a slot no LIVE group is using. The gate above already
+                    # guarantees one exists (at most `bound` groups are unfreed
+                    # and there are `bound + 1` slots), so this loop is a
+                    # backstop, not the normal path — but it must drain publishes
+                    # before blocking, exactly like the credit gate.
+                    while not self._free_slots:
+                        while pending_publish:
+                            self._await_publish(pending_publish.pop(0))
+                        self._drop_inflight(self._rpc("wait_freed"))
+                    slot_idx = self._free_slots.pop(0)
+                    self._slot_of_group[gi] = slot_idx
+                    st, vw, rf = self._pack_group_for_export(small, slot_idx)
                     storages.update(st)
                     views.update(vw)
                     refs.update(rf)
-                    ring_pos += 1
                 del small
                 _t_exp += time.perf_counter() - _te
                 del tensors
@@ -1362,8 +1416,23 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             self._export_ring_args = [None] * len(getattr(self, "_export_ring", []))
 
     def _drop_inflight(self, freed_keys: list) -> None:
+        """Release a freed group's refs AND its export-ring slot.
+
+        Returning the slot here — rather than assuming FIFO reuse — is what makes
+        the ring safe: a group's slot becomes reusable exactly when every live
+        consumer has finished with that group, whatever order the groups complete
+        in.
+        """
+        free_slots = getattr(self, "_free_slots", None)
+        slot_of_group = getattr(self, "_slot_of_group", None)
         for k in freed_keys:
-            self._inflight.pop(int(k), None)
+            gi = int(k)
+            self._inflight.pop(gi, None)
+            if slot_of_group is None:
+                continue
+            slot = slot_of_group.pop(gi, None)
+            if slot is not None and free_slots is not None and slot not in free_slots:
+                free_slots.append(slot)
 
     # ---------------- misc ----------------
 

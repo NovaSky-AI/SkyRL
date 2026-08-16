@@ -1408,10 +1408,12 @@ class RdtWeightSyncSender:
         # above. Fail-soft — never let timing collection break a sync.
         try:
             if hasattr(self._engine, "get_sync_timing"):
-                _loguru.info("[rdt-sync-timing] sync_timing=%s", self._engine.get_sync_timing())
+                # loguru formats with str.format, NOT %-style: a "%s" message with
+                # args renders the literal message and silently drops the dict.
+                _loguru.info("[rdt-sync-timing] sync_timing={}", self._engine.get_sync_timing())
             if hasattr(self._engine, "get_produce_timing"):
                 produce_timing = await asyncio.to_thread(self._engine.get_produce_timing)
-                _loguru.info("[rdt-sync-timing] produce_timing=%s", produce_timing)
+                _loguru.info("[rdt-sync-timing] produce_timing={}", produce_timing)
         except Exception:
             logger.exception("[rdt-sync-timing] failed to collect timing (ignored)")
 
@@ -1434,6 +1436,17 @@ class RdtWeightSyncSender:
         )
         dtype = str_to_torch_dtype(self._ie_cfg.model_dtype)
         source = make_weight_source(weight_extractor, dtype)
+        # Positive configuration tripwire. make_weight_source's own logs use the
+        # vLLM logger, which does NOT forward to the driver log from a Megatron
+        # rank actor (only loguru does), and the STACKED_EXPERTS=0 short-circuit
+        # logs nothing at all -- so an ablation could silently run the wrong
+        # source. Log the CHOSEN CLASS (not the env var) plus both knobs.
+        _loguru.info(
+            "[rdt-config] source={} lookahead_env={} stacked_experts_env={}",
+            type(source).__name__,
+            os.environ.get("SKYRL_RDT_LOOKAHEAD", "<default>"),
+            os.environ.get("SKYRL_RDT_STACKED_EXPERTS", "<default>"),
+        )
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
         # Pipeline-depth knobs are env-driven (SKYRL_* env vars are forwarded

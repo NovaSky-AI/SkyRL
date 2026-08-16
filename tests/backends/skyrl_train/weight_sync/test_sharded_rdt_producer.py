@@ -762,3 +762,130 @@ class TestExportRing:
         eng._pack_group_for_export([("a", torch.randn(8, 8).bfloat16())], 0)
         eng._pack_group_for_export([("b", torch.randn(8, 8).bfloat16())], 1)
         assert eng._export_ring[0].data_ptr() != eng._export_ring[1].data_ptr()
+
+
+class TestExportRingSlotSafety:
+    """The export ring packs every small storage of a group into ONE reused
+    buffer and ships per-name views into it. A slot may therefore be rewritten
+    only once the group that last used it is freed EVERYWHERE — otherwise the
+    consumer pulls that group's names and receives a later group's bytes, with
+    nothing downstream to notice.
+
+    The credit gate alone does not establish this. It bounds how MANY groups are
+    unfreed, not the ORDER they free in, and barriers complete out of order in
+    practice: `pre_free` fires at plan start for a group a consumer pulls nothing
+    from, and a light group can finish before an earlier heavy one. Assigning
+    slots by a modular counter therefore corrupted weights silently — the cause
+    of the reward collapse (see ~/default/rdt_reward_collapse_investigation.md).
+    """
+
+    @pytest.fixture
+    def gather_engine(self, monkeypatch):
+        """Same CPU seam as TestGatherCredit's fixture (class-scoped there)."""
+        monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self)
+        monkeypatch.setattr(
+            trainer_mod,
+            "reduce_tensor",
+            lambda base: (None, (base.numel(), None, None, None, None, None, -1, None)),
+        )
+        return _loop_engine
+
+    def test_a_slot_is_never_rewritten_while_its_group_is_still_live(self, server_factory, gather_engine):
+        """Consumer frees OUT OF ORDER (1 before 0, 3 before 2, ...), which is
+        what the modular counter got wrong: with lookahead=1 there are 2 slots,
+        so group 2 took group 0's slot while group 0 was still unfreed."""
+        server = server_factory(gather_lookahead=1)
+        n_groups = 8
+        engine = gather_engine(server, n_groups, lookahead=1)
+
+        violations: list[tuple[int, int]] = []
+        last_holder: dict[int, int] = {}
+        pending: dict[str, int] = {}
+
+        orig_pack = engine._pack_group_for_export
+
+        def _pack(held, slot_idx):
+            prev = last_holder.get(slot_idx)
+            if prev is not None and prev in engine._inflight:
+                violations.append((slot_idx, prev))
+            pending["slot"] = slot_idx
+            return orig_pack(held, slot_idx)
+
+        engine._pack_group_for_export = _pack
+
+        orig_pub = engine._publish_async
+
+        def _pub(group_idx, entries):
+            if "slot" in pending:
+                last_holder[pending.pop("slot")] = group_idx
+            return orig_pub(group_idx, entries)
+
+        engine._publish_async = _pub
+
+        def _await_published(gi: int) -> bool:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                with server._cache_cond:
+                    if gi in server._group_names:
+                        return True
+                time.sleep(0.002)
+            return False
+
+        def _consumer():
+            # Free the LATER group of each pair first, then hold the earlier one
+            # live until the NEXT group has been gathered. That is the window the
+            # modular counter got wrong: group base+2 packs while group base is
+            # still being served.
+            for base in range(0, n_groups, 2):
+                later, earlier = base + 1, base
+                if not _await_published(later):
+                    return
+                server.free_group(later)
+                nxt = base + 2
+                if nxt < n_groups and not _await_published(nxt):
+                    return
+                server.free_group(earlier)
+
+        consumer = threading.Thread(target=_consumer, daemon=True)
+        consumer.start()
+        engine._run_gather_loop(update_future=None, live_count=1)
+        consumer.join(timeout=15)
+
+        assert not violations, f"ring slot rewritten while its group was still live: {violations}"
+        assert engine._inflight == {}, "everything must be freed by end_sync"
+
+    def test_distinct_live_groups_never_share_a_slot(self, server_factory, gather_engine):
+        """The bookkeeping invariant behind the fix: at any moment, the slots
+        held by unfreed groups are distinct."""
+        server = server_factory(gather_lookahead=1)
+        engine = gather_engine(server, 6, lookahead=1)
+
+        seen: list[dict] = []
+        orig_pack = engine._pack_group_for_export
+
+        def _pack(held, slot_idx):
+            live = {g: s for g, s in engine._slot_of_group.items() if g in engine._inflight}
+            seen.append({"slot": slot_idx, "live": live})
+            return orig_pack(held, slot_idx)
+
+        engine._pack_group_for_export = _pack
+
+        def _consumer():
+            for gi in range(6):
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    with server._cache_cond:
+                        if gi in server._group_names:
+                            break
+                    time.sleep(0.002)
+                else:
+                    return
+                server.free_group(gi)
+
+        consumer = threading.Thread(target=_consumer, daemon=True)
+        consumer.start()
+        engine._run_gather_loop(update_future=None, live_count=1)
+        consumer.join(timeout=15)
+
+        for rec in seen:
+            assert rec["slot"] not in rec["live"].values(), f"slot {rec['slot']} was already held by a live group: {rec}"
