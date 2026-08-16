@@ -89,7 +89,9 @@ class KVCache:
             # jax-mps does not yet support the batched scatter produced by
             # vmap(dynamic_update_slice).
             max_start = max(k_cache.shape[1] - k.shape[1], 0)
-            update_start = jnp.clip(positions[:, :1], 0, max_start)
+            update_start = positions[:, :1]
+            update_start = jnp.where(update_start < 0, update_start + k_cache.shape[1], update_start)
+            update_start = jnp.clip(update_start, 0, max_start)
             update_positions = update_start + jnp.arange(k.shape[1])[None, :]
             update_mask = jnp.arange(k_cache.shape[1])[None, :, None] == update_positions[:, None, :]
 
