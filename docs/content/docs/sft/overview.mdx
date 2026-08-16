@@ -48,6 +48,8 @@ it through `model.bitsandbytes_4bit`; `quant_type` accepts `nf4` or `fp4`, and
 attention layout is incompatible with this FlashAttention 2 path. SDPA requires
 `remove_microbatch_padding=false`, as set in the example. Multi-GPU FSDP keeps
 packed 4-bit weights uncast during all-gathers while using BF16 for computation.
+Single-GPU 4-bit training skips FSDP wrapping, so keep `fsdp_config.cpu_offload=false`
+to use SkyRL's manual phase offload.
 
 ### Megatron (multi-GPU with TP/PP)
 

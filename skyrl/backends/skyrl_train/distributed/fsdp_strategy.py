@@ -231,6 +231,12 @@ class FSDPStrategy(DistributedStrategy):
         module = model.model if is_wrapped else model
 
         if self.is_4bit and self.world_size == 1:
+            if self.fsdp_config.cpu_offload:
+                raise ValueError(
+                    "fsdp_config.cpu_offload=true is unsupported for single-rank 4-bit training because "
+                    "the model is not FSDP-wrapped. Set fsdp_config.cpu_offload=false to use SkyRL's "
+                    "manual phase offload."
+                )
             return module
 
         # Params4bit cannot be moved through the meta device. Each rank already

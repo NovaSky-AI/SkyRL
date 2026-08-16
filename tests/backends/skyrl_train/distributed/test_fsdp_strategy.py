@@ -1,3 +1,4 @@
+import pytest
 import torch
 import torch.nn as nn
 
@@ -24,3 +25,14 @@ def test_4bit_fsdp_does_not_cast_packed_parameters(monkeypatch):
     policy = captured_kwargs["mp_policy"]
     assert policy.param_dtype is None
     assert policy.reduce_dtype is torch.float32
+
+
+def test_single_rank_4bit_rejects_native_cpu_offload():
+    strategy = fsdp_strategy.FSDPStrategy(
+        fsdp_config=FSDPConfig(cpu_offload=True),
+        model_config=ModelConfig(bitsandbytes_4bit=BitsAndBytes4BitConfig(enabled=True)),
+    )
+    strategy.world_size = 1
+
+    with pytest.raises(ValueError, match="single-rank 4-bit training"):
+        strategy._fsdp_init_model(nn.Linear(2, 2))
