@@ -330,6 +330,7 @@ def test_resume_can_skip_training_states(dummy_config, tmp_path: Path, load_glob
 
     assert global_step == expected_global_step
     assert loaded_path == str(checkpoint_path)
+    assert trainer._dataloader_state_restored is False
     trainer.train_dataloader.load_state_dict.assert_not_called()
     trainer.dispatch.load_checkpoint.assert_called_once_with(
         "policy",
@@ -337,6 +338,38 @@ def test_resume_can_skip_training_states(dummy_config, tmp_path: Path, load_glob
         load_optimizer_states=False,
         load_lr_scheduler_states=False,
     )
+
+
+def test_resume_records_successful_dataloader_state_restore(dummy_config, tmp_path: Path):
+    checkpoint_path = tmp_path / "global_step_7"
+    (checkpoint_path / "policy").mkdir(parents=True)
+    torch.save({"global_step": 7}, checkpoint_path / "trainer_state.pt")
+    torch.save({"position": 5}, checkpoint_path / "data.pt")
+
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.train_dataloader = MagicMock()
+    trainer.dispatch = MagicMock()
+
+    assert trainer.load_checkpoints() == (7, str(checkpoint_path))
+    assert trainer._dataloader_state_restored is True
+    trainer.train_dataloader.load_state_dict.assert_called_once_with({"position": 5})
+
+
+@pytest.mark.parametrize(
+    ("global_step", "state_restored", "expected"),
+    [(7, False, 1), (8, False, 4), (7, True, None), (0, False, None)],
+)
+def test_resumed_epoch_steps_remaining(global_step, state_restored, expected):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.global_step = global_step
+    trainer._dataloader_state_restored = state_restored
+    trainer.train_dataloader = [object()] * 4
+
+    assert trainer._get_resumed_epoch_steps_remaining() == expected
 
 
 def test_resume_without_train_dataloader_skips_cursor_restore(dummy_config, tmp_path: Path):

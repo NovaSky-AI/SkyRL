@@ -122,6 +122,7 @@ class RayPPOTrainer:
         self.inference_engine_client = inference_engine_client
         self.generator = generator
         self.train_dataloader = None
+        self._dataloader_state_restored = False
         self.total_training_steps = None
         self._build_train_dataloader_and_compute_training_steps()
 
@@ -187,6 +188,13 @@ class RayPPOTrainer:
         """Build a CallbackInput and dispatch the given event to all callbacks."""
         cb_input = self._build_callback_input(**fields)
         getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
+
+    def _get_resumed_epoch_steps_remaining(self) -> Optional[int]:
+        """Bound the first resumed epoch when the global step is kept but the data cursor is not."""
+        if self.global_step == 0 or self._dataloader_state_restored:
+            return None
+        steps_per_epoch = len(self.train_dataloader)
+        return steps_per_epoch - (self.global_step % steps_per_epoch)
 
     @property
     def has_critic(self) -> bool:
@@ -291,6 +299,7 @@ class RayPPOTrainer:
         # Compute start_epoch up-front so callback metadata is ready before
         # any event fires (including the baseline eval below).
         start_epoch = self.global_step // len(self.train_dataloader)
+        resumed_epoch_steps_remaining = self._get_resumed_epoch_steps_remaining()
         self._current_epoch = start_epoch
         self._training_control.reset()
 
@@ -542,6 +551,9 @@ class RayPPOTrainer:
                     # update progress bar after logging
                     pbar.update(1)
 
+                    if resumed_epoch_steps_remaining is not None and epoch == start_epoch:
+                        resumed_epoch_steps_remaining -= 1
+
                     self.global_step += 1
 
                     if (
@@ -555,6 +567,9 @@ class RayPPOTrainer:
                         break
 
                     del training_input, generator_output
+
+                    if resumed_epoch_steps_remaining == 0 and epoch == start_epoch:
+                        break
 
                 self._fire("on_epoch_end")
 
@@ -1801,6 +1816,7 @@ class RayPPOTrainer:
             )
 
         # 2. Load dataloader state if requested and available
+        self._dataloader_state_restored = False
         if self.train_dataloader is None:
             logger.info("No train dataloader initialized; skipping dataloader state restore")
         elif not self.cfg.trainer.resume_load_dataloader_state:
@@ -1810,6 +1826,7 @@ class RayPPOTrainer:
                 with io.open_file(dataloader_state_path, "rb") as f:
                     dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
                 self.train_dataloader.load_state_dict(dataloader_state)
+                self._dataloader_state_restored = True
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:
                 logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
