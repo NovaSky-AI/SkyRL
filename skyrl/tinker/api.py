@@ -1091,7 +1091,7 @@ async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackw
     ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
     """
     body = await request.body()
-    if PROTO_CONTENT_TYPE in request.headers.get("content-type", ""):
+    if PROTO_CONTENT_TYPE in request.headers.get("content-type", "").lower():
         try:
             request_dict, forward_only = parse_forward_backward_request(body)
         except (DecodeError, ValueError) as e:
@@ -1366,9 +1366,10 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
         # The SDK retrieves sample/forward/forward_backward results in proto
         # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
         # for these types. Errors and other result types stay JSON.
-        if types.RequestType(
-            request_type
-        ) in PROTO_SERIALIZABLE_REQUEST_TYPES and PROTO_CONTENT_TYPE in req.headers.get("accept", ""):
+        if (
+            types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
+            and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
+        ):
             return Response(
                 content=serialize_result(types.RequestType(request_type), json.loads(result_data)),
                 media_type=PROTO_CONTENT_TYPE,
