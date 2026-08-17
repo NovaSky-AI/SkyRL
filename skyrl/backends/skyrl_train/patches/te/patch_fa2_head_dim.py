@@ -21,6 +21,15 @@ inline boolean clause, so there is no sub-function seam to override -- we
 recompile that one function with the clause removed and rebind it on its
 module. Its only caller resolves it as a module attribute
 (``dpa_utils.get_attention_backend``), so the rebind is picked up.
+
+DELETE THIS PATCH once the transformer-engine pin moves to a release that
+contains #3360. This is a temporary backport of an upstream fix, not a SkyRL
+behavior change, and it has no reason to outlive the pin it works around.
+It fails safe in the meantime: the match below is against the literal 2.16.0
+source text, and TE expresses the same check against ``fa2_padded_head_dim``
+after the padding refactor, so on a newer TE this logs and no-ops rather than
+misfiring. That means a stale copy is quiet rather than harmful -- which also
+means nothing will alert you to remove it. Check this file when bumping TE.
 """
 
 import inspect
@@ -93,9 +102,12 @@ def patch_fa2_head_dim_allowlist(force: bool = False) -> bool:
         return False
 
     if _SM_ALLOWLIST_CLAUSE not in source:
+        # Most likely the TE pin moved past 2.16.0 and picked up #3360, in which
+        # case this whole module should be deleted rather than left to no-op.
         logger.info(
             "TE get_attention_backend does not contain the sm allowlist for head_dim > 192 "
-            "(likely fixed or refactored upstream); skipping FA2 head_dim patch"
+            "(likely fixed or refactored upstream); skipping FA2 head_dim patch. "
+            "If TE now includes NVIDIA/TransformerEngine#3360, delete this patch module."
         )
         return False
 
