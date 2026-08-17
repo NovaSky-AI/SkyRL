@@ -24,6 +24,18 @@ Key strategies:
 
 Note: Sequence parallelism is auto-enabled when `tensor_model_parallel_size > 1` — there is no separate config field for it.
 
+## Expert MXFP8
+
+Set `trainer.policy.model.expert_mxfp8.enabled=true` on SM100/SM103 to apply
+Transformer Engine MXFP8 only to routed expert linears. Set
+`persistent=true` with `ddp_config.fp8_param_gather=true` to keep those
+primary parameters in MXFP8 between optimizer steps.
+
+Use `generator.inference_engine.serialized_weight_sync_mode=mxfp8`
+with NCCL/CUDA-IPC to send expert E4M3 data and E8M0 scales to vLLM. Delta
+sync remains a dense pre-quantization transport and cannot consume serialized
+quantization chunks.
+
 ## Test Requirements
 
 Megatron GPU tests need: `NVTE_FLASH_ATTN=0`

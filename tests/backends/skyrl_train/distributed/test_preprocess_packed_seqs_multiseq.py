@@ -185,24 +185,24 @@ class TestSubSeqLengths:
         The intra-row offsets read by preprocess must match the
         collator's row layout, which advances ``row_offset += round_up(s,
         align_size)`` between sub-seqs. So with sub-seqs of length 3 and
-        5 and tp_size=4, the collator places sub-seq 1 at row column 16
-        (after the FP8/TP alignment pad gap), NOT row column 3.
+        5 and tp_size=4, the collator places sub-seq 1 at row column
+        ``align_size`` after the FP8/TP alignment gap, not row column 3.
         """
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
             preprocess_packed_seqs,
         )
 
-        seq_len = 48
         batch_size = 1
 
-        # Two sub-seqs of length 3 and 5; tp_size=4 still pads each to 16
-        # for Transformer Engine FP8 compatibility.
+        # Each sequence uses a global footprint that leaves TP-local inputs
+        # aligned to 128 tokens.
         align_size = _get_align_size(tp_size=4, cp_size=1, fp8_enabled=True)
+        seq_len = 2 * align_size
         # Row layout mirrors what PackedDataCollator produces:
-        # row[0:3]   = sub-seq 0 tokens
-        # row[3:16]  = alignment pad (zero)
-        # row[16:21] = sub-seq 1 tokens
-        # row[21:32] = alignment pad (zero)
+        # row[0:3]                         = sub-seq 0 tokens
+        # row[3:align_size]                = alignment pad (zero)
+        # row[align_size:align_size + 5]   = sub-seq 1 tokens
+        # row[align_size + 5:2*align_size] = alignment pad (zero)
         input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
         input_ids[0, :3] = torch.tensor([1, 2, 3])
         input_ids[0, align_size : align_size + 5] = torch.tensor([10, 11, 12, 13, 14])
@@ -222,11 +222,11 @@ class TestSubSeqLengths:
                 fp8_enabled=True,
             )
 
-        assert params.cu_seqlens_q.tolist() == [0, 16, 32]
-        assert packed.shape == (1, 32)
+        assert params.cu_seqlens_q.tolist() == [0, align_size, 2 * align_size]
+        assert packed.shape == (1, 2 * align_size)
         assert packed[0, :3].tolist() == [1, 2, 3]
-        assert packed[0, 3:16].tolist() == [0] * 13
-        assert packed[0, 16:21].tolist() == [10, 11, 12, 13, 14]
+        assert packed[0, 3:align_size].tolist() == [0] * (align_size - 3)
+        assert packed[0, align_size : align_size + 5].tolist() == [10, 11, 12, 13, 14]
 
     def test_multiple_bin_rows(self):
         """Two bin rows, each with two sub-seqs, produce 4+1 cu_seqlens entries."""

@@ -10,6 +10,11 @@ from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap impo
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.quantization import (
+    MXFP8,
+    get_quantized_model_layout,
+    get_serialized_weight_strategy,
+)
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 from skyrl.train.config import (
     InferenceEngineConfig,
@@ -18,6 +23,107 @@ from skyrl.train.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _load_serialized_quantization_context(strategy, model_path: Optional[str]):
+    if not model_path:
+        raise ValueError("A model path is required when serialized weight sync is enabled")
+    try:
+        from transformers import AutoConfig
+
+        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not inspect the model config required for serialized weight sync: " f"model_path={model_path!r}"
+        ) from exc
+    layout = get_quantized_model_layout(hf_config)
+    strategy.validate_layout(layout)
+    return hf_config, layout
+
+
+def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
+    if key in mapping and mapping[key] != expected:
+        raise ValueError(
+            f"{context}.{key} must be {expected!r} when serialized weight sync is enabled, " f"got {mapping[key]!r}"
+        )
+    mapping[key] = copy.deepcopy(expected)
+
+
+def _apply_serialized_weight_sync_defaults(
+    ie_cfg: InferenceEngineConfig,
+    engine_kwargs: Dict[str, Any],
+    model_path: Optional[str] = None,
+) -> None:
+    """Configure vLLM for strategy-driven checkpoint weight reloads."""
+
+    mode = ie_cfg.serialized_weight_sync_mode
+    if mode is None:
+        return
+    strategy = get_serialized_weight_strategy(mode)
+    if strategy.required_model_dtype is not None and ie_cfg.model_dtype != strategy.required_model_dtype:
+        raise ValueError(f"{mode} weight sync requires model_dtype={strategy.required_model_dtype!r}")
+
+    _set_or_validate(
+        engine_kwargs,
+        "quantization",
+        strategy.vllm_quantization,
+        context="engine_init_kwargs",
+    )
+    _set_or_validate(
+        engine_kwargs,
+        "load_format",
+        strategy.vllm_load_format,
+        context="engine_init_kwargs",
+    )
+
+    hf_overrides_value = engine_kwargs.get("hf_overrides")
+    hf_overrides = {} if hf_overrides_value is None else copy.deepcopy(hf_overrides_value)
+    if not isinstance(hf_overrides, dict):
+        raise ValueError("engine_init_kwargs.hf_overrides must be a dict when serialized weight sync is enabled")
+
+    qcfg_value = hf_overrides.get("quantization_config")
+    qcfg = {} if qcfg_value is None else copy.deepcopy(qcfg_value)
+    if not isinstance(qcfg, dict):
+        raise ValueError(
+            "engine_init_kwargs.hf_overrides.quantization_config must be a dict "
+            "when serialized weight sync is enabled"
+        )
+
+    hf_config, layout = _load_serialized_quantization_context(strategy, model_path)
+    quantization_config = strategy.vllm_quantization_config(ie_cfg, hf_config, layout)
+    ignored_layers = quantization_config.get("ignored_layers", [])
+    if ignored_layers:
+        logger.info(
+            "Serialized weight sync will leave %d vLLM modules unquantized.",
+            len(ignored_layers),
+        )
+
+    for key, value in quantization_config.items():
+        _set_or_validate(
+            qcfg,
+            key,
+            value,
+            context="engine_init_kwargs.hf_overrides.quantization_config",
+        )
+    hf_overrides["quantization_config"] = qcfg
+    engine_kwargs["hf_overrides"] = hf_overrides
+
+
+def apply_expert_mxfp8_rollout_config(args: Namespace, cfg: SkyRLTrainConfig, engine_kwargs: dict) -> None:
+    """Configure online expert MXFP8 when weights are not serialized."""
+
+    expert_mxfp8 = cfg.trainer.policy.model.expert_mxfp8
+    if not expert_mxfp8.enabled or not expert_mxfp8.rollout:
+        return
+    if cfg.generator.inference_engine.serialized_weight_sync_mode == MXFP8:
+        return
+    if cfg.generator.inference_engine.model_dtype not in ("bfloat16", "float16"):
+        raise ValueError("Expert MXFP8 rollout requires model_dtype=bfloat16 or float16")
+    conflicts = {"quantization", "quantization_config"} & engine_kwargs.keys()
+    if conflicts:
+        raise ValueError(f"Expert MXFP8 conflicts with engine_init_kwargs: {sorted(conflicts)}")
+    args.quantization = "online"
+    args.quantization_config = {"moe": "mxfp8"}
 
 
 def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
@@ -155,6 +261,12 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    _apply_serialized_weight_sync_defaults(
+        ie_cfg,
+        engine_kwargs,
+        cfg.trainer.policy.model.path,
+    )
+    apply_expert_mxfp8_rollout_config(args, cfg, engine_kwargs)
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
 
