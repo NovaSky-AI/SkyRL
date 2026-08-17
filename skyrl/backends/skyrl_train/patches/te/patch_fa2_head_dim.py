@@ -87,13 +87,20 @@ def patch_fa2_head_dim_allowlist(force: bool = False) -> bool:
         return True
 
     if not force:
-        compute_capability = dpa_utils.get_device_compute_capability()
-        if compute_capability in _UNAFFECTED_COMPUTE_CAPABILITIES:
-            logger.debug(
-                "sm{} is already allowed by TE; skipping FA2 head_dim patch",
-                ".".join(str(i) for i in compute_capability),
-            )
-            return False
+        # Looked up defensively: this guard only narrows the blast radius, so if TE
+        # ever renames it we fall through to the source match below, which is the
+        # real version gate.
+        get_compute_capability = getattr(dpa_utils, "get_device_compute_capability", None)
+        if get_compute_capability is None:
+            logger.debug("TE has no get_device_compute_capability; skipping the sm guard")
+        else:
+            compute_capability = get_compute_capability()
+            if compute_capability in _UNAFFECTED_COMPUTE_CAPABILITIES:
+                logger.debug(
+                    "sm{} is already allowed by TE; skipping FA2 head_dim patch",
+                    ".".join(str(i) for i in compute_capability),
+                )
+                return False
 
     try:
         source = inspect.getsource(target)
