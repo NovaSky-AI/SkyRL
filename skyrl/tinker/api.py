@@ -1124,21 +1124,15 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
     )
 
 
-async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardRequest, bool]:
-    """Read a forward_backward body in either wire format.
-
-    SDKs use protobuf and zstd when the client-config handshake enables them.
-    Forward-only passes use the proto's ``forward_only`` flag; clients that do
-    not support the negotiated path keep sending JSON to the legacy endpoints.
-    """
-    body = await req.body()
-    content_type = req.headers.get("content-type", "").lower()
-    content_encoding = req.headers.get("content-encoding", "").lower().strip()
+def _decode_forward_backward_request(
+    body: bytes, content_type: str, content_encoding: str
+) -> tuple[ForwardBackwardRequest, bool]:
+    """Decode and validate a forward_backward body in either wire format."""
     if content_encoding:
         if content_encoding != "zstd" or PROTO_CONTENT_TYPE not in content_type:
             raise HTTPException(status_code=415, detail=f"Unsupported content encoding: {content_encoding}")
         try:
-            body = await asyncio.to_thread(_decompress_forward_backward_body, body)
+            body = _decompress_forward_backward_body(body)
         except OverflowError:
             raise HTTPException(status_code=413, detail="Decompressed forward_backward body is too large")
         except zstd.ZstdError as e:
@@ -1160,17 +1154,31 @@ async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardR
         raise FastAPIRequestValidationError(e.errors())
 
 
+async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardRequest, bool]:
+    """Read a forward_backward body without blocking the API event loop.
+
+    SDKs use protobuf and zstd when the client-config handshake enables them.
+    Forward-only passes use the proto's ``forward_only`` flag; clients that do
+    not support the negotiated path keep sending JSON to the legacy endpoints.
+    """
+    body = await req.body()
+    content_type = req.headers.get("content-type", "").lower()
+    content_encoding = req.headers.get("content-encoding", "").lower().strip()
+    return await asyncio.to_thread(_decode_forward_backward_request, body, content_type, content_encoding)
+
+
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
 async def forward_backward(req: Request, session: AsyncSession = Depends(get_session)):
     """Compute and accumulate gradients (or run forward-only when the proto body asks for it)."""
     request, forward_only = await _read_forward_backward_request(req)
     await get_model(session, request.model_id)
+    request_data = await asyncio.to_thread(request.forward_backward_input.to_types)
 
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
-        request_data=request.forward_backward_input.to_types(),
+        request_data=request_data,
         seq_id=request.seq_id,
     )
 

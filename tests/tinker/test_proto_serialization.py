@@ -7,6 +7,7 @@ against the exact code the client runs.
 """
 
 import math
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -229,6 +230,25 @@ async def test_read_compressed_forward_backward_request():
     assert not forward_only
     assert request.model_id == "model_abc"
     assert request.seq_id == 1
+
+
+@pytest.mark.asyncio
+async def test_read_forward_backward_request_decodes_off_event_loop(monkeypatch):
+    event_loop_thread = threading.get_ident()
+    decoder_thread = None
+    decode = api._decode_forward_backward_request
+
+    def record_decoder_thread(*args):
+        nonlocal decoder_thread
+        decoder_thread = threading.get_ident()
+        return decode(*args)
+
+    monkeypatch.setattr(api, "_decode_forward_backward_request", record_decoder_thread)
+    await api._read_forward_backward_request(
+        _request_with_body(encode_sdk_fwd_bwd_request(), {"content-type": "application/x-protobuf"})
+    )
+
+    assert decoder_thread != event_loop_thread
 
 
 @pytest.mark.asyncio
