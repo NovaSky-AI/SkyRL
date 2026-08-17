@@ -28,9 +28,15 @@ from skyrl.tinker import types
 PROTO_CONTENT_TYPE = "application/x-protobuf"
 
 # Request types whose results the SDK can retrieve in proto form. All other
-# results are only ever served as JSON.
+# results are only ever served as JSON. EXTERNAL is a sample forwarded to
+# external/backend inference engines; its result_data is a SampleOutput dump.
 PROTO_SERIALIZABLE_REQUEST_TYPES = frozenset(
-    {types.RequestType.SAMPLE, types.RequestType.FORWARD, types.RequestType.FORWARD_BACKWARD}
+    {
+        types.RequestType.SAMPLE,
+        types.RequestType.EXTERNAL,
+        types.RequestType.FORWARD,
+        types.RequestType.FORWARD_BACKWARD,
+    }
 )
 
 # Sentinel fill for undefined top-k positions; must match the SDK's
@@ -106,7 +112,7 @@ def _tensor_from_proto(tensor: pb.Tensor) -> dict:
 
 def serialize_result(request_type: types.RequestType, result_data: dict) -> bytes:
     """Serialize a completed future's result_data dict to proto wire bytes."""
-    if request_type == types.RequestType.SAMPLE:
+    if request_type in (types.RequestType.SAMPLE, types.RequestType.EXTERNAL):
         return _serialize_sample_output(result_data)
     if request_type in (types.RequestType.FORWARD, types.RequestType.FORWARD_BACKWARD):
         return _serialize_forward_backward_output(result_data)

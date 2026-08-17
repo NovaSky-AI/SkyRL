@@ -147,6 +147,15 @@ def test_forward_uses_forward_backward_wire_type():
     np.testing.assert_allclose(output.loss_fn_outputs[0]["logprobs"].tolist(), [-0.5])
 
 
+def test_external_sample_serializes_as_sample_response():
+    """EXTERNAL futures (samples forwarded to external inference engines) must
+    serialize as SampleResponse like SAMPLE ones."""
+    result_data = {"sequences": [{"stop_reason": "stop", "tokens": [5, 6], "logprobs": [-0.5, -1.0]}]}
+    proto_bytes = serialize_result(types.RequestType.EXTERNAL, result_data)
+    response = deserialize_proto_response(proto_bytes, SampleResponse)
+    assert response.sequences[0].tokens == [5, 6]
+
+
 def test_unsupported_request_type_raises():
     with pytest.raises(ValueError, match="No proto serialization"):
         serialize_result(types.RequestType.OPTIM_STEP, {})
