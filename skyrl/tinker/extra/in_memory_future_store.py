@@ -1,6 +1,7 @@
 import asyncio
 import itertools
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from skyrl.tinker.db_models import RequestStatus
@@ -22,6 +23,7 @@ class InMemoryFutureStore:
         self._max_terminal_futures = max_terminal_futures
         self._next_id = itertools.count(start=-1, step=-1)
         self._futures: dict[int, _StoredFuture] = {}
+        self._terminal_futures: deque[tuple[float, int]] = deque()
 
     def create_future(self) -> int:
         self._cleanup_terminal_futures()
@@ -34,7 +36,9 @@ class InMemoryFutureStore:
         future.status = status
         future.result_data = result_data
         future.completed_at = time.monotonic()
+        self._terminal_futures.append((future.completed_at, request_id))
         future.event.set()
+        self._cleanup_terminal_futures()
 
     async def wait_for_future(self, request_id: int, timeout: float) -> tuple[RequestStatus, str | None] | None:
         future = self._futures.get(request_id)
@@ -49,19 +53,9 @@ class InMemoryFutureStore:
 
     def _cleanup_terminal_futures(self) -> None:
         now = time.monotonic()
-        expired = [
-            request_id
-            for request_id, future in self._futures.items()
-            if future.completed_at is not None and now - future.completed_at > self._terminal_retention_sec
-        ]
-        for request_id in expired:
-            del self._futures[request_id]
-
-        terminal = sorted(
-            (future.completed_at, request_id)
-            for request_id, future in self._futures.items()
-            if future.completed_at is not None
-        )
-        overflow = len(terminal) - self._max_terminal_futures
-        for _, request_id in terminal[: max(overflow, 0)]:
+        while self._terminal_futures and (
+            now - self._terminal_futures[0][0] > self._terminal_retention_sec
+            or len(self._terminal_futures) > self._max_terminal_futures
+        ):
+            _, request_id = self._terminal_futures.popleft()
             del self._futures[request_id]
