@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Callable
 
@@ -377,6 +378,56 @@ class TinkerEngine:
         )
         return dict(session.exec(query).all())
 
+    def _find_next_sequence_ids(self, session: Session) -> dict[str, int]:
+        """Derive each model's next SDK sequence from its persisted futures."""
+        query = (
+            select(FutureDB.model_id, func.max(FutureDB.seq_id))
+            .where(FutureDB.seq_id.is_not(None))
+            .where(FutureDB.status != RequestStatus.PENDING)
+            .group_by(FutureDB.model_id)
+        )
+        return {model_id: last_seq_id + 1 for model_id, last_seq_id in session.exec(query).all()}
+
+    def _find_sequenced_requests(
+        self, session: Session, request_types: set[types.RequestType]
+    ) -> list[tuple[int, str, types.RequestType]]:
+        """Find each model's leading contiguous SDK requests while their types are allowed."""
+        next_sequence_ids = self._find_next_sequence_ids(session)
+        pending = session.exec(
+            select(FutureDB.request_id, FutureDB.model_id, FutureDB.seq_id, FutureDB.request_type)
+            .where(FutureDB.seq_id.is_not(None))
+            .where(FutureDB.status == RequestStatus.PENDING)
+            .order_by(FutureDB.model_id, FutureDB.seq_id)
+        ).all()
+
+        batchable = []
+        for model_id, requests in groupby(pending, key=lambda row: row.model_id):
+            requests = list(requests)
+            expected_seq_id = next_sequence_ids.get(model_id)
+            if expected_seq_id is None:
+                initial_seq_id = requests[0].seq_id
+                if initial_seq_id not in {0, 1}:
+                    continue
+                expected_seq_id = initial_seq_id
+            for request_id, _, seq_id, pending_type in requests:
+                if seq_id != expected_seq_id or pending_type not in request_types:
+                    break
+                batchable.append((request_id, model_id, pending_type))
+                expected_seq_id += 1
+        return batchable
+
+    def _find_sequenced_single_requests(self, session: Session) -> list[tuple[int, str, types.RequestType]]:
+        """Find leading contiguous SDK requests that do not run as model-pass batches."""
+        return self._find_sequenced_requests(
+            session,
+            {
+                types.RequestType.OPTIM_STEP,
+                types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
+                types.RequestType.SAVE_WEIGHTS,
+                types.RequestType.LOAD_WEIGHTS,
+            },
+        )
+
     def find_batchable_model_passes(
         self, session: Session, request_type: types.RequestType
     ) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
@@ -399,16 +450,20 @@ class TinkerEngine:
             select(FutureDB.request_id, FutureDB.model_id)
             .where(FutureDB.request_type == request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
+            .where(FutureDB.seq_id.is_(None))
             .order_by(FutureDB.request_id)
         )
         ops = session.exec(query).all()
 
         # Filter: only include ops that come before their model's barrier
         batchable = [
+            (request_id, model_id) for request_id, model_id, _ in self._find_sequenced_requests(session, {request_type})
+        ]
+        batchable.extend(
             (request_id, model_id)
             for request_id, model_id in ops
             if model_id not in barriers or request_id < barriers[model_id]
-        ]
+        )
 
         return {
             str(request_id): (model_id, types.ForwardBackwardInput.model_validate(request_data))
@@ -490,6 +545,7 @@ class TinkerEngine:
         statement = (
             select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
+            .where(FutureDB.seq_id.is_(None))
             .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.request_type != types.RequestType.FORWARD)
             .where(FutureDB.request_type != types.RequestType.SAMPLE)
@@ -499,15 +555,18 @@ class TinkerEngine:
         other_futures = session.exec(statement).all()
 
         # Filter: only include ops that come before the first blocked pass for their model
-        other_futures = [
+        legacy_futures = [
             (request_id, model_id, request_type)
             for request_id, model_id, request_type in other_futures
             if model_id not in blocked_pass_barriers or request_id < blocked_pass_barriers[model_id]
         ]
+        sequenced_futures = self._find_sequenced_single_requests(session)
 
         return {
             str(request_id): (model_id, request_type, request_data)
-            for request_id, model_id, request_type, request_data in self._load_requests(session, other_futures)
+            for request_id, model_id, request_type, request_data in self._load_requests(
+                session, sequenced_futures + legacy_futures
+            )
         }
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:

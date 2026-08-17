@@ -1254,11 +1254,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             torch.cuda.empty_cache()
 
         # Aggregate metrics across micro-batches
-        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        loss_fn_output_batches = []
         for m_batch, metrics in zip(micro_buffer, metrics_list):
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
             # Skip fully-padding microbatches: their metrics (clip_ratio=0, policy_entropy=0,
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
             # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
@@ -1302,6 +1301,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if moe_metrics:
                 for k, v in moe_metrics.items():
                     status[k] = v
+
+        if not any(loss_fn_output_batches):
+            all_loss_fn_outputs = []
+        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
+            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
+        else:
+            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
