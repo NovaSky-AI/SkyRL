@@ -129,6 +129,16 @@ class SkyRLLoraConfig(BaseConfig):
 
 
 @dataclass
+class ExpertMxfp8Config(BaseConfig):
+    """MXFP8 for routed MoE experts."""
+
+    enabled: bool = False
+    training: bool = True
+    rollout: bool = True
+    persistent: bool = False
+
+
+@dataclass
 class FakeInt4QatConfig(BaseConfig):
     """Fake-INT4 quantization-aware training for MoE experts (Megatron only).
 
@@ -167,6 +177,7 @@ class ModelConfig(BaseConfig):
     path: Optional[str] = None
     """HuggingFace model path (or local directory) for this model."""
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
+    expert_mxfp8: ExpertMxfp8Config = field(default_factory=ExpertMxfp8Config)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
 
     def __post_init__(self) -> None:
@@ -254,6 +265,7 @@ class MegatronDDPConfig(BaseConfig):
     """Keep the DDP parameter all-gather in FP8.
     Must be ``True`` when training with ``transformer_config_kwargs.fp8_param=true`` so persistent
     FP8 params stay FP8 through the distributed-optimizer all-gather."""
+    reuse_grad_buf_for_mxfp8_param_ag: bool = False
     average_in_collective: bool = True
 
 
@@ -1138,14 +1150,15 @@ class InferenceEngineConfig(BaseConfig):
     """Should match the dtype used by the inference engine.
     Also used during full-weight sync, where policy weights are cast to this dtype before being sent
     to the inference engine. The LoRA-adapter sync path exports fp32 instead."""
-    fp8_weight_sync_mode: Optional[str] = None
-    """Optional rollout weight format. ``"blockwise"`` sends FP8 checkpoint weights and
+    serialized_weight_sync_mode: Optional[str] = None
+    """Optional serialized quantization strategy. ``"blockwise"`` sends FP8 checkpoint weights and
     scales (one FP32 scale per 128x128 block) instead of ``model_dtype`` tensors, halving transfer
-    volume and letting vLLM serve FP8. Requires ``trainer.strategy="megatron"`` and a model with a
-    registered FP8 spec (see ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The
+    volume and letting vLLM serve FP8. Requires ``trainer.strategy="megatron"`` and a registered
+    model quantization layout. The
     vLLM engine settings this needs (``quantization="fp8"``, ``load_format="dummy"``, and the
     matching ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
     automatically; the first weight sync supplies real weights before any generation."""
+
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
     When ``False``, point SkyRL at an external HTTP/vLLM deployment via ``external_proxy_url`` and/or
@@ -1565,6 +1578,58 @@ class TrainerConfig(BaseConfig):
                 "`trainer.policy.megatron_config.lora_config.merge_lora=False` so weight "
                 "sync preserves the inference engine's INT4 base weights."
             )
+
+        expert_mxfp8 = self.policy.model.expert_mxfp8
+        if expert_mxfp8.enabled:
+            if self.strategy != "megatron":
+                raise ValueError("Expert MXFP8 is only supported with trainer.strategy=megatron")
+            if not expert_mxfp8.training and not expert_mxfp8.rollout:
+                raise ValueError("Expert MXFP8 must enable training, rollout, or both")
+            if self.policy.model.fake_int4_qat.enabled:
+                raise ValueError("Expert MXFP8 and fake INT4 QAT are mutually exclusive")
+            if expert_mxfp8.training:
+                if not self.policy.megatron_config.moe_grouped_gemm:
+                    raise ValueError("Expert MXFP8 training requires moe_grouped_gemm=true")
+                if self.policy.megatron_config.moe_router_dtype != "fp32":
+                    raise ValueError("Expert MXFP8 training requires moe_router_dtype=fp32")
+                transformer_overrides = self.policy.megatron_config.transformer_config_kwargs
+                conflicts = {
+                    key
+                    for key in ("fp8", "fp8_recipe", "fp8_param", "quant_recipe")
+                    if transformer_overrides.get(key) not in (None, False)
+                }
+                conflicts.update(
+                    option
+                    for option in (
+                        "fp8_dot_product_attention",
+                        "fp8_multi_head_attention",
+                        "fp8_output_proj",
+                    )
+                    if transformer_overrides.get(option)
+                )
+                if conflicts:
+                    raise ValueError(f"Expert MXFP8 conflicts with transformer_config_kwargs: {sorted(conflicts)}")
+            if expert_mxfp8.persistent:
+                if not expert_mxfp8.training:
+                    raise ValueError("Persistent expert MXFP8 requires expert_mxfp8.training=true")
+                ddp_config = self.policy.megatron_config.ddp_config
+                if not ddp_config.fp8_param_gather:
+                    raise ValueError("Persistent expert MXFP8 requires ddp_config.fp8_param_gather=true")
+                if ddp_config.overlap_param_gather:
+                    raise ValueError("Persistent expert MXFP8 does not yet support overlap_param_gather=true")
+                optimizer_kwargs = self.policy.megatron_config.optimizer_config_kwargs
+                if optimizer_kwargs.get("optimizer_cpu_offload"):
+                    raise ValueError("Persistent expert MXFP8 does not support optimizer CPU offload")
+                ddp_config.reuse_grad_buf_for_mxfp8_param_ag = True
+                optimizer_kwargs["reuse_grad_buf_for_mxfp8_param_ag"] = True
+                optimizer_kwargs["fp8_recipe"] = "mxfp8"
+                optimizer_kwargs["overlap_param_gather"] = False
+            if (
+                expert_mxfp8.rollout
+                and self.policy.model.lora.rank > 0
+                and not self.policy.megatron_config.lora_config.merge_lora
+            ):
+                raise ValueError("Expert MXFP8 rollout does not support unmerged LoRA")
 
         if self.logprobs_chunk_size is not None and (
             not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0

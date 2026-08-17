@@ -26,8 +26,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
 )
-from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+from skyrl.backends.skyrl_train.quantization import (
     BLOCKWISE_FP8,
+    MXFP8,
+    get_serialized_weight_strategy,
 )
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
@@ -576,19 +578,30 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     """
     ie_cfg = cfg.generator.inference_engine
 
-    if ie_cfg.fp8_weight_sync_mode not in (None, BLOCKWISE_FP8):
-        raise ValueError(
-            f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}; " f"expected {BLOCKWISE_FP8!r} or None"
-        )
-    if ie_cfg.fp8_weight_sync_mode == BLOCKWISE_FP8:
+    serialized_mode = ie_cfg.serialized_weight_sync_mode
+    if serialized_mode is not None:
+        strategy = get_serialized_weight_strategy(serialized_mode)
         if cfg.trainer.strategy != "megatron":
-            raise ValueError("blockwise FP8 weight sync requires trainer.strategy='megatron'")
+            raise ValueError("Serialized weight sync requires trainer.strategy='megatron'")
+        if ie_cfg.weight_sync_backend == "delta":
+            raise ValueError(
+                "Delta weight sync does not support serialized quantized chunks; "
+                "use nccl or disable serialized_weight_sync_mode"
+            )
+        if strategy.required_model_dtype is not None and ie_cfg.model_dtype != strategy.required_model_dtype:
+            raise ValueError(f"{serialized_mode} requires model_dtype={strategy.required_model_dtype!r}")
         lora_cfg = cfg.trainer.policy.model.lora
         if lora_cfg.rank > 0 and not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
             raise ValueError(
-                "blockwise FP8 weight sync requires full-weight updates; "
+                "Serialized weight sync requires full-weight updates; "
                 "Megatron LoRA with merge_lora=false syncs adapters only"
             )
+        if serialized_mode == MXFP8:
+            expert_mxfp8 = cfg.trainer.policy.model.expert_mxfp8
+            if not expert_mxfp8.enabled or not expert_mxfp8.rollout:
+                raise ValueError("mxfp8 serialized sync requires policy.model.expert_mxfp8 rollout")
+        elif cfg.trainer.policy.model.expert_mxfp8.enabled and cfg.trainer.policy.model.expert_mxfp8.rollout:
+            raise ValueError("Expert MXFP8 rollout requires mxfp8 or no serialized weight mode")
 
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
@@ -894,7 +907,13 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # scales; Blackwell (SM100+) defaults to power-of-two scales, the only mode TE
     # supports for blockwise quantization there (it emulates Float8BlockScaling on
     # the MX datapath).
-    serialized_fp8 = cfg.generator.inference_engine.fp8_weight_sync_mode == BLOCKWISE_FP8
+    serialized_mode = cfg.generator.inference_engine.serialized_weight_sync_mode
+    serialized_fp8 = serialized_mode == BLOCKWISE_FP8
+    serialized_strategy_env = (
+        {}
+        if serialized_mode is None or serialized_fp8
+        else get_serialized_weight_strategy(serialized_mode).build_runtime_env()
+    )
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     policy_megatron_config = getattr(cfg.trainer.policy, "megatron_config", None)
     ref_megatron_config = getattr(cfg.trainer.ref, "megatron_config", None)
@@ -952,6 +971,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         if value := os.environ.get(var_name, fp8_env_defaults.get(var_name)):
             logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
             env_vars[var_name] = value
+    for var_name, value in serialized_strategy_env.items():
+        logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+        env_vars[var_name] = value
 
     return env_vars
 

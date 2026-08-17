@@ -31,6 +31,34 @@ generator.inference_engine.engine_init_kwargs.quantization=fp8
 
 This uses vLLM's [online dynamic FP8 quantization](https://docs.vllm.ai/en/latest/features/quantization/fp8.html), so no calibration data or pre-quantized checkpoint is required.
 
+## Persistent expert MXFP8
+
+On Blackwell GPUs, the Megatron backend can target routed MoE experts while
+leaving attention, dense layers, shared experts, routers, and the LM head in
+BF16:
+
+```bash
+trainer.strategy=megatron \
+trainer.policy.model.expert_mxfp8.enabled=true \
+trainer.policy.model.expert_mxfp8.persistent=true \
+trainer.policy.megatron_config.ddp_config.fp8_param_gather=true \
+trainer.policy.megatron_config.ddp_config.overlap_param_gather=false
+```
+
+The optimizer retains FP32 master shards and requantizes the persistent expert
+parameters after each step. For initial correctness experiments, keep rollout
+sync online by omitting `serialized_weight_sync_mode`. To exercise serialized
+MXFP8 expert transfer:
+
+```bash
+generator.inference_engine.weight_sync_backend=nccl \
+generator.inference_engine.serialized_weight_sync_mode=mxfp8
+```
+
+Serialized quantization is supported by NCCL broadcast and colocated CUDA IPC.
+Checkpoint-delta sync operates on dense weights before quantization and cannot
+be combined with a serialized weight mode.
+
 ## Enabling off-policy correction (TIS)
 
 To apply TIS, we need the inference engine to return the rollout logprobs for the generated tokens, and we configure the correction on the policy loss:

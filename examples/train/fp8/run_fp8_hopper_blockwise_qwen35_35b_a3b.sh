@@ -7,7 +7,7 @@ set -x
 # bash examples/train/fp8/run_fp8_hopper_blockwise_qwen35_35b_a3b.sh
 #
 # FP8 here covers trainer linear-layer GEMMs plus rollout weights via
-# representation-preserving weight sync (fp8_weight_sync_mode=blockwise):
+# representation-preserving weight sync (serialized_weight_sync_mode=blockwise):
 # vLLM receives the trainer-produced FP8 payloads and block scales instead of
 # re-quantizing a BF16 export.
 
@@ -41,7 +41,7 @@ MEGATRON_FP8=e4m3
 MEGATRON_FP8_RECIPE=blockwise
 MEGATRON_FP8_AMAX_COMPUTE_ALGO=most_recent
 MEGATRON_TP_ONLY_AMAX_RED=false
-FP8_WEIGHT_SYNC_MODE=blockwise
+SERIALIZED_WEIGHT_SYNC_MODE=blockwise
 export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
 export VLLM_USE_DEEP_GEMM_E8M0=0
 
@@ -89,7 +89,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.ref.megatron_config.fp8_amax_compute_algo=$MEGATRON_FP8_AMAX_COMPUTE_ALGO \
   trainer.policy.megatron_config.transformer_config_kwargs.tp_only_amax_red=$MEGATRON_TP_ONLY_AMAX_RED \
   trainer.ref.megatron_config.transformer_config_kwargs.tp_only_amax_red=$MEGATRON_TP_ONLY_AMAX_RED \
-  generator.inference_engine.fp8_weight_sync_mode=$FP8_WEIGHT_SYNC_MODE \
+  generator.inference_engine.serialized_weight_sync_mode=$SERIALIZED_WEIGHT_SYNC_MODE \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   generator.inference_engine.backend=vllm \

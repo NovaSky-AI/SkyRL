@@ -95,11 +95,11 @@ class DeltaWeightTransferSender(WeightTransferSender):
         **kwargs,
     ) -> None:
         if derive_metadata_from_chunks:
-            # Serialized-FP8 wire chunks carry marker names and scale tensors
+            # Serialized quantization chunks carry marker names and scale tensors
             # that the delta-checkpoint format cannot represent.
             raise ValueError(
-                "Delta weight sync does not support serialized FP8 chunks; "
-                "disable fp8_weight_sync_mode or use a broadcast/CUDA-IPC strategy"
+                "Delta weight sync does not support serialized quantized chunks; "
+                "disable serialized_weight_sync_mode or use a broadcast/CUDA-IPC strategy"
             )
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             rank = torch.distributed.get_rank()

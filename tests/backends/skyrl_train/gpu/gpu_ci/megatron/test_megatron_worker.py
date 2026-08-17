@@ -975,3 +975,46 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
             assert k in result_backload.metrics
             assert v == result_backload.metrics[k], f"Metrics mismatch for {k}: {v} != {result_backload.metrics[k]}"
         assert result.loss_fn_outputs == result_backload.loss_fn_outputs, "loss_fn_outputs mismatch after backload"
+
+
+@pytest.mark.asyncio
+@pytest.mark.megatron
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10,
+    reason="Persistent MXFP8 requires Blackwell",
+)
+async def test_persistent_expert_mxfp8_training_step(ray_init_fixture):
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.model.path=eatang/qwen3.5-moe-tiny-random",
+            "trainer.policy.model.expert_mxfp8.enabled=true",
+            "trainer.policy.model.expert_mxfp8.persistent=true",
+            "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true",
+            "trainer.placement.policy_num_gpus_per_node=1",
+            "trainer.train_batch_size=4",
+            "trainer.policy_mini_batch_size=4",
+            "trainer.micro_train_batch_size_per_gpu=1",
+            "trainer.remove_microbatch_padding=false",
+            "trainer.algorithm.use_kl_loss=false",
+        ]
+    )
+    batch = get_test_training_batch(4)
+    batch.metadata["global_step"] = 0
+    actor_group = init_worker_with_type(
+        "policy",
+        shared_pg=None,
+        colocate_all=False,
+        num_nodes=1,
+        num_gpus_per_node=1,
+        cfg=cfg,
+    )
+
+    outputs = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+    ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+    batch.metadata["global_step"] = 1
+    outputs_after_update = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+
+    assert outputs
+    assert all(torch.isfinite(torch.tensor(output.metrics["policy_loss"])) for output in outputs)
+    assert all(torch.isfinite(torch.tensor(output.metrics["policy_loss"])) for output in outputs_after_update)

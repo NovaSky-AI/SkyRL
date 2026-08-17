@@ -20,6 +20,11 @@ skyrl/backends/skyrl_train/weight_sync/
 └── weight_extractor_utils.py
 ```
 
+Quantization formats and model target layouts live in
+`skyrl/backends/skyrl_train/quantization/`. Broadcast and CUDA IPC accept
+serialized quantization chunks; delta sync accepts only dense checkpoint
+weights and quantizes after reconstruction.
+
 vLLM worker-extension class (loaded via `--worker-extension-cls`):
 
 - `skyrl/backends/skyrl_train/inference_servers/new_inference_worker_wrap.py` — `NewInferenceWorkerWrap`. Three-phase chunked lifecycle.

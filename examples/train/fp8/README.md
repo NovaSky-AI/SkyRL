@@ -2,7 +2,7 @@
 
 DAPO on AIME with FP8 across the performance-critical parts of the stack:
 trainer linear-layer GEMMs, rollout weights, and the weight transfer between
-them. All scripts use `fp8_weight_sync_mode=blockwise`, which sends
+them. All scripts use `serialized_weight_sync_mode=blockwise`, which sends
 the trainer-produced FP8 payloads and block scales directly to vLLM instead of
 re-quantizing a BF16 export — keeping the rollout policy numerically identical
 to the trained one.
