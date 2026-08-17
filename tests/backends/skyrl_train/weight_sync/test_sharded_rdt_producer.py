@@ -851,6 +851,7 @@ class TestExportRingSlotSafety:
         engine._run_gather_loop(update_future=None, live_count=1)
         consumer.join(timeout=15)
 
+        assert last_holder, "no group was ring-packed; the test proves nothing"
         assert not violations, f"ring slot rewritten while its group was still live: {violations}"
         assert engine._inflight == {}, "everything must be freed by end_sync"
 
@@ -887,5 +888,6 @@ class TestExportRingSlotSafety:
         engine._run_gather_loop(update_future=None, live_count=1)
         consumer.join(timeout=15)
 
+        assert seen, "no group was ring-packed; the test proves nothing"
         for rec in seen:
             assert rec["slot"] not in rec["live"].values(), f"slot {rec['slot']} was already held by a live group: {rec}"
