@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import random
 import re
@@ -12,8 +13,11 @@ from uuid import uuid4
 
 import fastapi
 import psutil
+import zstandard as zstd
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError as FastAPIRequestValidationError
 from fastapi.responses import RedirectResponse, StreamingResponse
+from google.protobuf.message import DecodeError
 from pydantic import (
     Base64Bytes,
     BaseModel,
@@ -43,7 +47,14 @@ from skyrl.tinker.db_models import (
 )
 from skyrl.tinker.extra import (
     ExternalInferenceClient,
+    InMemoryFutureStore,
     SkyRLTrainInferenceForwardingClient,
+)
+from skyrl.tinker.proto_serialization import (
+    PROTO_CONTENT_TYPE,
+    PROTO_SERIALIZABLE_REQUEST_TYPES,
+    parse_forward_backward_request,
+    serialize_result,
 )
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
@@ -68,6 +79,19 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 # Statuses a request never moves out of, i.e. the ones a waiter resolves on.
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
 
+# The SDK limits each uncompressed forward/backward chunk to roughly 5 MB.
+# Leave room for estimation error and future tensor fields while bounding
+# decompression so a malformed request cannot expand without limit.
+MAX_FORWARD_BACKWARD_BODY_BYTES = 64 * 1024 * 1024
+
+
+def _decompress_forward_backward_body(body: bytes) -> bytes:
+    with zstd.ZstdDecompressor().stream_reader(io.BytesIO(body)) as reader:
+        decompressed = reader.read(MAX_FORWARD_BACKWARD_BODY_BYTES + 1)
+    if len(decompressed) > MAX_FORWARD_BACKWARD_BODY_BYTES:
+        raise OverflowError
+    return decompressed
+
 
 def raw_json_response(payload: str | None) -> Response:
     """Return already-serialized JSON without routing it through FastAPI's encoder.
@@ -85,8 +109,8 @@ def raw_json_response(payload: str | None) -> Response:
 
 async def wait_for_future(
     waiters: dict[int, set[asyncio.Future]], request_id: int, timeout: float
-) -> tuple[RequestStatus, str | None] | None:
-    """Wait for ``request_id`` to finish, returning its ``(status, result_data)``.
+) -> tuple[RequestStatus, types.RequestType, str | None] | None:
+    """Wait for ``request_id`` to finish, returning its ``(status, request_type, result_data)``.
 
     ``result_data`` is the JSON text stored for the request, not a decoded
     object -- see :class:`FutureDB`.
@@ -142,15 +166,15 @@ async def poll_futures(
                     # The awaited ids go in as bound parameters, capped at 32766
                     # by SQLite (since 3.32) and 65535 by Postgres -- far above
                     # any plausible number of in-flight requests.
-                    statement = select(FutureDB.request_id, FutureDB.status, FutureDB.result_data).where(
-                        FutureDB.request_id.in_(awaited)
-                    )
+                    statement = select(
+                        FutureDB.request_id, FutureDB.status, FutureDB.request_type, FutureDB.result_data
+                    ).where(FutureDB.request_id.in_(awaited))
                     rows = (await session.exec(statement)).all()
 
                 # Pending requests are left alone to be picked up on a later tick.
-                outcomes: dict[int, tuple[RequestStatus, str | None] | KeyError] = {
-                    request_id: (status, result_data)
-                    for request_id, status, result_data in rows
+                outcomes: dict[int, tuple[RequestStatus, types.RequestType, str | None] | KeyError] = {
+                    request_id: (status, request_type, result_data)
+                    for request_id, status, request_type, result_data in rows
                     if status in TERMINAL_STATUSES
                 }
                 for request_id in set(awaited) - {request_id for request_id, *_ in rows}:
@@ -251,12 +275,17 @@ async def lifespan(app: FastAPI):
     # SkyRL-Train default is colocate_all=True; only opt into forwarding
     # when the operator explicitly sets it to False.
     is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
+    app.state.external_future_store = InMemoryFutureStore()
     if app.state.engine_config.external_inference_url:
-        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
+        app.state.external_inference_client = ExternalInferenceClient(
+            app.state.engine_config, app.state.external_future_store
+        )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
-            app.state.engine_config, app.state.db_engine
+            app.state.engine_config,
+            app.state.db_engine,
+            app.state.external_future_store,
         )
         logger.info(
             "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
@@ -602,19 +631,22 @@ class ForwardBackwardInput(BaseModel):
         "cross_entropy": set(),
         "importance_sampling": set(),
         "ppo": {"clip_low_threshold", "clip_high_threshold", "value_clip"},
+        "gspo": {"clip_low_threshold", "clip_high_threshold"},
         "cispo": {"clip_low_threshold", "clip_high_threshold"},
         "ppo_critic": {"value_clip"},
         "dppo": {"delta_low", "delta_high"},
     }
 
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic", "dppo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "gspo", "cispo", "ppo_critic", "dppo"]
     loss_fn_config: dict[str, float] | None = None
 
     @model_validator(mode="after")
     def validate_loss_fn_config_keys(self):
         """Validate loss_fn_config keys based on the selected loss function."""
         if self.loss_fn_config is None:
+            if self.loss_fn == "gspo":
+                raise ValueError("loss_fn='gspo' requires clip_low_threshold and clip_high_threshold.")
             return self
 
         allowed_keys = self._ALLOWED_KEYS_BY_LOSS_FN[self.loss_fn]
@@ -628,6 +660,18 @@ class ForwardBackwardInput(BaseModel):
             raise ValueError(
                 f"loss_fn='{self.loss_fn}' does not accept loss_fn_config keys. " f"Received: {invalid_keys}."
             )
+        if self.loss_fn == "gspo":
+            required_keys = {"clip_low_threshold", "clip_high_threshold"}
+            missing_keys = sorted(required_keys - self.loss_fn_config.keys())
+            if missing_keys:
+                raise ValueError(f"loss_fn='gspo' is missing required loss_fn_config keys: {missing_keys}.")
+            clip_low = self.loss_fn_config["clip_low_threshold"]
+            clip_high = self.loss_fn_config["clip_high_threshold"]
+            if not 0.0 <= clip_low <= 1.0 <= clip_high:
+                raise ValueError(
+                    "loss_fn='gspo' requires 0 <= clip_low_threshold <= 1 <= clip_high_threshold; "
+                    f"got {clip_low=} and {clip_high=}."
+                )
         return self
 
     def to_types(self) -> types.ForwardBackwardInput:
@@ -761,12 +805,14 @@ class SampleRequest(BaseModel):
 class SaveWeightsRequest(BaseModel):
     model_id: str
     path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
+    seq_id: int | None = None
     type: Literal["save_weights"] | None = None
 
 
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
+    seq_id: int | None = None
     type: Literal["load_weights"] | None = None
 
 
@@ -849,6 +895,7 @@ class SupportedModel(BaseModel):
 
 class GetServerCapabilitiesResponse(BaseModel):
     supported_models: list[SupportedModel]
+    supported_loss_fns: list[str]
 
 
 class ListCheckpointsResponse(BaseModel):
@@ -881,6 +928,10 @@ class WeightsInfoResponse(BaseModel):
 
 class ClientConfigResponse(BaseModel):
     pjwt_auth_enabled: bool = False
+    parallel_fwdbwd_chunks: bool = False
+    proto_write_fwdbwd: bool = True
+    proto_compress_fwdbwd: bool = True
+    fwd_via_fwdbwd: bool = True
 
 
 @app.post("/api/v1/client/config", response_model=ClientConfigResponse)
@@ -1073,16 +1124,73 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
     )
 
 
+def _decode_forward_backward_request(
+    body: bytes | bytearray, content_type: str, content_encoding: str
+) -> tuple[ForwardBackwardRequest, bool]:
+    """Decode and validate a forward_backward body in either wire format."""
+    body = bytes(body)
+    if content_encoding:
+        if content_encoding != "zstd" or PROTO_CONTENT_TYPE not in content_type:
+            raise HTTPException(status_code=415, detail=f"Unsupported content encoding: {content_encoding}")
+        try:
+            body = _decompress_forward_backward_body(body)
+        except OverflowError:
+            raise HTTPException(status_code=413, detail="Decompressed forward_backward body is too large")
+        except zstd.ZstdError as e:
+            raise HTTPException(status_code=422, detail=f"Invalid zstd forward_backward body: {e}")
+
+    if PROTO_CONTENT_TYPE in content_type:
+        try:
+            request_dict, forward_only = parse_forward_backward_request(body)
+        except (DecodeError, ValueError) as e:
+            raise HTTPException(status_code=422, detail=f"Invalid proto forward_backward body: {e}")
+    else:
+        request_dict, forward_only = None, False
+    try:
+        if request_dict is not None:
+            return ForwardBackwardRequest.model_validate(request_dict), forward_only
+        return ForwardBackwardRequest.model_validate_json(body), forward_only
+    except ValidationError as e:
+        # Match FastAPI's native body validation error shape (422).
+        raise FastAPIRequestValidationError(e.errors())
+
+
+async def _read_streaming_body(req: Request) -> bytearray:
+    """Read an upload cooperatively so other API requests remain responsive."""
+    body = bytearray()
+    async for chunk in req.stream():
+        body.extend(chunk)
+        # Uvicorn can have the next upload chunk ready immediately, so awaiting
+        # receive alone does not guarantee that other requests get scheduled.
+        await asyncio.sleep(0)
+    return body
+
+
+async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardRequest, bool]:
+    """Read a forward_backward body without blocking the API event loop.
+
+    SDKs use protobuf and zstd when the client-config handshake enables them.
+    Forward-only passes use the proto's ``forward_only`` flag; clients that do
+    not support the negotiated path keep sending JSON to the legacy endpoints.
+    """
+    body = await _read_streaming_body(req)
+    content_type = req.headers.get("content-type", "").lower()
+    content_encoding = req.headers.get("content-encoding", "").lower().strip()
+    return await asyncio.to_thread(_decode_forward_backward_request, body, content_type, content_encoding)
+
+
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
-async def forward_backward(request: ForwardBackwardRequest, session: AsyncSession = Depends(get_session)):
-    """Compute and accumulate gradients."""
+async def forward_backward(req: Request, session: AsyncSession = Depends(get_session)):
+    """Compute and accumulate gradients (or run forward-only when the proto body asks for it)."""
+    request, forward_only = await _read_forward_backward_request(req)
     await get_model(session, request.model_id)
+    request_data = await asyncio.to_thread(request.forward_backward_input.to_types)
 
     request_id = await create_future(
         session=session,
-        request_type=types.RequestType.FORWARD_BACKWARD,
+        request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
-        request_data=request.forward_backward_input.to_types(),
+        request_data=request_data,
         seq_id=request.seq_id,
     )
 
@@ -1150,6 +1258,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
         request_type=types.RequestType.LOAD_WEIGHTS,
         model_id=request.model_id,
         request_data=types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1173,6 +1282,7 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
         request_type=types.RequestType.SAVE_WEIGHTS,
         model_id=request.model_id,
         request_data=types.SaveWeightsInput(path=request.path),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1218,6 +1328,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
             seq_id=request.seq_id,
             sampling_session_id=sampling_session_id,
         ),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1267,35 +1378,33 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
-    request_id = await create_future(
-        session=session,
-        request_type=(
-            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-        ),
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
-            # A positive topk implies prompt logprobs: both are read off the same
-            # prompt forward pass, so asking for one asks for the other.
-            prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
-            topk_prompt_logprobs=request.topk_prompt_logprobs,
-            seq_id=request.seq_id,
-            sampling_session_id=request.sampling_session_id,
-        ),
-    )
-
-    await session.commit()
-
     if req.app.state.external_inference_client:
+        request_id = req.app.state.external_future_store.create_future()
         asyncio.create_task(
             req.app.state.external_inference_client.call_and_store_result(
                 request_id, request, model_id, checkpoint_id, base_model=base_model
             )
         )
+    else:
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.SAMPLE,
+            model_id=model_id,
+            request_data=types.SampleInput(
+                base_model=base_model,
+                prompt=request.prompt.to_types(),
+                sampling_params=request.sampling_params.to_types(),
+                num_samples=request.num_samples,
+                checkpoint_id=checkpoint_id,
+                # A positive topk implies prompt logprobs: both are read off the same
+                # prompt forward pass, so asking for one asks for the other.
+                prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+                topk_prompt_logprobs=request.topk_prompt_logprobs,
+                seq_id=request.seq_id,
+                sampling_session_id=request.sampling_session_id,
+            ),
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -1306,7 +1415,10 @@ async def get_server_capabilities(request: Request):
     supported_models = [
         SupportedModel(model_name=request.app.state.engine_config.base_model),
     ]
-    return GetServerCapabilitiesResponse(supported_models=supported_models)
+    return GetServerCapabilitiesResponse(
+        supported_models=supported_models,
+        supported_loss_fns=sorted(types.SUPPORTED_LOSS_FNS),
+    )
 
 
 class RetrieveFutureRequest(BaseModel):
@@ -1319,15 +1431,32 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     request_id = int(request.request_id)
 
     try:
-        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        if request_id < 0:
+            external_row = await req.app.state.external_future_store.wait_for_future(
+                request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS
+            )
+            row = None if external_row is None else (external_row[0], types.RequestType.SAMPLE, external_row[1])
+        else:
+            row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
     except KeyError:
         raise HTTPException(status_code=404, detail="Future not found")
 
     if row is None:
         raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
-    status, result_data = row
+    status, request_type, result_data = row
     if status == RequestStatus.COMPLETED:
+        # The SDK retrieves sample/forward/forward_backward results in proto
+        # wire format when it advertises support. Errors and other result types
+        # stay JSON.
+        if (
+            request_type in PROTO_SERIALIZABLE_REQUEST_TYPES
+            and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
+        ):
+            return Response(
+                content=serialize_result(request_type, result_data),
+                media_type=PROTO_CONTENT_TYPE,
+            )
         return raw_json_response(result_data)
 
     # Return 400 for handled errors (validation, etc.), 500 for unexpected failures.

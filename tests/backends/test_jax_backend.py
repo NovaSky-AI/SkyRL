@@ -496,6 +496,31 @@ def test_ppo_loss_fn_config_is_applied():
     np.testing.assert_allclose(tight_losses, -1.01, atol=1e-4)
 
 
+@pytest.mark.parametrize("loss_fn", ["dppo", "gspo", "ppo_critic"])
+def test_skyrl_train_losses_are_rejected_by_jax(loss_fn):
+    backend = JaxBackend(BASE_MODEL, JaxBackendConfig(max_lora_adapters=2, max_lora_rank=8))
+    model_id = "unsupported_loss_adapter"
+    backend.create_model(model_id, LoraConfig(rank=8, alpha=16, seed=0))
+    datum = types.Datum(
+        model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2])]),
+        loss_fn_inputs=types.LossFnInputs(
+            target_tokens=types.TensorData(data=[2, 0]),
+            weights=types.TensorData(data=[1.0, 1.0]),
+            logprobs=types.TensorData(data=[-1.0, -1.0]),
+            advantages=types.TensorData(data=[1.0, 1.0]),
+        ),
+    )
+    requests = {
+        "unsupported_loss": (
+            model_id,
+            types.ForwardBackwardInput(data=[datum], loss_fn=loss_fn),
+        )
+    }
+
+    with pytest.raises(ValueError, match=f"{loss_fn} is only supported by the SkyRL-Train backend"):
+        backend.forward(prepare_model_pass_batch(requests))
+
+
 def test_sample_max_num_sequences():
     """
     Verify sampling with sample_max_num_sequences constraint.
