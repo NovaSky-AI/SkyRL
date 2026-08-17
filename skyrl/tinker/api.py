@@ -1083,15 +1083,15 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
     )
 
 
-async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardRequest, bool]:
+async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackwardRequest, bool]:
     """Read a forward_backward body in either wire format.
 
     tinker SDK >= 0.25.0 submits the body as protobuf and routes forward-only
     passes here via the proto's ``forward_only`` flag instead of calling
     ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
     """
-    body = await req.body()
-    if PROTO_CONTENT_TYPE in req.headers.get("content-type", ""):
+    body = await request.body()
+    if PROTO_CONTENT_TYPE in request.headers.get("content-type", ""):
         try:
             request_dict, forward_only = parse_forward_backward_request(body)
         except (DecodeError, ValueError) as e:
@@ -1108,17 +1108,17 @@ async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardR
 
 
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
-async def forward_backward(req: Request, session: AsyncSession = Depends(get_session)):
+async def forward_backward(request: Request, session: AsyncSession = Depends(get_session)):
     """Compute and accumulate gradients (or run forward-only when the proto body asks for it)."""
-    request, forward_only = await _read_forward_backward_request(req)
-    await get_model(session, request.model_id)
+    req, forward_only = await _read_forward_backward_request(request)
+    await get_model(session, req.model_id)
 
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
-        model_id=request.model_id,
-        request_data=request.forward_backward_input.to_types(),
-        seq_id=request.seq_id,
+        model_id=req.model_id,
+        request_data=req.forward_backward_input.to_types(),
+        seq_id=req.seq_id,
     )
 
     await session.commit()
