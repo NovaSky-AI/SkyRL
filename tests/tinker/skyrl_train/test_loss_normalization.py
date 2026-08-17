@@ -53,6 +53,37 @@ def test_gspo_batch_normalization_gives_each_trainable_sequence_equal_weight():
     assert (batch["advantages"] * batch["loss_mask"]).sum(dim=-1).tolist() == pytest.approx([1.0, -0.5, 0.0])
 
 
+def test_gspo_selects_only_rows_with_gradient_contributions():
+    batch = skyrl_train_backend.TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2], [3, 0], [4, 5]]),
+            "attention_mask": torch.tensor([[1, 1], [1, 0], [1, 1]]),
+            "loss_mask": torch.tensor([[1.0, 0.0], [0.0, 0.0], [0.0, 1.0]]),
+        }
+    )
+    batch.metadata = {"response_length": 2}
+
+    selected, indices = skyrl_train_backend.SkyRLTrainBackend._select_trainable_gspo_rows(batch)
+
+    assert indices == [0, 2]
+    assert selected["sequences"].tolist() == [[1, 2], [4, 5]]
+    assert selected.metadata == batch.metadata
+
+
+def test_gspo_keeps_entirely_inactive_batch_for_zero_gradient_backward():
+    batch = skyrl_train_backend.TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2], [3, 4]]),
+            "loss_mask": torch.zeros(2, 2),
+        }
+    )
+
+    selected, indices = skyrl_train_backend.SkyRLTrainBackend._select_trainable_gspo_rows(batch)
+
+    assert selected is batch
+    assert indices == [0, 1]
+
+
 def test_dppo_deltas_are_nested_under_dppo():
     loss_fn, config = _normalize(None, "policy", "dppo", {"delta_low": 0.2, "delta_high": 0.3})
     assert loss_fn == "dppo"

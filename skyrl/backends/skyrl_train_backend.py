@@ -866,6 +866,24 @@ class SkyRLTrainBackend(AbstractBackend):
         batch["advantages"] = advantages / token_counts.clamp(min=1) / num_trainable_sequences
         batch["loss_mask"] = loss_mask
 
+    @staticmethod
+    def _select_trainable_gspo_rows(batch: TrainingInputBatch) -> tuple[TrainingInputBatch, list[int]]:
+        """Drop rows that cannot contribute to a GSPO gradient.
+
+        Keep an entirely inactive batch unchanged. Its backward pass materializes
+        zero gradients, preserving the optimizer semantics of the existing API.
+        """
+        trainable_rows = batch["loss_mask"].ne(0).any(dim=-1)
+        trainable_indices = trainable_rows.nonzero(as_tuple=False).flatten()
+        if trainable_indices.numel() == 0 or trainable_indices.numel() == batch.batch_size:
+            return batch, list(range(batch.batch_size))
+
+        selected = TrainingInputBatch(
+            {key: None if value is None else value[trainable_indices] for key, value in batch.items()}
+        )
+        selected.metadata = batch.metadata
+        return selected, trainable_indices.tolist()
+
     def forward_backward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
@@ -894,8 +912,13 @@ class SkyRLTrainBackend(AbstractBackend):
         ):
             raise ValueError("Critic forward_backward requires values and returns for every response token")
         batch = self._to_training_batch(prepared_batch, role)
+        original_batch_size = batch.batch_size
+        original_token_count = int(batch["attention_mask"].sum().item())
+        submitted_indices = list(range(original_batch_size))
         if loss_fn == "gspo":
             self._normalize_gspo_batch(batch)
+            batch, submitted_indices = self._select_trainable_gspo_rows(batch)
+        submitted_token_count = int(batch["attention_mask"].sum().item())
         micro_bs = (
             self._cfg.trainer.micro_train_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )
@@ -933,7 +956,24 @@ class SkyRLTrainBackend(AbstractBackend):
         if pad_size > 0 and per_sample_outputs:
             per_sample_outputs = per_sample_outputs[:-pad_size]
 
+        if len(submitted_indices) != original_batch_size:
+            restored_outputs = [
+                {"logprobs": list(logprobs)} for logprobs in prepared_batch.all_sampling_logprobs
+            ]
+            for index, output in zip(submitted_indices, per_sample_outputs, strict=True):
+                restored_outputs[index] = output
+            per_sample_outputs = restored_outputs
+
         metrics = self._extract_metrics(data.metrics)
+        if loss_fn == "gspo":
+            metrics.update(
+                {
+                    "skyrl.ai/submitted_datums:sum": float(len(submitted_indices)),
+                    "skyrl.ai/skipped_datums:sum": float(original_batch_size - len(submitted_indices)),
+                    "skyrl.ai/submitted_tokens:sum": float(submitted_token_count),
+                    "skyrl.ai/skipped_tokens:sum": float(original_token_count - submitted_token_count),
+                }
+            )
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
