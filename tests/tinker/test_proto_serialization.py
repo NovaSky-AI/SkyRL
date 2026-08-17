@@ -192,6 +192,7 @@ def test_parse_forward_backward_request():
     # The dict must validate against the API's JSON request model.
     request = api.ForwardBackwardRequest.model_validate(request_dict)
     assert request.model_id == "model_abc"
+    assert request.seq_id == 1
     assert request.forward_backward_input.loss_fn == "cross_entropy"
     assert request.forward_backward_input.loss_fn_config is None
     (datum,) = request.forward_backward_input.data

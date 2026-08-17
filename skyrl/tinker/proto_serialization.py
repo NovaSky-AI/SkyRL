@@ -92,6 +92,9 @@ def parse_forward_backward_request(body: bytes) -> tuple[dict, bool]:
 
     request_dict = {
         "model_id": msg.model_id,
+        # seq_id is non-optional on the wire; the SDK encodes a caller-supplied
+        # None as 0.
+        "seq_id": msg.seq_id or None,
         "forward_backward_input": {
             "data": data,
             "loss_fn": msg.loss_fn,

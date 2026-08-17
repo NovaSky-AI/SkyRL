@@ -252,7 +252,9 @@ async def test_retrieve_future_serves_proto_when_accepted(waiters, async_engine,
     mark_completed(
         sync_engine,
         request_id,
-        types.SampleOutput(sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1, 2], logprobs=[-0.5, -1.0])]),
+        types.SampleOutput(
+            sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1, 2], logprobs=[-0.5, -1.0])]
+        ),
     )
 
     result = await api.retrieve_future(
