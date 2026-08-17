@@ -776,12 +776,14 @@ class SampleRequest(BaseModel):
 class SaveWeightsRequest(BaseModel):
     model_id: str
     path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
+    seq_id: int | None = None
     type: Literal["save_weights"] | None = None
 
 
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
+    seq_id: int | None = None
     type: Literal["load_weights"] | None = None
 
 
@@ -1166,6 +1168,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
         request_type=types.RequestType.LOAD_WEIGHTS,
         model_id=request.model_id,
         request_data=types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1189,6 +1192,7 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
         request_type=types.RequestType.SAVE_WEIGHTS,
         model_id=request.model_id,
         request_data=types.SaveWeightsInput(path=request.path),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1234,6 +1238,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
             seq_id=request.seq_id,
             sampling_session_id=sampling_session_id,
         ),
+        seq_id=request.seq_id,
     )
 
     await session.commit()

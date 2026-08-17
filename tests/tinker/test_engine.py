@@ -380,6 +380,101 @@ def add_futures(engine, specs) -> list[int]:
         return [row.request_id for row in rows]
 
 
+def add_sequenced_futures(engine, specs) -> dict[int, int]:
+    """Add sequenced futures and return their database IDs keyed by sequence ID."""
+    with Session(engine.db_engine) as session:
+        rows = [
+            FutureDB(
+                request_type=request_type,
+                model_id=model_id,
+                seq_id=seq_id,
+                request_data=data,
+                status=status,
+            )
+            for request_type, model_id, seq_id, data, status in specs
+        ]
+        for row in rows:
+            session.add(row)
+        session.commit()
+        return {row.seq_id: row.request_id for row in rows}
+
+
+def test_sequenced_model_passes_wait_for_first_parallel_chunk(scheduling_engine):
+    """Later SDK chunks wait until the first chunk arrives, then batch together."""
+    engine = scheduling_engine
+    payload = forward_backward_payload()
+    request_ids = add_sequenced_futures(
+        engine,
+        [
+            (types.RequestType.FORWARD_BACKWARD, "model_a", 2, payload, RequestStatus.PENDING),
+            (types.RequestType.FORWARD_BACKWARD, "model_a", 3, payload, RequestStatus.PENDING),
+        ],
+    )
+
+    with Session(engine.db_engine) as session:
+        assert engine._find_ready_sequenced_request_ids(session) == set()
+
+    request_ids.update(
+        add_sequenced_futures(
+            engine,
+            [(types.RequestType.FORWARD_BACKWARD, "model_a", 1, payload, RequestStatus.PENDING)],
+        )
+    )
+    with Session(engine.db_engine) as session:
+        ready = engine._find_ready_sequenced_request_ids(session)
+        batchable = engine.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD, ready)
+
+    assert ready == set(request_ids.values())
+    assert set(batchable) == {str(request_id) for request_id in request_ids.values()}
+
+
+def test_sequenced_requests_stop_at_operation_boundary(scheduling_engine):
+    """Only one contiguous request type is released per model in an engine iteration."""
+    engine = scheduling_engine
+    request_ids = add_sequenced_futures(
+        engine,
+        [
+            (types.RequestType.FORWARD, "model_a", 1, {}, RequestStatus.PENDING),
+            (types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER, "model_a", 2, {}, RequestStatus.PENDING),
+            (types.RequestType.FORWARD_BACKWARD, "model_a", 3, {}, RequestStatus.PENDING),
+        ],
+    )
+
+    with Session(engine.db_engine) as session:
+        assert engine._find_ready_sequenced_request_ids(session) == {request_ids[1]}
+        first = session.get(FutureDB, request_ids[1])
+        first.status = RequestStatus.COMPLETED
+        session.add(first)
+        session.commit()
+        assert engine._find_ready_sequenced_request_ids(session) == {request_ids[2]}
+
+        second = session.get(FutureDB, request_ids[2])
+        second.status = RequestStatus.COMPLETED
+        session.add(second)
+        session.commit()
+        assert engine._find_ready_sequenced_request_ids(session) == {request_ids[3]}
+
+
+def test_sequenced_requests_resume_after_completed_predecessor(scheduling_engine):
+    """A later parallel block is released when its immediately preceding block completed."""
+    engine = scheduling_engine
+    payload = forward_backward_payload()
+    request_ids = add_sequenced_futures(
+        engine,
+        [
+            (types.RequestType.FORWARD_BACKWARD, "model_a", 1, payload, RequestStatus.COMPLETED),
+            (types.RequestType.FORWARD_BACKWARD, "model_a", 2, payload, RequestStatus.COMPLETED),
+            (types.RequestType.FORWARD_BACKWARD, "model_a", 4, payload, RequestStatus.PENDING),
+            (types.RequestType.FORWARD_BACKWARD, "model_a", 3, payload, RequestStatus.PENDING),
+        ],
+    )
+
+    with Session(engine.db_engine) as session:
+        ready = engine._find_ready_sequenced_request_ids(session)
+
+    assert ready == {request_ids[3], request_ids[4]}
+
+
 def test_find_batchable_model_passes_stops_at_barrier(scheduling_engine):
     """Passes behind an optim_step must not batch with earlier ones, and payloads still parse."""
     engine = scheduling_engine
