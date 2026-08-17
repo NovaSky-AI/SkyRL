@@ -9,8 +9,8 @@ bypassing the engine subprocess's serial scheduling loop.
 Coverage:
   - test_engine_state_published: after ``save_weights_for_sampler``, the
     engine's vLLM proxy URL is written to ``EngineStateDB``.
-  - test_sample_uses_external_path: an issued sample creates a future of
-    type ``EXTERNAL`` (not ``SAMPLE``) and resolves successfully.
+  - test_sample_bypasses_future_db: an issued sample resolves without creating
+    a database future.
   - test_sample_concurrent_with_training_is_fast: the central
     parallelism test. While a long-running stream of ``forward_backward``
     + ``optim_step`` calls is in flight, a sample request resolves in
@@ -210,15 +210,14 @@ def test_engine_state_published(server_db_path):
     ), f"expected an http(s) proxy URL, got {row.inference_proxy_url!r}"
 
 
-def test_sample_uses_external_path(server_db_path):
-    """A sample issued through the SDK creates a FutureDB row of type EXTERNAL.
+def test_sample_bypasses_future_db(server_db_path):
+    """A sample issued through the SDK does not use the engine's FutureDB.
 
     This is the "test" half of the design: the API hoists the sample off
-    the engine's serial loop and into the API process's asyncio loop.
+    the engine's serial loop and keeps its future in the API process.
     """
     from sqlmodel import Session, create_engine, func, select
 
-    from skyrl.tinker import types as skyrl_types
     from skyrl.tinker.db_models import FutureDB
 
     proc, db_path, _ = server_db_path
@@ -229,12 +228,11 @@ def test_sample_uses_external_path(server_db_path):
     _train_one_step(tc, tok)
     sampler = tc.save_weights_and_get_sampling_client(name="external_path_a")
 
-    # Snapshot the max future_id before submitting our sample so we can
-    # filter out any EXTERNAL futures from earlier tests.
+    # Snapshot the number of database futures before submitting our sample.
     eng = create_engine(f"sqlite:///{db_path}", echo=False)
     try:
         with Session(eng) as s:
-            max_before = s.exec(select(func.max(FutureDB.request_id))).one() or 0
+            count_before = s.exec(select(func.count()).select_from(FutureDB)).one()
     finally:
         eng.dispose()
 
@@ -245,24 +243,16 @@ def test_sample_uses_external_path(server_db_path):
     ).result()
     assert len(out.sequences) == 1
 
-    # Look for an EXTERNAL future with id > max_before. If async routing
-    # is on, every sample creates exactly one such row.
+    # API-forwarded samples use negative, in-memory future ids and must not
+    # add database work to the engine's scheduling hot path.
     eng = create_engine(f"sqlite:///{db_path}", echo=False)
     try:
         with Session(eng) as s:
-            stmt = (
-                select(FutureDB.request_id, FutureDB.request_type)
-                .where(FutureDB.request_id > max_before)
-                .where(FutureDB.request_type == skyrl_types.RequestType.EXTERNAL)
-            )
-            rows = s.exec(stmt).all()
+            count_after = s.exec(select(func.count()).select_from(FutureDB)).one()
     finally:
         eng.dispose()
 
-    assert len(rows) >= 1, (
-        f"expected at least one EXTERNAL future to be created by the sample call, "
-        f"found {len(rows)}; async sample routing may not be active"
-    )
+    assert count_after == count_before
 
 
 def test_sample_concurrent_with_training_is_fast(server_db_path):
