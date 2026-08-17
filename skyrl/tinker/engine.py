@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel
+from sqlalchemy import tuple_
 from sqlmodel import Session, create_engine, func, select, update
 
 from skyrl.backends.utils import log_timing
@@ -28,6 +29,14 @@ from skyrl.tinker.db_models import (
 from skyrl.utils.log import logger
 
 _MAX_IDS_PER_QUERY = 500
+_SEQUENCED_TRAINING_REQUEST_TYPES = (
+    types.RequestType.FORWARD_BACKWARD,
+    types.RequestType.FORWARD,
+    types.RequestType.OPTIM_STEP,
+    types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
+    types.RequestType.SAVE_WEIGHTS,
+    types.RequestType.LOAD_WEIGHTS,
+)
 
 
 def _model_not_found_error(model_id: str) -> types.ErrorResponse:
@@ -377,8 +386,62 @@ class TinkerEngine:
         )
         return dict(session.exec(query).all())
 
+    def _find_ready_sequenced_request_ids(self, session: Session) -> set[int]:
+        """Find the next contiguous training request block for each model.
+
+        The Tinker SDK submits parallel forward/backward chunks out of order: it
+        sends every later chunk first, then sends the first chunk to release the
+        complete batch. Hold those later chunks until their predecessor has
+        completed or is part of the same contiguous pending block.
+        """
+        statement = (
+            select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_type, FutureDB.seq_id)
+            .where(FutureDB.status == RequestStatus.PENDING)
+            .where(FutureDB.seq_id.is_not(None))
+            .where(FutureDB.request_type.in_(_SEQUENCED_TRAINING_REQUEST_TYPES))
+            .order_by(FutureDB.model_id, FutureDB.seq_id)
+        )
+        pending_by_model: dict[str, list[tuple[int, types.RequestType, int]]] = defaultdict(list)
+        for request_id, model_id, request_type, seq_id in session.exec(statement).all():
+            if model_id is None or seq_id is None:
+                raise ValueError("Sequenced training requests require model_id and seq_id")
+            pending_by_model[model_id].append((request_id, request_type, seq_id))
+
+        predecessor_keys = {
+            (model_id, requests[0][2] - 1) for model_id, requests in pending_by_model.items() if requests[0][2] > 1
+        }
+        completed_predecessors: set[tuple[str, int]] = set()
+        if predecessor_keys:
+            predecessor_statement = select(FutureDB.model_id, FutureDB.seq_id, FutureDB.status).where(
+                tuple_(FutureDB.model_id, FutureDB.seq_id).in_(predecessor_keys)
+            )
+            completed_predecessors = {
+                (model_id, seq_id)
+                for model_id, seq_id, status in session.exec(predecessor_statement).all()
+                if model_id is not None and seq_id is not None and status != RequestStatus.PENDING
+            }
+
+        ready: set[int] = set()
+        for model_id, requests in pending_by_model.items():
+            first_seq_id = requests[0][2]
+            if first_seq_id != 1 and (model_id, first_seq_id - 1) not in completed_predecessors:
+                continue
+
+            request_type = requests[0][1]
+            expected_seq_id = first_seq_id
+            for request_id, candidate_type, seq_id in requests:
+                if candidate_type != request_type or seq_id != expected_seq_id:
+                    break
+                ready.add(request_id)
+                expected_seq_id += 1
+
+        return ready
+
     def find_batchable_model_passes(
-        self, session: Session, request_type: types.RequestType
+        self,
+        session: Session,
+        request_type: types.RequestType,
+        ready_sequenced_request_ids: set[int] | None = None,
     ) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
         """Find all requests of the given type that come before any destructive update for their model.
 
@@ -396,7 +459,7 @@ class TinkerEngine:
 
         # Get all pending operations of the requested type ordered by request_id
         query = (
-            select(FutureDB.request_id, FutureDB.model_id)
+            select(FutureDB.request_id, FutureDB.model_id, FutureDB.seq_id)
             .where(FutureDB.request_type == request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
@@ -406,8 +469,9 @@ class TinkerEngine:
         # Filter: only include ops that come before their model's barrier
         batchable = [
             (request_id, model_id)
-            for request_id, model_id in ops
+            for request_id, model_id, seq_id in ops
             if model_id not in barriers or request_id < barriers[model_id]
+            if ready_sequenced_request_ids is None or seq_id is None or request_id in ready_sequenced_request_ids
         ]
 
         return {
@@ -458,7 +522,9 @@ class TinkerEngine:
             for request_id, model_id, request_data in self._load_requests(session, batchable)
         }
 
-    def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
+    def find_single_requests(
+        self, session: Session, ready_sequenced_request_ids: set[int] | None = None
+    ) -> dict[str, tuple[str, types.RequestType, dict]]:
         """Find all requests that need to be processed individually (not batchable).
 
         Args:
@@ -488,7 +554,7 @@ class TinkerEngine:
                     blocked_pass_barriers.setdefault(model_id, req_id)
 
         statement = (
-            select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_type)
+            select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_type, FutureDB.seq_id)
             .where(FutureDB.status == RequestStatus.PENDING)
             .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.request_type != types.RequestType.FORWARD)
@@ -501,8 +567,9 @@ class TinkerEngine:
         # Filter: only include ops that come before the first blocked pass for their model
         other_futures = [
             (request_id, model_id, request_type)
-            for request_id, model_id, request_type in other_futures
+            for request_id, model_id, request_type, seq_id in other_futures
             if model_id not in blocked_pass_barriers or request_id < blocked_pass_barriers[model_id]
+            if ready_sequenced_request_ids is None or seq_id is None or request_id in ready_sequenced_request_ids
         ]
 
         return {
@@ -807,15 +874,18 @@ class TinkerEngine:
         while True:
             # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
+                ready_sequenced_request_ids = self._find_ready_sequenced_request_ids(session)
                 # Use look-ahead scheduling to find batchable forward_backward and forward model passes
                 forward_backward_requests = self.find_batchable_model_passes(
-                    session, types.RequestType.FORWARD_BACKWARD
+                    session, types.RequestType.FORWARD_BACKWARD, ready_sequenced_request_ids
                 )
-                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
+                forward_requests = self.find_batchable_model_passes(
+                    session, types.RequestType.FORWARD, ready_sequenced_request_ids
+                )
                 # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
                 # Get other pending requests (non forward_backward and non sampling)
-                other_requests = self.find_single_requests(session)
+                other_requests = self.find_single_requests(session, ready_sequenced_request_ids)
 
             # Process batches outside of session context
             self.process_batch_requests(

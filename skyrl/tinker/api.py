@@ -43,6 +43,7 @@ from skyrl.tinker.db_models import (
 )
 from skyrl.tinker.extra import (
     ExternalInferenceClient,
+    InMemoryFutureStore,
     SkyRLTrainInferenceForwardingClient,
 )
 from skyrl.utils.log import get_uvicorn_log_config, logger
@@ -251,12 +252,17 @@ async def lifespan(app: FastAPI):
     # SkyRL-Train default is colocate_all=True; only opt into forwarding
     # when the operator explicitly sets it to False.
     is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
+    app.state.external_future_store = InMemoryFutureStore()
     if app.state.engine_config.external_inference_url:
-        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
+        app.state.external_inference_client = ExternalInferenceClient(
+            app.state.engine_config, app.state.external_future_store
+        )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
-            app.state.engine_config, app.state.db_engine
+            app.state.engine_config,
+            app.state.db_engine,
+            app.state.external_future_store,
         )
         logger.info(
             "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
@@ -762,12 +768,14 @@ class SampleRequest(BaseModel):
 class SaveWeightsRequest(BaseModel):
     model_id: str
     path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
+    seq_id: int | None = None
     type: Literal["save_weights"] | None = None
 
 
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
+    seq_id: int | None = None
     type: Literal["load_weights"] | None = None
 
 
@@ -1151,6 +1159,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
         request_type=types.RequestType.LOAD_WEIGHTS,
         model_id=request.model_id,
         request_data=types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1174,6 +1183,7 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
         request_type=types.RequestType.SAVE_WEIGHTS,
         model_id=request.model_id,
         request_data=types.SaveWeightsInput(path=request.path),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1219,6 +1229,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
             seq_id=request.seq_id,
             sampling_session_id=sampling_session_id,
         ),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1268,35 +1279,33 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
-    request_id = await create_future(
-        session=session,
-        request_type=(
-            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-        ),
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
-            # A positive topk implies prompt logprobs: both are read off the same
-            # prompt forward pass, so asking for one asks for the other.
-            prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
-            topk_prompt_logprobs=request.topk_prompt_logprobs,
-            seq_id=request.seq_id,
-            sampling_session_id=request.sampling_session_id,
-        ),
-    )
-
-    await session.commit()
-
     if req.app.state.external_inference_client:
+        request_id = req.app.state.external_future_store.create_future()
         asyncio.create_task(
             req.app.state.external_inference_client.call_and_store_result(
                 request_id, request, model_id, checkpoint_id, base_model=base_model
             )
         )
+    else:
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.SAMPLE,
+            model_id=model_id,
+            request_data=types.SampleInput(
+                base_model=base_model,
+                prompt=request.prompt.to_types(),
+                sampling_params=request.sampling_params.to_types(),
+                num_samples=request.num_samples,
+                checkpoint_id=checkpoint_id,
+                # A positive topk implies prompt logprobs: both are read off the same
+                # prompt forward pass, so asking for one asks for the other.
+                prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+                topk_prompt_logprobs=request.topk_prompt_logprobs,
+                seq_id=request.seq_id,
+                sampling_session_id=request.sampling_session_id,
+            ),
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -1320,7 +1329,10 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     request_id = int(request.request_id)
 
     try:
-        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        if request_id < 0:
+            row = await req.app.state.external_future_store.wait_for_future(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        else:
+            row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
     except KeyError:
         raise HTTPException(status_code=404, detail="Future not found")
 
