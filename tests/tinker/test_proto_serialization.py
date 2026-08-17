@@ -6,6 +6,7 @@ so the wire conventions (byte layouts, NaN/sentinel fills) are checked
 against the exact code the client runs.
 """
 
+import asyncio
 import math
 import threading
 from types import SimpleNamespace
@@ -211,10 +212,10 @@ def test_parse_forward_backward_request_garbage_raises():
 
 
 def _request_with_body(body: bytes, headers: dict[str, str]):
-    async def get_body():
-        return body
+    async def stream():
+        yield body
 
-    return SimpleNamespace(body=get_body, headers=headers)
+    return SimpleNamespace(stream=stream, headers=headers)
 
 
 @pytest.mark.asyncio
@@ -249,6 +250,20 @@ async def test_read_forward_backward_request_decodes_off_event_loop(monkeypatch)
     )
 
     assert decoder_thread != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_read_forward_backward_request_yields_while_streaming():
+    side_task_ran = False
+
+    async def run_side_task():
+        nonlocal side_task_ran
+        side_task_ran = True
+
+    side_task = asyncio.create_task(run_side_task())
+    await api._read_streaming_body(_request_with_body(b"body", {}))
+    assert side_task_ran
+    await side_task
 
 
 @pytest.mark.asyncio

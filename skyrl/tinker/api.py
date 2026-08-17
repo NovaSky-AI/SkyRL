@@ -1125,9 +1125,10 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
 
 
 def _decode_forward_backward_request(
-    body: bytes, content_type: str, content_encoding: str
+    body: bytes | bytearray, content_type: str, content_encoding: str
 ) -> tuple[ForwardBackwardRequest, bool]:
     """Decode and validate a forward_backward body in either wire format."""
+    body = bytes(body)
     if content_encoding:
         if content_encoding != "zstd" or PROTO_CONTENT_TYPE not in content_type:
             raise HTTPException(status_code=415, detail=f"Unsupported content encoding: {content_encoding}")
@@ -1154,6 +1155,17 @@ def _decode_forward_backward_request(
         raise FastAPIRequestValidationError(e.errors())
 
 
+async def _read_streaming_body(req: Request) -> bytearray:
+    """Read an upload cooperatively so other API requests remain responsive."""
+    body = bytearray()
+    async for chunk in req.stream():
+        body.extend(chunk)
+        # Uvicorn can have the next upload chunk ready immediately, so awaiting
+        # receive alone does not guarantee that other requests get scheduled.
+        await asyncio.sleep(0)
+    return body
+
+
 async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardRequest, bool]:
     """Read a forward_backward body without blocking the API event loop.
 
@@ -1161,7 +1173,7 @@ async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardR
     Forward-only passes use the proto's ``forward_only`` flag; clients that do
     not support the negotiated path keep sending JSON to the legacy endpoints.
     """
-    body = await req.body()
+    body = await _read_streaming_body(req)
     content_type = req.headers.get("content-type", "").lower()
     content_encoding = req.headers.get("content-encoding", "").lower().strip()
     return await asyncio.to_thread(_decode_forward_backward_request, body, content_type, content_encoding)
