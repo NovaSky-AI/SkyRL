@@ -930,6 +930,7 @@ class ClientConfigResponse(BaseModel):
     pjwt_auth_enabled: bool = False
     proto_write_fwdbwd: bool = True
     proto_compress_fwdbwd: bool = True
+    fwd_via_fwdbwd: bool = True
 
 
 @app.post("/api/v1/client/config", response_model=ClientConfigResponse)
@@ -1125,9 +1126,9 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
 async def _read_forward_backward_request(req: Request) -> tuple[ForwardBackwardRequest, bool]:
     """Read a forward_backward body in either wire format.
 
-    tinker SDK >= 0.25.0 submits the body as protobuf and routes forward-only
-    passes here via the proto's ``forward_only`` flag instead of calling
-    ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
+    SDKs use protobuf and zstd when the client-config handshake enables them.
+    Forward-only passes use the proto's ``forward_only`` flag; clients that do
+    not support the negotiated path keep sending JSON to the legacy endpoints.
     """
     body = await req.body()
     content_type = req.headers.get("content-type", "").lower()
@@ -1425,11 +1426,12 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     status, request_type, result_data = row
     if status == RequestStatus.COMPLETED:
         # The SDK retrieves sample/forward/forward_backward results in proto
-        # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
-        # for these types. Errors and other result types stay JSON.
-        if request_type in PROTO_SERIALIZABLE_REQUEST_TYPES and PROTO_CONTENT_TYPE in req.headers.get(
-            "accept", ""
-        ).lower():
+        # wire format when it advertises support. Errors and other result types
+        # stay JSON.
+        if (
+            request_type in PROTO_SERIALIZABLE_REQUEST_TYPES
+            and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
+        ):
             return Response(
                 content=serialize_result(request_type, result_data),
                 media_type=PROTO_CONTENT_TYPE,

@@ -14,6 +14,7 @@ import pytest
 import tinker.types as sdk_types
 import zstandard as zstd
 from fastapi import HTTPException
+from google.protobuf.message import DecodeError
 from tinker import ForwardBackwardOutput, SampleResponse
 from tinker.proto.request_conv import forward_backward_request_to_proto
 from tinker.proto.response_conv import deserialize_proto_response
@@ -204,7 +205,7 @@ def test_parse_forward_backward_request_forward_only_and_config():
 
 
 def test_parse_forward_backward_request_garbage_raises():
-    with pytest.raises(Exception):
+    with pytest.raises(DecodeError):
         parse_forward_backward_request(b"\xff\xfe not a proto")
 
 
