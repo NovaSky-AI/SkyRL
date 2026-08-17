@@ -1,17 +1,16 @@
 import asyncio
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 from cloudpathlib import AnyPath
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.backends.renderer import render_model_input
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import FutureDB, RequestStatus
+from skyrl.tinker.db_models import RequestStatus
+from skyrl.tinker.extra.in_memory_future_store import InMemoryFutureStore
 from skyrl.utils.log import logger
 from skyrl.utils.storage import download_and_unpack
 
@@ -41,12 +40,12 @@ def _extract_checkpoint_sync(checkpoint_path: AnyPath, target_dir: Path) -> None
 class ExternalInferenceClient:
     """Client for calling external inference engines (e.g., vLLM)."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    def __init__(self, engine_config: EngineConfig, future_store: InMemoryFutureStore):
         self.base_url = f"{engine_config.external_inference_url}/v1"
         self.api_key = engine_config.external_inference_api_key
         self.checkpoints_base = engine_config.checkpoints_base
         self.lora_base_dir = engine_config.external_inference_lora_base
-        self.db_engine = db_engine
+        self.future_store = future_store
 
     async def call_and_store_result(
         self,
@@ -57,7 +56,7 @@ class ExternalInferenceClient:
         *,
         base_model: str | None = None,
     ):
-        """Background task to call external engine and store result in database."""
+        """Call the external engine and resolve its API-process-owned future."""
         try:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
@@ -73,13 +72,7 @@ class ExternalInferenceClient:
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
-        async with AsyncSession(self.db_engine) as session:
-            future = await session.get(FutureDB, request_id)
-            # `result_data` is a text column holding pre-serialized JSON.
-            future.result_data = result.model_dump_json()
-            future.status = status
-            future.completed_at = datetime.now(timezone.utc)
-            await session.commit()
+        self.future_store.complete_future(request_id, status, result.model_dump_json())
 
     async def _forward_to_engine(
         self,
