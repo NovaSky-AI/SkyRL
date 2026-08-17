@@ -928,6 +928,7 @@ class WeightsInfoResponse(BaseModel):
 
 class ClientConfigResponse(BaseModel):
     pjwt_auth_enabled: bool = False
+    parallel_fwdbwd_chunks: bool = False
     proto_write_fwdbwd: bool = True
     proto_compress_fwdbwd: bool = True
     fwd_via_fwdbwd: bool = True

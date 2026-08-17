@@ -56,6 +56,13 @@ async def test_server_capabilities_advertise_native_gspo():
     assert "gspo" in capabilities.supported_loss_fns
 
 
+@pytest.mark.asyncio
+async def test_client_config_serializes_forward_backward_chunks():
+    config = await api.client_config()
+
+    assert config.parallel_fwdbwd_chunks is False
+
+
 def test_forward_backward_input_accepts_ppo_value_clip():
     req = api.ForwardBackwardInput(
         data=[_make_datum()],
