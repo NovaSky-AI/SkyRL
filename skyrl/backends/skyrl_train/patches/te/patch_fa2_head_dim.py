@@ -114,7 +114,8 @@ def patch_fa2_head_dim_allowlist(force: bool = False) -> bool:
     patched_source = source.replace(_SM_ALLOWLIST_CLAUSE, _REPLACEMENT_CLAUSE)
     # Execute in TE's own module namespace so the recompiled function keeps the
     # live module globals it depends on, and so the rebind lands on the module.
-    exec(compile(patched_source, dpa_utils.__file__, "exec"), dpa_utils.__dict__)  # noqa: S102
+    fn = getattr(dpa_utils, "__file__", None) or "<string>"
+    exec(compile(patched_source, fn, "exec"), dpa_utils.__dict__)  # noqa: S102
 
     patched = dpa_utils.get_attention_backend
     if patched is target:
@@ -124,8 +125,10 @@ def patch_fa2_head_dim_allowlist(force: bool = False) -> bool:
 
     # Backend selection is memoized per attention config; drop any entry chosen
     # by the unpatched function.
-    dpa._attention_backends["attention_params"] = None
-    dpa._attention_backends["backend_selection_requires_update"] = True
+    backends = getattr(dpa, "_attention_backends", None)
+    if isinstance(backends, dict):
+        backends["attention_params"] = None
+        backends["backend_selection_requires_update"] = True
 
     logger.info("Applied TE FA2 head_dim patch (NVIDIA/TransformerEngine#3360 backport)")
     return True
