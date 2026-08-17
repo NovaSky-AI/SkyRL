@@ -93,6 +93,53 @@ The one exception is `ci/anyscale_gpu_ci_h100.yaml`, which already points at an
 Anyscale-registry cu130 image that does exist:
 `anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu130-megatron-2.10-te-efa-1.47:1`.
 
+### 2b. Second missing image: the H100 CI Anyscale image (confirmed by a real CI run)
+
+This branch also renamed the H100 job's Anyscale-registry image:
+
+```diff
+-image_uri: anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu128-megatron-2.10-te-efa-1.47:1
++image_uri: anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu130-megatron-2.10-te-efa-1.47:1
+```
+
+The cu130 image was never built. I applied the `run_h100_gpu_ci` label to PR #2040 to run the
+real workflow; it failed in 7 seconds
+([run 32056729715](https://github.com/NovaSky-AI/SkyRL/actions/runs/32056729715)):
+
+```
+Error: API Exception (404) from POST /api/v2/builds/get_or_create_build_from_image_uri
+{"error":{"detail":"Cluster environment with name skyrl-train-ray-2.56.0-slim-py312-cu130-megatron-2.10-te-efa-1.47 not found"}}
+```
+
+This is *not* a credential-scope artifact: GitHub Actions used the real
+`secrets.ANYSCALE_CLI_TOKEN` and got the identical 404 that a manual submit from this
+workspace got. Meanwhile the old cu128 image resolves fine
+(`anyscale image get ...cu128-megatron-2.10-te-efa-1.47:1` → `status: SUCCEEDED`), confirming
+the rename is aspirational rather than the token being wrong.
+
+Anyscale does not expose the containerfile behind the existing cu128 image
+(`anyscale image get` returns only uri/status/ray_version), and the name encodes
+build inputs not present in this repo (an EFA 1.47 install layer on top of a megatron stack),
+so the cu130 equivalent cannot be faithfully reconstructed from the repo alone — whoever
+built the cu128 image needs to rebuild it for cu130.
+
+### 2c. Pre-existing (not caused by this branch): `SkyRL-GPU` cannot run on fork PRs
+
+`SkyRL-GPU` ([run 32055764447](https://github.com/NovaSky-AI/SkyRL/actions/runs/32055764447))
+fails on this PR with:
+
+```
+Error: Your user credentials are invalid. Please go to https://console.anyscale.com/v2/api-keys ...
+```
+
+Cause: `.github/workflows/gpu_skyrl.yaml` triggers on `pull_request` (not
+`pull_request_target`, which the other GPU workflows use). GitHub does not pass repository
+secrets to `pull_request` runs from a fork, so `ANYSCALE_CLI_TOKEN` arrives empty. PR #2040 is
+from the `erictang000/SkyRL` fork, hence the failure. The same workflow passes on push to
+`main` (run 32053268078 on 22b668f). This will fail identically for *any* fork PR and is
+unrelated to CUDA 13 — flagging it rather than fixing it here, since changing that trigger is
+a security-relevant decision outside this PR's scope.
+
 ## 3. Environment available for validation
 
 - This Anyscale workspace: 4×H100 80GB, driver 580.126.09, CUDA 13.0.
@@ -112,9 +159,32 @@ independently of the missing images.
 
 | Item | Status |
 |------|--------|
-| Verify review comment 1 (`jax[cuda13]`) | Done — invalid |
-| Verify review comment 2 (`nvidia-cudnn-cu13`) | Done — invalid |
-| Reply to review comments on PR | In progress |
-| Local validation of GPU CI suites on 4×H100 | In progress |
-| Missing `novaskyai` cu13.0 images | **Blocked** — needs maintainer push or Anyscale image build |
-| Full GPU CI green | Pending the above |
+| Verify review comment 1 (`jax[cuda13]`) | Done — invalid, no change |
+| Verify review comment 2 (`nvidia-cudnn-cu13`) | Done — invalid, no change |
+| Reply to both review comments on PR | Done |
+| FSDP env resolves/builds/imports on cu13 | Done — 121 tests collected |
+| Megatron env resolves/builds/imports on cu13 | Done — 368 pkgs incl. TE cu13 + megatron-bridge |
+| FSDP GPU CI suite on 4×H100 locally | Running |
+| Megatron GPU CI suite locally | Queued behind FSDP (GPU contention) |
+| Missing `novaskyai` cu13.0 Docker Hub images | **Blocked on you** — you're pushing them |
+| Missing cu130 H100 Anyscale image | **Blocked on you** — needs rebuild, containerfile not in repo |
+| Full GPU CI green | Blocked on both images above |
+
+### What I can and cannot do from here
+
+- **Cannot** submit the CI job specs directly: attempted, and it fails for the same reason CI
+  does (missing images). Separately, this workspace's token cannot see the `l4_ci` /
+  `k8s-single-node-4h100` compute configs, though it *is* in the same Anyscale org (it can
+  read the cu128 image).
+- **Can** trigger the real workflows via the `run_*_gpu_ci` labels on PR #2040 (my GitHub
+  token has admin). This is the working route and is what I used for the H100 run above.
+- **Can** run the CI suites' pytest commands locally on this workspace's 4×H100, which
+  validates the actual dependency substance of the PR (the runner scripts build their env from
+  `pyproject.toml`/`uv.lock` at runtime anyway).
+
+### Next steps once you've pushed the images
+
+1. Ping me when `novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0` and `-cu13.0-megatron` are
+   live, and when the cu130 H100 Anyscale image is registered.
+2. I re-apply each `run_*_gpu_ci` label (remove + re-add, since `pull_request_target` fires on
+   the `labeled` event) and drive all suites to green.
