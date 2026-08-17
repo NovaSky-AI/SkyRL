@@ -8,7 +8,7 @@ This page describes how SkyRL implements the Tinker API, including the system ar
 
 The integration is organized in three high-level layers:
 
-1. **API Layer** (`skyrl.tinker.api`) - FastAPI HTTP server that accepts Tinker API requests, stores them in a database, and returns future IDs for async polling
+1. **API Layer** (`skyrl.tinker.api`) - FastAPI HTTP server that accepts Tinker API requests and returns future IDs for async polling. Engine-owned operations use the database; API-forwarded samples use in-memory futures.
 2. **Engine Layer** (`skyrl.tinker.engine`) - Background subprocess that polls the database, batches pending requests, and dispatches them to the backend
 3. **Backend Layer** (`skyrl.backends`) - Translates Tinker operations into training and inference calls, managing Ray workers, FSDP/Megatron training, and vLLM inference
 
@@ -71,6 +71,9 @@ Sampling requests (`sample`) go through the following lifecycle:
 Client calls sample()
     │
     ▼
+API Server (FastAPI)
+    │  Creates an in-memory future
+    ▼
 SkyRL-Train Backend
     │  Converts Tinker SamplingParams → vLLM params
     ▼
@@ -83,10 +86,10 @@ RemoteInferenceClient
 Inference Workers (vLLM)
     │  Generate tokens with logprobs
     ▼
-Results aggregated → GeneratedSequence objects returned
+Results resolve the in-memory future → GeneratedSequence objects returned
 ```
 
-The `sample()` call is a fairly lightweight wrapper around SkyRL-Train's vLLM inference engines. The backend translates Tinker `SamplingParams` to vLLM format (e.g., `stop_strings` → `stop`, `stop_tokens` → `stop_token_ids`) and delegates prompts to the `RemoteInferenceClient`. `RemoteInferenceClient` forwards the requests to an instance of [vLLM Router](https://github.com/vllm-project/router), which handles load balancing and sticky routing across vLLM workers.
+The `sample()` call is a fairly lightweight wrapper around SkyRL-Train's vLLM inference engines. Non-colocated and external inference requests bypass the engine database: the API owns their futures and signals completion with `asyncio.Event`. The backend translates Tinker `SamplingParams` to vLLM format (e.g., `stop_strings` → `stop`, `stop_tokens` → `stop_token_ids`) and delegates prompts to the `RemoteInferenceClient`. `RemoteInferenceClient` forwards the requests to an instance of [vLLM Router](https://github.com/vllm-project/router), which handles load balancing and sticky routing across vLLM workers.
 
 
 ## Weight Sync

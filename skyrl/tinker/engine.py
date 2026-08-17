@@ -408,9 +408,7 @@ class TinkerEngine:
             pending_by_model[model_id].append((request_id, request_type, seq_id))
 
         predecessor_keys = {
-            (model_id, requests[0][2] - 1)
-            for model_id, requests in pending_by_model.items()
-            if requests[0][2] > 1
+            (model_id, requests[0][2] - 1) for model_id, requests in pending_by_model.items() if requests[0][2] > 1
         }
         completed_predecessors: set[tuple[str, int]] = set()
         if predecessor_keys:
@@ -473,9 +471,7 @@ class TinkerEngine:
             (request_id, model_id)
             for request_id, model_id, seq_id in ops
             if model_id not in barriers or request_id < barriers[model_id]
-            if ready_sequenced_request_ids is None
-            or seq_id is None
-            or request_id in ready_sequenced_request_ids
+            if ready_sequenced_request_ids is None or seq_id is None or request_id in ready_sequenced_request_ids
         ]
 
         return {
@@ -573,9 +569,7 @@ class TinkerEngine:
             (request_id, model_id, request_type)
             for request_id, model_id, request_type, seq_id in other_futures
             if model_id not in blocked_pass_barriers or request_id < blocked_pass_barriers[model_id]
-            if ready_sequenced_request_ids is None
-            or seq_id is None
-            or request_id in ready_sequenced_request_ids
+            if ready_sequenced_request_ids is None or seq_id is None or request_id in ready_sequenced_request_ids
         ]
 
         return {
