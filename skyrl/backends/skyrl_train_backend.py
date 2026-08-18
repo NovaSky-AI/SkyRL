@@ -53,12 +53,15 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     as overrides to the default SkyRL-Train config.
     """
 
-    keep_runtime_warm_on_last_unload: bool = False
+    keep_runtime_warm_on_last_unload: bool = True
     """Keep the shared runtime (Ray, training workers, inference engines, base
     model) alive when the last LoRA model is unloaded, so the next compatible
     ``create_model`` registers a fresh adapter against it instead of
     rebuilding. Only applies to LoRA policies; full-parameter fine-tuning
-    always tears down on unload."""
+    always tears down on unload. Set to ``False`` to release all GPUs on the
+    last unload (scale-to-zero) — also the escape hatch for changing the LoRA
+    ``(rank, alpha)`` signature, which is otherwise pinned by the first
+    ``create_model`` for the warm runtime's lifetime."""
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):

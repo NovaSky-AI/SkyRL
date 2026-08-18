@@ -75,7 +75,11 @@ def test_last_lora_unload_keeps_runtime_warm_when_enabled():
     backend._inference_state_publisher.assert_not_called()
 
 
-def test_last_lora_unload_tears_down_by_default():
+def test_keep_runtime_warm_defaults_to_true():
+    assert MegatronBackendOverrides().keep_runtime_warm_on_last_unload is True
+
+
+def test_last_lora_unload_tears_down_when_disabled():
     backend = _backend(keep_runtime_warm=False)
 
     with patch("skyrl.backends.skyrl_train_backend.ray.shutdown") as shutdown:
