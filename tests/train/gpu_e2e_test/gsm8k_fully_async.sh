@@ -11,8 +11,7 @@ SCRIPT_DIR=$(dirname $(realpath $0))
 # 18th Aug 2026). The window starts at #1929 (eval metrics logged at the right step), which
 # is the last change to shift these numbers. Rebaselined after the async codepath changes:
 # stale KV cache reuse on weight sync (#1798), policy_loss_type=rollout_is (#1850), and the
-# per-step cache salt (#1836). `loss/avg_final_rewards` in particular dropped from ~0.36 to
-# ~0.24 once the fully async scripts moved to rollout_is, while eval accuracy stayed flat.
+# per-step cache salt (#1836).
 EVAL_ACC_MIN_VALUE=0.50
 TRAIN_ACC_MIN_VALUE=0.198
 AVG_NUM_TOKENS_MAX_VALUE=285
