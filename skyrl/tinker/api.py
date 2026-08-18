@@ -1394,9 +1394,10 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     request_id = int(request.request_id)
+    is_external_future = request_id < 0
 
     try:
-        if request_id < 0:
+        if is_external_future:
             row = await req.app.state.external_future_store.wait_for_future(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
         else:
             row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
@@ -1406,13 +1407,18 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     if row is None:
         raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
-    status, request_type, result_data = row
+    if is_external_future:
+        status, result_data = row
+        request_type = None
+    else:
+        status, request_type, result_data = row
     if status == RequestStatus.COMPLETED:
         # The SDK retrieves sample/forward/forward_backward results in proto
         # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
         # for these types. Errors and other result types stay JSON.
         if (
-            types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
+            request_type is not None
+            and types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
             and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
         ):
             return Response(
