@@ -139,9 +139,9 @@ class PackedDataCollator:
         #   - Context Parallelism splits each segment into ``2*cp_size`` equal
         #     load-balanced causal chunks, so each segment must be divisible by
         #     ``2*cp_size``.
-        #   - When FP8 is enabled, Transformer Engine GEMMs require each CP
-        #     rank's local token slab to be 16-aligned; globally this means
-        #     ``16*cp_size``.
+        #   - When FP8 is enabled, Transformer Engine requires both a
+        #     16-token CP slab and an 8-token GEMM dimension after sequence
+        #     parallelism shards that slab over TP.
         # This MUST stay in lockstep with the worker's preprocess_packed_seqs
         # (megatron_utils.py): if the divisors drift, the per-rank CP/SP
         # gather/scatter offsets silently corrupt loss/grads (no crash).
@@ -270,8 +270,8 @@ class PackedDataCollator:
                     if n_write > 0:
                         loss_mask_np[row_idx, row_offset:write_end] = full_loss_masks[ex_idx][1 : 1 + n_write]
 
-                # Advance row_offset, padding sub-seq to the TP/CP layout
-                # multiple, plus FP8's 16-token local-rank multiple when active.
+                # Advance row_offset, padding the sub-seq for TP/CP layout and
+                # FP8 GEMMs after the local sequence shard is selected.
                 row_offset += _round_up(s, align_size)
 
         # Count response-token loss slots before normalization. The vectorized
