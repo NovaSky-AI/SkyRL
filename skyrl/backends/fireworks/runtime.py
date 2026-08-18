@@ -91,25 +91,18 @@ class FireworksRuntime:
         if not api_key:
             raise RuntimeError("FIREWORKS_API_KEY is required for Fireworks training")
         if not config.base_model or not config.training_shape_id:
-            raise ValueError(
-                "Dedicated Fireworks training requires base_model and training_shape_id"
-            )
+            raise ValueError("Dedicated Fireworks training requires base_model and training_shape_id")
         if not config.trainer_job_id or not config.deployment_id:
-            raise ValueError(
-                "Dedicated Fireworks training requires stable trainer_job_id and deployment_id"
-            )
+            raise ValueError("Dedicated Fireworks training requires stable trainer_job_id and deployment_id")
 
         try:
             from fireworks.training.sdk import FiretitanServiceClient
         except ImportError as exc:
             raise ImportError(
-                "The Fireworks backend requires fireworks-ai[training]; "
-                "install SkyRL with --extra fireworks"
+                "The Fireworks backend requires fireworks-ai[training]; " "install SkyRL with --extra fireworks"
             ) from exc
 
-        cleanup_deployment = (
-            config.cleanup_deployment_on_close if config.cleanup_on_exit else None
-        )
+        cleanup_deployment = config.cleanup_deployment_on_close if config.cleanup_on_exit else None
         service = FiretitanServiceClient.from_firetitan_config(
             api_key=api_key,
             base_url=config.base_url,
@@ -120,6 +113,7 @@ class FireworksRuntime:
             trainer_job_id=config.trainer_job_id,
             deployment_id=config.deployment_id,
             create_deployment=True,
+            use_reservation=config.use_reservation,
             max_context_length=config.max_seq_len,
             learning_rate=learning_rate,
             trainer_replica_count=config.trainer_replica_count,
@@ -190,10 +184,7 @@ class FireworksRuntime:
 
     def _snapshot_name(self, version: int) -> str:
         # Dedicated checkpoint names are lowercase DNS labels.
-        prefix = (
-            re.sub(r"[^a-z0-9-]+", "-", self.config.snapshot_prefix.lower()).strip("-")
-            or "skyrl"
-        )
+        prefix = re.sub(r"[^a-z0-9-]+", "-", self.config.snapshot_prefix.lower()).strip("-") or "skyrl"
         suffix = f"-v{version:08d}-{uuid.uuid4().hex[:8]}"
         # Fireworks appends another ``-<8 hex>`` suffix. Keep our input at 54
         # characters so the provider-side name remains at most 63 characters.
@@ -216,15 +207,11 @@ class FireworksRuntime:
                 result = future.result(timeout=self.config.request_timeout_s)
                 path = getattr(result, "path", None)
                 if not path:
-                    raise RuntimeError(
-                        f"Fireworks save_weights_for_sampler({name!r}) returned no path"
-                    )
+                    raise RuntimeError(f"Fireworks save_weights_for_sampler({name!r}) returned no path")
                 return str(path)
 
             snapshot_path = await asyncio.to_thread(_save)
-            await asyncio.to_thread(
-                self.service.hotload_sampler_snapshot, snapshot_path
-            )
+            await asyncio.to_thread(self.service.hotload_sampler_snapshot, snapshot_path)
 
             # The client is created once, after the first snapshot is ready.
             with self._state_lock:
@@ -251,9 +238,7 @@ class FireworksRuntime:
             if self._closed:
                 raise RuntimeError("Fireworks runtime is closed")
             if self._sampler is None or self._sampler_identity is None:
-                raise RuntimeError(
-                    "Fireworks sampler weights have not been published yet"
-                )
+                raise RuntimeError("Fireworks sampler weights have not been published yet")
             sampler = self._sampler
             identity = self._sampler_identity
             self._active_samples += 1
@@ -279,9 +264,7 @@ class FireworksRuntime:
         with self._use_sampler() as (sampler, identity):
             native_sample = getattr(sampler, "sample_async", None)
             if native_sample is None:
-                raise RuntimeError(
-                    "The dedicated Fireworks sampler must expose sample_async()"
-                )
+                raise RuntimeError("The dedicated Fireworks sampler must expose sample_async()")
             result = await asyncio.wait_for(
                 native_sample(
                     prompt=prompt,

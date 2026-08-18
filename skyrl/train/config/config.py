@@ -928,6 +928,7 @@ class FireworksConfig(BaseConfig):
     """Training shape resource name."""
     trainer_job_id: Optional[str] = None
     """Stable trainer ID, used for audit and failure cleanup."""
+    use_reservation: bool = False
     trainer_replica_count: int = 1
     """Number of data-parallel HSDP trainer replicas for dedicated training.
 
