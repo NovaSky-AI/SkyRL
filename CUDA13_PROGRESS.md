@@ -1,52 +1,47 @@
-# CUDA 13 Upgrade — Review Response & CI Validation
+# CUDA 13 Upgrade — Review Response & Local GPU CI Report
 
 Branch: `eric/cuda-13` → PR [NovaSky-AI/SkyRL#2040](https://github.com/NovaSky-AI/SkyRL/pull/2040)
 
-## 1. Review comments — both INVALID (no code change needed)
+**Bottom line:** both review comments are factually wrong and need no code change. Locally,
+**292 GPU tests pass** across all six pytest-based GPU CI suites; the only 3 failures are an
+artifact of this workspace being a CUDA 12.8 box, not a defect in the PR. No source changes
+were needed — the branch is unmodified apart from this report.
 
-Both comments came from `gemini-code-assist[bot]`, flagged "high priority". Both assert that
-a package/extra does not exist on PyPI. Both assertions are false, verified directly against
-the PyPI JSON API and by real dependency resolution.
+---
 
-### 1.1 `jax[cuda13]` — comment claims the `cuda13` extra does not exist
+## 1. Review comments — both INVALID, no code changed
 
-**Claim:** "JAX does not publish a `cuda13` extra on PyPI ... Using `cuda13` will cause
+Both are from `gemini-code-assist[bot]`, both marked "high priority", and both assert that a
+package or extra does not exist on PyPI. Both assertions are false. Replied on the PR with the
+evidence below.
+
+### 1.1 `jax[cuda13]` (`pyproject.toml:31`)
+
+Claim: "JAX does not publish a `cuda13` extra on PyPI ... Using `cuda13` will cause
 installation of the `gpu` extra to fail." Suggested `jax[cuda12]`.
 
-**Verdict: false.** `jax` has published a `cuda13` extra since well before our floor of
-`>=0.7.2`.
+**False.** `jax` 0.7.2 (our floor) and 0.8.0 both list it:
 
 ```
 $ curl -s https://pypi.org/pypi/jax/0.7.2/json | jq -r '.info.provides_extra[]'
 minimum-jaxlib, cpu, ci, tpu, cuda, cuda12, cuda13, cuda12-local, cuda13-local, rocm, k8s, xprof
 ```
 
-The extra resolves to a real, published plugin:
+It resolves to a real published plugin (`jax-cuda13-plugin[with-cuda]`), the committed
+`uv.lock` already contains the resolved `jax-cuda13-plugin` / `jax-cuda13-pjrt` entries, and
+`uv lock --check` passes (464 packages).
 
-```
-jaxlib<=0.7.2,>=0.7.2;              extra == "cuda13"
-jax-cuda13-plugin[with-cuda]<=0.7.2,>=0.7.2; extra == "cuda13"
-```
+**Confirmed at runtime, not just in resolution:** the `tests/tx/gpu` CI suite installs the
+`gpu` extra — i.e. `jax[cuda13]` — and **12/12 tests pass on GPU** (§2). The extra it claims
+cannot install is the one that just ran.
 
-`jax 0.8.0` lists the same extra. Our committed `uv.lock` already contains the resolved
-`jax-cuda13-plugin` (0.10.2 / 0.11.0) and `jax-cuda13-pjrt` entries, i.e. resolution of the
-`gpu` extra demonstrably succeeds today — `uv lock --check` passes with 464 packages resolved.
+### 1.2 `nvidia-cudnn-cu13` (`docker/Dockerfile.megatron:40`)
 
-**Why the suggested change would be worse:** `jax[cuda12]` pulls the `nvidia-*-cu12` CUDA
-runtime stack. This project pins `torch==2.11.0+cu130` from the `pytorch-cu130` index, so
-taking the suggestion would install a *second*, redundant CUDA runtime (cu12 alongside cu13)
-into every GPU environment — the exact duplication the rest of this PR removes (see the
-`nixl-cu12; sys_platform == 'never'` exclusion in `pyproject.toml`).
+Claim: "NVIDIA does not publish a `nvidia-cudnn-cu13` package on PyPI ... will result in a
+package resolution error and break the Docker build." Suggested `nvidia-cudnn-cu12>=9.3`.
 
-### 1.2 `nvidia-cudnn-cu13` — comment claims the package does not exist
-
-**Claim:** "NVIDIA does not publish a `nvidia-cudnn-cu13` package on PyPI ... will result in
-a package resolution error and break the Docker build." Suggested `nvidia-cudnn-cu12>=9.3`.
-
-**Verdict: false.** The package exists and is actively released (currently 9.24.0.43, with
-releases back through 9.12.0.46).
-
-The exact `docker/Dockerfile.megatron` install line resolves cleanly against a fresh target:
+**False.** The package exists and is actively released (9.24.0.43 today, back through
+9.12.0.46). The flagged line resolves cleanly against a fresh target:
 
 ```
 $ uv pip install --dry-run --python-platform linux --python-version 3.12 \
@@ -57,134 +52,154 @@ Resolved 29 packages
  + torch==2.11.0+cu130
 ```
 
-`nvidia-cudnn-cu13` is also already present in the committed `uv.lock`.
+### Why both suggestions would actively regress the PR
 
-**Why the suggested change would be worse:** same reason as above — `nvidia-cudnn-cu12`
-carries `nvidia-*-cu12` runtime deps, so it would drag a mismatched cuDNN/CUDA-12 runtime
-into a cu13 image alongside the cu13 one.
+Each proposed fix swaps a cu13 package for its cu12 twin, which drags the `nvidia-*-cu12`
+runtime stack in beside torch's cu130 — two CUDA runtimes in one environment. That is not
+hypothetical: §3 below is a failure caused by exactly that condition. The suggestions would
+create more instances of the very bug class, and the PR already removes one deliberately
+(`nixl-cu12; sys_platform == 'never'`).
 
-**Conclusion:** no code changes made for either comment. Replied on the PR with the evidence
-above.
+---
 
-## 2. Real blocker found while setting up GPU CI
+## 2. Local GPU CI results — 292 passed, 3 failed
 
-The published Docker Hub images the GPU CI job specs point at **do not exist**.
+Run on this workspace (4×H100 80GB, driver 580.126.09), executing each `ci/gpu_ci_run_*.sh`
+pytest invocation verbatim, serially.
 
-Every `ci/anyscale_gpu_*.yaml` on this branch was retargeted from `cu12.8` to `cu13.0`:
+| # | Suite (source script) | Result | Time |
+|---|---|---|---|
+| 1 | FSDP GPU CI (`gpu_ci_run_skyrl_train.sh`) | **112 passed**, 9 skipped, 36 deselected | 2:27:07 |
+| 2 | `tests/tx/gpu` (`gpu_ci_run.sh`, `--extra gpu`) | **12 passed** | 0:00:26 |
+| 3 | Megatron GPU CI (`gpu_ci_run_skyrl_train_megatron.sh`) | **130 passed**, 2 skipped, 148 deselected | 3:14:07 |
+| 4 | Megatron models (`..._megatron_models.sh`) | **3 passed**, 4 skipped, 273 deselected | 0:16:58 |
+| 5a | H100 FSDP (`gpu_ci_run_h100.sh`, part 1) | **2 passed**, 6 deselected | 0:14:38 |
+| 5b | H100 Megatron (`gpu_ci_run_h100.sh`, part 2) | **3 failed**, 2 passed, 4 deselected | 0:30:53 |
+| 6 | Tinker↔Megatron backend (`..._tinker_skyrl_train_backend.sh`) | **31 passed** | 0:13:08 |
 
-```yaml
-image_uri: novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0          # 8 job specs
-image_uri: novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0-megatron # 4 job specs
-```
+Both dependency stacks resolve, build and import cleanly on CUDA 13 (FSDP: 121 tests
+collected; Megatron: 368 packages including `transformer-engine-cu13` 2.16 and
+`megatron-bridge` built from git). Since the CI runner scripts build their environment from
+`pyproject.toml` + `uv.lock` at runtime, this exercises the actual dependency substance of the
+PR rather than a prebuilt image.
 
-Docker Hub `novaskyai` has 9 repositories. It contains
-`skyrl-train-ray-2.56.0-py3.12-cu12.8` and `...-cu12.8-megatron`, but **no `cu13.0`
-repositories at all** (`GET /v2/repositories/novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0/`
-→ `object not found`). There is no image build/push automation anywhere in the repo
-(`.github/`, `ci/`, `docker/` contain no `docker build`/`docker push`/`buildx`), so these are
-published out-of-band by a maintainer.
+---
 
-Consequence: those 12 GPU CI jobs cannot start — the cluster fails the image pull before the
-entrypoint ever runs. Note this failure mode is *also* what
-`ci/submit_anyscale_job.sh` treats as a GPU-capacity failure (job fails with zero job runs),
-so it will burn all 5 submission attempts, 300s apart, before reporting failure.
+## 3. The 3 failures are a property of this workspace, not of the PR
 
-The one exception is `ci/anyscale_gpu_ci_h100.yaml`, which already points at an
-Anyscale-registry cu130 image that does exist:
-`anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu130-megatron-2.10-te-efa-1.47:1`.
-
-### 2b. Second missing image: the H100 CI Anyscale image (confirmed by a real CI run)
-
-This branch also renamed the H100 job's Anyscale-registry image:
-
-```diff
--image_uri: anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu128-megatron-2.10-te-efa-1.47:1
-+image_uri: anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu130-megatron-2.10-te-efa-1.47:1
-```
-
-The cu130 image was never built. I applied the `run_h100_gpu_ci` label to PR #2040 to run the
-real workflow; it failed in 7 seconds
-([run 32056729715](https://github.com/NovaSky-AI/SkyRL/actions/runs/32056729715)):
+All three (`test_logprobs_matching_roundtrip[glm-4.7-flash_h100_tp4_ep4]`,
+`test_router_replay::test_logprobs[tp2_pp2_ep2]`,
+`test_router_replay::test_forward_backward[tp2_pp2_ep2]`) die in Transformer Engine's cuDNN
+fused-attention path with:
 
 ```
-Error: API Exception (404) from POST /api/v2/builds/get_or_create_build_from_image_uri
-{"error":{"detail":"Cluster environment with name skyrl-train-ray-2.56.0-slim-py312-cu130-megatron-2.10-te-efa-1.47 not found"}}
+RuntimeError: Multiple libcudart libraries found: libcudart.so.12 and libcudart.so.13
 ```
 
-This is *not* a credential-scope artifact: GitHub Actions used the real
-`secrets.ANYSCALE_CLI_TOKEN` and got the identical 404 that a manual submit from this
-workspace got. Meanwhile the old cu128 image resolves fine
-(`anyscale image get ...cu128-megatron-2.10-te-efa-1.47:1` → `status: SUCCEEDED`), confirming
-the rename is aspirational rather than the token being wrong.
-
-Anyscale does not expose the containerfile behind the existing cu128 image
-(`anyscale image get` returns only uri/status/ray_version), and the name encodes
-build inputs not present in this repo (an EFA 1.47 install layer on top of a megatron stack),
-so the cu130 equivalent cannot be faithfully reconstructed from the repo alone — whoever
-built the cu128 image needs to rebuild it for cu130.
-
-### 2c. Pre-existing (not caused by this branch): `SkyRL-GPU` cannot run on fork PRs
-
-`SkyRL-GPU` ([run 32055764447](https://github.com/NovaSky-AI/SkyRL/actions/runs/32055764447))
-fails on this PR with:
+**Where the cu12 runtime comes from — not from any Python package.** A scan of the megatron
+environment's `site-packages` finds exactly one CUDA runtime, `nvidia/cu13/lib/libcudart.so.13`.
+The cu12 copy comes from the operating system:
 
 ```
-Error: Your user credentials are invalid. Please go to https://console.anyscale.com/v2/api-keys ...
+$ ls -ld /usr/local/cuda            →  /usr/local/cuda -> /usr/local/cuda-12.8/
+$ echo $LD_LIBRARY_PATH             →  /opt/cudnn/lib:/usr/local/cuda/lib64
+$ readlink -f /usr/local/cuda/lib64 →  /usr/local/cuda-12.8/targets/x86_64-linux/lib
 ```
 
-Cause: `.github/workflows/gpu_skyrl.yaml` triggers on `pull_request` (not
-`pull_request_target`, which the other GPU workflows use). GitHub does not pass repository
-secrets to `pull_request` runs from a fork, so `ANYSCALE_CLI_TOKEN` arrives empty. PR #2040 is
-from the `erictang000/SkyRL` fork, hence the failure. The same workflow passes on push to
-`main` (run 32053268078 on 22b668f). This will fail identically for *any* fork PR and is
-unrelated to CUDA 13 — flagging it rather than fixing it here, since changing that trigger is
-a security-relevant decision outside this PR's scope.
+This Anyscale workspace runs a CUDA 12.8 base image with no CUDA 13 toolkit, so
+`libcudart.so.12` sits on the loader path. TE's fused attention refuses to run when it sees
+two libcudart versions, and the pip stack correctly supplies the cu13 one — hence the clash.
 
-## 3. Environment available for validation
+**The CI image does not have this problem, by construction.** `docker/Dockerfile.megatron`
+installs the CUDA 13.0.2 toolkit, which repoints `/usr/local/cuda` at 13.0 (the Dockerfile's
+own comment says so explicitly):
 
-- This Anyscale workspace: 4×H100 80GB, driver 580.126.09, CUDA 13.0.
-- `anyscale` CLI present, `ANYSCALE_CLI_TOKEN` set → can submit the real CI job specs.
-- GitHub token is `erictang000` with **admin** on `NovaSky-AI/SkyRL` → can apply the
-  `run_*_gpu_ci` gating labels to trigger the real workflows.
-- **No** docker/podman/buildah binary in this workspace → cannot build or push the
-  `novaskyai` Docker Hub images from here.
+```dockerfile
+RUN wget https://developer.download.nvidia.com/compute/cuda/13.0.2/local_installers/cuda_13.0.2_580.95.05_linux.run \
+    && sudo sh cuda_13.0.2_580.95.05_linux.run --silent --toolkit && rm -rf cuda_13.0.2_580.95.05_linux.run
+```
 
-Relevant: the CI runner scripts build their own environment at runtime
-(`uv run --isolated --extra dev --extra fsdp ...`) from `pyproject.toml` + `uv.lock`. The
-docker image supplies the base layer (Ray, CUDA system libs, NCCL headers), so the
-dependency substance of this PR can be validated locally on this workspace's H100s
-independently of the missing images.
+So in CI, `/usr/local/cuda/lib64` resolves to the 13.0 tree and only `libcudart.so.13` is
+visible. The cu12.8 remnants of the base layer stay at `/usr/local/cuda-12.8` and off the
+path. The h100 job additionally runs on a cu130 image rather than this one.
 
-## 4. Status
+**Not reproducible-away locally.** Ray workers inherit the raylet's environment, not the
+caller's, so overriding `LD_LIBRARY_PATH` for pytest does not reach the workers (verified:
+a probe actor still reports `/opt/cudnn/lib:/usr/local/cuda/lib64` and can load
+`libcudart.so.12`). Forcing a private Ray cluster with a clean path segfaults against the
+managed workspace cluster. Properly validating these 3 tests needs an image whose
+`/usr/local/cuda` is 13.0 — i.e. the CI image.
+
+### A wrong turn, recorded
+
+I first blamed `nvidia-cutlass-dsl==4.6.0`, which depends on `nvidia-cutlass-dsl-libs-cu12`
+unconditionally while adding `-cu13` only under its `cu13` extra, so both land in the
+environment. I added an override dropping the cu12 variant, re-locked, and re-ran: **the
+failure was identical**. Inspecting the wheel shows why — `nvidia-cutlass-dsl-libs-cu12`
+contains 19 entries and no cudart at all (just `_cutlass_ir.cu12*.so` and
+`libcute_dsl_runtime.so`), so it could never have been the source. That change is
+**reverted**; `pyproject.toml` and `uv.lock` are untouched on this branch. Dropping the
+redundant cu12 CUTLASS libs may still be a reasonable cleanup on its own merits, but it fixes
+nothing here and I have not validated it, so it is not proposed.
+
+---
+
+## 4. Still blocked (needs you)
+
+### 4.1 The cu13.0 images do not exist
+
+Every GPU CI job spec was retargeted to images that were never published, so the workflows
+cannot start — they fail at image pull, before the entrypoint runs.
+
+- **Docker Hub (12 job specs):** `novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0` and
+  `-cu13.0-megatron`. The `novaskyai` org has 9 repos, including the `cu12.8` pair and no
+  `cu13.0` anything. There is no build/push automation in the repo — these are published
+  out-of-band. You said you'd push these.
+- **Anyscale registry (h100 job):** the branch renamed
+  `anyscale/image/...-cu128-megatron-2.10-te-efa-1.47:1` → `...-cu130-...`, which was never
+  built. I applied the `run_h100_gpu_ci` label to PR #2040; the real workflow failed in 7
+  seconds ([run 32056729715](https://github.com/NovaSky-AI/SkyRL/actions/runs/32056729715))
+  with a 404 on that image name. Not a credentials artifact — CI's own
+  `secrets.ANYSCALE_CLI_TOKEN` produced the identical error a manual submit did, and the old
+  cu128 image still resolves. Anyscale does not expose the containerfile behind it, and its
+  name encodes an EFA 1.47 layer absent from this repo, so it needs a rebuild by whoever built
+  the cu128 one.
+
+Note for whoever re-triggers: `pull_request_target` fires on the `labeled` event, so a label
+already present must be removed and re-added.
+
+### 4.2 The 6 e2e suites need wandb
+
+`gsm8k_colocate`, `gsm8k_fully_async`, `gsm8k_colocate_megatron`, `sft_tulu3_megatron`,
+`gsm8k_tinker`, `gsm8k_tinker_fully_async` all verify through wandb (`get_summary.py` /
+`check_sft_trend.py` read run history via `wandb.Api()`), and no `WANDB_API_KEY` is configured
+here. The first three honor a `LOGGER` env var, so their *training* could be run with
+`LOGGER=console` to exercise the stack on cu13, but their accuracy/token/logprob threshold
+assertions cannot be checked without wandb. `sft_tulu3_megatron` hardcodes `logger=wandb`;
+the two tinker suites drive wandb natively through `tinker-cookbook`. **None were run** —
+say the word if you want the console-only training variants.
+
+### 4.3 Pre-existing, unrelated: `SkyRL-GPU` cannot run on fork PRs
+
+[Run 32055764447](https://github.com/NovaSky-AI/SkyRL/actions/runs/32055764447) fails with
+"Your user credentials are invalid" because `.github/workflows/gpu_skyrl.yaml` triggers on
+`pull_request` rather than the `pull_request_target` the other GPU workflows use, and GitHub
+withholds secrets from fork `pull_request` runs. PR #2040 is from the `erictang000` fork. The
+same workflow passes on push to `main` (run 32053268078). This affects every fork PR and has
+nothing to do with CUDA 13; changing that trigger is a security decision outside this PR's
+scope, so it is flagged, not fixed.
+
+---
+
+## 5. Verification status
 
 | Item | Status |
-|------|--------|
-| Verify review comment 1 (`jax[cuda13]`) | Done — invalid, no change |
-| Verify review comment 2 (`nvidia-cudnn-cu13`) | Done — invalid, no change |
-| Reply to both review comments on PR | Done |
-| FSDP env resolves/builds/imports on cu13 | Done — 121 tests collected |
-| Megatron env resolves/builds/imports on cu13 | Done — 368 pkgs incl. TE cu13 + megatron-bridge |
-| FSDP GPU CI suite on 4×H100 locally | Running |
-| Megatron GPU CI suite locally | Queued behind FSDP (GPU contention) |
-| Missing `novaskyai` cu13.0 Docker Hub images | **Blocked on you** — you're pushing them |
-| Missing cu130 H100 Anyscale image | **Blocked on you** — needs rebuild, containerfile not in repo |
-| Full GPU CI green | Blocked on both images above |
-
-### What I can and cannot do from here
-
-- **Cannot** submit the CI job specs directly: attempted, and it fails for the same reason CI
-  does (missing images). Separately, this workspace's token cannot see the `l4_ci` /
-  `k8s-single-node-4h100` compute configs, though it *is* in the same Anyscale org (it can
-  read the cu128 image).
-- **Can** trigger the real workflows via the `run_*_gpu_ci` labels on PR #2040 (my GitHub
-  token has admin). This is the working route and is what I used for the H100 run above.
-- **Can** run the CI suites' pytest commands locally on this workspace's 4×H100, which
-  validates the actual dependency substance of the PR (the runner scripts build their env from
-  `pyproject.toml`/`uv.lock` at runtime anyway).
-
-### Next steps once you've pushed the images
-
-1. Ping me when `novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0` and `-cu13.0-megatron` are
-   live, and when the cu130 H100 Anyscale image is registered.
-2. I re-apply each `run_*_gpu_ci` label (remove + re-add, since `pull_request_target` fires on
-   the `labeled` event) and drive all suites to green.
+|---|---|
+| Review comment 1 (`jax[cuda13]`) | Invalid — refuted, and the extra runs green on GPU |
+| Review comment 2 (`nvidia-cudnn-cu13`) | Invalid — refuted by fresh-target resolution |
+| Both replied to on PR | Done |
+| FSDP / Megatron envs resolve + import on cu13 | Verified |
+| 6 pytest GPU CI suites run locally | Verified — 292 passed |
+| 3 h100 megatron tests | **Unverified** — needs a `/usr/local/cuda`→13.0 image |
+| 6 e2e training suites | **Not run** — need `WANDB_API_KEY` |
+| Full GPU CI green | Blocked on the missing cu13.0 images (§4.1) |
