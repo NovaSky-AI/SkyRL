@@ -35,10 +35,7 @@ def _load_adapter_store():
         "megatron.core.optimizer": optimizer,
     }
     module_name = "adapter_store_under_test"
-    path = (
-        Path(__file__).parents[5]
-        / "skyrl/backends/skyrl_train/workers/megatron/adapter_store.py"
-    )
+    path = Path(__file__).parents[5] / "skyrl/backends/skyrl_train/workers/megatron/adapter_store.py"
     spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
