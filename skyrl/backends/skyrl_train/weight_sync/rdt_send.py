@@ -387,6 +387,12 @@ class MegatronStackedWeightSource(WeightSource):
         self._verified = False
         # Per-layer expert HF name lists, built once (see _expert_names_for).
         self._expert_names: dict = {}
+        # The bridge's own mapping registry, cached: `mapping_registry()` rebuilds
+        # the whole mapping list per call. Used ONLY for name lookup (a pure
+        # string op), never to run a mapping, so it needs no process groups
+        # installed on it.
+        self._mapping_reg: Any = None
+        self._expert_name_source: Optional[str] = None
         # [RDT-EXPORT-RING] Reused expert-stack buffers (see _stack_into_ring).
         # Depth reads the same knob as the trainer's gather_lookahead, so the
         # ring can never be shallower than the residency the credit gate allows.
@@ -607,18 +613,86 @@ class MegatronStackedWeightSource(WeightSource):
         mb.hf_pretrained = self._bridge.hf_pretrained
         return mb
 
-    def _expert_names_for(self, layer: int, E: int) -> list:
+    @staticmethod
+    def _mg_expert_template(sample_global_param_name: str) -> str:
+        """``'<head>layers.{layer}.<tail>weight{e}'`` from a real expert task's
+        Megatron name, e.g. ``decoder.layers.3.mlp.experts.linear_fc1.weight5``.
+
+        Only the SHAPE of the name is taken from the sample; both indices are
+        re-substituted, so the same template serves foreign experts this rank
+        holds no task for.
+        """
+        head, _, rest = sample_global_param_name.partition("layers.")
+        _layer, _, tail = rest.partition(".")
+        base = tail.rsplit("weight", 1)[0]
+        return head + "layers.{layer}." + base + "weight{e}"
+
+    def _resolved_expert_names(self, lay: "_ExpertLayer", E: int) -> Optional[list]:
+        """Expert HF names straight from the bridge's mapping registry, or None.
+
+        ``megatron_to_hf_lookup`` resolves a Megatron param name to the CONCRETE
+        HF name(s) — no model, no collective, pure string work — so whatever the
+        architecture calls its decoder stack, its MoE container and its
+        projections is what we emit. The fused fc1 resolves to a
+        ``GatedMLPMapping`` whose ``hf_param`` names gate/up BY KEY, so the two
+        halves are identified rather than assumed.
+
+        Returns None (caller falls back) on any shape we do not recognize, since
+        a wrong name here is SILENT: the consumer never bakes it, so it is
+        skipped rather than raising.
+        """
+        try:
+            # getattr: tests drive this source on instances built without __init__.
+            reg = getattr(self, "_mapping_reg", None)
+            if reg is None:
+                reg = self._mapping_reg = self._prepared_model_bridge().mapping_registry()
+            t1 = self._mg_expert_template(lay.fc1[0].global_param_name)
+            t2 = self._mg_expert_template(lay.fc2[0].global_param_name)
+            names: list = []
+            for e in range(E):
+                fc1 = getattr(reg.megatron_to_hf_lookup(t1.format(layer=lay.layer, e=e)), "hf_param", None)
+                fc2 = getattr(reg.megatron_to_hf_lookup(t2.format(layer=lay.layer, e=e)), "hf_param", None)
+                if not isinstance(fc1, dict) or "gate" not in fc1 or "up" not in fc1 or not isinstance(fc2, str):
+                    return None
+                names.append(fc1["gate"])
+                names.append(fc1["up"])
+                names.append(fc2)
+            return names
+        except Exception:  # noqa: BLE001 - any registry shape we cannot read -> fall back
+            logger.warning("[rdt] expert-name lookup via the bridge failed; using the legacy names", exc_info=True)
+            return None
+
+    def _expert_names_for(self, lay: "_ExpertLayer", E: int) -> list:
         """Per-layer expert HF names in yield order (gate/up/down per expert),
-        built once and cached — otherwise ~36k f-strings per sync at 235B."""
-        names = self._expert_names.get(layer)
+        built once and cached — otherwise ~36k lookups per sync at 235B.
+
+        Resolved through the bridge (see ``_resolved_expert_names``), falling
+        back to the legacy synthesis. That fallback assumed
+        ``model.layers.<L>.mlp.experts.<e>.{gate,up,down}_proj.weight`` — the
+        Qwen3-MoE family's naming, which GLM and DeepSeek share and which
+        Kimi K2.5-VL does NOT: it nests the stack under ``language_model.``, so
+        every expert name missed and the experts silently never synced.
+        Verified on CPU that the bridge reproduces the legacy names exactly for
+        Qwen3-MoE, so this is a no-op wherever it already worked.
+        """
+        names = self._expert_names.get(lay.layer)
+        if names is not None:
+            return names
+        names = self._resolved_expert_names(lay, E)
+        source = "bridge mapping_registry"
         if names is None:
-            prefix = f"model.layers.{layer}.mlp.experts"
+            prefix = f"model.layers.{lay.layer}.mlp.experts"
             names = []
             for e in range(E):
                 names.append(f"{prefix}.{e}.gate_proj.weight")
                 names.append(f"{prefix}.{e}.up_proj.weight")
                 names.append(f"{prefix}.{e}.down_proj.weight")
-            self._expert_names[layer] = names
+            source = "legacy synthesis (model.layers.* assumed)"
+        if getattr(self, "_expert_name_source", None) is None:
+            # Positive marker, once: which naming path a run actually took.
+            self._expert_name_source = source
+            logger.info("[rdt-config] expert HF names from: %s", source)
+        self._expert_names[lay.layer] = names
         return names
 
     def _stack_into_ring(self, kind: str, src: list) -> torch.Tensor:
@@ -687,7 +761,7 @@ class MegatronStackedWeightSource(WeightSource):
         gates = fc1_local[:, :F].unbind(0)
         ups = fc1_local[:, F:].unbind(0)
         downs = fc2_local.unbind(0)
-        names.extend(self._expert_names_for(lay.layer, E))
+        names.extend(self._expert_names_for(lay, E))
         # At ep==1, lo == 0 and n_local == E: every expert is local.
         lo = lay.n_local * self._my_ep_rank
         for e in range(E):

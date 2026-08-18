@@ -133,3 +133,72 @@ class TestHeldNamesDefault:
         names = ["embed.w", "model.layers.0.a"]
         src = TestWeightSourceGroupContract._Source(names)
         assert src.held_names() is None
+
+
+class TestExpertNameResolution:
+    """Expert HF names come from the bridge's mapping registry, not a guess.
+
+    The legacy synthesis hardcoded `model.layers.<L>.mlp.experts.<e>.*_proj.weight`
+    — the Qwen3-MoE family's naming. Kimi K2.5-VL nests its decoder stack under
+    `language_model.`, so every synthesized expert name missed; a missed name is
+    never baked by the consumer, so the experts silently never sync rather than
+    raising. `megatron_to_hf_lookup` is pure string work (no model, no CUDA, no
+    collective), which is what lets this be a CPU test.
+    """
+
+    def test_template_resubstitutes_both_indices(self):
+        """Only the SHAPE of the sample name is kept — a foreign expert this rank
+        holds no task for still gets the right name."""
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import MegatronStackedWeightSource as S
+
+        t = S._mg_expert_template("decoder.layers.3.mlp.experts.linear_fc1.weight5")
+        assert t.format(layer=7, e=11) == "decoder.layers.7.mlp.experts.linear_fc1.weight11"
+
+    def test_template_keeps_a_nested_stack_prefix(self):
+        """The Kimi case: the prefix must survive, since that is the whole bug."""
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import MegatronStackedWeightSource as S
+
+        t = S._mg_expert_template("language_model.decoder.layers.3.mlp.experts.linear_fc2.weight5")
+        assert t.format(layer=0, e=2) == "language_model.decoder.layers.0.mlp.experts.linear_fc2.weight2"
+
+    @pytest.mark.parametrize(
+        "module,cls_hint,mg_prefix,hf_prefix",
+        [
+            ("megatron.bridge.models.qwen.qwen3_moe_bridge", "Bridge", "decoder", "model"),
+            (
+                "megatron.bridge.models.kimi_vl.kimi_k25_vl_bridge",
+                "Bridge",
+                "language_model.decoder",
+                "language_model.model",
+            ),
+        ],
+    )
+    def test_registry_resolves_expert_names(self, module, cls_hint, mg_prefix, hf_prefix):
+        """The registry returns CONCRETE names with both indices substituted, and
+        names gate/up by KEY rather than by position.
+
+        For Qwen3-MoE the result must equal the legacy synthesis exactly — that
+        is the regression guard saying this change is a no-op where it already
+        worked. For Kimi it must carry the `language_model.` prefix the legacy
+        path dropped.
+        """
+        import importlib
+        import inspect
+
+        pytest.importorskip("megatron.bridge", reason="needs the megatron extra")
+        mod = importlib.import_module(module)
+        bridge_cls = next(
+            o
+            for n, o in vars(mod).items()
+            if inspect.isclass(o) and cls_hint in n and o.__module__ == mod.__name__
+        )
+        # `mapping_registry` never touches `self`, so no model is required.
+        reg = bridge_cls.mapping_registry(None)
+
+        layer, expert = 3, 5
+        fc1 = reg.megatron_to_hf_lookup(f"{mg_prefix}.layers.{layer}.mlp.experts.linear_fc1.weight{expert}").hf_param
+        fc2 = reg.megatron_to_hf_lookup(f"{mg_prefix}.layers.{layer}.mlp.experts.linear_fc2.weight{expert}").hf_param
+
+        base = f"{hf_prefix}.layers.{layer}.mlp.experts.{expert}"
+        assert fc1 == {"gate": f"{base}.gate_proj.weight", "up": f"{base}.up_proj.weight"}
+        assert fc2 == f"{base}.down_proj.weight"
