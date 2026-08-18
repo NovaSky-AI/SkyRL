@@ -23,8 +23,8 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_blackwell_or_newer,
     is_fp8_enabled,
-    is_mxfp8_recipe,
     resolve_auto_fp8_recipe,
+    validate_concrete_fp8_recipe,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     BLOCKWISE_FP8,
@@ -223,29 +223,17 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         )
 
     # Resolve fp8_recipe="auto" to the architecture-native recipe (blockwise on
-    # Hopper, mxfp8 on Blackwell) before the config is shipped to Ray actors, so
-    # workers and the sequence-alignment helpers all see one concrete value.
+    # Hopper, mxfp8 on Blackwell) before the config is shipped to Ray actors.
+    # A GPU-less driver leaves "auto" in place — guessing here would bake the
+    # wrong recipe into every worker's config — and each Megatron worker then
+    # resolves and re-validates locally against its own device.
     for worker_cfg in (cfg.trainer.policy, cfg.trainer.ref):
         megatron_config = getattr(worker_cfg, "megatron_config", None)
         transformer_kwargs = getattr(megatron_config, "transformer_config_kwargs", None)
         if not transformer_kwargs:
             continue
-        recipe = resolve_auto_fp8_recipe(transformer_kwargs)
-        if not is_mxfp8_recipe(recipe):
-            continue
-        if torch.cuda.is_available() and not is_blackwell_or_newer():
-            raise ValueError(
-                "fp8_recipe=mxfp8 requires SM100+ (Blackwell): TE's MXFP8BlockScaling has "
-                "no pre-Blackwell kernel path. Use fp8_recipe='blockwise' (or 'auto') on Hopper."
-            )
-        if is_fp8_enabled(transformer_kwargs.get("fp8_param")):
-            raise ValueError(
-                "fp8_param=true is not supported with fp8_recipe=mxfp8: Transformer Engine "
-                "2.11 cannot re-point MXFP8Tensor storage (replace_raw_data raises "
-                "NotImplementedError), and Megatron's reuse_grad_buf_for_mxfp8_param_ag "
-                "fallback zeroes freshly loaded persistent params on the first param "
-                "all-gather. Use fp8_param=false with mxfp8."
-            )
+        resolve_auto_fp8_recipe(transformer_kwargs)
+        validate_concrete_fp8_recipe(transformer_kwargs)
 
     if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
         assert (

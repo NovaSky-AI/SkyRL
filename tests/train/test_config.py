@@ -314,6 +314,7 @@ def test_megatron_validation_allows_inference_only_fp8_param_without_gather():
 
 @pytest.mark.parametrize(("blackwell", "expected_recipe"), [(True, "mxfp8"), (False, "blockwise")])
 def test_megatron_validation_resolves_auto_fp8_recipe(monkeypatch, blackwell, expected_recipe):
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: True)
     monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: blackwell)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: blackwell)
     cfg = _make_validated_test_config()
@@ -327,8 +328,9 @@ def test_megatron_validation_resolves_auto_fp8_recipe(monkeypatch, blackwell, ex
 
 
 def test_megatron_validation_rejects_mxfp8_before_blackwell(monkeypatch):
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: True)
+    monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: False)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: False)
-    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
     cfg.trainer.policy.megatron_config.transformer_config_kwargs["fp8"] = "e4m3"

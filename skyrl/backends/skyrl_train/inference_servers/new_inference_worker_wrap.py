@@ -107,7 +107,18 @@ def _load_batched_moe_fp8_tensor(
     if target_name is None or shard_id is None:
         raise ValueError(f"Unsupported batched MoE wire tensor name {wire_name!r}")
     if target_name not in params_dict:
-        raise ValueError(f"Batched MoE target parameter {target_name!r} was not found for wire tensor {wire_name!r}")
+        # vLLM 0.26 turned FusedMoE into a factory returning a MoERunner whose
+        # RoutedExperts submodule registers the expert parameters, adding one
+        # segment to every runtime name; earlier engines register them on the
+        # experts module directly.
+        module_path, _, param_leaf = target_name.rpartition(".")
+        nested_name = f"{module_path}.routed_experts.{param_leaf}"
+        if nested_name not in params_dict:
+            raise ValueError(
+                f"Batched MoE target parameter was not found for wire tensor {wire_name!r}: "
+                f"tried {target_name!r} and {nested_name!r}"
+            )
+        target_name = nested_name
 
     param = params_dict[target_name]
     weight_loader = getattr(param, "weight_loader", None)
@@ -165,6 +176,24 @@ def _load_checkpoint_weights(model: torch.nn.Module, weights: list[tuple[str, to
     if ordinary_weights:
         return model.load_weights(weights=ordinary_weights)
     return set()
+
+
+class _LoadWeightsProxy:
+    """Wraps a model, overriding only ``load_weights``.
+
+    vLLM's weight transfer engines call ``self.model.load_weights(...)``
+    internally (as of 0.26 there is no injectable callback). Handing them this
+    proxy via ``set_weight_update_target`` lets SkyRL interpose its own loader
+    while every other attribute access falls through to the real model.
+    """
+
+    def __init__(self, model, load_weights):
+        self._model = model
+        self.load_weights = load_weights
+
+    def __getattr__(self, name):
+        # Only reached for attributes not set on the proxy itself.
+        return getattr(self._model, name)
 
 
 class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
@@ -305,7 +334,8 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
             _reload_spec_decode_drafter,
         )
 
-        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        engine = self.weight_transfer_engine
+        typed_update_info = engine.parse_update_info(update_info)
         model = self.model_runner.model
 
         def _load_weights(weights):
@@ -314,11 +344,20 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
             _reload_spec_decode_drafter(self.model_runner, weights)
             return loaded
 
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            self.weight_transfer_engine.receive_weights(
-                typed_update_info,
-                load_weights=_load_weights,
-            )
+        # vLLM 0.26 dropped the `load_weights` callback parameter from
+        # WeightTransferEngine.receive_weights; the engines now call
+        # `self.model.load_weights` directly. Retarget the engine at a proxy
+        # whose load_weights is ours (so the spec-decode drafter still gets
+        # reloaded), using vLLM's own set/reset_weight_update_target hooks.
+        engine.set_weight_update_target(
+            _LoadWeightsProxy(model, _load_weights),
+            self.model_config,
+        )
+        try:
+            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+                engine.receive_weights(typed_update_info)
+        finally:
+            engine.reset_weight_update_target()
 
         torch.accelerator.synchronize()
         _empty_cuda_cache_rocm()

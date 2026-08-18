@@ -37,8 +37,16 @@ MEGATRON_CP=1
 MEGATRON_EP=8
 MEGATRON_ETP=1
 
-# Hopper blockwise FP8 uses exact FP32 block scales end to end. Both variables
-# are defaulted and validated by SkyRL at startup; exported here for clarity.
+# ---- FP8: trainer GEMMs + rollout weight sync ----
+# Hopper blockwise FP8 uses exact FP32 block scales end to end. Both exported
+# variables are defaulted and validated by SkyRL at startup; set for clarity.
+MEGATRON_FP8=e4m3
+MEGATRON_FP8_RECIPE=blockwise
+MEGATRON_FP8_PARAM=true
+MEGATRON_FP8_PARAM_GATHER=true
+MEGATRON_FP8_AMAX_COMPUTE_ALGO=most_recent
+MEGATRON_TP_ONLY_AMAX_RED=false
+FP8_WEIGHT_SYNC_MODE=blockwise
 export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
 export VLLM_USE_DEEP_GEMM_E8M0=0
 
@@ -78,18 +86,18 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.ref.megatron_config.context_parallel_size=$MEGATRON_CP \
   trainer.ref.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.ref.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
-  trainer.policy.megatron_config.fp8=e4m3 \
-  trainer.ref.megatron_config.fp8=e4m3 \
-  trainer.policy.megatron_config.fp8_recipe=blockwise \
-  trainer.ref.megatron_config.fp8_recipe=blockwise \
-  trainer.policy.megatron_config.fp8_amax_compute_algo=most_recent \
-  trainer.ref.megatron_config.fp8_amax_compute_algo=most_recent \
-  trainer.policy.megatron_config.transformer_config_kwargs.tp_only_amax_red=false \
-  trainer.ref.megatron_config.transformer_config_kwargs.tp_only_amax_red=false \
-  trainer.policy.megatron_config.fp8_param=true \
-  trainer.ref.megatron_config.fp8_param=true \
-  trainer.policy.megatron_config.ddp_config.fp8_param_gather=true \
-  generator.inference_engine.fp8_weight_sync_mode=blockwise \
+  trainer.policy.megatron_config.fp8=$MEGATRON_FP8 \
+  trainer.ref.megatron_config.fp8=$MEGATRON_FP8 \
+  trainer.policy.megatron_config.fp8_recipe=$MEGATRON_FP8_RECIPE \
+  trainer.ref.megatron_config.fp8_recipe=$MEGATRON_FP8_RECIPE \
+  trainer.policy.megatron_config.fp8_amax_compute_algo=$MEGATRON_FP8_AMAX_COMPUTE_ALGO \
+  trainer.ref.megatron_config.fp8_amax_compute_algo=$MEGATRON_FP8_AMAX_COMPUTE_ALGO \
+  trainer.policy.megatron_config.transformer_config_kwargs.tp_only_amax_red=$MEGATRON_TP_ONLY_AMAX_RED \
+  trainer.ref.megatron_config.transformer_config_kwargs.tp_only_amax_red=$MEGATRON_TP_ONLY_AMAX_RED \
+  trainer.policy.megatron_config.fp8_param=$MEGATRON_FP8_PARAM \
+  trainer.ref.megatron_config.fp8_param=$MEGATRON_FP8_PARAM \
+  trainer.policy.megatron_config.ddp_config.fp8_param_gather=$MEGATRON_FP8_PARAM_GATHER \
+  generator.inference_engine.fp8_weight_sync_mode=$FP8_WEIGHT_SYNC_MODE \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   generator.inference_engine.backend=vllm \

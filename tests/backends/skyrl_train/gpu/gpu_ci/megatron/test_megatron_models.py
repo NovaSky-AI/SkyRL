@@ -41,14 +41,6 @@ N_SAMPLES_PER_PROMPT = 8
 MAX_GENERATE_LENGTH = 128
 
 
-# vLLM's Triton MLA decode kernel (the only MLA backend on sm < 9.0) fails
-# to compile for glm-4's MLA shape; FLASH_ATTN_MLA / FLASHMLA need Hopper.
-_skip_mla_on_pre_hopper = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 9,
-    reason="no working MLA backend for glm-4 on pre-Hopper GPUs",
-)
-
-
 def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model_name
@@ -90,8 +82,10 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
     # weight-sync, so skip optimizer construction entirely.
-    is_large_moe = ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()) or (
-        "nemotron-3-nano" in model_name.lower()
+    is_large_moe = (
+        ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower())
+        or ("nemotron-3-nano" in model_name.lower())
+        or ("glm-4.7-flash" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -137,6 +131,11 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
             # pool fits ~163 blocks, and the vLLM default max_num_seqs=1024
             # fails CUDA-graph capture. The test runs <= 80 concurrent seqs.
             overrides["max_num_seqs"] = 128
+    if "glm-4.7-flash" in model_name.lower():
+        # GLM-4.7-Flash's 202k default context would size the KV pool far past
+        # what is left next to the colocated Megatron policy shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
     return overrides
 
 
@@ -223,20 +222,23 @@ async def construct_training_input_from_generator_output(generator_output, token
     [
         pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, None, id="qwen3-moe_tp2_ep2"),
         pytest.param(1, 2, 2, 1, None, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, None, id="qwen3-moe_pp2_cp2"),
+        # GLM-4.7-Flash (~31B MoE, MLA) on 4xH100-80G. Mesh: TP=4 EP=4 ETP=1
+        # -> DP=1, vLLM TP=4 colocated on the same GPUs, same layout as the
+        # other large-MoE entries below.
         pytest.param(
-            2,
-            1,
-            1,
-            2,
-            1,
-            2,
             4,
-            "eatang/glm-4.7-flash-tiny-random",
-            1e-1,
-            2e-2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            "zai-org/GLM-4.7-Flash",
+            3e-1,
+            5e-2,
             None,
-            id="glm-4.7-flash_tp2_ep2",
-            marks=_skip_mla_on_pre_hopper,
+            id="glm-4.7-flash_h100_tp4_ep4",
+            marks=pytest.mark.h100,
         ),
         pytest.param(
             2,
