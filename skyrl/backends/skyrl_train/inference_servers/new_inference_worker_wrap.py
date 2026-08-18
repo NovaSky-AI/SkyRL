@@ -30,6 +30,11 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
     _empty_cuda_cache_rocm,
 )
+from skyrl.backends.skyrl_train.patches.vllm.patch_hybrid_fp8_kv_wake import (
+    patch_hybrid_fp8_kv_wake,
+)
+
+patch_hybrid_fp8_kv_wake()
 
 try:
     from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
