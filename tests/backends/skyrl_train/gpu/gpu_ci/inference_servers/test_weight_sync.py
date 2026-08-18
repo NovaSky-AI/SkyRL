@@ -506,11 +506,8 @@ class TestColocatedIpcWeightUpdateFlow:
 # _RDTProducerServer actor (the NIXL serve surface) and shares gathered weights
 # into it over CUDA IPC; send_weights drives the concurrent start/update/finish
 # handshake. This test drives that engine from a single-GPU (no-FSDP) Ray actor
-# via the SkyRL adapter (_SyncInferenceClient + _FsdpWeightSource) — the same
-# code path FSDPPolicyWorkerBase uses in production, minus FSDP sharding.
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (  # noqa: E402
-    RemoteInferenceClient,
-)
+# via the SkyRL adapter (SyncRdtControlPlaneClient + _FsdpWeightSource) — the
+# same code path FSDPPolicyWorkerBase uses in production, minus FSDP sharding.
 
 
 class _ShimExtractor:
@@ -541,30 +538,22 @@ class _ShimExtractor:
 class RdtTrainerActor:
     """Single-GPU (no-FSDP) trainer that drives the vendored sidecar RDT engine.
 
-    Holds the model on its own GPU and owns a background asyncio loop so the
-    engine's synchronous control-plane calls (via ``_SyncInferenceClient``) can
-    drive SkyRL's async ``RemoteInferenceClient`` off the loop. ``num_gpus=1``
-    (a real GPU assignment) is what lets the trainer engine pin its spawned
-    ``_RDTProducerServer`` to this GPU for CUDA IPC.
+    Holds the model on its own GPU and drives the engine's synchronous
+    control-plane calls through ``SyncRdtControlPlaneClient`` (blocking HTTP to
+    the servers' ``/collective_rpc``). No event loop and no async client are
+    involved: the July control-plane rework replaced the old
+    ``_SyncInferenceClient`` loop bridge with direct blocking HTTP.
+    ``num_gpus=1`` (a real GPU assignment) is what lets the trainer engine pin
+    its spawned ``_RDTProducerServer`` to this GPU for CUDA IPC.
     """
 
-    def __init__(self, model_name, proxy_url, server_urls, data_parallel_size, model_id, namespace, num_consumers):
-        import threading
-
+    def __init__(self, model_name, server_urls, data_parallel_size, namespace, num_consumers):
         self._model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to("cuda")
         self._extractor = _ShimExtractor(self._model)
         self._namespace = namespace
         self._num_consumers = num_consumers
-        # Background event loop for the sync client (the engine calls it from a
-        # worker thread, never from this loop, so run_coroutine_threadsafe is safe).
-        self._loop = asyncio.new_event_loop()
-        threading.Thread(target=self._loop.run_forever, daemon=True).start()
-        self._client = RemoteInferenceClient(
-            proxy_url=proxy_url,
-            server_urls=server_urls,
-            data_parallel_size=data_parallel_size,
-            model_name=model_id,
-        )
+        self._server_urls = list(server_urls)
+        self._data_parallel_size = data_parallel_size
         self._engine = None
 
     def ready(self):
@@ -573,16 +562,16 @@ class RdtTrainerActor:
     def sync_once(self):
         """Rendezvous (first call: spawn server + bake the inference side) and run
         one full weight sync through the vendored engine."""
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
-            _FsdpWeightSource,
-            _SyncInferenceClient,
+        from skyrl.backends.skyrl_train.weight_sync.rdt_control_plane import (
+            SyncRdtControlPlaneClient,
         )
+        from skyrl.backends.skyrl_train.weight_sync.rdt_send import _FsdpWeightSource
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer import (
             ShardedRDTTrainerInitInfo,
             ShardedRDTTrainerWeightTransferEngine,
         )
 
-        sync_client = _SyncInferenceClient(self._client, self._loop)
+        sync_client = SyncRdtControlPlaneClient(self._server_urls, self._data_parallel_size)
         source = _FsdpWeightSource(self._extractor, torch.bfloat16)
         if self._engine is None:
             init_info = ShardedRDTTrainerInitInfo(
@@ -631,10 +620,8 @@ async def rdt_weight_update_env(class_scoped_ray_init_fixture):
         namespace = ray.get_runtime_context().namespace or None
         trainer = RdtTrainerActor.remote(
             MODEL,
-            client.proxy_url,
             client.server_urls,
             client.data_parallel_size,
-            client.model_name,
             namespace,
             1,  # num_consumers (TP=1, single engine)
         )

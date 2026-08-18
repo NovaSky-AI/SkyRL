@@ -49,7 +49,16 @@ class DAPOTrainer(RayPPOTrainer):
         response_ids = generator_output["response_ids"]
         rewards = generator_output["rewards"]
 
-        assert not isinstance(rewards[0], list), "we assume verifiable sequence level rewards here"
+        # Both reward shapes are supported. `batched=true` (what every shipped DAPO
+        # example sets) yields one float per trajectory; the agent-loop path yields
+        # token-level rewards, with the verifier's score parked on the final token by
+        # `_build_per_token_rewards`. This used to assert the sequence-level shape,
+        # which coupled soft overlong punishment to `batched=true` -- and that is
+        # exactly the setting inference-engine fault tolerance cannot use, since
+        # `generate_batched` bypasses the trajectory-level retry wrapper. The
+        # fully-async DAPO entrypoint already handles both for the same reason; this
+        # mirrors it.
+        is_per_token = bool(rewards) and isinstance(rewards[0], list)
 
         # get the response length
         response_lengths = [len(response) for response in response_ids]
@@ -67,11 +76,23 @@ class DAPOTrainer(RayPPOTrainer):
                 exceed_length = response_length - max_exceed_length
                 penalty = exceed_length / overlong_buffer_len * overlong_buffer_penalty_factor
 
-                rewards[i] -= penalty
+                if is_per_token:
+                    # Reassign a fresh list rather than mutating in place: reward lists
+                    # can be shared between concatenated generator outputs (only the
+                    # outer list is copied), so an in-place edit could penalize the same
+                    # trajectory twice.
+                    penalized = list(rewards[i])
+                    penalized[-1] -= penalty
+                    rewards[i] = penalized
+                else:
+                    rewards[i] -= penalty
             # if the response is outside the overlong buffer, set the reward to 0
             elif response_length > max_response_length:
                 # if self.cfg.generator.apply_overlong_filtering is true, loss masks are already set to 0 for these responses
-                rewards[i] = 0.0
+                if is_per_token:
+                    rewards[i] = [0.0] * len(rewards[i])
+                else:
+                    rewards[i] = 0.0
 
         generator_output["rewards"] = rewards
 

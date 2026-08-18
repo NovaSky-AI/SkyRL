@@ -1382,6 +1382,16 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
                 del small
                 _t_exp += time.perf_counter() - _te
                 del tensors
+                # The loop above leaves its last iteration's `tensor` / `ust` /
+                # `base` bound for the rest of this group's turn -- through the
+                # credit gate and into the NEXT gather. `base` is a
+                # whole-storage view, so that pins one tensor AND its entire
+                # allocation past `_drop_inflight`, where `refs` was already
+                # dropped. It is invisible to the `_inflight` accounting the
+                # `lookahead + 1` residency bound is built on, so nothing
+                # catches it. Assignment rather than `del`: all three are
+                # unbound when the group had no direct-path tensor.
+                tensor = ust = base = None
                 if not refs:
                     # A group with nothing held here cannot occur (every group
                     # carries replicated names), but publishing an empty group

@@ -1,0 +1,39 @@
+name: codecontest_fully_async_demo
+
+# Pre-uploaded package, copied into the us-east-2 bucket (65f98108) so the
+# h100-cluster-use2 pods can read it. The identical object in the us-east-1
+# bucket (6cc98604) is unreadable from us-east-2 — that was the AccessDenied.
+# This zip already exports WANDB_API_KEY + DAYTONA_API_KEY and has the
+# prepare_harbor_dataset.py calls uncommented, so no env_vars or entrypoint
+# wrapper is needed here.
+working_dir: s3://anyscale-k8s-rkn-gpu-cloud-65f98108/org_7c1Kalm9WcX2bNIjW53GUT/cld_82np1njz31y9lwk56mc2xcc23x/runtime_env_packages/pkg_4ecbfa0ce32e4e86a394a92de69f239fc69f5806f7d6e83f6287d225473a39b2.zip
+
+image_uri: anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu128-megatron-2.10-te-efa-1.47:1
+ray_version: 2.56.0
+project: default
+cloud: rkn-gpu-cloud
+max_retries: 5
+
+compute_config:
+  cloud: rkn-gpu-cloud
+  # Pin to the us-east-2 resource that actually has H100s. Without this you get
+  # the cloud's default resource (us-east-1), where Kueue admits the workload
+  # but no node can host the pod.
+  cloud_resource: h100-cluster-use2
+  head_node:
+    instance_type: 184CPU-1920GB-8xH100
+    advanced_instance_config:
+      metadata:
+        labels:
+          kueue.x-k8s.io/queue-name: llm-team-queue
+  worker_nodes: []
+  enable_cross_zone_scaling: false
+  advanced_instance_config:
+    metadata:
+      labels:
+        kueue.x-k8s.io/queue-name: llm-team-queue
+  flags:
+    cloud_resource_strategy: availability
+  auto_select_worker_config: false
+
+entrypoint: bash examples/train_integrations/harbor/run_codecontest_fully_async.sh

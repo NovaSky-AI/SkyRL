@@ -881,6 +881,10 @@ class MegatronStackedWeightSource(WeightSource):
         metadata() and the fallback per-name __iter__."""
         for names, tensors in self._iter_groups_impl(collect_meta):
             yield from zip(names, tensors)
+            # Drop the group before the `for` asks for the next one: until the
+            # loop variables are REBOUND they still reference this group, so the
+            # next group would be gathered while this one is still alive.
+            names = tensors = None
 
     def _foreign_expert_shape(self, name: str) -> tuple:
         """Shape of a foreign expert's entry, synthesized from local geometry.
@@ -961,6 +965,11 @@ class MegatronStackedWeightSource(WeightSource):
                     "not in the assembled partition; metadata() and the walk disagree."
                 )
             held[gi] = (names, tensors)
+            # `held` is the legitimate hold (bounded to 2 below); the loop
+            # variables are not. Un-bind them so a group already yielded is not
+            # ALSO pinned while the next one is gathered -- the same ~4.6 GiB of
+            # stacks this function raises about holding.
+            names = tensors = None
             while expect and expect[0] in held:
                 yield held.pop(expect.pop(0))
             if len(held) > 2:
@@ -1194,7 +1203,28 @@ def make_weight_source(weight_extractor: Any, dtype: torch.dtype) -> WeightSourc
                 except Exception:  # noqa: BLE001
                     etp = 1 if not wrapped else 0
                 etp_ok = etp == 1
-                if expert_tasks and not grouped and etp_ok:
+                # A DENSE model has no expert tasks, but the source's two grains
+                # engage INDEPENDENTLY: PP-local ("this stage exports only its own
+                # layers") needs no experts at all. At pp>1 that is the difference
+                # between fitting and not -- measured on Qwen3-32B, where the plain
+                # source's whole-model export OOMed at both tp4/pp2 (70.56 GiB) and
+                # tp8/pp2 (73.06 GiB) of 79.18. Halving per-rank params did not help,
+                # which is what identifies the export as model-sized rather than
+                # shard-sized.
+                #
+                # At pp==1 the stacked source degenerates to the plain
+                # filtered==full export, so there is nothing to win and the simpler
+                # path is kept. The `_demoted` check below is unchanged and still
+                # catches layouts a stage cannot serve alone (tied embeddings, MTP).
+                pp_local_gain = False
+                if not expert_tasks:
+                    try:
+                        from megatron.core import parallel_state
+
+                        pp_local_gain = parallel_state.get_pipeline_model_parallel_world_size() > 1
+                    except Exception:  # noqa: BLE001
+                        pp_local_gain = False
+                if (expert_tasks or pp_local_gain) and not grouped and etp_ok:
                     if wrapped:
                         logger.info("[rdt] stacked expert source with LoRA stack-merge (etp=1)")
                     src = MegatronStackedWeightSource(weight_extractor, dtype)
@@ -1219,7 +1249,10 @@ def make_weight_source(weight_extractor: Any, dtype: torch.dtype) -> WeightSourc
                 elif grouped:
                     logger.info("[rdt] grouped-export arch; using plain MegatronWeightSource")
                 else:
-                    logger.info("[rdt] no per-expert tasks (dense model); using plain MegatronWeightSource")
+                    logger.info(
+                        "[rdt] dense model at pp==1: PP-local serving would narrow nothing "
+                        "and there are no experts to stack; using plain MegatronWeightSource"
+                    )
             except Exception:  # noqa: BLE001
                 logger.warning("[rdt] stacked-source probe failed; using plain MegatronWeightSource", exc_info=True)
         return MegatronWeightSource(weight_extractor, dtype)
