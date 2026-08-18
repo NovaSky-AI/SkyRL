@@ -48,9 +48,7 @@ def patch_hybrid_fp8_kv_wake() -> bool:
     try:
         source = textwrap.dedent(inspect.getsource(target))
     except (OSError, TypeError):
-        logger.warning(
-            "Cannot read vLLM init_fp8_kv_scales source; skipping hybrid KV wake patch"
-        )
+        logger.warning("Cannot read vLLM init_fp8_kv_scales source; skipping hybrid KV wake patch")
         return False
 
     if _OLD_LOOP not in source:
@@ -67,7 +65,5 @@ def patch_hybrid_fp8_kv_wake() -> bool:
     setattr(patched, _PATCHED_FLAG, True)
     runner_cls.init_fp8_kv_scales = patched
 
-    logger.info(
-        "Applied hybrid FP8 KV-cache wake patch (vllm-project/vllm#41602 backport)"
-    )
+    logger.info("Applied hybrid FP8 KV-cache wake patch (vllm-project/vllm#41602 backport)")
     return True
