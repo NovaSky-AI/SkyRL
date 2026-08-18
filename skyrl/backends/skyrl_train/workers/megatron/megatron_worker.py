@@ -155,7 +155,9 @@ class MegatronWeightExtractor(WeightExtractor):
                 }
                 scale = prec_to_bytes[self.training_dtype] / prec_to_bytes[param.dtype]
                 size_in_bytes = param.element_size() * param.numel() * tp_size * ep_size * scale
-            return broadcast_object_across_pp_ranks(size_in_bytes)
+            # allow_missing: a task may correspond to no parameter on any PP rank
+            # (see the layout note below), in which case there is no size to agree on.
+            return broadcast_object_across_pp_ranks(size_in_bytes, allow_missing=True)
 
         sizes = [
             calculate_size_in_bytes(
@@ -175,6 +177,14 @@ class MegatronWeightExtractor(WeightExtractor):
         regular_task_indices: list[int] = []
 
         for idx, task in enumerate(weight_conversion_tasks):
+            # Skip tasks that own no parameter on any PP rank. megatron-bridge 0.7.0
+            # registers mappings for BOTH MoE expert layouts -- grouped-GEMM
+            # (`mlp.experts.linear_fc1`) and SequentialMLP
+            # (`mlp.experts.local_experts.*.linear_fc1`) -- so a model built with one
+            # layout still gets conversion tasks for the other. Those have no weights
+            # to export, and including them would break bucket-size accounting.
+            if sizes[idx] is None:
+                continue
             if getattr(task.mapping, "is_grouped_export", False):
                 gk = getattr(task.mapping, "group_key", None)
                 grouped_task_indices.setdefault(gk, []).append(idx)
@@ -492,6 +502,19 @@ class MegatronWorker:
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
+
+        # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
+        # sized for the full model, and megatron-core asserts
+        # `len(pattern) == num_layers` in `get_linear_attention_pattern`. Truncate so a
+        # `num_layers` override still builds. Only shrink: a pattern shorter than
+        # `num_layers` is a genuine misconfiguration, so let the upstream assert report it.
+        linear_attention_freq = getattr(provider, "linear_attention_freq", None)
+        if isinstance(linear_attention_freq, (list, tuple)) and provider.num_layers is not None and len(linear_attention_freq) > provider.num_layers:
+            logger.info(
+                f"Truncating linear_attention_freq from {len(linear_attention_freq)} to "
+                f"{provider.num_layers} entries to match the configured num_layers"
+            )
+            provider.linear_attention_freq = linear_attention_freq[: provider.num_layers]
 
         # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
         if not enable_mtp:
