@@ -236,9 +236,10 @@ async def test_retrieve_future_returns_in_memory_external_result(waiters, async_
 
     response = await api.retrieve_future(
         api.RetrieveFutureRequest(request_id=str(request_id)),
-        _stub_request(async_engine, waiters, store),
+        _stub_request(async_engine, waiters, store, headers={"accept": api.PROTO_CONTENT_TYPE}),
     )
 
+    # Forwarded samples use the Tinker JSON response even when the client also accepts proto.
     assert response.media_type == "application/json"
     assert response.body == SAMPLE_RESULT.model_dump_json().encode()
 
