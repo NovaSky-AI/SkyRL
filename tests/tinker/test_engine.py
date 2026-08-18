@@ -477,23 +477,28 @@ def test_find_single_requests_accepts_sdk_sequence_bootstraps(scheduling_engine,
         }
 
 
-def test_find_single_requests_waits_for_next_sdk_sequence(scheduling_engine):
-    """A destructive request cannot overtake a missing earlier SDK request."""
+def test_find_single_requests_bootstraps_resumed_sdk_sequence(scheduling_engine):
     engine = scheduling_engine
     with Session(engine.db_engine) as session:
-        session.add(
-            FutureDB(
-                request_type=types.RequestType.OPTIM_STEP,
-                model_id="model_a",
-                seq_id=2,
-                request_data={},
-                status=RequestStatus.PENDING,
-            )
+        resumed_request = FutureDB(
+            request_type=types.RequestType.OPTIM_STEP,
+            model_id="model_a",
+            seq_id=100,
+            request_data={},
+            status=RequestStatus.PENDING,
         )
+        session.add(resumed_request)
         session.commit()
+        resumed_request_id = resumed_request.request_id
 
     with Session(engine.db_engine) as session:
-        assert engine.find_single_requests(session) == {}
+        assert engine.find_single_requests(session) == {
+            str(resumed_request_id): (
+                "model_a",
+                types.RequestType.OPTIM_STEP,
+                {},
+            )
+        }
 
 
 def sample_payload(checkpoint_id: str) -> dict:

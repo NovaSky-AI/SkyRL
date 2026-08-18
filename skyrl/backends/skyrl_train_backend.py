@@ -959,7 +959,7 @@ class SkyRLTrainBackend(AbstractBackend):
         if pad_size > 0 and per_sample_outputs:
             per_sample_outputs = per_sample_outputs[:-pad_size]
 
-        if len(submitted_indices) != original_batch_size:
+        if per_sample_outputs and len(submitted_indices) != original_batch_size:
             restored_outputs = [{"logprobs": list(logprobs)} for logprobs in prepared_batch.all_sampling_logprobs]
             for index, output in zip(submitted_indices, per_sample_outputs, strict=True):
                 restored_outputs[index] = output

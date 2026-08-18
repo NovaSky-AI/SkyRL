@@ -405,10 +405,7 @@ class TinkerEngine:
             requests = list(requests)
             expected_seq_id = next_sequence_ids.get(model_id)
             if expected_seq_id is None:
-                initial_seq_id = requests[0].seq_id
-                if initial_seq_id not in {0, 1}:
-                    continue
-                expected_seq_id = initial_seq_id
+                expected_seq_id = requests[0].seq_id
             for request_id, _, seq_id, pending_type in requests:
                 if seq_id != expected_seq_id or pending_type not in request_types:
                     break

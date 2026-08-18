@@ -1257,6 +1257,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         loss_fn_output_batches = []
         for m_batch, metrics in zip(micro_buffer, metrics_list):
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
+            if metrics is None:
+                loss_fn_output_batches.append([])
+                continue
             loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
             # Skip fully-padding microbatches: their metrics (clip_ratio=0, policy_entropy=0,
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
