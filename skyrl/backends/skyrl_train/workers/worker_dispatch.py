@@ -86,11 +86,17 @@ class WorkerDispatch:
         No-op when ``model_id is None`` (single-tenant / FFT path) or when
         the workers don't have an AdapterStore (non-LoRA strategies).
 
-        Must be called *after* ``_ensure_on_gpu(role, ...)`` so the model
-        and optimizer storages are live before we tensor.copy_() into them.
+        The swap copies the DDP param buffers, so the model must be resident
+        before it runs. Callers generally arrive here right after their own
+        ``_ensure_on_gpu``; we repeat it (a no-op against dispatch-local
+        state) so paths that only need the optimizer — ``set_lr``, say —
+        can't hand the AdapterStore freed param storage. The optimizer and
+        grad buffers are allowed to stay offloaded: the store copies the
+        optimizer's CPU tensors in place and leaves parked grads alone.
         """
         if model_id is None or role not in self._actor_groups:
             return
+        self._ensure_on_gpu(role, need_optimizer=False, need_model=True)
         ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
 
     def register_adapter(self, role: str, model_id: str) -> None:
@@ -417,7 +423,14 @@ class WorkerDispatch:
         """Run optimizer step. For single-tenant training, the model should already be on GPU from forward_backward.
 
         For multi-tenant LoRA training, ``model_id`` is used to ensure the correct adapter is used.
+
+        The residency check is not redundant with ``forward_backward``'s under
+        multi-tenancy: another tenant's request (e.g. a sample, which offloads
+        the optimizer) can land between this model's forward_backward and its
+        optim_step, so the state this step writes to may have been offloaded
+        in the gap.
         """
+        self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
         refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
         grad_norms = ray.get(refs)
