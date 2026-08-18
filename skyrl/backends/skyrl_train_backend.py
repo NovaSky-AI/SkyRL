@@ -57,11 +57,13 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Keep the shared runtime (Ray, training workers, inference engines, base
     model) alive when the last LoRA model is unloaded, so the next compatible
     ``create_model`` registers a fresh adapter against it instead of
-    rebuilding. Only applies to LoRA policies; full-parameter fine-tuning
-    always tears down on unload. Set to ``False`` to release all GPUs on the
-    last unload (scale-to-zero) — also the escape hatch for changing the LoRA
-    ``(rank, alpha)`` signature, which is otherwise pinned by the first
-    ``create_model`` for the warm runtime's lifetime."""
+    rebuilding. Only applies to Megatron LoRA policies (the warm path needs
+    the per-tenant adapter machinery, which FSDP does not implement);
+    full-parameter fine-tuning and FSDP always tear down on unload. Set to
+    ``False`` to release all GPUs on the last unload (scale-to-zero) — also
+    the escape hatch for changing the LoRA ``(rank, alpha)`` signature, which
+    is otherwise pinned by the first ``create_model`` for the warm runtime's
+    lifetime."""
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
@@ -573,7 +575,11 @@ class SkyRLTrainBackend(AbstractBackend):
         # drop just this adapter slot rather than tearing down the shared Ray
         # runtime. The live GPU state may still mirror this adapter; it'll be
         # overwritten on the next swap_to (no eager swap-away here).
-        if len(self._model_ids_to_role) > 1 or self.config.keep_runtime_warm_on_last_unload:
+        # The warm path requires the per-tenant adapter machinery
+        # (delete_adapter on the workers), which only the Megatron backend
+        # implements — FSDP falls through to the teardown below.
+        supports_warm_unload = self._cfg is not None and self._cfg.trainer.strategy == "megatron"
+        if len(self._model_ids_to_role) > 1 or (self.config.keep_runtime_warm_on_last_unload and supports_warm_unload):
             if role == "policy" and self._base_lora_signature is not None:
                 self._unload_inference_adapter(model_id)
                 self._dispatch.delete_adapter("policy", model_id)

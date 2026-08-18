@@ -33,6 +33,7 @@ def _backend(
     keep_runtime_warm: bool,
     model_ids: tuple[str, ...] = ("model-a",),
     lora: bool = True,
+    strategy: str = "megatron",
 ) -> SkyRLTrainBackend:
     """Build a backend in the post-create_model state without running __init__."""
     backend = object.__new__(SkyRLTrainBackend)
@@ -42,6 +43,7 @@ def _backend(
         model_id: types.ModelMetadata(adapter_index=0, lora_config=LORA_CONFIG) for model_id in model_ids
     }
     backend._cfg = Mock()
+    backend._cfg.trainer.strategy = strategy
     backend._dispatch = Mock()
     backend._colocate_pg = None
     backend._inference_engine_client = Mock()
@@ -86,6 +88,23 @@ def test_last_lora_unload_tears_down_when_disabled():
         backend.delete_model("model-a")
 
     shutdown.assert_called_once_with()
+    assert backend._dispatch is None
+    assert backend._base_lora_signature is None
+    backend._inference_state_publisher.assert_called_once_with(None)
+
+
+def test_fsdp_lora_unload_tears_down_even_when_warm_enabled():
+    """FSDP has no per-tenant adapter machinery (no delete_adapter on its
+    workers), so the warm path must not fire for it — the last unload takes
+    the teardown branch exactly as before the flag existed."""
+    backend = _backend(keep_runtime_warm=True, strategy="fsdp")
+    dispatch = backend._dispatch
+
+    with patch("skyrl.backends.skyrl_train_backend.ray.shutdown") as shutdown:
+        backend.delete_model("model-a")
+
+    shutdown.assert_called_once_with()
+    dispatch.delete_adapter.assert_not_called()
     assert backend._dispatch is None
     assert backend._base_lora_signature is None
     backend._inference_state_publisher.assert_called_once_with(None)
