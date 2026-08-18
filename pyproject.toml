@@ -367,7 +367,7 @@ torchvision = [
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
 megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "b7b4e11b054e73fa3cfc52e5df14cd6b4d50e02e", marker = "sys_platform == 'linux'"}
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "d1cab16a010b2a51b538604135f1181e720c60f9", marker = "sys_platform == 'linux'"}
+megatron-core = {git = "https://github.com/j316chuck/Megatron-LM", rev = "1f07701b1893d7f6d68ae1f20f42acde9509f52f", marker = "sys_platform == 'linux'"}
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14
 # TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
 vllm-router = [
