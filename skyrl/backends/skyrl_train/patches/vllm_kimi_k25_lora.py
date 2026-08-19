@@ -52,6 +52,13 @@ def apply_kimi_k25_lora_patch() -> None:
     # the flat 3D-MoE layout, and use gated MLPs.
     cls.is_3d_moe_weight = False
     cls.is_non_gated_moe = False
+    # vLLM 0.26 added an annotation-only `lora_manager` member to the
+    # SupportsLoRA protocol. Nominal subclasses (native models) skip the
+    # structural isinstance() check, but this patched class is checked
+    # structurally, so every protocol member must *exist* on the class —
+    # including annotation-only ones. The worker's LoRA mixin assigns the
+    # real manager at runtime; None is the documented "not yet set" state.
+    cls.lora_manager = None
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Multimodal module split so LoRA skips the tower/connector."""
