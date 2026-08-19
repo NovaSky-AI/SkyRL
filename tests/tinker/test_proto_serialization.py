@@ -17,6 +17,8 @@ from tinker.proto.response_conv import deserialize_proto_response
 
 from skyrl.tinker import api, types
 from skyrl.tinker.proto_serialization import (
+    parse_forward_backward_input,
+    parse_forward_backward_metadata,
     parse_forward_backward_request,
     serialize_result,
 )
@@ -200,6 +202,15 @@ def test_parse_forward_backward_request():
     assert chunk.tokens == [1, 2, 3, 4]
     assert datum.loss_fn_inputs["target_tokens"].data == [2, 3, 4, 5]
     assert datum.loss_fn_inputs["weights"].data == [1.0, 0.5, 1.0, 0.0]
+
+    assert parse_forward_backward_metadata(encode_sdk_fwd_bwd_request()) == (
+        "model_abc",
+        1,
+        False,
+    )
+    internal = parse_forward_backward_input(encode_sdk_fwd_bwd_request())
+    assert internal.data[0].loss_fn_inputs.target_tokens.data == [2, 3, 4, 5]
+    assert internal.data[0].loss_fn_inputs.advantages.data == []
 
 
 def test_parse_forward_backward_request_forward_only_and_config():

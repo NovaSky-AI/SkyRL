@@ -59,3 +59,16 @@ async def test_terminal_future_retention_is_bounded():
         RequestStatus.COMPLETED,
         "{}",
     )
+
+
+@pytest.mark.asyncio
+async def test_terminal_result_bytes_are_bounded():
+    store = InMemoryFutureStore(max_terminal_bytes=4)
+    first_id = store.create_future()
+    store.complete_future(first_id, RequestStatus.COMPLETED, "1234")
+    second_id = store.create_future()
+    store.complete_future(second_id, RequestStatus.COMPLETED, "56")
+
+    with pytest.raises(KeyError):
+        await store.wait_for_future(first_id, 1)
+    assert await store.wait_for_future(second_id, 1) == (RequestStatus.COMPLETED, "56")
