@@ -5,12 +5,14 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Callable
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel
 from sqlmodel import Session, create_engine, func, select, update
+from zstandard import decompress as zstd_decompress
 
 from skyrl.backends.utils import log_timing
 from skyrl.tinker import types
@@ -25,6 +27,12 @@ from skyrl.tinker.db_models import (
     SessionDB,
     enable_sqlite_wal,
 )
+from skyrl.tinker.operation_transport import (
+    ClaimedOperation,
+    OperationPayloadFormat,
+    OperationTransportClient,
+)
+from skyrl.tinker.proto_serialization import parse_forward_backward_input
 from skyrl.utils.log import logger
 
 _MAX_IDS_PER_QUERY = 500
@@ -256,6 +264,7 @@ class TinkerEngine:
     def __init__(
         self,
         config: EngineConfig,
+        operation_transport_socket: str | None = None,
     ):
         """Initialize the engine with a database connection and base model."""
         self.config = config
@@ -267,6 +276,9 @@ class TinkerEngine:
         backend_class, backend_config_class = get_backend_classes(config.backend, use_ray=use_ray)
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
+        self.operation_transport = (
+            OperationTransportClient(operation_transport_socket) if operation_transport_socket is not None else None
+        )
 
         # Backends that support async sample routing notify us when their
         # inference endpoint changes; we persist it to EngineStateDB so the
@@ -377,6 +389,58 @@ class TinkerEngine:
         )
         return dict(session.exec(query).all())
 
+    def _find_next_sequence_ids(self, session: Session) -> dict[str, int]:
+        """Derive each model's next SDK sequence from its persisted futures."""
+        query = (
+            select(FutureDB.model_id, func.max(FutureDB.seq_id))
+            .where(FutureDB.seq_id.is_not(None))
+            .where(FutureDB.status != RequestStatus.PENDING)
+            .group_by(FutureDB.model_id)
+        )
+        return {model_id: last_seq_id + 1 for model_id, last_seq_id in session.exec(query).all()}
+
+    def _find_sequenced_requests(
+        self, session: Session, request_types: set[types.RequestType]
+    ) -> list[tuple[int, str, types.RequestType]]:
+        """Find each model's leading contiguous SDK requests while their types are allowed."""
+        next_sequence_ids = self._find_next_sequence_ids(session)
+        pending = session.exec(
+            select(
+                FutureDB.request_id,
+                FutureDB.model_id,
+                FutureDB.seq_id,
+                FutureDB.request_type,
+            )
+            .where(FutureDB.seq_id.is_not(None))
+            .where(FutureDB.status == RequestStatus.PENDING)
+            .order_by(FutureDB.model_id, FutureDB.seq_id)
+        ).all()
+
+        batchable = []
+        for model_id, requests in groupby(pending, key=lambda row: row.model_id):
+            requests = list(requests)
+            expected_seq_id = next_sequence_ids.get(model_id)
+            if expected_seq_id is None:
+                expected_seq_id = requests[0].seq_id
+            for request_id, _, seq_id, pending_type in requests:
+                if seq_id != expected_seq_id or pending_type not in request_types:
+                    break
+                batchable.append((request_id, model_id, pending_type))
+                expected_seq_id += 1
+        return batchable
+
+    def _find_sequenced_single_requests(self, session: Session) -> list[tuple[int, str, types.RequestType]]:
+        """Find leading contiguous SDK requests that do not run as model-pass batches."""
+        return self._find_sequenced_requests(
+            session,
+            {
+                types.RequestType.OPTIM_STEP,
+                types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
+                types.RequestType.SAVE_WEIGHTS,
+                types.RequestType.LOAD_WEIGHTS,
+            },
+        )
+
     def find_batchable_model_passes(
         self, session: Session, request_type: types.RequestType
     ) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
@@ -399,19 +463,26 @@ class TinkerEngine:
             select(FutureDB.request_id, FutureDB.model_id)
             .where(FutureDB.request_type == request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
+            .where(FutureDB.seq_id.is_(None))
             .order_by(FutureDB.request_id)
         )
         ops = session.exec(query).all()
 
         # Filter: only include ops that come before their model's barrier
         batchable = [
+            (request_id, model_id) for request_id, model_id, _ in self._find_sequenced_requests(session, {request_type})
+        ]
+        batchable.extend(
             (request_id, model_id)
             for request_id, model_id in ops
             if model_id not in barriers or request_id < barriers[model_id]
-        ]
+        )
 
         return {
-            str(request_id): (model_id, types.ForwardBackwardInput.model_validate(request_data))
+            str(request_id): (
+                model_id,
+                types.ForwardBackwardInput.model_validate(request_data),
+            )
             for request_id, model_id, request_data in self._load_requests(session, batchable)
         }
 
@@ -433,7 +504,11 @@ class TinkerEngine:
         """
         # checkpoint_id is extracted in the database so prompts stay out of this query
         sample_query = (
-            select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_data["checkpoint_id"].as_string())
+            select(
+                FutureDB.request_id,
+                FutureDB.model_id,
+                FutureDB.request_data["checkpoint_id"].as_string(),
+            )
             .where(FutureDB.request_type == types.RequestType.SAMPLE)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
@@ -490,6 +565,7 @@ class TinkerEngine:
         statement = (
             select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
+            .where(FutureDB.seq_id.is_(None))
             .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.request_type != types.RequestType.FORWARD)
             .where(FutureDB.request_type != types.RequestType.SAMPLE)
@@ -499,15 +575,18 @@ class TinkerEngine:
         other_futures = session.exec(statement).all()
 
         # Filter: only include ops that come before the first blocked pass for their model
-        other_futures = [
+        legacy_futures = [
             (request_id, model_id, request_type)
             for request_id, model_id, request_type in other_futures
             if model_id not in blocked_pass_barriers or request_id < blocked_pass_barriers[model_id]
         ]
+        sequenced_futures = self._find_sequenced_single_requests(session)
 
         return {
             str(request_id): (model_id, request_type, request_data)
-            for request_id, model_id, request_type, request_data in self._load_requests(session, other_futures)
+            for request_id, model_id, request_type, request_data in self._load_requests(
+                session, sequenced_futures + legacy_futures
+            )
         }
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
@@ -641,7 +720,7 @@ class TinkerEngine:
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
         )
 
-        self.backend.load_checkpoint(checkpoint_path, model_id, load_optimizer=request_data.load_optimizer)
+        self.backend.load_checkpoint(checkpoint_path, model_id)
 
         return types.LoadWeightsOutput(type="load_weights")
 
@@ -733,7 +812,8 @@ class TinkerEngine:
                 return self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
             case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
                 return self.process_save_weights_for_sampler(
-                    model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
+                    model_id,
+                    types.SaveWeightsForSamplerInput.model_validate(request_data),
                 )
             case types.RequestType.SAVE_WEIGHTS:
                 return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
@@ -802,16 +882,122 @@ class TinkerEngine:
                     results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in group}
             self._complete_futures(results)
 
+    def process_transport_operations(self, operations: list[ClaimedOperation]) -> None:
+        """Execute one API-owned batch and return results over the local IPC channel."""
+        if not operations:
+            return
+        assert self.operation_transport is not None
+        request_type = operations[0].request_type
+        if any(operation.request_type != request_type for operation in operations):
+            raise ValueError("operation transport returned a mixed-kind batch")
+
+        if request_type in (
+            types.RequestType.FORWARD,
+            types.RequestType.FORWARD_BACKWARD,
+        ):
+            requests: dict[str, tuple[str, types.ForwardBackwardInput]] = {}
+            results: dict[str, BaseModel] = {}
+            for operation in operations:
+                try:
+                    if operation.payload_format is OperationPayloadFormat.JSON:
+                        request_data = types.ForwardBackwardInput.model_validate_json(operation.payload)
+                    else:
+                        body = (
+                            zstd_decompress(operation.payload)
+                            if operation.payload_format is OperationPayloadFormat.PROTO_ZSTD
+                            else operation.payload
+                        )
+                        request_data = parse_forward_backward_input(body)
+                    operation.payload = b""
+                    requests[str(operation.request_id)] = (
+                        operation.model_id,
+                        request_data,
+                    )
+                except Exception as error:
+                    logger.exception(
+                        "Error parsing transported %s operation %s",
+                        request_type.value,
+                        operation.request_id,
+                    )
+                    results[str(operation.request_id)] = types.ErrorResponse(
+                        error=str(error),
+                        status="failed",
+                    )
+            try:
+                invalid, valid = self._filter_valid_requests(requests)
+                results.update(invalid)
+                if valid:
+                    processor = (
+                        self.process_forward
+                        if request_type == types.RequestType.FORWARD
+                        else self.process_forward_backward
+                    )
+                    results.update(processor(valid))
+            except Exception as error:
+                logger.exception("Error processing transported %s batch", request_type.value)
+                results.update(
+                    {
+                        str(operation.request_id): types.ErrorResponse(error=str(error), status="failed")
+                        for operation in operations
+                        if str(operation.request_id) not in results
+                    }
+                )
+            for operation in operations:
+                result = results.get(str(operation.request_id))
+                if result is None:
+                    result = types.ErrorResponse(error="Backend returned no result", status="failed")
+                self.operation_transport.complete(operation.request_id, result)
+            return
+
+        control_input_types = {
+            types.RequestType.OPTIM_STEP: types.OptimStepInput,
+            types.RequestType.SAVE_WEIGHTS: types.SaveWeightsInput,
+            types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER: types.SaveWeightsForSamplerInput,
+            types.RequestType.LOAD_WEIGHTS: types.LoadWeightsInput,
+        }
+        if request_type in control_input_types and len(operations) == 1:
+            operation = operations[0]
+            try:
+                request_data = control_input_types[request_type].model_validate_json(operation.payload)
+                operation.payload = b""
+                result = self.process_single_request(
+                    request_type,
+                    operation.model_id,
+                    request_data.model_dump(mode="json"),
+                )
+            except Exception as error:
+                logger.exception("Error processing transported %s", request_type.value)
+                result = types.ErrorResponse(error=str(error), status="failed")
+            self.operation_transport.complete(operation.request_id, result)
+            return
+
+        error = types.ErrorResponse(
+            error=f"Unsupported transported request type: {request_type.value}",
+            status="failed",
+        )
+        for operation in operations:
+            self.operation_transport.complete(operation.request_id, error)
+
     def process_pending_requests(self):
         """Main loop to process pending requests."""
         while True:
+            if self.operation_transport is not None:
+                transported = self.operation_transport.claim()
+                if transported:
+                    self.process_transport_operations(transported)
+                    continue
+
             # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
-                # Use look-ahead scheduling to find batchable forward_backward and forward model passes
-                forward_backward_requests = self.find_batchable_model_passes(
-                    session, types.RequestType.FORWARD_BACKWARD
-                )
-                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
+                if self.operation_transport is None:
+                    # Direct engine construction keeps the database path for tests and benchmarks.
+                    forward_backward_requests = self.find_batchable_model_passes(
+                        session, types.RequestType.FORWARD_BACKWARD
+                    )
+                    forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
+                else:
+                    forward_backward_requests = {}
+                    forward_requests = {}
                 # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
                 # Get other pending requests (non forward_backward and non sampling)
@@ -819,7 +1005,10 @@ class TinkerEngine:
 
             # Process batches outside of session context
             self.process_batch_requests(
-                forward_backward_requests, self.process_forward_backward, "forward_backward", per_model=True
+                forward_backward_requests,
+                self.process_forward_backward,
+                "forward_backward",
+                per_model=True,
             )
             self.process_batch_requests(forward_requests, self.process_forward, "forward", per_model=True)
             self.process_batch_requests(sample_requests, self.process_sample, "sample")
@@ -847,15 +1036,18 @@ def main():
     # Create argument parser and add Pydantic model fields
     parser = argparse.ArgumentParser(description="SkyRL tinker engine for processing requests")
     add_model(parser, EngineConfig)
+    parser.add_argument("--operation-transport-socket", default=None, help=argparse.SUPPRESS)
 
     # Parse command-line arguments
     args = parser.parse_args()
 
     # Create EngineConfig from parsed arguments
-    config = EngineConfig.model_validate(vars(args))
+    parsed = vars(args)
+    operation_transport_socket = parsed.pop("operation_transport_socket")
+    config = EngineConfig.model_validate(parsed)
 
     # Initialize and run the engine
-    TinkerEngine(config).run()
+    TinkerEngine(config, operation_transport_socket=operation_transport_socket).run()
 
 
 if __name__ == "__main__":

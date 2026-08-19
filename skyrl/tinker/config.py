@@ -58,6 +58,16 @@ class EngineConfig(BaseModel):
         ),
         json_schema_extra={"argparse_type": lambda v: None if v == "None" else int(v)},
     )
+    training_operation_max_pending_per_model: int = Field(
+        default=512,
+        gt=0,
+        description="Maximum number of incomplete training operations held for one model.",
+    )
+    training_operation_max_payload_bytes: int = Field(
+        default=2 * 1024**3,
+        gt=0,
+        description="Maximum total bytes of training request payloads held by the API process.",
+    )
     session_cleanup_interval_sec: int = Field(
         default=60,
         description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",
