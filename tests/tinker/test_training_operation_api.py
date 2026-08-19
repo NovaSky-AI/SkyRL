@@ -215,6 +215,40 @@ async def test_http_training_burst_stays_out_of_sqlite_and_orders_optimizer(
 
 
 @pytest.mark.asyncio
+async def test_parallel_training_uploads_do_not_wait_for_the_parse_slot(operation_api):
+    client, _, _ = operation_api
+    uploads_started = [asyncio.Event(), asyncio.Event()]
+    release_uploads = asyncio.Event()
+
+    async def body(index: int):
+        uploads_started[index].set()
+        await release_uploads.wait()
+        yield json.dumps(_forward_backward(index + 1)).encode()
+
+    requests = [
+        asyncio.create_task(
+            client.post(
+                "/api/v1/forward_backward",
+                content=body(index),
+                headers={"content-type": "application/json"},
+            )
+        )
+        for index in range(2)
+    ]
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(started.wait() for started in uploads_started)),
+            timeout=1,
+        )
+    finally:
+        release_uploads.set()
+
+    responses = await asyncio.gather(*requests)
+
+    assert [response.status_code for response in responses] == [200, 200]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("compressed", [False, True])
 async def test_forward_backward_accepts_sdk_proto(operation_api, compressed):
     client, _, queue = operation_api

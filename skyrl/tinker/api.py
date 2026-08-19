@@ -1365,8 +1365,8 @@ async def _read_forward_backward_request(
     passes here via the proto's ``forward_only`` flag instead of calling
     ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
     """
+    body = await _read_training_body(request)
     async with request.app.state.training_parse_semaphore:
-        body = await _read_training_body(request)
         is_proto = PROTO_CONTENT_TYPE in request.headers.get("content-type", "").lower()
         content_encoding = request.headers.get("content-encoding", "").lower().strip()
         if content_encoding not in ("", "identity", "zstd"):
@@ -1414,8 +1414,8 @@ async def forward_backward(request: Request, session: AsyncSession = Depends(get
 @app.post("/api/v1/forward", response_model=FutureResponse)
 async def forward(request: Request, session: AsyncSession = Depends(get_session)):
     """Forward pass to obtain logprobs without accumulating gradients"""
+    body = await _read_training_body(request)
     async with request.app.state.training_parse_semaphore:
-        body = await _read_training_body(request)
         try:
             model_id, seq_id, payload = await asyncio.to_thread(_parse_forward_body, body)
         except ValidationError as error:
