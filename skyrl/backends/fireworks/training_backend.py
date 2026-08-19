@@ -15,7 +15,7 @@ from skyrl.backends.fireworks.runtime import FireworksRuntime
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import FireworksConfig, OptimizerConfig
 
 
 class FireworksPolicyDispatch:
@@ -23,13 +23,15 @@ class FireworksPolicyDispatch:
 
     def __init__(
         self,
-        cfg: SkyRLTrainConfig,
         runtime: FireworksRuntime,
+        fireworks_config: FireworksConfig,
+        optimizer_config: OptimizerConfig,
         *,
         datum_builder=build_tinker_grpo_datums,
     ) -> None:
-        self.cfg = cfg
         self.runtime = runtime
+        self.fireworks_config = fireworks_config
+        self.optimizer_config = optimizer_config
         self._datum_builder = datum_builder
         self._last_optim_metrics: dict[str, float] = {}
 
@@ -43,9 +45,7 @@ class FireworksPolicyDispatch:
     @staticmethod
     def _require_policy(model: str) -> None:
         if model != "policy":
-            raise NotImplementedError(
-                f"Fireworks GRPO is policy-only, got model={model!r}"
-            )
+            raise NotImplementedError(f"Fireworks policy dispatch is policy-only, got model={model!r}")
 
     def stage_data(self, model: str, data: TrainingInputBatch, mini_batch_boundaries):
         self._require_policy(model)
@@ -61,20 +61,15 @@ class FireworksPolicyDispatch:
     ) -> WorkerOutput:
         self._require_policy(model)
         if loss_fn is not None or loss_fn_config is not None or model_id is not None:
-            raise NotImplementedError(
-                "Fireworks native GRPO dispatch does not accept per-call loss/model overrides"
-            )
+            raise NotImplementedError("Fireworks native GRPO dispatch does not accept per-call loss/model overrides")
         datums = self._datum_builder(
             staged_batch,
-            max_seq_len=self.cfg.trainer.fireworks.max_seq_len,
+            max_seq_len=self.fireworks_config.max_seq_len,
         )
-        result = self.runtime.training_client.forward_backward(
-            datums, "importance_sampling"
-        ).result(timeout=self.cfg.trainer.fireworks.request_timeout_s)
-        metrics = {
-            key: float(value)
-            for key, value in (getattr(result, "metrics", None) or {}).items()
-        }
+        result = self.runtime.training_client.forward_backward(datums, "importance_sampling").result(
+            timeout=self.fireworks_config.request_timeout_s
+        )
+        metrics = {key: float(value) for key, value in (getattr(result, "metrics", None) or {}).items()}
         if "loss:sum" in metrics:
             metrics.setdefault("final_loss", metrics["loss:sum"])
         return WorkerOutput(
@@ -86,31 +81,26 @@ class FireworksPolicyDispatch:
     def optim_step(self, model: str, model_id: Optional[str] = None) -> Optional[float]:
         self._require_policy(model)
         if model_id is not None:
-            raise NotImplementedError(
-                "Fireworks GRPO does not support model_id overrides"
-            )
+            raise NotImplementedError("Fireworks policy dispatch does not support model_id overrides")
         try:
             import tinker
         except ImportError as exc:
-            raise ImportError(
-                "Fireworks optimizer construction requires the tinker package"
-            ) from exc
+            raise ImportError("Fireworks optimizer construction requires the tinker package") from exc
 
-        optimizer = self.cfg.trainer.policy.optimizer_config
+        optimizer = self.optimizer_config
         params = tinker.AdamParams(
             learning_rate=optimizer.lr,
             beta1=optimizer.adam_betas[0],
             beta2=optimizer.adam_betas[1],
-            eps=self.cfg.trainer.fireworks.adam_eps,
+            eps=self.fireworks_config.adam_eps,
             weight_decay=optimizer.weight_decay,
             grad_clip_norm=optimizer.max_grad_norm,
         )
-        result = self.runtime.training_client.optim_step(params).result(
-            timeout=self.cfg.trainer.fireworks.request_timeout_s
+        result = self.runtime.training_client.optim_step(params, grad_accumulation_normalization=None).result(
+            timeout=self.fireworks_config.request_timeout_s
         )
         self._last_optim_metrics = {
-            key: float(value)
-            for key, value in (getattr(result, "metrics", None) or {}).items()
+            key: float(value) for key, value in (getattr(result, "metrics", None) or {}).items()
         }
         for key, value in self._last_optim_metrics.items():
             if "grad_norm" in key:
@@ -119,9 +109,7 @@ class FireworksPolicyDispatch:
 
     async def save_weights_for_sampler(self, model_id: Optional[str] = None) -> None:
         if model_id is not None:
-            raise NotImplementedError(
-                "Fireworks GRPO does not support model_id overrides"
-            )
+            raise NotImplementedError("Fireworks policy dispatch does not support model_id overrides")
         identity = await self.runtime.publish_sampler_weights()
         logger.info(
             "Published Fireworks sampler weights: version={}, snapshot={}",
@@ -131,9 +119,7 @@ class FireworksPolicyDispatch:
 
     def init_weight_sync_state(self, inference_engine_client) -> None:
         if getattr(inference_engine_client, "runtime", None) is not self.runtime:
-            raise ValueError(
-                "Fireworks training and inference adapters must share one runtime"
-            )
+            raise ValueError("Fireworks training and inference adapters must share one runtime")
 
     def empty_cache(self, model: Optional[str] = None) -> None:
         if model is not None:
@@ -156,12 +142,12 @@ class FireworksPolicyDispatch:
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError(
-            "Fireworks GRPO requires rollout logprobs so the local policy forward is skipped"
+            "Fireworks policy dispatch requires rollout logprobs so the local policy forward is skipped"
         )
 
     def forward_from_staged(self, *args, **kwargs):
         raise NotImplementedError(
-            "Fireworks GRPO requires rollout logprobs so the local policy forward is skipped"
+            "Fireworks policy dispatch requires rollout logprobs so the local policy forward is skipped"
         )
 
     _CHECKPOINT_MANIFEST = "fireworks_checkpoint.json"
@@ -182,13 +168,11 @@ class FireworksPolicyDispatch:
         step = step_match.group(1) if step_match else "unknown"
         checkpoint_name = f"skyrl-step-{step}-{uuid.uuid4().hex[:8]}"
         result = self.runtime.training_client.save_state(checkpoint_name).result(
-            timeout=self.cfg.trainer.fireworks.request_timeout_s
+            timeout=self.fireworks_config.request_timeout_s
         )
         provider_path = str(getattr(result, "path", "") or "")
         if not provider_path:
-            raise RuntimeError(
-                f"Fireworks save_state({checkpoint_name!r}) returned no checkpoint path"
-            )
+            raise RuntimeError(f"Fireworks save_state({checkpoint_name!r}) returned no checkpoint path")
 
         manifest = {
             "format_version": 1,
@@ -222,21 +206,16 @@ class FireworksPolicyDispatch:
 
         self._require_policy(model)
         if load_lr_scheduler_states and not load_optimizer_states:
-            raise ValueError(
-                "Fireworks cannot restore scheduler state without the optimizer state"
-            )
+            raise ValueError("Fireworks cannot restore scheduler state without the optimizer state")
 
         manifest_path = os.path.join(ckpt_dir, self._CHECKPOINT_MANIFEST)
         if not io.exists(manifest_path):
-            raise FileNotFoundError(
-                f"Fireworks checkpoint manifest not found: {manifest_path}"
-            )
+            raise FileNotFoundError(f"Fireworks checkpoint manifest not found: {manifest_path}")
         with io.open_file(manifest_path, "r") as f:
             manifest = json.load(f)
         if manifest.get("format_version") != 1:
             raise ValueError(
-                "Unsupported Fireworks checkpoint manifest version: "
-                f"{manifest.get('format_version')!r}"
+                "Unsupported Fireworks checkpoint manifest version: " f"{manifest.get('format_version')!r}"
             )
 
         checkpoint_name = str(manifest.get("checkpoint_name") or "")
@@ -252,16 +231,14 @@ class FireworksPolicyDispatch:
             # their returned Tinker path is already directly loadable.
             load_path = provider_path
         else:
-            raise ValueError(
-                f"Fireworks checkpoint manifest has no loadable reference: {manifest_path}"
-            )
+            raise ValueError(f"Fireworks checkpoint manifest has no loadable reference: {manifest_path}")
 
         load = (
             self.runtime.training_client.load_state_with_optimizer
             if load_optimizer_states
             else self.runtime.training_client.load_state
         )
-        load(load_path).result(timeout=self.cfg.trainer.fireworks.request_timeout_s)
+        load(load_path).result(timeout=self.fireworks_config.request_timeout_s)
         logger.info(
             "Loaded Fireworks DCP checkpoint: reference={}, optimizer_restored={}",
             load_path,
@@ -269,6 +246,4 @@ class FireworksPolicyDispatch:
         )
 
     def save_hf_model(self, *args, **kwargs) -> None:
-        raise NotImplementedError(
-            "Promoting a Fireworks adapter is not implemented yet"
-        )
+        raise NotImplementedError("Promoting a Fireworks adapter is not implemented yet")

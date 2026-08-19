@@ -25,6 +25,7 @@ class _TrainingClient:
     def __init__(self):
         self.forward_backward_calls = []
         self.optim_params = []
+        self.optim_kwargs = []
         self.saved_states = []
         self.loaded_states = []
 
@@ -37,8 +38,9 @@ class _TrainingClient:
             )
         )
 
-    def optim_step(self, params):
+    def optim_step(self, params, **kwargs):
         self.optim_params.append(params)
+        self.optim_kwargs.append(kwargs)
         return _Future(SimpleNamespace(metrics={"grad_norm": 0.75}))
 
     def save_state(self, name):
@@ -65,25 +67,27 @@ def _cfg() -> SkyRLTrainConfig:
 
 def test_policy_dispatch_stages_and_submits_importance_sampling() -> None:
     training_client = _TrainingClient()
-    runtime = SimpleNamespace(
-        training_client=training_client, publish_sampler_weights=None
-    )
+    runtime = SimpleNamespace(training_client=training_client, publish_sampler_weights=None)
     built_batches = []
 
     def datum_builder(batch, *, max_seq_len):
         built_batches.append((batch, max_seq_len))
         return ["datum"] * batch.batch_size
 
-    dispatch = FireworksPolicyDispatch(_cfg(), runtime, datum_builder=datum_builder)
+    cfg = _cfg()
+    dispatch = FireworksPolicyDispatch(
+        runtime,
+        cfg.trainer.fireworks,
+        cfg.trainer.policy.optimizer_config,
+        datum_builder=datum_builder,
+    )
     batch = TrainingInputBatch({"sequences": torch.arange(12).reshape(4, 3)})
     staged = dispatch.stage_data("policy", batch, [(0, 2), (2, 4)])
 
     assert [part.batch_size for part in staged] == [2, 2]
     output = dispatch.forward_backward_from_staged("policy", staged[0])
 
-    assert training_client.forward_backward_calls == [
-        (["datum", "datum"], "importance_sampling")
-    ]
+    assert training_client.forward_backward_calls == [(["datum", "datum"], "importance_sampling")]
     assert built_batches[0][1] == 128
     assert output.metrics["final_loss"] == pytest.approx(1.25)
     assert output.metrics["response_tokens"] == pytest.approx(4.0)
@@ -97,7 +101,9 @@ def test_policy_dispatch_optimizer_uses_skyrl_optimizer_config() -> None:
     cfg.trainer.policy.optimizer_config.max_grad_norm = 2.0
     training_client = _TrainingClient()
     dispatch = FireworksPolicyDispatch(
-        cfg, SimpleNamespace(training_client=training_client)
+        SimpleNamespace(training_client=training_client),
+        cfg.trainer.fireworks,
+        cfg.trainer.policy.optimizer_config,
     )
 
     grad_norm = dispatch.optim_step("policy")
@@ -108,6 +114,7 @@ def test_policy_dispatch_optimizer_uses_skyrl_optimizer_config() -> None:
     assert params.beta2 == pytest.approx(0.9)
     assert params.weight_decay == pytest.approx(0.1)
     assert params.grad_clip_norm == pytest.approx(2.0)
+    assert training_client.optim_kwargs == [{"grad_accumulation_normalization": None}]
     assert grad_norm == pytest.approx(0.75)
 
 
@@ -119,7 +126,7 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
     )
     cfg = _cfg()
     cfg.trainer.fireworks.request_timeout_s = 123
-    dispatch = FireworksPolicyDispatch(cfg, runtime)
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
     ckpt_dir = tmp_path / "global_step_7" / "policy"
 
     dispatch.save_checkpoint("policy", str(ckpt_dir), tokenizer="unused")
@@ -148,7 +155,8 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
 def test_policy_dispatch_load_falls_back_to_manifest_provider_path(tmp_path) -> None:
     training_client = _TrainingClient()
     runtime = SimpleNamespace(training_client=training_client, trainer_job_id=None)
-    dispatch = FireworksPolicyDispatch(_cfg(), runtime)
+    cfg = _cfg()
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
     ckpt_dir = tmp_path / "global_step_2" / "policy"
     ckpt_dir.mkdir(parents=True)
     provider_path = "tinker://prior-run/weights/step-2"
