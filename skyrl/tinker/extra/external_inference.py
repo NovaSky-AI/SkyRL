@@ -67,16 +67,16 @@ class ExternalInferenceClient:
                 result = await self._forward_to_engine(
                     sample_req, model_id, checkpoint_id, http_client, base_model=base_model
                 )
-            result_data = result.model_dump()
             status = RequestStatus.COMPLETED
         except Exception as e:
             logger.exception("External engine error")
-            result_data = {"error": str(e), "status": "failed"}
+            result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
-            future.result_data = result_data
+            # `result_data` is a text column holding pre-serialized JSON.
+            future.result_data = result.model_dump_json()
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()

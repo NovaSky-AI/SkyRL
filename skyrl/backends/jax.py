@@ -634,8 +634,9 @@ class JaxBackendImpl(AbstractBackend):
         """
         if not prepared_batch.all_model_inputs:
             return {}
-        if "ppo_critic" in prepared_batch.all_loss_fns:
-            raise ValueError("ppo_critic is only supported by the SkyRL-Train backend")
+        unsupported_loss_fns = set(prepared_batch.all_loss_fns) - LOSS_TYPES.keys()
+        if unsupported_loss_fns:
+            raise ValueError(f"Loss functions {sorted(unsupported_loss_fns)} are not supported by the JAX backend")
 
         results = {}
 
