@@ -4,6 +4,8 @@
 
 - **`skyrl/train/entrypoints/main_base.py`** — Primary training entrypoint. Handles inference server setup, training loop, weight sync.
 - **`skyrl/train/entrypoints/main_generate.py`** — Generation-only entrypoint (no training).
+- **`skyrl/train/entrypoints/main_fireworks.py`** — Hosted Fireworks RL entrypoint (no Ray workers).
+- **`skyrl/train/entrypoints/main_fireworks_sft.py`** — Hosted Fireworks SFT entrypoint reusing the native SFT loop.
 
 ## Running Training
 

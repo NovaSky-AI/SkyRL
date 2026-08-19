@@ -1,6 +1,6 @@
 # SFT (Supervised Fine-Tuning) Example
 
-This example demonstrates supervised fine-tuning using SkyRL, with support for both FSDP and Megatron backends.
+This example demonstrates supervised fine-tuning using SkyRL with FSDP, Megatron, and hosted Fireworks backends.
 
 ## Dataset
 
@@ -25,6 +25,17 @@ bash examples/train/sft/run_sft_megatron.sh
 ```
 
 Trains `Qwen/Qwen3-0.6B` on 4 GPUs with Megatron (TP=2, PP=2). Key defaults: max length 512, batch size 4, 10 training steps.
+
+### Fireworks (hosted trainer)
+
+```bash
+export FIREWORKS_API_KEY=<your-key>
+bash examples/train/sft/run_sft_fireworks.sh
+```
+
+Fireworks owns model computation and optimizer state; the SkyRL driver owns dataset loading, tokenization, batching, evaluation, callbacks, and logging. The hosted entrypoint runs directly without Ray or locally owned GPUs. The example provisions one dedicated trainer and no rollout deployment, requires explicit paid-run confirmation, and deletes the trainer on completion or failure.
+
+Phase-one Fireworks SFT is text-only and requires `remove_microbatch_padding=false`, `use_sequence_packing=false`, `enable_ray_gpu_monitor=false`, `hf_save_interval=0`, and no persistent checkpoint/resume configuration. It supports the same chat/Alpaca datasets, assistant masking, dataset mixing, evaluation, and callbacks as the native SFT loop.
 
 ### VLM SFT (Megatron, multi-GPU)
 
@@ -83,8 +94,12 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `strategy` | `megatron` | Backend: `megatron` or `fsdp` |
-| `model.path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path |
+| `strategy` | `megatron` | Backend: `megatron`, `fsdp`, or `fireworks` (hosted entrypoint) |
+| `model.path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path; must match the Fireworks base-model tokenizer |
+| `fireworks.base_model` | `None` | Fireworks model resource (Fireworks only) |
+| `fireworks.training_shape_id` | `None` | Dedicated Fireworks training shape (Fireworks only) |
+| `fireworks.trainer_job_id` | `None` | Stable trainer resource ID used for audit and cleanup (Fireworks only) |
+| `fireworks.max_seq_len` | `None` | Maximum submitted model-input length (Fireworks only) |
 | `train_datasets` | `[yahma/alpaca-cleaned]` | List of HuggingFace dataset names to train on; multiple entries are mixed per `train_dataset_weights` |
 | `train_dataset_splits` | `[train[:100]]` | Split/slice per training dataset (same length as `train_datasets`) |
 | `train_dataset_weights` | equal (`1/N`) | Per-dataset sampling ratios within a batch, independent of dataset sizes; `sampler=random` only |
@@ -120,14 +135,19 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 
 ## Entrypoint
 
-The SFT trainer is invoked as a module:
+Local FSDP and Megatron training use:
 
 ```bash
-python -m skyrl.train.main_sft [key=value overrides...]
+uv run --isolated --extra <fsdp|megatron> -m skyrl.train.main_sft [key=value overrides...]
 ```
 
-See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI entrypoint and
-[`skyrl/train/sft_trainer.py`](../../../skyrl/train/sft_trainer.py) for the full implementation.
+Hosted Fireworks training uses:
+
+```bash
+uv run --isolated --extra fireworks -m skyrl.train.entrypoints.main_fireworks_sft [key=value overrides...]
+```
+
+See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py), [`skyrl/train/entrypoints/main_fireworks_sft.py`](../../../skyrl/train/entrypoints/main_fireworks_sft.py), and [`skyrl/train/sft_trainer.py`](../../../skyrl/train/sft_trainer.py).
 
 ## Minibatch packing (controller-level FFD, Megatron only)
 
