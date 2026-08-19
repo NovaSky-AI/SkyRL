@@ -40,6 +40,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
+    validate_mxfp8_gdn_tp_alignment,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
@@ -56,7 +57,7 @@ from skyrl.backends.skyrl_train.weight_sync import (
     WeightExtractor,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
-    BLOCKWISE_FP8,
+    WIRE_FORMATS,
     SerializedFp8Config,
     iter_serialized_fp8_tensors,
     registered_fp8_spec_names,
@@ -134,7 +135,7 @@ class MegatronWeightExtractor(WeightExtractor):
         self.training_dtype = training_dtype
         if fp8_weight_sync_mode is None:
             self.serialized_fp8_config = None
-        elif fp8_weight_sync_mode == BLOCKWISE_FP8:
+        elif fp8_weight_sync_mode in WIRE_FORMATS:
             spec = resolve_fp8_spec(hf_config) if hf_config is not None else None
             if spec is None:
                 raise ValueError(
@@ -142,7 +143,7 @@ class MegatronWeightExtractor(WeightExtractor):
                     f"checkpoint layout (registered specs: {', '.join(registered_fp8_spec_names())}); "
                     "no spec matches the provided hf_config"
                 )
-            self.serialized_fp8_config = SerializedFp8Config(spec=spec)
+            self.serialized_fp8_config = SerializedFp8Config(spec=spec, wire_format=fp8_weight_sync_mode)
         else:
             raise ValueError(f"Unsupported fp8_weight_sync_mode={fp8_weight_sync_mode!r}")
 
@@ -480,6 +481,12 @@ class MegatronWorker:
         # re-run the device/recipe validation the blind driver had to skip.
         resolve_auto_fp8_recipe(transformer_config_kwargs)
         validate_concrete_fp8_recipe(transformer_config_kwargs)
+        # Megatron's own fp8 guard checks only the GLOBAL GDN in_proj dim; TE
+        # quantizes the TP shard. Refuse misaligned shards here with the
+        # arithmetic instead of TE's C++ assert deep inside model build.
+        validate_mxfp8_gdn_tp_alignment(
+            transformer_config_kwargs, hf_config, megatron_config.tensor_model_parallel_size
+        )
 
         if not self.cfg.gradient_checkpointing:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):

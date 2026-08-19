@@ -15,7 +15,7 @@ from skyrl.train.config import SkyRLTrainConfig
 def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path: [])
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _wire_format=None: [])
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
     ie_cfg.fp8_weight_sync_mode = "blockwise"
@@ -44,7 +44,7 @@ def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monke
 def test_serialized_fp8_weight_sync_rejects_conflicting_vllm_settings(engine_kwargs, monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path: [])
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _wire_format=None: [])
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
 
@@ -157,3 +157,30 @@ def test_resolve_policy_model_name_uses_served_model_name():
     cfg.generator.inference_engine.served_model_name = "served-alias"
 
     assert resolve_policy_model_name(cfg) == "served-alias"
+
+
+def test_serialized_fp8_threads_the_wire_format_into_the_ignore_list(monkeypatch):
+    """The engine ignore list is wire-specific, so the resolved wire must reach the spec.
+
+    MXFP8 excludes more modules than blockwise (its kernels need a 32-aligned reduction dim
+    and out_features >= 128), and the engine builds quantized modules for everything absent
+    from this list, so a blockwise list under an MXFP8 wire builds modules the sync never
+    feeds.
+    """
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    seen = []
+    monkeypatch.setattr(
+        inference_utils,
+        "_serialized_fp8_ignored_layers",
+        lambda _model_path, wire_format=None: seen.append(wire_format) or [],
+    )
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.fp8_weight_sync_mode = "mxfp8"
+    engine_kwargs = {}
+
+    _apply_serialized_fp8_weight_sync_defaults(ie_cfg, engine_kwargs, model_path="qwen35-test")
+
+    assert seen == ["mxfp8"]
+    assert engine_kwargs["quantization"] == "compressed-tensors"

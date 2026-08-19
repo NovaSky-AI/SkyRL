@@ -1,4 +1,4 @@
-"""Generic per-model spec for serialized blockwise FP8 weight sync.
+"""Generic per-model spec for serialized FP8 weight sync (blockwise and MXFP8 wires).
 
 ``ModelFp8Spec`` groups everything the sync path must know about one model
 family — which HF configs it matches, which weights quantize, which vLLM
@@ -14,6 +14,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
+
+# Wire formats live here rather than in vllm_format so model specs can name them
+# without importing the serializer that imports this module.
+BLOCKWISE_FP8 = "blockwise"
+MXFP8 = "mxfp8"
+AUTO_FP8 = "auto"
+WIRE_FORMATS = (BLOCKWISE_FP8, MXFP8)
+
+# Scale tensor suffix each wire pairs with a quantized ``.weight`` — the one
+# mapping both the serializer (name emission) and the batched-MoE receiver
+# (target routing) consume.
+WIRE_SCALE_SUFFIX = {
+    BLOCKWISE_FP8: ".weight_scale_inv",
+    MXFP8: ".weight_scale",
+}
 
 
 @dataclass(frozen=True)
@@ -41,15 +56,16 @@ class MoeExpertSpec:
 
 @dataclass(frozen=True)
 class ModelFp8Spec:
-    """Per-model policy for serialized blockwise FP8 weight sync."""
+    """Per-model policy for serialized FP8 weight sync; wire-format-aware
+    callbacks receive the concrete format so one spec serves both wires."""
 
     name: str
     # hf_config -> does this spec support the checkpoint layout?
     matches: Callable[[Any], bool]
-    # (hf_name, shape) -> serialize this exported weight as FP8?
-    should_quantize: Callable[[str, Sequence[int]], bool]
-    # hf_config -> vLLM module prefixes that must stay unquantized
-    ignored_layers: Callable[[Any], list[str]]
+    # (hf_name, shape, wire_format) -> serialize this exported weight as FP8?
+    should_quantize: Callable[[str, Sequence[int], str], bool]
+    # (hf_config, wire_format) -> vLLM module prefixes that must stay unquantized
+    ignored_layers: Callable[[Any, str], list[str]]
     # batched expert tensor name -> MoeExpertSpec, or None if not one
     moe_expert_spec: Callable[[str], Optional[MoeExpertSpec]]
     # module segment holding routed experts in vLLM parameter names
@@ -93,7 +109,13 @@ def batched_moe_wire_targets() -> dict[str, tuple[str, str]]:
     targets: dict[str, tuple[str, str]] = {}
     for spec in _REGISTRY:
         for proj in spec.moe_projections:
-            for weight_suffix, param_suffix in ((".weight", ""), (".weight_scale_inv", "_scale_inv")):
+            # Blockwise ships weight_scale_inv; MXFP8 ships compressed-tensors'
+            # weight_scale. Both map onto the same fused parameter family.
+            for weight_suffix, param_suffix in (
+                (".weight", ""),
+                (WIRE_SCALE_SUFFIX[BLOCKWISE_FP8], "_scale_inv"),
+                (WIRE_SCALE_SUFFIX[MXFP8], "_scale"),
+            ):
                 key = f".{spec.moe_module}.{proj.hf_name}{weight_suffix}"
                 value = (f".{spec.moe_module}.{proj.vllm_param}{param_suffix}", proj.shard_id)
                 if targets.setdefault(key, value) != value:

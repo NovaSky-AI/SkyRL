@@ -129,6 +129,16 @@ class LayerwiseReloadWorkerMixin:
             patch_numel_loaded()
             _PATCHED_LAYERWISE_NUMEL_LOADED = True
 
+        # MXFP8 TRT-LLM MoE prepare re-derives a fixed per-layer weight/scale
+        # relocation on every sync. Replace it with a learned,
+        # bitwise-validated permutation cache; falls back to the original on
+        # any mismatch. No-op for non-MXFP8 wires.
+        from skyrl.backends.skyrl_train.inference_servers.trtllm_moe_prepare_cache import (
+            install as install_trtllm_moe_prepare_cache,
+        )
+
+        install_trtllm_moe_prepare_cache()
+
         if is_checkpoint_format:
             # Lazy import: vllm is a Linux-only optional dependency, so this module stays importable on macOS / CI.
             from vllm.config import set_current_vllm_config
@@ -170,6 +180,19 @@ class LayerwiseReloadWorkerMixin:
             model = self.model_runner.model
             with set_current_vllm_config(self.vllm_config), torch.device(self.device):
                 finalize_layerwise_reload(model, self.model_config)
+
+        # Serialized FP8 sync ships no KV/attention scale calibration, so scales
+        # are 1.0 by contract. Re-assert it after every sync: vLLM 0.26 corrupts
+        # them at boot (compressed-tensors copies dummy-load placeholders
+        # verbatim) and after level-2 wake (init_fp8_kv_scales resets only the
+        # k/v tensors — q wakes as 0.0 and the float mirrors keep garbage),
+        # which serves NaN (quantized-Q path) or silently wrong logprobs
+        # (bf16-Q path) under kv_cache_dtype=fp8_*.
+        from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+            normalize_serialized_fp8_kv_scales,
+        )
+
+        normalize_serialized_fp8_kv_scales(self.model_runner)
 
         self._skyrl_weight_update_active = False
         self._skyrl_is_checkpoint_format = True

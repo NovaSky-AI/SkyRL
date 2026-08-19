@@ -166,3 +166,43 @@ def test_megatron_extractor_iteration_order_consistency(ray_init_fixture, model_
             )
     finally:
         _megatron_worker_mod.RefWorker = _orig_ref_worker
+
+
+@pytest.mark.megatron
+@pytest.mark.parametrize("wire_format", ["blockwise", "mxfp8"])
+def test_extractor_accepts_every_wire_format_and_threads_it(wire_format):
+    """The sender must build a serializer for each supported wire, not just blockwise.
+
+    The extractor is the only place that turns fp8_weight_sync_mode into a
+    SerializedFp8Config, so a gate that admits one wire silently makes the other
+    unusable end to end: engines boot for it, and the first sync raises instead.
+    Construction needs no GPU; the wire is a config decision.
+    """
+    hf_config = type(
+        "Cfg",
+        (),
+        {"model_type": "qwen3_5_moe", "layer_types": ["linear_attention", "full_attention"]},
+    )()
+
+    extractor = MegatronWeightExtractor(
+        bridge=None,
+        actor_module=None,
+        fp8_weight_sync_mode=wire_format,
+        hf_config=hf_config,
+    )
+
+    assert extractor.serialized_fp8_config is not None
+    assert extractor.serialized_fp8_config.wire_format == wire_format
+    assert extractor.serialized_fp8_config.is_mxfp8 is (wire_format == "mxfp8")
+
+
+@pytest.mark.megatron
+def test_extractor_rejects_an_unknown_wire_format():
+    hf_config = type("Cfg", (), {"model_type": "qwen3_5_moe", "layer_types": ["full_attention"]})()
+    with pytest.raises(ValueError, match="Unsupported fp8_weight_sync_mode"):
+        MegatronWeightExtractor(
+            bridge=None,
+            actor_module=None,
+            fp8_weight_sync_mode="int4",
+            hf_config=hf_config,
+        )

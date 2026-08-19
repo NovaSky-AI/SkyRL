@@ -230,6 +230,34 @@ def test_serialized_fp8_pow2_scales_reject_disabled_e8m0_on_blackwell(monkeypatc
         prepare_runtime_environment(cfg)
 
 
+def test_mxfp8_runtime_takes_no_blockwise_scale_pins(monkeypatch):
+    # Both scale-contract vars belong to the blockwise wire; the MXFP8 wire
+    # (compressed-tensors, native E8M0) must neither stage them nor validate
+    # them — VLLM_USE_DEEP_GEMM_E8M0=0 is exactly what the blockwise-Hopper
+    # contract exports, and it must not fail an mxfp8 launch on SM100.
+    monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: True)
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "mxfp8"
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert "NVTE_FP8_BLOCK_SCALING_FP32_SCALES" not in env_vars
+
+
+def test_inference_engine_cfg_rejects_unresolved_auto_sync_mode():
+    # "auto" resolves from the trainer recipe on the megatron training path;
+    # a path that never runs that resolution must reject it with the way out
+    # rather than listing "auto" as an accepted value.
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "auto"
+
+    with pytest.raises(ValueError, match="megatron"):
+        train_utils.validate_inference_engine_cfg(cfg)
+
+
 def test_serialized_fp8_weight_sync_requires_megatron():
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "fsdp"

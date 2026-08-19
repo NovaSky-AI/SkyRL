@@ -8,6 +8,10 @@ fp8_param=true persistent params for the fp8_param row) and vLLM
 (quantization=fp8 fed by fp8_weight_sync_mode=blockwise), with FP32
 block scales (NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1, set by
 _extra_env_vars_for_model). Select them with: -k "full_fp8 or fp8_param".
+
+The *_mxfp8 rows are Blackwell-only (pytest.mark.b200): mxfp8 Megatron compute
+and a serialized MXFP8 wire (fp8_weight_sync_mode=mxfp8) into vLLM's
+compressed-tensors MXFP8 path. Select with: -m b200.
 """
 
 import pytest
@@ -99,13 +103,20 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
     # NVTE_FUSED_ATTN=0; re-enable it here so the fused backend is available).
     if "moonlight" in model_name.lower() or "glm-4" in model_name.lower():
         env["NVTE_FUSED_ATTN"] = "1"
-    if fp8_mode:
+    if fp8_mode and not fp8_mode.startswith("mxfp8"):
         # Hopper serialized-FP8 contract: FP32 block scales end-to-end, and
         # vLLM must not requantize wire scales to E8M0 (train/utils/utils.py
         # pins both in production; the test sets them explicitly because the
         # fp8 fields are applied after get_test_actor_config's validate_cfg).
+        # Both pins belong to the blockwise wire; MXFP8's native scale
+        # encoding IS E8M0, so the mxfp8 rows take no pins.
         env["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = "1"
         env["VLLM_USE_DEEP_GEMM_E8M0"] = "0"
+    if fp8_mode and fp8_mode.startswith("mxfp8"):
+        # flashinfer's MXFP8 GEMM autotune on a cold cache can exceed the
+        # 600 s health-wait default; production stages the same ceiling. This
+        # is a ceiling, not a duration — warm caches boot in minutes.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = "7200"
     return env or None
 
 
@@ -119,6 +130,11 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         overrides["gpu_memory_utilization"] = 0.5
     # Large MoE: Megatron policy init also needs room alongside vLLM on the
     # same GPU, so lower vLLM's pool footprint.
+    if fp8_mode == "mxfp8_fp8kv":
+        # FP8 KV on the MXFP8 wire: the scale normalization in vllm_compat is
+        # what makes this legal (boot-garbage scales otherwise get baked into
+        # captured attention plans, and post-wake resets miss q/prob + floats).
+        overrides["engine_init_kwargs"]["kv_cache_dtype"] = "fp8_e4m3"
     if "qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower():
         overrides["gpu_memory_utilization"] = 0.5
         if fp8_mode:
@@ -369,6 +385,65 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-35b-a3b_h100_tp4_ep4_full_fp8",
             marks=pytest.mark.h100,
         ),
+        # MXFP8 rows (Blackwell-only): mxfp8 Megatron compute + vLLM rollout
+        # fed by the serialized MXFP8 wire — the recipe/wire pair that
+        # fp8_recipe="auto" + fp8_weight_sync_mode="auto" resolve to on B200.
+        # TE's MXFP8BlockScaling and vLLM's compressed-tensors MXFP8 kernels
+        # both require SM100+, which is why these cannot ride the H100 fleet.
+        # Trainer runs TP=1: TE MXFP8 requires every dim of each rank's
+        # quantized weight shard to be % 32, and Megatron's fused GDN in_proj
+        # (12352 = 32*386 rows on 35B; 386 = 2*193) shards 32-aligned only for
+        # TP that divides 386 — validate_mxfp8_gdn_tp_alignment enforces this.
+        # TP=1 matches the validated B200 production layout.
+        # Thresholds mirror the blockwise rows; tune as diffs accumulate.
+        pytest.param(
+            1,
+            1,
+            1,
+            1,
+            None,
+            1,
+            2,
+            "Qwen/Qwen3.5-0.8B",
+            1e-1,
+            5e-2,
+            "mxfp8",
+            id="qwen3.5-0.8b-dense_mxfp8",
+            marks=pytest.mark.b200,
+        ),
+        # Same dense shape with kv_cache_dtype=fp8_e4m3: pins the vllm_compat
+        # FP8 KV scale normalization (without it: NaN generations on the
+        # quantized-Q path, silently wrong logprobs on the bf16-Q path).
+        pytest.param(
+            1,
+            1,
+            1,
+            1,
+            None,
+            1,
+            2,
+            "Qwen/Qwen3.5-0.8B",
+            1e-1,
+            5e-2,
+            "mxfp8_fp8kv",
+            id="qwen3.5-0.8b-dense_mxfp8_fp8kv",
+            marks=pytest.mark.b200,
+        ),
+        pytest.param(
+            1,
+            1,
+            1,
+            8,
+            1,
+            1,
+            8,
+            "Qwen/Qwen3.5-35B-A3B",
+            3e-1,
+            5e-2,
+            "mxfp8",
+            id="qwen3.5-35b-a3b_b200_tp1_ep8_mxfp8",
+            marks=pytest.mark.b200,
+        ),
     ],
 )
 async def test_logprobs_matching_roundtrip(
@@ -399,7 +474,7 @@ async def test_logprobs_matching_roundtrip(
             transformer_config_kwargs.update(
                 {
                     "fp8": "e4m3",
-                    "fp8_recipe": "blockwise",
+                    "fp8_recipe": "mxfp8" if fp8_mode.startswith("mxfp8") else "blockwise",
                     "fp8_amax_compute_algo": "most_recent",
                     "fp8_param": fp8_mode == "fp8_param",
                 }
@@ -407,11 +482,16 @@ async def test_logprobs_matching_roundtrip(
             mcfg.transformer_config_kwargs = transformer_config_kwargs
             if fp8_mode == "fp8_param":
                 mcfg.ddp_config.fp8_param_gather = True
-            # vLLM: FP8 rollout fed by serialized blockwise weight sync
-            # (_apply_serialized_fp8_weight_sync_defaults injects
-            # quantization=fp8, load_format=dummy and the blockwise
-            # quantization_config into the engine kwargs).
-            cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
+            # vLLM: FP8 rollout fed by the serialized weight sync
+            # (_apply_serialized_fp8_weight_sync_defaults injects the
+            # quantization method, load_format=dummy and the wire's
+            # quantization_config into the engine kwargs). The wire is set
+            # explicitly: production resolves "auto" in validate_megatron_cfg,
+            # which already ran inside get_test_actor_config before these fp8
+            # fields were applied.
+            cfg.generator.inference_engine.fp8_weight_sync_mode = (
+                "mxfp8" if fp8_mode.startswith("mxfp8") else "blockwise"
+            )
             # The validated FP8 production runs use the mp executor; with the
             # ray executor, vLLM 0.23's ray_executor_v2 ignores
             # VLLM_RAY_BUNDLE_INDICES, so multi-engine colocate (e.g. the 35B

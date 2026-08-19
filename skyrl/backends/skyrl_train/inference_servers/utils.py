@@ -4,6 +4,9 @@ import logging
 from argparse import Namespace
 from typing import Any, Dict, List, Optional
 
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    wire_to_engine_quantization,
+)
 from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
     VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS,
 )
@@ -26,7 +29,7 @@ from skyrl.train.config import (
 logger = logging.getLogger(__name__)
 
 
-def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
+def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str = BLOCKWISE_FP8) -> list[str]:
     if not model_path:
         raise ValueError("A model path is required when FP8 weight sync is enabled")
     try:
@@ -43,7 +46,7 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
             "FP8 weight sync has no registered model spec for this checkpoint layout "
             f"(registered specs: {', '.join(registered_fp8_spec_names())}); model_path={model_path!r}"
         )
-    return spec.ignored_layers(hf_config)
+    return spec.ignored_layers(hf_config, wire_format)
 
 
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
@@ -59,15 +62,18 @@ def _apply_serialized_fp8_weight_sync_defaults(
     engine_kwargs: Dict[str, Any],
     model_path: Optional[str] = None,
 ) -> None:
-    """Configure vLLM for checkpoint-format blockwise FP8 weight reloads."""
+    """Configure vLLM for checkpoint-format serialized FP8 weight reloads.
+
+    Wire-format-agnostic apart from ``wire_to_engine_quantization`` and the
+    injected quantization config, both of which key off the concrete wire.
+    """
 
     mode = ie_cfg.fp8_weight_sync_mode
     if mode is None:
         return
-    if mode != BLOCKWISE_FP8:
-        raise ValueError(f"Unsupported fp8_weight_sync_mode={mode!r}. " f"Supported value: {BLOCKWISE_FP8!r}.")
-
-    _set_or_validate(engine_kwargs, "quantization", "fp8", context="engine_init_kwargs")
+    # wire_to_engine_quantization raises on anything outside WIRE_FORMATS.
+    quant_method = wire_to_engine_quantization(mode)
+    _set_or_validate(engine_kwargs, "quantization", quant_method, context="engine_init_kwargs")
     # Build FP8 modules without a bootstrap checkpoint; the first full-weight
     # sync replaces the dummy values.
     _set_or_validate(engine_kwargs, "load_format", "dummy", context="engine_init_kwargs")
@@ -84,15 +90,18 @@ def _apply_serialized_fp8_weight_sync_defaults(
             "engine_init_kwargs.hf_overrides.quantization_config must be a dict " "when FP8 weight sync is enabled"
         )
 
-    ignored_layers = _serialized_fp8_ignored_layers(model_path)
+    ignored_layers = _serialized_fp8_ignored_layers(model_path, mode)
     if ignored_layers:
         logger.info(
-            "FP8 weight sync will leave %d vLLM modules unquantized " "to match the model's FP8 quantization spec.",
+            "FP8 weight sync (%s) will leave %d vLLM modules unquantized "
+            "to match the model's FP8 quantization spec.",
+            mode,
             len(ignored_layers),
         )
 
     for key, value in get_serialized_fp8_quantization_config(
         ignored_layers=ignored_layers,
+        wire_format=mode,
     ).items():
         _set_or_validate(
             qcfg,

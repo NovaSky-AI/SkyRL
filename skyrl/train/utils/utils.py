@@ -24,10 +24,13 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_blackwell_or_newer,
     is_fp8_enabled,
     resolve_auto_fp8_recipe,
+    resolve_auto_wire_format,
     validate_concrete_fp8_recipe,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+    AUTO_FP8,
     BLOCKWISE_FP8,
+    WIRE_FORMATS,
 )
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
@@ -234,6 +237,25 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             continue
         resolve_auto_fp8_recipe(transformer_kwargs)
         validate_concrete_fp8_recipe(transformer_kwargs)
+
+    # Resolve fp8_weight_sync_mode="auto" from the policy's recipe so the
+    # rollout serves the representation the trainer computes with. This keys
+    # off the resolved recipe, never the architecture: an explicit
+    # fp8_recipe="blockwise" on Blackwell is legal (TE emulates it on the MX
+    # datapath) and must keep a blockwise wire, or train and rollout would
+    # disagree again -- the exact failure this sync path exists to prevent.
+    # A GPU-less driver may still hold fp8_recipe="auto" here; unlike the
+    # recipe, the wire cannot defer to the workers (it shapes every engine's
+    # boot config), so resolve_auto_wire_format refuses to guess and raises.
+    ie_cfg = cfg.generator.inference_engine
+    if ie_cfg.fp8_weight_sync_mode == AUTO_FP8:
+        policy_recipe = cfg.trainer.policy.megatron_config.transformer_config_kwargs.get("fp8_recipe")
+        ie_cfg.fp8_weight_sync_mode = resolve_auto_wire_format(policy_recipe)
+        logger.info(
+            "fp8_weight_sync_mode='auto' resolved to {!r} from fp8_recipe={!r}",
+            ie_cfg.fp8_weight_sync_mode,
+            policy_recipe,
+        )
 
     if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
         assert (
@@ -576,17 +598,27 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     """
     ie_cfg = cfg.generator.inference_engine
 
-    if ie_cfg.fp8_weight_sync_mode not in (None, BLOCKWISE_FP8):
+    # "auto" resolves from the trainer recipe in validate_megatron_cfg; a
+    # config path that never runs it (the serve entrypoint, non-megatron
+    # strategies) has no recipe to resolve from, so reject it with the way out
+    # instead of listing "auto" as an accepted value here.
+    if ie_cfg.fp8_weight_sync_mode == AUTO_FP8:
         raise ValueError(
-            f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}; " f"expected {BLOCKWISE_FP8!r} or None"
+            'fp8_weight_sync_mode="auto" resolves from the trainer recipe on the megatron '
+            f"training path only; set one of {WIRE_FORMATS!r} explicitly for this entrypoint."
         )
-    if ie_cfg.fp8_weight_sync_mode == BLOCKWISE_FP8:
+    if ie_cfg.fp8_weight_sync_mode not in (None, *WIRE_FORMATS):
+        raise ValueError(
+            f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}; "
+            f"expected one of {(*WIRE_FORMATS, AUTO_FP8)!r} or None"
+        )
+    if ie_cfg.fp8_weight_sync_mode in WIRE_FORMATS:
         if cfg.trainer.strategy != "megatron":
-            raise ValueError("blockwise FP8 weight sync requires trainer.strategy='megatron'")
+            raise ValueError("FP8 weight sync requires trainer.strategy='megatron'")
         lora_cfg = cfg.trainer.policy.model.lora
         if lora_cfg.rank > 0 and not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
             raise ValueError(
-                "blockwise FP8 weight sync requires full-weight updates; "
+                "FP8 weight sync requires full-weight updates; "
                 "Megatron LoRA with merge_lora=false syncs adapters only"
             )
 
@@ -894,7 +926,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # scales; Blackwell (SM100+) defaults to power-of-two scales, the only mode TE
     # supports for blockwise quantization there (it emulates Float8BlockScaling on
     # the MX datapath).
-    serialized_fp8 = cfg.generator.inference_engine.fp8_weight_sync_mode == BLOCKWISE_FP8
+    # Both env vars below belong to the blockwise wire's scale contract
+    # (Float8BlockScaling / DeepGEMM); the MXFP8 wire serves through
+    # compressed-tensors with native E8M0 scales and takes no pins.
+    blockwise_wire = cfg.generator.inference_engine.fp8_weight_sync_mode == BLOCKWISE_FP8
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     policy_megatron_config = getattr(cfg.trainer.policy, "megatron_config", None)
     ref_megatron_config = getattr(cfg.trainer.ref, "megatron_config", None)
@@ -905,7 +940,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     fp8_compute = is_fp8_enabled(policy_transformer_kwargs.get("fp8")) or (
         use_ref_model and is_fp8_enabled(ref_transformer_kwargs.get("fp8"))
     )
-    fp8_contract_enabled = serialized_fp8 or fp8_compute or policy_fp8_param or ref_fp8_param
+    fp8_contract_enabled = blockwise_wire or fp8_compute or policy_fp8_param or ref_fp8_param
 
     fp8_env_defaults: dict[str, str] = {}
     configured_scale_mode = os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES")
@@ -922,7 +957,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
 
         if fp8_contract_enabled:
             fp8_env_defaults["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = scale_mode
-        if serialized_fp8 and scale_mode == "1":
+        if blockwise_wire and scale_mode == "1":
             e8m0_mode = os.environ.get("VLLM_USE_DEEP_GEMM_E8M0", "0")
             if e8m0_mode != "0":
                 raise ValueError(
@@ -930,7 +965,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
                     "does not requantize them to power-of-2 scales."
                 )
             fp8_env_defaults["VLLM_USE_DEEP_GEMM_E8M0"] = e8m0_mode
-        elif serialized_fp8 and scale_mode == "0" and is_blackwell_or_newer():
+        elif blockwise_wire and scale_mode == "0" and is_blackwell_or_newer():
             # The symmetric rule: SM100 DeepGEMM only accepts E8M0 scale factors
             # (with VLLM_USE_DEEP_GEMM_E8M0=0 it asserts "Unsupported architecture
             # or scaling factor types"). Power-of-2 wire scales are exactly
