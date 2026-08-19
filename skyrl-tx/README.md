@@ -283,7 +283,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m skyrl.tinker.a
 
 ## 🤝 Contributing
 
-We welcome contributions! The project is early and hackable — now is a great time to get involved.
+We welcome contributions! The codebase is small and hackable — it's easy to get involved.
 
 **Ways to contribute:**
 - Try examples from the [Tinker documentation](https://tinker-docs.thinkingmachines.ai/) or [cookbook](https://github.com/thinking-machines-lab/tinker-cookbook)

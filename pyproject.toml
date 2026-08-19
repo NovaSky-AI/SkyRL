@@ -36,7 +36,7 @@ tpu = [
 ]
 
 tinker = [
-    "tinker>=0.3.0",
+    "tinker>=0.3.0,<=0.24.1",
     "fastapi[standard]",
     "sqlmodel",
     "sqlalchemy[asyncio]",
@@ -91,7 +91,7 @@ skyrl-train = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "flash-attn==2.8.3+cu.12.8.torch.2.11; sys_platform == 'linux'",
     "polars",
     "s3fs",
     "s5cmd>=0.3.3; sys_platform == 'linux'",
@@ -112,7 +112,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.23.0; sys_platform == 'linux'",
+    "vllm==0.26.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
@@ -120,33 +120,35 @@ fsdp = [
     # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
     "nixl; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
-    "causal-conv1d; sys_platform == 'linux'",
-    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "causal-conv1d==1.6.2.post1+cu.12.8.torch.2.11; sys_platform == 'linux'",
+    "flash-attn==2.8.3+cu.12.8.torch.2.11; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
 megatron = [
     "skyrl[skyrl-train]",
-    "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
+    "transformer-engine[pytorch]==2.16.0; sys_platform == 'linux'",
     # Declared directly (not just via transformer-engine[pytorch]) so the
-    # [tool.uv.sources] URL below is honored — uv ignores sources for
+    # [tool.uv.sources] index below is honored — uv ignores sources for
     # transitive-only packages, which would otherwise fall back to the PyPI sdist.
-    "transformer-engine-torch==2.11.0; sys_platform == 'linux'",
-    # TE core CUDA lib (libtransformer_engine.so). The meta `transformer-engine`
-    # package hardcodes `transformer-engine-cu13` as its core dep, which we
-    # override to `never` below because this image is CUDA 12.8. cu12 is the
-    # matching core — without it the meta package's sanity check fails with
-    # "Found empty `transformer-engine` meta package installed".
-    "transformer-engine-cu12==2.11.0; sys_platform == 'linux'",
-    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "transformer-engine-torch==2.16.0+cu.12.8.torch.2.11; sys_platform == 'linux'",
+    # TE core CUDA lib (libtransformer_engine.so). Declared directly because the
+    # meta package only pulls a core via its `core*` extras, which we don't request
+    # — without it the meta package's sanity check fails with "Found empty
+    # `transformer-engine` meta package installed". cu12 matches this CUDA 12.8
+    # image; Astral's 2.16 meta package resolves `core` to cu12 as well, so the
+    # `transformer-engine-cu13; sys_platform == 'never'` override that PyPI's
+    # cu13-defaulting metadata used to need is no longer required.
+    "transformer-engine-cu12==2.16.0+cu.12.8; sys_platform == 'linux'",
+    "flash-attn==2.8.3+cu.12.8.torch.2.11; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
-    "causal-conv1d; sys_platform == 'linux'",
-    "mamba-ssm>=2.3.0; sys_platform == 'linux'",
-    "vllm==0.23.0; sys_platform == 'linux'",
+    "causal-conv1d==1.6.2.post1+cu.12.8.torch.2.11; sys_platform == 'linux'",
+    "mamba-ssm==2.3.2.post1+cu.12.8.torch.2.11; sys_platform == 'linux'",
+    "vllm==0.26.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches to `nixl_cu12`.
     # `nixl-cu12` ships the `nixl_cu12` module, but vLLM imports `nixl._api`.
@@ -154,14 +156,14 @@ megatron = [
     # out below (it would drag in the CUDA-13 stack and break the cu12 torch pin).
     "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     # megatron-bridge requires Python 3.12+; pin megatron-core to the same
     # constraint so both packages are consistently available (or absent).
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
@@ -225,33 +227,49 @@ conflicts = [
 ]
 # disable build isolation for megatron related dependencies
 no-build-isolation-package = [
-    "transformer-engine-torch",
-    "transformer-engine",
     "nv-grouped-gemm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
 # unpinned dependencies.
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
-    "transformer-engine[pytorch]==2.11.0; sys_platform == 'linux'",
+    "transformer-engine[pytorch]==2.16.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
-    "transformer-engine-cu13; sys_platform == 'never'",
     # `nixl` hard-depends on both nixl-cu12 and nixl-cu13; drop the cu13 variant
     # so it doesn't pull the CUDA-13 stack and bump torch off the cu12 pin.
     "nixl-cu13; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our exact 0.6.12 pin (the version vLLM 0.23.0 requires). Override it to our version.
-    "flashinfer-python==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.12; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # our pin. vLLM 0.26.0's metadata asks for 0.6.14, but flashinfer-cubin was
+    # never released at 0.6.14 and flashinfer hard-errors when cubin's version
+    # differs from its own, so all three are held at 0.6.13 -- the version vLLM
+    # 0.26.0 was developed against. It must be >=0.6.13: older flashinfer rejects
+    # the `layout_code` vLLM's allreduce+RMS fusion pass hands the MNNVL backend
+    # ("MNNVL AllReduce does not support quantization fusion").
+    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
+    # vLLM 0.26.0 pins tilelang==0.1.9 and apache-tvm-ffi==0.1.10. Both overrides
+    # hold these at the versions the lock already resolved to before mamba-ssm moved
+    # to the Astral wheel, so they only relax mamba-ssm's pins — no other package's
+    # resolved version changes.
+    "tilelang==0.1.9; sys_platform == 'linux'",
+    "apache-tvm-ffi==0.1.10; sys_platform == 'linux'",
+    # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
+    # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
+    # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
+    "xgrammar==0.2.3",
+    # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 while vLLM pins ==0.1.9.
+    "tilelang==0.1.9; sys_platform == 'linux'",
+    # mamba-ssm 2.3.2.post1 caps apache-tvm-ffi at <=0.1.9 while vLLM 0.26.0 pins ==0.1.10. 
+    # Without this, resolution fails outright (the py>=3.14 split has no preferences to fall back on)
+    "apache-tvm-ffi==0.1.10; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
-transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
-transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -288,28 +306,53 @@ explicit = true
 
 [[tool.uv.index]]
 name = "vllm-cu129"
-url = "https://wheels.vllm.ai/0.23.0/cu129"
+url = "https://wheels.vllm.ai/0.26.0/cu129"
+explicit = true
+
+# Astral's prebuilt GPU wheels (https://wheels.astral.sh). cu128 to match torch's
+# CUDA variant. Wheels are published per (CUDA, torch) pair and carry that pair in
+# a local version segment (e.g. `+cu.12.8.torch.2.11`), so the exact build must be
+# pinned in the requirement — see the pins in the `fsdp` / `megatron` extras.
+[[tool.uv.index]]
+name = "astral-cu128"
+url = "https://wheels.astral.sh/simple/cu128/"
 explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
 # Match torch's CUDA variant (cu128).
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
-# vllm 0.23.0's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
+# vllm 0.26.0's PyPI wheel needs CUDA 13 (libcudart.so.13); the cu129 wheel
 # links libcudart.so.12, which torch+cu128 supplies.
 vllm = [
     { index = "vllm-cu129", marker = "sys_platform == 'linux'" },
 ]
-# torch-2.11 wheels for these three aren't published upstream; built locally
-# on erictang000 forks (cu128 / cxx11abiTRUE / py3.12). flash-attn has its
-# +cu12torch2.11cxx11abiTRUE local-version stripped from METADATA — PEP 440
-# treats 2.8.3+local > 2.8.3, so TE's get_attention_backend (max_version=
-# "2.8.3") rejected it and silently fell back to broken unfused attention.
-flash-attn = { url = "https://github.com/erictang000/flash-attention/releases/download/v2.8.3-torch2.11-clean/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
-causal-conv1d = { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
-mamba-ssm = { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
-# transformer-engine-torch 2.11.0 built against torch 2.11 (cu128 / cp312).
-transformer-engine-torch = { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12' and platform_machine == 'x86_64'" }
+# torch-2.11 builds of these aren't published on PyPI, so they come from Astral's
+# prebuilt GPU index instead of wheels built by hand on personal forks. Astral
+# publishes cp310-cp314 for both x86_64 and aarch64, so no python/arch marker is
+# needed beyond the platform — this covers aarch64/GB200 with the same official
+# wheels, retiring the separate hand-built aarch64 artifacts these replace.
+#
+# Astral versions each wheel with the (CUDA, torch) pair it was built against, in a
+# PEP 440 local segment (`+cu.12.8.torch.2.11`), so the exact build is pinned in the
+# requirement rather than here — see the `fsdp` / `megatron` extras.
+#
+# flash-attn must stay at exactly 2.8.3, NOT 2.8.3.post1: TE gates flash-attn on
+# `max_version = 2.8.3` and 2.8.3.post1 > 2.8.3. TE >= 2.16 strips the local segment
+# before comparing (`PkgVersion(...).public`); TE 2.11 did not, which is why this
+# previously had to be a fork wheel with the local version stripped from METADATA —
+# otherwise TE rejected it and silently fell back to broken unfused attention.
+flash-attn = { index = "astral-cu128", marker = "sys_platform == 'linux'" }
+causal-conv1d = { index = "astral-cu128", marker = "sys_platform == 'linux'" }
+mamba-ssm = { index = "astral-cu128", marker = "sys_platform == 'linux'" }
+# The TE trio must come from Astral as a set. Astral versions the core and torch
+# wheels with local segments (2.16.0+cu.12.8 / +cu.12.8.torch.2.11) while the meta
+# package stays plain 2.16.0, and upstream TE asserts raw string equality across the
+# three at import. Astral's meta wheel carries a patch comparing base versions
+# instead, so mixing their core/torch wheels with the PyPI meta package fails.
+transformer-engine = { index = "astral-cu128", marker = "sys_platform == 'linux'" }
+transformer-engine-cu12 = { index = "astral-cu128", marker = "sys_platform == 'linux'" }
+transformer-engine-torch = { index = "astral-cu128", marker = "sys_platform == 'linux'" }
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
 # Linux uses the cu128 index (torch 2.11 wheels are published there).
 torch = [
