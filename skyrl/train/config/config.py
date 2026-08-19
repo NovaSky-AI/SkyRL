@@ -159,7 +159,10 @@ class FakeInt4QatConfig(BaseConfig):
     weights from this path instead. The INT4 ``model.path`` remains what the
     inference engine serves and the logical name. When None, the trainer loads
     weights from ``model.path`` directly (only valid if that path is already a
-    BF16 checkpoint)."""
+    BF16 checkpoint). For models whose BF16 originals were never released
+    (Kimi-style ``scale_divisor=7.0`` checkpoints), produce the masters by
+    dequantizing the INT4 release with
+    ``skyrl.backends.skyrl_train.workers.megatron.dequantize_int4_checkpoint``."""
 
 
 @dataclass
