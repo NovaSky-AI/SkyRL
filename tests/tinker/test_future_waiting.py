@@ -2,6 +2,8 @@
 
 import asyncio
 from contextlib import suppress
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -226,22 +228,43 @@ async def test_retrieve_future_returns_completed_result(waiters, async_engine, s
 
 
 @pytest.mark.asyncio
-async def test_retrieve_future_returns_in_memory_external_result(waiters, async_engine):
+async def test_external_sample_future_is_served_as_proto(waiters, async_engine, monkeypatch):
+    from tinker import SampleResponse
+    from tinker.proto.response_conv import deserialize_proto_response
+
     from skyrl.tinker import api
     from skyrl.tinker.extra import InMemoryFutureStore
 
     store = InMemoryFutureStore()
-    request_id = store.create_future()
+    inference_client = AsyncMock()
+    request = _stub_request(async_engine, waiters, store, headers={"accept": api.PROTO_CONTENT_TYPE})
+    request.app.state.external_inference_client = inference_client
+    monkeypatch.setattr(
+        api,
+        "get_sampling_target",
+        AsyncMock(return_value=api.SamplingTarget(base_model=None, model_id="model_a", checkpoint_id="checkpoint_a")),
+    )
+
+    pending = await api.asample(
+        request=SimpleNamespace(sampling_session_id="sampling_a"),
+        req=request,
+        session=None,
+    )
+    request_id = int(pending.request_id)
+    await asyncio.sleep(0)
+
+    assert store.request_type(request_id) == types.RequestType.SAMPLE
+    inference_client.call_and_store_result.assert_awaited_once()
     store.complete_future(request_id, RequestStatus.COMPLETED, SAMPLE_RESULT.model_dump_json())
 
     response = await api.retrieve_future(
         api.RetrieveFutureRequest(request_id=str(request_id)),
-        _stub_request(async_engine, waiters, store, headers={"accept": api.PROTO_CONTENT_TYPE}),
+        request,
     )
 
-    # Forwarded samples use the Tinker JSON response even when the client also accepts proto.
-    assert response.media_type == "application/json"
-    assert response.body == SAMPLE_RESULT.model_dump_json().encode()
+    assert response.media_type == api.PROTO_CONTENT_TYPE
+    result = deserialize_proto_response(response.body, SampleResponse)
+    assert result.sequences[0].tokens == [1]
 
 
 @pytest.mark.asyncio

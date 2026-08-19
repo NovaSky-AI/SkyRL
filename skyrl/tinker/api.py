@@ -1686,7 +1686,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
     target = await get_sampling_target(request, req, session)
 
     if req.app.state.external_inference_client:
-        request_id = req.app.state.external_future_store.create_future()
+        request_id = req.app.state.external_future_store.create_future(types.RequestType.SAMPLE)
         asyncio.create_task(
             req.app.state.external_inference_client.call_and_store_result(
                 request_id,
