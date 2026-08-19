@@ -40,9 +40,12 @@ _PATCHED_FLAG = "_skyrl_hybrid_fp8_kv_wake_patched"
 def patch_hybrid_fp8_kv_wake() -> bool:
     """Teach the pinned vLLM wake path to zero hybrid KV-cache entries."""
     if importlib.util.find_spec("vllm") is None:
+def patch_hybrid_fp8_kv_wake() -> bool:
+    """Teach the pinned vLLM wake path to zero hybrid KV-cache entries."""
+    try:
+        from vllm.v1.worker import gpu_model_runner
+    except ModuleNotFoundError:
         return False
-
-    from vllm.v1.worker import gpu_model_runner
 
     runner_cls = gpu_model_runner.GPUModelRunner
     target = runner_cls.init_fp8_kv_scales
