@@ -19,8 +19,7 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
 from skyrl.train.config.config import get_config_as_dict
 
 
-def pissa_decompose(weight: torch.Tensor, rank: int, scale: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Split a weight into exact rank-``rank`` principal factors and a residual."""
+def _pissa_factors(weight: torch.Tensor, rank: int, scale: float) -> tuple[torch.Tensor, torch.Tensor]:
     max_rank = min(weight.shape)
     if rank > max_rank:
         raise ValueError(f"PiSSA rank {rank} exceeds maximum rank {max_rank} for weight shape {tuple(weight.shape)}")
@@ -32,6 +31,12 @@ def pissa_decompose(weight: torch.Tensor, rank: int, scale: float) -> tuple[torc
     factor = math.sqrt(scale)
     linear_out /= factor
     linear_in /= factor
+    return linear_in, linear_out
+
+
+def pissa_decompose(weight: torch.Tensor, rank: int, scale: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split a weight into exact rank-``rank`` principal factors and a residual."""
+    linear_in, linear_out = _pissa_factors(weight, rank, scale)
     residual = weight.float() - scale * (linear_out @ linear_in)
     return linear_in, linear_out, residual
 
@@ -91,6 +96,26 @@ def _shard(full: torch.Tensor, dim: int, tp_rank: int, tp_size: int) -> torch.Te
     return full.narrow(dim, tp_rank * chunk, chunk).contiguous()
 
 
+def _synchronized_pissa_decompose(
+    weight: torch.Tensor, rank: int, scale: float, group
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute PiSSA factors once and broadcast them within a parallel group."""
+    max_rank = min(weight.shape)
+    if rank > max_rank:
+        raise ValueError(f"PiSSA rank {rank} exceeds maximum rank {max_rank} for weight shape {tuple(weight.shape)}")
+
+    if torch.distributed.get_rank(group) == 0:
+        linear_in, linear_out = _pissa_factors(weight, rank, scale)
+    else:
+        linear_in = torch.empty((rank, weight.shape[1]), dtype=torch.float32, device=weight.device)
+        linear_out = torch.empty((weight.shape[0], rank), dtype=torch.float32, device=weight.device)
+
+    torch.distributed.broadcast(linear_in, group=group, group_src=0)
+    torch.distributed.broadcast(linear_out, group=group, group_src=0)
+    residual = weight.float() - scale * (linear_out @ linear_in)
+    return linear_in, linear_out, residual
+
+
 @torch.no_grad()
 def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group) -> None:
     base_weight = base_linear.weight
@@ -106,19 +131,19 @@ def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group
 
     base_shard_dim = 1 if input_is_parallel else 0
     if tp_size == 1:
-        full_w = base_weight.data.float()
+        full_w = base_weight.detach().float()
+        linear_in_full, linear_out_full, residual_full = pissa_decompose(full_w, rank, scale)
     else:
-        full_w = _all_gather(base_weight.data.float(), base_shard_dim, tp_size, tp_group)
-
-    linear_in_full, linear_out_full, residual_full = pissa_decompose(full_w, rank, scale)
+        full_w = _all_gather(base_weight.detach().float(), base_shard_dim, tp_size, tp_group)
+        linear_in_full, linear_out_full, residual_full = _synchronized_pissa_decompose(full_w, rank, scale, tp_group)
 
     lin_in_shard_dim = 1 if input_is_parallel else 0
     base_dtype = base_weight.dtype
     lora_dtype = adapter.linear_in.weight.dtype
 
-    base_weight.data.copy_(_shard(residual_full, base_shard_dim, tp_rank, tp_size).to(base_dtype))
-    adapter.linear_out.weight.data.copy_(_shard(linear_out_full, 0, tp_rank, tp_size).to(lora_dtype))
-    adapter.linear_in.weight.data.copy_(_shard(linear_in_full, lin_in_shard_dim, tp_rank, tp_size).to(lora_dtype))
+    base_weight.copy_(_shard(residual_full, base_shard_dim, tp_rank, tp_size).to(base_dtype))
+    adapter.linear_out.weight.copy_(_shard(linear_out_full, 0, tp_rank, tp_size).to(lora_dtype))
+    adapter.linear_in.weight.copy_(_shard(linear_in_full, lin_in_shard_dim, tp_rank, tp_size).to(lora_dtype))
 
 
 def _grouped_base_weights(base_linear, num_experts: int) -> list[torch.Tensor]:
@@ -149,18 +174,18 @@ def _init_grouped_adapter(base_linear, adapter) -> None:
                 "PiSSA: base weight is on the meta device at adapter-init time; pretrained weights "
                 "must be loaded first. Disable meta-device init (init_model_with_meta_device) for PiSSA."
             )
-        full_weight = (
-            base_weight.data.float()
-            if etp_size == 1
-            else _all_gather(base_weight.data.float(), base_shard_dim, etp_size, etp_group)
-        )
-        linear_in, linear_out, residual = pissa_decompose(full_weight, adapter.dim, scale)
+        if etp_size == 1:
+            full_weight = base_weight.detach().float()
+            linear_in, linear_out, residual = pissa_decompose(full_weight, adapter.dim, scale)
+        else:
+            full_weight = _all_gather(base_weight.detach().float(), base_shard_dim, etp_size, etp_group)
+            linear_in, linear_out, residual = _synchronized_pissa_decompose(full_weight, adapter.dim, scale, etp_group)
 
-        base_weight.data.copy_(_shard(residual, base_shard_dim, etp_rank, etp_size).to(base_weight.dtype))
-        adapter.linear_in.weight.data[expert_idx].copy_(
+        base_weight.copy_(_shard(residual, base_shard_dim, etp_rank, etp_size).to(base_weight.dtype))
+        adapter.linear_in.weight[expert_idx].copy_(
             _shard(linear_in, linear_in_shard_dim, etp_rank, etp_size).to(adapter.linear_in.weight.dtype)
         )
-        adapter.linear_out.weight.data[expert_idx].copy_(
+        adapter.linear_out.weight[expert_idx].copy_(
             _shard(linear_out, 0, etp_rank, etp_size).to(adapter.linear_out.weight.dtype)
         )
 

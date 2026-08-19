@@ -61,7 +61,7 @@ def main() -> None:
             sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
             record_memory=cfg.trainer.policy.record_memory,
         )
-        ray.get(policy.async_init_model(args.base_model, num_training_steps=1e9))
+        ray.get(policy.async_init_model(args.base_model, num_training_steps=1_000_000_000))
         ray.get(policy.async_run_ray_method("pass_through", "_set_pad_token_id", tokenizer.pad_token_id))
         ray.get(policy.async_run_ray_method("pass_through", "prime_optimizer_state"))
 

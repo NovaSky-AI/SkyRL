@@ -52,6 +52,34 @@ def test_rank_too_large_raises():
         pissa_init_worker.pissa_decompose(w, 9, 1.0)  # 9 > min(8, 12)
 
 
+@pytest.mark.parametrize("group_rank", [0, 1])
+def test_distributed_decomposition_uses_rank_zero_factors(monkeypatch, group_rank):
+    torch.manual_seed(3)
+    weight = torch.randn(12, 8)
+    rank = 4
+    expected_in, expected_out, _ = pissa_init_worker.pissa_decompose(weight, rank, 1.0)
+    factors = iter((expected_in, expected_out))
+
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group: group_rank)
+    monkeypatch.setattr(
+        torch.distributed,
+        "broadcast",
+        lambda tensor, group, group_src: tensor.copy_(next(factors)),
+    )
+    if group_rank != 0:
+        monkeypatch.setattr(
+            pissa_init_worker,
+            "_pissa_factors",
+            lambda *args: pytest.fail("nonzero rank recomputed the SVD"),
+        )
+
+    linear_in, linear_out, residual = pissa_init_worker._synchronized_pissa_decompose(weight, rank, 1.0, object())
+
+    torch.testing.assert_close(linear_in, expected_in)
+    torch.testing.assert_close(linear_out, expected_out)
+    torch.testing.assert_close(residual + linear_out @ linear_in, weight)
+
+
 @pytest.mark.parametrize(
     ("rank", "lora_type"),
     [
@@ -125,6 +153,11 @@ def test_pissa_initialization_reshards_parallel_adapters(monkeypatch, input_is_p
         linear_out=SimpleNamespace(weight=torch.nn.Parameter(torch.empty(full_weight.shape[0] // tp_size, rank))),
     )
     monkeypatch.setattr(pissa_init_worker, "_all_gather", lambda *args: full_weight)
+    monkeypatch.setattr(
+        pissa_init_worker,
+        "_synchronized_pissa_decompose",
+        lambda weight, rank, scale, group: pissa_init_worker.pissa_decompose(weight, rank, scale),
+    )
 
     pissa_init_worker._init_one_adapter(base_linear, adapter, tp_size, tp_rank, None)
 
@@ -176,6 +209,11 @@ def test_pissa_initialization_reshards_grouped_experts(monkeypatch, input_is_par
         pissa_init_worker,
         "_all_gather",
         lambda local, dim, size, group: next(gathered_weights),
+    )
+    monkeypatch.setattr(
+        pissa_init_worker,
+        "_synchronized_pissa_decompose",
+        lambda weight, rank, scale, group: pissa_init_worker.pissa_decompose(weight, rank, scale),
     )
 
     pissa_init_worker._init_grouped_adapter(base_linear, adapter)
