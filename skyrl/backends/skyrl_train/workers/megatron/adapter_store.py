@@ -41,6 +41,22 @@ def _new_pinned_like(t: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(t, device="cpu").pin_memory()
 
 
+def _grad_data_live(buf) -> bool:
+    """False while the buffer's grad storage is offloaded (freed).
+
+    DDP.offload_grad_buffers() frees grad_data via storage().resize_(0) while
+    keeping the tensor view intact; touching the view in that state is
+    undefined behavior (cudaMemcpyAsync on the stale pointer fails with
+    `invalid argument`). restore_grad_buffers()/zero_grad_buffer() reallocate
+    it zero-filled, i.e. Megatron already treats offloaded grads as discarded
+    — so snapshot/restore skip the grad copy instead of crashing. Grads are
+    only offloaded post-optim-step (never mid-accumulation), so the pending
+    grads at that point have been consumed and are safe to drop.
+    """
+    gd = buf.grad_data
+    return not (gd.is_cuda and gd.untyped_storage().size() == 0)
+
+
 def _expected_lora_param_check(model_chunks) -> None:
     """Sanity-check: every trainable param under DDP buffers is a LoRA adapter param.
 
@@ -149,6 +165,11 @@ class AdapterStore:
         self._pristine: Optional[AdapterSlot] = None
         self._current_id: Optional[str] = None
         self._signature: Optional[LoraSignature] = None
+        # True when the live GPU state no longer mirrors any registered slot
+        # (nor pristine): set when the current adapter is deleted, cleared by
+        # the next completed swap_to(). While dirty, create() must NOT adopt
+        # the live state as a new adapter — it belongs to a deleted tenant.
+        self._live_dirty: bool = False
 
     @property
     def current_id(self) -> Optional[str]:
@@ -227,7 +248,14 @@ class AdapterStore:
         """Copy live GPU state into `slot` (CPU)."""
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
             slot.cpu_param_data[mc_idx][buf_idx].copy_(buf.param_data, non_blocking=True)
-            slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
+            if _grad_data_live(buf):
+                slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
+            else:
+                # Grad storage is offloaded/freed: the live grads were already
+                # consumed by the last optim step and Megatron zero-fills on
+                # reload, so record them as zero rather than reading a freed
+                # pointer.
+                slot.cpu_grad_data[mc_idx][buf_idx].zero_()
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
             groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
             for g, group in enumerate(groups):
@@ -254,7 +282,12 @@ class AdapterStore:
         """Copy `slot` (CPU) into live GPU state."""
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
             buf.param_data.copy_(slot.cpu_param_data[mc_idx][buf_idx], non_blocking=True)
-            buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
+            if _grad_data_live(buf):
+                buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
+            # else: grad storage is offloaded/freed. zero_grad_buffer() /
+            # restore_grad_buffers() reallocate it zero-filled before the next
+            # forward_backward, and a slot swapped in while offloaded carries
+            # post-step (zero) grads anyway — skipping loses nothing.
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
             groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
             for g, group in enumerate(groups):
@@ -304,17 +337,26 @@ class AdapterStore:
         self._signature = signature
         self._pristine = self._allocate_empty_slot(model_chunks, optimizer)
         self._snapshot(self._pristine, model_chunks, optimizer)
+        # _snapshot issues non_blocking D2H copies into pinned memory; the
+        # pristine slot is read on the *CPU* by create()'s _copy_slot, so the
+        # DMA must have landed before this returns.
+        torch.cuda.current_stream().synchronize()
 
     @torch.no_grad()
     def create(self, model_id: str, model_chunks, optimizer, signature: LoraSignature) -> None:
         """Register a new adapter slot.
 
-        - First registration: this is also the live adapter; allocate a slot
-          but skip the pristine→slot copy because the live state already
-          equals pristine. `current_id` becomes `model_id`.
+        - First registration (live state still pristine): this is also the
+          live adapter; allocate a slot but skip the pristine→slot copy
+          because the live state already equals pristine. `current_id`
+          becomes `model_id`.
         - Subsequent registrations: allocate slot and copy pristine → slot.
           Live state is unchanged (no swap). The new adapter only becomes
           live when the next `swap_to(model_id)` is issued.
+        - After a delete of the current adapter (`current_id is None` but
+          live state is dirty), the new adapter is seeded from pristine like
+          any other registration: adopting the live state here would silently
+          inherit the deleted tenant's weights, fp32 masters and Adam state.
         """
         if self._signature is None:
             raise RuntimeError("AdapterStore.create called before register_pristine")
@@ -329,12 +371,14 @@ class AdapterStore:
             raise ValueError(f"AdapterStore: adapter '{model_id}' already registered")
 
         slot = self._allocate_empty_slot(model_chunks, optimizer)
-        if self._current_id is None:
+        if self._current_id is None and not self._live_dirty:
             # First adapter: live state IS pristine; slot will be filled on
             # the next snapshot (i.e. swap-away). Treat live as authoritative.
             self._current_id = model_id
         else:
-            # Seed the new slot from pristine.
+            # Seed the new slot from pristine. When current_id is None but
+            # live is dirty (current adapter was deleted), the next
+            # swap_to(model_id) restores this pristine copy into live.
             self._copy_slot(self._pristine, slot)
         self._slots[model_id] = slot
 
@@ -384,6 +428,9 @@ class AdapterStore:
         del self._slots[model_id]
         if self._current_id == model_id:
             self._current_id = None
+            # Live GPU state still mirrors the deleted adapter. Mark it dirty
+            # so create() won't adopt it; the next swap_to() overwrites it.
+            self._live_dirty = True
 
     @torch.no_grad()
     def swap_to(self, model_id: str, model_chunks, optimizer) -> None:
@@ -407,9 +454,8 @@ class AdapterStore:
         if self._current_id == model_id:
             return  # no-op fast path
 
-        dp_group = mpu.get_data_parallel_group()
         if dist.is_available() and dist.is_initialized():
-            dist.barrier(group=dp_group)
+            dist.barrier(group=mpu.get_data_parallel_group())
 
         if self._current_id is not None:
             current_slot = self._slots[self._current_id]
@@ -421,6 +467,7 @@ class AdapterStore:
         torch.cuda.current_stream().synchronize()
 
         self._current_id = model_id
+        self._live_dirty = False  # live now mirrors target_slot
 
         if dist.is_available() and dist.is_initialized():
-            dist.barrier(group=dp_group)
+            dist.barrier(group=mpu.get_data_parallel_group())
