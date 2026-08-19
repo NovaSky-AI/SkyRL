@@ -66,6 +66,8 @@ def main():
         python -m skyrl.train.main_sft strategy=megatron model.path=Qwen/Qwen3-0.6B
     """
     cfg = SFTConfig.from_cli_overrides(sys.argv[1:])
+    if cfg.strategy == "fireworks":
+        raise ValueError("Use skyrl.train.entrypoints.main_fireworks_sft for strategy='fireworks'")
     validate_sft_cfg(cfg)
     skyrl_cfg = build_skyrl_config_for_sft(cfg)
     initialize_ray(skyrl_cfg)

@@ -31,6 +31,9 @@ class _Sampler:
 
 
 class _Service:
+    trainer_job_id = "trainer"
+    deployment_id = "deployment"
+
     def __init__(self):
         self.samplers = []
         self.hotloads = []
@@ -92,9 +95,7 @@ def test_connect_uses_managed_dedicated_resources(monkeypatch) -> None:
         return service
 
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-key")
-    monkeypatch.setattr(
-        FiretitanServiceClient, "from_firetitan_config", staticmethod(_factory)
-    )
+    monkeypatch.setattr(FiretitanServiceClient, "from_firetitan_config", staticmethod(_factory))
     config = FireworksConfig(
         base_model="accounts/fireworks/models/qwen3-4b",
         max_seq_len=32768,
@@ -128,12 +129,54 @@ def test_connect_uses_managed_dedicated_resources(monkeypatch) -> None:
     assert service.closed is True
 
 
+def test_connect_can_provision_trainer_without_deployment(monkeypatch) -> None:
+    from fireworks.training.sdk import FiretitanServiceClient
+
+    captured = {}
+
+    class ManagedService(_Service):
+        trainer_job_id = "skyrl-smoke-sft-trainer"
+        deployment_id = None
+
+        def create_training_client(self, **kwargs):
+            return _TrainingClient()
+
+    service = ManagedService()
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return service
+
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-key")
+    monkeypatch.setattr(FiretitanServiceClient, "from_firetitan_config", staticmethod(factory))
+    config = FireworksConfig(
+        base_model="accounts/fireworks/models/qwen3-4b",
+        max_seq_len=32768,
+        training_shape_id="accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora",
+        trainer_job_id="skyrl-smoke-sft-trainer",
+    )
+
+    runtime = FireworksRuntime.connect(
+        config=config,
+        tokenizer="tokenizer",
+        tokenizer_model="Qwen/Qwen3-4B",
+        lora_rank=8,
+        learning_rate=1e-5,
+        create_deployment=False,
+    )
+
+    assert captured["create_deployment"] is False
+    assert captured["deployment_id"] is None
+    assert captured["cleanup_deployment_on_close"] is None
+    assert runtime.deployment_id is None
+    asyncio.run(runtime.close())
+    assert service.closed is True
+
+
 def test_runtime_exposes_native_inference_endpoint() -> None:
     service = _Service()
     service._managed_handle = SimpleNamespace(
-        deployment=SimpleNamespace(
-            inference_model="accounts/test/deployments/skyrl-rollout"
-        ),
+        deployment=SimpleNamespace(inference_model="accounts/test/deployments/skyrl-rollout"),
         deployment_manager=SimpleNamespace(inference_url="https://api.fireworks.ai/"),
     )
     runtime = _runtime(service=service)
@@ -194,9 +237,7 @@ async def test_active_sample_spans_hotload_on_same_client() -> None:
         config=FireworksConfig(sampling_timeout_s=1),
     )
     first = await runtime.publish_sampler_weights()
-    sample_task = asyncio.create_task(
-        runtime.sample_async(prompt="prompt", sampling_params="params")
-    )
+    sample_task = asyncio.create_task(runtime.sample_async(prompt="prompt", sampling_params="params"))
     await asyncio.wait_for(started.wait(), timeout=1)
 
     second = await runtime.publish_sampler_weights()
@@ -235,9 +276,7 @@ async def test_failed_hotload_preserves_published_identity_and_client() -> None:
 
 
 def test_snapshot_name_leaves_room_for_provider_suffix() -> None:
-    runtime = _runtime(
-        config=FireworksConfig(snapshot_prefix="skyrl-smoke-" + "long-prefix-" * 8)
-    )
+    runtime = _runtime(config=FireworksConfig(snapshot_prefix="skyrl-smoke-" + "long-prefix-" * 8))
 
     name = runtime._snapshot_name(42)
     prefix, version, random_suffix = name.rsplit("-", 2)
@@ -250,9 +289,7 @@ def test_snapshot_name_leaves_room_for_provider_suffix() -> None:
 
 
 def test_snapshot_name_is_a_lowercase_dns_label() -> None:
-    runtime = _runtime(
-        config=FireworksConfig(snapshot_prefix="My Run_with.dots / and spaces")
-    )
+    runtime = _runtime(config=FireworksConfig(snapshot_prefix="My Run_with.dots / and spaces"))
 
     name = runtime._snapshot_name(0)
 
@@ -282,9 +319,7 @@ async def test_close_waits_for_active_sample() -> None:
         config=FireworksConfig(sampling_timeout_s=1),
     )
     await runtime.publish_sampler_weights()
-    sample_task = asyncio.create_task(
-        runtime.sample_async(prompt="prompt", sampling_params="params")
-    )
+    sample_task = asyncio.create_task(runtime.sample_async(prompt="prompt", sampling_params="params"))
     await asyncio.wait_for(started.wait(), timeout=1)
 
     close_task = asyncio.create_task(runtime.close())

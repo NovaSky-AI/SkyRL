@@ -13,7 +13,11 @@ from skyrl.train.config import (
     SFTConfig,
     build_skyrl_config_for_sft,
 )
-from skyrl.train.config.sft_config import _normalize_dataset_cfg, validate_sft_cfg
+from skyrl.train.config.sft_config import (
+    _normalize_dataset_cfg,
+    validate_fireworks_sft_cfg,
+    validate_sft_cfg,
+)
 
 
 def _sft_cfg_from_overrides(overrides: list[str]) -> SFTConfig:
@@ -211,6 +215,103 @@ class TestFSDPConfigOverrides:
         )
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         assert skyrl_cfg.trainer.policy.fsdp_config.reshard_after_forward is False
+
+
+class TestFireworksConfig:
+    def _cfg(self) -> SFTConfig:
+        cfg = SFTConfig(
+            strategy="fireworks",
+            max_length=512,
+            remove_microbatch_padding=False,
+            use_sequence_packing=False,
+            enable_ray_gpu_monitor=False,
+            hf_save_interval=0,
+        )
+        cfg.model.path = "Qwen/Qwen3-4B"
+        cfg.model.lora.rank = 8
+        cfg.fireworks.base_model = "accounts/fireworks/models/qwen3-4b"
+        cfg.fireworks.training_shape_id = "accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora"
+        cfg.fireworks.trainer_job_id = "skyrl-smoke-sft-trainer"
+        cfg.fireworks.max_seq_len = 32768
+        return cfg
+
+    def test_valid_config_bridges_fireworks_fields(self):
+        cfg = self._cfg()
+
+        validate_fireworks_sft_cfg(cfg)
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+
+        assert skyrl_cfg.trainer.strategy == "fireworks"
+        assert skyrl_cfg.trainer.fireworks is cfg.fireworks
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("enable_ray_gpu_monitor", True, "enable_ray_gpu_monitor"),
+            ("remove_microbatch_padding", True, "padding removal"),
+            ("use_sequence_packing", True, "use_sequence_packing"),
+            ("hf_save_interval", 1, "Hugging Face export"),
+        ],
+    )
+    def test_local_only_features_are_rejected(self, field, value, message):
+        cfg = self._cfg()
+        setattr(cfg, field, value)
+
+        with pytest.raises((ValueError, AssertionError), match=message):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_deployment_id_is_not_required(self):
+        cfg = self._cfg()
+        cfg.fireworks.deployment_id = None
+
+        validate_fireworks_sft_cfg(cfg)
+
+    @pytest.mark.parametrize("field", ["request_timeout_s", "trainer_timeout_s"])
+    def test_timeouts_must_be_positive(self, field):
+        cfg = self._cfg()
+        setattr(cfg.fireworks, field, 0)
+
+        with pytest.raises(ValueError, match="timeouts must be positive"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_negative_lora_rank_is_rejected(self):
+        cfg = self._cfg()
+        cfg.model.lora.rank = -1
+
+        with pytest.raises(ValueError, match="rank must be non-negative"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_nondefault_lora_fields_are_rejected(self):
+        cfg = self._cfg()
+        cfg.model.lora.alpha = 32
+
+        with pytest.raises(ValueError, match="other LoRA fields must use defaults"):
+            validate_fireworks_sft_cfg(cfg)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("ckpt_path", "/tmp/ckpt"), ("resume_from", "latest"), ("ckpt_interval", 1)],
+    )
+    def test_persistent_checkpointing_is_rejected(self, field, value):
+        cfg = self._cfg()
+        setattr(cfg, field, value)
+
+        with pytest.raises(ValueError, match="persistent checkpointing or resume"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_checkpoint_retention_is_rejected(self):
+        cfg = self._cfg()
+        cfg.max_ckpts_to_keep = 1
+
+        with pytest.raises(ValueError, match="max_ckpts_to_keep=-1"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_local_entrypoint_redirects_fireworks_strategy(self, monkeypatch):
+        from skyrl.train.main_sft import main
+
+        monkeypatch.setattr("sys.argv", ["main_sft", "strategy=fireworks"])
+        with pytest.raises(ValueError, match="main_fireworks_sft"):
+            main()
 
 
 class TestMaxTokensPerMicrobatch:
