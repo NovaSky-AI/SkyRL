@@ -36,7 +36,7 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 | `/asample` | POST | Generate samples from current or base model |
 | `/save_weights` | POST | Save full training checkpoint (weights + optimizer) |
 | `/save_weights_for_sampler` | POST | Sync weights to inference engines |
-| `/load_weights` | POST | Load a previously saved checkpoint |
+| `/load_weights` | POST | Load a previously saved checkpoint. Only permitted as a model's first request (matching the Tinker service); later attempts get a 400 -- load into a freshly created model instead |
 | `/training_runs/{unique_id}/checkpoints/weights/{checkpoint_id}` | DELETE | Delete a saved training checkpoint archive from disk |
 | `/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}` | DELETE | Delete a saved sampler checkpoint archive from disk |
 | `/retrieve_future` | POST | Long-poll for async result (300s timeout) |

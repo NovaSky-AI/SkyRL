@@ -615,6 +615,7 @@ class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
     optimizer: bool = True
+    seq_id: int | None = None
     type: Literal["load_weights"] | None = None
 
 
@@ -974,8 +975,25 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
 
 @app.post("/api/v1/load_weights", response_model=FutureResponse)
 async def load_weights(request: LoadWeightsRequest, req: Request, session: AsyncSession = Depends(get_session)):
-    """Loads weights and training state."""
+    """Loads weights and training state.
+
+    Matching the Tinker service, LoadWeights is only permitted as a model's first
+    request: any prior request for the model (forward_backward, save_weights, a
+    previous load_weights, ...) makes further loads a 400. Load into a freshly
+    created model instead (create_training_client_from_state[_with_optimizer]).
+    """
     await get_model(session, request.model_id)
+
+    prior_requests = await session.exec(
+        select(func.count())
+        .select_from(FutureDB)
+        .where(FutureDB.model_id == request.model_id)
+        .where(FutureDB.request_type != types.RequestType.CREATE_MODEL)
+    )
+    prior_count = prior_requests.one()
+    if prior_count > 0:
+        seq_id = request.seq_id if request.seq_id is not None else prior_count + 1
+        raise HTTPException(status_code=400, detail=f"LoadWeights is not permitted with seq_id {seq_id}")
 
     path = types.TinkerPath.parse(request.path)
     if (
