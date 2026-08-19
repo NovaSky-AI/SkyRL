@@ -91,6 +91,14 @@ def _build_skyrl_train_config(
         "megatron",
     ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
     user_overrides["trainer.strategy"] = overrides.strategy
+    # LoRA rank/alpha must also be on the override dict so post_init validation
+    # sees them — e.g. fake_int4_qat.enabled requires lora.rank > 0, which
+    # would spuriously fail for LoRA clients if the rank were applied after
+    # from_cli_overrides. The client-requested LoRA config wins over any
+    # backend_config value (matching the previous post-assignment behaviour).
+    if lora_config is not None and lora_config.rank > 0:
+        user_overrides["trainer.policy.model.lora.rank"] = lora_config.rank
+        user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
@@ -101,11 +109,6 @@ def _build_skyrl_train_config(
 
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
-
-    # Apply LoRA configuration
-    if lora_config is not None and lora_config.rank > 0:
-        cfg.trainer.policy.model.lora.rank = lora_config.rank
-        cfg.trainer.policy.model.lora.alpha = int(lora_config.alpha)
 
     logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
     return cfg
@@ -853,7 +856,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 normalized_config["dppo"] = dppo_overrides
             return loss_fn, normalized_config or None
 
-        if loss_fn != "ppo":
+        if loss_fn not in {"ppo", "gspo"}:
             return loss_fn, loss_fn_config
 
         normalized_config = dict(loss_fn_config or {})
@@ -863,7 +866,7 @@ class SkyRLTrainBackend(AbstractBackend):
             normalized_config["eps_clip_low"] = 1.0 - clip_low_threshold
         if clip_high_threshold is not None:
             normalized_config["eps_clip_high"] = clip_high_threshold - 1.0
-        return "regular", normalized_config or None
+        return ("regular" if loss_fn == "ppo" else "gspo"), normalized_config or None
 
     def forward_backward(
         self,
