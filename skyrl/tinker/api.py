@@ -234,6 +234,9 @@ async def lifespan(app: FastAPI):
     db_url = get_async_database_url(app.state.engine_config.database_url)
     app.state.db_engine = create_async_engine(db_url, echo=False)
     enable_sqlite_wal(app.state.db_engine.sync_engine)
+    app.state.training_request_write_lock = (
+        asyncio.Lock() if app.state.db_engine.sync_engine.dialect.name == "sqlite" else None
+    )
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
@@ -346,6 +349,20 @@ async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
     """Dependency to get a database session."""
     async with AsyncSession(request.app.state.db_engine) as session:
         yield session
+
+
+@asynccontextmanager
+async def open_training_request_write_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
+    """Open a write session without contending SQLite writers for pooled connections."""
+    write_lock = request.app.state.training_request_write_lock
+    if write_lock is None:
+        async with AsyncSession(request.app.state.db_engine) as session:
+            yield session
+        return
+
+    async with write_lock:
+        async with AsyncSession(request.app.state.db_engine) as session:
+            yield session
 
 
 async def get_model(session: AsyncSession, model_id: str) -> ModelDB:
@@ -1108,56 +1125,59 @@ async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackw
 
 
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
-async def forward_backward(request: Request, session: AsyncSession = Depends(get_session)):
+async def forward_backward(request: Request):
     """Compute and accumulate gradients (or run forward-only when the proto body asks for it)."""
     req, forward_only = await _read_forward_backward_request(request)
-    await get_model(session, req.model_id)
+    async with open_training_request_write_session(request) as session:
+        await get_model(session, req.model_id)
 
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
-        model_id=req.model_id,
-        request_data=req.forward_backward_input.to_types(),
-        seq_id=req.seq_id,
-    )
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
+            model_id=req.model_id,
+            request_data=req.forward_backward_input.to_types(),
+            seq_id=req.seq_id,
+        )
 
-    await session.commit()
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
 @app.post("/api/v1/forward", response_model=FutureResponse)
-async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_session)):
+async def forward(request: ForwardRequest, req: Request):
     """Forward pass to obtain logprobs without accumulating gradients"""
-    await get_model(session, request.model_id)
+    async with open_training_request_write_session(req) as session:
+        await get_model(session, request.model_id)
 
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.FORWARD,
-        model_id=request.model_id,
-        request_data=request.forward_input.to_types(),
-        seq_id=request.seq_id,
-    )
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.FORWARD,
+            model_id=request.model_id,
+            request_data=request.forward_input.to_types(),
+            seq_id=request.seq_id,
+        )
 
-    await session.commit()
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
 @app.post("/api/v1/optim_step", response_model=FutureResponse)
-async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(get_session)):
+async def optim_step(request: OptimStepRequest, req: Request):
     """Update model using accumulated gradients."""
-    await get_model(session, request.model_id)
+    async with open_training_request_write_session(req) as session:
+        await get_model(session, request.model_id)
 
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.OPTIM_STEP,
-        model_id=request.model_id,
-        request_data=types.OptimStepInput(adam_params=request.adam_params.to_types()),
-        seq_id=request.seq_id,
-    )
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.OPTIM_STEP,
+            model_id=request.model_id,
+            request_data=types.OptimStepInput(adam_params=request.adam_params.to_types()),
+            seq_id=request.seq_id,
+        )
 
-    await session.commit()
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
