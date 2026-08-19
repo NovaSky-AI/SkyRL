@@ -42,11 +42,10 @@ def _matrix(batch: TrainingInputBatch, name: str) -> torch.Tensor:
 
 
 def _tokens(sequences: torch.Tensor, attention_mask: torch.Tensor, row_index: int) -> list[int]:
-    present = [bool(value) for value in attention_mask.tolist()]
-    count = sum(present)
-    if present != [False] * (len(present) - count) + [True] * count:
+    present = attention_mask.bool()
+    if torch.any(present[:-1] & ~present[1:]):
         raise ValueError(f"attention_mask[{row_index}] must describe contiguous left padding")
-    return [int(token) for token in sequences[attention_mask.bool()].tolist()]
+    return [int(token) for token in sequences[present].tolist()]
 
 
 def training_batch_to_sft_datum_specs(
