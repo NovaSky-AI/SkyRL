@@ -7,6 +7,7 @@ import shutil
 import signal
 import threading
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
 from uuid import uuid4
@@ -76,6 +77,13 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 
 # Statuses a request never moves out of, i.e. the ones a waiter resolves on.
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
+
+
+@dataclass(frozen=True)
+class SamplingTarget:
+    base_model: str | None
+    model_id: str
+    checkpoint_id: str
 
 
 def raw_json_response(payload: str | None) -> Response:
@@ -260,6 +268,8 @@ async def lifespan(app: FastAPI):
     # SkyRL-Train default is colocate_all=True; only opt into forwarding
     # when the operator explicitly sets it to False.
     is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
+    app.state.external_sampling_targets = {}
+    app.state.external_sampling_target_locks = {}
     if app.state.engine_config.external_inference_url:
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
@@ -1280,7 +1290,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
-async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (str | None, str | None):
+async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> tuple[str | None, str | None]:
     """Return (base_model, model_path) for a sampling request."""
     # Resolve model/base from sampling_session_id if provided
     if request.sampling_session_id is not None:
@@ -1289,6 +1299,49 @@ async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (
             raise HTTPException(status_code=404, detail="Sampling session not found")
         return (sampling_session.base_model, sampling_session.model_path)
     return (request.base_model, request.model_path)
+
+
+async def get_sampling_target(request: SampleRequest, req: Request, session: AsyncSession) -> SamplingTarget:
+    """Resolve and validate the model used by a sample request."""
+
+    async def resolve() -> SamplingTarget:
+        base_model, model_path = await get_sampling_model(request, session)
+        if base_model:
+            return SamplingTarget(base_model=base_model, model_id="", checkpoint_id="")
+
+        assert model_path is not None
+        path = types.TinkerPath.parse(model_path)
+        if (
+            not path
+            or path.kind not in ("", "sampler_weights")
+            or not (model_id := path.primary_id)
+            or not (checkpoint_id := path.secondary_id)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
+            )
+        await get_model(session, model_id)
+        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
+        return SamplingTarget(base_model=None, model_id=model_id, checkpoint_id=checkpoint_id)
+
+    sampling_session_id = request.sampling_session_id
+    if sampling_session_id is None or not req.app.state.external_inference_client:
+        return await resolve()
+
+    targets: dict[str, SamplingTarget] = req.app.state.external_sampling_targets
+    target = targets.get(sampling_session_id)
+    if target is not None:
+        return target
+
+    locks: dict[str, asyncio.Lock] = req.app.state.external_sampling_target_locks
+    lock = locks.setdefault(sampling_session_id, asyncio.Lock())
+    async with lock:
+        target = targets.get(sampling_session_id)
+        if target is None:
+            target = await resolve()
+            targets[sampling_session_id] = target
+        return target
 
 
 @app.post("/api/v1/asample", response_model=FutureResponse)
@@ -1300,40 +1353,20 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             detail="sampling_session_id must not contain ':' (the routing-key delimiter)",
         )
 
-    base_model, model_path = await get_sampling_model(request, session)
-
-    if base_model:
-        model_id = checkpoint_id = ""
-    else:
-        assert model_path is not None
-        path = types.TinkerPath.parse(model_path)
-        if (
-            not path
-            # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
-            or path.kind not in ("", "sampler_weights")
-            or not (model_id := path.primary_id)
-            or not (checkpoint_id := path.secondary_id)
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
-            )
-        await get_model(session, model_id)
-        # Validate that the checkpoint exists and is ready
-        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
+    target = await get_sampling_target(request, req, session)
 
     request_id = await create_future(
         session=session,
         request_type=(
             types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
         ),
-        model_id=model_id,
+        model_id=target.model_id,
         request_data=types.SampleInput(
-            base_model=base_model,
+            base_model=target.base_model,
             prompt=request.prompt.to_types(),
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
+            checkpoint_id=target.checkpoint_id,
             # A positive topk implies prompt logprobs: both are read off the same
             # prompt forward pass, so asking for one asks for the other.
             prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
@@ -1348,10 +1381,13 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
     if req.app.state.external_inference_client:
         asyncio.create_task(
             req.app.state.external_inference_client.call_and_store_result(
-                request_id, request, model_id, checkpoint_id, base_model=base_model
+                request_id,
+                request,
+                target.model_id,
+                target.checkpoint_id,
+                base_model=target.base_model,
             )
         )
-
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
