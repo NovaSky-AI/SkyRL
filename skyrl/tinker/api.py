@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import fastapi
 import psutil
+import zstandard
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError as FastAPIRequestValidationError
 from fastapi.responses import RedirectResponse, StreamingResponse
@@ -1083,14 +1084,28 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
     )
 
 
+# Upper bound for a decompressed forward_backward body. Far above any
+# legitimate payload (requests are chunked client-side well below this), but
+# it keeps a small crafted body from ballooning into an arbitrarily large
+# allocation.
+_MAX_FWDBWD_BODY_BYTES = 1 << 30  # 1 GiB
+
+
 async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackwardRequest, bool]:
     """Read a forward_backward body in either wire format.
 
     tinker SDK >= 0.25.0 submits the body as protobuf and routes forward-only
     passes here via the proto's ``forward_only`` flag instead of calling
     ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
+    Large proto bodies may arrive zstd-compressed (``Content-Encoding: zstd``);
+    ASGI servers do not decode request bodies, so decompress here.
     """
     body = await request.body()
+    if request.headers.get("content-encoding", "").strip().lower() == "zstd":
+        try:
+            body = zstandard.ZstdDecompressor().decompress(body, max_output_size=_MAX_FWDBWD_BODY_BYTES)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"failed to zstd-decompress request body: {exc}") from exc
     if PROTO_CONTENT_TYPE in request.headers.get("content-type", "").lower():
         try:
             request_dict, forward_only = parse_forward_backward_request(body)
