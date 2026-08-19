@@ -437,3 +437,206 @@ def test_payload_lookup_is_chunked(scheduling_engine):
         batchable = engine.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD)
 
     assert len(batchable) == count
+
+
+# ---------------------------------------------------------------------------
+# Continuous sampling (per-request future completion; drain before blocking ops)
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+import time  # noqa: E402
+
+from sqlmodel import select  # noqa: E402
+
+
+class _FakeContinuousBackend:
+    """Fake skyrl-train backend exposing the continuous-sampling surface.
+
+    ``order`` records completion order across sample generations and
+    blocking ops so tests can assert drain-before-op sequencing.
+    """
+
+    def __init__(self):
+        self.delays: dict[str, float] = {}
+        self.prepare_calls = 0
+        self.sample_calls: list[str] = []
+        self.order: list[str] = []
+
+    def has_model(self, model_id: str) -> bool:
+        return True
+
+    def prepare_for_sampling(self) -> None:
+        self.prepare_calls += 1
+
+    async def sample_batch_async(self, prepared):
+        request_id = str(prepared.request_batch_slices[0][0])
+        self.sample_calls.append(request_id)
+        await asyncio.sleep(self.delays.get(request_id, 0.05))
+        self.order.append(f"sample:{request_id}")
+        out = types.SampleOutput(
+            sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1], logprobs=[0.0])]
+        )
+        return {request_id: out}
+
+    def optim_step(self, model_id, request_data):
+        self.order.append("optim")
+        return types.OptimStepOutput(metrics={})
+
+
+@pytest.fixture()
+def continuous_engine(tmp_path):
+    """Engine with a file-backed DB (shared across threads) + fake async backend.
+
+    The continuous sampler completes futures from its own thread; a
+    ``:memory:`` SQLite would give that thread a separate empty database
+    (SingletonThreadPool), so these tests use a real file like production.
+    """
+    from sqlalchemy import create_engine as _sa_create_engine
+
+    from skyrl.tinker.db_models import enable_sqlite_wal
+
+    engine = object.__new__(TinkerEngine)
+    engine.db_engine = _sa_create_engine(f"sqlite:///{tmp_path}/engine.db", echo=False)
+    enable_sqlite_wal(engine.db_engine)
+    SQLModel.metadata.create_all(engine.db_engine)
+    engine.config = EngineConfig(
+        base_model=BASE_MODEL,
+        checkpoints_base=AnyPath(""),
+        backend="megatron",
+        session_cleanup_interval_sec=-1,  # cleanup disabled for these tests
+    )
+    engine.backend = _FakeContinuousBackend()
+    engine._continuous_sampling = True
+    engine._sampler = None
+    engine._last_cleanup_time = time.time()
+    return engine
+
+
+def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.02) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def _future_status(engine, request_id: int):
+    with Session(engine.db_engine) as session:
+        return session.exec(select(FutureDB.status).where(FutureDB.request_id == request_id)).one()
+
+
+def test_continuous_sampling_completes_futures_independently(continuous_engine):
+    """A short generation's future must complete while a long one is still
+    in flight — the whole point of continuous sampling (previously every
+    future in a wave waited for the wave's slowest generation)."""
+    engine = continuous_engine
+    rid_slow, rid_fast = add_futures(
+        engine,
+        [
+            (types.RequestType.SAMPLE, "model_a", sample_payload("")),
+            (types.RequestType.SAMPLE, "model_a", sample_payload("")),
+        ],
+    )
+    engine.backend.delays = {str(rid_slow): 0.8, str(rid_fast): 0.05}
+
+    engine.process_pending_requests_once()
+
+    assert _wait_for(lambda: _future_status(engine, rid_fast) == RequestStatus.COMPLETED, timeout=3.0)
+    assert _future_status(engine, rid_slow) == RequestStatus.PENDING
+    assert engine._sampler.inflight_count() == 1
+
+    # Re-running the scheduler must not double-admit the in-flight request.
+    engine.process_pending_requests_once()
+    assert engine.backend.sample_calls.count(str(rid_slow)) == 1
+
+    assert _wait_for(lambda: _future_status(engine, rid_slow) == RequestStatus.COMPLETED, timeout=3.0)
+    assert engine.backend.prepare_calls == 1
+
+
+def test_blocking_single_request_drains_inflight_samples(continuous_engine):
+    """A pending blocking op (optim_step) must wait for in-flight samples to
+    finish (drain) before it runs — engines may sleep during the op."""
+    engine = continuous_engine
+    (rid_sample,) = add_futures(engine, [(types.RequestType.SAMPLE, "model_a", sample_payload(""))])
+    engine.backend.delays = {str(rid_sample): 0.4}
+
+    engine.process_pending_requests_once()  # admits the sample
+    assert engine._sampler.inflight_count() == 1
+
+    adam = types.AdamParams(learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0)
+    (rid_optim,) = add_futures(
+        engine,
+        [(types.RequestType.OPTIM_STEP, "model_a", types.OptimStepInput(adam_params=adam).model_dump(mode="json"))],
+    )
+    engine.process_pending_requests_once()  # must drain, then run the optim step
+
+    assert engine.backend.order == [f"sample:{rid_sample}", "optim"]
+    assert _future_status(engine, rid_sample) == RequestStatus.COMPLETED
+    assert _future_status(engine, rid_optim) == RequestStatus.COMPLETED
+
+
+def test_blocking_op_defers_new_sample_admission(continuous_engine):
+    """Samples arriving alongside a blocking op are deferred (stay PENDING),
+    not processed as a serial convoy batch, and get admitted next iteration."""
+    engine = continuous_engine
+    adam = types.AdamParams(learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0)
+    rid_optim, rid_sample = add_futures(
+        engine,
+        [
+            (types.RequestType.OPTIM_STEP, "model_a", types.OptimStepInput(adam_params=adam).model_dump(mode="json")),
+            (types.RequestType.SAMPLE, "model_a", sample_payload("")),
+        ],
+    )
+
+    engine.process_pending_requests_once()
+    assert _future_status(engine, rid_optim) == RequestStatus.COMPLETED
+    assert _future_status(engine, rid_sample) == RequestStatus.PENDING
+    assert engine.backend.sample_calls == []
+
+    engine.process_pending_requests_once()
+    assert _wait_for(lambda: _future_status(engine, rid_sample) == RequestStatus.COMPLETED, timeout=3.0)
+
+
+def test_admission_fails_unknown_models_without_touching_backend(continuous_engine):
+    """Stale requests for unloaded models (e.g. from a previous server) must
+    be failed by the admission filter without triggering an engine build."""
+    engine = continuous_engine
+    engine.backend.has_model = lambda model_id: False
+
+    (rid,) = add_futures(engine, [(types.RequestType.SAMPLE, "ghost_model", sample_payload(""))])
+    engine.process_pending_requests_once()
+
+    assert _future_status(engine, rid) == RequestStatus.FAILED
+    assert engine.backend.prepare_calls == 0
+    assert engine.backend.sample_calls == []
+
+
+def test_serial_fallback_when_continuous_disabled(continuous_engine):
+    """SKYRL_TINKER_CONTINUOUS_SAMPLING=0 semantics: the serial batch path."""
+    engine = continuous_engine
+    engine._continuous_sampling = False
+    serial_batches = []
+
+    def fake_sample(prepared):
+        rids = [str(s[0]) for s in prepared.request_batch_slices]
+        serial_batches.append(rids)
+        out = types.SampleOutput(
+            sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1], logprobs=[0.0])]
+        )
+        return {rid: out for rid in rids}
+
+    engine.backend.sample = fake_sample
+    rid1, rid2 = add_futures(
+        engine,
+        [
+            (types.RequestType.SAMPLE, "model_a", sample_payload("")),
+            (types.RequestType.SAMPLE, "model_a", sample_payload("")),
+        ],
+    )
+
+    engine.process_pending_requests_once()
+
+    assert serial_batches == [[str(rid1), str(rid2)]]
+    assert _future_status(engine, rid1) == RequestStatus.COMPLETED
+    assert _future_status(engine, rid2) == RequestStatus.COMPLETED

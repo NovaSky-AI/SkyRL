@@ -289,7 +289,19 @@ class RemoteInferenceClient(InferenceEngineInterface):
         # aiohttp.ClientSession is tied to the event loop.
         current_loop = asyncio.get_running_loop()
         if self._session is not None and not self._session.closed and self._session.loop != current_loop:
-            # Event loop changed - the old session is unusable (bound to a dead loop).
+            # Event loop changed - the old session is unusable (bound to another,
+            # possibly dead, loop) and cannot be aclose()'d from here. Close its
+            # connector synchronously (sync API in aiohttp 3.x) so the sockets are
+            # released now and GC doesn't log "Unclosed client session" errors —
+            # this handoff happens routinely between the engine main thread's
+            # transient loops (wake/sleep/adapter loads) and the continuous
+            # sampler's persistent loop.
+            old_connector = getattr(self._session, "_connector", None)
+            try:
+                if old_connector is not None:
+                    old_connector.close()
+            except Exception:
+                pass
             self._session = None
         if self._session is None or self._session.closed:
             # keepalive_timeout must be shorter than the server's timeout_keep_alive

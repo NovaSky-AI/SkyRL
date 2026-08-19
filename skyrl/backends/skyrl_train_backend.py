@@ -1049,16 +1049,38 @@ class SkyRLTrainBackend(AbstractBackend):
         have been updated.
         """
         # 1. Ensure inference engines are initialized and awake
+        self.prepare_for_sampling()
+
+        # 2. Validate model ids, 3. dispatch to the sampling path.
+        errors = self._validate_sample_models(prepared_batch)
+        if errors is not None:
+            return errors
+        return self._sample_with_remote_client(prepared_batch)
+
+    def prepare_for_sampling(self) -> None:
+        """Ensure inference engines exist and are awake for sampling.
+
+        Idempotent and cheap when the engines are already up and awake. The
+        Tinker engine's continuous sampler calls this from its main loop
+        before admitting sample requests to the background executor, so the
+        executor's coroutines never have to touch engine lifecycle (which is
+        not thread-safe) — they only issue data-plane HTTP calls.
+        """
         self._ensure_inference_engines()
         self._wake_inference_engines_for_sampling()
 
-        # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
-        # mixes adapters in one batched sample call (the engine batches across
-        # model_ids in find_batchable_sample); we route each request via the
-        # `model` field in _sample_with_remote_client below. An empty model_id
-        # is base-model sampling (create_sampling_client(base_model=...): the
-        # API maps it to model_id "") and must not be treated as unknown --
-        # _sample_with_remote_client routes it to the served base model name.
+    def _validate_sample_models(
+        self, prepared_batch: types.PreparedSampleBatch
+    ) -> dict[str, types.ErrorResponse] | None:
+        """Validate every model_id in the batch is a known policy; None if OK.
+
+        Multi-LoRA mixes adapters in one batched sample call (the engine
+        batches across model_ids in find_batchable_sample); we route each
+        request via the `model` field in _sample_with_remote_client. An empty
+        model_id is base-model sampling (create_sampling_client(base_model=...):
+        the API maps it to model_id "") and must not be treated as unknown --
+        _sample_with_remote_client routes it to the served base model name.
+        """
         unique_models = set(prepared_batch.all_model_ids)
         unknown = [mid for mid in unique_models if mid and mid not in self._model_ids_to_role]
         if unknown:
@@ -1073,15 +1095,45 @@ class SkyRLTrainBackend(AbstractBackend):
                 status="error",
             )
             return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
+        return None
 
-        # 3. Dispatch to the sampling path
-        return self._sample_with_remote_client(prepared_batch)
+    async def sample_batch_async(
+        self, prepared_batch: types.PreparedSampleBatch
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Awaitable sample path for the engine's continuous sampler.
+
+        The caller (engine main loop) must have called prepare_for_sampling()
+        before scheduling this, and must not sleep the engines, swap adapters,
+        or tear down the runtime while calls are in flight (the engine drains
+        the sampler before such ops). This coroutine runs on the sampler
+        thread's event loop and touches only read-only backend state plus the
+        data-plane HTTP client, which recreates its session/semaphores per
+        event loop.
+        """
+        errors = self._validate_sample_models(prepared_batch)
+        if errors is not None:
+            return errors
+        return await self._sample_with_remote_client_async(prepared_batch, close_client=False)
 
     def _sample_with_remote_client(
         self,
         prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Sample using RemoteInferenceClient, forwarding model input chunks directly."""
+        """Sync wrapper over the async sampling core (serial engine-loop path)."""
+        return asyncio.run(self._sample_with_remote_client_async(prepared_batch, close_client=True))
+
+    async def _sample_with_remote_client_async(
+        self,
+        prepared_batch: types.PreparedSampleBatch,
+        close_client: bool,
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Sample using RemoteInferenceClient, forwarding model input chunks directly.
+
+        ``close_client`` closes the HTTP session when done: the serial path
+        runs each batch on a throwaway event loop (asyncio.run), so its
+        session must not outlive the loop. The continuous sampler runs on a
+        persistent loop and reuses the session across requests instead.
+        """
 
         # Resolve the inference-engine model name per request. With multi-LoRA
         # the adapter name on vLLM IS the Tinker model_id (registered by
@@ -1141,10 +1193,11 @@ class SkyRLTrainBackend(AbstractBackend):
             try:
                 return await asyncio.gather(*tasks, return_exceptions=True)
             finally:
-                await self._inference_engine_client.aclose()
+                if close_client:
+                    await self._inference_engine_client.aclose()
 
-        sample_outputs = asyncio.run(sample_all())
-        logger.info(f"Collected {len(sample_outputs)} sample outputs")
+        sample_outputs = await sample_all()
+        logger.debug(f"Collected {len(sample_outputs)} sample outputs")
         return self._aggregate_sample_results(prepared_batch, sample_outputs)
 
     def _aggregate_sample_results(
@@ -1153,7 +1206,7 @@ class SkyRLTrainBackend(AbstractBackend):
         sample_outputs: list,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Convert sample outputs to Tinker format."""
-        logger.info(f"Aggregating sample results for {len(sample_outputs)} samples")
+        logger.debug(f"Aggregating sample results for {len(sample_outputs)} samples")
 
         def _extract_sequences(output):
             """Yield (tokens, logprobs, stop_reason) from a single sample output."""
