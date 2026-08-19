@@ -9,7 +9,6 @@ The upstream fix handles both entry shapes. Remove this backport when the vLLM
 pin includes https://github.com/vllm-project/vllm/pull/41602.
 """
 
-import importlib.util
 import inspect
 import textwrap
 
