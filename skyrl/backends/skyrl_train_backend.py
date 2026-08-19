@@ -1270,6 +1270,12 @@ class SkyRLTrainBackend(AbstractBackend):
         self._validate_model_state(model_id)
         role = self._get_role(model_id)
 
+        # The dispatch backloads the trainer (masters + optimizer) for the
+        # save; awake colocated engines hold most of the GPU (218GiB/GPU at
+        # gpu_memory_utilization=0.8) and the backload OOMs. Same idiom as
+        # forward/forward_backward: sleep first, the next weight sync wakes.
+        self._sleep_inference_engines()
+
         # Create temp directory for checkpoint on the same (shared) filesystem
         # as output_path so the remote worker that writes the files and the
         # engine that tars them both see the same path.
@@ -1291,6 +1297,10 @@ class SkyRLTrainBackend(AbstractBackend):
         """Load full training checkpoint (model + optimizer + scheduler) from tar."""
         self._validate_model_state(model_id)
         role = self._get_role(model_id)
+
+        # Same GPU-residency requirement as save_checkpoint: the trainer
+        # backload cannot fit beside awake colocated engines.
+        self._sleep_inference_engines()
 
         # Extract tar to temp directory on the same (shared) filesystem as
         # checkpoint_path so the remote worker that loads the files can see it.
