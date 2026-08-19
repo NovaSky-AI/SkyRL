@@ -42,6 +42,9 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.patches.megatron_mla_thd_v_pad import (
     apply_megatron_mla_thd_v_pad_patch,
 )
+from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
+    patch_fa2_head_dim_allowlist,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -600,6 +603,10 @@ class MegatronWorker:
             DistributedDataParallelConfig,
         )
 
+        # TE patch to allow FA2 for head_dim 256 on SM103 (B300)
+        # Delete along with the patch module once the TE pin includes NVIDIA/TransformerEngine#3360.
+        patch_fa2_head_dim_allowlist()
+
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type)
 
@@ -1119,6 +1126,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         The batch is split into micro batches based on micro_train_batch_size_per_gpu,
         or by token count if max_tokens_per_microbatch is configured.
         Megatron Core's forward_backward_func handles gradient accumulation internally.
+        Gradients also accumulate across calls until :meth:`optim_step`; Tinker can
+        split one logical batch into multiple forward_backward requests.
 
         Args:
             data: TrainingInputBatch (already DP-sharded by WorkerDispatch/MeshDispatch)
@@ -1133,9 +1142,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ``metrics`` (all-reduced across DP).
         """
         self.model.train()
-        for chunk in self.actor_module:
-            # if use distributed optimizer, zero grad buffer will be handled by optimizer
-            chunk.zero_grad_buffer()
 
         all_metrics = defaultdict(list)
 
@@ -1310,6 +1316,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         Note: Unlike FSDP workers, Megatron doesn't need manual gradient scaling here
         because Megatron Core's forward_backward_func handles loss scaling internally.
+        However, we do need to manually trigger the call to `finalize_model_grads` to
+        reduce gradients that have been accumulated across multiple forward_backward calls.
+
+        This is the end of a gradient accumulation window: gradients from every
+        ``forward_backward`` call since the last step are reduced once, applied, and
+        then cleared. See :meth:`MegatronModelWrapper.run_pending_grad_sync`.
 
         Returns:
             The gradient norm (before scaling, after clipping), or None if unavailable.
@@ -1317,7 +1329,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.optimizer is None:
             raise RuntimeError("optim_step called but policy.inference_only_init=True (no optimizer constructed)")
 
+        # Reduce gradients across DP (and TP/PP for layernorm/embedding grads) for the
+        # whole accumulated window. Deferred out of forward_backward because the reduce
+        # is not idempotent -- running it per call corrupts gradients once a window
+        # spans more than one call.
+        self.model.run_pending_grad_sync()
+
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+
+        # Clear the DDP grad buffers for the next window. `optimizer.zero_grad()` inside
+        # `optimizer_step` only drops `param.grad` / the fp32 main-param grads -- the
+        # `grad_data` buffer that `param.main_grad` views is untouched, so without this
+        # the gradients just applied would be accumulated into again by the next window.
+        # Also re-arms Megatron's per-iteration bookkeeping (bucket-group grad-ready
+        # counters, `grad_added_to_main_grad`).
+        for chunk in self.actor_module:
+            chunk.zero_grad_buffer()
 
         # Reset counter for next accumulation cycle
         self._micro_batches_accumulated = 0

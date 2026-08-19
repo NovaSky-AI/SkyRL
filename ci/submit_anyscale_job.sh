@@ -7,10 +7,18 @@
 # STARTING straight to FAILED without the entrypoint ever executing. That is a
 # capacity problem, not a test problem, so we resubmit instead of failing CI.
 #
-# Reaching RUNNING is the signal that provisioning succeeded, so `anyscale job wait
-# --state RUNNING` is the gate: it exits 0 on RUNNING, and non-zero if the job hits
-# a terminal state first. Anything that fails *after* RUNNING is a real test failure
-# and is reported as-is.
+# Reaching RUNNING is NOT that signal. The CLI collapses Anyscale's internal HA job
+# states onto a handful of user-facing ones, and ERRORED / CLEANING_UP / RESTARTING
+# all map to RUNNING (see HA_JOB_STATE_TO_JOB_STATE in anyscale/job/_private/job_sdk.py)
+# because ERRORED is transient when retries remain. So a cluster that dies during
+# provisioning still reports STARTING -> RUNNING for the few seconds it spends tearing
+# itself down, and `job wait --state RUNNING` exits 0 on it.
+#
+# What actually distinguishes the two cases is whether Anyscale ever created a *job
+# run*: a run exists only once the cluster came up and the entrypoint was submitted to
+# it. So the gate is applied after the job settles -- if it failed without a run, it
+# never got GPUs and we resubmit; if it failed with one, the tests really failed and
+# we report it as-is.
 #
 # Usage: ci/submit_anyscale_job.sh <config-file> <job-name> <run-timeout-s> [start-timeout-s]
 #
@@ -54,12 +62,35 @@ job_state() {
         || echo "UNKNOWN"
 }
 
+# Number of job runs Anyscale created for a job, or "unknown" if the status call
+# failed. A run is created when the entrypoint is submitted to a live cluster, so
+# zero runs means provisioning never finished.
+job_run_count() {
+    anyscale job status --cloud "$CLOUD" --name "$1" --json 2>/dev/null \
+        | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("runs") or []))' 2>/dev/null \
+        || echo "unknown"
+}
+
 # True when the entrypoint produced output, i.e. the cluster really did come up.
-# Guards against misreading a fast entrypoint crash as a capacity failure.
+# Fallback for when the run count is unavailable -- `job logs` needs a different
+# credential type than `job status` on some tokens, hence not using it as primary.
 entrypoint_produced_logs() {
     local logs
     logs="$(anyscale job logs --cloud "$CLOUD" --name "$1" --head --max-lines 5 2>/dev/null || true)"
     [[ -n "${logs//[[:space:]]/}" ]]
+}
+
+# True when the cluster came up far enough to execute the entrypoint. Guards against
+# both misreading a fast entrypoint crash as a capacity failure and misreading a
+# capacity failure's transient RUNNING as a real test failure.
+entrypoint_ran() {
+    local runs
+    runs="$(job_run_count "$1")"
+    if [[ "$runs" == "unknown" ]]; then
+        entrypoint_produced_logs "$1"
+    else
+        [[ "$runs" -gt 0 ]]
+    fi
 }
 
 for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
@@ -75,39 +106,43 @@ for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     anyscale job wait --cloud "$CLOUD" --name "$run_name" \
         --state RUNNING --timeout "$START_TIMEOUT_S" || started=0
 
-    state="$(job_state "$run_name")"
-
-    if [[ "$started" -eq 0 ]]; then
-        # A job can pass through RUNNING between two 10s `job wait` polls, so a
-        # missed RUNNING with a terminal SUCCEEDED still means we got GPUs.
-        if [[ "$state" == "SUCCEEDED" ]]; then
-            echo "Job ${run_name} succeeded before RUNNING was observed."
+    if [[ "$started" -eq 1 ]]; then
+        # Provisional -- see the note at the top on RUNNING being reported for a
+        # cluster that is actually tearing down after failing to provision.
+        echo "Job ${run_name} reached RUNNING, waiting for it to finish."
+        if anyscale job wait --cloud "$CLOUD" --name "$run_name" --timeout "$RUN_TIMEOUT_S"; then
             exit 0
         fi
-        if entrypoint_produced_logs "$run_name"; then
-            echo "Job ${run_name} failed (state: ${state}) but the entrypoint ran -- real failure, not retrying." >&2
-            exit 1
-        fi
-        echo "Job ${run_name} never reached RUNNING (state: ${state}) and the entrypoint never ran:" >&2
-        echo "treating this as a GPU capacity failure." >&2
-        # A `job wait` timeout leaves the job running -- it only stops the client
-        # polling. Terminate before resubmitting so we never leave a second cluster
-        # competing for the same scarce instance type (or silently running tests
-        # whose result nobody reads).
-        case "$state" in
-            SUCCEEDED | FAILED | TERMINATED) ;;
-            *) anyscale job terminate --cloud "$CLOUD" --name "$run_name" || true ;;
-        esac
-        if [[ "$attempt" -lt "$MAX_ATTEMPTS" ]]; then
-            echo "Resubmitting in ${RETRY_DELAY_S}s ..." >&2
-            sleep "$RETRY_DELAY_S"
-        fi
-        continue
     fi
 
-    echo "Job ${run_name} reached RUNNING -- GPUs acquired, waiting for the tests to finish."
-    anyscale job wait --cloud "$CLOUD" --name "$run_name" --timeout "$RUN_TIMEOUT_S"
-    exit 0
+    state="$(job_state "$run_name")"
+
+    # A job can pass through RUNNING between two 10s `job wait` polls, so a missed
+    # RUNNING with a terminal SUCCEEDED still means we got GPUs.
+    if [[ "$state" == "SUCCEEDED" ]]; then
+        echo "Job ${run_name} succeeded."
+        exit 0
+    fi
+
+    if entrypoint_ran "$run_name"; then
+        echo "Job ${run_name} failed (state: ${state}) but the entrypoint ran -- real failure, not retrying." >&2
+        exit 1
+    fi
+
+    echo "Job ${run_name} failed (state: ${state}) without ever running its entrypoint:" >&2
+    echo "treating this as a GPU capacity failure." >&2
+    # A `job wait` timeout leaves the job running -- it only stops the client
+    # polling. Terminate before resubmitting so we never leave a second cluster
+    # competing for the same scarce instance type (or silently running tests
+    # whose result nobody reads).
+    case "$state" in
+        SUCCEEDED | FAILED | TERMINATED) ;;
+        *) anyscale job terminate --cloud "$CLOUD" --name "$run_name" || true ;;
+    esac
+    if [[ "$attempt" -lt "$MAX_ATTEMPTS" ]]; then
+        echo "Resubmitting in ${RETRY_DELAY_S}s ..." >&2
+        sleep "$RETRY_DELAY_S"
+    fi
 done
 
 echo "Gave up after ${MAX_ATTEMPTS} attempts without ever acquiring GPUs." >&2
