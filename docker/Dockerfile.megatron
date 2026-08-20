@@ -37,10 +37,26 @@ RUN sudo apt update && sudo apt install --fix-broken && sudo apt install -y defa
     && sudo apt-get clean \
     && sudo rm -rf /var/lib/apt/lists/*
 
+# Re-add NVIDIA's CUDA apt repo. The cu130 base installs cuda-keyring in its own
+# history, but the repo is not configured at build time -- `apt-get update` fetches
+# only the ubuntu archives, so libnccl* is not findable at all:
+#   E: Version '2.28.9-1+cuda13.0' for 'libnccl2' was not found
+# (The slim cu128 base did have it, which is why this only appeared after the base
+# switch.) Uses wget, installed above, since the base purges curl in its own layers.
+RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+    && sudo dpkg -i cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb
+
 # build toolchain + nccl dev headers for the source-built CUDA extensions
 # (nv-grouped-gemm). Pinned to the same NCCL the pip stack resolves
 # (nvidia-nccl-cu13 2.28.9) so the headers match the library loaded at runtime.
-RUN sudo apt-get update && sudo apt-get install -y \
+#
+# --allow-change-held-packages: NVIDIA's CUDA images apt-mark hold libnccl2 (and, on
+# the cu130 base, libnccl-dev too) so an unrelated apt call cannot bump NCCL. Moving it
+# to our pinned 2.28.9 is a change to a held package, which apt refuses under plain -y:
+#   E: Held packages were changed and -y was used without --allow-change-held-packages
+# The flag scopes the override to this step and leaves the hold in place for later apt
+# calls, which `apt-mark unhold` would not.
+RUN sudo apt-get update && sudo apt-get install -y --allow-change-held-packages \
     cmake \
     ninja-build \
     libnccl-dev=2.28.9-1+cuda13.0 \
