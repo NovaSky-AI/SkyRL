@@ -12,6 +12,9 @@ set -euo pipefail
 : "${MAX_LENGTH:=512}"
 : "${BATCH_SIZE:=4}"
 : "${NUM_STEPS:=2}"
+: "${CKPT_PATH:=}"
+: "${CKPT_INTERVAL:=0}"
+: "${RESUME_FROM:=}"
 : "${MAX_PAID_RUNTIME_MINUTES:=15}"
 : "${RESOURCE_SUFFIX:=$(date -u +%Y%m%d%H%M%S)-$RANDOM}"
 : "${FIREWORKS_TRAINER_JOB_ID:=skyrl-smoke-sft-${RESOURCE_SUFFIX}-trainer}"
@@ -35,6 +38,9 @@ if [[ "${FIREWORKS_RUN_CONFIRMED:-0}" != "1" ]]; then
     "  dataset: ${TRAIN_DATASET} (${TRAIN_SPLIT})" \
     "  optimizer steps: ${NUM_STEPS}" \
     "  batch size: ${BATCH_SIZE}" \
+    "  checkpoint path: ${CKPT_PATH:-disabled}" \
+    "  checkpoint interval: ${CKPT_INTERVAL}" \
+    "  resume from: ${RESUME_FROM:-fresh}" \
     "  wall-clock cap: ${MAX_PAID_RUNTIME_MINUTES} minutes" \
     "  pricing: https://fireworks.ai/pricing" \
     "  log: ${LOG_FILE}" \
@@ -94,10 +100,11 @@ timeout --signal=INT --kill-after=2m "${MAX_PAID_RUNTIME_MINUTES}m" \
   logger=console \
   project_name=skyrl_sft \
   run_name="$RUN_NAME" \
-  ckpt_path="" \
-  ckpt_interval=0 \
+  ckpt_path="$CKPT_PATH" \
+  ckpt_interval="$CKPT_INTERVAL" \
+  max_ckpts_to_keep=-1 \
   hf_save_interval=0 \
-  resume_from="" \
+  resume_from="$RESUME_FROM" \
   "$@" > "$LOG_FILE" 2>&1
 
 printf 'Fireworks SFT smoke run completed. Log: %s\n' "$LOG_FILE"

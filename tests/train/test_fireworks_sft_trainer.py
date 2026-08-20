@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -162,11 +163,62 @@ def test_tracker_failure_closes_runtime(monkeypatch) -> None:
     assert trainer._fireworks_runtime is None
 
 
-def test_callback_checkpoint_request_fails_before_provider_save() -> None:
-    trainer = _trainer()
+def test_fireworks_trainer_reuses_native_checkpoint_methods() -> None:
+    assert FireworksSFTTrainer.save_checkpoint is SFTTrainer.save_checkpoint
+    assert FireworksSFTTrainer.load_checkpoint is SFTTrainer.load_checkpoint
 
-    with pytest.raises(NotImplementedError, match="persistent checkpoints"):
-        trainer.save_checkpoint()
+
+def test_checkpoint_saves_provider_and_dataloader_state(tmp_path) -> None:
+    trainer = _trainer()
+    trainer.sft_cfg.ckpt_path = str(tmp_path)
+    trainer.global_step = 7
+    trainer.train_dataloader = SimpleNamespace(state_dict=lambda: {"position": 7})
+    saved = []
+
+    class Dispatch:
+        def save_checkpoint(self, model, path, tokenizer):
+            Path(path).mkdir(parents=True)
+            saved.append((model, path, tokenizer))
+
+    trainer.dispatch = Dispatch()
+
+    checkpoint_path = trainer.save_checkpoint()
+
+    assert checkpoint_path == str(tmp_path / "global_step_7")
+    assert saved == [("policy", str(tmp_path / "global_step_7" / "policy"), trainer.tokenizer)]
+    assert torch.load(tmp_path / "global_step_7" / "data.pt", weights_only=False) == {"position": 7}
+    assert torch.load(tmp_path / "global_step_7" / "trainer_state.pt", weights_only=False)["global_step"] == 7
+    assert (tmp_path / "latest_ckpt_global_step.txt").read_text() == "7"
+
+
+def test_checkpoint_restores_provider_and_dataloader_state(tmp_path) -> None:
+    trainer = _trainer()
+    checkpoint_path = tmp_path / "global_step_7"
+    (checkpoint_path / "policy").mkdir(parents=True)
+    torch.save({"global_step": 7}, checkpoint_path / "trainer_state.pt")
+    torch.save({"position": 7}, checkpoint_path / "data.pt")
+    trainer.sft_cfg.resume_from = str(checkpoint_path)
+    restored_data = []
+    loaded = []
+    trainer.train_dataloader = SimpleNamespace(load_state_dict=lambda state: restored_data.append(state))
+
+    class Dispatch:
+        def load_checkpoint(self, model, path, **kwargs):
+            loaded.append((model, path, kwargs))
+
+    trainer.dispatch = Dispatch()
+
+    step = trainer.load_checkpoint()
+
+    assert step == 7
+    assert restored_data == [{"position": 7}]
+    assert loaded == [
+        (
+            "policy",
+            str(checkpoint_path / "policy"),
+            {"load_optimizer_states": True, "load_lr_scheduler_states": True},
+        )
+    ]
 
 
 def test_shutdown_is_idempotent() -> None:

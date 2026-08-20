@@ -62,9 +62,6 @@ class FireworksSFTTrainer(SFTTrainer):
         if self.sft_cfg.batch_size <= 0:
             raise ValueError("batch_size must be positive")
 
-    def save_checkpoint(self) -> str:
-        raise NotImplementedError("Fireworks SFT does not support persistent checkpoints")
-
     def shutdown(self) -> None:
         try:
             super().shutdown()

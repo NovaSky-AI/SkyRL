@@ -65,7 +65,18 @@ The hosted backend reuses `SFTTrainer`, so it accepts the same inputs as local S
 
 ## Checkpoints
 
-Persistent checkpointing and resume are not supported in the initial hosted backend. Fireworks DCP objects are scoped to the dedicated trainer and are deleted with it, while SkyRL requires trainer cleanup to prevent ongoing billing. Configure `ckpt_path=""`, `resume_from=""`, `max_ckpts_to_keep=-1`, and `hf_save_interval=0`.
+Fireworks SFT uses the native SkyRL checkpoint lifecycle. A checkpoint combines Fireworks DCP state (model weights and optimizer state) with SkyRL's `global_step`, stateful dataloader position, and configuration metadata.
+
+```bash
+ckpt_path=s3://bucket/path/to/checkpoints \
+ckpt_interval=25 \
+resume_from=latest \
+max_ckpts_to_keep=-1
+```
+
+Set `ckpt_path` to storage that survives the driver process. `ckpt_interval=0` disables periodic saves but still writes a final checkpoint when `ckpt_path` is non-empty. Use `resume_from=latest` with the same checkpoint root, or pass a specific `global_step_N` directory.
+
+Fireworks does not expose checkpoint deletion through the training SDK. `max_ckpts_to_keep` therefore remains `-1`; local checkpoint pruning must not be presented as remote DCP deletion. Checkpoints are training-resume artifacts, not deployable model exports. Keep `hf_save_interval=0`.
 
 ## Initial limitations
 

@@ -568,8 +568,12 @@ def validate_fireworks_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError("Fireworks SFT requires sequence packing and padding removal to be disabled")
     if cfg.hf_save_interval != 0:
         raise ValueError("Fireworks SFT does not support Hugging Face export")
-    if cfg.ckpt_path or cfg.resume_from or cfg.ckpt_interval != 0:
-        raise ValueError("Fireworks SFT does not support persistent checkpointing or resume")
+    if cfg.ckpt_interval < 0:
+        raise ValueError("Fireworks SFT requires ckpt_interval >= 0")
+    if cfg.ckpt_interval > 0 and not cfg.ckpt_path:
+        raise ValueError("Fireworks SFT requires ckpt_path when ckpt_interval > 0")
+    if cfg.resume_from == "latest" and not cfg.ckpt_path:
+        raise ValueError("Fireworks SFT requires ckpt_path when resume_from='latest'")
     if cfg.max_ckpts_to_keep != -1:
         raise ValueError("Fireworks SFT requires max_ckpts_to_keep=-1")
     if cfg.optimizer_config.scheduler != "constant_with_warmup" or cfg.optimizer_config.num_warmup_steps != 0:

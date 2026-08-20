@@ -288,15 +288,39 @@ class TestFireworksConfig:
         with pytest.raises(ValueError, match="other LoRA fields must use defaults"):
             validate_fireworks_sft_cfg(cfg)
 
+    def test_persistent_checkpointing_is_supported(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.ckpt_interval = 10
+        cfg.resume_from = "latest"
+
+        validate_fireworks_sft_cfg(cfg)
+
+    def test_final_only_checkpoint_is_supported(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+
+        validate_fireworks_sft_cfg(cfg)
+
+    def test_direct_checkpoint_resume_is_supported_without_root(self):
+        cfg = self._cfg()
+        cfg.resume_from = "s3://bucket/sft-checkpoints/run/global_step_10"
+
+        validate_fireworks_sft_cfg(cfg)
+
     @pytest.mark.parametrize(
-        ("field", "value"),
-        [("ckpt_path", "/tmp/ckpt"), ("resume_from", "latest"), ("ckpt_interval", 1)],
+        ("field", "value", "match"),
+        [
+            ("ckpt_interval", -1, "ckpt_interval >= 0"),
+            ("ckpt_interval", 1, "ckpt_path when ckpt_interval > 0"),
+            ("resume_from", "latest", "ckpt_path when resume_from='latest'"),
+        ],
     )
-    def test_persistent_checkpointing_is_rejected(self, field, value):
+    def test_invalid_checkpoint_configuration_is_rejected(self, field, value, match):
         cfg = self._cfg()
         setattr(cfg, field, value)
 
-        with pytest.raises(ValueError, match="persistent checkpointing or resume"):
+        with pytest.raises(ValueError, match=match):
             validate_fireworks_sft_cfg(cfg)
 
     def test_checkpoint_retention_is_rejected(self):
