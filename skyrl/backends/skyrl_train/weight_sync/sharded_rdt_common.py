@@ -117,6 +117,7 @@ class RdtRouter:
         name_owner_class: list[int] | None = None,
         names: list[str] | None = None,
         group_lens: list[int] | None = None,
+        workers_per_replica: int = 0,
     ) -> None:
         """Build the routing tables from the wire data both engines receive.
 
@@ -126,10 +127,8 @@ class RdtRouter:
         Args:
             num_producers: Trainer ranks. Owner indices are positions in this
                 range, and ``validate`` rejects any that fall outside it.
-            num_consumers: Inference workers across the whole fleet. Used only
-                to carve a name's owner list into per-consumer blocks, so
-                consumers spread their pulls over the owners instead of every
-                one of them choosing the same producer.
+            num_consumers: Inference workers across the whole fleet. Fixes the
+                id space; the block carve uses ``workers_per_replica`` of it.
             owner_sets: The distinct producer sets that occur, one row per
                 owner class; each row is deduplicated and sorted here. Empty
                 means a single class owning every producer.
@@ -142,9 +141,28 @@ class RdtRouter:
             group_lens: Length of each gather group, consecutive over
                 ``names``, so they sum to ``len(names)``. Fixes name -> group
                 and the per-group owner union the free barrier fans out to.
+            workers_per_replica: Consumers per inference DEPLOYMENT. The block
+                carve spreads this many consumers over an owner set, and every
+                deployment reuses the same carve — see ``producer_for``. 0 (the
+                default) means one deployment, i.e. carve over the whole fleet.
+
+        Raises:
+            ValueError: ``workers_per_replica`` does not divide
+                ``num_consumers``, so the deployments cannot be uniform and the
+                overlay would map two workers of one deployment onto the same
+                block index.
         """
         self.num_producers = max(1, num_producers)
         self.num_consumers = max(1, num_consumers)
+        # [RDT-SHARE-SLOTS] Width of the block carve: one deployment's worth of
+        # consumers, so deployments OVERLAY rather than spread (producer_for).
+        self._block_consumers = min(self.num_consumers, max(1, workers_per_replica or self.num_consumers))
+        if self.num_consumers % self._block_consumers:
+            raise ValueError(
+                f"workers_per_replica={workers_per_replica} does not divide num_consumers="
+                f"{self.num_consumers}; the inference deployments must be uniform for the "
+                "per-deployment block carve to be well defined."
+            )
         self._owner_sets = [sorted(set(row)) for row in owner_sets] if owner_sets else [list(range(self.num_producers))]
         names = list(names or [])
         self.num_groups = len(group_lens) if group_lens else 0
@@ -201,11 +219,26 @@ class RdtRouter:
         consumer spreads its groups over its block instead of hammering one NIC.
         Rotating per group (not per name) keeps every name of a chunk on one
         producer, which is what lets a chunk be a single pull.
+
+        [RDT-SHARE-SLOTS] The carve is over ONE DEPLOYMENT (the consumer's index
+        within its own deployment, over ``workers_per_replica`` of them), so
+        worker w of every deployment resolves the SAME producer for every name.
+        Carving over the whole fleet instead would spread the multi-owner
+        (replicated) names of different deployments onto different producers,
+        while the single-owner names still route by ownership -- so a producer
+        would serve several distinct worker indices, each needing its own serve
+        ring, and no two of them could share a slot (their plans differ). With
+        the deployments overlaid, the consumers that meet on a producer are
+        exactly the copies of one worker, whose pulls are byte-identical, which
+        is what the producer's rendezvous collapses onto one slot.
+
+        With one deployment the width IS the fleet, so this is the historical
+        rule unchanged.
         """
         own = self.owners(name)
         if not own:
             raise ValueError(f"{name!r} has no owner")
-        block = assign_producer_indices(len(own), self.num_consumers, consumer_id)
+        block = assign_producer_indices(len(own), self._block_consumers, consumer_id % self._block_consumers)
         return own[block[self._group_of.get(name, 0) % len(block)]]
 
     def validate(self) -> None:
@@ -243,24 +276,37 @@ class RdtRouter:
         if not self._produce_methods:
             raise RuntimeError("RdtRouter has no producers bound; call bind() first.")
 
-    def pull(self, owner: int, keys: list) -> Any:
-        """Issue one packed pull to ``owner``. The consumer id keys the producer's
-        per-consumer serve ring; without it every worker is served out of ring 0
-        and concurrent pulls overwrite each other's blob."""
+    def pull(self, owner: int, keys: list, seq: int) -> Any:
+        """Issue one packed pull to ``owner``.
+
+        The consumer id keys the producer's serve ring; without it every worker is
+        served out of ring 0 and concurrent pulls overwrite each other's blob.
+        ``seq`` is this call's index in the stream to ``owner`` (see ``_Chunk``):
+        it selects the serve slot in ISSUE order, so a slot is never repacked
+        while the read of its previous contents is still in flight."""
         self._bound()
-        return self._produce_methods[owner].remote(keys, consumer_id=self.consumer_id)
+        return self._produce_methods[owner].remote(keys, consumer_id=self.consumer_id, seq=seq)
 
     def free_group(self, group_idx: int) -> list:
         """Signal the group done at every producer holding any of its names."""
         self._bound()
         return [self._actors[p].free_group.remote(group_idx) for p in self.group_owners(group_idx)]
 
-    def reserve_serve_buffers(self, bytes_by_producer: list[int]) -> list:
+    def reserve_serve_buffers(self, bytes_by_producer: list[int], plan_digests: list[str] | None = None) -> list:
         """Ask each producer to pre-register a serve ring sized to the most this
-        consumer will pull from it."""
+        consumer will pull from it.
+
+        ``plan_digests[p]`` describes the chunks this consumer pulls from producer
+        ``p``, in pull order. Producers that share one serve ring between the
+        consumers of several inference deployments compare it across those
+        consumers, so a fleet whose deployments are not actually identical fails
+        at init instead of stalling mid-sync. Optional: a producer that does not
+        share rings ignores it.
+        """
         self._bound()
+        digests: list = list(plan_digests) if plan_digests else [None] * len(bytes_by_producer)
         return [
-            self._actors[p].reserve_serve_buffer.remote(self.consumer_id, nb)
+            self._actors[p].reserve_serve_buffer.remote(self.consumer_id, nb, digests[p])
             for p, nb in enumerate(bytes_by_producer)
             if nb > 0
         ]

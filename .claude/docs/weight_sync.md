@@ -61,6 +61,62 @@ barrier *target* over it; every rank must get the same live set; and the gather 
 still iterates every owned group on every rank, because the non-expert gather is a
 collective.
 
+## Slot sharing across replicas (`sharded_rdt`)
+
+With several inference deployments, consumers whose ids differ by a multiple of
+`workers_per_replica` (= `num_consumers // num_replicas`) are the same worker of
+different deployments: same parallel config, same baked plan, same chunk sequence,
+byte-identical pack layout. They are served out of ONE registered serve slot on
+each producer instead of one ring each, because NIXL reads are one-sided and
+non-destructive. Two halves, both required:
+
+```
+[routing]  RdtRouter.producer_for carves the owner-set block over ONE deployment
+             (consumer_id % workers_per_replica), so worker w of every deployment
+             resolves the SAME producer -> the R copies meet somewhere to merge.
+             One deployment => width is the fleet => the historical rule exactly.
+[sender]   workers_per_replica -> ShardedRDTTrainerInitInfo -> the sidecar
+             SKYRL_RDT_SHARE_SLOTS=0 sets it to 0, i.e. sharing off
+[consumer] _preregister_at_init: reserve_serve_buffer(cid, max_bytes, plan_digest)
+             one ring per GROUP, and the digest is where mismatched deployments fail
+[producer] rdt_produce_weights_batched: the group's live sharers rendezvous per
+             chunk (keyed by `seq`), the LAST arrival packs, all return that blob
+             and the slot is `seq % ring_depth`
+```
+
+The serve slot is chosen from the consumer's ISSUE index, never from a per-call
+counter on the producer. The pipeline drains pull i before issuing i+K, so
+`seq % K` is provably free; execution order is not, because Ray may start a
+consumer's K concurrent produce calls in any order, and the slot of a pull that
+is still being read then gets repacked. That bug was live and cost 2x on the
+logprob gap -- see `~/default/RDT_WEIGHT_SYNC.md` §8.
+
+Pulls and free signals still carry the fleet-GLOBAL consumer id; only the block
+carve uses the intra-deployment index. The producer needs the global id to tell
+the sharers of a slot apart and count their arrivals separately.
+
+What makes the slot safe is the same inference the unshared path makes: a consumer
+issues the pull that reuses its own ring slot only after draining the pull K
+earlier, so a sharer's arrival proves it finished reading whatever it saw K
+arrivals ago. A generation's slot returns to the group's free list only once every
+sharer that arrived at it is K arrivals past it, so at most K generations hold a
+slot and the K slots always suffice.
+
+One deployment (`workers_per_replica == num_consumers`) makes every group a
+singleton, which is the previous serve path exactly — same rotation over K slots,
+and the request signature is not even computed. `begin_sync` now takes the live
+consumer IDS alongside the count, because a rendezvous is a specific set of ids
+where the free barrier only needs a total; a degraded sync narrows the groups.
+
+Producer-side cost this addresses (235B, 4 nodes, K=2, largest chunk 1.16 GiB):
+5.0 GiB of serve rings per trainer GPU at one deployment, and without these
+changes 14 at two, 28 at four, 54 at eight. Both together hold it at 5.0 for any
+count, with the pack work flat too. Sharing alone would be 12/22/40 -- at R>1 most
+of a producer's ring count comes from distinct worker indices, not from replicas
+of one, which is what the overlay fixes. Counters: `shared_serves`,
+`share_wait_seconds`, `cfg_share_width`, `cfg_serve_rings` in
+`get_produce_timing()`.
+
 `_RDTProducerServer` also carries a **stall watchdog** (`stall_timeout_s`, default 300s).
 Detection is generation-driven and no generation is in flight during a sync, so a death
 inside the sync window has no detector — the dead consumer never sends its `free_group`

@@ -114,6 +114,15 @@ class _Chunk:
     # Trainer rank serving this chunk, resolved at plan time. One per chunk:
     # every name in it shares an owner class, so one producer holds them all.
     owner: int
+    # [RDT-ISSUE-SEQ] This chunk's index among the chunks this worker pulls from
+    # ``owner``, in issue order. It picks the producer's serve slot
+    # (``seq % ring_depth``), which is what makes slot reuse safe: the pipeline
+    # drains pull i before issuing i+K, so the slot seq+K takes was last used by
+    # seq, whose read is finished. Choosing the slot in EXECUTION order instead
+    # -- as a per-call counter on the producer does -- can hand a slot to a pull
+    # whose predecessor is still being read, because Ray may start a consumer's
+    # concurrent produce calls in any order. Static, since the plan is.
+    seq: int = 0
 
 
 @dataclass
@@ -531,6 +540,10 @@ class ShardedRDTWeightTransferEngine(
             name_owner_class or None,
             list(init_info.names),
             list(init_info.group_lens),
+            # [RDT-SHARE-SLOTS] Carve the block per DEPLOYMENT so every replica's
+            # worker w pulls each name from the same producer, which is what lets
+            # that producer serve all of them from one slot.
+            workers_per_replica=self._workers_per_replica(init_info),
         )
         router.validate()
 
@@ -552,6 +565,24 @@ class ShardedRDTWeightTransferEngine(
                     f"{chosen_name!r} (namespace="
                     f"{init_info.trainer_actor_namespace!r})."
                 ) from e
+            # `ray.get_actor` resolves by NAME, in a process that never imported
+            # the producer's class -- and `enable_tensor_transport` lives in that
+            # class's metadata (ray/actor.py: the creating process passes
+            # `meta.enable_tensor_transport`, and Ray infers it from the class's
+            # @ray.method(tensor_transport=...) decorators). A name-resolved
+            # handle therefore always comes back False, and the dispatch guard
+            # rejects the pull with "not supported when
+            # enable_tensor_transport=False. Please set
+            # @ray.remote(enable_tensor_transport=True)" -- which the trainer
+            # already did. Not a version bug: it is inherent to resolving by name
+            # from another process, and it fails on Ray 2.56.0.
+            #
+            # Forcing it skips no real validation. Ray's next guard,
+            # `actor_has_tensor_transport`, asks the LIVE actor whether it can
+            # build a NIXL agent, which is authoritative and cross-process, and
+            # still runs. And a genuinely misconfigured producer is unreachable
+            # here anyway: `_spawn_server` hardcodes the actor option.
+            actor._ray_enable_tensor_transport = True
             actors.append(actor)
             methods.append(getattr(actor, init_info.produce_method_name))
         router.bind(actors, methods, consumer_id)
@@ -564,6 +595,15 @@ class ShardedRDTWeightTransferEngine(
             len(init_info.owner_sets) or 1,
         )
 
+    def _workers_per_replica(self, init_info: ShardedRDTWeightTransferInitInfo) -> int:
+        """Consumers per inference DEPLOYMENT, assuming a uniform fleet (which
+        ``get_world_size`` asserts).
+
+        Two things read it and must not disagree: this worker's own consumer id,
+        and the router's block carve. So it is derived once, here.
+        """
+        return max(1, self._num_consumers() // max(1, int(init_info.num_replicas or 1)))
+
     def _resolve_consumer_id(self, init_info: ShardedRDTWeightTransferInitInfo) -> int:
         """This worker's DISTINCT index in 0..C-1 across the whole fleet.
 
@@ -574,10 +614,8 @@ class ShardedRDTWeightTransferEngine(
         ``workers_per_replica = C // num_replicas``. ``num_replicas`` defaults to
         1 (offset 0), preserving single-engine and single-DP-deployment behaviour.
         """
-        num_replicas = max(1, int(init_info.num_replicas or 1))
         replica_rank = max(0, int(init_info.replica_rank or 0))
-        workers_per_replica = self._num_consumers() // num_replicas
-        return replica_rank * workers_per_replica + self._global_worker_index()
+        return replica_rank * self._workers_per_replica(init_info) + self._global_worker_index()
 
     def _build_static_plan(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Build the chunk/free plan once. It never changes across syncs, so
@@ -621,14 +659,18 @@ class ShardedRDTWeightTransferEngine(
                 self._dest_buffers[slot][torch.uint8] = buffer
 
         # (b) producer serve rings — max bytes this consumer pulls from each
-        # bound producer.
+        # bound producer, plus the per-producer plan digest that lets a producer
+        # sharing one ring across deployments check they really are identical.
         assert self._router is not None
         serve_bytes = [0] * self._router.num_producers
+        per_owner_keys: list[list] = [[] for _ in range(self._router.num_producers)]
         for c in plan.chunks:
             serve_bytes[c.owner] = max(serve_bytes[c.owner], c.pack_bytes)
+            per_owner_keys[c.owner].append(c.keys)
+        digests = [_plan_digest(keys) for keys in per_owner_keys]
         import ray
 
-        refs = self._router.reserve_serve_buffers(serve_bytes)
+        refs = self._router.reserve_serve_buffers(serve_bytes, digests)
         if refs:
             ray.get(refs)  # block until every serve ring is registered
         logger.info(
@@ -793,7 +835,7 @@ class ShardedRDTWeightTransferEngine(
         # reroutes the transfer into a fallback buffer.
         blob = buffer[:cur]
         assert self._router is not None
-        ref = self._router.pull(chunk.owner, keys)
+        ref = self._router.pull(chunk.owner, keys, chunk.seq)
         set_target_for_ref(ref, [blob])
         return _PendingPull(
             ref=ref,
@@ -1316,6 +1358,7 @@ class ShardedRDTWeightTransferEngine(
 
         # --- pass 3: assemble _Chunks (dedup keys + precompute pack layout) ----
         chunks: list[_Chunk] = []
+        per_owner_seq: dict[int, int] = collections.defaultdict(int)
         for ci, scatters in enumerate(raw_chunks):
             keys: list[FetchKey] = []
             kmeta: dict[FetchKey, tuple[torch.dtype, tuple[int, ...]]] = {}
@@ -1331,8 +1374,10 @@ class ShardedRDTWeightTransferEngine(
                 off = (cur + 15) & ~15
                 pack_layout.append((off, dt, numel, shape))
                 cur = off + numel * dt.itemsize
+            owner = self._router.producer_for(self._router.consumer_id, scatters[0].src[0])
             chunks.append(
                 _Chunk(
+                    seq=per_owner_seq[owner],
                     scatters=scatters,
                     keys=keys,
                     pack_layout=pack_layout,
@@ -1340,11 +1385,10 @@ class ShardedRDTWeightTransferEngine(
                     materialize=materialize_at.get(ci, []),
                     quant=quant_at.get(ci, []),
                     free=free_at.get(ci, []),
-                    # Every name of a chunk shares an owner class and a group,
-                    # so any of them resolves the same producer.
-                    owner=self._router.producer_for(self._router.consumer_id, scatters[0].src[0]),
+                    owner=owner,
                 )
             )
+            per_owner_seq[owner] += 1
         return _CallPlan(chunks=chunks, pre_free=pre_free)
 
     def _signal_group_done(self, group_idx: int) -> None:
@@ -1702,6 +1746,24 @@ class ShardedRDTWeightTransferEngine(
         Retained to satisfy the abstract base class.
         """
         del iterator, trainer_args
+
+
+def _plan_digest(keys_per_chunk: list) -> str:
+    """Digest of the chunks one consumer pulls from one producer, in pull order.
+
+    Two consumers that a producer serves out of ONE shared serve ring must agree
+    on this, because sharing rests on their plans being identical; the producer
+    compares it at init (see ``reserve_serve_buffer``). Keyed on the whole
+    (name, op-chain) list rather than the names, since the chains are what decide
+    the bytes each pull returns.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    for keys in keys_per_chunk:
+        h.update(repr(keys).encode())
+        h.update(b"\n")
+    return h.hexdigest()[:32]
 
 
 def _dtype_from_name(name: str) -> torch.dtype:

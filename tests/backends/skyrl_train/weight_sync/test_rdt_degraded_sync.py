@@ -10,8 +10,10 @@ Two hops, each with its own way of going quietly wrong:
     on a re-reserved port: the URL is an address, the slot is the identity.
   * ``ShardedRDTTrainerWeightTransferEngine.send_weights`` turns that set into
     this sync's free-barrier TARGET — the live consumer COUNT handed to the
-    producer server's ``begin_sync``. The provisioned geometry (router,
-    ownership, ``served_names``) is frozen; degrading only lowers one integer.
+    producer server's ``begin_sync``, plus the live ids themselves, which size
+    each slot-sharing group's rendezvous. The provisioned geometry (router,
+    ownership, ``served_names``) is frozen; degrading only lowers the target and
+    narrows the rendezvous.
 
 CPU-only: both are pure functions over already-resolved geometry, so the engine
 and sender are built field-by-field rather than through their real inits (which
@@ -187,7 +189,7 @@ def _engine(num_consumers, world=2, rank=0):
     e._router = RdtRouter(world, num_consumers, None, None, names, [1, 1, 1, 1])
     e.source = object()  # send_weights asserts a source is present
     received: list = []
-    e._send_weights_inner = received.append
+    e._send_weights_inner = lambda count, ids: received.append((count, ids))
     return e, received
 
 
@@ -199,12 +201,12 @@ class TestLiveCountPlumbing:
     def test_none_counts_the_whole_provisioned_fleet(self):
         e, got = _engine(num_consumers=8)
         e.send_weights(None)
-        assert got == [8]
+        assert got == [(8, list(range(8)))]
 
     def test_a_live_set_counts_its_distinct_members(self):
         e, got = _engine(num_consumers=8)
         e.send_weights([0, 1, 4, 5, 5])
-        assert got == [4]
+        assert got == [(4, [0, 1, 4, 5])]
 
     def test_a_full_live_set_matches_the_provisioned_count(self):
         """Explicitly-live-everyone and None must produce the same target, so a
@@ -212,7 +214,7 @@ class TestLiveCountPlumbing:
         e, got = _engine(num_consumers=8)
         e.send_weights(list(range(8)))
         e.send_weights(None)
-        assert got == [8, 8]
+        assert got == [(8, list(range(8))), (8, list(range(8)))]
 
     def test_which_consumers_died_does_not_matter_only_how_many(self):
         """The whole point of the barrier: no routed per-producer targets, so
@@ -221,5 +223,14 @@ class TestLiveCountPlumbing:
         for live in ([0, 1, 2, 3], [4, 5, 6, 7], [0, 2, 4, 6]):
             e, got = _engine(num_consumers=8)
             e.send_weights(live)
-            counts += got
+            counts += [c for c, _ids in got]
         assert counts == [4, 4, 4]
+
+    def test_the_live_ids_travel_with_the_count(self):
+        """The count sizes the free barrier, the ids size the slot-sharing
+        rendezvous, so a producer that shares slots can tell WHICH consumers it
+        is still waiting for. They must describe the same set."""
+        e, got = _engine(num_consumers=8)
+        e.send_weights([6, 0, 2, 2])
+        ((count, ids),) = got
+        assert ids == [0, 2, 6] and count == len(ids)

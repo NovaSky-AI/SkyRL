@@ -21,11 +21,14 @@ covered by the GPU tests in `the fork's test_weight_transfer.py`.
 import gc
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 
 import pytest
 import torch
 
 import skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer as trainer_mod
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import buffer_alloc_bytes
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer import (
     DEFAULT_GATHER_LOOKAHEAD,
     ShardedRDTTrainerInitInfo,
@@ -890,4 +893,246 @@ class TestExportRingSlotSafety:
 
         assert seen, "no group was ring-packed; the test proves nothing"
         for rec in seen:
-            assert rec["slot"] not in rec["live"].values(), f"slot {rec['slot']} was already held by a live group: {rec}"
+            assert (
+                rec["slot"] not in rec["live"].values()
+            ), f"slot {rec['slot']} was already held by a live group: {rec}"
+
+
+@pytest.fixture
+def sharing_server(server_factory):
+    """A producer whose serve slots are plain CPU tensors.
+
+    The pack is the only part of the serve path that touches a buffer, so
+    replacing the one allocation seam (`_new_serve_buffer`, which would
+    `torch.empty(..., device="cuda")` and register the result with NIXL) puts the
+    whole shared-pack path within reach of a CPU test.
+    """
+
+    def _make(**kwargs):
+        kwargs.setdefault("workers_per_replica", 2)
+        server = server_factory(**kwargs)
+        server._serve_device = torch.device("cpu")
+        server._new_serve_buffer = lambda nbytes: torch.zeros(nbytes, dtype=torch.uint8)
+        return server
+
+    return _make
+
+
+def _blob_bytes(server, name):
+    """The cached tensor's bytes, as the pack should land them in the slot."""
+    t = server._cache[name]
+    return t.contiguous().view(torch.uint8).flatten()
+
+
+class TestSharedServeSlots:
+    """[RDT-SHARE-SLOTS] One registered slot serving several deployments.
+
+    Consumers whose ids differ by a multiple of `workers_per_replica` are the
+    same worker of different inference deployments: same parallel config, same
+    baked plan, same chunk sequence, byte-identical pack layout. They rendezvous
+    per chunk, the last arrival packs, and every one of them returns that blob,
+    so R deployments cost one ring and one pack rather than R of each.
+
+    The rendezvous is also the slot's safety argument: a sharer's arrival is what
+    proves it finished reading the generation it saw K arrivals ago, which is the
+    same inference the unshared path makes from drain-before-issue.
+    """
+
+    def test_one_deployment_never_shares(self, sharing_server):
+        """With the width equal to the live count every group is a singleton, so
+        each call packs for itself out of its own ring: the unshared path."""
+        server = sharing_server(workers_per_replica=2)
+        server.begin_sync(2, [0, 1])
+        _publish(server, GI_A, GROUP_A)
+        specs = [(GROUP_A[0], ())]
+        blobs = [server.rdt_produce_weights_batched(specs, c, 0)[0] for c in (0, 1)]
+
+        assert server.get_produce_timing()["shared_serves"] == 0
+        assert blobs[0].data_ptr() != blobs[1].data_ptr()
+        assert len(server._serve_rings) == 2
+
+    def test_sharers_are_served_one_pack_out_of_one_buffer(self, sharing_server):
+        server = sharing_server(workers_per_replica=2)
+        server.begin_sync(4, [0, 1, 2, 3])
+        _publish(server, GI_A, GROUP_A)
+        specs = [(GROUP_A[0], ())]
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futures = [ex.submit(server.rdt_produce_weights_batched, specs, c, 0) for c in (0, 2)]
+            blobs = [f.result(timeout=10)[0] for f in futures]
+
+        expected = _blob_bytes(server, GROUP_A[0])
+        assert blobs[0].data_ptr() == blobs[1].data_ptr()
+        assert len(server._serve_rings) == 1
+        assert torch.equal(blobs[0][: expected.numel()], expected)
+        timing = server.get_produce_timing()
+        assert timing["calls"] == 2 and timing["shared_serves"] == 1
+
+    def test_a_sharer_blocks_until_its_peer_arrives(self, sharing_server):
+        """The wait is not an optimization: without it the packer could repack a
+        slot a peer had not read yet."""
+        server = sharing_server(workers_per_replica=2, stall_timeout_s=30.0)
+        server.begin_sync(4, [0, 1, 2, 3])
+        _publish(server, GI_A, GROUP_A)
+        specs = [(GROUP_A[0], ())]
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            first = ex.submit(server.rdt_produce_weights_batched, specs, 0, 0)
+            with pytest.raises(FuturesTimeout):
+                first.result(timeout=0.5)
+            second = ex.submit(server.rdt_produce_weights_batched, specs, 2, 0)
+            assert first.result(timeout=10)[0].data_ptr() == second.result(timeout=10)[0].data_ptr()
+
+    def test_a_slot_is_reused_only_after_every_sharer_moved_k_arrivals_past_it(self, sharing_server):
+        """K=2, so generation 2 is the first that may take generation 0's slot —
+        and it may only take it because by then both sharers have arrived twice
+        more, which is what proves they read it."""
+        server = sharing_server(workers_per_replica=2, num_rdt_buffers=2)
+        server.begin_sync(4, [0, 1, 2, 3])
+        names = ("a.w", "b.w", "c.w")
+        for gi, name in enumerate(names):
+            _publish(server, gi, (name,))
+
+        pointers = []
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            for seq, name in enumerate(names):
+                specs = [(name, ())]
+                futures = [ex.submit(server.rdt_produce_weights_batched, specs, c, seq) for c in (0, 2)]
+                pointers.append({f.result(timeout=10)[0].data_ptr() for f in futures})
+
+        assert all(len(p) == 1 for p in pointers), "every generation must be served from ONE buffer"
+        assert pointers[0] != pointers[1], "consecutive generations must not share a slot"
+        assert pointers[0] == pointers[2], "generation 2 should recycle generation 0's slot"
+
+    def test_the_slot_follows_the_consumers_issue_order(self, sharing_server):
+        """The invariant slot safety rests on. The consumer drains pull i before
+        issuing i+K, so choosing the slot as ``seq % K`` means a slot is only
+        repacked once the read of its previous contents is over. Deriving it from
+        a per-call counter on the producer instead (execution order) can hand a
+        slot to a pull whose predecessor is still being read, because Ray may
+        start a consumer's concurrent produce calls in any order -- measured as a
+        2x logprob gap on the 4-node 235B run.
+        """
+        server = sharing_server(workers_per_replica=2, num_rdt_buffers=2)
+        server.begin_sync(4, [0, 1, 2, 3])
+        names = ("a.w", "b.w", "c.w")
+        for gi, name in enumerate(names):
+            _publish(server, gi, (name,))
+
+        # Arrive OUT of issue order: seq 1 first, then 0, then 2. The slot must
+        # follow seq, not arrival.
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            for seq in (1, 0, 2):
+                futures = [ex.submit(server.rdt_produce_weights_batched, [(names[seq], ())], c, seq) for c in (0, 2)]
+                [f.result(timeout=10) for f in futures]
+
+        slots = {seq: gen.slot for seq, gen in server._gens[0].items()}
+        assert slots == {0: 0, 1: 1, 2: 0}, f"slot must be seq % K regardless of arrival order, got {slots}"
+
+    def test_an_unshared_consumer_still_rotates_its_k_slots(self, sharing_server):
+        """The same accounting with a single sharer reproduces the plain ring
+        rotation, so turning sharing off changes nothing about the serve."""
+        server = sharing_server(workers_per_replica=0, num_rdt_buffers=2)
+        server.begin_sync(1, [0])
+        names = ("a.w", "b.w", "c.w")
+        for gi, name in enumerate(names):
+            _publish(server, gi, (name,))
+
+        pointers = [server.rdt_produce_weights_batched([(n, ())], 0, i)[0].data_ptr() for i, n in enumerate(names)]
+
+        assert pointers[0] != pointers[1] and pointers[0] == pointers[2]
+        assert server.get_produce_timing()["shared_serves"] == 0
+
+    def test_a_failed_pack_reaches_every_sharer(self, sharing_server):
+        """Only the packer touches the buffer, so its failure has to be
+        republished: a waiter must raise rather than read a half-written slot."""
+        server = sharing_server(workers_per_replica=2)
+        server.begin_sync(4, [0, 1, 2, 3])
+        _publish(server, GI_A, GROUP_A)
+        specs = [(GROUP_A[0], (("mutate_", (), ()),))]  # not in ALLOWED_OPS
+
+        raised = []
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futures = [ex.submit(server.rdt_produce_weights_batched, specs, c, 0) for c in (0, 2)]
+            for future in futures:
+                with pytest.raises((ValueError, RuntimeError)) as excinfo:
+                    future.result(timeout=10)
+                raised.append(excinfo.value)
+
+        assert any(isinstance(e, ValueError) and "disallowed op" in str(e) for e in raised)
+        assert any("packing this chunk failed" in str(e) for e in raised)
+
+    def test_a_degraded_sync_narrows_the_rendezvous(self, sharing_server):
+        """A dead deployment must not be waited for: the rendezvous is sized from
+        `begin_sync`'s live set, so a survivor left alone in its group packs for
+        itself instead of blocking on the corpse."""
+        server = sharing_server(workers_per_replica=2, stall_timeout_s=30.0)
+        server.begin_sync(3, [0, 1, 3])  # consumer 2 died
+        _publish(server, GI_A, GROUP_A)
+
+        blob = server.rdt_produce_weights_batched([(GROUP_A[0], ())], 0, 0)[0]
+
+        expected = _blob_bytes(server, GROUP_A[0])
+        assert torch.equal(blob[: expected.numel()], expected)
+        assert server._sharers_of(0) == frozenset({0})
+        assert server._sharers_of(1) == frozenset({1, 3})
+
+    def test_a_sharer_that_never_arrives_trips_the_watchdog(self, sharing_server):
+        """A consumer that dies INSIDE the sync window has no detector, exactly
+        as for the free barrier; the rendezvous waits on the same channel, so it
+        fails with a real error instead of hanging."""
+        server = sharing_server(workers_per_replica=2, stall_timeout_s=0.3)
+        server.begin_sync(4, [0, 1, 2, 3])
+        _publish(server, GI_A, GROUP_A)
+
+        with pytest.raises(RuntimeError, match="gather errored|RDT stall"):
+            server.rdt_produce_weights_batched([(GROUP_A[0], ())], 0, 0)
+        assert "RDT stall" in str(server._gather_error)
+
+
+class TestSharedReservation:
+    """`reserve_serve_buffer` under sharing: one ring per GROUP, and the
+    init-time check that the group's members really do pull the same chunks."""
+
+    def test_matching_plans_reserve_one_ring_between_them(self, sharing_server):
+        server = sharing_server(workers_per_replica=2)
+        for consumer_id in (0, 2):
+            server.reserve_serve_buffer(consumer_id, 1024, "plan-a")
+
+        assert list(server._serve_rings) == [0]
+        assert [s.numel() for s in server._serve_rings[0]] == [buffer_alloc_bytes(1024)] * 2
+
+    def test_sharing_off_reserves_a_ring_per_consumer(self, sharing_server):
+        server = sharing_server(workers_per_replica=0)
+        for consumer_id in (0, 2):
+            server.reserve_serve_buffer(consumer_id, 1024, "plan-a")
+
+        assert sorted(server._serve_rings) == [0, 2]
+
+    def test_mismatched_plans_fail_at_reservation(self, sharing_server):
+        """Sharing rests on the sharers pulling the same chunks. Checked here,
+        where it names both consumers, rather than at serve time, where it is a
+        rendezvous nobody ever completes."""
+        server = sharing_server(workers_per_replica=2)
+        server.reserve_serve_buffer(0, 1024, "plan-a")
+
+        with pytest.raises(RuntimeError, match="do not pull the same chunks"):
+            server.reserve_serve_buffer(2, 1024, "plan-b")
+
+    def test_different_groups_may_differ(self, sharing_server):
+        """Only the members of ONE group have to agree; worker 0 and worker 1 of
+        the same deployment hold different slices and never share a slot."""
+        server = sharing_server(workers_per_replica=2)
+        server.reserve_serve_buffer(0, 1024, "plan-a")
+        server.reserve_serve_buffer(1, 1024, "plan-b")
+
+        assert sorted(server._serve_rings) == [0, 1]
+
+    def test_a_missing_digest_skips_the_check(self, sharing_server):
+        """The digest is optional on the wire, so an engine that does not send
+        one still reserves (it just gets no cross-deployment verification)."""
+        server = sharing_server(workers_per_replica=2)
+        server.reserve_serve_buffer(0, 1024, None)
+        server.reserve_serve_buffer(2, 1024, None)
+
+        assert list(server._serve_rings) == [0]

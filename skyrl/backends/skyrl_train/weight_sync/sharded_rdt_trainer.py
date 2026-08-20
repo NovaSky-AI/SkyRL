@@ -28,7 +28,7 @@ import time
 import uuid
 from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar
 
 import ray
@@ -96,6 +96,63 @@ _STALL_POLL_S = 5.0
 PRODUCE_METHOD_NAME = "rdt_produce_weights_batched"
 
 
+# [RDT-SHARE-SLOTS] Cross-deployment serve-slot sharing.
+#
+# Consumers whose ids differ by a multiple of ``workers_per_replica`` are the
+# same worker of different inference deployments: identical parallel config,
+# identical baked plan, identical chunk sequence, byte-identical pack layout. A
+# serve ring per consumer therefore costs one full ring PER REPLICA on the
+# producer's GPU (measured on the 235B 4-node shape: 5.0 GiB at one deployment,
+# 12-14 GiB at two, 26-28 GiB at four -- on top of the ~44 GiB the trainer rank
+# itself holds), and repeats the pack once per replica for identical bytes.
+#
+# NIXL reads are one-sided and non-destructive, so R readers can read ONE
+# registered slot concurrently. What a producer cannot observe is when a reader
+# has FINISHED, so the release edge comes from the consumer's ISSUE order, which
+# it sends as ``seq`` (see the consumer's ``_Chunk``): the pipeline drains pull i
+# before issuing i+K, so slot ``seq % K`` was last packed for ``seq - K``, whose
+# read is over. Under sharing the same holds, because generation ``seq`` is only
+# packed once every live sharer has arrived at it -- so each has drained
+# ``seq - K``.
+#
+# Deriving the slot from a per-call counter on THIS side instead (execution
+# order) is what the earlier version did, and it is wrong: Ray may start a
+# consumer's K concurrent produce calls in any order, so the call that executes
+# K-before another can be a pull that is still being read, and its slot gets
+# repacked underneath the reader. Silent, and it shows up only as a logprob
+# drift -- measured at 2x the healthy gap on the 4-node 235B run.
+#
+# Hence one rendezvous per generation, keyed by ``seq``: the group's live sharers
+# meet there, the LAST to arrive packs, and all of them return that one blob.
+#
+# Two failure modes, both closed rather than left silent:
+#   * sharers that DON'T pull the same chunks would rendezvous on signatures
+#     nobody else ever sends -- a 300s stall watchdog death. So the plan is
+#     compared at init instead (``reserve_serve_buffer``'s ``plan_digest``),
+#     where it is one error naming both consumers before any byte moves.
+#   * a sharer that dies mid-sync never arrives, so its group stalls -- exactly
+#     what a dead consumer already does to the per-group free barrier. The next
+#     sync's ``begin_sync`` narrows the live set and the group shrinks with it.
+
+
+@dataclass
+class _SharedPack:
+    """One generation of one slot-sharing group: the rendezvous state for a
+    single chunk, identified by the consumers' issue index. See
+    ``[RDT-SHARE-SLOTS]``."""
+
+    group: int
+    slot: int
+    """``seq % ring_depth``. Fixed at creation, so slot reuse follows the
+    consumers' issue order rather than this side's execution order."""
+    arrived: set[int] = field(default_factory=set)
+    blob: Any = None
+    nbytes: int = 0
+    packing: bool = False
+    done: bool = False
+    error: BaseException | None = None
+
+
 @dataclass
 class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Trainer init info for the sharded-RDT backend.
@@ -111,6 +168,16 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     num_consumers: int
     """Total inference-worker (consumer) count across the whole fleet
     (DP*TP*PP*PCP), for the M:N block assignment / free ref-count."""
+    workers_per_replica: int = 0
+    """Consumers per inference DEPLOYMENT (``num_consumers // num_replicas``).
+
+    Fixes the slot-sharing groups: consumers whose ids differ by a multiple of
+    this are the same worker of different deployments, so they bake identical
+    plans and pull byte-identical chunks, and ONE registered serve slot can
+    serve all of them (see ``[RDT-SHARE-SLOTS]``). 0 disables sharing, and so
+    does the single-deployment value ``num_consumers``, which makes every group
+    a singleton and the serve path byte-identical to the unshared one.
+    """
     trainer_actor_namespace: str | None = None
     """Ray namespace the engine spawns its serve actors in. The inference
     workers (which run in their own EngineCore subprocess with its own
@@ -151,6 +218,7 @@ class _RDTProducerServer:
         gather_lookahead: int,
         served_names: list[str] | None = None,
         stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S,
+        workers_per_replica: int = 0,
     ) -> None:
         import gc
 
@@ -189,17 +257,32 @@ class _RDTProducerServer:
         self._name_to_group: dict[str, int] = {}
         self._freed_pending: list[int] = []
 
-        # [RDT-RING] Per-consumer ring of packed serve buffers, rotated per pull.
+        # [RDT-RING] Ring of packed serve buffers, one ring per SLOT-SHARING
+        # GROUP (one consumer per group unless several deployments share, see
+        # [RDT-SHARE-SLOTS]), a slot handed out per generation.
         self._nring = max(1, num_rdt_buffers)
         self._serve_rings: dict[int, list[torch.Tensor | None]] = {}
-        self._serve_idx: dict[int, int] = {}
         self._serve_lock = threading.Lock()
         # registerMem on a shared NIXL agent is not concurrency-safe; serialize.
         self._reg_lock = threading.Lock()
         self._buffer_presize = int(buffer_presize_gb * (1 << 30))
+        self._serve_device = torch.device("cuda", self._device_index)
+
+        # [RDT-SHARE-SLOTS] Slot-sharing state, all guarded by _cache_cond (the
+        # rendezvous waits are on it, so the stall watchdog covers them too).
+        # `_share_width` = consumers per deployment; 0 means every group is a
+        # singleton and this degenerates to the unshared serve path.
+        self._share_width = max(0, int(workers_per_replica))
+        self._live_ids: set[int] | None = None
+        self._sharing_active = False
+        self._sharers: dict[int, frozenset] = {}  # group -> live members
+        self._gens: dict[int, dict] = {}  # group -> {seq: _SharedPack}
+        # group -> {cid: plan digest}. Init-time only, so NOT cleared per sync:
+        # it is what proves the sharers of a group pull the same chunks.
+        self._plan_digests: dict[int, dict[int, str]] = {}
 
         self._pack_check = pack_check
-        # [RDT-PACK-DSTS] (consumer_id, ring idx, packed layout) ->
+        # [RDT-PACK-DSTS] (sharing group, ring idx, packed layout) ->
         # (buffer data_ptr, destination views). Keyed on the buffer pointer too, so
         # a ring regrow invalidates rather than writing into a freed buffer. See
         # the serve path for why the layout, not the spec names, is the key.
@@ -234,6 +317,10 @@ class _RDTProducerServer:
         self._free_lag_seconds = 0.0  # last serve done -> freeing free_group arrival
         self._free_lag_count = 0
         self._publish_to_free_seconds = 0.0  # publish done -> freed (downstream RTT)
+        # [RDT-SHARE-SLOTS] serves answered from a co-replica's pack, and what
+        # waiting for it cost. shared_serves == 0 means nothing was shared.
+        self._shared_serves = 0
+        self._share_wait_seconds = 0.0
 
         from skyrl.backends.skyrl_train.weight_sync._nixl_profile import (
             install_nixl_timing,
@@ -305,7 +392,7 @@ class _RDTProducerServer:
 
     # ---------------- engine-facing (per sync) ----------------
 
-    def begin_sync(self, live_count: int) -> None:
+    def begin_sync(self, live_count: int, live_consumer_ids: list | None = None) -> None:
         """Reset per-sync free/backpressure state and set this sync's barrier
         target.
 
@@ -316,12 +403,27 @@ class _RDTProducerServer:
         nothing is in flight; a straggler signal would otherwise credit the wrong
         sync, which is why the consumer drains its signals before finishing.
 
+        ``live_consumer_ids`` is that same live set enumerated, which is what
+        sizes each slot-sharing group's rendezvous ([RDT-SHARE-SLOTS]) — a count
+        cannot, since a group is a specific set of ids. ``None`` (what an engine
+        that does not send it gets) leaves every group a singleton, i.e. sharing
+        off for the sync.
+
         The packed-destination cache deliberately survives: the layout repeats
-        every sync.
+        every sync. So does ``_plan_digests``, which is init-time state.
         """
         with self._cache_cond:
             self._gather_error = None
             self._live_count = max(1, int(live_count))
+            self._live_ids = set(int(c) for c in live_consumer_ids) if live_consumer_ids is not None else None
+            # Sharing is only ON when the geometry says several deployments are
+            # present; one deployment (width == live count) takes the singleton
+            # path, which skips even the request signature.
+            self._sharing_active = (
+                self._share_width > 0 and self._live_ids is not None and len(self._live_ids) > self._share_width
+            )
+            self._sharers.clear()
+            self._gens.clear()
             self._free_counts.clear()
             self._group_names.clear()
             self._inflight_groups.clear()
@@ -482,34 +584,215 @@ class _RDTProducerServer:
             self._note_progress_locked()
             self._cache_cond.notify_all()
 
-    def reserve_serve_buffer(self, consumer_id: int, nbytes: int) -> None:
-        """Pre-allocate + NIXL-register this consumer's serve ring before any
-        pull, while the fabric is idle (avoids registration races during the
-        sync-0 RDMA churn under M:N fan-in). Idempotent; grows only if needed."""
+    def _new_serve_buffer(self, nbytes: int) -> torch.Tensor:
+        """Allocate + NIXL-register one serve slot: the single allocation seam, so
+        registration can never be skipped on one of the two paths that make
+        buffers (the init-time reservation and the serve-path backstop)."""
         from ray.experimental import register_nixl_memory
 
+        t = torch.empty(nbytes, dtype=torch.uint8, device=self._serve_device)
+        with self._reg_lock:
+            register_nixl_memory(t)
+        return t
+
+    def reserve_serve_buffer(self, consumer_id: int, nbytes: int, plan_digest: str | None = None) -> None:
+        """Pre-allocate + NIXL-register this consumer's serve ring before any
+        pull, while the fabric is idle (avoids registration races during the
+        sync-0 RDMA churn under M:N fan-in). Idempotent; grows only if needed.
+
+        The ring is keyed by SLOT-SHARING GROUP, so the sharers of one group
+        reserve ONE ring between them ([RDT-SHARE-SLOTS]): R deployments cost one
+        ring, not R. They all call this — same group, same size — so the whole
+        body runs under ``_serve_lock``, or two concurrent first-callers would
+        each allocate a ring and one would be dropped still registered.
+
+        ``plan_digest`` is the caller's ordered chunk plan for THIS producer.
+        Sharers must agree on it, and this is where a disagreement is caught,
+        deliberately rather than at serve time: at serve time it is a rendezvous
+        nobody completes (a 300s stall-watchdog death), here it is one error
+        naming both consumers before a byte moves.
+
+        Raises:
+            RuntimeError: two consumers of one sharing group disagree on the
+                chunks they pull from this producer.
+        """
+        sg = self._share_group(consumer_id)
+        if plan_digest is not None:
+            with self._cache_cond:
+                seen = self._plan_digests.setdefault(sg, {})
+                clash = next(((c, d) for c, d in seen.items() if d != plan_digest), None)
+                if clash is None:
+                    seen[consumer_id] = plan_digest
+            if clash is not None:
+                raise RuntimeError(
+                    f"consumers {clash[0]} and {consumer_id} are in slot-sharing group {sg} but do "
+                    f"not pull the same chunks from this producer ({clash[1]} != {plan_digest}). "
+                    "Sharing a serve slot requires the deployments to be identical; check that "
+                    "workers_per_replica matches the inference fleet's geometry."
+                )
         alloc = buffer_alloc_bytes(nbytes, self._buffer_presize)
         with self._serve_lock:
-            rings = self._serve_rings.setdefault(consumer_id, [None] * self._nring)
-            self._serve_idx.setdefault(consumer_id, 0)
-        for i in range(self._nring):
-            slot = rings[i]
-            if slot is None or slot.numel() < alloc:
-                t = torch.empty(alloc, dtype=torch.uint8, device="cuda:0")
-                with self._reg_lock:
-                    register_nixl_memory(t)
-                rings[i] = t
+            rings = self._serve_rings.setdefault(sg, [None] * self._nring)
+            for i in range(self._nring):
+                slot = rings[i]
+                if slot is None or slot.numel() < alloc:
+                    rings[i] = self._new_serve_buffer(alloc)
+
+    # ---------------- [RDT-SHARE-SLOTS] the rendezvous ----------------
+
+    def _share_group(self, consumer_id: int) -> int:
+        """The slot-sharing group ``consumer_id`` belongs to — its index WITHIN
+        its deployment, since that is what fixes the plan. Without a width the
+        group is the consumer itself and nothing is ever shared."""
+        return consumer_id % self._share_width if self._share_width > 0 else consumer_id
+
+    def _sharers_of(self, sg: int) -> frozenset:
+        """The LIVE consumers of group ``sg``: the rendezvous width. Derived from
+        ``begin_sync``'s live set, so a degraded sync narrows the barrier instead
+        of waiting forever on a dead replica. Caller holds ``_cache_cond``."""
+        cached = self._sharers.get(sg)
+        if cached is None:
+            if not self._sharing_active or self._live_ids is None:
+                cached = frozenset((sg,))
+            else:
+                cached = frozenset(c for c in self._live_ids if c % self._share_width == sg) or frozenset((sg,))
+            self._sharers[sg] = cached
+        return cached
+
+    def _join_share_group(self, consumer_id: int, seq: int) -> tuple:
+        """Register this call's arrival in its group's rendezvous for ``seq`` and
+        return ``(generation, is_packer)``.
+
+        Exactly one caller per generation gets ``is_packer=True`` -- whichever
+        completes the arrival set -- and it is the only one that touches the GPU.
+        The slot is ``seq % nring``: fixed by the consumers' issue order, so it
+        needs no release accounting on this side (see ``[RDT-SHARE-SLOTS]``).
+        """
+        sg = self._share_group(consumer_id)
+        with self._cache_cond:
+            gens = self._gens.setdefault(sg, {})
+            gen = gens.get(seq)
+            if gen is None:
+                gen = gens[seq] = _SharedPack(group=sg, slot=seq % self._nring)
+            gen.arrived.add(consumer_id)
+            if gen.packing or gen.done or not gen.arrived >= self._sharers_of(sg):
+                return gen, False
+            gen.packing = True
+            return gen, True
+
+    def _await_shared_pack(self, gen: _SharedPack) -> torch.Tensor:
+        """Block until this generation's packer published its blob, and return
+        it. A failed pack is re-raised here, so every sharer of a bad pack fails
+        instead of reading a half-written slot."""
+        _t0 = time.perf_counter()
+        with self._cache_cond:
+            self._wait_for(lambda: not gen.done and gen.error is None, "a co-replica's shared serve pack")
+            if gen.error is not None:
+                raise RuntimeError(f"the sharer packing this chunk failed: {gen.error!r}") from gen.error
+            if not gen.done:
+                raise RuntimeError(f"gather errored while awaiting a shared pack: {self._gather_error!r}")
+            blob = gen.blob
+        with self._timing_lock:
+            self._shared_serves += 1
+            self._share_wait_seconds += time.perf_counter() - _t0
+        return blob
+
+    def _serve_slot(self, sg: int, idx: int, need: int) -> torch.Tensor:
+        """Group ``sg``'s ring slot ``idx``, grown if this chunk outgrew the
+        reservation. Growing registers memory while the fabric is busy — the
+        hazard ``reserve_serve_buffer`` exists to avoid — so it is a backstop:
+        the reservation is sized from the same static plan as this pack. The slot
+        is owned by one generation, so no other call can touch ``rings[idx]``."""
+        with self._serve_lock:
+            buffer = self._serve_rings.setdefault(sg, [None] * self._nring)[idx]
+        if buffer is not None and buffer.numel() >= need:
+            return buffer
+        buffer = self._new_serve_buffer(buffer_alloc_bytes(need, self._buffer_presize))
+        with self._serve_lock:
+            self._serve_rings.setdefault(sg, [None] * self._nring)[idx] = buffer
+        return buffer
+
+    def _pack_shared(self, gen: _SharedPack, specs: list) -> tuple:
+        """Replay the op chains into this generation's slot and publish the blob
+        to the sharers waiting on it.
+
+        Runs on exactly one call per generation and OUTSIDE ``_cache_cond``: the
+        pack is GPU work and must not block publishes, frees or other groups'
+        rendezvous.
+        """
+        sliced: list = []  # (byte_off, tensor)
+        pack_cur = 0
+        nbytes = 0
+        for name, chain in specs:
+            t = self._cache[name]
+            for op, args, kw in chain:
+                if op not in ALLOWED_OPS:
+                    raise ValueError(f"{name!r}: disallowed op {op!r}")
+                t = getattr(t, op)(*args, **dict(kw))
+            off = (pack_cur + 15) & ~15
+            pack_cur = off + t.numel() * t.element_size()
+            sliced.append((off, t))
+            nbytes += t.numel() * t.element_size()
+
+        buffer = self._serve_slot(gen.group, gen.slot, pack_cur)
+
+        # [RDT-PACK-DSTS] The destination views are a pure function of the packed
+        # layout, which is byte-identical every sync, so build them once per
+        # (sharing group, ring slot, layout) and reuse — rebuilding per call cost
+        # 5.2ms of a 7.5ms 384-spec 235B group.
+        #
+        # The key is the LAYOUT, not the spec names: a name can appear in two
+        # requests with different op chains (per-ep_rank chunking splits one
+        # name's copies across chunks), and serving the second through the first's
+        # views would write the wrong bytes with nothing downstream to catch it.
+        dst_key = (
+            gen.group,
+            gen.slot,
+            tuple((off, t.dtype, t.shape) for off, t in sliced),
+        )
+        cached = self._pack_dsts.get(dst_key)
+        if cached is None or cached[0] != buffer.data_ptr():
+            dsts = []
+            for off, t in sliced:
+                nb = t.numel() * t.element_size()
+                dsts.append(buffer[off : off + nb].view(t.dtype).reshape(t.shape))
+            self._pack_dsts[dst_key] = (buffer.data_ptr(), dsts)
+        else:
+            dsts = cached[1]
+        torch._foreach_copy_(dsts, [t for _off, t in sliced])
+
+        blob = buffer[:pack_cur]
+        with self._cache_cond:
+            gen.blob = blob
+            gen.nbytes = nbytes
+            gen.done = True
+            self._note_progress_locked()
+            self._cache_cond.notify_all()
+        return blob, nbytes
+
+    def _fail_shared_pack(self, gen: _SharedPack, exc: BaseException) -> None:
+        """Publish a pack failure so the waiting sharers raise instead of hanging
+        on a generation that will never complete."""
+        with self._cache_cond:
+            gen.error = exc
+            self._cache_cond.notify_all()
 
     @ray.method(tensor_transport="nixl")
-    def rdt_produce_weights_batched(self, specs: list, consumer_id: int = 0):
+    def rdt_produce_weights_batched(self, specs: list, consumer_id: int = 0, seq: int = -1):
         """Serve one batched slice request over NIXL.
 
-        Waits until the specs' names are cached, replays each spec's op chain
-        (pure views into cached tensors, guarded by ALLOWED_OPS), byte-packs the
-        slices 16B-aligned into this consumer's ring slot (mirroring the
-        consumer's identical layout), and returns the one packed blob. Callers
-        that want a single slice pass one spec and read the blob back with that
-        slice's dtype/shape (see the consumer's ``PullSink``).
+        Waits until the specs' names are cached, then rendezvouses with the other
+        live sharers of this consumer's slot-sharing group ([RDT-SHARE-SLOTS]).
+        The last sharer to arrive replays each spec's op chain (pure views into
+        cached tensors, guarded by ALLOWED_OPS) and byte-packs the slices
+        16B-aligned into the group's ring slot, mirroring the consumer's identical
+        layout; every sharer then returns that one packed blob, and R deployments
+        cost one pack and one slot instead of R. With a single deployment every
+        group is a singleton, so the arriving call is always its own packer and
+        this is the unshared serve path exactly.
+
+        Callers that want a single slice pass one spec and read the blob back with
+        that slice's dtype/shape (see the consumer's ``PullSink``).
         """
         t_m0 = time.perf_counter()
         needed = sorted({n for n, _ in specs})
@@ -544,70 +827,33 @@ class _RDTProducerServer:
                     self._serve_lag_ready_seconds += _lag
                     self._serve_lag_ready_calls += 1
 
+        if seq < 0:
+            # The slot is derived from it, so a caller that does not send one
+            # cannot be served safely (see [RDT-SHARE-SLOTS]).
+            raise ValueError("rdt_produce_weights_batched requires the consumer's issue index `seq`")
+        gen, is_packer = self._join_share_group(consumer_id, seq)
+        if not is_packer:
+            blob = self._await_shared_pack(gen)
+            self._bump_timing(t_m0, wait_s, None, len(specs), gen.nbytes, _grp_key)
+            return [blob]
+
         t_s0 = time.perf_counter()
-        sliced: list = []  # (byte_off, tensor)
-        pack_cur = 0
-        nbytes = 0
-        for name, chain in specs:
-            t = self._cache[name]
-            for op, args, kw in chain:
-                if op not in ALLOWED_OPS:
-                    raise ValueError(f"{name!r}: disallowed op {op!r}")
-                t = getattr(t, op)(*args, **dict(kw))
-            off = (pack_cur + 15) & ~15
-            pack_cur = off + t.numel() * t.element_size()
-            sliced.append((off, t))
-            nbytes += t.numel() * t.element_size()
-
-        with self._serve_lock:
-            rings = self._serve_rings.setdefault(consumer_id, [None] * self._nring)
-            idx = self._serve_idx.get(consumer_id, 0)
-            self._serve_idx[consumer_id] = (idx + 1) % self._nring
-        buffer = rings[idx]
-        if buffer is None or buffer.numel() < pack_cur:
-            from ray.experimental import register_nixl_memory
-
-            alloc = buffer_alloc_bytes(pack_cur, self._buffer_presize)
-            buffer = torch.empty(alloc, dtype=torch.uint8, device="cuda:0")
-            with self._reg_lock:
-                register_nixl_memory(buffer)
-            rings[idx] = buffer
-
-        # [RDT-PACK-DSTS] The destination views are a pure function of the packed
-        # layout, which is byte-identical every sync, so build them once per
-        # (consumer, ring slot, layout) and reuse — rebuilding per call cost 5.2ms
-        # of a 7.5ms 384-spec 235B group.
-        #
-        # The key is the LAYOUT, not the spec names: a name can appear in two
-        # requests with different op chains (per-ep_rank chunking splits one
-        # name's copies across chunks), and serving the second through the first's
-        # views would write the wrong bytes with nothing downstream to catch it.
-        dst_key = (
-            consumer_id,
-            idx,
-            tuple((off, t.dtype, t.shape) for off, t in sliced),
-        )
-        cached = self._pack_dsts.get(dst_key)
-        if cached is None or cached[0] != buffer.data_ptr():
-            dsts = []
-            for off, t in sliced:
-                nb = t.numel() * t.element_size()
-                dsts.append(buffer[off : off + nb].view(t.dtype).reshape(t.shape))
-            self._pack_dsts[dst_key] = (buffer.data_ptr(), dsts)
-        else:
-            dsts = cached[1]
-        torch._foreach_copy_(dsts, [t for _off, t in sliced])
-
-        blob = buffer[:pack_cur]
+        try:
+            blob, nbytes = self._pack_shared(gen, specs)
+        except BaseException as e:
+            self._fail_shared_pack(gen, e)
+            raise
         if self._pack_check:
-            self._log_pack_check(blob, pack_cur)
+            self._log_pack_check(blob, blob.numel())
         self._bump_timing(t_m0, wait_s, t_s0, len(specs), nbytes, _grp_key)
         return [blob]
 
     # ---------------- profiling ----------------
 
     def _bump_timing(self, t_m0, wait_s, t_s0, nspecs, nbytes, grp_key=None) -> None:
-        slice_s = time.perf_counter() - t_s0
+        # t_s0 None = this call was answered from another sharer's pack, so it
+        # sliced nothing; its blocked time is in share_wait_seconds instead.
+        slice_s = 0.0 if t_s0 is None else time.perf_counter() - t_s0
         # [RDT-LINK-TIMING] last serve of the group; free_group measures its arrival
         # against this stamp. Also the third of the four progress signals the stall
         # watchdog reads (publish / produce / free / begin_sync): a long sync whose
@@ -670,6 +916,11 @@ class _RDTProducerServer:
                 free_lag_seconds=self._free_lag_seconds,
                 free_lag_count=self._free_lag_count,
                 publish_to_free_seconds=self._publish_to_free_seconds,
+                shared_serves=self._shared_serves,
+                share_wait_seconds=self._share_wait_seconds,
+                cfg_share_width=self._share_width,
+                cfg_sharing_active=self._sharing_active,
+                cfg_serve_rings=len(self._serve_rings),
                 cfg_lookahead=self._lookahead,
                 cfg_nring=self._nring,
                 cfg_served_names=-1 if self._served_names is None else len(self._served_names),
@@ -690,6 +941,8 @@ class _RDTProducerServer:
             self._serve_lag_waited_calls = self._serve_lag_ready_calls = 0
             self._free_lag_seconds = self._publish_to_free_seconds = 0.0
             self._free_lag_count = 0
+            self._shared_serves = 0
+            self._share_wait_seconds = 0.0
 
     def get_nixl_timing(self) -> dict:
         from skyrl.backends.skyrl_train.weight_sync import _nixl_profile
@@ -704,6 +957,10 @@ class _RDTProducerServer:
     def shutdown(self) -> None:
         with self._cache_cond:
             self._cache.clear()
+        with self._cache_cond:
+            # Generations hold blob views into the rings, so they go first.
+            self._gens.clear()
+            self._sharers.clear()
         with self._serve_lock:
             self._serve_rings.clear()
             # Must go with the rings: these are views INTO them, and the
@@ -1151,6 +1408,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             pack_check=ii.pack_check,
             gather_lookahead=ii.gather_lookahead,
             stall_timeout_s=ii.stall_timeout_s,
+            workers_per_replica=ii.workers_per_replica,
         )
         ray.get(self._server.ping.remote())
         # Pre-barrier NIXL warmup: must complete before _all_gather_server_names
@@ -1195,19 +1453,21 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         """
         assert self.source is not None
         if live_consumer_ids is None:
-            live_count = self._init_info.num_consumers
+            live_ids = list(range(self._init_info.num_consumers))
+            live_count = len(live_ids)
         else:
-            live_count = len(set(live_consumer_ids))
+            live_ids = sorted(set(int(c) for c in live_consumer_ids))
+            live_count = len(live_ids)
             logger.warning(
                 "[rdt-degraded] serving %d/%d live consumers; every group's free " "barrier counts to the live total",
                 live_count,
                 self._init_info.num_consumers,
             )
-        self._send_weights_inner(live_count)
+        self._send_weights_inner(live_count, live_ids)
 
-    def _send_weights_inner(self, live_count: int) -> None:
+    def _send_weights_inner(self, live_count: int, live_ids: list[int]) -> None:
         if not self.is_sender:
-            self._run_gather_loop(update_future=None, live_count=live_count)
+            self._run_gather_loop(update_future=None, live_count=live_count, live_ids=live_ids)
             return
 
         wall0 = time.perf_counter()
@@ -1228,7 +1488,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             tu0 = time.perf_counter()
             future = exe.submit(self.client.update_weights, empty_update)
             _t0 = _t.time()
-            self._run_gather_loop(update_future=future, live_count=live_count)
+            self._run_gather_loop(update_future=future, live_count=live_count, live_ids=live_ids)
             _gather = _t.time() - _t0
             future.result()  # surface inference-side errors
             _tail = _t.time() - _t0 - _gather
@@ -1240,7 +1500,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         self._sync_timing["wall_seconds"] = time.perf_counter() - wall0
         logger.info("[rdt-sync-timing] gather_publish_loop=%.2fs consumer_tail_after_gather=%.2fs", _gather, _tail)
 
-    def _run_gather_loop(self, update_future, live_count: int) -> None:
+    def _run_gather_loop(self, update_future, live_count: int, live_ids: list[int] | None = None) -> None:
         """Gather this rank's weights group-by-group and publish each into the
         server over CUDA IPC. A gathered group is published — serveable —
         immediately; the loop gates BEFORE the next gather while more than
@@ -1252,7 +1512,10 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         gather0 = time.perf_counter()
         _t_next = _t_pub = _t_exp = _t_credit = 0.0
         assert self.source is not None  # guaranteed by trainer_init
-        self._rpc("begin_sync", live_count)
+        # The live IDS ride along with the count: the free barrier only needs the
+        # count, but the producer's slot-sharing rendezvous needs to know WHICH
+        # consumers are live ([RDT-SHARE-SLOTS]).
+        self._rpc("begin_sync", live_count, live_ids)
         # One generator resume per GROUP: `iter_groups` yields (names, tensors)
         # per owned group in metadata order. Every owner must reach a group in the
         # same order or their shared gather collective mismatches.

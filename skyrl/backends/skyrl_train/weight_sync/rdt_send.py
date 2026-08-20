@@ -1566,9 +1566,25 @@ class RdtWeightSyncSender:
             v = os.environ.get(env)
             return v if v is not None else default
 
+        # [RDT-SHARE-SLOTS] Consumers per deployment, which is what groups the
+        # workers that can share one serve slot on each producer. Resolved here
+        # because the sidecar is a Ray actor that never sees this process's env;
+        # 0 turns sharing off, and one deployment makes it a no-op anyway (the
+        # width equals the consumer count, so every group is a singleton).
+        share_slots = os.environ.get("SKYRL_RDT_SHARE_SLOTS", "1") not in ("0", "false", "False")
+        workers_per_replica = self._world_size // max(1, self._num_replicas) if share_slots else 0
+        _loguru.info(
+            "[rdt-config] num_consumers={} num_replicas={} workers_per_replica={} (slot sharing {})",
+            self._world_size,
+            self._num_replicas,
+            workers_per_replica,
+            "on" if share_slots and self._num_replicas > 1 else "off",
+        )
+
         init_info = ShardedRDTTrainerInitInfo(
             rank=rank,
             num_consumers=self._world_size,
+            workers_per_replica=workers_per_replica,
             trainer_actor_namespace=self._namespace,
             num_rdt_buffers=int(_knob("SKYRL_RDT_NUM_BUFFERS", _DEFAULT_NUM_RDT_BUFFERS)),
             buffer_presize_gb=float(_knob("SKYRL_RDT_BUFFER_PRESIZE_GB", _DEFAULT_BUFFER_PRESIZE_GB)),
