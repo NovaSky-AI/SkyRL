@@ -15,6 +15,7 @@ set -euo pipefail
 : "${CKPT_PATH:=}"
 : "${CKPT_INTERVAL:=0}"
 : "${RESUME_FROM:=}"
+: "${PRESERVE_TRAINER_FOR_RESUME:=0}"
 : "${MAX_PAID_RUNTIME_MINUTES:=15}"
 : "${RESOURCE_SUFFIX:=$(date -u +%Y%m%d%H%M%S)-$RANDOM}"
 : "${FIREWORKS_TRAINER_JOB_ID:=skyrl-smoke-sft-${RESOURCE_SUFFIX}-trainer}"
@@ -23,6 +24,14 @@ set -euo pipefail
 
 if [[ "$FIREWORKS_TRAINER_JOB_ID" != skyrl-smoke-* || "$FIREWORKS_TRAINER_JOB_ID" == */* ]]; then
   printf 'Refusing unsafe smoke trainer ID: %s\n' "$FIREWORKS_TRAINER_JOB_ID" >&2
+  exit 2
+fi
+if [[ "$PRESERVE_TRAINER_FOR_RESUME" != "0" && "$PRESERVE_TRAINER_FOR_RESUME" != "1" ]]; then
+  printf 'PRESERVE_TRAINER_FOR_RESUME must be 0 or 1.\n' >&2
+  exit 2
+fi
+if [[ "$PRESERVE_TRAINER_FOR_RESUME" == "1" && -z "$CKPT_PATH" ]]; then
+  printf 'PRESERVE_TRAINER_FOR_RESUME=1 requires CKPT_PATH.\n' >&2
   exit 2
 fi
 
@@ -41,6 +50,7 @@ if [[ "${FIREWORKS_RUN_CONFIRMED:-0}" != "1" ]]; then
     "  checkpoint path: ${CKPT_PATH:-disabled}" \
     "  checkpoint interval: ${CKPT_INTERVAL}" \
     "  resume from: ${RESUME_FROM:-fresh}" \
+    "  preserve trainer for resume: ${PRESERVE_TRAINER_FOR_RESUME}" \
     "  wall-clock cap: ${MAX_PAID_RUNTIME_MINUTES} minutes" \
     "  pricing: https://fireworks.ai/pricing" \
     "  log: ${LOG_FILE}" \
@@ -58,6 +68,10 @@ cleanup_resources() {
   local command_status=$?
   trap - EXIT INT TERM
   set +e
+  if [[ "$PRESERVE_TRAINER_FOR_RESUME" == "1" ]]; then
+    printf 'Trainer preserved for resume: %s\n' "$FIREWORKS_TRAINER_JOB_ID" >> "$LOG_FILE"
+    exit "$command_status"
+  fi
   uv run --isolated --extra fireworks examples/train/gsm8k/fireworks_dedicated_cleanup.py \
     --trainer-job-id "$FIREWORKS_TRAINER_JOB_ID" >> "$LOG_FILE" 2>&1
   local cleanup_status=$?
@@ -71,6 +85,11 @@ trap cleanup_resources EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+FIREWORKS_CLEANUP_ON_EXIT=true
+if [[ "$PRESERVE_TRAINER_FOR_RESUME" == "1" ]]; then
+  FIREWORKS_CLEANUP_ON_EXIT=false
+fi
+
 timeout --signal=INT --kill-after=2m "${MAX_PAID_RUNTIME_MINUTES}m" \
   uv run --isolated --extra fireworks -m skyrl.train.entrypoints.main_fireworks_sft \
   strategy=fireworks \
@@ -82,7 +101,7 @@ timeout --signal=INT --kill-after=2m "${MAX_PAID_RUNTIME_MINUTES}m" \
   fireworks.trainer_job_id="$FIREWORKS_TRAINER_JOB_ID" \
   fireworks.trainer_replica_count=1 \
   fireworks.request_timeout_s=600 \
-  fireworks.cleanup_on_exit=true \
+  fireworks.cleanup_on_exit="$FIREWORKS_CLEANUP_ON_EXIT" \
   train_datasets="['$TRAIN_DATASET']" \
   train_dataset_splits="['$TRAIN_SPLIT']" \
   max_length="$MAX_LENGTH" \

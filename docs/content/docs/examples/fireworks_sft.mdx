@@ -71,10 +71,13 @@ Fireworks SFT uses the native SkyRL checkpoint lifecycle. A checkpoint combines 
 ckpt_path=s3://bucket/path/to/checkpoints \
 ckpt_interval=25 \
 resume_from=latest \
-max_ckpts_to_keep=-1
+max_ckpts_to_keep=-1 \
+fireworks.cleanup_on_exit=false
 ```
 
-Set `ckpt_path` to storage that survives the driver process. `ckpt_interval=0` disables periodic saves but still writes a final checkpoint when `ckpt_path` is non-empty. Use `resume_from=latest` with the same checkpoint root, or pass a specific `global_step_N` directory.
+Set `ckpt_path` to storage that survives the driver process. `ckpt_interval=0` disables periodic saves but still writes a final checkpoint when `ckpt_path` is non-empty. Use `resume_from=latest` with the same checkpoint root and the same `fireworks.trainer_job_id`, or pass a specific `global_step_N` directory.
+
+Resumable DCP state belongs to the live trainer namespace. Checkpointed runs require `fireworks.cleanup_on_exit=false` so a later process can reconnect to that trainer ID. Fireworks inactivity cleanup releases idle trainer GPUs, but the caller remains responsible for deleting the trainer after training or final model promotion. Deleting the trainer archives the ID and makes its DCP state unavailable for resume.
 
 Fireworks does not expose checkpoint deletion through the training SDK. `max_ckpts_to_keep` therefore remains `-1`; local checkpoint pruning must not be presented as remote DCP deletion. Checkpoints are training-resume artifacts, not deployable model exports. Keep `hf_save_interval=0`.
 

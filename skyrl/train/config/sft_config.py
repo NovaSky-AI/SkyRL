@@ -547,8 +547,6 @@ def validate_fireworks_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError("optimizer_config.adam_betas must contain beta1 and beta2")
     if cfg.fireworks.request_timeout_s <= 0 or cfg.fireworks.trainer_timeout_s <= 0:
         raise ValueError("Fireworks request and trainer timeouts must be positive")
-    if not cfg.fireworks.cleanup_on_exit:
-        raise ValueError("Fireworks SFT requires cleanup_on_exit=true")
     if cfg.enable_ray_gpu_monitor:
         raise ValueError("Fireworks SFT requires enable_ray_gpu_monitor=false")
     if cfg.torch_profiler_config.enable:
@@ -574,6 +572,11 @@ def validate_fireworks_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError("Fireworks SFT requires ckpt_path when ckpt_interval > 0")
     if cfg.resume_from == "latest" and not cfg.ckpt_path:
         raise ValueError("Fireworks SFT requires ckpt_path when resume_from='latest'")
+    checkpoint_enabled = bool(cfg.ckpt_path or cfg.resume_from or cfg.ckpt_interval)
+    if checkpoint_enabled and cfg.fireworks.cleanup_on_exit:
+        raise ValueError("Fireworks SFT checkpoint/resume requires cleanup_on_exit=false")
+    if not checkpoint_enabled and not cfg.fireworks.cleanup_on_exit:
+        raise ValueError("Fireworks SFT without checkpointing requires cleanup_on_exit=true")
     if cfg.max_ckpts_to_keep != -1:
         raise ValueError("Fireworks SFT requires max_ckpts_to_keep=-1")
     if cfg.optimizer_config.scheduler != "constant_with_warmup" or cfg.optimizer_config.num_warmup_steps != 0:

@@ -293,18 +293,21 @@ class TestFireworksConfig:
         cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
         cfg.ckpt_interval = 10
         cfg.resume_from = "latest"
+        cfg.fireworks.cleanup_on_exit = False
 
         validate_fireworks_sft_cfg(cfg)
 
     def test_final_only_checkpoint_is_supported(self):
         cfg = self._cfg()
         cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.fireworks.cleanup_on_exit = False
 
         validate_fireworks_sft_cfg(cfg)
 
     def test_direct_checkpoint_resume_is_supported_without_root(self):
         cfg = self._cfg()
         cfg.resume_from = "s3://bucket/sft-checkpoints/run/global_step_10"
+        cfg.fireworks.cleanup_on_exit = False
 
         validate_fireworks_sft_cfg(cfg)
 
@@ -321,6 +324,20 @@ class TestFireworksConfig:
         setattr(cfg, field, value)
 
         with pytest.raises(ValueError, match=match):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_checkpointing_requires_preserved_trainer(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+
+        with pytest.raises(ValueError, match="checkpoint/resume requires cleanup_on_exit=false"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_cleanup_cannot_be_disabled_without_checkpointing(self):
+        cfg = self._cfg()
+        cfg.fireworks.cleanup_on_exit = False
+
+        with pytest.raises(ValueError, match="without checkpointing requires cleanup_on_exit=true"):
             validate_fireworks_sft_cfg(cfg)
 
     def test_checkpoint_retention_is_rejected(self):
