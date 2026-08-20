@@ -709,7 +709,12 @@ class TinkerEngine:
         params = [
             {
                 "request_id": int(request_id),
-                "result_data": result.model_dump(),
+                # `result_data` holds JSON text, so serialize straight to it:
+                # sample results may carry top-k logprobs for every prompt token,
+                # and the dict `model_dump()` builds would only exist for
+                # `json.dumps` to walk again -- several times the cost of
+                # `model_dump_json()`.
+                "result_data": result.model_dump_json(),
                 "status": RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED,
                 "completed_at": completed_at,
             }

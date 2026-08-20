@@ -45,6 +45,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
+    patch_fa2_head_dim_allowlist,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -704,6 +707,10 @@ class MegatronWorker:
         from megatron.core.distributed.distributed_data_parallel_config import (
             DistributedDataParallelConfig,
         )
+
+        # TE patch to allow FA2 for head_dim 256 on SM103 (B300)
+        # Delete along with the patch module once the TE pin includes NVIDIA/TransformerEngine#3360.
+        patch_fa2_head_dim_allowlist()
 
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type)

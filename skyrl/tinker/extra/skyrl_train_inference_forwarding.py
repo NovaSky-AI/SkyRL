@@ -74,11 +74,10 @@ class SkyRLTrainInferenceForwardingClient:
         """Forward a sample request to vLLM and write the result to FutureDB."""
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
-            result_data = result.model_dump()
             status = RequestStatus.COMPLETED
         except Exception as e:
             logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
-            result_data = {"error": str(e), "status": "failed"}
+            result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
         async with AsyncSession(self.db_engine) as session:
@@ -88,7 +87,8 @@ class SkyRLTrainInferenceForwardingClient:
                 # request, stale-session GC). Nothing to write back.
                 logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
                 return
-            future.result_data = result_data
+            # `result_data` is a text column holding pre-serialized JSON.
+            future.result_data = result.model_dump_json()
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()

@@ -37,11 +37,19 @@ from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
     patch_vllm_fp8_kv_scale_boot_normalization,
     patch_vllm_fp8_kv_scale_completion,
 )
+from skyrl.backends.skyrl_train.patches.vllm.patch_hybrid_fp8_kv_wake import (
+    patch_hybrid_fp8_kv_wake,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
     batched_moe_wire_targets,
 )
+
+# The vllm#41602 backport rewrites init_fp8_kv_scales from pristine vLLM source,
+# so it must run before the sleep/wake wrapper below (which then wraps the
+# patched function; both handle hybrid nested caches, composition is safe).
+patch_hybrid_fp8_kv_wake()
 
 try:
     from skyrl.backends.skyrl_train.weight_sync.delta_engine import (

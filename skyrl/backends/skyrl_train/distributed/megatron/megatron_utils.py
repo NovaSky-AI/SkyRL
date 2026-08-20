@@ -525,6 +525,7 @@ def preprocess_packed_seqs(
                     remain_start:remain_end
                 ]
 
+    # Mamba derives per-token document labels from the global padded token count.
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
         cu_seqlens_q=cu_seqlens_padded,
@@ -533,6 +534,7 @@ def preprocess_packed_seqs(
         max_seqlen_kv=max_seqlen_in_batch,
         cu_seqlens_q_padded=cu_seqlens_padded,
         cu_seqlens_kv_padded=cu_seqlens_padded,
+        total_tokens=cu_seqlens_padded_cpu[-1],
     )
     if pre_process:
         return input_ids_rmpad.unsqueeze(0), packed_seq_params
