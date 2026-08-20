@@ -321,14 +321,16 @@ def test_entrypoint_run_uses_hosted_trainer_lifecycle(monkeypatch) -> None:
 
         def export_final_model(self):
             events.append("export")
+            return {"model": "promoted"}
 
         def shutdown(self):
             events.append("shutdown")
 
     monkeypatch.setattr("skyrl.train.entrypoints.main_fireworks_sft.FireworksSFTTrainer", Trainer)
 
-    run(_cfg())
+    result = run(_cfg())
 
+    assert result == {"model": "promoted"}
     assert events == ["init", "setup", "train", "export", "shutdown"]
 
 

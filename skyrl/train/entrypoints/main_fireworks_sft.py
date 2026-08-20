@@ -14,7 +14,7 @@ from skyrl.train.config import (
 from skyrl.train.fireworks_sft_trainer import FireworksSFTTrainer
 
 
-def run(cfg: SFTConfig) -> None:
+def run(cfg: SFTConfig) -> dict | None:
     """Run the native SFT loop without attaching to Ray."""
 
     validate_fireworks_sft_cfg(cfg)
@@ -22,7 +22,7 @@ def run(cfg: SFTConfig) -> None:
     try:
         trainer.setup()
         trainer.train()
-        trainer.export_final_model()
+        return trainer.export_final_model()
     except Exception as exc:
         if trainer.tracker is not None:
             trainer.tracker.log_exception(exc, step=trainer.global_step)
