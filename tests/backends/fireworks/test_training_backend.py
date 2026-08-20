@@ -48,6 +48,8 @@ class _TrainingClient:
         return _Future(SimpleNamespace(path=f"tinker://source/weights/{name}"))
 
     def resolve_checkpoint_path(self, checkpoint_name, source_job_id=None):
+        if source_job_id is None:
+            return checkpoint_name
         return f"cross-job://{source_job_id}/{checkpoint_name}"
 
     def load_state_with_optimizer(self, path):
@@ -137,6 +139,7 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
     assert manifest["source_trainer_job_id"] == "source-trainer"
     assert manifest["includes_optimizer_state"] is True
 
+    runtime.trainer_job_id = "target-trainer"
     dispatch.load_checkpoint(
         "policy",
         str(ckpt_dir),
@@ -150,6 +153,36 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
             True,
         )
     ]
+
+
+def test_policy_dispatch_loads_same_trainer_checkpoint_by_name(tmp_path) -> None:
+    training_client = _TrainingClient()
+    runtime = SimpleNamespace(training_client=training_client, trainer_job_id="same-trainer")
+    cfg = _cfg()
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
+    ckpt_dir = tmp_path / "global_step_2" / "policy"
+    ckpt_dir.mkdir(parents=True)
+    (ckpt_dir / "fireworks_checkpoint.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "checkpoint_kind": "fireworks_dcp",
+                "checkpoint_name": "step-2",
+                "provider_path": "tinker://same-trainer/weights/step-2",
+                "source_trainer_job_id": "same-trainer",
+                "includes_optimizer_state": True,
+            }
+        )
+    )
+
+    dispatch.load_checkpoint(
+        "policy",
+        str(ckpt_dir),
+        load_optimizer_states=True,
+        load_lr_scheduler_states=True,
+    )
+
+    assert training_client.loaded_states == [("step-2", True)]
 
 
 def test_policy_dispatch_load_falls_back_to_manifest_provider_path(tmp_path) -> None:

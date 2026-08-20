@@ -222,9 +222,10 @@ class FireworksPolicyDispatch:
         provider_path = str(manifest.get("provider_path") or "")
         source_job_id = manifest.get("source_trainer_job_id")
         if source_job_id and checkpoint_name:
+            current_job_id = self.runtime.trainer_job_id
             load_path = self.runtime.training_client.resolve_checkpoint_path(
                 checkpoint_name,
-                source_job_id=str(source_job_id),
+                source_job_id=str(source_job_id) if str(source_job_id) != current_job_id else None,
             )
         elif provider_path:
             # Serverless sessions may not expose a dedicated trainer job ID;
