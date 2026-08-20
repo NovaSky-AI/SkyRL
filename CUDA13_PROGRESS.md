@@ -284,7 +284,7 @@ That size is a deliberate trade for a base with **no CUDA 12 tree at all** — n
 Transformer Engine's libcudart scan to trip over, rather than a CUDA 12 tree merely hidden
 behind a symlink. Given §3, that robustness is worth paying for.
 
-#### What this switch required (items 3–4 found by building, not by inspection)
+#### Two things this switch required / raised
 
 1. **`ENV PATH=/home/ray/.local/bin:${PATH}` — required, not cosmetic.** The slim images put
    `~/.local/bin` on `PATH`; the cu130 image does **not**:
@@ -318,30 +318,7 @@ behind a symlink. Given §3, that robustness is worth paying for.
    the base's apt-managed toolkit in the same `/usr/local/cuda-13.0` prefix for ~4 GB and no
    gain. Removing it roughly cancels the larger base: +4.8 GB of base, −4 GB of toolkit.
 
-3. **`--allow-change-held-packages` on the NCCL step — found by an actual build.** NVIDIA's
-   CUDA images `apt-mark hold` `libnccl2` (this base holds `2.27.7-1+cuda13.0`) so an
-   unrelated apt call cannot bump NCCL. `Dockerfile.megatron` pins
-   `libnccl2=2.28.9-1+cuda13.0` to match the pip stack's `nvidia-nccl-cu13`, which *is* a
-   change to a held package, and apt refuses it under plain `-y`:
-
-   ```
-   The following held packages will be changed: libnccl2
-   E: Held packages were changed and -y was used without --allow-change-held-packages
-   ```
-
-   The slim cu128 base did not hold it, so this is new with the base switch. Fixed with
-   `--allow-change-held-packages`, which scopes the override to that one step and leaves the
-   hold intact for later apt calls (`apt-mark unhold` would not).
-
-4. **Trailing-colon `CPATH`, also from the build log.** `ENV CPATH=${CUDNN_PATH}/include:${CPATH}`
-   emitted `UndefinedVar: Usage of undefined variable '$CPATH'` — `CPATH` is unset in this
-   base, so the naive form leaves a trailing colon, which tells the compiler to search the
-   *current directory* for headers. That matters here because nv-grouped-gemm and the other
-   CUDA extensions are built from source in this image. Changed to
-   `${CUDNN_PATH}/include${CPATH:+:${CPATH}}`. (`LD_LIBRARY_PATH` is set in this base, so the
-   adjacent line has no such problem.) Pre-existing, but only surfaced once a build ran.
-
-5. **Watch item: the cu130 base bundles its own cuDNN.** It sets
+3. **Watch item: the cu130 base bundles its own cuDNN.** It sets
    `NV_CUDNN_PACKAGE=libcudnn9-cuda-13=9.12.0.46-1`, which the slim cu128 base did not.
    `Dockerfile.megatron` also pip-installs `nvidia-cudnn-cu13>=9.3` and prepends
    `/opt/cudnn/lib` to `LD_LIBRARY_PATH`, so there are now two cuDNN 9 copies with the pip one
