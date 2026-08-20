@@ -40,15 +40,7 @@ RUN sudo apt update && sudo apt install --fix-broken && sudo apt install -y defa
 # build toolchain + nccl dev headers for the source-built CUDA extensions
 # (nv-grouped-gemm). Pinned to the same NCCL the pip stack resolves
 # (nvidia-nccl-cu13 2.28.9) so the headers match the library loaded at runtime.
-#
-# --allow-change-held-packages is required on the cu130 base: NVIDIA's CUDA images
-# apt-mark hold libnccl2 (this base holds 2.27.7-1+cuda13.0) to stop NCCL being
-# bumped by an unrelated apt operation. Upgrading it to our pinned 2.28.9 therefore
-# changes a held package, which apt refuses under plain -y:
-#   E: Held packages were changed and -y was used without --allow-change-held-packages
-# The flag scopes that override to this one step and leaves the hold in place for any
-# later apt call, which `apt-mark unhold` would not.
-RUN sudo apt-get update && sudo apt-get install -y --allow-change-held-packages \
+RUN sudo apt-get update && sudo apt-get install -y \
     cmake \
     ninja-build \
     libnccl-dev=2.28.9-1+cuda13.0 \
@@ -63,11 +55,7 @@ RUN uv pip install --system --no-cache-dir "torch==2.11.0" "nvidia-cudnn-cu13>=9
     echo "/opt/cudnn/lib" | sudo tee /etc/ld.so.conf.d/cudnn.conf >/dev/null && sudo ldconfig
 
 ENV CUDNN_PATH=/opt/cudnn
-# ${CPATH:+:${CPATH}} rather than :${CPATH} -- CPATH is unset in this base, and the
-# naive form leaves a trailing colon, which tells the compiler to also search the
-# current directory for headers. That is a real hazard here, since nv-grouped-gemm and
-# the other CUDA extensions are built from source in this image.
-ENV CPATH=${CUDNN_PATH}/include${CPATH:+:${CPATH}}
+ENV CPATH=${CUDNN_PATH}/include:${CPATH}
 ENV LD_LIBRARY_PATH=${CUDNN_PATH}/lib:${LD_LIBRARY_PATH}
 
 RUN uv pip install  --system --no-cache-dir \
