@@ -309,10 +309,6 @@ explicit = true
 skyrl-gym = { path = "./skyrl-gym", editable = true }
 # Match torch's CUDA variant (cu130).
 flashinfer-jit-cache = { index = "flashinfer-cu130", marker = "sys_platform == 'linux'" }
-# vllm comes straight from PyPI: that wheel links libcudart.so.13 and pulls
-# nvidia-cutlass-dsl[cu13], which is exactly what torch+cu130 supplies. The
-# `wheels.vllm.ai/0.26.0/cu129` index this used to need existed only to get a
-# libcudart.so.12 build back when torch was cu128.
 
 # torch-2.11 builds of these aren't published on PyPI, so they come from Astral's
 # prebuilt GPU index instead of wheels built by hand on personal forks. Astral
