@@ -208,6 +208,7 @@ class SaveWeightsOutput(BaseModel):
 class LoadWeightsInput(BaseModel):
     source_model_id: str
     checkpoint_id: str
+    load_optimizer: bool = True
 
 
 class LoadWeightsOutput(BaseModel):

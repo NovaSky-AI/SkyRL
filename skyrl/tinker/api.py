@@ -777,6 +777,7 @@ class SaveWeightsRequest(BaseModel):
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
+    optimizer: bool = True
     type: Literal["load_weights"] | None = None
 
 
@@ -1184,7 +1185,11 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
         session=session,
         request_type=types.RequestType.LOAD_WEIGHTS,
         model_id=request.model_id,
-        request_data=types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id),
+        request_data=types.LoadWeightsInput(
+            source_model_id=source_model_id,
+            checkpoint_id=checkpoint_id,
+            load_optimizer=request.optimizer,
+        ),
     )
 
     await session.commit()
