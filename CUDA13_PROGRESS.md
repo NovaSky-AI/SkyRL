@@ -4,8 +4,11 @@ Branch: `eric/cuda-13` → PR [NovaSky-AI/SkyRL#2040](https://github.com/NovaSky
 
 **Bottom line:** both review comments are factually wrong and need no code change. Locally,
 **292 GPU tests pass** across all six pytest-based GPU CI suites; the only 3 failures are an
-artifact of this workspace being a CUDA 12.8 box, not a defect in the PR. No source changes
-were needed — the branch is unmodified apart from this report.
+artifact of this workspace being a CUDA 12.8 box, not a defect in the PR.
+
+The branch has since also been bumped **Ray 2.56.0 → 2.57.0** (§6). Note the 292-test run
+above predates that bump and **cannot be repeated on this workspace**, because its Ray cluster
+is 2.56.0 and a 2.57.0 client refuses to connect.
 
 ---
 
@@ -119,9 +122,22 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/13.0.2/local_install
     && sudo sh cuda_13.0.2_580.95.05_linux.run --silent --toolkit && rm -rf cuda_13.0.2_580.95.05_linux.run
 ```
 
-So in CI, `/usr/local/cuda/lib64` resolves to the 13.0 tree and only `libcudart.so.13` is
-visible. The cu12.8 remnants of the base layer stay at `/usr/local/cuda-12.8` and off the
-path. The h100 job additionally runs on a cu130 image rather than this one.
+So in the images built from those Dockerfiles, `/usr/local/cuda/lib64` resolves to the 13.0
+tree and only `libcudart.so.13` is visible; the base layer's `cu12.8` remnants stay at
+`/usr/local/cuda-12.8`, off the loader path. (The base sets
+`LD_LIBRARY_PATH=/usr/local/cuda/lib64` — the symlink — confirmed from its registry config, so
+repointing the symlink is sufficient.)
+
+**But this is a live risk for the h100 job specifically, not merely local noise.** This
+workspace's image is
+`anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu128-megatron-2.10-te-efa-1.47:2` — the
+**cu128 counterpart of the h100 CI image itself** (§4.1 wants the `cu130` variant of that same
+name). That image is *not* built from `docker/Dockerfile.megatron`, so it never gets the
+13.0.2 runfile step, and its cu128 build has no CUDA 13 toolkit at all. Hence: if the cu130
+rebuild is produced by renaming a cu128-shaped image rather than genuinely moving to CUDA 13,
+the h100 suite will fail in CI with the exact error seen here. The rebuild must base on a
+cu130 tag or add the 13.0.2 runfile step. `CUDA13_HANDOFF.md` §2 carries the verification
+commands.
 
 **Not reproducible-away locally.** Ray workers inherit the raylet's environment, not the
 caller's, so overriding `LD_LIBRARY_PATH` for pytest does not reach the workers (verified:
@@ -151,8 +167,8 @@ nothing here and I have not validated it, so it is not proposed.
 Every GPU CI job spec was retargeted to images that were never published, so the workflows
 cannot start — they fail at image pull, before the entrypoint runs.
 
-- **Docker Hub (12 job specs):** `novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0` and
-  `-cu13.0-megatron`. The `novaskyai` org has 9 repos, including the `cu12.8` pair and no
+- **Docker Hub (12 job specs):** `novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0` and
+  `-cu13.0-megatron` (names now carry Ray 2.57.0). The `novaskyai` org has 9 repos, including the `cu12.8` pair and no
   `cu13.0` anything. There is no build/push automation in the repo — these are published
   out-of-band. You said you'd push these.
 - **Anyscale registry (h100 job):** the branch renamed
@@ -203,3 +219,142 @@ scope, so it is flagged, not fixed.
 | 3 h100 megatron tests | **Unverified** — needs a `/usr/local/cuda`→13.0 image |
 | 6 e2e training suites | **Not run** — need `WANDB_API_KEY` |
 | Full GPU CI green | Blocked on the missing cu13.0 images (§4.1) |
+
+---
+
+## 6. Ray 2.56.0 → 2.57.0
+
+Requested as a low-risk addition to this PR, and the dependency graph agrees: the lock diff is
+**one package, 17 lines**.
+
+```
+$ uv lock
+Resolved 464 packages in 35.65s
+Updated ray v2.56.0 -> v2.57.0
+$ git diff uv.lock | grep -E '^[-+](name|version) = ' | sort | uniq -c
+      1 -version = "2.56.0"
+      1 +version = "2.57.0"
+```
+
+Nothing else in the graph moved, and nothing constrains `ray` besides our own pin.
+
+### What changed
+
+- `pyproject.toml`: `ray[default]==2.57.0` and `ray==2.57.0`.
+- All 12 `ci/anyscale_*.yaml`: `ray_version: "2.57.0"`. Anyscale requires this to match the
+  Ray actually installed in the image.
+- **Image names, which embed the Ray version:** `novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0`,
+  `...-cu13.0-megatron`, and the h100 job's
+  `anyscale/image/skyrl-train-ray-2.57.0-slim-py312-cu130-megatron-2.10-te-efa-1.47:1`. These
+  are the names to build (§4.1) — the 2.56.0 names are now obsolete and were never published
+  either.
+- `docker/Dockerfile`, `docker/Dockerfile.megatron`: base tag →
+  `anyscale/ray:2.57.0-slim-py312-cu128`. `docker/Dockerfile.amd`: `ARG RAY_VERSION=2.57.0`.
+- Docs and the modal example: image tags and the "we suggest Ray x.y.z" prose.
+
+### Deliberately left alone
+
+- **`docs/.../installation.mdx` "Ray < 2.56.0" section.** The `< 2.56.0` threshold there is a
+  real behavioural boundary — below it you must install vllm in the base pip environment for
+  the uv + Ray integration to work. That is a property of Ray, not of our pin, so bumping the
+  number would make the docs assert something false about 2.56.0.
+- **`skyrl-agent/pyproject.toml`** (`override-dependencies = ["ray==2.56.0", ...]`). It is a
+  separate project with its own `uv.lock`, not a uv workspace member, and this PR does not
+  otherwise touch it. Bumping it means re-locking an unrelated package. Flagged, not done.
+
+### Base image: moved to the full cu130 tag
+
+The Dockerfiles previously based on `anyscale/ray:2.56.0-slim-py312-cu128` and relied on the
+CUDA 13.0.2 runfile repointing `/usr/local/cuda` to keep the base layer's CUDA 12 tree off the
+loader path. Both now base on the real thing:
+
+```
+FROM anyscale/ray:2.57.0-py312-cu130
+```
+
+At 2.57.0 Anyscale's `slim` variants stop at cu129, so a genuinely-CUDA-13 base means giving
+up `slim`:
+
+| Tag | Size (compressed, amd64) |
+|---|---|
+| `2.57.0-slim-py312-cu128` | 3.19 GB |
+| `2.57.0-py312-cu130` | **8.00 GB** |
+
+That size is a deliberate trade for a base with **no CUDA 12 tree at all** — nothing for
+Transformer Engine's libcudart scan to trip over, rather than a CUDA 12 tree merely hidden
+behind a symlink. Given §3, that robustness is worth paying for.
+
+#### What this switch required (items 3–4 found by building, not by inspection)
+
+1. **`ENV PATH=/home/ray/.local/bin:${PATH}` — required, not cosmetic.** The slim images put
+   `~/.local/bin` on `PATH`; the cu130 image does **not**:
+
+   | | slim cu128 | full cu130 |
+   |---|---|---|
+   | `PATH` includes `~/.local/bin` | yes | **no** |
+   | `User` | `ray` | `1000` |
+
+   The uv installer writes its binary there, so without this `ENV` the `RUN uv pip install
+   --system ...` step in `Dockerfile.megatron` fails with `uv: command not found`, and the CI
+   entrypoints' `uv run` would fail at runtime too. Caught by reading the base images' registry
+   configs, not by a build.
+
+2. **The CUDA runfile install was dropped.** Both Dockerfiles previously did
+
+   ```dockerfile
+   RUN wget .../cuda_13.0.2_580.95.05_linux.run && sudo sh ... --silent --toolkit
+   ```
+
+   which existed only to get a CUDA 13 `nvcc` for deepspeed onto a cu128 base. The cu130 base
+   already ships one — verified in the image itself:
+
+   ```
+   $ docker run --rm anyscale/ray:2.57.0-py312-cu130 nvcc --version
+   Cuda compilation tools, release 13.0, V13.0.88
+   ```
+
+   (Note V13.0.88 is the 13.0.2-level compiler, despite the base's `CUDA_VERSION=13.0.0`, so
+   nothing regresses versus the runfile.) Keeping it would have layered a runfile install over
+   the base's apt-managed toolkit in the same `/usr/local/cuda-13.0` prefix for ~4 GB and no
+   gain. Removing it roughly cancels the larger base: +4.8 GB of base, −4 GB of toolkit.
+
+3. **`--allow-change-held-packages` on the NCCL step — found by an actual build.** NVIDIA's
+   CUDA images `apt-mark hold` `libnccl2` (this base holds `2.27.7-1+cuda13.0`) so an
+   unrelated apt call cannot bump NCCL. `Dockerfile.megatron` pins
+   `libnccl2=2.28.9-1+cuda13.0` to match the pip stack's `nvidia-nccl-cu13`, which *is* a
+   change to a held package, and apt refuses it under plain `-y`:
+
+   ```
+   The following held packages will be changed: libnccl2
+   E: Held packages were changed and -y was used without --allow-change-held-packages
+   ```
+
+   The slim cu128 base did not hold it, so this is new with the base switch. Fixed with
+   `--allow-change-held-packages`, which scopes the override to that one step and leaves the
+   hold intact for later apt calls (`apt-mark unhold` would not).
+
+4. **Trailing-colon `CPATH`, also from the build log.** `ENV CPATH=${CUDNN_PATH}/include:${CPATH}`
+   emitted `UndefinedVar: Usage of undefined variable '$CPATH'` — `CPATH` is unset in this
+   base, so the naive form leaves a trailing colon, which tells the compiler to search the
+   *current directory* for headers. That matters here because nv-grouped-gemm and the other
+   CUDA extensions are built from source in this image. Changed to
+   `${CUDNN_PATH}/include${CPATH:+:${CPATH}}`. (`LD_LIBRARY_PATH` is set in this base, so the
+   adjacent line has no such problem.) Pre-existing, but only surfaced once a build ran.
+
+5. **Watch item: the cu130 base bundles its own cuDNN.** It sets
+   `NV_CUDNN_PACKAGE=libcudnn9-cuda-13=9.12.0.46-1`, which the slim cu128 base did not.
+   `Dockerfile.megatron` also pip-installs `nvidia-cudnn-cu13>=9.3` and prepends
+   `/opt/cudnn/lib` to `LD_LIBRARY_PATH`, so there are now two cuDNN 9 copies with the pip one
+   taking precedence. Both are cuDNN 9 for CUDA 13, so no cross-major conflict is expected,
+   but given how much time §3 cost, verify on first build:
+   `python -c "import transformer_engine.pytorch"` plus one fused-attention test.
+
+### Validation status — weaker than for the CUDA 13 work
+
+Verified: dependency resolution (above), and the CPU suites that CPU CI runs.
+
+**Not** verified: any GPU test, because this workspace cannot run one against Ray 2.57.0. Its
+cluster is 2.56.0, so a 2.57.0 client dies with `RuntimeError: Version mismatch`, and starting
+an isolated second cluster segfaults on this Anyscale node (it does so on 2.56.0 too, so that
+is an environment constraint rather than anything to do with 2.57.0). The first real GPU CI
+run is therefore the first genuine test of this bump.

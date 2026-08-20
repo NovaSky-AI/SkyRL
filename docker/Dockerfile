@@ -1,18 +1,30 @@
-# NOTE: the tag still says cu128 because Anyscale publishes no cu130 Ray image at
-# 2.56.0 (cu130 tags start at Ray 2.57.0, and none of them are `slim`). The base
-# tag only decides which CUDA the image ships preinstalled; every CUDA library we
-# actually load at runtime comes from the pip stack, which is cu13 throughout, and
-# the toolkit installed below repoints /usr/local/cuda at 13.0. Switch this to a
-# cu130 tag whenever the Ray pin moves to 2.57.0.
-FROM anyscale/ray:2.56.0-slim-py312-cu128
+# NOTE: this is the full (non-slim) cu130 Ray image. At 2.57.0 Anyscale's `slim`
+# variants stop at cu129, so a genuinely-CUDA-13 base means giving up `slim`: 8.0 GB
+# compressed against 3.2 GB for slim-cu128. What that buys is a base with no CUDA 12
+# tree at all, so there is nothing for Transformer Engine's fused attention to trip
+# over when it scans for libcudart -- rather than a cu128 base whose CUDA 12 tree is
+# merely kept off the loader path by repointing /usr/local/cuda. Every CUDA library we
+# actually load at runtime still comes from the pip stack, which is cu13 throughout.
+#
+# Unlike the slim images, this base's PATH does NOT include ~/.local/bin, which is
+# where the uv installer below puts its binary -- hence the explicit ENV PATH.
+FROM anyscale/ray:2.57.0-py312-cu130
 
 RUN sudo apt-get update -y && sudo apt-get install -y wget kmod libxml2 build-essential libnuma-dev
 
-# the cuda compiler here is needed for deepspeed
-RUN wget https://developer.download.nvidia.com/compute/cuda/13.0.2/local_installers/cuda_13.0.2_580.95.05_linux.run \
-    && sudo sh cuda_13.0.2_580.95.05_linux.run --silent --toolkit && rm -rf cuda_13.0.2_580.95.05_linux.run
+# No CUDA toolkit install here: the cu130 base already ships one, including the nvcc
+# that deepspeed needs. Verified in the base image:
+#   $ docker run --rm anyscale/ray:2.57.0-py312-cu130 nvcc --version
+#   Cuda compilation tools, release 13.0, V13.0.88
+# The cu128-based predecessor of this file had to install the toolkit by runfile to get
+# a CUDA 13 nvcc; doing that now would only layer a runfile install over the base's
+# apt-managed toolkit in the same /usr/local/cuda-13.0 prefix, for ~4 GB and no gain.
 
 RUN curl -LsSf https://astral.sh/uv/0.9.4/install.sh | sh
+# The uv installer writes to ~/.local/bin, which this base (unlike the slim images)
+# leaves off PATH. Without this, `uv` is not found either by the build steps below or
+# by the CI entrypoints at runtime.
+ENV PATH=/home/ray/.local/bin:${PATH}
 RUN echo "export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook" >> /home/ray/.bashrc
 
 RUN sudo apt-get update \

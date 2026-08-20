@@ -9,8 +9,16 @@ binary, so the image builds could not be done there.
 `mergeable_state: unstable`. `main` is **not** branch-protected, so there are no required
 status checks and no red check can physically block the merge button.
 
-**The whole remaining task:** three container images referenced by CI were renamed to cu13.0
-on this branch but never built. Build and publish them, then let GPU CI run.
+**The whole remaining task:** three container images referenced by CI were renamed on this
+branch (to cu13.0, and to Ray 2.57.0) but never built. Build and publish them, then let GPU
+CI run.
+
+> **The image names embed the Ray version.** This branch also bumps Ray 2.56.0 → 2.57.0, so
+> the images to build are `...ray-2.57.0-...`, **not** `...ray-2.56.0-...`. The 12 job specs
+> already declare `ray_version: "2.57.0"`, and Anyscale requires that to match the Ray
+> actually installed in the image. The Dockerfiles install Ray via their base tag
+> (`anyscale/ray:2.57.0-slim-py312-cu128`), so building from this branch gets this right
+> automatically — just don't hand-edit the tags back.
 
 ---
 
@@ -50,14 +58,14 @@ docker login   # needs push rights to the novaskyai org
 # 1) base image -- 6 job specs depend on it
 docker build --platform linux/amd64 \
   -f docker/Dockerfile \
-  -t novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0 .
-docker push novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0
+  -t novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0 .
+docker push novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0
 
 # 2) megatron image -- 5 job specs depend on it
 docker build --platform linux/amd64 \
   -f docker/Dockerfile.megatron \
-  -t novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0-megatron .
-docker push novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0-megatron
+  -t novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron .
+docker push novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron
 ```
 
 Expect these to be slow: each downloads and silently installs the 13.0.2 CUDA toolkit runfile
@@ -67,7 +75,7 @@ Expect these to be slow: each downloads and silently installs the 13.0.2 CUDA to
 the last CI failure):
 
 ```bash
-for r in skyrl-train-ray-2.56.0-py3.12-cu13.0 skyrl-train-ray-2.56.0-py3.12-cu13.0-megatron; do
+for r in skyrl-train-ray-2.57.0-py3.12-cu13.0 skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron; do
   curl -s "https://hub.docker.com/v2/repositories/novaskyai/$r/" | jq -r '.name // .message'
 done
 # Must print the two repo names. "object not found" means the push did not land.
@@ -85,7 +93,7 @@ build/push automation anywhere in the repo** (`.github/`, `ci/`, `docker/` conta
 `ci/anyscale_gpu_ci_h100.yaml` was renamed to:
 
 ```
-anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu130-megatron-2.10-te-efa-1.47:1
+anyscale/image/skyrl-train-ray-2.57.0-slim-py312-cu130-megatron-2.10-te-efa-1.47:1
 ```
 
 That image does not exist. Applying `run_h100_gpu_ci` to the PR failed in 7 seconds
@@ -110,12 +118,53 @@ job at the megatron image from §1. Note the constraints before choosing:
 - **Option A (needs the original author):** whoever built the cu128 image rebuilds it for
   cu130 and registers it under the same name with `:1`. Preserves EFA and the existing spec.
 - **Option B (repo-only, needs judgement):** repoint `ci/anyscale_gpu_ci_h100.yaml` at
-  `novaskyai/skyrl-train-ray-2.56.0-py3.12-cu13.0-megatron`. Its compute config is
+  `novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron`. Its compute config is
   `k8s-single-node-4h100:1` — a **single node**, so EFA (a multi-node interconnect) is
   plausibly unnecessary. This is a real change to CI topology, though: confirm with the
   maintainers rather than assuming, and be aware it changes what that job actually tests.
 
 Ask before picking. Do not silently switch the h100 job to a different image.
+
+### Whichever way you go: that image MUST put CUDA 13 on the loader path
+
+This is the one real trap. The h100 image is **not** built from `docker/Dockerfile.megatron`,
+so it does not inherit that file's CUDA 13.0.2 toolkit step. Its existing cu128 build has no
+CUDA 13 toolkit at all — verified by inspecting a workspace running exactly that image
+(`anyscale/image/skyrl-train-ray-2.56.0-slim-py312-cu128-megatron-2.10-te-efa-1.47:2`): only
+`/usr/local/cuda-12.8` is present and `/usr/local/cuda` points at it.
+
+Run the h100 suite on such an image with this branch's cu13 pip stack and 3 tests fail:
+
+```
+RuntimeError: Multiple libcudart libraries found: libcudart.so.12 and libcudart.so.13
+```
+
+because the OS supplies `libcudart.so.12` via `LD_LIBRARY_PATH=.../usr/local/cuda/lib64` while
+pip supplies `libcudart.so.13`, and TE's cuDNN fused attention refuses to run with both
+visible. That is precisely what happened during local validation (see §5), and it will happen
+in CI too if the cu130 rebuild is a cu128 image with a new name.
+
+So the rebuild must genuinely be CUDA 13 — base it on a cu130 tag, as
+`docker/Dockerfile[.megatron]` now do (`anyscale/ray:2.57.0-py312-cu130`), or otherwise install
+a CUDA 13 toolkit. Verify before wiring it into CI:
+
+```bash
+# inside the built image
+readlink -f /usr/local/cuda        # want /usr/local/cuda-13.0 (NOT cuda-12.8)
+echo "$LD_LIBRARY_PATH"
+ls /usr/local/cuda/lib64/libcudart.so.*   # want only libcudart.so.13
+```
+
+The two Docker Hub images in §1 are fine on this point by construction: they now base on
+`anyscale/ray:2.57.0-py312-cu130`, which has no CUDA 12 tree at all. (They previously used a
+cu128 slim base and depended on the runfile repointing `/usr/local/cuda`; the switch to a real
+cu130 base removes that dependency.) Still worth confirming with the same three commands on
+first build, since no one has built them yet.
+
+Note one consequence of that base for the build: it does **not** put `~/.local/bin` on `PATH`
+the way the slim images do, so the Dockerfiles now set `ENV PATH=/home/ray/.local/bin:${PATH}`
+after installing uv. Without it the build dies at `uv pip install` with `uv: command not
+found`. Do not "tidy" that line away.
 
 ---
 
@@ -170,6 +219,14 @@ are missing. Trigger them manually with `workflow_dispatch` if you want pre-merg
 
 Run on a 4×H100 workspace, executing each `ci/gpu_ci_run_*.sh` pytest invocation verbatim.
 **292 tests passed.** See `CUDA13_PROGRESS.md` on this branch for the full evidence.
+
+> **Caveat: that run was on Ray 2.56.0, before the 2.57.0 bump, and could not be repeated.**
+> This workspace's Ray cluster is 2.56.0, so a 2.57.0 client refuses to connect
+> (`RuntimeError: Version mismatch`), and starting a second, isolated cluster segfaults on
+> this Anyscale node. So the Ray bump itself is validated only by dependency resolution (a
+> clean one-package lock diff, `ray v2.56.0 -> v2.57.0`) plus the CPU suites — **not** by any
+> GPU test. Treat the first CI run as the real test of the Ray upgrade, and do not assume the
+> 292 figure below still holds for it.
 
 | Suite | Result |
 |---|---|
