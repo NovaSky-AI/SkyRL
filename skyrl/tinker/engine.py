@@ -275,6 +275,10 @@ class TinkerEngine:
         if hasattr(self.backend, "set_inference_state_publisher"):
             self.backend.set_inference_state_publisher(self._write_inference_state_to_db)
 
+        is_colocated = bool(config.backend_config.get("trainer.placement.colocate_all", True))
+        if not is_colocated and hasattr(self.backend, "initialize_base_inference"):
+            self.backend.initialize_base_inference()
+
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()
 

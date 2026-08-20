@@ -1744,8 +1744,8 @@ class SkyRLTrainConfig(BaseConfig):
                 "data.dataloader.persistent_workers requires num_workers > 0, but it was set explicitly to 0."
             )
 
-        # TODO(devpatel): Bandaid solution, replace this once we have a better
-        # solution for LoRA performance degradation on the vLLM side
+        # LoRA in eager mode is slower, but eager execution can be required for
+        # model or hardware compatibility. Respect the explicit user choice.
         from skyrl.backends.skyrl_train.inference_servers.utils import (
             _uses_lora_weight_sync,
         )
@@ -1757,9 +1757,7 @@ class SkyRLTrainConfig(BaseConfig):
             warnings.warn(
                 "LoRA is enabled but inference_engine.enforce_eager=true. "
                 "This combination causes significant performance degradation (2-3x slower generation). "
-                "Automatically setting enforce_eager=false for better performance. "
             )
-            ie_cfg.enforce_eager = False
 
     @classmethod
     def from_cli_overrides(cls, args: Union[List[str], dict]) -> "SkyRLTrainConfig":

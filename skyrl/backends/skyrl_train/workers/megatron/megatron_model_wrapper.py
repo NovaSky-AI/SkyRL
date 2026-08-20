@@ -13,6 +13,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
     model_packs_sequences_internally,
+    model_supports_output_processor,
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
@@ -460,7 +461,7 @@ class MegatronModelWrapper:
                     remove_microbatch_padding=self.remove_microbatch_padding,
                 )
 
-            if self._fused_lm_head:
+            if self._fused_lm_head and model_supports_output_processor(model):
                 # Fused LM-head inference: the output_processor returns decoder
                 # hidden states (not logits) and stashes the LM-head weight, so
                 # collection_func can fold the projection into the chunked
@@ -1123,7 +1124,7 @@ class MegatronModelWrapper:
             student_hidden = None
             student_model = None
             with maybe_capture_mtp_hidden(model, mtp_enabled) as capture:
-                if self._fused_lm_head:
+                if self._fused_lm_head and model_supports_output_processor(model):
                     # output_processor returns decoder hidden states (not logits) and
                     # stashes the LM-head weight; loss_func then fuses the projection.
                     _op_ctx: dict = {}

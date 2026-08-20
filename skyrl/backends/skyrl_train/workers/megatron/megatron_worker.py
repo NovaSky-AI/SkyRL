@@ -548,7 +548,7 @@ class MegatronWorker:
         if lora_type == "lora":
             self.lora_cls = LoRA(
                 target_modules=(
-                    ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]
+                    ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
                     if lora_config.target_modules == "all-linear"
                     else lora_config.target_modules
                 ),
@@ -1416,7 +1416,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         adapter_state = {}
         for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
-            adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
+            # ConditionalGeneration models nest the decoder below
+            # ``language_model`` in vLLM, while Megatron Bridge exports the
+            # inverse segment order. Unmapped keys are silently ignored by the
+            # PEFT loader, leaving sampling on the frozen base model.
+            if name.startswith("model.language_model."):
+                name = "language_model.model." + name[len("model.language_model.") :]
+            adapter_state[f"base_model.model.{name}"] = tensor.clone()
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
