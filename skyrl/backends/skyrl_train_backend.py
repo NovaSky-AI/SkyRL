@@ -808,6 +808,21 @@ class SkyRLTrainBackend(AbstractBackend):
         if role == "critic":
             return loss_fn, loss_fn_config
 
+        if loss_fn == "gspo":
+            normalized_config = dict(loss_fn_config or {})
+            clip_low_threshold = normalized_config.pop("clip_low_threshold", None)
+            clip_high_threshold = normalized_config.pop("clip_high_threshold", None)
+            if clip_low_threshold is None or clip_high_threshold is None:
+                raise ValueError("loss_fn='gspo' requires clip_low_threshold and clip_high_threshold")
+            normalized_config.update(
+                eps_clip_low=1.0 - clip_low_threshold,
+                eps_clip_high=clip_high_threshold - 1.0,
+                loss_reduction="sequence_mean",
+                use_entropy_loss=False,
+                use_kl_loss=False,
+            )
+            return loss_fn, normalized_config
+
         if loss_fn == "dppo":
             # DPPO thresholds live in the nested `algorithm.dppo` sub-config, but
             # Tinker's loss_fn_config is a flat float dict. Re-nest so the
@@ -831,6 +846,47 @@ class SkyRLTrainBackend(AbstractBackend):
         if clip_high_threshold is not None:
             normalized_config["eps_clip_high"] = clip_high_threshold - 1.0
         return ("regular" if loss_fn == "ppo" else "gspo"), normalized_config or None
+
+    @staticmethod
+    def _normalize_gspo_batch(batch: TrainingInputBatch) -> None:
+        """Apply Tinker's sequence-mean GSPO reduction before DP sharding."""
+        advantages = batch["advantages"]
+        loss_mask = advantages.ne(0).to(batch["loss_mask"].dtype)
+        token_counts = loss_mask.sum(dim=-1, keepdim=True)
+        trainable_sequences = token_counts.squeeze(-1).gt(0)
+        num_trainable_sequences = trainable_sequences.sum().clamp(min=1)
+        batch["advantages"] = advantages / token_counts.clamp(min=1) / num_trainable_sequences
+        batch["loss_mask"] = loss_mask
+
+    @staticmethod
+    def _select_trainable_gspo_rows(batch: TrainingInputBatch) -> tuple[TrainingInputBatch, list[int]]:
+        """Drop inactive rows while preserving all-zero-batch optimizer semantics."""
+        trainable_rows = batch["loss_mask"].ne(0).any(dim=-1)
+        trainable_indices = trainable_rows.nonzero(as_tuple=False).flatten()
+        if trainable_indices.numel() == 0 or trainable_indices.numel() == batch.batch_size:
+            return batch, list(range(batch.batch_size))
+
+        selected = TrainingInputBatch(
+            {key: None if value is None else value[trainable_indices] for key, value in batch.items()}
+        )
+        selected.metadata = batch.metadata
+        return selected, trainable_indices.tolist()
+
+    @staticmethod
+    def _get_gspo_pruning_metrics(
+        original_token_counts: list[int], submitted_indices: set[int], start_idx: int, end_idx: int
+    ) -> dict[str, float]:
+        """Report one SDK chunk's pruning counts so combined futures sum to the batch total."""
+        request_indices = range(start_idx, end_idx)
+        request_submitted_indices = [index for index in request_indices if index in submitted_indices]
+        submitted_tokens = sum(original_token_counts[index] for index in request_submitted_indices)
+        original_tokens = sum(original_token_counts[index] for index in request_indices)
+        return {
+            "skyrl.ai/submitted_datums:sum": float(len(request_submitted_indices)),
+            "skyrl.ai/skipped_datums:sum": float(end_idx - start_idx - len(request_submitted_indices)),
+            "skyrl.ai/submitted_tokens:sum": float(submitted_tokens),
+            "skyrl.ai/skipped_tokens:sum": float(original_tokens - submitted_tokens),
+        }
 
     def forward_backward(
         self,
@@ -860,6 +916,12 @@ class SkyRLTrainBackend(AbstractBackend):
         ):
             raise ValueError("Critic forward_backward requires values and returns for every response token")
         batch = self._to_training_batch(prepared_batch, role)
+        original_batch_size = batch.batch_size
+        original_token_counts = [int(count) for count in batch["attention_mask"].sum(dim=-1).tolist()]
+        submitted_indices = list(range(original_batch_size))
+        if loss_fn == "gspo":
+            self._normalize_gspo_batch(batch)
+            batch, submitted_indices = self._select_trainable_gspo_rows(batch)
         micro_bs = (
             self._cfg.trainer.micro_train_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
         )
@@ -897,7 +959,14 @@ class SkyRLTrainBackend(AbstractBackend):
         if pad_size > 0 and per_sample_outputs:
             per_sample_outputs = per_sample_outputs[:-pad_size]
 
+        if per_sample_outputs and len(submitted_indices) != original_batch_size:
+            restored_outputs = [{"logprobs": list(logprobs)} for logprobs in prepared_batch.all_sampling_logprobs]
+            for index, output in zip(submitted_indices, per_sample_outputs, strict=True):
+                restored_outputs[index] = output
+            per_sample_outputs = restored_outputs
+
         metrics = self._extract_metrics(data.metrics)
+        submitted_index_set = set(submitted_indices)
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
@@ -917,10 +986,15 @@ class SkyRLTrainBackend(AbstractBackend):
                     loss_fn_outputs.append(formatted_output)
             else:
                 loss_fn_outputs = [{} for _ in range(end_idx - start_idx)]
+            request_metrics = dict(metrics)
+            if loss_fn == "gspo":
+                request_metrics.update(
+                    self._get_gspo_pruning_metrics(original_token_counts, submitted_index_set, start_idx, end_idx)
+                )
             results[request_id] = types.ForwardBackwardOutput(
                 loss_fn_output_type=data.loss_fn_output_type,
                 loss_fn_outputs=loss_fn_outputs,
-                metrics=metrics,
+                metrics=request_metrics,
             )
         return results
 

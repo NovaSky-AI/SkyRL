@@ -8,8 +8,8 @@ This page describes how SkyRL implements the Tinker API, including the system ar
 
 The integration is organized in three high-level layers:
 
-1. **API Layer** (`skyrl.tinker.api`) - FastAPI HTTP server that accepts Tinker API requests, stores them in a database, and returns future IDs for async polling
-2. **Engine Layer** (`skyrl.tinker.engine`) - Background subprocess that polls the database, batches pending requests, and dispatches them to the backend
+1. **API Layer** (`skyrl.tinker.api`) - FastAPI HTTP server that accepts Tinker API requests and returns future IDs for async polling. It keeps ordered training requests and forwarded sample futures in memory. SQLite stores durable model, session, and checkpoint records.
+2. **Engine Layer** (`skyrl.tinker.engine`) - Background subprocess that receives training requests through a private Unix socket, batches compatible requests, and dispatches them to the backend. Database-backed model creation and sampling requests keep their existing path.
 3. **Backend Layer** (`skyrl.backends`) - Translates Tinker operations into training and inference calls, managing Ray workers, FSDP/Megatron training, and vLLM inference
 
 <div style={{width: "80%", margin: "0 auto"}}>
@@ -29,10 +29,10 @@ Client (tinker SDK)
     │
     ▼
 API Server (FastAPI)
-    │  Writes request to SQLite DB
+    │  Validates, orders, and bounds requests in memory
     ▼
 Background Engine (subprocess)
-    │  Polls DB, batches requests
+    │  Claims ready requests through a private Unix socket
     ▼
 SkyRL-Train Backend
     │  Converts Tinker batch → SkyRL TrainingInputBatch
@@ -43,8 +43,12 @@ RayPPOTrainer.dispatch
 GPU Workers (FSDP or Megatron)
     │  Execute forward/backward/optim
     ▼
-Results aggregated → DB updated → Client polls future
+Results returned through the socket → Client polls in-memory future
 ```
+
+The API retains each request body until the engine confirms receipt. It then releases the API copy. Oversized requests return HTTP 413. Per-model count and total-byte limits return HTTP 429 before memory grows without a bound. The queue reserves capacity for a missing sequence ID so later requests cannot block their own gap filler.
+
+Training operations and their futures are not durable. If the API controller or engine process restarts, pending and completed in-memory results are lost and `retrieve_future` returns 404. The API and engine stop together, so no request can continue against an empty controller. On startup, the API marks training work and checkpoints left pending by an older process as failed. Completed checkpoints remain available, but the client must resume from one and resubmit work after a restart.
 
 ### `forward_backward()`
 
@@ -71,6 +75,9 @@ Sampling requests (`sample`) go through the following lifecycle:
 Client calls sample()
     │
     ▼
+API Server (FastAPI)
+    │  Creates an in-memory future
+    ▼
 SkyRL-Train Backend
     │  Converts Tinker SamplingParams → vLLM params
     ▼
@@ -83,10 +90,10 @@ RemoteInferenceClient
 Inference Workers (vLLM)
     │  Generate tokens with logprobs
     ▼
-Results aggregated → GeneratedSequence objects returned
+Results resolve the in-memory future → GeneratedSequence objects returned
 ```
 
-The `sample()` call is a fairly lightweight wrapper around SkyRL-Train's vLLM inference engines. The backend translates Tinker `SamplingParams` to vLLM format (e.g., `stop_strings` → `stop`, `stop_tokens` → `stop_token_ids`) and delegates prompts to the `RemoteInferenceClient`. `RemoteInferenceClient` forwards the requests to an instance of [vLLM Router](https://github.com/vllm-project/router), which handles load balancing and sticky routing across vLLM workers.
+The `sample()` call is a fairly lightweight wrapper around SkyRL-Train's vLLM inference engines. Non-colocated and external inference requests bypass the engine database: the API owns their futures and signals completion with `asyncio.Event`. The backend translates Tinker `SamplingParams` to vLLM format (e.g., `stop_strings` → `stop`, `stop_tokens` → `stop_token_ids`) and delegates prompts to the `RemoteInferenceClient`. `RemoteInferenceClient` forwards the requests to an instance of [vLLM Router](https://github.com/vllm-project/router), which handles load balancing and sticky routing across vLLM workers.
 
 
 ## Weight Sync
@@ -156,9 +163,10 @@ SkyRL-Train's `PolicyLossRegistry` also contains additional loss functions (`reg
 The Tinker API is inherently asynchronous:
 
 1. Clients submit requests and receive a `request_id` (future)
-2. The background engine batches compatible requests (e.g., multiple `forward_backward` calls for the same model)
-3. Barrier operations (`optim_step`, `load_checkpoint`) block until prior operations complete
-4. Clients poll `retrieve_future` to get results
+2. The API holds out-of-order requests until each model has a continuous sequence
+3. The background engine batches compatible requests (e.g., multiple `forward_backward` calls for the same model)
+4. `optim_step` and checkpoint operations wait until prior operations complete
+5. Clients poll `retrieve_future` to get results
 
 This design allows the engine to batch small requests for better GPU utilization and to pipeline operations when possible.
 
