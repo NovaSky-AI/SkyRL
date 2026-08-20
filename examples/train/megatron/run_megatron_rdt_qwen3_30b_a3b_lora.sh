@@ -1,6 +1,6 @@
 set -x
 
-# Disaggregated GRPO for Qwen3-30B-A3B (LoRA) on GSM8K with Megatron and
+# Disaggregated GRPO for Qwen3-30B-A3B (full fine-tuning) on GSM8K with Megatron and
 # RDT (Ray Direct Transport / NIXL) sharded weight sync.
 # Runs on 3 nodes of 8xH100s: 2 trainer nodes + 1 inference node.
 #
@@ -55,10 +55,6 @@ MEGATRON_ETP=1
 NUM_INFERENCE_ENGINES=1
 INFERENCE_ENGINE_TP=8
 
-# LoRA configuration (merged into full weights at each sync)
-LORA_RANK=128
-LORA_ALPHA=128
-
 # large-model engines can take a while to load weights on first start
 export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
 
@@ -76,8 +72,6 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.85 \
   generator.inference_engine.weight_sync_backend=$WEIGHT_SYNC_BACKEND \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
-  trainer.policy.model.lora.rank=$LORA_RANK \
-  trainer.policy.model.lora.alpha=$LORA_ALPHA \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
@@ -102,8 +96,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=false \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/rdt_qwen3_30b_a3b_lora" \
+  trainer.ckpt_path="$HOME/ckpts/rdt_qwen3_30b_a3b" \
   trainer.logger="$LOGGER" \
   trainer.project_name="skyrl-rdt" \
-  trainer.run_name="rdt_qwen3_30b_a3b_lora_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}" \
+  trainer.run_name="rdt_qwen3_30b_a3b_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}" \
   $@

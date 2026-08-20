@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 # Defaults for the must-agree wire knobs (mirror the vLLM sharded_rdt defaults).
 _DEFAULT_NUM_RDT_BUFFERS = 2
-_DEFAULT_ARENA_PRESIZE_GB = 0.0
+_DEFAULT_BUFFER_PRESIZE_GB = 0.0
 # Gathered-but-unfreed groups the trainer's gather loop runs ahead by; bounds
 # trainer-resident memory at lookahead + 1 groups (see sharded_rdt_trainer.
 # DEFAULT_GATHER_LOOKAHEAD). 1 = while the consumers pull group N, group N+1 is
@@ -1571,7 +1571,7 @@ class RdtWeightSyncSender:
             num_consumers=self._world_size,
             trainer_actor_namespace=self._namespace,
             num_rdt_buffers=int(_knob("SKYRL_RDT_NUM_BUFFERS", _DEFAULT_NUM_RDT_BUFFERS)),
-            arena_presize_gb=float(_knob("SKYRL_RDT_ARENA_PRESIZE_GB", _DEFAULT_ARENA_PRESIZE_GB)),
+            buffer_presize_gb=float(_knob("SKYRL_RDT_BUFFER_PRESIZE_GB", _DEFAULT_BUFFER_PRESIZE_GB)),
             pack_check=os.environ.get("SKYRL_RDT_PACK_CHECK") == "1",
             gather_lookahead=int(_knob("SKYRL_RDT_LOOKAHEAD", _DEFAULT_GATHER_LOOKAHEAD)),
             # Resolved here, not in the sidecar: the sidecar is a Ray actor that

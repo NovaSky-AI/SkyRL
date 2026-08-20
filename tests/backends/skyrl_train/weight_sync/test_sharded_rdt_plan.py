@@ -21,18 +21,18 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
     ALLOWED_OPS,
     SUPPORTED_OPS,
     RdtRouter,
-    arena_alloc_bytes,
     assign_producer_indices,
+    buffer_alloc_bytes,
 )
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
     _dtype_from_name,
 )
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_lazy import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_fake import (
     BakeSink,
-    LazyRDTTensor,
+    FakeRDTTensor,
     _Scatter,
-    _UnsupportedLazyOp,
+    _UnsupportedFakeOp,
 )
 
 META = torch.device("meta")
@@ -134,20 +134,20 @@ def _one_module_per_layer(n_layers, *, dtype="bfloat16", numel=4):
 
 
 # ---------------------------------------------------------------------------
-# LazyRDTTensor: op-chain recording
+# FakeRDTTensor: op-chain recording
 # ---------------------------------------------------------------------------
 
 
-class TestLazyOpChains:
+class TestFakeOpChains:
     """Every allowlisted op must append itself to the chain and hand back a
     child whose shape/dtype PyTorch itself computed. The chain is the wire
     format the producer replays, so its exact contents are load-bearing."""
 
-    def _lazy(self, shape=(4, 6), dtype=torch.bfloat16, sink=None):
-        return LazyRDTTensor(name="w", shape=torch.Size(shape), dtype=dtype, device=META, sink=sink)
+    def _fake(self, shape=(4, 6), dtype=torch.bfloat16, sink=None):
+        return FakeRDTTensor(name="w", shape=torch.Size(shape), dtype=dtype, device=META, sink=sink)
 
-    def test_bare_lazy_has_metadata_but_no_chain(self):
-        t = self._lazy()
+    def test_bare_fake_has_metadata_but_no_chain(self):
+        t = self._fake()
         assert t.shape == (4, 6)
         assert t.dtype is torch.bfloat16
         assert t._key() == ("w", ())
@@ -168,18 +168,18 @@ class TestLazyOpChains:
         ],
     )
     def test_single_return_op_appends_one_spec(self, call, expect_op, expect_shape):
-        child = call(self._lazy())
-        assert isinstance(child, LazyRDTTensor)
+        child = call(self._fake())
+        assert isinstance(child, FakeRDTTensor)
         assert child._key() == ("w", (expect_op,))
         assert tuple(child.shape) == expect_shape
 
     def test_squeeze_records_its_argument(self):
-        child = self._lazy(shape=(1, 4)).squeeze(0)
+        child = self._fake(shape=(1, 4)).squeeze(0)
         assert child._key() == ("w", (("squeeze", (0,), ()),))
         assert tuple(child.shape) == (4,)
 
     def test_chains_compose_in_call_order(self):
-        child = self._lazy().t().narrow(0, 0, 3).flatten()
+        child = self._fake().t().narrow(0, 0, 3).flatten()
         assert child._key() == (
             "w",
             (
@@ -191,7 +191,7 @@ class TestLazyOpChains:
         assert tuple(child.shape) == (12,)
 
     def test_kwargs_are_frozen_sorted_for_hashability(self):
-        child = self._lazy().narrow(dim=0, start=1, length=2)
+        child = self._fake().narrow(dim=0, start=1, length=2)
         op, args, kwargs = child._key()[1][0]
         assert (op, args) == ("narrow", ())
         assert kwargs == (("dim", 0), ("length", 2), ("start", 1))
@@ -201,7 +201,7 @@ class TestLazyOpChains:
     def test_multi_return_op_emits_one_child_per_output(self, op, n):
         """chunk/unbind hand back a tuple; each child carries the base op plus a
         trailing __getitem__(i) so the producer can index the replayed result."""
-        parts = getattr(self._lazy(), op)(*((n,) if op == "chunk" else ()), 0)
+        parts = getattr(self._fake(), op)(*((n,) if op == "chunk" else ()), 0)
         assert isinstance(parts, tuple)
         assert len(parts) == n
         for i, part in enumerate(parts):
@@ -210,16 +210,16 @@ class TestLazyOpChains:
             assert index == ("__getitem__", (i,), ())
 
     def test_op_chain_is_hashable_as_a_fetch_key(self):
-        keys = {self._lazy().t()._key(), self._lazy().t()._key()}
+        keys = {self._fake().t()._key(), self._fake().t()._key()}
         assert len(keys) == 1, "equal chains must collapse — they dedup pull keys"
 
 
-class TestLazyUnsupportedOps:
+class TestFakeUnsupportedOps:
     """Anything that needs real data must fail loudly at bake time rather than
     silently transferring the wrong bytes."""
 
-    def _lazy(self):
-        return LazyRDTTensor(
+    def _fake(self):
+        return FakeRDTTensor(
             name="w",
             shape=torch.Size((4,)),
             dtype=torch.bfloat16,
@@ -239,43 +239,43 @@ class TestLazyUnsupportedOps:
         ids=["to", "float", "add", "mul", "sum"],
     )
     def test_data_dependent_ops_raise(self, call):
-        with pytest.raises(_UnsupportedLazyOp):
-            call(self._lazy())
+        with pytest.raises(_UnsupportedFakeOp):
+            call(self._fake())
 
     def test_error_names_the_weight_and_the_chain(self):
-        with pytest.raises(_UnsupportedLazyOp) as exc:
-            self._lazy().narrow(0, 0, 2).float()
+        with pytest.raises(_UnsupportedFakeOp) as exc:
+            self._fake().narrow(0, 0, 2).float()
         msg = str(exc.value)
         assert "'w'" in msg
         assert "narrow" in msg
 
     def test_unsupported_is_a_notimplementederror(self):
         """Callers distinguish "this backend can't handle the loader" from bugs."""
-        assert issubclass(_UnsupportedLazyOp, NotImplementedError)
+        assert issubclass(_UnsupportedFakeOp, NotImplementedError)
 
 
 class TestBakeRecording:
-    """During the dry run the lazy's ``copy_`` is the data sink: it records the
+    """During the dry run the fake's ``copy_`` is the data sink: it records the
     source chain plus the meta destination's strided region and moves nothing."""
 
-    def _recorder_and_lazy(self, shape=(4, 6)):
+    def _recorder_and_fake(self, shape=(4, 6)):
         rec = BakeSink()
-        lazy = LazyRDTTensor(
+        fake = FakeRDTTensor(
             name="w",
             shape=torch.Size(shape),
             dtype=torch.bfloat16,
             device=META,
             sink=rec,
         )
-        return rec, lazy
+        return rec, fake
 
     def test_copy_records_the_destination_region(self):
-        rec, lazy = self._recorder_and_lazy()
+        rec, fake = self._recorder_and_fake()
         layer = _FakeLayer("q_proj")
         param = torch.empty((8, 6), dtype=torch.bfloat16, device=META)
         dest = param.narrow(0, 4, 4)  # the second half of a fused param
         rec.current = (layer, "weight")
-        dest.copy_(lazy)
+        dest.copy_(fake)
 
         (recorded,) = rec.copies_by_layer[layer]
         assert recorded.src == ("w", ())
@@ -285,25 +285,25 @@ class TestBakeRecording:
         assert recorded.stride == (6, 1)
 
     def test_copy_marks_the_source_name_live(self):
-        rec, lazy = self._recorder_and_lazy()
+        rec, fake = self._recorder_and_fake()
         rec.current = (_FakeLayer("l"), "weight")
-        torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(lazy)
+        torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(fake)
         assert rec.copied_names == {"w"}
 
     def test_unattributed_copy_is_live_but_unrecorded(self):
         """A copy_ with no loader stamp cannot be attributed to a param, so its
         module must fall back to the plain load — but the name still moved data."""
-        rec, lazy = self._recorder_and_lazy()
+        rec, fake = self._recorder_and_fake()
         rec.current = None
-        torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(lazy)
+        torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(fake)
         assert rec.copied_names == {"w"}
         assert dict(rec.copies_by_layer) == {}
 
     def test_copies_are_grouped_by_module_in_call_order(self):
-        rec, _ = self._recorder_and_lazy()
+        rec, _ = self._recorder_and_fake()
         layer = _FakeLayer("gate_up")
         for i, name in enumerate(("gate", "up")):
-            lazy = LazyRDTTensor(
+            fake = FakeRDTTensor(
                 name=name,
                 shape=torch.Size((4,)),
                 dtype=torch.bfloat16,
@@ -312,17 +312,17 @@ class TestBakeRecording:
             )
             param = torch.empty((8,), dtype=torch.bfloat16, device=META)
             rec.current = (layer, "weight")
-            param.narrow(0, 4 * i, 4).copy_(lazy)
+            param.narrow(0, 4 * i, 4).copy_(fake)
         assert [c.src[0] for c in rec.copies_by_layer[layer]] == ["gate", "up"]
         assert [c.offset for c in rec.copies_by_layer[layer]] == [0, 4]
 
     def test_recording_a_sliced_source(self):
         """The chain on the source and the region on the dest are independent."""
-        rec, lazy = self._recorder_and_lazy(shape=(8, 6))
+        rec, fake = self._recorder_and_fake(shape=(8, 6))
         layer = _FakeLayer("k_proj")
         rec.current = (layer, "weight")
         param = torch.empty((4, 6), dtype=torch.bfloat16, device=META)
-        param.copy_(lazy.narrow(0, 2, 4))
+        param.copy_(fake.narrow(0, 2, 4))
         (recorded,) = rec.copies_by_layer[layer]
         assert recorded.src == ("w", (("narrow", (0, 2, 4), ()),))
         assert recorded.shape == (4, 6)
@@ -333,10 +333,10 @@ class TestBakeRecording:
         POST-chain dtype: taking it from the source name's metadata instead sizes
         the slice with the wrong itemsize and shifts every later slice in the
         chunk, carving the packed blob differently on the two sides."""
-        rec, lazy = self._recorder_and_lazy(shape=(4,))
+        rec, fake = self._recorder_and_fake(shape=(4,))
         layer = _FakeLayer("reinterpreted")
         rec.current = (layer, "weight")
-        viewed = lazy.view(torch.float32)  # 4 x bf16 -> 2 x f32
+        viewed = fake.view(torch.float32)  # 4 x bf16 -> 2 x f32
         param = torch.empty((2,), dtype=torch.float32, device=META)
         param.copy_(viewed)
 
@@ -627,7 +627,7 @@ class TestChunkModuleScatters:
         ]
 
     def test_scatters_carry_their_own_dtype_and_nbytes(self):
-        """dtype rides the record from the bake, where it is the lazy's dtype
+        """dtype rides the record from the bake, where it is the fake's dtype
         AFTER its op chain — not a plan-time lookup of the source name, which
         would be wrong for any chain that reinterprets dtype."""
         layer = _FakeLayer("l")
@@ -970,20 +970,20 @@ class TestSignalCompleteness:
 # ---------------------------------------------------------------------------
 
 
-class TestArenaAllocBytes:
+class TestBufferAllocBytes:
     def test_rounds_up_to_a_coarse_256mb_boundary(self):
-        assert arena_alloc_bytes(1) == 256 << 20
-        assert arena_alloc_bytes(256 << 20) == 256 << 20
-        assert arena_alloc_bytes((256 << 20) + 1) == 512 << 20
+        assert buffer_alloc_bytes(1) == 256 << 20
+        assert buffer_alloc_bytes(256 << 20) == 256 << 20
+        assert buffer_alloc_bytes((256 << 20) + 1) == 512 << 20
 
     def test_presize_is_a_floor_not_a_cap(self):
-        assert arena_alloc_bytes(1, presize=3 << 30) == 3 << 30
+        assert buffer_alloc_bytes(1, presize=3 << 30) == 3 << 30
         big = 4 << 30
-        assert arena_alloc_bytes(big, presize=1 << 30) == big
+        assert buffer_alloc_bytes(big, presize=1 << 30) == big
 
     def test_never_returns_less_than_requested(self):
         for nbytes in (1, 1 << 20, (700 << 20) + 3):
-            assert arena_alloc_bytes(nbytes) >= nbytes
+            assert buffer_alloc_bytes(nbytes) >= nbytes
 
 
 class TestLayerwiseGroups:
@@ -1185,12 +1185,12 @@ class TestOpAllowlistAgreement:
     def test_transpose_via_t_is_serveable(self):
         """The specific regression: a chain recorded from ``.t()`` must pass the
         producer's guard."""
-        lazy = LazyRDTTensor(
+        fake = FakeRDTTensor(
             name="w",
             shape=torch.Size((4, 6)),
             dtype=torch.bfloat16,
             device=META,
             sink=None,
         )
-        op, _args, _kwargs = lazy.t()._key()[1][0]
+        op, _args, _kwargs = fake.t()._key()[1][0]
         assert op in ALLOWED_OPS

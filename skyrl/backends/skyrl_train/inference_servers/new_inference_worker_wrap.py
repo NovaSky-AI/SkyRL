@@ -218,7 +218,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
 
         Called once per sync (the engine pre-built its static whole-model plan at
         init, so update_info is empty). The engine pulls every slice over NIXL,
-        pipelined across its receive-arena ring, and DEFERS the GPU
+        pipelined across its receive-buffer ring, and DEFERS the GPU
         post-processing (materialize/scatter/quant/kernel-copy) to background
         threads — so, unlike the ipc/nccl paths, we do NOT synchronize here.
         skyrl_finish_weight_update drains the deferred work before finalize.

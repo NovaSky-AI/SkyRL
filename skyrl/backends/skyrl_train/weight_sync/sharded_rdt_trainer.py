@@ -54,7 +54,7 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
 )
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
     ALLOWED_OPS,
-    arena_alloc_bytes,
+    buffer_alloc_bytes,
     check_ray_rdt_version,
 )
 
@@ -118,8 +118,8 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     they can see. Forwarded to the worker-side init info."""
     num_rdt_buffers: int = 2
     """Serve/receive ring depth K (must match the worker)."""
-    arena_presize_gb: float = 0.0
-    """Serve-arena pre-size floor in GiB (avoids NIXL desc-cache churn)."""
+    buffer_presize_gb: float = 0.0
+    """Serve-buffer pre-size floor in GiB (avoids NIXL desc-cache churn)."""
     pack_check: bool = False
     """Emit per-blob checksums to /tmp/rdt_profile for offline diffing."""
     gather_lookahead: int = DEFAULT_GATHER_LOOKAHEAD
@@ -146,7 +146,7 @@ class _RDTProducerServer:
         self,
         *,
         num_rdt_buffers: int,
-        arena_presize_gb: float,
+        buffer_presize_gb: float,
         pack_check: bool,
         gather_lookahead: int,
         served_names: list[str] | None = None,
@@ -189,18 +189,18 @@ class _RDTProducerServer:
         self._name_to_group: dict[str, int] = {}
         self._freed_pending: list[int] = []
 
-        # [RDT-RING] Per-consumer ring of packed serve arenas, rotated per pull.
+        # [RDT-RING] Per-consumer ring of packed serve buffers, rotated per pull.
         self._nring = max(1, num_rdt_buffers)
         self._serve_rings: dict[int, list[torch.Tensor | None]] = {}
         self._serve_idx: dict[int, int] = {}
         self._serve_lock = threading.Lock()
         # registerMem on a shared NIXL agent is not concurrency-safe; serialize.
         self._reg_lock = threading.Lock()
-        self._arena_presize = int(arena_presize_gb * (1 << 30))
+        self._buffer_presize = int(buffer_presize_gb * (1 << 30))
 
         self._pack_check = pack_check
         # [RDT-PACK-DSTS] (consumer_id, ring idx, packed layout) ->
-        # (arena data_ptr, destination views). Keyed on the arena pointer too, so
+        # (buffer data_ptr, destination views). Keyed on the buffer pointer too, so
         # a ring regrow invalidates rather than writing into a freed buffer. See
         # the serve path for why the layout, not the spec names, is the key.
         self._pack_dsts: dict[tuple, tuple[int, list[torch.Tensor]]] = {}
@@ -482,13 +482,13 @@ class _RDTProducerServer:
             self._note_progress_locked()
             self._cache_cond.notify_all()
 
-    def reserve_serve_arena(self, consumer_id: int, nbytes: int) -> None:
+    def reserve_serve_buffer(self, consumer_id: int, nbytes: int) -> None:
         """Pre-allocate + NIXL-register this consumer's serve ring before any
         pull, while the fabric is idle (avoids registration races during the
         sync-0 RDMA churn under M:N fan-in). Idempotent; grows only if needed."""
         from ray.experimental import register_nixl_memory
 
-        alloc = arena_alloc_bytes(nbytes, self._arena_presize)
+        alloc = buffer_alloc_bytes(nbytes, self._buffer_presize)
         with self._serve_lock:
             rings = self._serve_rings.setdefault(consumer_id, [None] * self._nring)
             self._serve_idx.setdefault(consumer_id, 0)
@@ -563,15 +563,15 @@ class _RDTProducerServer:
             rings = self._serve_rings.setdefault(consumer_id, [None] * self._nring)
             idx = self._serve_idx.get(consumer_id, 0)
             self._serve_idx[consumer_id] = (idx + 1) % self._nring
-        arena = rings[idx]
-        if arena is None or arena.numel() < pack_cur:
+        buffer = rings[idx]
+        if buffer is None or buffer.numel() < pack_cur:
             from ray.experimental import register_nixl_memory
 
-            alloc = arena_alloc_bytes(pack_cur, self._arena_presize)
-            arena = torch.empty(alloc, dtype=torch.uint8, device="cuda:0")
+            alloc = buffer_alloc_bytes(pack_cur, self._buffer_presize)
+            buffer = torch.empty(alloc, dtype=torch.uint8, device="cuda:0")
             with self._reg_lock:
-                register_nixl_memory(arena)
-            rings[idx] = arena
+                register_nixl_memory(buffer)
+            rings[idx] = buffer
 
         # [RDT-PACK-DSTS] The destination views are a pure function of the packed
         # layout, which is byte-identical every sync, so build them once per
@@ -588,17 +588,17 @@ class _RDTProducerServer:
             tuple((off, t.dtype, t.shape) for off, t in sliced),
         )
         cached = self._pack_dsts.get(dst_key)
-        if cached is None or cached[0] != arena.data_ptr():
+        if cached is None or cached[0] != buffer.data_ptr():
             dsts = []
             for off, t in sliced:
                 nb = t.numel() * t.element_size()
-                dsts.append(arena[off : off + nb].view(t.dtype).reshape(t.shape))
-            self._pack_dsts[dst_key] = (arena.data_ptr(), dsts)
+                dsts.append(buffer[off : off + nb].view(t.dtype).reshape(t.shape))
+            self._pack_dsts[dst_key] = (buffer.data_ptr(), dsts)
         else:
             dsts = cached[1]
         torch._foreach_copy_(dsts, [t for _off, t in sliced])
 
-        blob = arena[:pack_cur]
+        blob = buffer[:pack_cur]
         if self._pack_check:
             self._log_pack_check(blob, pack_cur)
         self._bump_timing(t_m0, wait_s, t_s0, len(specs), nbytes, _grp_key)
@@ -708,7 +708,7 @@ class _RDTProducerServer:
             self._serve_rings.clear()
             # Must go with the rings: these are views INTO them, and the
             # data_ptr guard that normally invalidates them cannot tell a freed
-            # arena from a new one recycled at the same address.
+            # buffer from a new one recycled at the same address.
             self._pack_dsts.clear()
 
 
@@ -924,7 +924,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         engine._spawn_server(sorted(engine._held_names or []))
 
         # Every rank's server must exist before the sender's init RPC (the worker
-        # init calls reserve_serve_arena back on ALL producer servers). The
+        # init calls reserve_serve_buffer back on ALL producer servers). The
         # all-gather of server names doubles as that barrier.
         server_names = engine._all_gather_server_names(world, rank)
         # Retained so a RESTARTED consumer can be re-initialized without another
@@ -1147,7 +1147,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         self._server = server_cls.remote(
             served_names=served_names,
             num_rdt_buffers=ii.num_rdt_buffers,
-            arena_presize_gb=ii.arena_presize_gb,
+            buffer_presize_gb=ii.buffer_presize_gb,
             pack_check=ii.pack_check,
             gather_lookahead=ii.gather_lookahead,
             stall_timeout_s=ii.stall_timeout_s,
@@ -1178,7 +1178,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
             name_owner_class=self._name_owner_class,
             num_consumers=self._init_info.num_consumers,
             num_rdt_buffers=self._init_info.num_rdt_buffers,
-            arena_presize_gb=self._init_info.arena_presize_gb,
+            buffer_presize_gb=self._init_info.buffer_presize_gb,
             pack_check=self._init_info.pack_check,
         )
 

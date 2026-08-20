@@ -1,6 +1,6 @@
 set -x
 
-# Disaggregated GRPO for Qwen3-235B-A22B (LoRA) on GSM8K with Megatron and
+# Disaggregated GRPO for Qwen3-235B-A22B (full fine-tuning) on GSM8K with Megatron and
 # RDT (Ray Direct Transport / NIXL) sharded weight sync — vLLM in DP8/TP1 with
 # expert parallelism (EP8) instead of TP8.
 # Runs on 3 nodes of 8xH100s: 2 trainer nodes + 1 inference node.
@@ -26,7 +26,7 @@ set -x
 #     max-model-len request; the checkpoint default (40960) needs ~7.5 GiB
 #     when only ~2.8 GiB remains. This recipe generates 512+1024 tokens.
 #   * enforce_eager=true + gpu_memory_utilization=0.90 — the RDT receive
-#     arenas live OUTSIDE vLLM's memory fraction, and under DP their ring
+#     buffers live OUTSIDE vLLM's memory fraction, and under DP their ring
 #     slots hold the largest chunk, the full untied embed/lm_head matrix:
 #     2 slots x 1.25 GiB (vs 256 MB slots under TP8). Dropping the ~2 GiB
 #     CUDA-graph pool and 0.05 of utilization makes room. Costs decode speed
@@ -42,6 +42,22 @@ set -x
 # uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/train/megatron/run_megatron_rdt_dpep_qwen3_235b_a22b_lora.sh
+#
+# ---- WILL NOT FIT ON THE 4x8xH100 CLUSTER AS WRITTEN ----------------------
+# This recipe was LoRA (frozen base + r128 adapters, merged at every sync),
+# which is what made Qwen3-235B-A22B trainable on 16 GPUs at all. Full
+# fine-tuning needs, per trainer GPU: 29 GB of bf16 weights + 29 GB of
+# bf16 grads = 59 GB of an 80 GB card BEFORE activations, the RDT gather
+# buffers (~5 GB) and allocator churn -- and the CPU-offloaded optimizer
+# (fp32 master + Adam m/v = 12 B/param) needs ~1.41 TB per node against
+# 1.92 TB of RAM. Both are over budget.
+#
+# To run this full-FT you need more trainer nodes (~64 GPUs to reach the
+# same per-GPU footprint LoRA had). To run it on THIS cluster, restore LoRA:
+#   trainer.policy.model.lora.rank=128 trainer.policy.model.lora.alpha=128
+# merge_lora defaults to true, so the sync still streams full merged weights --
+# LoRA changes the TRAINER's memory, never the weight-sync path or its timing.
+# --------------------------------------------------------------------------
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
@@ -70,10 +86,6 @@ INFERENCE_ENGINE_TP=1
 INFERENCE_ENGINE_DP=8
 INFERENCE_ENGINE_EP=8
 
-# LoRA configuration (merged into full weights at each sync)
-LORA_RANK=128
-LORA_ALPHA=128
-
 # the 235B engine takes well over the default 600s to load weights
 export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
 
@@ -97,8 +109,6 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.engine_init_kwargs.max_model_len=2048 \
   generator.inference_engine.weight_sync_backend=$WEIGHT_SYNC_BACKEND \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
-  trainer.policy.model.lora.rank=$LORA_RANK \
-  trainer.policy.model.lora.alpha=$LORA_ALPHA \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
@@ -122,11 +132,11 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.n_samples_per_prompt=4 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
-  trainer.policy.optimizer_config.lr=1.0e-5 \
+  trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=false \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/rdt_dpep_qwen3_235b_a22b_lora" \
+  trainer.ckpt_path="$HOME/ckpts/rdt_dpep_qwen3_235b_a22b" \
   trainer.logger="$LOGGER" \
   trainer.project_name="skyrl-rdt" \
-  trainer.run_name="rdt_dpep_qwen3_235b_a22b_lora_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}" \
+  trainer.run_name="rdt_dpep_qwen3_235b_a22b_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}" \
   $@

@@ -1,11 +1,11 @@
 set -x
 
-# Disaggregated GRPO for Qwen3-235B-A22B (LoRA) on GSM8K with Megatron and
+# Disaggregated GRPO for Qwen3-235B-A22B (full fine-tuning) on GSM8K with Megatron and
 # RDT (Ray Direct Transport / NIXL) sharded weight sync.
 # Runs on 3 nodes of 8xH100s: 2 trainer nodes + 1 inference node.
 #
-# This is the at-scale RDT weight-sync demonstration: LoRA is merged into the
-# base weights at every sync, so each sync moves the FULL ~470GB merged model
+# This is the at-scale RDT weight-sync demonstration: every sync moves the
+# FULL ~470GB model
 # from 16 Megatron ranks (tp4/pp2/ep8) to the vLLM TP8 engine. With
 # sharded_rdt each trainer rank publishes its shard once and the engine pulls
 # directly over the fabric (NIXL), overlapping gather/publish/pull: syncs take
@@ -41,6 +41,22 @@ set -x
 # layers and each expert-parallel rank serves only its own experts (a source
 # with shared groups, e.g. tied embeddings, demotes itself to the full gather;
 # SKYRL_RDT_STACKED_EXPERTS=0 forces the plain source).
+#
+# ---- WILL NOT FIT ON THE 4x8xH100 CLUSTER AS WRITTEN ----------------------
+# This recipe was LoRA (frozen base + r128 adapters, merged at every sync),
+# which is what made Qwen3-235B-A22B trainable on 16 GPUs at all. Full
+# fine-tuning needs, per trainer GPU: 29 GB of bf16 weights + 29 GB of
+# bf16 grads = 59 GB of an 80 GB card BEFORE activations, the RDT gather
+# buffers (~5 GB) and allocator churn -- and the CPU-offloaded optimizer
+# (fp32 master + Adam m/v = 12 B/param) needs ~1.41 TB per node against
+# 1.92 TB of RAM. Both are over budget.
+#
+# To run this full-FT you need more trainer nodes (~64 GPUs to reach the
+# same per-GPU footprint LoRA had). To run it on THIS cluster, restore LoRA:
+#   trainer.policy.model.lora.rank=128 trainer.policy.model.lora.alpha=128
+# merge_lora defaults to true, so the sync still streams full merged weights --
+# LoRA changes the TRAINER's memory, never the weight-sync path or its timing.
+# --------------------------------------------------------------------------
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
@@ -65,10 +81,6 @@ MEGATRON_ETP=1
 NUM_INFERENCE_ENGINES=1
 INFERENCE_ENGINE_TP=8
 
-# LoRA configuration (merged into full weights at each sync)
-LORA_RANK=128
-LORA_ALPHA=128
-
 # the 235B engine takes well over the default 600s to load weights
 export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
 
@@ -86,8 +98,6 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.gpu_memory_utilization=0.95 \
   generator.inference_engine.weight_sync_backend=$WEIGHT_SYNC_BACKEND \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
-  trainer.policy.model.lora.rank=$LORA_RANK \
-  trainer.policy.model.lora.alpha=$LORA_ALPHA \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
@@ -111,11 +121,11 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.n_samples_per_prompt=4 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
-  trainer.policy.optimizer_config.lr=1.0e-5 \
+  trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=false \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/rdt_qwen3_235b_a22b_lora" \
+  trainer.ckpt_path="$HOME/ckpts/rdt_qwen3_235b_a22b" \
   trainer.logger="$LOGGER" \
   trainer.project_name="skyrl-rdt" \
-  trainer.run_name="rdt_qwen3_235b_a22b_lora_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}" \
+  trainer.run_name="rdt_qwen3_235b_a22b_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}" \
   $@

@@ -1,6 +1,6 @@
 set -x
 
-# Disaggregated GRPO for GLM-4.5-Air (LoRA) on GSM8K with Megatron and RDT
+# Disaggregated GRPO for GLM-4.5-Air (full fine-tuning) on GSM8K with Megatron and RDT
 # (Ray Direct Transport / NIXL) sharded weight sync — vLLM in DP8/TP1 with
 # expert parallelism (EP8).
 # Runs on 2 nodes of 8xH100s: 1 trainer node + 1 inference node.
@@ -17,15 +17,14 @@ set -x
 # cheap):
 #   * Trainer: TP=1/PP=1/EP=8 (MoE TP is sized by ACTIVE params — 12B needs
 #     no TP; EP8 puts 16 full experts on each of the 8 ranks, DP=8 for the
-#     LoRA training itself). Each rank holds ~25 GB of experts + ~14 GB of
+#     training itself). Each rank holds ~25 GB of experts + ~14 GB of
 #     replicated non-expert weights.
 #   * vLLM: DP=8/TP=1 with expert parallel (EP size = TP x DP = 8), matching
 #     the trainer's EP8 so each consumer's 16-expert range maps to exactly
 #     one trainer coordinate: ~2 chunks per layer group (1 expert chunk + 1
 #     replicated chunk) per consumer instead of a TP slice of every
 #     coordinate. Same DP+EP shape that measured 3.2-3.3s engine-level syncs
-#     on Qwen3-235B; this model moves ~214 GB/sync (LoRA merged into the
-#     full weights at every sync).
+#     on Qwen3-235B; this model moves ~214 GB/sync.
 #
 # Memory notes (80 GB cards): at ~40 GB/rank of vLLM weights CUDA graphs stay
 # ON, but gpu_memory_utilization must be 0.75, NOT higher. The audited ledger
@@ -34,7 +33,7 @@ set -x
 # runs ~10 GB/GPU on a DP+EP worker, so torch's usable pool is ~69 GB; the
 # sync's transient churn keeps ~5 GB of split-segment reservations on top of
 # active memory; so the ACTIVE budget (weights 36.7 + KV + graphs 3.1 + MoE
-# workspace + 2.5 GB NIXL receive arenas) must stay under ~63 GB. vLLM fills
+# workspace + 2.5 GB NIXL receive buffers) must stay under ~63 GB. vLLM fills
 # its whole fraction with KV no matter how small the model, so the fraction
 # is the lever: 0.75 -> ~13.7 GB KV and ~4 GB of true slack. (0.80/0.85/0.90
 # all OOM'd the first sync's layer materialization.) Two more knobs are
@@ -44,11 +43,11 @@ set -x
 #   * engine_init_kwargs.max_model_len=2048 — the KV cache must fit one
 #     max-model-len request at engine start; the checkpoint default is 131K.
 #     This recipe generates 512 prompt + 1024 completion tokens.
-# The RDT receive arenas (2 ring slots x 1.25 GiB — a slot holds the largest
+# The RDT receive buffers (2 ring slots x 1.25 GiB — a slot holds the largest
 # chunk, the full untied embed/lm_head matrix) live OUTSIDE vLLM's memory
 # fraction and fit in the ~8 GB the 0.85 utilization leaves free.
 # (use_expandable_segments does NOT work here: NIXL/RDMA cannot register
-# VMM-backed allocations — the arena registration fails at init. The sync's
+# VMM-backed allocations — the buffer registration fails at init. The sync's
 # allocator-fragmentation pressure is instead handled by the engine's bounded
 # retirement queue, which caps materialized-layer churn at ~2 groups.)
 #
@@ -63,6 +62,22 @@ set -x
 # uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/train/megatron/run_megatron_rdt_dpep_glm45_air_lora.sh
+#
+# ---- WILL NOT FIT ON THE 4x8xH100 CLUSTER AS WRITTEN ----------------------
+# This recipe was LoRA (frozen base + r128 adapters, merged at every sync),
+# which is what made GLM-4.5-Air trainable on 8 GPUs at all. Full
+# fine-tuning needs, per trainer GPU: 26 GB of bf16 weights + 26 GB of
+# bf16 grads = 53 GB of an 80 GB card BEFORE activations, the RDT gather
+# buffers (~5 GB) and allocator churn -- and the CPU-offloaded optimizer
+# (fp32 master + Adam m/v = 12 B/param) needs ~1.27 TB per node against
+# 1.92 TB of RAM. Both are over budget.
+#
+# To run this full-FT you need more trainer nodes (~24 GPUs to reach the
+# same per-GPU footprint LoRA had). To run it on THIS cluster, restore LoRA:
+#   trainer.policy.model.lora.rank=128 trainer.policy.model.lora.alpha=128
+# merge_lora defaults to true, so the sync still streams full merged weights --
+# LoRA changes the TRAINER's memory, never the weight-sync path or its timing.
+# --------------------------------------------------------------------------
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
@@ -98,10 +113,6 @@ INFERENCE_ENGINE_TP=1
 INFERENCE_ENGINE_DP=8
 INFERENCE_ENGINE_EP=8
 
-# LoRA configuration (merged into full weights at each sync)
-LORA_RANK=128
-LORA_ALPHA=128
-
 export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
@@ -122,8 +133,6 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.engine_init_kwargs.max_model_len=2048 \
   generator.inference_engine.weight_sync_backend=$WEIGHT_SYNC_BACKEND \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
-  trainer.policy.model.lora.rank=$LORA_RANK \
-  trainer.policy.model.lora.alpha=$LORA_ALPHA \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
@@ -152,11 +161,11 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.n_samples_per_prompt=4 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
-  trainer.policy.optimizer_config.lr=1.0e-5 \
+  trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=false \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/rdt_dpep_glm45_air_lora" \
+  trainer.ckpt_path="$HOME/ckpts/rdt_dpep_glm45_air" \
   trainer.logger="$LOGGER" \
   trainer.project_name="skyrl-rdt" \
-  trainer.run_name="rdt_dpep_glm45_air_lora_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}" \
+  trainer.run_name="rdt_dpep_glm45_air_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}" \
   $@

@@ -1,6 +1,6 @@
 set -x
 
-# Disaggregated GRPO for Qwen3-235B-A22B (LoRA) on GSM8K with Megatron and RDT
+# Disaggregated GRPO for Qwen3-235B-A22B (full fine-tuning) on GSM8K with Megatron and RDT
 # (Ray Direct Transport / NIXL) sharded weight sync — vLLM in DP16/TP1 with
 # expert parallelism (EP16) spread across TWO inference nodes, with CUDA graphs
 # and torch.compile ENABLED.
@@ -33,7 +33,7 @@ set -x
 # The 3-node DPEP recipe sets enforce_eager=true purely because it cannot
 # afford the graph pool: DP leaves attention and embeddings UNSLICED, so each
 # rank holds 67.8 GiB of an 80 GiB card and ~11 GiB has to cover non-torch
-# memory, activations, KV and the receive arenas. Dropping the ~2 GiB CUDA-graph
+# memory, activations, KV and the receive buffers. Dropping the ~2 GiB CUDA-graph
 # pool was the only way to fit. That is a property of the 8-way shape, not of
 # RDT: the TP8 recipe (run_megatron_rdt_qwen3_235b_a22b_lora.sh) never sets
 # enforce_eager, because TP8 slices everything down to ~55 GiB/rank.
@@ -60,7 +60,7 @@ set -x
 #   vLLM's own fraction (0.75 x ~79.6) covers weights + non-torch +
 #     activation peak, and gives the remainder to KV  ~7-9 GiB of KV here
 #   CUDA-graph pool, captured AFTER that accounting   ~3 GiB
-#   RDT receive arenas, OUTSIDE vLLM's fraction:
+#   RDT receive buffers, OUTSIDE vLLM's fraction:
 #     num_rdt_buffers(2) x largest chunk (the full untied
 #     151936x4096 embed/lm_head matrix, 1.16 GiB)     ~2.5 GiB
 #   churn reserve for the sync's materialization      ~5 GiB
@@ -77,7 +77,7 @@ set -x
 #     max-model-len request at engine start; the checkpoint default is 40960.
 #     This recipe generates 512 prompt + 1024 completion tokens.
 # (use_expandable_segments must stay off on the engine: NIXL/RDMA cannot
-# register VMM-backed allocations, so arena registration fails at init.)
+# register VMM-backed allocations, so buffer registration fails at init.)
 #
 # ---- WHAT THIS DOES TO THE WEIGHT SYNC -------------------------------------
 # Consumer count doubles (16 instead of 8), and that cuts both ways:
@@ -114,7 +114,23 @@ set -x
 #
 # uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/train/megatron/run_megatron_rdt_dpep_qwen3_235b_a22b_lora_4node.sh
+# bash examples/train/megatron/run_megatron_rdt_dpep_qwen3_235b_a22b_4node.sh
+#
+# ---- WILL NOT FIT ON THE 4x8xH100 CLUSTER AS WRITTEN ----------------------
+# This recipe was LoRA (frozen base + r128 adapters, merged at every sync),
+# which is what made Qwen3-235B-A22B trainable on 16 GPUs at all. Full
+# fine-tuning needs, per trainer GPU: 29 GB of bf16 weights + 29 GB of
+# bf16 grads = 59 GB of an 80 GB card BEFORE activations, the RDT gather
+# buffers (~5 GB) and allocator churn -- and the CPU-offloaded optimizer
+# (fp32 master + Adam m/v = 12 B/param) needs ~1.41 TB per node against
+# 1.92 TB of RAM. Both are over budget.
+#
+# To run this full-FT you need more trainer nodes (~64 GPUs to reach the
+# same per-GPU footprint LoRA had). To run it on THIS cluster, restore LoRA:
+#   trainer.policy.model.lora.rank=128 trainer.policy.model.lora.alpha=128
+# merge_lora defaults to true, so the sync still streams full merged weights --
+# LoRA changes the TRAINER's memory, never the weight-sync path or its timing.
+# --------------------------------------------------------------------------
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
@@ -143,10 +159,6 @@ INFERENCE_ENGINE_TP=1
 INFERENCE_ENGINE_DP=16
 INFERENCE_ENGINE_EP=16
 
-# LoRA configuration (merged into full weights at each sync)
-LORA_RANK=128
-LORA_ALPHA=128
-
 # the 235B engine takes well over the default 600s to load weights, and with
 # compilation enabled the first start also pays torch.compile on each node
 export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
@@ -171,8 +183,6 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.engine_init_kwargs.max_model_len=2048 \
   generator.inference_engine.weight_sync_backend=$WEIGHT_SYNC_BACKEND \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
-  trainer.policy.model.lora.rank=$LORA_RANK \
-  trainer.policy.model.lora.alpha=$LORA_ALPHA \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
@@ -196,11 +206,11 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.n_samples_per_prompt=4 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
-  trainer.policy.optimizer_config.lr=1.0e-5 \
+  trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=false \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/rdt_dpep_qwen3_235b_a22b_lora_4node" \
+  trainer.ckpt_path="$HOME/ckpts/rdt_dpep_qwen3_235b_a22b_4node" \
   trainer.logger="$LOGGER" \
   trainer.project_name="skyrl-rdt" \
-  trainer.run_name="rdt_dpep_qwen3_235b_a22b_lora_4node_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}_dp${INFERENCE_ENGINE_DP}" \
+  trainer.run_name="rdt_dpep_qwen3_235b_a22b_4node_tp${MEGATRON_TP}pp${MEGATRON_PP}ep${MEGATRON_EP}_dp${INFERENCE_ENGINE_DP}" \
   $@
