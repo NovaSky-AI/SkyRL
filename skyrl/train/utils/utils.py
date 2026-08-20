@@ -194,7 +194,10 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
-    assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
+    assert ie_cfg.weight_sync_backend in {
+        "nccl",
+        "delta",
+    }, "only nccl and delta are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
@@ -205,6 +208,15 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
+        # Megatron's fused top-k returns before compute_topk consults router_replay
+        # (moe_utils.topk_routing_with_score_function), so the replayed experts are
+        # silently discarded while R3 still pays its full cost. Refuse the pair rather
+        # than train against routing that does not match the rollout.
+        if config.megatron_config.moe_enable_routing_replay:
+            assert not config.megatron_config.transformer_config_kwargs.get("moe_router_fusion"), (
+                f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
+                "moe_router_fusion=True -- the fused router bypasses replay. Set moe_router_fusion=False."
+            )
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert (
@@ -268,8 +280,7 @@ def _validate_fireworks_cfg(cfg: SkyRLTrainConfig) -> None:
 
     if trainer.strategy != "fireworks" or inference.backend != "fireworks":
         raise ValueError(
-            "Fireworks must be selected for both trainer.strategy and "
-            "generator.inference_engine.backend"
+            "Fireworks must be selected for both trainer.strategy and " "generator.inference_engine.backend"
         )
     if not fireworks.base_model:
         raise ValueError("trainer.fireworks.base_model is required")
@@ -297,9 +308,7 @@ def _validate_fireworks_cfg(cfg: SkyRLTrainConfig) -> None:
     if algorithm.advantage_estimator != "grpo":
         raise ValueError("The initial Fireworks backend is GRPO-only")
     if algorithm.policy_loss_type != "rollout_is":
-        raise ValueError(
-            "The initial Fireworks GRPO backend requires trainer.algorithm.policy_loss_type='rollout_is'"
-        )
+        raise ValueError("The initial Fireworks GRPO backend requires trainer.algorithm.policy_loss_type='rollout_is'")
     if algorithm.use_kl_loss or algorithm.use_kl_in_reward:
         raise ValueError("The initial Fireworks GRPO backend requires KL loss and KL reward penalty to be disabled")
     if trainer.critic.model.path:
@@ -323,17 +332,11 @@ def _validate_fireworks_cfg(cfg: SkyRLTrainConfig) -> None:
         raise NotImplementedError("The initial Fireworks backend supports text-only rollouts")
 
     if trainer.resume_mode not in (None, "none", "latest", "from_path"):
-        raise ValueError(
-            "trainer.resume_mode must be null/'none', 'latest', or 'from_path'"
-        )
+        raise ValueError("trainer.resume_mode must be null/'none', 'latest', or 'from_path'")
     if trainer.resume_mode == "from_path" and not trainer.resume_path:
-        raise ValueError(
-            "trainer.resume_path is required when trainer.resume_mode='from_path'"
-        )
+        raise ValueError("trainer.resume_path is required when trainer.resume_mode='from_path'")
     if trainer.hf_save_interval > 0:
-        raise NotImplementedError(
-            "HuggingFace export is not wired to Fireworks yet; set trainer.hf_save_interval=-1"
-        )
+        raise NotImplementedError("HuggingFace export is not wired to Fireworks yet; set trainer.hf_save_interval=-1")
     if trainer.policy.torch_profiler_config.enable:
         raise ValueError("Local torch profiling is unavailable with hosted Fireworks training")
     if trainer.enable_ray_gpu_monitor:
@@ -544,6 +547,14 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
 
+        # delta weight sync is not yet supported
+        # TODO (sumanthrh): Delta weight sync should be naturally supported for `merge_lora=true`, we should
+        # test and enable this in a follow-up. `merge_lora=false` needs bookkeeping of per-LoRA safetensors
+        # on the inference side.
+        assert (
+            cfg.generator.inference_engine.weight_sync_backend != "delta"
+        ), "Delta weight sync is not yet supported for LoRA"
+
     # Validate placement
     if cfg.trainer.placement.colocate_all:
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -639,8 +650,7 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     if ie_cfg.backend == "fireworks":
         if cfg.trainer.strategy != "fireworks":
             raise ValueError(
-                "generator.inference_engine.backend='fireworks' currently requires "
-                "trainer.strategy='fireworks'"
+                "generator.inference_engine.backend='fireworks' currently requires " "trainer.strategy='fireworks'"
             )
         return
 
@@ -686,6 +696,20 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         raise ValueError(
             "Each inference engine DP rank (TP*PP workers) must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
         )
+
+    # Validate the non-colocated sleep-during-weight-sync option.
+    if ie_cfg.offload_kv_for_weight_sync:
+        assert not cfg.trainer.placement.colocate_all, (
+            "offload_kv_for_weight_sync is for non-colocated weight sync only; "
+            "colocated mode already sleeps the engines and wakes weights/KV cache around sync."
+        )
+        assert cfg.trainer.policy.model.lora.rank == 0, (
+            "offload_kv_for_weight_sync does not support LoRA weight sync "
+            "(the in-place LoRA adapter swap path does not go through the sleep/wake broadcast)."
+        )
+        assert (
+            ie_cfg.weight_sync_backend != "delta"
+        ), "Offloading KV cache during weight sync is not supported for delta weight sync"
 
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
@@ -900,6 +924,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
         env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
 
+    if worker_nccl_timeout := os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S"):
+        logger.info(f"Exporting `SKYRL_WORKER_NCCL_TIMEOUT_IN_S` to ray runtime env: {worker_nccl_timeout}")
+        env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = worker_nccl_timeout
     # Forward uv's project-environment selection to the workers. Ray's uv runtime-env hook makes each
     # worker re-run `uv run ... --extra <backend>`, and that subprocess must resolve to the SAME venv
     # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a

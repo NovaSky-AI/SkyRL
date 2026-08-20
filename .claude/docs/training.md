@@ -26,6 +26,16 @@ uv run --isolated --extra megatron --env-file .env.test -m skyrl.train.entrypoin
 - Configurations are implemented as dataclass. CLI parsing is via OmegaConf.
 - Pass overrides as `key=value` args on the command line. Unlike Hydra, we do not support `+` overrides for new keys
 - Main config object: `SkyRLTrainConfig` in `skyrl/train/config/`.
+- Document a new or changed field with an attribute docstring directly below it (the `"""..."""`
+  style already used throughout `config.py`), not in a separate docs page. The
+  `/docs/api-ref/skyrl/config` reference page is generated from these docstrings by
+  `docs/generate-api-docs.py` via griffe, which reads attribute docstrings but *not*
+  `field(metadata={"help": ...})`.
+- Keep the first physical line of an attribute docstring a complete sentence: the generated
+  reference's summary table shows only that first line, truncating at the newline.
+- If a field's guidance is topic-specific (a backend, a training mode, a pitfall with a symptom),
+  put the long-form explanation on the corresponding example/tutorial/troubleshooting page and keep
+  the docstring itself focused on the field.
 
 ## Example Scripts
 

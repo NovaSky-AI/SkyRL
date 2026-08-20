@@ -91,6 +91,14 @@ def _build_skyrl_train_config(
         "megatron",
     ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
     user_overrides["trainer.strategy"] = overrides.strategy
+    # LoRA rank/alpha must also be on the override dict so post_init validation
+    # sees them — e.g. fake_int4_qat.enabled requires lora.rank > 0, which
+    # would spuriously fail for LoRA clients if the rank were applied after
+    # from_cli_overrides. The client-requested LoRA config wins over any
+    # backend_config value (matching the previous post-assignment behaviour).
+    if lora_config is not None and lora_config.rank > 0:
+        user_overrides["trainer.policy.model.lora.rank"] = lora_config.rank
+        user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
@@ -102,11 +110,6 @@ def _build_skyrl_train_config(
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
 
-    # Apply LoRA configuration
-    if lora_config is not None and lora_config.rank > 0:
-        cfg.trainer.policy.model.lora.rank = lora_config.rank
-        cfg.trainer.policy.model.lora.alpha = int(lora_config.alpha)
-
     logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
     return cfg
 
@@ -115,10 +118,6 @@ class SkyRLTrainBackend(AbstractBackend):
     """SkyRL-Train backend for supervised training."""
 
     def __init__(self, base_model: str, config: SkyRLTrainBackendOverrides):
-        logger.warning("=" * 80)
-        logger.warning("SkyRLTrainBackend is currently EXPERIMENTAL!")
-        logger.warning("=" * 80)
-
         if ray is None:
             raise ImportError(
                 "SkyRLTrainBackend requires `ray`. Install the appropriate extras (e.g. `--extra skyrl_train`)."
@@ -821,7 +820,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 normalized_config["dppo"] = dppo_overrides
             return loss_fn, normalized_config or None
 
-        if loss_fn != "ppo":
+        if loss_fn not in {"ppo", "gspo"}:
             return loss_fn, loss_fn_config
 
         normalized_config = dict(loss_fn_config or {})
@@ -831,7 +830,7 @@ class SkyRLTrainBackend(AbstractBackend):
             normalized_config["eps_clip_low"] = 1.0 - clip_low_threshold
         if clip_high_threshold is not None:
             normalized_config["eps_clip_high"] = clip_high_threshold - 1.0
-        return "regular", normalized_config or None
+        return ("regular" if loss_fn == "ppo" else "gspo"), normalized_config or None
 
     def forward_backward(
         self,
@@ -1026,14 +1025,14 @@ class SkyRLTrainBackend(AbstractBackend):
             error = types.ErrorResponse(
                 error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}", status="error"
             )
-            return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
+            return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
         non_policy = [mid for mid in unique_models if self._model_ids_to_role.get(mid) != "policy"]
         if non_policy:
             error = types.ErrorResponse(
                 error=f"Sampling is only supported for policy models, got non-policy: {sorted(non_policy)}",
                 status="error",
             )
-            return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
+            return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
 
         # 3. Dispatch to the sampling path
         return self._sample_with_remote_client(prepared_batch)
@@ -1054,9 +1053,19 @@ class SkyRLTrainBackend(AbstractBackend):
             for mid in prepared_batch.all_model_ids
         ]
 
+        # Prompt logprobs are a property of the prompt, and all `num_samples`
+        # samples of a request share one prompt, so only ask for them on the
+        # first sample of each request -- that's also the one
+        # _aggregate_sample_results reads them back from.
+        num_samples_total = len(prepared_batch.all_model_inputs)
+        prompt_logprobs_at: dict[int, int] = {}
+        for _, _, start_idx, _, prompt_logprobs_requested, topk in prepared_batch.request_batch_slices:
+            if prompt_logprobs_requested and start_idx < num_samples_total:
+                prompt_logprobs_at[start_idx] = topk
+
         async def sample_all():
             tasks = []
-            for i in range(len(prepared_batch.all_model_inputs)):
+            for i in range(num_samples_total):
                 model_input = prepared_batch.all_model_inputs[i]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
@@ -1066,6 +1075,11 @@ class SkyRLTrainBackend(AbstractBackend):
                     "num_samples": 1,
                     "sampling_params": sampling_params.model_dump(),
                 }
+
+                if i in prompt_logprobs_at:
+                    json_body["include_prompt_logprobs"] = True
+                    if prompt_logprobs_at[i] > 0:
+                        json_body["topk_prompt_logprobs"] = prompt_logprobs_at[i]
 
                 session_id = prepared_batch.all_session_ids[i]
                 if session_id is not None:
@@ -1095,7 +1109,14 @@ class SkyRLTrainBackend(AbstractBackend):
                 yield seq["tokens"], seq.get("logprobs"), seq.get("stop_reason")
 
         results = {}
-        for request_id, model_id, start_idx, end_idx, prompt_logprobs_requested in prepared_batch.request_batch_slices:
+        for (
+            request_id,
+            model_id,
+            start_idx,
+            end_idx,
+            prompt_logprobs_requested,
+            topk_prompt_logprobs,
+        ) in prepared_batch.request_batch_slices:
             sequences = []
             has_error = False
             error_msg = None
@@ -1139,18 +1160,24 @@ class SkyRLTrainBackend(AbstractBackend):
                     status="error",
                 )
             else:
-                # All samples for a request share the same prompt, so use the first sample's
-                # prompt logprobs (parity with JAX backend).
+                # All samples of a request share one prompt, and only the first
+                # sample asked the engine for prompt logprobs (see
+                # _sample_with_remote_client), so read them back from there.
+                # Both fields are flat, one entry per prompt token.
                 first_output = sample_outputs[start_idx]
                 prompt_logprobs = None
+                topk = None
                 if prompt_logprobs_requested:
-                    all_prompt_logprobs = first_output.get("prompt_logprobs")
-                    if all_prompt_logprobs and len(all_prompt_logprobs) > 0:
-                        prompt_logprobs = all_prompt_logprobs[0]
+                    prompt_logprobs = first_output.get("prompt_logprobs")
+                    if prompt_logprobs is None:
+                        logger.warning(f"Request {request_id} asked for prompt logprobs but the engine returned none")
+                    if topk_prompt_logprobs > 0:
+                        topk = first_output.get("topk_prompt_logprobs")
 
                 results[request_id] = types.SampleOutput(
                     sequences=sequences,
                     prompt_logprobs=prompt_logprobs,
+                    topk_prompt_logprobs=topk,
                 )
 
         return results
@@ -1199,6 +1226,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
             # Save checkpoint directory (includes optimizer state automatically)
             self._dispatch.save_checkpoint(model=role, ckpt_dir=ckpt_dir, tokenizer=self._tokenizer, model_id=model_id)
+
+            # Drain any in-flight async write so the tar can't capture a partial checkpoint.
+            self._dispatch.finalize_pending_saves(role)
 
             # Create tar archive
             self._create_tar_from_directory(ckpt_dir, output_path)

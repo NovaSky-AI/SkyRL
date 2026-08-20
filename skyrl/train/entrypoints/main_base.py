@@ -73,11 +73,11 @@ class BasePPOExp:
     def get_cfg_as_str(cfg: SkyRLTrainConfig) -> str:
         return get_config_as_yaml_str(cfg)
 
-    def get_train_dataset(self):
+    def get_train_dataset(self) -> PromptDataset:
         """Initializes the training dataset.
 
         Returns:
-            PromptDataset: The training dataset.
+            The training dataset.
         """
         prompts_dataset = PromptDataset(
             datasets=self.cfg.data.train_data,
@@ -91,11 +91,11 @@ class BasePPOExp:
         ), f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
         return prompts_dataset
 
-    def get_eval_dataset(self):
+    def get_eval_dataset(self) -> Optional[PromptDataset]:
         """Initializes the evaluation dataset.
 
         Returns:
-            PromptDataset: The evaluation dataset.
+            The evaluation dataset, or None if evaluation is disabled.
         """
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
             prompts_dataset = PromptDataset(
@@ -117,7 +117,7 @@ class BasePPOExp:
             timeout (int): The timeout for the placement group to be ready.
 
         Returns:
-            ResolvedPlacementGroup: The placement group wrapper for colocated training, or None.
+            The placement group wrapper for colocated training, or None.
         """
         if not self.cfg.trainer.placement.colocate_all:
             return None
@@ -133,11 +133,11 @@ class BasePPOExp:
         get_ray_pg_ready_with_timeout(pg, timeout=timeout)
         return ResolvedPlacementGroup(pg)
 
-    def get_generator(self, cfg, tokenizer, inference_engine_client):
+    def get_generator(self, cfg, tokenizer, inference_engine_client) -> GeneratorInterface:
         """Initializes the generator.
 
         Returns:
-            GeneratorInterface: The generator.
+            The generator.
         """
         if cfg.generator.vision_language_generator:
             from skyrl.train.generators.skyrl_vlm_generator import SkyRLVLMGymGenerator
@@ -166,11 +166,11 @@ class BasePPOExp:
         inference_engine_client,
         generator: GeneratorInterface,
         colocate_pg,
-    ):
+    ) -> RayPPOTrainer:
         """Initializes the trainer.
 
         Returns:
-            RayPPOTrainer: The trainer.
+            The trainer.
         """
         return RayPPOTrainer(
             cfg=cfg,
@@ -183,11 +183,11 @@ class BasePPOExp:
             colocate_pg=colocate_pg,
         )
 
-    def get_tracker(self):
+    def get_tracker(self) -> Tracking:
         """Initializes the tracker for experiment tracking.
 
         Returns:
-            Tracking: The tracker.
+            The tracker.
         """
         return Tracking(
             project_name=self.cfg.trainer.project_name,
@@ -207,7 +207,7 @@ class BasePPOExp:
         across evals via the wandb-Table re-create workaround.
 
         Returns:
-            TrajectoryLogger: The trajectory logger.
+            The trajectory logger.
         """
         return TrajectoryLogger()
 
@@ -218,16 +218,16 @@ class BasePPOExp:
         inference engine creation (e.g., custom clients or backends).
 
         Returns:
-            InferenceEngineInterface: The inference engine client.
+            The inference engine client.
         """
         logger.info("Initializing inference client")
         return self._get_new_inference_client()
 
-    def _get_new_inference_client(self):
+    def _get_new_inference_client(self) -> InferenceEngineInterface:
         """New inference client using HTTP endpoints.
 
         Returns:
-            RemoteInferenceClient: The new inference client.
+            The new inference client.
         """
         from skyrl.backends.skyrl_train.inference_servers.setup import (
             build_new_inference_client,
@@ -251,13 +251,13 @@ class BasePPOExp:
 
         return client
 
-    def _setup_trainer(self):
+    def _setup_trainer(self) -> RayPPOTrainer:
         """Setup and return the trainer.
 
         Instantiates the trainer and all the associated models for training.
 
         Returns:
-            RayPPOTrainer: The trainer.
+            The trainer.
         """
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)

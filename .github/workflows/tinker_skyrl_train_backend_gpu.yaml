@@ -46,11 +46,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          # The Anyscale job uploads this working dir, so we need the PR head.
+          # Fork code only reaches here after a maintainer applies the gating
+          # label above; don't leave the base repo token on disk for it.
+          allow-unsafe-pr-checkout: true
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -68,7 +72,6 @@ jobs:
         run: |
           envsubst < ci/anyscale_tinker_skyrl_train_backend_gpu.yaml > ci/anyscale_tinker_skyrl_train_backend_gpu_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="tinker-skyrl-train-backend-gpu-${COMMIT_SHA:0:7}-${{ github.run_id }}"
-          anyscale job submit -f ci/anyscale_tinker_skyrl_train_backend_gpu_envsubst.yaml --name "$JOB_NAME" --timeout 5000
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 5000
+          JOB_NAME="tinker-skyrl-train-backend-gpu-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          bash ci/submit_anyscale_job.sh ci/anyscale_tinker_skyrl_train_backend_gpu_envsubst.yaml "$JOB_NAME" 5000
           rm -f ci/anyscale_tinker_skyrl_train_backend_gpu_envsubst.yaml

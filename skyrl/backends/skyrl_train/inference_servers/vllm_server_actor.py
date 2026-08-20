@@ -10,9 +10,10 @@ from argparse import Namespace
 from typing import List, Optional, Tuple
 
 import httpx
+import orjson
 import uvicorn
 import vllm.envs as envs
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from ray.util.placement_group import PlacementGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -30,8 +31,14 @@ from vllm.utils.system_utils import set_ulimit
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
     ServerInfo,
+    compute_dp_master_port,
     find_and_reserve_port,
     get_node_ip,
+)
+from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
+    CLAMPED_LOGPROB,
+    build_logprobs_content,
+    pack_routed_experts,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.env_vars import (
@@ -147,6 +154,13 @@ class VLLMServerActor(ServerActorProtocol):
         os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
         # TODO (aaron): once native ipc stops needing this, remove
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+        # Give this engine's workers a TCPStore probe window disjoint from every
+        # other engine's -- see `_seed_dp_master_port` for why. Derived from the
+        # assigned `start_port` rather than the reserved `self._port`, since only
+        # the former is guaranteed `SERVER_PORT_STRIDE` apart across actors.
+        # TODO: delete once vllm#50969 lands -- see the removal checklist on
+        # `compute_dp_master_port` in inference_servers/common.py.
+        os.environ["VLLM_DP_MASTER_PORT"] = str(compute_dp_master_port(start_port))
 
         # Configure the distributed executor backend
         self._cli_args.distributed_executor_backend = distributed_executor_backend
@@ -330,9 +344,9 @@ class VLLMServerActor(ServerActorProtocol):
         entrypoint, so it takes the engine and CLI args explicitly rather than
         reading them off ``self``.
         """
-        # Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
-        # /update_weights, /get_world_size) registered by the RLHF router when
-        # VLLM_SERVER_DEV_MODE=1.
+        # Most weight-sync endpoints are registered by vLLM dev mode. SkyRL
+        # adds /fetch_weights because checkpoint-delta pulls and applies
+        # payloads before the paused /update_weights reload.
 
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
@@ -344,6 +358,22 @@ class VLLMServerActor(ServerActorProtocol):
             reset_running_requests = data.get("reset_running_requests", False)
             await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
             return {"status": "ok"}
+
+        @app.post("/fetch_weights")
+        async def _fetch_weights(request: Request):
+            """Fetch/apply checkpoint-delta payloads before the paused reload phase."""
+            body = await request.json()
+            target_version = body.get("target_version")
+            if target_version is None:
+                raise HTTPException(status_code=400, detail="'target_version' is required")
+
+            kwargs = {"target_version": int(target_version)}
+            if body.get("sync_dir") is not None:
+                kwargs["sync_dir"] = body["sync_dir"]
+            if body.get("uri") is not None:
+                kwargs["uri"] = body["uri"]
+            result = await engine.collective_rpc("fetch_weights", kwargs=kwargs)
+            return {"status": "ok", "result": result}
 
         @app.post("/skyrl/v1/load_lora_adapter")
         async def _skyrl_load_lora_adapter(request: Request):
@@ -421,23 +451,19 @@ class VLLMServerActor(ServerActorProtocol):
 
             logprobs = None
             if resp.logprobs is not None:
-                content = []
-                for tid, lp_dict in zip(token_ids_out, resp.logprobs):
-                    if lp_dict and tid in lp_dict:
-                        content.append({"logprob": lp_dict[tid].logprob})
-                    else:
-                        # -9999.0 is the default in vLLM's ChatCompletionLogProb
-                        content.append({"logprob": -9999.0})
+                content, num_clamped = build_logprobs_content(token_ids_out, resp.logprobs)
+                if num_clamped:
+                    logger.warning(
+                        f"request {request_id}: clamped {num_clamped}/{len(token_ids_out)} missing or "
+                        f"non-finite sampled logprobs to {CLAMPED_LOGPROB}"
+                    )
                 logprobs = {"content": content}
 
             routed_experts = None
             if resp.routed_experts is not None:
-                if hasattr(resp.routed_experts, "tolist"):
-                    routed_experts = resp.routed_experts.tolist()
-                else:
-                    routed_experts = resp.routed_experts
+                routed_experts = pack_routed_experts(resp.routed_experts)
 
-            return {
+            payload = {
                 "choices": [
                     {
                         "token_ids": token_ids_out,
@@ -447,6 +473,7 @@ class VLLMServerActor(ServerActorProtocol):
                     }
                 ]
             }
+            return Response(content=orjson.dumps(payload), media_type="application/json")
 
     async def shutdown(self) -> None:
         """Gracefully shutdown the server."""
@@ -456,6 +483,41 @@ class VLLMServerActor(ServerActorProtocol):
                 await self._server_task
             except asyncio.CancelledError:
                 pass
+
+
+def _seed_dp_master_port(http_port: int) -> None:
+    """Give vLLM's ray executor a private TCPStore port window.
+
+    ``RayExecutorV2`` (the default for ``distributed_executor_backend="ray"``)
+    picks the port for the engine's workers' ``torch.distributed`` group by
+    probing ``[VLLM_DP_MASTER_PORT + 100 + 32 * local_dp_rank, +32)`` and taking
+    the first port whose bind succeeds. With DP disabled ``ParallelConfig`` falls
+    back to the env defaults -- ``VLLM_DP_MASTER_PORT`` is 0, and
+    ``VLLM_DP_RANK_LOCAL`` defaults to ``VLLM_DP_RANK`` (0) rather than ``None``,
+    which would have routed us to vLLM's random-port branch -- so *every* engine
+    on the node probes the same window starting at port 100.
+
+    On a host where unprivileged ports start at 1024, all 32 probes fail and vLLM
+    falls back to a random port. But containers commonly set
+    ``net.ipv4.ip_unprivileged_port_start=0``, and there the probe *succeeds*:
+    since it closes the socket before TCPStore binds, two co-located engines both
+    settle on port 100 and the second dies with ``EADDRINUSE``.
+
+    The fix is disjoint windows, not a reserved port -- vLLM probes a 32-port
+    range, so there is no single port to hold. ``VLLMServerActor`` seeds this in
+    ``__init__`` from its group-assigned ``start_port``, which is unique per
+    actor; this call only takes effect on the standalone ``python -m`` path, where
+    the server owns its whole port window anyway.
+
+    Ignored when DP is enabled: vLLM overwrites ``data_parallel_master_port`` from
+    ``get_open_ports_list()`` on that path and leaves ``data_parallel_rank_local``
+    as ``None``, which reaches the random-port branch.
+
+    TODO: delete this function and its call site once vllm#50969 lands -- see the
+    removal checklist on ``compute_dp_master_port`` in
+    ``inference_servers/common.py``.
+    """
+    os.environ.setdefault("VLLM_DP_MASTER_PORT", str(compute_dp_master_port(http_port)))
 
 
 async def _build_and_serve_vllm_server(
@@ -469,8 +531,12 @@ async def _build_and_serve_vllm_server(
     Shared by ``VLLMServerActor._run_server`` (Ray-actor deployment) and the
     standalone ``python -m`` entrypoint below.
     """
+    _seed_dp_master_port(cli_args.port)
+
     sock_addr = (cli_args.host, cli_args.port)
-    sock = create_server_socket(sock_addr)
+    # One uvicorn per port (no api_server_count fan-out), matching vLLM's own
+    # single-server path, so SO_REUSEPORT stays off.
+    sock = create_server_socket(sock_addr, reuse_port=False)
     app = build_app(cli_args)
 
     # Initialize the engine (this loads the model - takes time)
@@ -552,9 +618,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     concerns (placement-group bundle indices, DP master rendezvous) do not apply
     here; pass standard vLLM flags to control parallelism and placement.
     """
-    # Match VLLMServerActor.__init__: enable vLLM dev-mode endpoints (sleep/wake,
-    # /init_weight_transfer_engine, /collective_rpc, /get_world_size), runtime
-    # LoRA load/unload, and CUDA-IPC weight transfer.
+    # Match VLLMServerActor.__init__: enable vLLM dev-mode endpoints
+    # (sleep/wake, /init_weight_transfer_engine, /collective_rpc,
+    # /get_world_size), SkyRL /fetch_weights, runtime LoRA load/unload, and
+    # CUDA-IPC weight transfer.
     os.environ["VLLM_SERVER_DEV_MODE"] = "1"
     os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"

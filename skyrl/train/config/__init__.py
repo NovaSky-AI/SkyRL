@@ -7,6 +7,7 @@ from skyrl.train.config.config import (
     CriticConfig,
     DataConfig,
     DataLoaderConfig,
+    DeltaWeightSyncConfig,
     DPPOConfig,
     DynamicSamplingConfig,
     EnvironmentConfig,
@@ -96,4 +97,5 @@ __all__ = [
     "build_skyrl_config_for_sft",
     "validate_fireworks_sft_cfg",
     "validate_sft_cfg",
+    "DeltaWeightSyncConfig",
 ]

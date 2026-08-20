@@ -37,11 +37,17 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install uv
-      run: |
-        curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Use the action rather than the curl installer: on GitHub-hosted runners it
+      # also restores/saves ~/.cache/uv between runs, which matters here because
+      # this job resolves several distinct extra sets (tinker/jax/dev).
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Run lint
       run: |
-        uvx ruff check
+        # Pin to match the ruff rev in .pre-commit-config.yaml. Unpinned `uvx ruff`
+        # picks up ruff's expanded default rule set in newer releases and fails CI.
+        uvx ruff@0.11.9 check
     - name: Run pytest
       run: |
         uv run --extra tinker --extra jax --extra dev --with transformers==5.2.0 pytest --forked -s tests/tx/models/test_qwen3_5.py
