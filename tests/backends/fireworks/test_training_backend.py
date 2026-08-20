@@ -5,6 +5,7 @@ import pytest
 import ray
 import torch
 
+from skyrl.backends.fireworks.runtime import ResumableCheckpoint
 from skyrl.backends.fireworks.training_backend import FireworksPolicyDispatch
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.config import SkyRLTrainConfig
@@ -67,6 +68,15 @@ def _cfg() -> SkyRLTrainConfig:
     return cfg
 
 
+def _resolve_resumable(name, **_kwargs):
+    return ResumableCheckpoint(
+        requested_name=name,
+        checkpoint_name="step-7",
+        checkpoint_resource="accounts/test/rlorTrainerJobs/source-trainer/checkpoints/step-7",
+        checkpoint_type="CHECKPOINT_TYPE_TRAINING",
+    )
+
+
 def test_policy_dispatch_stages_and_submits_importance_sampling() -> None:
     training_client = _TrainingClient()
     runtime = SimpleNamespace(training_client=training_client, publish_sampler_weights=None)
@@ -125,6 +135,7 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
     runtime = SimpleNamespace(
         training_client=training_client,
         trainer_job_id="source-trainer",
+        resolve_resumable_checkpoint=_resolve_resumable,
     )
     cfg = _cfg()
     cfg.trainer.fireworks.request_timeout_s = 123
@@ -137,6 +148,9 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
     assert training_client.saved_states[0].startswith("skyrl-step-7-")
     manifest = json.loads((ckpt_dir / "fireworks_checkpoint.json").read_text())
     assert manifest["source_trainer_job_id"] == "source-trainer"
+    assert manifest["requested_checkpoint_name"].startswith("skyrl-step-7-")
+    assert manifest["checkpoint_name"] == "step-7"
+    assert manifest["checkpoint_resource"].endswith("/checkpoints/step-7")
     assert manifest["includes_optimizer_state"] is True
     assert "promotable_checkpoint" not in manifest
 
@@ -171,6 +185,7 @@ def test_policy_dispatch_saves_promotable_checkpoint_when_enabled(tmp_path) -> N
     runtime = SimpleNamespace(
         training_client=training_client,
         trainer_job_id="source-trainer",
+        resolve_resumable_checkpoint=_resolve_resumable,
         save_promotable_checkpoint=save_promotable,
     )
     cfg = _cfg()
@@ -181,13 +196,36 @@ def test_policy_dispatch_saves_promotable_checkpoint_when_enabled(tmp_path) -> N
     dispatch.save_checkpoint("policy", str(ckpt_dir), tokenizer="unused")
 
     manifest = json.loads((ckpt_dir / "fireworks_checkpoint.json").read_text())
-    checkpoint_name = manifest["checkpoint_name"]
-    assert saved_promotable == [checkpoint_name]
+    requested_name = manifest["requested_checkpoint_name"]
+    assert saved_promotable == [requested_name]
     assert manifest["promotable_checkpoint"] == {
-        "snapshot_path": f"snapshot://{checkpoint_name}-cafebabe",
-        "checkpoint_resource": (f"accounts/test/rlorTrainerJobs/trainer/checkpoints/{checkpoint_name}-cafebabe"),
+        "snapshot_path": f"snapshot://{requested_name}-cafebabe",
+        "checkpoint_resource": (f"accounts/test/rlorTrainerJobs/trainer/checkpoints/{requested_name}-cafebabe"),
         "checkpoint_type": "CHECKPOINT_TYPE_INFERENCE_BASE",
     }
+
+
+def test_policy_dispatch_rejects_unresolved_cross_job_checkpoint(tmp_path) -> None:
+    training_client = _TrainingClient()
+    runtime = SimpleNamespace(training_client=training_client, trainer_job_id="target-trainer")
+    cfg = _cfg()
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
+    ckpt_dir = tmp_path / "global_step_2" / "policy"
+    ckpt_dir.mkdir(parents=True)
+    (ckpt_dir / "fireworks_checkpoint.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "checkpoint_name": "skyrl-step-2-deadbeef",
+                "checkpoint_resource": None,
+                "provider_path": "tinker://source/weights/skyrl-step-2-deadbeef",
+                "source_trainer_job_id": "source-trainer",
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="no resolved control-plane identity"):
+        dispatch.load_checkpoint("policy", str(ckpt_dir))
 
 
 def test_policy_dispatch_loads_same_trainer_checkpoint_by_name(tmp_path) -> None:

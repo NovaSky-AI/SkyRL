@@ -1,5 +1,7 @@
 import asyncio
 import re
+import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -223,6 +225,46 @@ async def test_publish_reuses_one_stable_sampler() -> None:
 
     # Teardown is intentionally idempotent.
     await runtime.close()
+
+
+def test_resolve_resumable_checkpoint_uses_server_stored_name() -> None:
+    service = _Service()
+    created = datetime.fromtimestamp(time.time(), timezone.utc).isoformat().replace("+00:00", "Z")
+    service.checkpoint_rows = [
+        {
+            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2",
+            "checkpointType": "CHECKPOINT_TYPE_TRAINING",
+            "createTime": created,
+        }
+    ]
+    runtime = _runtime(service=service)
+
+    result = runtime.resolve_resumable_checkpoint(
+        "skyrl-step-2-deadbeef",
+        save_started_at=time.time(),
+        poll_s=0,
+    )
+
+    assert result.requested_name == "skyrl-step-2-deadbeef"
+    assert result.checkpoint_name == "step-2"
+    assert result.checkpoint_resource.endswith("/checkpoints/step-2")
+    assert result.checkpoint_type == "CHECKPOINT_TYPE_TRAINING"
+
+
+def test_resolve_resumable_checkpoint_keeps_unresolved_save() -> None:
+    runtime = _runtime()
+
+    with pytest.warns(RuntimeWarning, match="visibility timeout"):
+        result = runtime.resolve_resumable_checkpoint(
+            "skyrl-step-2-deadbeef",
+            save_started_at=time.time(),
+            appear_timeout_s=0,
+            poll_s=0,
+        )
+
+    assert result.checkpoint_name == "skyrl-step-2-deadbeef"
+    assert result.checkpoint_resource is None
+    assert result.checkpoint_type is None
 
 
 def test_save_promotable_checkpoint_uses_base_sampler_and_control_plane_row() -> None:

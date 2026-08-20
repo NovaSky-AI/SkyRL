@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from typing import Any, Optional
 
@@ -166,22 +167,30 @@ class FireworksPolicyDispatch:
 
         step_match = re.search(r"global_step_(\d+)", ckpt_dir)
         step = step_match.group(1) if step_match else "unknown"
-        checkpoint_name = f"skyrl-step-{step}-{uuid.uuid4().hex[:8]}"
-        result = self.runtime.training_client.save_state(checkpoint_name).result(
+        requested_checkpoint_name = f"skyrl-step-{step}-{uuid.uuid4().hex[:8]}"
+        save_started_at = time.time()
+        result = self.runtime.training_client.save_state(requested_checkpoint_name).result(
             timeout=self.fireworks_config.request_timeout_s
         )
         provider_path = str(getattr(result, "path", "") or "")
         if not provider_path:
-            raise RuntimeError(f"Fireworks save_state({checkpoint_name!r}) returned no checkpoint path")
+            raise RuntimeError(f"Fireworks save_state({requested_checkpoint_name!r}) returned no checkpoint path")
+        resumable = self.runtime.resolve_resumable_checkpoint(
+            requested_checkpoint_name,
+            save_started_at=save_started_at,
+        )
 
         promotable = None
         if self.fireworks_config.save_promotable_checkpoints:
-            promotable = self.runtime.save_promotable_checkpoint(checkpoint_name)
+            promotable = self.runtime.save_promotable_checkpoint(requested_checkpoint_name)
 
         manifest = {
             "format_version": 1,
             "checkpoint_kind": "fireworks_dcp",
-            "checkpoint_name": checkpoint_name,
+            "checkpoint_name": resumable.checkpoint_name,
+            "requested_checkpoint_name": resumable.requested_name,
+            "checkpoint_resource": resumable.checkpoint_resource,
+            "checkpoint_type": resumable.checkpoint_type,
             "provider_path": provider_path,
             "source_trainer_job_id": self.runtime.trainer_job_id,
             "base_model": self.fireworks_config.base_model,
@@ -200,7 +209,7 @@ class FireworksPolicyDispatch:
             f.write("\n")
         logger.info(
             "Saved Fireworks DCP checkpoint: name={}, path={}, manifest={}",
-            checkpoint_name,
+            resumable.checkpoint_name,
             provider_path,
             manifest_path,
         )
@@ -234,6 +243,15 @@ class FireworksPolicyDispatch:
         source_job_id = manifest.get("source_trainer_job_id")
         if source_job_id and checkpoint_name:
             current_job_id = self.runtime.trainer_job_id
+            if (
+                str(source_job_id) != current_job_id
+                and "checkpoint_resource" in manifest
+                and not manifest.get("checkpoint_resource")
+            ):
+                raise ValueError(
+                    f"Fireworks checkpoint has no resolved control-plane identity for cross-job resume: "
+                    f"{manifest_path}"
+                )
             load_path = self.runtime.training_client.resolve_checkpoint_path(
                 checkpoint_name,
                 source_job_id=str(source_job_id) if str(source_job_id) != current_job_id else None,

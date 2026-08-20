@@ -12,6 +12,7 @@ import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from skyrl.train.config import FireworksConfig
@@ -21,12 +22,37 @@ def _checkpoint_short_name(row: dict) -> str:
     return str(row.get("name", "")).rstrip("/").rsplit("/", 1)[-1]
 
 
+def _checkpoint_create_timestamp(row: dict) -> float | None:
+    value = row.get("createTime")
+    if not isinstance(value, str) or not value:
+        return None
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 @dataclass(frozen=True)
 class SamplerVersion:
     """Snapshot identity visible to rollout calls admitted after publication."""
 
     version: int
     snapshot_path: str
+
+
+@dataclass(frozen=True)
+class ResumableCheckpoint:
+    """DCP checkpoint identity used for same-trainer or cross-job resume."""
+
+    requested_name: str
+    checkpoint_name: str
+    checkpoint_resource: str | None
+    checkpoint_type: str | None
 
 
 @dataclass(frozen=True)
@@ -247,6 +273,56 @@ class FireworksRuntime:
                 self._sampler_identity = identity
                 self._next_version = version + 1
             return identity
+
+    def resolve_resumable_checkpoint(
+        self,
+        requested_name: str,
+        *,
+        save_started_at: float,
+        appear_timeout_s: float = 90.0,
+        poll_s: float = 3.0,
+    ) -> ResumableCheckpoint:
+        with self._provider_operation_lock:
+            with self._state_lock:
+                if self._closed:
+                    raise RuntimeError("Fireworks runtime is closed")
+
+            deadline = time.monotonic() + appear_timeout_s
+            matches: list[dict] = []
+            while time.monotonic() < deadline:
+                try:
+                    rows = self.service.list_checkpoints(self.trainer_job_id)
+                except Exception:
+                    time.sleep(poll_s)
+                    continue
+                matches = [
+                    row
+                    for row in rows
+                    if str(row.get("checkpointType", "")).endswith(("TRAINING", "TRAINING_LORA"))
+                    and (_checkpoint_create_timestamp(row) or 0) >= save_started_at - 10
+                ]
+                if matches:
+                    break
+                time.sleep(poll_s)
+            if matches:
+                checkpoint = max(matches, key=lambda row: _checkpoint_create_timestamp(row) or 0)
+                return ResumableCheckpoint(
+                    requested_name=requested_name,
+                    checkpoint_name=_checkpoint_short_name(checkpoint),
+                    checkpoint_resource=checkpoint["name"],
+                    checkpoint_type=checkpoint.get("checkpointType"),
+                )
+            warnings.warn(
+                f"Resumable Fireworks checkpoint {requested_name!r} was saved but did not "
+                "surface on the control plane before the visibility timeout",
+                RuntimeWarning,
+            )
+            return ResumableCheckpoint(
+                requested_name=requested_name,
+                checkpoint_name=requested_name,
+                checkpoint_resource=None,
+                checkpoint_type=None,
+            )
 
     def save_promotable_checkpoint(
         self,
