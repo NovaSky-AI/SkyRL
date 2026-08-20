@@ -340,6 +340,30 @@ class TestFireworksConfig:
         with pytest.raises(ValueError, match="without checkpointing requires cleanup_on_exit=true"):
             validate_fireworks_sft_cfg(cfg)
 
+    def test_final_model_promotion_is_supported(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.fireworks.cleanup_on_exit = False
+        cfg.fireworks.output_model_id = "sft-final-step-10"
+
+        validate_fireworks_sft_cfg(cfg)
+
+    def test_final_model_promotion_requires_checkpoint_root(self):
+        cfg = self._cfg()
+        cfg.fireworks.output_model_id = "sft-final-step-10"
+
+        with pytest.raises(ValueError, match="ckpt_path when output_model_id is set"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_invalid_output_model_id_is_rejected(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.fireworks.cleanup_on_exit = False
+        cfg.fireworks.output_model_id = "Invalid_Model_ID"
+
+        with pytest.raises(ValueError, match="Invalid Fireworks output_model_id"):
+            validate_fireworks_sft_cfg(cfg)
+
     def test_checkpoint_retention_is_rejected(self):
         cfg = self._cfg()
         cfg.max_ckpts_to_keep = 1

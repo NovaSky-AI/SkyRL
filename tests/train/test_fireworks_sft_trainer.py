@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,9 +15,27 @@ from skyrl.train.sft_trainer import SFTTrainer
 
 
 class _Runtime:
+    trainer_job_id = "skyrl-smoke-sft-trainer"
+
     def __init__(self):
         self.training_client = SimpleNamespace()
         self.closed = 0
+        self.promotions = []
+        self.deleted = 0
+
+    async def promote_final_model(self, **kwargs):
+        self.promotions.append(kwargs)
+        return {
+            "sampler_path": "snapshot://final",
+            "checkpoint_resource": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final",
+            "checkpoint_type": "CHECKPOINT_TYPE_INFERENCE_BASE",
+            "output_model_id": kwargs["output_model_id"],
+            "model": {"name": f"accounts/test/models/{kwargs['output_model_id']}"},
+        }
+
+    async def delete_trainer(self):
+        self.deleted += 1
+        return "JOB_STATE_DELETED"
 
     async def close(self):
         self.closed += 1
@@ -221,6 +240,55 @@ def test_checkpoint_restores_provider_and_dataloader_state(tmp_path) -> None:
     ]
 
 
+def test_export_final_model_promotes_dcp_name_and_deletes_trainer(tmp_path) -> None:
+    trainer = _trainer()
+    trainer.global_step = 7
+    trainer.sft_cfg.ckpt_path = str(tmp_path)
+    trainer.sft_cfg.fireworks.output_model_id = "sft-final-step-7"
+    trainer.sft_cfg.fireworks.delete_trainer_after_promotion = True
+    runtime = _Runtime()
+    trainer._fireworks_runtime = runtime
+    policy_dir = tmp_path / "global_step_7" / "policy"
+    policy_dir.mkdir(parents=True)
+    (policy_dir / "fireworks_checkpoint.json").write_text(json.dumps({"checkpoint_name": "skyrl-step-7-deadbeef"}))
+
+    manifest = trainer.export_final_model()
+
+    assert runtime.promotions == [{"checkpoint_name": "skyrl-step-7-deadbeef", "output_model_id": "sft-final-step-7"}]
+    assert runtime.deleted == 1
+    assert manifest["trainer_state_after_delete"] == "JOB_STATE_DELETED"
+    written = json.loads((tmp_path / "global_step_7" / "fireworks_final_model.json").read_text())
+    assert written == {key: value for key, value in manifest.items() if key != "trainer_state_after_delete"}
+    cleanup = json.loads((tmp_path / "global_step_7" / "fireworks_trainer_cleanup.json").read_text())
+    assert cleanup == {
+        "trainer_job_id": "skyrl-smoke-sft-trainer",
+        "state": "JOB_STATE_DELETED",
+    }
+
+
+def test_promotion_failure_preserves_trainer(tmp_path) -> None:
+    trainer = _trainer()
+    trainer.global_step = 7
+    trainer.sft_cfg.ckpt_path = str(tmp_path)
+    trainer.sft_cfg.fireworks.output_model_id = "sft-final-step-7"
+    runtime = _Runtime()
+
+    async def fail_promotion(**kwargs):
+        raise RuntimeError("promotion failed")
+
+    runtime.promote_final_model = fail_promotion
+    trainer._fireworks_runtime = runtime
+    policy_dir = tmp_path / "global_step_7" / "policy"
+    policy_dir.mkdir(parents=True)
+    (policy_dir / "fireworks_checkpoint.json").write_text(json.dumps({"checkpoint_name": "skyrl-step-7-deadbeef"}))
+
+    with pytest.raises(RuntimeError, match="promotion failed"):
+        trainer.export_final_model()
+
+    assert runtime.deleted == 0
+    assert not (tmp_path / "global_step_7" / "fireworks_final_model.json").exists()
+
+
 def test_shutdown_is_idempotent() -> None:
     trainer = _trainer()
     runtime = _Runtime()
@@ -251,6 +319,9 @@ def test_entrypoint_run_uses_hosted_trainer_lifecycle(monkeypatch) -> None:
         def train(self):
             events.append("train")
 
+        def export_final_model(self):
+            events.append("export")
+
         def shutdown(self):
             events.append("shutdown")
 
@@ -258,7 +329,7 @@ def test_entrypoint_run_uses_hosted_trainer_lifecycle(monkeypatch) -> None:
 
     run(_cfg())
 
-    assert events == ["init", "setup", "train", "shutdown"]
+    assert events == ["init", "setup", "train", "export", "shutdown"]
 
 
 def test_entrypoint_interrupts_without_error_logging(monkeypatch) -> None:

@@ -572,6 +572,14 @@ def validate_fireworks_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError("Fireworks SFT requires ckpt_path when ckpt_interval > 0")
     if cfg.resume_from == "latest" and not cfg.ckpt_path:
         raise ValueError("Fireworks SFT requires ckpt_path when resume_from='latest'")
+    if cfg.fireworks.output_model_id:
+        if not cfg.ckpt_path:
+            raise ValueError("Fireworks SFT requires ckpt_path when output_model_id is set")
+        from fireworks.training.sdk import validate_output_model_id
+
+        errors = validate_output_model_id(cfg.fireworks.output_model_id)
+        if errors:
+            raise ValueError("Invalid Fireworks output_model_id: " + "; ".join(errors))
     checkpoint_enabled = bool(cfg.ckpt_path or cfg.resume_from or cfg.ckpt_interval)
     if checkpoint_enabled and cfg.fireworks.cleanup_on_exit:
         raise ValueError("Fireworks SFT checkpoint/resume requires cleanup_on_exit=false")

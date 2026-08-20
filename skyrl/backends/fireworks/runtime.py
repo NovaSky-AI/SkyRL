@@ -17,6 +17,10 @@ from typing import Any
 from skyrl.train.config import FireworksConfig
 
 
+def _checkpoint_short_name(row: dict) -> str:
+    return str(row.get("name", "")).rstrip("/").rsplit("/", 1)[-1]
+
+
 @dataclass(frozen=True)
 class SamplerVersion:
     """Snapshot identity visible to rollout calls admitted after publication."""
@@ -233,6 +237,87 @@ class FireworksRuntime:
                 self._sampler_identity = identity
                 self._next_version = version + 1
             return identity
+
+    async def promote_final_model(
+        self,
+        *,
+        checkpoint_name: str,
+        output_model_id: str,
+        appear_timeout_s: float = 90.0,
+        poll_s: float = 3.0,
+    ) -> dict[str, Any]:
+        async with self._publish_lock:
+            with self._state_lock:
+                if self._closed:
+                    raise RuntimeError("Fireworks runtime is closed")
+
+            def _save() -> str:
+                future = self.training_client.save_weights_for_sampler(
+                    checkpoint_name,
+                    checkpoint_type="base",
+                )
+                result = future.result(timeout=self.config.request_timeout_s)
+                path = str(getattr(result, "path", "") or "")
+                if not path:
+                    raise RuntimeError(f"Fireworks save_weights_for_sampler({checkpoint_name!r}) returned no path")
+                return path
+
+            snapshot_path = await asyncio.to_thread(_save)
+            snapshot_id = snapshot_path.rstrip("/").rsplit("/", 1)[-1]
+            deadline = time.monotonic() + appear_timeout_s
+            matches: list[dict] = []
+            while time.monotonic() < deadline:
+                try:
+                    rows = await asyncio.to_thread(self.service.list_checkpoints, self.trainer_job_id)
+                except Exception:
+                    await asyncio.sleep(poll_s)
+                    continue
+                matches = [row for row in rows if row.get("promotable") and _checkpoint_short_name(row) == snapshot_id]
+                if matches:
+                    break
+                await asyncio.sleep(poll_s)
+            if len(matches) != 1:
+                raise RuntimeError(
+                    f"Expected one promotable Fireworks checkpoint for {checkpoint_name!r}, got {len(matches)}"
+                )
+
+            checkpoint = matches[0]
+            model = await asyncio.to_thread(
+                self.service.promote_checkpoint,
+                name=checkpoint["name"],
+                output_model_id=output_model_id,
+                base_model=self.config.base_model,
+            )
+            return {
+                "sampler_path": snapshot_path,
+                "checkpoint_resource": checkpoint["name"],
+                "checkpoint_type": checkpoint.get("checkpointType"),
+                "output_model_id": output_model_id,
+                "model": model,
+            }
+
+    async def delete_trainer(self, *, timeout_s: float = 60.0, poll_s: float = 5.0) -> str:
+        from fireworks.training.sdk import TrainerJobManager
+
+        api_key = os.environ.get("FIREWORKS_API_KEY")
+        if not api_key or not self.trainer_job_id:
+            raise RuntimeError("Fireworks trainer deletion requires API credentials and a trainer ID")
+        manager = TrainerJobManager(api_key=api_key, base_url=self.config.base_url)
+        try:
+            await asyncio.to_thread(manager.delete, self.trainer_job_id)
+            deadline = time.monotonic() + timeout_s
+            state = "unknown"
+            while time.monotonic() < deadline:
+                row = await asyncio.to_thread(manager.try_get, self.trainer_job_id)
+                state = "absent" if row is None else str(row.get("state", "?"))
+                if state in ("absent", "JOB_STATE_DELETED"):
+                    return state
+                await asyncio.sleep(poll_s)
+            raise RuntimeError(
+                f"Fireworks trainer {self.trainer_job_id!r} did not reach a deleted state; state={state}"
+            )
+        finally:
+            await asyncio.to_thread(manager.close)
 
     @contextmanager
     def _use_sampler(self) -> Iterator[tuple[Any, SamplerVersion]]:

@@ -22,6 +22,7 @@ def run(cfg: SFTConfig) -> None:
     try:
         trainer.setup()
         trainer.train()
+        trainer.export_final_model()
     except Exception as exc:
         if trainer.tracker is not None:
             trainer.tracker.log_exception(exc, step=trainer.global_step)

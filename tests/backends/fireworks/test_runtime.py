@@ -37,6 +37,8 @@ class _Service:
     def __init__(self):
         self.samplers = []
         self.hotloads = []
+        self.checkpoint_rows = []
+        self.promotions = []
         self.closed = False
 
     def create_sampling_client(self, *, tokenizer):
@@ -48,6 +50,14 @@ class _Service:
     def hotload_sampler_snapshot(self, path):
         self.hotloads.append(path)
 
+    def list_checkpoints(self, job_id):
+        assert job_id == self.trainer_job_id
+        return list(self.checkpoint_rows)
+
+    def promote_checkpoint(self, **kwargs):
+        self.promotions.append(kwargs)
+        return {"name": f"accounts/test/models/{kwargs['output_model_id']}"}
+
     def close(self):
         self.closed = True
 
@@ -55,10 +65,12 @@ class _Service:
 class _TrainingClient:
     def __init__(self):
         self.names = []
+        self.checkpoint_types = []
 
-    def save_weights_for_sampler(self, name):
+    def save_weights_for_sampler(self, name, *, checkpoint_type=None):
         self.names.append(name)
-        return _Future(SimpleNamespace(path=f"snapshot://{name}"))
+        self.checkpoint_types.append(checkpoint_type)
+        return _Future(SimpleNamespace(path=f"snapshot://{name}-cafebabe"))
 
 
 def _runtime(
@@ -211,6 +223,97 @@ async def test_publish_reuses_one_stable_sampler() -> None:
 
     # Teardown is intentionally idempotent.
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_promote_final_model_saves_base_sampler_and_uses_control_plane_row() -> None:
+    service = _Service()
+    service.deployment_id = None
+    service.checkpoint_rows = [
+        {
+            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final-step-2-deadbeef",
+            "promotable": True,
+            "checkpointType": "CHECKPOINT_TYPE_INFERENCE_BASE",
+        },
+        {
+            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final-step-2-cafebabe",
+            "promotable": True,
+            "checkpointType": "CHECKPOINT_TYPE_INFERENCE_BASE",
+        },
+    ]
+    training = _TrainingClient()
+    runtime = _runtime(
+        service=service,
+        training_client=training,
+        config=FireworksConfig(base_model="accounts/fireworks/models/qwen3-4b", request_timeout_s=123),
+    )
+
+    result = await runtime.promote_final_model(
+        checkpoint_name="final-step-2",
+        output_model_id="sft-final-step-2",
+        poll_s=0,
+    )
+
+    assert training.names == ["final-step-2"]
+    assert training.checkpoint_types == ["base"]
+    assert service.promotions == [
+        {
+            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final-step-2-cafebabe",
+            "output_model_id": "sft-final-step-2",
+            "base_model": "accounts/fireworks/models/qwen3-4b",
+        }
+    ]
+    assert result["checkpoint_type"] == "CHECKPOINT_TYPE_INFERENCE_BASE"
+    assert result["model"]["name"] == "accounts/test/models/sft-final-step-2"
+
+
+@pytest.mark.asyncio
+async def test_promote_final_model_retries_control_plane_listing() -> None:
+    class FlakyService(_Service):
+        def __init__(self):
+            super().__init__()
+            self.list_calls = 0
+            self.checkpoint_rows = [
+                {
+                    "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final-cafebabe",
+                    "promotable": True,
+                }
+            ]
+
+        def list_checkpoints(self, job_id):
+            self.list_calls += 1
+            if self.list_calls == 1:
+                raise RuntimeError("control plane unavailable")
+            return super().list_checkpoints(job_id)
+
+    service = FlakyService()
+    runtime = _runtime(
+        service=service,
+        config=FireworksConfig(base_model="accounts/fireworks/models/qwen3-4b"),
+    )
+
+    result = await runtime.promote_final_model(
+        checkpoint_name="final",
+        output_model_id="sft-final",
+        appear_timeout_s=1,
+        poll_s=0,
+    )
+
+    assert service.list_calls == 2
+    assert result["checkpoint_resource"].endswith("final-cafebabe")
+
+
+@pytest.mark.asyncio
+async def test_promote_final_model_requires_one_promotable_row() -> None:
+    runtime = _runtime(config=FireworksConfig(base_model="accounts/fireworks/models/qwen3-4b"))
+
+    with pytest.raises(RuntimeError, match="Expected one promotable"):
+        await runtime.promote_final_model(
+            checkpoint_name="missing",
+            output_model_id="sft-final",
+            appear_timeout_s=0,
+            poll_s=0,
+        )
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ set -euo pipefail
 : "${CKPT_INTERVAL:=0}"
 : "${RESUME_FROM:=}"
 : "${PRESERVE_TRAINER_FOR_RESUME:=0}"
+: "${OUTPUT_MODEL_ID:=}"
 : "${MAX_PAID_RUNTIME_MINUTES:=15}"
 : "${RESOURCE_SUFFIX:=$(date -u +%Y%m%d%H%M%S)-$RANDOM}"
 : "${FIREWORKS_TRAINER_JOB_ID:=skyrl-smoke-sft-${RESOURCE_SUFFIX}-trainer}"
@@ -32,6 +33,10 @@ if [[ "$PRESERVE_TRAINER_FOR_RESUME" != "0" && "$PRESERVE_TRAINER_FOR_RESUME" !=
 fi
 if [[ "$PRESERVE_TRAINER_FOR_RESUME" == "1" && -z "$CKPT_PATH" ]]; then
   printf 'PRESERVE_TRAINER_FOR_RESUME=1 requires CKPT_PATH.\n' >&2
+  exit 2
+fi
+if [[ -n "$OUTPUT_MODEL_ID" && ( -z "$CKPT_PATH" || "$PRESERVE_TRAINER_FOR_RESUME" != "1" ) ]]; then
+  printf 'OUTPUT_MODEL_ID requires CKPT_PATH and PRESERVE_TRAINER_FOR_RESUME=1.\n' >&2
   exit 2
 fi
 
@@ -51,6 +56,7 @@ if [[ "${FIREWORKS_RUN_CONFIRMED:-0}" != "1" ]]; then
     "  checkpoint interval: ${CKPT_INTERVAL}" \
     "  resume from: ${RESUME_FROM:-fresh}" \
     "  preserve trainer for resume: ${PRESERVE_TRAINER_FOR_RESUME}" \
+    "  output model: ${OUTPUT_MODEL_ID:-none}" \
     "  wall-clock cap: ${MAX_PAID_RUNTIME_MINUTES} minutes" \
     "  pricing: https://fireworks.ai/pricing" \
     "  log: ${LOG_FILE}" \
@@ -69,7 +75,11 @@ cleanup_resources() {
   trap - EXIT INT TERM
   set +e
   if [[ "$PRESERVE_TRAINER_FOR_RESUME" == "1" ]]; then
-    printf 'Trainer preserved for resume: %s\n' "$FIREWORKS_TRAINER_JOB_ID" >> "$LOG_FILE"
+    if [[ -n "$OUTPUT_MODEL_ID" && "$command_status" -eq 0 ]]; then
+      printf 'Trainer cleanup handled after final model promotion: %s\n' "$FIREWORKS_TRAINER_JOB_ID" >> "$LOG_FILE"
+    else
+      printf 'Trainer preserved for resume: %s\n' "$FIREWORKS_TRAINER_JOB_ID" >> "$LOG_FILE"
+    fi
     exit "$command_status"
   fi
   uv run --isolated --extra fireworks examples/train/gsm8k/fireworks_dedicated_cleanup.py \
@@ -102,6 +112,8 @@ timeout --signal=INT --kill-after=2m "${MAX_PAID_RUNTIME_MINUTES}m" \
   fireworks.trainer_replica_count=1 \
   fireworks.request_timeout_s=600 \
   fireworks.cleanup_on_exit="$FIREWORKS_CLEANUP_ON_EXIT" \
+  fireworks.output_model_id="$OUTPUT_MODEL_ID" \
+  fireworks.delete_trainer_after_promotion=true \
   train_datasets="['$TRAIN_DATASET']" \
   train_dataset_splits="['$TRAIN_SPLIT']" \
   max_length="$MAX_LENGTH" \
