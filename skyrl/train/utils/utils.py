@@ -714,6 +714,13 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
             env_vars["NVTE_FUSED_ATTN"] = "0"
 
+        # Forward TransformerEngine attention-backend debug logging to workers when
+        # set on the driver. Workers are re-exec'd through the runtime env (e.g. the
+        # uv hook), so a plain raylet/driver export does not reach them.
+        for nvte_var in ("NVTE_DEBUG", "NVTE_DEBUG_LEVEL"):
+            if os.environ.get(nvte_var):
+                env_vars[nvte_var] = os.environ[nvte_var]
+
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
