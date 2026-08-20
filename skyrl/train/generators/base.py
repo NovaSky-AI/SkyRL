@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 import torch
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
-from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 
 TrainingPhase = Literal["train", "eval"]
 
@@ -47,11 +46,7 @@ class GeneratorOutput(TypedDict):
     # trajectory in the input batch (i.e. per ``agent_loop`` call). Used by the fully
     # async trainer to compute per-group / intra-group completion-time metrics.
     trajectory_generation_times: Optional[List[float]]
-    # Engine and env time splits of ``trajectory_generation_times``, one list entry per trajectory,
-    # e.g. {"llm": [...], "env": [...]}. trajectory_time_splits is None if any trajectory did not
-    # record its split.
-    trajectory_time_splits: Optional[Dict[str, List[float]]]
-    rollout_expert_indices: Optional[List[RoutedExpertIndices]]
+    rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
     # Per-row env metrics (one dict per row in the flattened batch). Used by

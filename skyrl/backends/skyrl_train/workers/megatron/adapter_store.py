@@ -112,8 +112,8 @@ class AdapterSlot:
           (mc.buffers + mc.expert_parallel_buffers).
       cpu_grad_data[mc_idx]  -> same shape as cpu_param_data; mirrors
           buffer.grad_data so that grads accumulated by an interrupted
-          forward_backward aren't lost when another tenant runs before
-          this adapter's optim_step.
+          forward_backward aren't lost when another tenant runs in the
+          gap before this adapter's optim_step.
       cpu_main_param[opt_idx][g] -> list[Tensor], shapes matching
           opt.shard_fp32_from_float16_groups[g].
       cpu_opt_state[opt_idx][g][i] -> dict[str, Tensor], mirroring
@@ -181,8 +181,9 @@ class AdapterStore:
     def _allocate_empty_slot(self, model_chunks, optimizer) -> AdapterSlot:
         slot = AdapterSlot()
         # Param data + grad data: one pinned bf16 tensor each per (mc, buffer).
-        # Grads must travel with the slot so forward_backward calls accumulate
-        # into the correct adapter even when requests from tenants interleave.
+        # Grads must travel with the slot — otherwise an interleaved tenant's
+        # forward_backward will clobber unconsumed grads via zero_grad_buffer
+        # at the top of forward_backward. See docs/.../multi_lora_design.mdx.
         for mc_idx, _buf_idx, buf in _iter_buffers(model_chunks):
             while len(slot.cpu_param_data) <= mc_idx:
                 slot.cpu_param_data.append([])

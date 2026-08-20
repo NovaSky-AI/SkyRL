@@ -60,7 +60,9 @@ def test_validate_dedicated_fireworks_grpo_config() -> None:
 
 def test_validate_dedicated_full_parameter_fireworks_grpo_config() -> None:
     cfg = _valid_fireworks_cfg()
-    cfg.trainer.fireworks.training_shape_id = "accounts/fireworks/trainingShapes/qwen3-4b-minimum"
+    cfg.trainer.fireworks.training_shape_id = (
+        "accounts/fireworks/trainingShapes/qwen3-4b-minimum"
+    )
     cfg.trainer.fireworks.replica_count = 4
     cfg.trainer.policy.model.lora.rank = 0
 
@@ -129,7 +131,9 @@ def test_validate_dedicated_requires_auditable_resource_ids() -> None:
         ),
     ],
 )
-def test_validate_fireworks_rejects_out_of_scope_algorithms(mutate, message: str) -> None:
+def test_validate_fireworks_rejects_out_of_scope_algorithms(
+    mutate, message: str
+) -> None:
     cfg = _valid_fireworks_cfg()
     mutate(cfg)
 

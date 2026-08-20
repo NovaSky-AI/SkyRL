@@ -148,7 +148,6 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
-        **kwargs,
     ) -> None:
         """Send chunks via CUDA IPC.
 
@@ -273,9 +272,7 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
 
     @staticmethod
     def create_init_info(
-        ie_cfg: "InferenceEngineConfig",
-        inference_world_size: Optional[int] = None,
-        base_model_path: Optional[str] = None,
+        ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None
     ) -> CudaIpcInitInfo:
         """Create init info with all config-derived args."""
         return CudaIpcInitInfo(

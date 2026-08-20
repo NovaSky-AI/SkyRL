@@ -171,10 +171,11 @@ def _cfg(tp: int, num_gpus: int):
     return cfg
 
 
-# TP=4xDP1 mirrors the 9B/MiMo recipes (sequence parallel on, vocab-sharded draft loss); TP=2xDP2
-# exercises the DistributedOptimizer DP-sharding of param ownership.
+# TP=4 mirrors the 9B/MiMo recipes (sequence parallel on, vocab-sharded draft loss); TP=1 is the
+# minimal case; TP4xDP2 mirrors the full 8-GPU recipe (the DistributedOptimizer DP-shards param
+# ownership, which coverage checks must account for).
 @pytest.mark.megatron
-@pytest.mark.parametrize("tp,dp", [(4, 1), (2, 2)])
+@pytest.mark.parametrize("tp,dp", [(1, 1), (4, 1), (4, 2)])
 def test_mtp_grad_isolation(ray_init_fixture, tp, dp):
     num_gpus = tp * dp
     cfg = _cfg(tp, num_gpus)

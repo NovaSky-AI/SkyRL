@@ -634,9 +634,8 @@ class JaxBackendImpl(AbstractBackend):
         """
         if not prepared_batch.all_model_inputs:
             return {}
-        unsupported_loss_fns = set(prepared_batch.all_loss_fns) - LOSS_TYPES.keys()
-        if unsupported_loss_fns:
-            raise ValueError(f"Loss functions {sorted(unsupported_loss_fns)} are not supported by the JAX backend")
+        if "ppo_critic" in prepared_batch.all_loss_fns:
+            raise ValueError("ppo_critic is only supported by the SkyRL-Train backend")
 
         results = {}
 
@@ -912,15 +911,7 @@ class JaxBackendImpl(AbstractBackend):
                 if needs_prompt_logprobs and result.prompt_logprobs:
                     all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
 
-        for request_id, _, start_idx, end_idx, prompt_logprobs_requested, topk_prompt_logprobs in request_batch_slices:
-            if topk_prompt_logprobs > 0:
-                # tx's generator only returns the sampled token's logprob per
-                # prompt position, so there is nothing to build top-k from.
-                results[request_id] = types.ErrorResponse(
-                    error="topk_prompt_logprobs is not supported by the JAX backend",
-                    status="error",
-                )
-                continue
+        for request_id, _, start_idx, end_idx, prompt_logprobs_requested in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
             # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
             prompt_logprobs = (

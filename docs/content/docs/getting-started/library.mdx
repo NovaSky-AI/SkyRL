@@ -14,34 +14,25 @@ dependencies = [
     # Option B: Install from Git (latest)
     # "skyrl[fsdp]",
 
-    "flashinfer-jit-cache==0.6.13",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11"
+    "flashinfer-jit-cache==0.5.3",
+    "flash-attn==2.8.3"
 ]
 
+[tool.uv.extra-build-dependencies]
+flash-attn = [{requirement = "torch", match-runtime = true}]
+
 [tool.uv.sources]
-flashinfer-jit-cache = { index = "flashinfer-cu130" }
-flash-attn = { index = "astral-cu130" }
+flashinfer-jit-cache = { index = "flashinfer-cu128" }
 # Only needed for Option B (Git install):
 # skyrl-gym = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-gym" }
 # skyrl = { git = "https://github.com/NovaSky-AI/SkyRL" }
 
 [[tool.uv.index]]
-name = "flashinfer-cu130"
-url = "https://flashinfer.ai/whl/cu130"
-explicit = true
-
-[[tool.uv.index]]
-name = "astral-cu130"
-url = "https://wheels.astral.sh/simple/cu130/"
+name = "flashinfer-cu128"
+url = "https://flashinfer.ai/whl/cu128"
 explicit = true
 ```
 
 **Option A (PyPI)**: Use `skyrl[fsdp]`. No additional sources needed.
 
 **Option B (Git)**: Uncomment the `skyrl-gym` and `skyrl` sources to install from the latest commit.
-
-SkyRL is built against CUDA 13 and torch 2.11, so both indexes above are the cu130
-variants. `flash-attn` comes from Astral's prebuilt GPU wheel index, which stamps
-each wheel with the (CUDA, torch) pair it was built against as a PEP 440 local
-version — the pin has to name that build exactly. Keep it at `2.8.3`, not
-`2.8.3.post1`: Transformer Engine only accepts flash-attn up to `2.8.3`.

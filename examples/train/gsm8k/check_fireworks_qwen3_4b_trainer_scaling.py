@@ -26,18 +26,27 @@ DEFAULT_BASE_MODEL = "accounts/fireworks/models/qwen3-4b"
 DEFAULT_SHAPE = "accounts/fireworks/trainingShapes/qwen3-4b-minimum"
 
 
-def _shape_versions(manager: TrainerJobManager, base_model: str) -> list[dict[str, Any]]:
+def _shape_versions(
+    manager: TrainerJobManager, base_model: str
+) -> list[dict[str, Any]]:
     params = urlencode(
         {
             "filter": (f'snapshot.base_model="{base_model}" AND latest_validated=true'),
             "pageSize": 200,
         }
     )
-    response = manager._get(f"/v1/accounts/-/trainingShapes/-/versions?{params}", timeout=30)
+    response = manager._get(
+        f"/v1/accounts/-/trainingShapes/-/versions?{params}", timeout=30
+    )
     if not response.is_success:
-        raise RuntimeError("Failed to list training shapes " f"(HTTP {response.status_code}): {response.text}")
+        raise RuntimeError(
+            "Failed to list training shapes "
+            f"(HTTP {response.status_code}): {response.text}"
+        )
     body = response.json() or {}
-    return body.get("trainingShapeVersions") or body.get("training_shape_versions") or []
+    return (
+        body.get("trainingShapeVersions") or body.get("training_shape_versions") or []
+    )
 
 
 def _validate_case(label: str, config: TrainerJobConfig) -> None:

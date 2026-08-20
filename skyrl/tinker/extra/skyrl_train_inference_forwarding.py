@@ -11,7 +11,6 @@ import httpx
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.backends.renderer import render_model_input
-from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
@@ -74,10 +73,11 @@ class SkyRLTrainInferenceForwardingClient:
         """Forward a sample request to vLLM and write the result to FutureDB."""
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
+            result_data = result.model_dump()
             status = RequestStatus.COMPLETED
         except Exception as e:
             logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
-            result = types.ErrorResponse(error=str(e), status="failed")
+            result_data = {"error": str(e), "status": "failed"}
             status = RequestStatus.FAILED
 
         async with AsyncSession(self.db_engine) as session:
@@ -87,8 +87,7 @@ class SkyRLTrainInferenceForwardingClient:
                 # request, stale-session GC). Nothing to write back.
                 logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
                 return
-            # `result_data` is a text column holding pre-serialized JSON.
-            future.result_data = result.model_dump_json()
+            future.result_data = result_data
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
@@ -134,12 +133,6 @@ class SkyRLTrainInferenceForwardingClient:
             "stream": False,
             "return_token_ids": True,
         }
-        # vLLM's `prompt_logprobs` is an int: 0 returns just the prompt tokens'
-        # own logprobs, k>0 also returns the top-k per position.
-        topk_prompt_logprobs = getattr(sample_req, "topk_prompt_logprobs", 0) or 0
-        want_prompt_logprobs = bool(sample_req.prompt_logprobs) or topk_prompt_logprobs > 0
-        if want_prompt_logprobs:
-            payload["prompt_logprobs"] = topk_prompt_logprobs
         # SamplingParams.stop is polymorphic (list[str] | list[int]).
         stop = getattr(sp, "stop", None)
         if stop:
@@ -167,17 +160,6 @@ class SkyRLTrainInferenceForwardingClient:
                 f"content-type={response.headers.get('content-type')!r}): {response.text[:512]}"
             ) from e
 
-        prompt_logprobs = None
-        topk = None
-        if want_prompt_logprobs:
-            # All `n` choices share one prompt, so vLLM repeats the same prompt
-            # logprobs on each choice; read them off the first.
-            choices = result.get("choices") or []
-            raw = choices[0].get("prompt_logprobs") if choices else None
-            if raw is None:
-                logger.warning("Requested prompt logprobs but vLLM /v1/completions returned none")
-            prompt_logprobs, topk = convert_vllm_prompt_logprobs(prompt_tokens, raw, topk=topk_prompt_logprobs)
-
         sequences = []
         for choice in result.get("choices", []):
             tokens = choice.get("token_ids", [])
@@ -199,8 +181,4 @@ class SkyRLTrainInferenceForwardingClient:
                 )
             )
 
-        return types.SampleOutput(
-            sequences=sequences,
-            prompt_logprobs=prompt_logprobs,
-            topk_prompt_logprobs=topk,
-        )
+        return types.SampleOutput(sequences=sequences, prompt_logprobs=None)

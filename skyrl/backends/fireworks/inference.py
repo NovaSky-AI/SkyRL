@@ -89,9 +89,17 @@ class FireworksInferenceClient(InferenceEngineInterface):
         sequence = sequences[0]
         response_ids = [int(token) for token in list(sequence.tokens)]
         raw_logprobs = getattr(sequence, "logprobs", None)
-        response_logprobs = None if raw_logprobs is None else [float(value) for value in list(raw_logprobs)]
-        if request_logprobs and (response_logprobs is None or len(response_logprobs) != len(response_ids)):
-            raise RuntimeError("Fireworks did not return one rollout logprob per generated token")
+        response_logprobs = (
+            None
+            if raw_logprobs is None
+            else [float(value) for value in list(raw_logprobs)]
+        )
+        if request_logprobs and (
+            response_logprobs is None or len(response_logprobs) != len(response_ids)
+        ):
+            raise RuntimeError(
+                "Fireworks did not return one rollout logprob per generated token"
+            )
         response = self.runtime.tokenizer.decode(response_ids, skip_special_tokens=True)
         return (
             response,
@@ -108,7 +116,9 @@ class FireworksInferenceClient(InferenceEngineInterface):
         del model
         prompt_token_ids = input_batch.get("prompt_token_ids")
         if prompt_token_ids is None or input_batch.get("prompts") is not None:
-            raise ValueError("Fireworks hosted generation currently requires prompt_token_ids only")
+            raise ValueError(
+                "Fireworks hosted generation currently requires prompt_token_ids only"
+            )
 
         await self._wait_for_admission()
         values: dict[str, Any] = dict(self._default_sampling_params)
@@ -121,7 +131,9 @@ class FireworksInferenceClient(InferenceEngineInterface):
 
         rows = await asyncio.gather(
             *(
-                self._sample_one(list(tokens), params=params, request_logprobs=request_logprobs)
+                self._sample_one(
+                    list(tokens), params=params, request_logprobs=request_logprobs
+                )
                 for tokens in prompt_token_ids
             )
         )
@@ -139,15 +151,23 @@ class FireworksInferenceClient(InferenceEngineInterface):
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         del request_payload
-        raise NotImplementedError("Fireworks hosted sampling currently uses token-in/token-out generation")
+        raise NotImplementedError(
+            "Fireworks hosted sampling currently uses token-in/token-out generation"
+        )
 
-    async def render_chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def render_chat_completion(
+        self, request_payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
         del request_payload
-        raise NotImplementedError("Fireworks hosted rendering is performed by the SkyRL tokenizer")
+        raise NotImplementedError(
+            "Fireworks hosted rendering is performed by the SkyRL tokenizer"
+        )
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         del request_payload
-        raise NotImplementedError("Use token-in/token-out generate() with Fireworks hosted sampling")
+        raise NotImplementedError(
+            "Use token-in/token-out generate() with Fireworks hosted sampling"
+        )
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         return None

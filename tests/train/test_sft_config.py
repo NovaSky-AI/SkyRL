@@ -7,8 +7,6 @@ correctly bridged to the internal SkyRLTrainConfig by build_skyrl_config_for_sft
 uv run --isolated --extra dev pytest tests/train/test_sft_config.py -v
 """
 
-import pathlib
-
 import pytest
 
 from skyrl.train.config import (
@@ -55,83 +53,6 @@ class TestUseSamplePackingAlias:
     def test_use_sample_packing_with_new_key_raises(self):
         with pytest.raises(ValueError, match="only one of use_sample_packing"):
             _sft_cfg_from_overrides(["use_sample_packing=true", "remove_microbatch_padding=false"])
-
-
-class TestCliOverridesFromDict:
-    """Dict overrides round-trip by type rather than through YAML re-parsing.
-
-    See https://github.com/NovaSky-AI/SkyRL/issues/1567.
-    """
-
-    def test_none_values_stay_none(self):
-        """``None`` values arrive as ``None``, not the string ``"None"``."""
-        cfg = SFTConfig.from_cli_overrides(
-            {
-                "max_training_steps": None,
-                "num_steps": None,
-                "sampler_class_path": None,
-            }
-        )
-        assert cfg.max_training_steps is None
-        assert cfg.num_steps is None
-        assert cfg.sampler_class_path is None
-
-    def test_none_override_passes_validation(self):
-        """A ``None`` ``max_training_steps`` override passes ``validate_sft_cfg``.
-
-        ``validate_sft_cfg`` compares ``max_training_steps`` against ``0``, which
-        raises ``TypeError`` for a string.
-        """
-        cfg = SFTConfig.from_cli_overrides({"max_training_steps": None, "model.path": "test/my-model"})
-        validate_sft_cfg(cfg)
-        assert cfg.max_training_steps is None
-
-    @pytest.mark.parametrize(
-        "value",
-        [
-            "null",
-            "true",
-            "",
-            "[not-a-list]",
-            "{not: a-dict}",
-            "name: with colon",
-        ],
-    )
-    def test_string_values_stay_strings(self, value):
-        cfg = SFTConfig.from_cli_overrides({"run_name": value})
-        assert cfg.run_name == value
-
-    def test_scalar_and_container_values_keep_their_types(self):
-        cfg = SFTConfig.from_cli_overrides(
-            {
-                "num_steps": 10,
-                "remove_microbatch_padding": True,
-                "use_sequence_packing": False,
-                "model.path": "Qwen/Qwen3-0.6B",
-            }
-        )
-        assert cfg.num_steps == 10
-        assert cfg.remove_microbatch_padding is True
-        assert cfg.use_sequence_packing is False
-        assert cfg.model.path == "Qwen/Qwen3-0.6B"
-
-    def test_non_json_serializable_values_fall_back_to_str(self):
-        cfg = SFTConfig.from_cli_overrides({"model.path": pathlib.Path("/tmp/model")})
-        assert cfg.model.path == "/tmp/model"
-
-    @pytest.mark.parametrize(
-        ("dict_value", "dotlist_arg", "expected"),
-        [
-            pytest.param(None, "num_steps=null", None, id="none"),
-            pytest.param(5, "num_steps=5", 5, id="int"),
-        ],
-    )
-    def test_dict_and_dotlist_paths_agree(self, dict_value, dotlist_arg, expected):
-        """A dict override matches the dotlist spelling of the same value."""
-        from_dict = SFTConfig.from_cli_overrides({"num_steps": dict_value})
-        from_list = SFTConfig.from_cli_overrides([dotlist_arg])
-        assert from_dict.num_steps == expected
-        assert from_list.num_steps == expected
 
 
 class TestTopLevelOverrides:

@@ -23,7 +23,6 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
     InferenceEngineInterface,
 )
-from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -51,15 +50,12 @@ class TrajectoryOutput:
     prompt_ids: List[int]
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
-    rollout_expert_indices: Optional[RoutedExpertIndices] = None
+    rollout_expert_indices: Optional[List[List[List[int]]]] = None
     pixel_values: Optional[torch.Tensor] = None
     image_grid_thw: Optional[torch.Tensor] = None
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
-    # Wall-clock seconds spent in each phase. "llm" is time in inference-engine calls, "env" is
-    # time in env.step. Field is None if any loop did not record a split.
-    time_splits: Optional[Dict[str, float]] = None
 
 
 @dataclass
@@ -70,9 +66,6 @@ class StepWiseOutput:
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
     # leave this as None if they do not track timing.
     e2e_time: Optional[float] = None
-    # Wall-clock seconds spent in each phase. "llm" is time in inference-engine calls, "env" is
-    # time in env.step. Field is None if any loop did not record a split.
-    time_splits: Optional[Dict[str, float]] = None
 
 
 @dataclass
@@ -83,7 +76,7 @@ class AgentLoopState:
     rollout_logprobs: Optional[List[float]]
     response_end_idx: Optional[int]
     done: bool
-    rollout_expert_indices: Optional[RoutedExpertIndices] = None
+    rollout_expert_indices: Optional[List[List[List[int]]]] = None
 
 
 @dataclass
@@ -93,13 +86,30 @@ class TurnOutput:
     output_logprobs: Optional[List[float]]
     new_obs: ConversationType
     obs_ids: List[int]
-    rollout_expert_indices: Optional[RoutedExpertIndices]
+    rollout_expert_indices: Optional[List[List[List[int]]]]  # [seq_len, layer_num, topk]
     reward: Optional[float]
     added_eos: bool = False
 
-    def get_turn_rollout_expert_indices(self) -> Optional[RoutedExpertIndices]:
-        """Return only routes that the inference model actually executed."""
-        return self.rollout_expert_indices
+    def get_turn_rollout_expert_indices(self) -> Optional[List[List[List[int]]]]:
+        """
+        Get rollout inference indices for this turn's tokens (output tokens + observation tokens).
+
+        Returns indices for generated output tokens, with padding entries (all 0)
+        for any manually-added EOS token and observation tokens
+        Returns None if rollout_expert_indices is None.
+        """
+        if self.rollout_expert_indices is None:
+            return None
+        if not self.rollout_expert_indices:
+            return self.rollout_expert_indices
+        layer_num = len(self.rollout_expert_indices[0])
+        topk = len(self.rollout_expert_indices[0][0]) if layer_num > 0 else 0
+        pad_entry = [[0] * topk for _ in range(layer_num)]
+        indices = list(self.rollout_expert_indices)
+        if self.added_eos:
+            indices.append(pad_entry)
+        indices.extend(pad_entry for _ in range(len(self.obs_ids)))
+        return indices
 
     def get_turn_loss_mask(self) -> List[int]:
         """
@@ -128,13 +138,6 @@ class TurnOutput:
         if not self.output_logprobs:
             return None
         return self.output_logprobs + [0.0] * len(self.obs_ids)
-
-
-def _split_lists(time_splits: List[Optional[Dict[str, float]]]) -> Optional[Dict[str, List[float]]]:
-    """Per-component lists from per-trajectory time splits, or None if any trajectory lacks them."""
-    if not time_splits or any(s is None for s in time_splits):
-        return None
-    return {name: [s[name] for s in time_splits] for name in time_splits[0]}
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -318,7 +321,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs: Optional[List[float]]
         """
         agent_loop_start_time = time.monotonic()
-        time_splits = {"llm": 0.0, "env": 0.0}
 
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
@@ -407,9 +409,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     sampling_params=sampling_params,
                     cache_salt=cache_salt,
                 )
-                llm_call_start_time = time.monotonic()
                 engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
-                time_splits["llm"] += time.monotonic() - llm_call_start_time
                 output = engine_output["responses"][0]
                 output_ids = engine_output["response_ids"][0]
                 stop_reason = engine_output["stop_reasons"][0]
@@ -443,9 +443,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                         added_eos = True
 
                 # 2. Environment step
-                env_step_start_time = time.monotonic()
                 env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
-                time_splits["env"] += time.monotonic() - env_step_start_time
                 new_obs = env_step_output["observations"]
                 step_reward: float = env_step_output["reward"]
                 agent_loop_state.done = env_step_output["done"]
@@ -473,6 +471,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                     added_eos=added_eos,
                     rollout_expert_indices=rollout_expert_indices,
                 )
+
+                if turn_output.rollout_expert_indices is not None and agent_loop_state.rollout_expert_indices is None:
+                    agent_loop_state.rollout_expert_indices = []
 
                 if is_step_wise:
                     # current response + observation ids
@@ -568,9 +569,15 @@ class SkyRLGymGenerator(GeneratorInterface):
                 assert response_ids is not None and loss_mask is not None
                 if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                     response_ids.append(self.tokenizer.eos_token_id)
+                    # TODO(Charlie): this should be 0? Otherwise logprobs will be extremely off. But if it is loss
+                    # masked with 0, why bother adding it?
                     loss_mask.append(1)
                     if rollout_logprobs is not None:
                         rollout_logprobs.append(0.0)
+                    if rollout_expert_indices_out is not None and rollout_expert_indices_out:
+                        layer_num = len(rollout_expert_indices_out[0])
+                        topk = len(rollout_expert_indices_out[0][0]) if layer_num > 0 else 0
+                        rollout_expert_indices_out.append([[0] * topk for _ in range(layer_num)])
                     appended_eos_token = True
 
             if self.generator_cfg.step_wise_trajectories:
@@ -599,7 +606,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 trajectory_id,
             )
             agent_loop_output.e2e_time = time.monotonic() - agent_loop_start_time
-            agent_loop_output.time_splits = time_splits
             return agent_loop_output
 
         finally:
@@ -764,7 +770,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_masks = []
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
-        truncated_indices: Optional[List[RoutedExpertIndices]] = [] if raw_rollout_expert_indices is not None else None
+        truncated_indices: Optional[List] = [] if raw_rollout_expert_indices is not None else None
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
@@ -867,7 +873,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         trajectory_generation_times_per_prompt = [getattr(output, "e2e_time", None) for output in all_outputs]
         if any(t is None for t in trajectory_generation_times_per_prompt):
             trajectory_generation_times_per_prompt = None
-        trajectory_time_splits_per_prompt = _split_lists([getattr(o, "time_splits", None) for o in all_outputs])
 
         if self.generator_cfg.step_wise_trajectories:
             responses = []
@@ -880,7 +885,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             out_trajectory_ids = []
             out_env_classes = []
             out_trajectory_generation_times = []
-            out_step_time_splits = []
             for i, output in enumerate(all_outputs):
                 for j, step_output in enumerate(output.step_outputs):
                     responses.append(step_output.response_ids)
@@ -892,13 +896,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                     is_last_step.append(j == len(output.step_outputs) - 1)
                     out_trajectory_ids.append(trajectory_ids[i])
                     out_env_classes.append(env_classes[i])
-                    # For trajectory completion per turn we just use the trajectory level times
+                    # For trajectory completion per turn we just use the trajectory level e2e time
                     out_trajectory_generation_times.append(getattr(output, "e2e_time", None))
-                    out_step_time_splits.append(getattr(output, "time_splits", None))
             # Keep aligned with the per-prompt None handling:
             if not trajectory_generation_times_per_prompt:
                 out_trajectory_generation_times = None
-            out_trajectory_time_splits = _split_lists(out_step_time_splits)
             env_classes = out_env_classes
         else:
             responses = [output.response_ids for output in all_outputs]
@@ -911,7 +913,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             out_trajectory_ids = None
             # One time per trajectory, already aligned 1:1 with responses (None if not all recorded).
             out_trajectory_generation_times = trajectory_generation_times_per_prompt
-            out_trajectory_time_splits = trajectory_time_splits_per_prompt
 
         has_vision_features = any(getattr(output, "pixel_values", None) is not None for output in all_outputs)
         pixel_values = (
@@ -952,7 +953,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             # NOTE: we only use trajectory completion times per prompt for
             # metrics, to avoid duplicate entries with step-wise training
             trajectory_completion_times=trajectory_generation_times_per_prompt,
-            trajectory_time_splits=trajectory_time_splits_per_prompt,
         )
 
         if self.generator_cfg.zero_reward_on_non_stop:
@@ -974,7 +974,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             "trajectory_ids": out_trajectory_ids,
             # NOTE: for completion metrics, we output the completion time
             "trajectory_generation_times": out_trajectory_generation_times,
-            "trajectory_time_splits": out_trajectory_time_splits,
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
             "env_metrics": env_metrics,
@@ -1119,7 +1118,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             agent_loop_state.loss_mask += loss_mask_for_turn
             if agent_loop_state.rollout_logprobs is not None and rollout_logprobs_for_turn is not None:
                 agent_loop_state.rollout_logprobs += rollout_logprobs_for_turn
-            if rollout_expert_indices_for_turn is not None:
+            if agent_loop_state.rollout_expert_indices is not None and rollout_expert_indices_for_turn is not None:
                 # overwrite the existing rollout inference indices, since the inference engine should
                 # return the expert indices for the entire sequence including each turn's input
                 # and the final response should not have an observation appended to it

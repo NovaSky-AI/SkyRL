@@ -64,7 +64,6 @@ from typing import (
 )
 
 import aiohttp
-import orjson
 
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
@@ -73,10 +72,6 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
 )
-from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
-    decode_packed_routed_experts,
-)
-from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
     SKYRL_HTTP_CONNECTION_LIMIT,
@@ -317,8 +312,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
             try:
                 async with session.post(url, json=json, headers=headers) as resp:
                     try:
-                        body = orjson.loads(await resp.read())
-                    except orjson.JSONDecodeError as e:
+                        body = await resp.json(content_type=None)
+                    except Exception as e:
                         if 400 <= resp.status < 500:
                             # Non-JSON client error (e.g. plain text 422 from vllm-router).
                             # Raise immediately — client errors won't succeed on retry.
@@ -451,16 +446,15 @@ class RemoteInferenceClient(InferenceEngineInterface):
         raw_results = await asyncio.gather(*[_throttled_generate(idx) for idx in range(batch_size)])
         responses = await asyncio.gather(*[_throttled_detokenize(r["response_ids"]) for r in raw_results])
 
-        rollout_expert_indices = (
-            [result["routed_experts"] for result in raw_results] if self.enable_return_routed_experts else None
-        )
+        rollout_expert_indices = [r.get("routed_experts") for r in raw_results]
+        has_routed_experts = any(x is not None for x in rollout_expert_indices)
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=[r["stop_reason"] for r in raw_results],
             response_ids=[r["response_ids"] for r in raw_results],
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
-            rollout_expert_indices=rollout_expert_indices,
+            rollout_expert_indices=rollout_expert_indices if has_routed_experts else None,
         )
 
     async def _generate_single(
@@ -517,12 +511,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             if logprobs_content:
                 response_logprobs = [logprob_info["logprob"] for logprob_info in logprobs_content]
 
-        routed_experts = None
-        if self.enable_return_routed_experts:
-            packed_routed_experts = choice.get("routed_experts")
-            if not isinstance(packed_routed_experts, dict):
-                raise ValueError("/skyrl/v1/generate must return packed routed_experts")
-            routed_experts = decode_packed_routed_experts(packed_routed_experts)
+        routed_experts = choice.get("routed_experts")
 
         return {
             "stop_reason": stop_reason,
@@ -695,12 +684,28 @@ class RemoteInferenceClient(InferenceEngineInterface):
         result_prompt_logprobs: Optional[List[Optional[float]]] = None
         result_topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = None
 
-        if include_prompt_logprobs:
-            result_prompt_logprobs, result_topk_prompt_logprobs = convert_vllm_prompt_logprobs(
-                token_ids,
-                response.get("prompt_logprobs"),
-                topk=topk_prompt_logprobs_k,
-            )
+        raw_prompt_logprobs = response.get("prompt_logprobs")
+        if raw_prompt_logprobs is not None and include_prompt_logprobs:
+            result_prompt_logprobs = [
+                (pos_dict.get(str(tid)) or {}).get("logprob") if pos_dict is not None else None
+                for tid, pos_dict in zip(token_ids, raw_prompt_logprobs)
+            ]
+            if topk_prompt_logprobs_k > 0:
+                # vLLM returns k or k+1 logprobs per position (the extra entry is the
+                # prompt token when it falls outside the top-k). Tinker always returns
+                # exactly top-k, so we sort and truncate below.
+                result_topk_prompt_logprobs = [
+                    (
+                        sorted(
+                            [(int(tid), entry["logprob"]) for tid, entry in pos_dict.items()],
+                            key=lambda x: x[1],
+                            reverse=True,
+                        )[:topk_prompt_logprobs_k]
+                        if pos_dict is not None
+                        else None
+                    )
+                    for _, pos_dict in zip(token_ids, raw_prompt_logprobs)
+                ]
 
         # Transform response choices → sequences
         sequences = []
@@ -1057,32 +1062,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
         params = {"tags": tags} if tags else {}
         return await self._call_all_servers("/wake_up", params=params)
 
-    async def sleep_for_weight_sync(self, offload_kv: bool = True) -> Dict[str, Any]:
-        """Free GPU memory for weight sync while keeping in-flight requests frozen.
-
-        Sleeps the allocator via ``/collective_rpc`` without touching the scheduler
-        (unlike :meth:`sleep`, which preempts running requests and clears the prefix
-        cache). ``offload_kv`` offloads the KV cache to CPU so frozen requests resume
-        from it; set False to discard it (e.g. when the sync will reset it anyway).
-        Pair with :meth:`wake_for_weight_sync`; the caller must KEEP-pause before and
-        ``resume`` after.
-        """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": offload_kv}},
-        )
-
-    async def wake_for_weight_sync(self, tags: List[str]) -> Dict[str, Any]:
-        """Restore allocator pools by tag (see :meth:`sleep_for_weight_sync`).
-
-        Wake ``["weights"]`` before the broadcast and ``["kv_cache"]`` after. Does
-        not resume generation -- call :meth:`resume_generation` once KV is back.
-        """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {"method": "skyrl_wake_for_weight_sync", "kwargs": {"tags": tags}},
-        )
-
     async def reset_prefix_cache(
         self,
         reset_running_requests: bool = False,
@@ -1150,23 +1129,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "/update_weights",
             {"update_info": update_info},
         )
-
-    async def fetch_weights(
-        self,
-        target_version: int,
-        sync_dir: Optional[str] = None,
-        uri: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Fetch/apply a published checkpoint delta on every inference worker before
-        pausing generation for reload.
-        """
-        kwargs: Dict[str, Any] = {"target_version": target_version}
-        if sync_dir is not None:
-            kwargs["sync_dir"] = sync_dir
-        if uri is not None:
-            kwargs["uri"] = uri
-        return await self._call_all_servers("/fetch_weights", kwargs)
 
     # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
     # these three methods from /collective_rpc to the native vLLM endpoints

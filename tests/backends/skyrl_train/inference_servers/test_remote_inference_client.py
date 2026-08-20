@@ -8,7 +8,6 @@ from typing import Dict, List, Optional
 
 import aiohttp
 import httpx
-import numpy as np
 import pytest
 import pytest_asyncio
 import uvicorn
@@ -16,9 +15,6 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
-from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
-    pack_routed_experts,
-)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
     PauseMode,
@@ -40,11 +36,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app.state.last_render_model = None
     # Per-server LoRA registry: lora_name -> lora_path
     app.state.lora_registry = {}
-    app.state.fetch_weights_requests = []
     # Session ids received via /finish_session, in arrival order.
     app.state.finished_sessions = []
-    # Number of /get_world_size hits, used to assert client-side caching.
-    app.state.world_size_calls = 0
 
     @app.get("/health")
     async def health():
@@ -78,12 +71,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
     @app.get("/get_world_size")
     async def get_world_size():
-        app.state.world_size_calls += 1
         return {"world_size": 2}  # Simulate TP=2
-
-    @app.get("/test/world_size_calls")
-    async def get_world_size_calls():
-        return {"count": app.state.world_size_calls}
 
     @app.post("/v1/completions")
     async def completions(request: Request):
@@ -125,9 +113,6 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
                 for i in range(num_choices)
             ]
         }
-        if request.url.path == "/skyrl/v1/generate":
-            routes = np.arange(12).reshape(3, 2, 2)
-            response["choices"][0]["routed_experts"] = pack_routed_experts(routes)
 
         features = body.get("features")
         app.state.last_generate_features = features
@@ -256,21 +241,15 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
     @app.post("/reset_prefix_cache")
     async def reset_prefix_cache(request: Request):
-        return {"status": "cache_reset", "server_id": server_id, "body": await request.json()}
+        return {"status": "cache_reset", "server_id": server_id}
 
     @app.post("/init_weight_transfer_engine")
     async def init_weight_transfer_engine(request: Request):
-        return {"status": "ok", "server_id": server_id, "body": await request.json()}
+        return {"status": "ok", "server_id": server_id}
 
     @app.post("/update_weights")
     async def update_weights(request: Request):
-        return {"status": "ok", "server_id": server_id, "body": await request.json()}
-
-    @app.post("/fetch_weights")
-    async def fetch_weights(request: Request):
-        body = await request.json()
-        app.state.fetch_weights_requests.append(body)
-        return {"status": "ok", "server_id": server_id, "body": body}
+        return {"status": "ok", "server_id": server_id}
 
     @app.post("/skyrl/v1/load_lora_adapter")
     async def load_lora_adapter(request: Request):
@@ -472,47 +451,6 @@ class TestDataPlane:
         assert len(result["responses"]) == 1
 
     @pytest.mark.asyncio
-    async def test_generate_decodes_packed_routed_experts(self, mock_servers):
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-            data_parallel_size=1,
-            enable_return_routed_experts=True,
-        )
-        try:
-            result = await client.generate({"prompt_token_ids": [[1, 2, 3]]})
-        finally:
-            await client.teardown()
-
-        assert len(result["rollout_expert_indices"]) == 1
-        assert result["rollout_expert_indices"][0].dtype == np.uint8
-        assert np.array_equal(result["rollout_expert_indices"][0], np.arange(12).reshape(3, 2, 2))
-
-    @pytest.mark.asyncio
-    async def test_generate_rejects_list_routed_experts(self, monkeypatch):
-        client = RemoteInferenceClient(
-            proxy_url="http://unused",
-            server_urls=["http://unused"],
-            data_parallel_size=1,
-            enable_return_routed_experts=True,
-        )
-
-        async def return_list_routes(*args, **kwargs):
-            return {
-                "choices": [
-                    {
-                        "token_ids": [1],
-                        "finish_reason": "stop",
-                        "routed_experts": [[[0, 1]]],
-                    }
-                ]
-            }
-
-        monkeypatch.setattr(client, "_post", return_list_routes)
-        with pytest.raises(ValueError, match="must return packed"):
-            await client._generate_single([1], {}, None, "model")
-
-    @pytest.mark.asyncio
     async def test_chat_completion(self, client):
         """Test chat completion method."""
         request_payload = {
@@ -639,12 +577,9 @@ class TestControlPlane:
 
     @pytest.mark.asyncio
     async def test_reset_prefix_cache(self, client):
-        """Test reset_prefix_cache fans out to all servers with the request body."""
-        result = await client.reset_prefix_cache(reset_running_requests=True)
-        assert set(result) == set(client.server_urls)
-        for response in result.values():
-            assert response["body"]["status"] == "cache_reset"
-            assert response["body"]["body"] == {"reset_running_requests": True}
+        """Test reset_prefix_cache fans out to all servers."""
+        result = await client.reset_prefix_cache()
+        assert len(result) == 2
 
 
 class TestWeightSync:
@@ -652,8 +587,7 @@ class TestWeightSync:
 
     @pytest.mark.asyncio
     async def test_init_weight_update_communicator(self, client):
-        """Test init_weight_update_communicator expands init_info via to_api_payload and fans out."""
-        api_payload = {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5}
+        """Test init_weight_update_communicator expands init_info and fans out to all servers."""
 
         class MockInitInfo:
             """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
@@ -662,12 +596,10 @@ class TestWeightSync:
                 return [self] * num_servers
 
             def to_api_payload(self):
-                return dict(api_payload)
+                return {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5}
 
         result = await client.init_weight_update_communicator(MockInitInfo())
-        assert set(result) == set(client.server_urls)
-        for response in result.values():
-            assert response["body"]["body"] == {"init_info": api_payload}
+        assert len(result) == 2
 
     @pytest.mark.asyncio
     async def test_update_named_weights(self, client):
@@ -679,25 +611,7 @@ class TestWeightSync:
             "packed": True,
         }
         result = await client.update_named_weights(update_info)
-        assert set(result) == set(client.server_urls)
-        for response in result.values():
-            assert response["body"]["body"] == {"update_info": update_info}
-
-    @pytest.mark.asyncio
-    async def test_fetch_weights(self, client):
-        """Test fetch_weights uses the first-class /fetch_weights endpoint."""
-        result = await client.fetch_weights(
-            target_version=3,
-            sync_dir="gs://bucket/prefix",
-            uri="gs://bucket/prefix/delta-00000003",
-        )
         assert len(result) == 2
-        for response in result.values():
-            assert response["body"]["body"] == {
-                "target_version": 3,
-                "sync_dir": "gs://bucket/prefix",
-                "uri": "gs://bucket/prefix/delta-00000003",
-            }
 
 
 class TestServerInfo:
@@ -705,27 +619,16 @@ class TestServerInfo:
 
     @pytest.mark.asyncio
     async def test_get_world_size(self, client):
-        """world_size sums across servers and is cached after the first call."""
-
-        async def _total_server_calls():
-            counts = await client._call_all_servers("/test/world_size_calls", {}, method="GET")
-            return sum(response["body"]["count"] for response in counts.values())
-
-        before = await _total_server_calls()
-
-        # First call fetches from all servers and sums (each mock reports 2, 2 servers = 4).
+        """Test world_size fetching and caching."""
+        # First call fetches from all servers and sums
         total_world_size, world_size_per_server = await client.get_world_size()
+        # Each mock server reports world_size=2, we have 2 servers = 4
         assert total_world_size == 4
         assert world_size_per_server == 2
-        after_first = await _total_server_calls()
-        # It queried every server exactly once.
-        assert after_first - before == len(client.server_urls)
 
-        # Second call is served from the client-side cache — no further server queries.
+        # Second call returns cached value
         total_world_size2, _ = await client.get_world_size()
         assert total_world_size2 == 4
-        after_second = await _total_server_calls()
-        assert after_second - after_first == 0
 
 
 class TestSample:

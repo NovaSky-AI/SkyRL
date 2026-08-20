@@ -24,58 +24,6 @@ def pad(xs, pad_to: int, *, fill):
     return xs + ([fill] * (pad_to - len(xs)))
 
 
-def convert_vllm_prompt_logprobs(
-    prompt_token_ids: list[int],
-    raw_prompt_logprobs: list[dict[str, dict] | None] | None,
-    topk: int = 0,
-) -> tuple[list[float | None] | None, list[list[tuple[int, float]] | None] | None]:
-    """Convert vLLM prompt logprobs into the Tinker response shape.
-
-    vLLM returns one entry per prompt token, each a
-    ``{str(token_id): {"logprob": float, ...}}`` dict (``None`` at position 0,
-    which has no preceding context). Tinker returns a flat list of the prompt
-    tokens' own logprobs plus, when ``topk > 0``, a list of ``(token_id,
-    logprob)`` pairs per position.
-
-    Args:
-        prompt_token_ids: The prompt tokens the logprobs were computed for.
-        raw_prompt_logprobs: vLLM's per-position logprob dicts, or None.
-        topk: Number of top entries to return per position (0 disables).
-
-    Returns:
-        ``(prompt_logprobs, topk_prompt_logprobs)``. Both are None when
-        ``raw_prompt_logprobs`` is None; the second is also None when
-        ``topk <= 0``.
-    """
-    if raw_prompt_logprobs is None:
-        return None, None
-
-    prompt_logprobs: list[float | None] = [
-        (pos_dict.get(str(tid)) or {}).get("logprob") if pos_dict is not None else None
-        for tid, pos_dict in zip(prompt_token_ids, raw_prompt_logprobs)
-    ]
-
-    if topk <= 0:
-        return prompt_logprobs, None
-
-    # vLLM returns k or k+1 logprobs per position (the extra entry is the prompt
-    # token when it falls outside the top-k). Tinker returns exactly top-k, so
-    # sort by logprob and truncate.
-    topk_prompt_logprobs: list[list[tuple[int, float]] | None] = [
-        (
-            sorted(
-                [(int(tid), entry["logprob"]) for tid, entry in pos_dict.items()],
-                key=lambda x: x[1],
-                reverse=True,
-            )[:topk]
-            if pos_dict is not None
-            else None
-        )
-        for pos_dict in raw_prompt_logprobs[: len(prompt_token_ids)]
-    ]
-    return prompt_logprobs, topk_prompt_logprobs
-
-
 def pad_batch(sequences: list[list], max_length: int, dtype) -> np.ndarray:
     """Pad a batch of sequences to max_length.
 

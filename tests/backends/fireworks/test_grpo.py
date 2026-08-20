@@ -84,7 +84,9 @@ def test_training_batch_to_grpo_datum_specs_rejects_non_finite_trainable_values(
     batch = _batch()
     batch[field][0, -2] = math.nan
 
-    with pytest.raises(ValueError, match="non-finite value at trainable response index"):
+    with pytest.raises(
+        ValueError, match="non-finite value at trainable response index"
+    ):
         training_batch_to_grpo_datum_specs(batch)
 
 
@@ -108,7 +110,9 @@ def test_build_tinker_grpo_datums() -> None:
 
     assert [datum.model_input.length for datum in datums] == [4, 3]
     target_tokens = datums[0].loss_fn_inputs["target_tokens"]
-    target_data = target_tokens.data if hasattr(target_tokens, "data") else target_tokens
+    target_data = (
+        target_tokens.data if hasattr(target_tokens, "data") else target_tokens
+    )
     assert list(target_data) == [0, 0, 30, 31]
     assert datums[0].loss_fn_inputs["target_tokens"].dtype == "int64"
     assert datums[0].loss_fn_inputs["logprobs"].dtype == "float32"

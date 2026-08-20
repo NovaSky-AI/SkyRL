@@ -95,19 +95,6 @@ def _load_curriculum_cls():
     return _load_example_cls("curriculum_sampler.py", "CurriculumLearningSampler")
 
 
-def _concat_dataset(*sizes: int):
-    """ConcatSFTDataset of int-payload sources: source k holds a contiguous
-    index range, so an item's source is recoverable by comparing to the
-    boundary (mirrors how the trainer concatenates real sources)."""
-    from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, TextDataset
-
-    parts, offset = [], 0
-    for n in sizes:
-        parts.append(TextDataset(list(range(offset, offset + n))))
-        offset += n
-    return ConcatSFTDataset(parts)
-
-
 def _make_trainer(**overrides) -> SFTTrainer:
     """Build a bare SFTTrainer (no setup/Ray/GPU) for dataloader-building tests.
 
@@ -220,24 +207,23 @@ class TestBuildTrainSampler:
 
     def test_random_single_source_lengths_returns_none(self):
         trainer = _make_trainer(sampler="random")
-        assert trainer.build_train_sampler(_concat_dataset(10)) is None
+        assert trainer.build_train_sampler(list(range(10)), dataset_lengths=[10]) is None
 
     def test_random_multi_dataset_returns_mixing_sampler(self):
         trainer = _make_trainer(sampler="random", train_dataset_weights=[0.8, 0.2], seed=11)
-        sampler = trainer.build_train_sampler(_concat_dataset(10, 10))
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[10, 10])
         assert isinstance(sampler, DataMixingSampler)
         assert len(sampler) == 20
         # Seeded from the config so runs are reproducible.
         other = _make_trainer(sampler="random", train_dataset_weights=[0.8, 0.2], seed=11).build_train_sampler(
-            _concat_dataset(10, 10)
+            list(range(20)), dataset_lengths=[10, 10]
         )
         assert list(sampler) == list(other)
 
-    def test_random_multi_dataset_builds_mixing_sampler(self):
-        # train_dataset_weights is filled by config normalization
-        # (validate_sft_cfg) on every construction path.
-        trainer = _make_trainer(sampler="random", train_dataset_weights=[0.5, 0.5])
-        sampler = trainer.build_train_sampler(_concat_dataset(10, 10))
+    def test_random_multi_dataset_defaults_to_equal_weights(self):
+        # Bare trainers skip config normalization; equal mixing is the fallback.
+        trainer = _make_trainer(sampler="random")
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[10, 10])
         assert isinstance(sampler, DataMixingSampler)
 
     def test_custom_multi_dataset_injects_lengths(self):
@@ -246,7 +232,7 @@ class TestBuildTrainSampler:
             sampler_class_path=_LENGTHS_SAMPLER_PATH,
             sampler_kwargs={"num_samples": 8},
         )
-        sampler = trainer.build_train_sampler(_concat_dataset(12, 8))
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[12, 8])
         assert isinstance(sampler, _LengthsAwareSampler)
         assert sampler.lengths == [12, 8]
 
@@ -256,7 +242,7 @@ class TestBuildTrainSampler:
             sampler_class_path=_LENGTHS_SAMPLER_PATH,
             sampler_kwargs={"num_samples": 8, "lengths": [1, 19]},
         )
-        sampler = trainer.build_train_sampler(_concat_dataset(12, 8))
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[12, 8])
         assert sampler.lengths == [1, 19]
 
     def test_custom_single_dataset_does_not_inject_lengths(self):
@@ -265,7 +251,7 @@ class TestBuildTrainSampler:
             sampler_class_path=_LENGTHS_SAMPLER_PATH,
             sampler_kwargs={"num_samples": 8},
         )
-        sampler = trainer.build_train_sampler(_concat_dataset(20))
+        sampler = trainer.build_train_sampler(list(range(20)), dataset_lengths=[20])
         assert sampler.lengths is None
 
 
@@ -690,8 +676,8 @@ class TestMultiDatasetMixing:
     independent of the individual dataset sizes."""
 
     @staticmethod
-    def _source0_fraction(trainer, data, boundary, epochs=10):
-        dl = trainer.build_train_dataloader(data)
+    def _source0_fraction(trainer, data, dataset_lengths, boundary, epochs=10):
+        dl = trainer.build_train_dataloader(data, dataset_lengths=dataset_lengths)
         drawn = []
         for _ in range(epochs):
             drawn.extend(_flatten(dl))
@@ -699,22 +685,21 @@ class TestMultiDatasetMixing:
 
     def test_user_weights_reflected_in_batches(self):
         # Two sources of 100 each, weighted 80/20.
-        data = _concat_dataset(100, 100)
+        data = list(range(200))
         trainer = _make_trainer(sampler="random", batch_size=20, seed=3, train_dataset_weights=[0.8, 0.2])
-        frac = self._source0_fraction(trainer, data, boundary=100)
+        frac = self._source0_fraction(trainer, data, [100, 100], boundary=100)
         assert 0.75 < frac < 0.85, frac
 
     def test_default_weights_mix_equally(self):
-        # Equal weights (what config normalization fills by default) mix ~50/50.
-        data = _concat_dataset(100, 100)
-        trainer = _make_trainer(sampler="random", batch_size=20, seed=3, train_dataset_weights=[0.5, 0.5])
-        frac = self._source0_fraction(trainer, data, boundary=100)
+        data = list(range(200))
+        trainer = _make_trainer(sampler="random", batch_size=20, seed=3)
+        frac = self._source0_fraction(trainer, data, [100, 100], boundary=100)
         assert 0.45 < frac < 0.55, frac
 
     def test_mixing_independent_of_dataset_sizes(self):
         # Source 0 has 20 examples, source 1 has 180; equal weights should
         # still yield ~50/50 representation in batches.
-        data = _concat_dataset(20, 180)
+        data = list(range(200))
         trainer = _make_trainer(sampler="random", batch_size=20, seed=3, train_dataset_weights=[0.5, 0.5])
-        frac = self._source0_fraction(trainer, data, boundary=20)
+        frac = self._source0_fraction(trainer, data, [20, 180], boundary=20)
         assert 0.45 < frac < 0.55, frac

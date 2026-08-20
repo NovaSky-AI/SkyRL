@@ -86,7 +86,7 @@ This comes with support for reloading checkpoints in a different parallelism sch
 
 ## Key Configuration Parameters
 
-Checkpointing behavior is controlled by several parameters in the YAML configuration (see the [configuration API reference](/docs/api-ref/skyrl/config) for the full training config):
+Checkpointing behavior is controlled by several parameters in the YAML configuration (see [configuration guide](../configuration/config) for the full training config):
 
 **Checkpoint Saving**
 
@@ -141,29 +141,3 @@ In addition to checkpointing, users can optionally save the policy model in Hugg
   - **Default**: `"~/exports/"`
   - **Purpose**: Base directory where HuggingFace models and other artifacts are saved
   - **Structure**: Models are saved to `{export_path}/global_step_{N}/policy/`
-
-### Distributed HuggingFace Export (Megatron)
-
-By default the Megatron-to-HuggingFace safetensors export is written entirely from rank 0. For
-multi-hundred-GB checkpoints that serial write stalls every rank, so the write can be fanned out
-across ranks instead. The on-disk result is the standard HF sharded format either way — only the
-write is parallelized. This applies to exports triggered by `hf_save_interval` or by explicit
-`save_hf_model` calls.
-
-`trainer.policy.megatron_config.hf_export_config.distributed_save`
-  - **Default**: `false`
-  - **Purpose**: Fan the export writes across ranks instead of writing from rank 0
-
-`trainer.policy.megatron_config.hf_export_config.save_every_n_ranks`
-  - **Default**: `1`
-  - **Purpose**: Rank stride for the export writers. With `distributed_save=true`, ranks `0`, `N`,
-    `2N`, ... write shards. Set this to the number of Megatron worker GPUs per node for one writer
-    per node. Must be at least `1`; ignored when `distributed_save=false`.
-
-<Callout type="warn">
-For sharded multi-node exports with `distributed_save=true`, set `trainer.export_path` to a shared
-filesystem path visible to all Megatron ranks. Node-local paths and cloud paths can split shards
-across per-rank local work directories, and Megatron-Bridge builds `model.safetensors.index.json`
-from the shard files visible to rank 0 — so the index comes out incomplete if rank 0 cannot see
-every shard written by the other ranks.
-</Callout>

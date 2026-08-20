@@ -48,7 +48,6 @@ class _PackedSeqParams:
     max_seqlen_kv: Any = None
     cu_seqlens_q_padded: Any = None
     cu_seqlens_kv_padded: Any = None
-    total_tokens: Any = None
 
 
 _MEGATRON_MODULES = [

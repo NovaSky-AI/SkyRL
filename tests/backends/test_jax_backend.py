@@ -6,7 +6,7 @@ import numpy as np
 import optax
 import pytest
 
-from skyrl.backends.jax import JaxBackend, JaxBackendConfig, JaxBackendImpl
+from skyrl.backends.jax import JaxBackend, JaxBackendConfig
 from skyrl.tinker import api, types
 from skyrl.tinker.engine import prepare_model_pass_batch, prepare_sample_batch
 from skyrl.tinker.types import LoraConfig, OptimStepInput
@@ -170,17 +170,6 @@ def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInp
             )
         )
     return types.ForwardBackwardInput(data=samples, loss_fn="cross_entropy")
-
-
-@pytest.mark.parametrize("loss_fn", ["gspo", "dppo", "ppo_critic"])
-def test_model_pass_rejects_unsupported_loss(loss_fn):
-    model_pass_input = make_fwd_bwd_input([[1, 2, 3]])
-    model_pass_input.loss_fn = loss_fn
-    prepared_batch = prepare_model_pass_batch({"request": ("model", model_pass_input)})
-
-    backend = object.__new__(JaxBackendImpl)
-    with pytest.raises(ValueError, match=f"{loss_fn}.*not supported by the JAX backend"):
-        backend._model_pass(prepared_batch, None)
 
 
 def _assert_tree_allclose(t1, t2, rtol=1e-3, atol=1e-3, min_match_pct=99.0):

@@ -14,7 +14,7 @@
 
 SkyRL is a full-stack RL library that provides the following components:
 
-- [skyrl](./skyrl): Our unified library for RL on your own hardware, with support for the [Tinker API](https://docs.skyrl.ai/docs/tinker/overview). `skyrl` combines our previous work:
+- [skyrl](./skyrl): Our new unified library for RL on your own hardware, with support for the [Tinker API](https://docs.skyrl.ai/docs/tinker/overview). `skyrl` combines our previous work:
 
   * [`skyrl-train`](./skyrl-train): A modular, performant training framework for RL.  
   * [`skyrl-tx`](./skyrl-tx): A cross-platform library implementing a backend for the [Tinker API](https://docs.skyrl.ai/docs/tinker/overview), with a unified engine for training and inference.
@@ -35,8 +35,6 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 For a list of supported models, see our [Supported Models](https://docs.skyrl.ai/docs/getting-started/supported_models) docs.
 
 # News
-- **[2026/08/18]** 🎉 SkyRL is hosting it's first meetup at the Anyscale SF office! [[Link](https://luma.com/y4ahouh6)]
-- **[2026/07/16]** 🎉 SkyRL v0.3.0 is released [[Blog](https://novasky-ai.notion.site/skyrl-v03)]
 - **[2026/02/17]** 🎉 SkyRL is officially integrated with Harbor! Train your terminal-use agent! [[Blog](https://novasky-ai.notion.site/skyrl-harbor)]
 - **[2026/02/13]** 🎉 SkyRL now implements the Tinker API! Run any training script written in the Tinker API on your local GPUs with SkyRL! [[Blog](https://novasky-ai.notion.site/skyrl-tinker)]
 - **[2025/11/26]** 🎉 We released SkyRL-Agent: An agent layer for efficient, multi-turn, long-horizon agent training and evaluation. [[Paper](https://arxiv.org/pdf/2511.16108)]
@@ -47,9 +45,6 @@ For a list of supported models, see our [Supported Models](https://docs.skyrl.ai
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
-- 📜 [SkyRL v0.3.0 Release](https://novasky-ai.notion.site/skyrl-v03)
-- 📜 [Multi-LoRA Training for Continual Learning (w/ Trajectory)](https://trajectory.ai/field-notes/multi-lora-training-for-continual-learning)
-- 📜 [Native RL APIs in vLLM](https://vllm.ai/blog/2026-05-28-native-rl-apis)
 - 📜 [Train Your Terminal-Use Agent with SkyRL + Harbor](https://novasky-ai.notion.site/skyrl-harbor)
 - 📜 [SkyRL Brings Tinker to Your GPUs](https://novasky-ai.notion.site/skyrl-tinker)
 - 📜 [Fully Async RL with In-Flight Weight Updates in SkyRL](https://docs.skyrl.ai/docs/tutorials/fully_async)
@@ -68,7 +63,6 @@ For a list of supported models, see our [Supported Models](https://docs.skyrl.ai
 - [Endless Terminals](https://arxiv.org/abs/2601.16443): A fully autonomous pipeline that procedurally generates terminal tasks for RL training with no human annotation needed ![GitHub Repo stars](https://img.shields.io/github/stars/kanishkg/endless-terminals)
 - [CodeScout](https://arxiv.org/abs/2603.17829): Open-source SoTA code localization on SWE-Bench via RL ![GitHub Repo stars](https://img.shields.io/github/stars/OpenHands/codescout)
 - [Reinforcing Recursive Language Models](https://www.alphaxiv.org/blog/reinforcement-learning-for-rlms): RL fine-tuning small models to behave as recursive language models
-- [ECHO]: Terminal Agents Learn World Models for Free ![Github repo stars](https://github.com/microsoft/echo-rl)
 
 # Acknowledgement
 

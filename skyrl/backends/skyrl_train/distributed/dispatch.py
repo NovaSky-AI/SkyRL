@@ -169,7 +169,7 @@ class MeshDispatch(Dispatch):
         actor_infos: List[ActorInfo],
         method: str,
         chunk_refs: List[ObjectRef],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[ObjectRef]:
         """
         Dispatch pre-staged per-DP chunks to workers.

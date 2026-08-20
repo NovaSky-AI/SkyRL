@@ -62,30 +62,6 @@ def compute_reinforce_policy_loss(log_probs, old_log_probs, advantages, config, 
 
 ```
 
-#### How the built-in PPO loss composes the config
-
-It can be helpful to see how the built-in loss uses the `trainer.algorithm` options before writing
-your own. [`ppo_policy_loss`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/backends/skyrl_train/utils/ppo_utils.py)
-(which handles `policy_loss_type` of `regular` and `dual_clip`) applies them in this order:
-
-1. Computes the importance ratio `exp(log_probs - old_log_probs)`.
-2. Clips it to `[1 - eps_clip_low, 1 + eps_clip_high]` and takes the pessimistic (minimum) of the
-   clipped and unclipped surrogate objectives.
-3. For `dual_clip`, additionally caps the loss at `-advantages * clip_ratio_c` on the tokens where
-   the advantage is negative.
-4. Applies `off_policy_correction`, which can both rescale the loss and mask out tokens or sequences.
-5. Sums the masked per-token loss via `reduce_loss`.
-
-Note that step 5 is a plain masked **sum** — `loss_reduction` is *not* applied by the loss function.
-The trainer pre-scales advantages per mini-batch (`apply_loss_reduction_to_advantages_minibatch`)
-before the loss is called, so the reduction is already baked into the advantages. A custom policy
-loss should therefore sum its masked per-token losses rather than averaging them, or it will apply
-the reduction twice.
-
-Custom losses receive the same `config` object (`AlgorithmConfig`), so any field on it — including
-fields added by subclassing — is available. See the
-[configuration API reference](/docs/api-ref/skyrl/config) for the full field list.
-
 ### Registry Ray Distribution
 
 The registry system handles Ray actor synchronization when Ray is initialized. Functions registered on one process will be available to all Ray actors:

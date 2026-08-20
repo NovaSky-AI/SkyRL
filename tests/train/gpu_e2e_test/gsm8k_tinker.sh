@@ -15,39 +15,14 @@ mkdir -p "$LOG_DIR"
 # matching the convention in gsm8k_colocate.sh.
 REWARD_MIN_VALUE=0.0
 
-# gpu_memory_utilization: 0.7, not 0.8. Unlike the main trainer entrypoint (engines
-# profile on empty GPUs before models are built), the tinker backend starts engines
-# lazily at the first save_weights_for_sampler, after the FSDP workers have left ~800MiB
-# of unreclaimable CUDA context per GPU. vLLM 0.26's startup peak (cudagraph capture +
-# flashinfer sampler warmup) on top of a 0.8 KV budget then OOMs a 22GiB L4.
-BACKEND_CONFIG='{"trainer.placement.colocate_all": true, "trainer.placement.policy_num_gpus_per_node": 4, "trainer.micro_forward_batch_size_per_gpu": 8, "trainer.micro_train_batch_size_per_gpu": 8, "generator.inference_engine.num_engines": 4, "generator.inference_engine.tensor_parallel_size": 1, "generator.inference_engine.backend": "vllm", "generator.inference_engine.run_engines_locally": true, "generator.inference_engine.weight_sync_backend": "nccl", "generator.inference_engine.gpu_memory_utilization": 0.7, "generator.batched": true}'
+BACKEND_CONFIG='{"trainer.placement.colocate_all": true, "trainer.placement.policy_num_gpus_per_node": 4, "trainer.micro_forward_batch_size_per_gpu": 8, "trainer.micro_train_batch_size_per_gpu": 8, "generator.inference_engine.num_engines": 4, "generator.inference_engine.tensor_parallel_size": 1, "generator.inference_engine.backend": "vllm", "generator.inference_engine.run_engines_locally": true, "generator.inference_engine.weight_sync_backend": "nccl", "generator.inference_engine.gpu_memory_utilization": 0.8, "generator.batched": true}'
 
 # Start tinker server in its own process group so we can clean up the engine subprocess too.
 setsid uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
   --base-model "Qwen/Qwen3-0.6B" --backend fsdp --port 8000 \
   --backend-config "$BACKEND_CONFIG" >"$LOG_DIR/server.log" 2>&1 &
 SERVER_PID=$!
-
-# On failure, dump the server log plus the newest SkyRL infra log: Ray actor output
-# (including the vLLM engine's real error, e.g. an OOM during engine startup) is
-# redirected there and never reaches server.log, so without this the job log only
-# shows the opaque re-raised RayTaskError.
-cleanup() {
-  status=$?
-  if [ "$status" -ne 0 ]; then
-    echo "=== tinker server log tail (exit $status) ===" >&2
-    tail -n 200 "$LOG_DIR/server.log" >&2 || true
-    infra_log=$(ls -t /tmp/skyrl-logs/infra-*.log 2>/dev/null | head -1 || true)
-    if [ -n "${infra_log:-}" ]; then
-      echo "=== skyrl infra log tail ($infra_log) ===" >&2
-      tail -n 200 "$infra_log" >&2 || true
-    fi
-  fi
-  kill -TERM -- -$SERVER_PID 2>/dev/null || true
-  sleep 5
-  kill -KILL -- -$SERVER_PID 2>/dev/null || true
-}
-trap cleanup EXIT
+trap 'kill -TERM -- -$SERVER_PID 2>/dev/null || true; sleep 5; kill -KILL -- -$SERVER_PID 2>/dev/null || true' EXIT
 
 deadline=$(( $(date +%s) + 1800 ))
 until curl -sSf http://localhost:8000/docs >/dev/null 2>&1; do
@@ -75,9 +50,7 @@ COOKBOOK_COMMIT="016468b0f214f30492f9f8eb001f9094970b3ad5"
 cd "$COOKBOOK_DIR"
 git fetch --depth 1 origin "$COOKBOOK_COMMIT"
 git checkout --detach "$COOKBOOK_COMMIT"
-# Run the client from SkyRL's project so the tinker SDK resolves from SkyRL's uv.lock.
-cd "$SKYRL_REPO_ROOT"
-TINKER_API_KEY=tml-dummy uv run --extra tinker --with-editable "$COOKBOOK_DIR[math-rl,wandb]" --with datasets --with torch \
+TINKER_API_KEY=tml-dummy uv run --extra math-rl --extra wandb --with tinker --with datasets --with torch \
   python -m tinker_cookbook.recipes.math_rl.train \
   base_url=http://localhost:8000 \
   model_name="Qwen/Qwen3-0.6B" \

@@ -1,9 +1,9 @@
 """End-to-end multi-LoRA tests against a Tinker server backed by SkyRL-Train Megatron.
 
-GPU-gated: skipped automatically when fewer than 3 CUDA devices are visible to
-the test process. The server starts a real Megatron policy worker at DP=2 plus a
-vLLM engine, so tests in this module need at least 3 GPUs and the ``tinker`` +
-``megatron`` extras installed.
+GPU-gated: skipped automatically when no CUDA device is visible to the test
+process. The server starts a real Megatron policy worker, which means tests
+in this module need at least one GPU and the ``tinker`` + ``megatron`` extras
+installed.
 
 Coverage:
   - test_two_adapters_train_independently: A's optimizer state survives a
@@ -12,13 +12,6 @@ Coverage:
     is hard-rejected at the controller-level signature gate.
   - test_per_adapter_step_isolation: A's and B's pre-update losses are
     bit-exact when they were both pristine + saw identical data.
-  - test_forward_backward_accumulates_across_requests: two separate
-    forward_backward calls produce the same update as one combined call,
-    with one datum per chunk so only one DP rank gets a microbatch.
-  - test_forward_backward_accumulates_with_every_rank_fed: the same
-    comparison with every chunk wide enough to feed both DP ranks.
-  - test_zero_weight_chunks_are_noops: appending gradient-free chunks
-    before optim_step leaves the update bit-identical.
   - test_delete_then_train_remaining: deleting one of two adapters does
     not tear down the Ray runtime; the other adapter continues to train.
   - test_per_adapter_sample_isolation: pristine adapters following an
@@ -27,9 +20,6 @@ Coverage:
   - test_two_adapters_sample_independently: weight-sync of adapter B
     does not clobber adapter A's slot on vLLM; A's optimizer state
     survives B's intervention end-to-end through sampling.
-  - test_sample_prompt_logprobs: prompt logprobs and top-k prompt logprobs
-    come back populated from vLLM (the JAX generator cannot do top-k, so
-    tests/tinker/test_api.py only covers the flat field there).
 
 Run with:
   uv run --extra tinker --extra megatron --with pytest --with pytest-timeout \\
@@ -51,13 +41,11 @@ cuda_available = False
 try:  # pragma: no cover - import guard
     import torch
 
-    cuda_available = bool(torch.cuda.is_available() and torch.cuda.device_count() >= 3)
+    cuda_available = bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
 except Exception:
     cuda_available = False
 
-pytestmark = pytest.mark.skipif(
-    not cuda_available, reason="multi-LoRA Megatron tests need >= 3 CUDA GPUs (2 policy at DP=2 + 1 vLLM)"
-)
+pytestmark = pytest.mark.skipif(not cuda_available, reason="multi-LoRA Megatron tests require at least one CUDA GPU")
 
 tinker = pytest.importorskip("tinker")
 from tinker import types as tinker_types  # noqa: E402
@@ -68,20 +56,14 @@ BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 TINKER_API_KEY = "tml-dummy"
 TEST_PORT = 8011
 
-# Tiny config: 2 GPUs for the policy worker at TP=PP=1, so DP=2, plus 1 for
-# vLLM. With a tiny model + LoRA rank 8 this fits comfortably on any modern
-# GPU triple. DP=2 rather than a single GPU because the cross-request
-# accumulation tests only fail against a non-idempotent grad sync when DP > 1
-# (see the module docstring); the rest of the tests are topology-agnostic and
-# ride along for free on the same server. merge_lora is False so vLLM serves
-# per-tenant LoRA adapters by name — required for the per-adapter sampling
-# tests below; harmless for the train-only tests since they don't hit the
-# sample/sync path. Note if raising tensor_model_parallel_size: tiny-Qwen3's
-# vocab (151669) isn't divisible by 2, so TP > 1 additionally needs
-# `transformer_config_kwargs.should_pad_vocab=True`.
+# Tiny config: 1 GPU for the policy worker, 1 for vLLM. With a tiny model
+# + LoRA rank 8, this fits comfortably on any modern GPU pair. merge_lora
+# is False so vLLM serves per-tenant LoRA adapters by name — required for
+# the per-adapter sampling tests below; harmless for the train-only tests
+# since they don't hit the sample/sync path.
 BACKEND_CONFIG = {
     "strategy": "megatron",
-    "trainer.placement.policy_num_gpus_per_node": 2,
+    "trainer.placement.policy_num_gpus_per_node": 1,
     "trainer.placement.policy_num_nodes": 1,
     "trainer.placement.colocate_all": False,
     "trainer.policy.megatron_config.tensor_model_parallel_size": 1,
@@ -124,10 +106,10 @@ def _api_server(port: int, backend_config: dict | None = None):
         with open(log_path, "w") as log_file:
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
             try:
-                # Wait for server to come up.
+                # Wait for server to come up
                 ok = wait_for_condition(
                     lambda: _server_is_up(port),
-                    timeout_sec=300,
+                    timeout_sec=120,
                     poll_interval_sec=2,
                 )
                 if not ok:
@@ -154,15 +136,15 @@ def _server_is_up(port: int) -> bool:
         return False
 
 
-def _make_datum(tokenizer, prompt: str, completion: str, completion_weight: float = 1.0):
+def _make_datum(tokenizer, prompt: str, completion: str):
     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
     completion_tokens = tokenizer.encode(f"{completion}\n\n", add_special_tokens=False)
     all_tokens = prompt_tokens + completion_tokens
     target_tokens = all_tokens[1:] + [tokenizer.eos_token_id]
-    weights = [0.0] * len(prompt_tokens) + [completion_weight] * len(completion_tokens)
+    weights = [0.0] * len(prompt_tokens) + [1.0] * len(completion_tokens)
     return tinker_types.Datum(
         model_input=tinker_types.ModelInput.from_ints(all_tokens),
-        loss_fn_inputs={"target_tokens": target_tokens, "weights": weights[1:] + [completion_weight]},
+        loss_fn_inputs={"target_tokens": target_tokens, "weights": weights[1:] + [1.0]},
     )
 
 
@@ -286,140 +268,6 @@ def test_per_adapter_step_isolation(service_client):
         f"`param_groups[g]['step']`) advancing on every optim_step instead of being "
         f"held per-adapter."
     )
-
-
-def test_forward_backward_accumulates_across_requests(service_client):
-    """Every call before optim_step must contribute, even when the last call has zero loss.
-
-    One datum per chunk, which at DP=2 means each ``forward_backward`` feeds a
-    single DP rank and the other rank gets no microbatch at all — so this also
-    covers the rank that never reaches the schedule's finalize hook and must
-    still join the deferred collective.
-    """
-    split = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
-    combined = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
-    tok = split.get_tokenizer()
-    first = _make_datum(tok, "Question: 1+1?\nAnswer:", " 2")
-    second = _make_datum(tok, "Question: 2+2?\nAnswer:", " 4")
-    final_zero = _make_datum(tok, "Question: 0+0?\nAnswer:", " 0", completion_weight=0.0)
-    assert not any(final_zero.loss_fn_inputs["weights"].data)
-
-    split.forward_backward([first], "cross_entropy").result()
-    split.forward_backward([second], "cross_entropy").result()
-    split.forward_backward([final_zero], "cross_entropy").result()
-    split.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
-
-    combined.forward_backward([first, second, final_zero], "cross_entropy").result()
-    combined.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
-
-    probe = [_make_datum(tok, "Question: 3+3?\nAnswer:", " 6")]
-    split_out = split.forward_backward(probe, "cross_entropy").result()
-    combined_out = combined.forward_backward(probe, "cross_entropy").result()
-    split_loss = sum(sum(output["elementwise_loss"].data) for output in split_out.loss_fn_outputs)
-    combined_loss = sum(sum(output["elementwise_loss"].data) for output in combined_out.loss_fn_outputs)
-
-    assert split_loss == pytest.approx(
-        combined_loss, abs=1e-6
-    ), f"separate requests produced a different update: split={split_loss}, combined={combined_loss}"
-
-
-def test_forward_backward_accumulates_with_every_rank_fed(service_client):
-    """Same assertion as above with two datums per chunk, so every DP rank gets
-    real work in the split path rather than idling through some of the chunks.
-
-    This is the configuration the DP=2 sweep measured at |Δ| = 1.18e-02 against a
-    per-call grad sync; the single-datum variant above leans on the empty-rank
-    path instead.
-    """
-    split = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
-    combined = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
-    tok = split.get_tokenizer()
-
-    chunk1 = [
-        _make_datum(tok, "Question: 1+1?\nAnswer:", " 2"),
-        _make_datum(tok, "Question: 5+3?\nAnswer:", " 8"),
-    ]
-    chunk2 = [
-        _make_datum(tok, "Question: 2+2?\nAnswer:", " 4"),
-        _make_datum(tok, "Question: 7+1?\nAnswer:", " 8"),
-    ]
-    chunk3 = [
-        _make_datum(tok, "Question: 0+0?\nAnswer:", " 0", completion_weight=0.0),
-        _make_datum(tok, "Question: 9+0?\nAnswer:", " 9", completion_weight=0.0),
-    ]
-    assert not any(chunk3[0].loss_fn_inputs["weights"].data)
-
-    for chunk in (chunk1, chunk2, chunk3):
-        split.forward_backward(chunk, "cross_entropy").result()
-    split.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
-
-    combined.forward_backward(chunk1 + chunk2 + chunk3, "cross_entropy").result()
-    combined.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
-
-    probe = [
-        _make_datum(tok, "Question: 3+3?\nAnswer:", " 6"),
-        _make_datum(tok, "Question: 4+4?\nAnswer:", " 8"),
-    ]
-    split_out = split.forward_backward(probe, "cross_entropy").result()
-    combined_out = combined.forward_backward(probe, "cross_entropy").result()
-    split_loss = sum(sum(o["elementwise_loss"].data) for o in split_out.loss_fn_outputs)
-    combined_loss = sum(sum(o["elementwise_loss"].data) for o in combined_out.loss_fn_outputs)
-
-    print(
-        f"\n[every_rank_fed] split={split_loss!r} combined={combined_loss!r} |Δ|={abs(split_loss - combined_loss):.6e}"
-    )
-
-    assert split_loss == pytest.approx(
-        combined_loss, abs=1e-6
-    ), f"separate requests produced a different update: split={split_loss}, combined={combined_loss}"
-
-
-def test_zero_weight_chunks_are_noops(service_client):
-    """Control for the accumulation results above: appending gradient-free
-    chunks must change nothing.
-
-    Both clients see the exact same real data in their first (and only
-    gradient-producing) call, so sharding, microbatch grouping and FP summation
-    order are identical between them. The only difference is that ``padded``
-    issues two extra all-zero forward_backward calls before its optim_step. A
-    correct implementation is bit-identical; any delta is the extra per-call
-    grad sync re-reducing gradients that were already reduced.
-    """
-    padded = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
-    plain = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
-    tok = padded.get_tokenizer()
-
-    real = [
-        _make_datum(tok, "Question: 1+1?\nAnswer:", " 2"),
-        _make_datum(tok, "Question: 5+3?\nAnswer:", " 8"),
-    ]
-    zeros = [
-        _make_datum(tok, "Question: 0+0?\nAnswer:", " 0", completion_weight=0.0),
-        _make_datum(tok, "Question: 9+0?\nAnswer:", " 9", completion_weight=0.0),
-    ]
-
-    padded.forward_backward(real, "cross_entropy").result()
-    padded.forward_backward(zeros, "cross_entropy").result()
-    padded.forward_backward(zeros, "cross_entropy").result()
-    padded.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
-
-    plain.forward_backward(real, "cross_entropy").result()
-    plain.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
-
-    probe = [
-        _make_datum(tok, "Question: 3+3?\nAnswer:", " 6"),
-        _make_datum(tok, "Question: 4+4?\nAnswer:", " 8"),
-    ]
-    padded_out = padded.forward_backward(probe, "cross_entropy").result()
-    plain_out = plain.forward_backward(probe, "cross_entropy").result()
-    padded_loss = sum(sum(o["elementwise_loss"].data) for o in padded_out.loss_fn_outputs)
-    plain_loss = sum(sum(o["elementwise_loss"].data) for o in plain_out.loss_fn_outputs)
-
-    print(f"\n[zero-chunks] padded={padded_loss!r} plain={plain_loss!r} |Δ|={abs(padded_loss - plain_loss):.6e}")
-
-    assert padded_loss == pytest.approx(
-        plain_loss, abs=1e-6
-    ), f"gradient-free chunks changed the update: padded={padded_loss}, plain={plain_loss}"
 
 
 def test_delete_then_train_remaining(service_client):
@@ -558,72 +406,3 @@ def test_two_adapters_sample_independently(service_client):
         f"A's continued sample matches B's sample: A={tokens_a_continued!r}, B={tokens_b!r}. "
         "B's adapter sync may have clobbered A's slot on vLLM."
     )
-
-
-def test_sample_prompt_logprobs(service_client):
-    """Full prompt-logprob contract on vLLM: flat per-token logprobs, top-k
-    distributions, and neither field invented when it wasn't asked for.
-
-    tests/tinker/test_api.py covers the same API surface on JAX, but that
-    generator only produces the prompt tokens' own logprobs and rejects
-    ``topk_prompt_logprobs``, so top-k is only reachable here.
-    """
-    tc = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
-    tok = tc.get_tokenizer()
-    sampler = tc.save_weights_and_get_sampling_client(name="prompt_logprobs")
-    prompt_tokens = tok.encode("Question: what is 2+2?\nAnswer:", add_special_tokens=True)
-    prompt = tinker_types.ModelInput.from_ints(prompt_tokens)
-    params = tinker_types.SamplingParams(max_tokens=8, temperature=0.0, seed=0)
-    # vLLM's completions endpoint rejects n > 1 under greedy decoding ("n must
-    # be 1 when using greedy sampling"), so the multi-sample case below has to
-    # sample at a temperature. Prompt logprobs come off the prompt forward pass
-    # and don't depend on how the continuation is drawn, so this costs the
-    # assertions nothing; the seed keeps the run reproducible.
-    multi_params = tinker_types.SamplingParams(max_tokens=8, temperature=1.0, seed=0)
-
-    def _check_flat(prompt_logprobs):
-        # One entry per prompt token, flat (not a list of lists); position 0
-        # has no preceding context so vLLM computes no logprob for it.
-        assert prompt_logprobs is not None, "asked for prompt logprobs but the field came back unset"
-        assert len(prompt_logprobs) == len(prompt_tokens), (
-            f"expected {len(prompt_tokens)} prompt logprobs, got {len(prompt_logprobs)} — "
-            "a flat per-token list read as a list-of-lists looks exactly like this."
-        )
-        assert prompt_logprobs[0] is None
-        assert all(isinstance(lp, float) and lp <= 1e-6 for lp in prompt_logprobs[1:])
-
-    # num_samples=3: all three samples share one prompt, and only the first
-    # asks vLLM for prompt logprobs — that's also the one the result is read
-    # back from, so an off-by-one there returns None for the whole field.
-    result = sampler.sample(
-        prompt=prompt, sampling_params=multi_params, num_samples=3, include_prompt_logprobs=True
-    ).result()
-    assert len(result.sequences) == 3
-    _check_flat(result.prompt_logprobs)
-    assert result.topk_prompt_logprobs is None, "top-k was not requested"
-
-    # A positive top-k implies prompt logprobs: both come off the same prompt
-    # forward pass, so `include_prompt_logprobs` is deliberately left off.
-    topk = 4
-    result = sampler.sample(prompt=prompt, sampling_params=params, num_samples=1, topk_prompt_logprobs=topk).result()
-    _check_flat(result.prompt_logprobs)
-    per_position = result.topk_prompt_logprobs
-    assert per_position is not None, "topk_prompt_logprobs came back unset"
-    assert len(per_position) == len(prompt_tokens)
-    assert per_position[0] is None
-    for i, entries in enumerate(per_position[1:], start=1):
-        assert entries and len(entries) <= topk, f"position {i}: got {entries!r} for k={topk}"
-        logprobs = [lp for _, lp in entries]
-        assert all(isinstance(tid, int) for tid, _ in entries)
-        assert logprobs == sorted(logprobs, reverse=True), f"top-k at position {i} is not descending: {logprobs}"
-        # Where the prompt's own token is inside the top-k, its logprob must
-        # match the flat list — both are built from one vLLM per-position
-        # dict, so a mismatch means the two fields are off by a position.
-        own = dict(entries).get(prompt_tokens[i])
-        if own is not None:
-            assert own == pytest.approx(result.prompt_logprobs[i])
-
-    # Neither field is paid for (or invented) when unrequested.
-    result = sampler.sample(prompt=prompt, sampling_params=params, num_samples=1).result()
-    assert result.prompt_logprobs is None
-    assert result.topk_prompt_logprobs is None

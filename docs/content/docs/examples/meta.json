@@ -4,7 +4,6 @@
     "megatron",
     "ppo",
     "lora",
-    "amd",
     "llm_as_a_judge",
     "remote_server",
     "training_backends",
@@ -16,7 +15,6 @@
     "quantized_rollouts",
     "spec_decode",
     "mini_swe_agent",
-    "openenv",
-    "delta_weight_sync"
+    "openenv"
   ]
 }

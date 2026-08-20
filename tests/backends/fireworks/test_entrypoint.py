@@ -9,7 +9,9 @@ from skyrl.train.entrypoints.main_fireworks import (
 )
 
 
-def test_fireworks_provider_preflight_runs_before_tracker(monkeypatch, tmp_path) -> None:
+def test_fireworks_provider_preflight_runs_before_tracker(
+    monkeypatch, tmp_path
+) -> None:
     cfg = SkyRLTrainConfig()
     cfg.trainer.strategy = "fireworks"
     cfg.trainer.fireworks.base_model = "accounts/fireworks/models/test"

@@ -106,9 +106,7 @@ class TestVLLMRendererTextOnly:
         assert vllm_result.prompt_ids == free_fn_result.prompt_ids
 
 
-# vLLM 0.26 location; renderer.py falls back to the pre-0.26
-# vllm.entrypoints.serve.disagg path.
-_VLLM_SERDE_MODULE = "vllm.entrypoints.scale_out.token_in_token_out.mm_serde"
+_VLLM_SERDE_MODULE = "vllm.entrypoints.serve.disagg.mm_serde"
 
 
 def _patch_vllm_decode():
@@ -120,8 +118,8 @@ def _patch_vllm_decode():
     modules = {
         "vllm": MagicMock(),
         "vllm.entrypoints": MagicMock(),
-        "vllm.entrypoints.scale_out": MagicMock(),
-        "vllm.entrypoints.scale_out.token_in_token_out": MagicMock(),
+        "vllm.entrypoints.serve": MagicMock(),
+        "vllm.entrypoints.serve.disagg": MagicMock(),
         _VLLM_SERDE_MODULE: fake_serde,
     }
     return patch.dict(sys.modules, modules)

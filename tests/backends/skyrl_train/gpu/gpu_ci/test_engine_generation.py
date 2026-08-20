@@ -28,9 +28,6 @@ def get_test_actor_config(model: str = MODEL) -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
 
-    if model == MOE_MODEL:
-        cfg.generator.inference_engine.gpu_memory_utilization = 0.6
-
     cfg.generator.sampling_params.temperature = 0.0
     cfg.generator.sampling_params.top_p = 1
     cfg.generator.sampling_params.top_k = -1

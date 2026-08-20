@@ -117,7 +117,6 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
-        **kwargs,
     ) -> None:
         """Send chunks via broadcast or vLLM native NCCL.
 
@@ -201,11 +200,7 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(
-        ie_cfg: "InferenceEngineConfig",
-        inference_world_size: int,
-        base_model_path: Optional[str] = None,
-    ) -> BroadcastInitInfo:
+    def create_init_info(ie_cfg: "InferenceEngineConfig", inference_world_size: int) -> BroadcastInitInfo:
         """Create init info with all config-derived args.
 
         Args:

@@ -12,17 +12,6 @@ const config = {
         destination: '/docs',
         permanent: true,
       },
-      {
-        // Retired page; redirect to the generated config reference.
-        source: '/docs/configuration/config',
-        destination: '/docs/api-ref/skyrl/config',
-        permanent: true,
-      },
-      {
-        source: '/docs/configuration/placement',
-        destination: '/docs/tutorials/placement',
-        permanent: true,
-      },
     ];
   },
 };

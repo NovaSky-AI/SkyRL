@@ -95,8 +95,8 @@ def test_native_train_step_uses_hosted_dispatch() -> None:
     calls = []
 
     class Dispatch:
-        def forward_backward(self, model, batch, loss_fn, *, return_per_token_outputs):
-            calls.append(("forward_backward", model, loss_fn, return_per_token_outputs))
+        def forward_backward(self, model, batch, loss_fn):
+            calls.append(("forward_backward", model, loss_fn))
             return WorkerOutput("scalar", [], {"final_loss": 1.25})
 
         def optim_step(self, model):
@@ -107,7 +107,7 @@ def test_native_train_step_uses_hosted_dispatch() -> None:
     result = trainer.train_step(TrainingInputBatch({"sequences": torch.tensor([[1, 2]])}), step=1)
 
     assert calls == [
-        ("forward_backward", "policy", "cross_entropy", False),
+        ("forward_backward", "policy", "cross_entropy"),
         ("optim_step", "policy"),
     ]
     assert result["loss"] == pytest.approx(1.25)
