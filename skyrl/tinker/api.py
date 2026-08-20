@@ -46,6 +46,7 @@ from skyrl.tinker.db_models import (
 )
 from skyrl.tinker.extra import (
     ExternalInferenceClient,
+    InMemoryFutureStore,
     SkyRLTrainInferenceForwardingClient,
 )
 from skyrl.tinker.proto_serialization import (
@@ -260,12 +261,17 @@ async def lifespan(app: FastAPI):
     # SkyRL-Train default is colocate_all=True; only opt into forwarding
     # when the operator explicitly sets it to False.
     is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
+    app.state.external_future_store = InMemoryFutureStore()
     if app.state.engine_config.external_inference_url:
-        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
+        app.state.external_inference_client = ExternalInferenceClient(
+            app.state.engine_config, app.state.external_future_store
+        )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
-            app.state.engine_config, app.state.db_engine
+            app.state.engine_config,
+            app.state.db_engine,
+            app.state.external_future_store,
         )
         logger.info(
             "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
@@ -625,6 +631,8 @@ class ForwardBackwardInput(BaseModel):
     def validate_loss_fn_config_keys(self):
         """Validate loss_fn_config keys based on the selected loss function."""
         if self.loss_fn_config is None:
+            if self.loss_fn == "gspo":
+                raise ValueError("loss_fn='gspo' requires clip_low_threshold and clip_high_threshold.")
             return self
 
         allowed_keys = self._ALLOWED_KEYS_BY_LOSS_FN[self.loss_fn]
@@ -638,6 +646,18 @@ class ForwardBackwardInput(BaseModel):
             raise ValueError(
                 f"loss_fn='{self.loss_fn}' does not accept loss_fn_config keys. " f"Received: {invalid_keys}."
             )
+        if self.loss_fn == "gspo":
+            required_keys = {"clip_low_threshold", "clip_high_threshold"}
+            missing_keys = sorted(required_keys - self.loss_fn_config.keys())
+            if missing_keys:
+                raise ValueError(f"loss_fn='gspo' is missing required loss_fn_config keys: {missing_keys}.")
+            clip_low = self.loss_fn_config["clip_low_threshold"]
+            clip_high = self.loss_fn_config["clip_high_threshold"]
+            if not 0.0 <= clip_low <= 1.0 <= clip_high:
+                raise ValueError(
+                    "loss_fn='gspo' requires 0 <= clip_low_threshold <= 1 <= clip_high_threshold; "
+                    f"got {clip_low=} and {clip_high=}."
+                )
         return self
 
     def to_types(self) -> types.ForwardBackwardInput:
@@ -771,12 +791,14 @@ class SampleRequest(BaseModel):
 class SaveWeightsRequest(BaseModel):
     model_id: str
     path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
+    seq_id: int | None = None
     type: Literal["save_weights"] | None = None
 
 
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
+    seq_id: int | None = None
     type: Literal["load_weights"] | None = None
 
 
@@ -859,6 +881,7 @@ class SupportedModel(BaseModel):
 
 class GetServerCapabilitiesResponse(BaseModel):
     supported_models: list[SupportedModel]
+    supported_loss_fns: list[str]
 
 
 class ListCheckpointsResponse(BaseModel):
@@ -1185,6 +1208,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
         request_type=types.RequestType.LOAD_WEIGHTS,
         model_id=request.model_id,
         request_data=types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1208,6 +1232,7 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
         request_type=types.RequestType.SAVE_WEIGHTS,
         model_id=request.model_id,
         request_data=types.SaveWeightsInput(path=request.path),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1253,6 +1278,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
             seq_id=request.seq_id,
             sampling_session_id=sampling_session_id,
         ),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1302,35 +1328,33 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
-    request_id = await create_future(
-        session=session,
-        request_type=(
-            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-        ),
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
-            # A positive topk implies prompt logprobs: both are read off the same
-            # prompt forward pass, so asking for one asks for the other.
-            prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
-            topk_prompt_logprobs=request.topk_prompt_logprobs,
-            seq_id=request.seq_id,
-            sampling_session_id=request.sampling_session_id,
-        ),
-    )
-
-    await session.commit()
-
     if req.app.state.external_inference_client:
+        request_id = req.app.state.external_future_store.create_future()
         asyncio.create_task(
             req.app.state.external_inference_client.call_and_store_result(
                 request_id, request, model_id, checkpoint_id, base_model=base_model
             )
         )
+    else:
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.SAMPLE,
+            model_id=model_id,
+            request_data=types.SampleInput(
+                base_model=base_model,
+                prompt=request.prompt.to_types(),
+                sampling_params=request.sampling_params.to_types(),
+                num_samples=request.num_samples,
+                checkpoint_id=checkpoint_id,
+                # A positive topk implies prompt logprobs: both are read off the same
+                # prompt forward pass, so asking for one asks for the other.
+                prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+                topk_prompt_logprobs=request.topk_prompt_logprobs,
+                seq_id=request.seq_id,
+                sampling_session_id=request.sampling_session_id,
+            ),
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -1341,7 +1365,10 @@ async def get_server_capabilities(request: Request):
     supported_models = [
         SupportedModel(model_name=request.app.state.engine_config.base_model),
     ]
-    return GetServerCapabilitiesResponse(supported_models=supported_models)
+    return GetServerCapabilitiesResponse(
+        supported_models=supported_models,
+        supported_loss_fns=sorted(types.SUPPORTED_LOSS_FNS),
+    )
 
 
 class RetrieveFutureRequest(BaseModel):
@@ -1352,22 +1379,31 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     request_id = int(request.request_id)
+    is_external_future = request_id < 0
 
     try:
-        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        if is_external_future:
+            row = await req.app.state.external_future_store.wait_for_future(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        else:
+            row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
     except KeyError:
         raise HTTPException(status_code=404, detail="Future not found")
 
     if row is None:
         raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
-    status, request_type, result_data = row
+    if is_external_future:
+        status, result_data = row
+        request_type = None
+    else:
+        status, request_type, result_data = row
     if status == RequestStatus.COMPLETED:
         # The SDK retrieves sample/forward/forward_backward results in proto
         # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
         # for these types. Errors and other result types stay JSON.
         if (
-            types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
+            request_type is not None
+            and types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
             and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
         ):
             return Response(

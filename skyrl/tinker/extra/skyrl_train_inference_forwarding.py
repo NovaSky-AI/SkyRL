@@ -5,7 +5,6 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
-from datetime import datetime, timezone
 
 import httpx
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -14,16 +13,18 @@ from skyrl.backends.renderer import render_model_input
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
+from skyrl.tinker.db_models import EngineStateDB, RequestStatus
+from skyrl.tinker.extra.in_memory_future_store import InMemoryFutureStore
 from skyrl.utils.log import logger
 
 
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    def __init__(self, engine_config: EngineConfig, db_engine, future_store: InMemoryFutureStore):
         self.engine_config = engine_config
         self.db_engine = db_engine
+        self.future_store = future_store
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
@@ -71,7 +72,7 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and write the result to FutureDB."""
+        """Forward a sample request to vLLM and resolve its API-process-owned future."""
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
@@ -80,18 +81,7 @@ class SkyRLTrainInferenceForwardingClient:
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
-        async with AsyncSession(self.db_engine) as session:
-            future = await session.get(FutureDB, request_id)
-            if future is None:
-                # Row was deleted between scheduling and completion (cancelled
-                # request, stale-session GC). Nothing to write back.
-                logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
-                return
-            # `result_data` is a text column holding pre-serialized JSON.
-            future.result_data = result.model_dump_json()
-            future.status = status
-            future.completed_at = datetime.now(timezone.utc)
-            await session.commit()
+        self.future_store.complete_future(request_id, status, result.model_dump_json())
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
         # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.
