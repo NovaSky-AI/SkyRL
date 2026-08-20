@@ -174,14 +174,25 @@ class FireworksPolicyDispatch:
         if not provider_path:
             raise RuntimeError(f"Fireworks save_state({checkpoint_name!r}) returned no checkpoint path")
 
+        promotable = None
+        if self.fireworks_config.save_promotable_checkpoints:
+            promotable = self.runtime.save_promotable_checkpoint(checkpoint_name)
+
         manifest = {
             "format_version": 1,
             "checkpoint_kind": "fireworks_dcp",
             "checkpoint_name": checkpoint_name,
             "provider_path": provider_path,
             "source_trainer_job_id": self.runtime.trainer_job_id,
+            "base_model": self.fireworks_config.base_model,
             "includes_optimizer_state": True,
         }
+        if promotable is not None:
+            manifest["promotable_checkpoint"] = {
+                "snapshot_path": promotable.snapshot_path,
+                "checkpoint_resource": promotable.checkpoint_resource,
+                "checkpoint_type": promotable.checkpoint_type,
+            }
         io.makedirs(ckpt_dir, exist_ok=True)
         manifest_path = os.path.join(ckpt_dir, self._CHECKPOINT_MANIFEST)
         with io.open_file(manifest_path, "w") as f:

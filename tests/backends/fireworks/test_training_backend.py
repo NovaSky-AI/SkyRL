@@ -138,6 +138,7 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
     manifest = json.loads((ckpt_dir / "fireworks_checkpoint.json").read_text())
     assert manifest["source_trainer_job_id"] == "source-trainer"
     assert manifest["includes_optimizer_state"] is True
+    assert "promotable_checkpoint" not in manifest
 
     runtime.trainer_job_id = "target-trainer"
     dispatch.load_checkpoint(
@@ -153,6 +154,40 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
             True,
         )
     ]
+
+
+def test_policy_dispatch_saves_promotable_checkpoint_when_enabled(tmp_path) -> None:
+    training_client = _TrainingClient()
+    saved_promotable = []
+
+    def save_promotable(name):
+        saved_promotable.append(name)
+        return SimpleNamespace(
+            snapshot_path=f"snapshot://{name}-cafebabe",
+            checkpoint_resource=f"accounts/test/rlorTrainerJobs/trainer/checkpoints/{name}-cafebabe",
+            checkpoint_type="CHECKPOINT_TYPE_INFERENCE_BASE",
+        )
+
+    runtime = SimpleNamespace(
+        training_client=training_client,
+        trainer_job_id="source-trainer",
+        save_promotable_checkpoint=save_promotable,
+    )
+    cfg = _cfg()
+    cfg.trainer.fireworks.save_promotable_checkpoints = True
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
+    ckpt_dir = tmp_path / "global_step_7" / "policy"
+
+    dispatch.save_checkpoint("policy", str(ckpt_dir), tokenizer="unused")
+
+    manifest = json.loads((ckpt_dir / "fireworks_checkpoint.json").read_text())
+    checkpoint_name = manifest["checkpoint_name"]
+    assert saved_promotable == [checkpoint_name]
+    assert manifest["promotable_checkpoint"] == {
+        "snapshot_path": f"snapshot://{checkpoint_name}-cafebabe",
+        "checkpoint_resource": (f"accounts/test/rlorTrainerJobs/trainer/checkpoints/{checkpoint_name}-cafebabe"),
+        "checkpoint_type": "CHECKPOINT_TYPE_INFERENCE_BASE",
+    }
 
 
 def test_policy_dispatch_loads_same_trainer_checkpoint_by_name(tmp_path) -> None:

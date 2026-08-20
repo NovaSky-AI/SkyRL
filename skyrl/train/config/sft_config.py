@@ -572,6 +572,8 @@ def validate_fireworks_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError("Fireworks SFT requires ckpt_path when ckpt_interval > 0")
     if cfg.resume_from == "latest" and not cfg.ckpt_path:
         raise ValueError("Fireworks SFT requires ckpt_path when resume_from='latest'")
+    if cfg.fireworks.save_promotable_checkpoints and not cfg.ckpt_path:
+        raise ValueError("Fireworks SFT requires ckpt_path when save_promotable_checkpoints=true")
     if cfg.fireworks.output_model_id:
         if not cfg.ckpt_path:
             raise ValueError("Fireworks SFT requires ckpt_path when output_model_id is set")

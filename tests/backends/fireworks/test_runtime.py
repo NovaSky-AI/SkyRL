@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from skyrl.backends.fireworks.runtime import FireworksRuntime
+from skyrl.backends.fireworks.runtime import FireworksRuntime, PromotableCheckpoint
 from skyrl.train.config import FireworksConfig
 
 
@@ -223,6 +223,71 @@ async def test_publish_reuses_one_stable_sampler() -> None:
 
     # Teardown is intentionally idempotent.
     await runtime.close()
+
+
+def test_save_promotable_checkpoint_uses_base_sampler_and_control_plane_row() -> None:
+    service = _Service()
+    service.checkpoint_rows = [
+        {
+            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2-cafebabe",
+            "promotable": True,
+            "checkpointType": "CHECKPOINT_TYPE_INFERENCE_BASE",
+        }
+    ]
+    training = _TrainingClient()
+    runtime = _runtime(
+        service=service,
+        training_client=training,
+        config=FireworksConfig(request_timeout_s=123),
+    )
+
+    result = runtime.save_promotable_checkpoint("step-2", poll_s=0)
+
+    assert training.names == ["step-2"]
+    assert training.checkpoint_types == ["base"]
+    assert result.snapshot_path == "snapshot://step-2-cafebabe"
+    assert result.checkpoint_resource.endswith("step-2-cafebabe")
+    assert result.checkpoint_type == "CHECKPOINT_TYPE_INFERENCE_BASE"
+
+
+def test_save_promotable_checkpoint_keeps_path_when_control_plane_lags() -> None:
+    runtime = _runtime()
+
+    with pytest.warns(RuntimeWarning, match="visibility timeout"):
+        result = runtime.save_promotable_checkpoint("step-2", appear_timeout_s=0, poll_s=0)
+
+    assert result.snapshot_path == "snapshot://step-2-cafebabe"
+    assert result.checkpoint_resource is None
+    assert result.checkpoint_type is None
+
+
+@pytest.mark.asyncio
+async def test_promote_checkpoint_resource_uses_existing_control_plane_row() -> None:
+    service = _Service()
+    runtime = _runtime(
+        service=service,
+        config=FireworksConfig(base_model="accounts/fireworks/models/qwen3-4b"),
+    )
+    checkpoint = PromotableCheckpoint(
+        snapshot_path="snapshot://step-2-cafebabe",
+        checkpoint_resource="accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2-cafebabe",
+        checkpoint_type="CHECKPOINT_TYPE_INFERENCE_BASE",
+    )
+
+    result = await runtime.promote_checkpoint_resource(
+        checkpoint=checkpoint,
+        output_model_id="sft-step-2",
+    )
+
+    assert service.promotions == [
+        {
+            "name": checkpoint.checkpoint_resource,
+            "output_model_id": "sft-step-2",
+            "base_model": "accounts/fireworks/models/qwen3-4b",
+        }
+    ]
+    assert result["checkpoint_resource"] == checkpoint.checkpoint_resource
+    assert result["model"]["name"] == "accounts/test/models/sft-step-2"
 
 
 @pytest.mark.asyncio

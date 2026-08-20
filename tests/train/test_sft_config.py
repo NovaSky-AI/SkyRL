@@ -243,6 +243,7 @@ class TestFireworksConfig:
 
         assert skyrl_cfg.trainer.strategy == "fireworks"
         assert skyrl_cfg.trainer.fireworks is cfg.fireworks
+        assert cfg.fireworks.save_promotable_checkpoints is False
 
     @pytest.mark.parametrize(
         ("field", "value", "message"),
@@ -296,6 +297,21 @@ class TestFireworksConfig:
         cfg.fireworks.cleanup_on_exit = False
 
         validate_fireworks_sft_cfg(cfg)
+
+    def test_promotable_checkpoint_saves_are_supported(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.fireworks.cleanup_on_exit = False
+        cfg.fireworks.save_promotable_checkpoints = True
+
+        validate_fireworks_sft_cfg(cfg)
+
+    def test_promotable_checkpoint_saves_require_checkpoint_root(self):
+        cfg = self._cfg()
+        cfg.fireworks.save_promotable_checkpoints = True
+
+        with pytest.raises(ValueError, match="ckpt_path when save_promotable_checkpoints=true"):
+            validate_fireworks_sft_cfg(cfg)
 
     def test_final_only_checkpoint_is_supported(self):
         cfg = self._cfg()

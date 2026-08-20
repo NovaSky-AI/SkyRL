@@ -942,6 +942,8 @@ class FireworksConfig(BaseConfig):
     cleanup_on_exit: bool = True
     output_model_id: Optional[str] = None
     """Optional Fireworks model ID promoted from the final sampler checkpoint."""
+    save_promotable_checkpoints: bool = False
+    """Save a promotable inference snapshot alongside each resumable checkpoint."""
     delete_trainer_after_promotion: bool = True
     cleanup_deployment_on_close: str = "delete"
     """``"delete"`` or ``"scale_to_zero"`` for the SDK-created deployment."""

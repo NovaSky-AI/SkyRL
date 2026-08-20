@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 
-from skyrl.backends.fireworks.runtime import FireworksRuntime
+from skyrl.backends.fireworks.runtime import FireworksRuntime, PromotableCheckpoint
 from skyrl.backends.fireworks.sft import FireworksSFTDispatch
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.train.sft_trainer import SFTTrainer
@@ -80,12 +80,32 @@ class FireworksSFTTrainer(SFTTrainer):
         if not checkpoint_name:
             raise ValueError(f"Fireworks DCP manifest has no checkpoint_name: {dcp_manifest_path}")
 
-        result = asyncio.run(
-            self._fireworks_runtime.promote_final_model(
-                checkpoint_name=checkpoint_name,
-                output_model_id=output_model_id,
+        promotable = dcp_manifest.get("promotable_checkpoint")
+        snapshot_path = promotable.get("snapshot_path") if isinstance(promotable, dict) else None
+        checkpoint_resource = promotable.get("checkpoint_resource") if isinstance(promotable, dict) else None
+        if (
+            isinstance(snapshot_path, str)
+            and snapshot_path
+            and isinstance(checkpoint_resource, str)
+            and "/checkpoints/" in checkpoint_resource
+        ):
+            result = asyncio.run(
+                self._fireworks_runtime.promote_checkpoint_resource(
+                    checkpoint=PromotableCheckpoint(
+                        snapshot_path=snapshot_path,
+                        checkpoint_resource=checkpoint_resource,
+                        checkpoint_type=promotable.get("checkpoint_type"),
+                    ),
+                    output_model_id=output_model_id,
+                )
             )
-        )
+        else:
+            result = asyncio.run(
+                self._fireworks_runtime.promote_final_model(
+                    checkpoint_name=checkpoint_name,
+                    output_model_id=output_model_id,
+                )
+            )
         manifest = {
             "format_version": 1,
             "global_step": self.global_step,

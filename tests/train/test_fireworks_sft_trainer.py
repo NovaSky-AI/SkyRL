@@ -21,6 +21,7 @@ class _Runtime:
         self.training_client = SimpleNamespace()
         self.closed = 0
         self.promotions = []
+        self.promoted_resources = []
         self.deleted = 0
 
     async def promote_final_model(self, **kwargs):
@@ -29,6 +30,17 @@ class _Runtime:
             "sampler_path": "snapshot://final",
             "checkpoint_resource": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final",
             "checkpoint_type": "CHECKPOINT_TYPE_INFERENCE_BASE",
+            "output_model_id": kwargs["output_model_id"],
+            "model": {"name": f"accounts/test/models/{kwargs['output_model_id']}"},
+        }
+
+    async def promote_checkpoint_resource(self, **kwargs):
+        self.promoted_resources.append(kwargs)
+        checkpoint = kwargs["checkpoint"]
+        return {
+            "sampler_path": checkpoint.snapshot_path,
+            "checkpoint_resource": checkpoint.checkpoint_resource,
+            "checkpoint_type": checkpoint.checkpoint_type,
             "output_model_id": kwargs["output_model_id"],
             "model": {"name": f"accounts/test/models/{kwargs['output_model_id']}"},
         }
@@ -264,6 +276,64 @@ def test_export_final_model_promotes_dcp_name_and_deletes_trainer(tmp_path) -> N
         "trainer_job_id": "skyrl-smoke-sft-trainer",
         "state": "JOB_STATE_DELETED",
     }
+
+
+def test_export_final_model_promotes_saved_promotable_checkpoint(tmp_path) -> None:
+    trainer = _trainer()
+    trainer.global_step = 7
+    trainer.sft_cfg.ckpt_path = str(tmp_path)
+    trainer.sft_cfg.fireworks.output_model_id = "sft-final-step-7"
+    runtime = _Runtime()
+    trainer._fireworks_runtime = runtime
+    policy_dir = tmp_path / "global_step_7" / "policy"
+    policy_dir.mkdir(parents=True)
+    checkpoint_resource = "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-7-cafebabe"
+    (policy_dir / "fireworks_checkpoint.json").write_text(
+        json.dumps(
+            {
+                "checkpoint_name": "skyrl-step-7-deadbeef",
+                "promotable_checkpoint": {
+                    "snapshot_path": "snapshot://step-7-cafebabe",
+                    "checkpoint_resource": checkpoint_resource,
+                    "checkpoint_type": "CHECKPOINT_TYPE_INFERENCE_BASE",
+                },
+            }
+        )
+    )
+
+    manifest = trainer.export_final_model()
+
+    assert runtime.promotions == []
+    assert len(runtime.promoted_resources) == 1
+    promoted = runtime.promoted_resources[0]
+    assert promoted["checkpoint"].checkpoint_resource == checkpoint_resource
+    assert promoted["output_model_id"] == "sft-final-step-7"
+    assert manifest["checkpoint_resource"] == checkpoint_resource
+
+
+def test_export_final_model_falls_back_when_promotable_manifest_is_partial(tmp_path) -> None:
+    trainer = _trainer()
+    trainer.global_step = 7
+    trainer.sft_cfg.ckpt_path = str(tmp_path)
+    trainer.sft_cfg.fireworks.output_model_id = "sft-final-step-7"
+    trainer.sft_cfg.fireworks.delete_trainer_after_promotion = False
+    runtime = _Runtime()
+    trainer._fireworks_runtime = runtime
+    policy_dir = tmp_path / "global_step_7" / "policy"
+    policy_dir.mkdir(parents=True)
+    (policy_dir / "fireworks_checkpoint.json").write_text(
+        json.dumps(
+            {
+                "checkpoint_name": "skyrl-step-7-deadbeef",
+                "promotable_checkpoint": {"snapshot_path": "snapshot://step-7-cafebabe"},
+            }
+        )
+    )
+
+    trainer.export_final_model()
+
+    assert runtime.promoted_resources == []
+    assert runtime.promotions == [{"checkpoint_name": "skyrl-step-7-deadbeef", "output_model_id": "sft-final-step-7"}]
 
 
 def test_promotion_failure_preserves_trainer(tmp_path) -> None:

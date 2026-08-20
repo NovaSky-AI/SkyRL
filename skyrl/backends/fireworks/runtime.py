@@ -30,6 +30,15 @@ class SamplerVersion:
 
 
 @dataclass(frozen=True)
+class PromotableCheckpoint:
+    """Inference checkpoint persisted for later model promotion."""
+
+    snapshot_path: str
+    checkpoint_resource: str | None
+    checkpoint_type: str | None
+
+
+@dataclass(frozen=True)
 class FireworksInferenceEndpoint:
     """Native OpenAI-compatible endpoint for the managed deployment."""
 
@@ -72,6 +81,7 @@ class FireworksRuntime:
         self.tokenizer = tokenizer
         self.config = config
         self._state_lock = threading.Condition()
+        self._provider_operation_lock = threading.RLock()
         self._publish_lock = asyncio.Lock()
         self._sampler: Any | None = None
         self._sampler_identity: SamplerVersion | None = None
@@ -238,6 +248,91 @@ class FireworksRuntime:
                 self._next_version = version + 1
             return identity
 
+    def save_promotable_checkpoint(
+        self,
+        checkpoint_name: str,
+        *,
+        appear_timeout_s: float = 90.0,
+        poll_s: float = 3.0,
+    ) -> PromotableCheckpoint:
+        with self._provider_operation_lock:
+            with self._state_lock:
+                if self._closed:
+                    raise RuntimeError("Fireworks runtime is closed")
+
+            result = self.training_client.save_weights_for_sampler(
+                checkpoint_name,
+                checkpoint_type="base",
+            ).result(timeout=self.config.request_timeout_s)
+            snapshot_path = str(getattr(result, "path", "") or "")
+            if not snapshot_path:
+                raise RuntimeError(f"Fireworks save_weights_for_sampler({checkpoint_name!r}) returned no path")
+
+            snapshot_id = snapshot_path.rstrip("/").rsplit("/", 1)[-1]
+            deadline = time.monotonic() + appear_timeout_s
+            matches: list[dict] = []
+            while time.monotonic() < deadline:
+                try:
+                    rows = self.service.list_checkpoints(self.trainer_job_id)
+                except Exception:
+                    time.sleep(poll_s)
+                    continue
+                matches = [row for row in rows if row.get("promotable") and _checkpoint_short_name(row) == snapshot_id]
+                if matches:
+                    break
+                time.sleep(poll_s)
+            if len(matches) > 1:
+                raise RuntimeError(
+                    f"Expected at most one promotable Fireworks checkpoint for {checkpoint_name!r}, "
+                    f"got {len(matches)}"
+                )
+            if not matches:
+                warnings.warn(
+                    f"Promotable Fireworks checkpoint {checkpoint_name!r} was saved but did not "
+                    "surface on the control plane before the visibility timeout",
+                    RuntimeWarning,
+                )
+                return PromotableCheckpoint(
+                    snapshot_path=snapshot_path,
+                    checkpoint_resource=None,
+                    checkpoint_type=None,
+                )
+            checkpoint = matches[0]
+            return PromotableCheckpoint(
+                snapshot_path=snapshot_path,
+                checkpoint_resource=checkpoint["name"],
+                checkpoint_type=checkpoint.get("checkpointType"),
+            )
+
+    async def promote_checkpoint_resource(
+        self,
+        *,
+        checkpoint: PromotableCheckpoint,
+        output_model_id: str,
+    ) -> dict[str, Any]:
+        if not checkpoint.checkpoint_resource:
+            raise ValueError("Promotable checkpoint has no control-plane resource")
+
+        def _promote() -> dict:
+            with self._provider_operation_lock:
+                with self._state_lock:
+                    if self._closed:
+                        raise RuntimeError("Fireworks runtime is closed")
+                return self.service.promote_checkpoint(
+                    name=checkpoint.checkpoint_resource,
+                    output_model_id=output_model_id,
+                    base_model=self.config.base_model,
+                )
+
+        model = await asyncio.to_thread(_promote)
+        return {
+            "sampler_path": checkpoint.snapshot_path,
+            "checkpoint_resource": checkpoint.checkpoint_resource,
+            "checkpoint_type": checkpoint.checkpoint_type,
+            "output_model_id": output_model_id,
+            "model": model,
+        }
+
     async def promote_final_model(
         self,
         *,
@@ -397,4 +492,9 @@ class FireworksRuntime:
                 )
             if sampler is not None:
                 await asyncio.to_thread(_close_quietly, sampler)
-            await asyncio.to_thread(_close_quietly, self.service)
+
+            def _close_service() -> None:
+                with self._provider_operation_lock:
+                    _close_quietly(self.service)
+
+            await asyncio.to_thread(_close_service)
