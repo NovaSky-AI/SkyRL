@@ -82,6 +82,34 @@ def test_native_train_step_uses_hosted_dispatch() -> None:
     assert result["grad_norm"] == pytest.approx(0.75)
 
 
+def test_setup_uses_tokenizer_only_path(monkeypatch) -> None:
+    trainer = _trainer()
+    seen = {}
+
+    def tokenizer(path, **kwargs):
+        seen.update(path=path, **kwargs)
+        return "tokenizer"
+
+    monkeypatch.setattr("skyrl.train.fireworks_sft_trainer.get_tokenizer", tokenizer)
+    monkeypatch.setattr(trainer, "_build_collator", lambda value: ("collator", value))
+    monkeypatch.setattr(trainer, "_init_tracker", lambda: seen.update(tracker=True))
+    monkeypatch.setattr(trainer, "_init_workers", lambda: seen.update(workers=True))
+
+    trainer.setup()
+
+    assert trainer.is_vlm is False
+    assert trainer.tokenizer == "tokenizer"
+    assert trainer.collator == ("collator", "tokenizer")
+    assert seen == {
+        "path": "Qwen/Qwen3-4B",
+        "trust_remote_code": True,
+        "use_fast": True,
+        "padding_side": "left",
+        "tracker": True,
+        "workers": True,
+    }
+
+
 def test_tracker_initialization_is_deferred() -> None:
     trainer = _trainer()
 

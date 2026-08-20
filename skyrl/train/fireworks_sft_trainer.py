@@ -7,6 +7,7 @@ import asyncio
 from skyrl.backends.fireworks.runtime import FireworksRuntime
 from skyrl.backends.fireworks.sft import FireworksSFTDispatch
 from skyrl.train.sft_trainer import SFTTrainer
+from skyrl.utils.tok import get_tokenizer
 
 
 class FireworksSFTTrainer(SFTTrainer):
@@ -17,6 +18,18 @@ class FireworksSFTTrainer(SFTTrainer):
         self._fireworks_runtime: FireworksRuntime | None = None
         self._ray_gpu_monitor = None
         self._num_training_gpus = 1
+
+    def setup(self) -> None:
+        tokenizer_kwargs = {
+            "trust_remote_code": True,
+            "use_fast": not self.cfg.trainer.disable_fast_tokenizer,
+            "padding_side": "left",
+        }
+        self.is_vlm = False
+        self.tokenizer = get_tokenizer(self.cfg.trainer.policy.model.path, **tokenizer_kwargs)
+        self.collator = self._build_collator(self.tokenizer)
+        self._init_tracker()
+        self._init_workers()
 
     def _init_tracker(self) -> None:
         self.tracker = None
