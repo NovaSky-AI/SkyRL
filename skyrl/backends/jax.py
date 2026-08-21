@@ -24,6 +24,7 @@ import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, get_type_hints
 
 import jax
@@ -1002,7 +1003,7 @@ class JaxBackendImpl(AbstractBackend):
         # Training and sampling share one in-memory model in this backend. Marking
         # these weights as loaded avoids a redundant archive round trip on the
         # next sample request, and lets ephemeral RL syncs skip disk entirely.
-        checkpoint_id = output_path.name.removesuffix(".tar.gz")
+        checkpoint_id = Path(str(output_path)).name.removesuffix(".tar.gz")
         lora_model.loaded_checkpoint_id = checkpoint_id
         if not persist:
             logger.info(f"Updated in-memory LoRA sampler weights for model {model_id}")
