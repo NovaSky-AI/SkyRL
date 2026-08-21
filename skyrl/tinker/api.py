@@ -625,6 +625,8 @@ class ForwardBackwardInput(BaseModel):
     def validate_loss_fn_config_keys(self):
         """Validate loss_fn_config keys based on the selected loss function."""
         if self.loss_fn_config is None:
+            if self.loss_fn == "gspo":
+                raise ValueError("loss_fn='gspo' requires clip_low_threshold and clip_high_threshold.")
             return self
 
         allowed_keys = self._ALLOWED_KEYS_BY_LOSS_FN[self.loss_fn]
@@ -638,6 +640,18 @@ class ForwardBackwardInput(BaseModel):
             raise ValueError(
                 f"loss_fn='{self.loss_fn}' does not accept loss_fn_config keys. " f"Received: {invalid_keys}."
             )
+        if self.loss_fn == "gspo":
+            required_keys = {"clip_low_threshold", "clip_high_threshold"}
+            missing_keys = sorted(required_keys - self.loss_fn_config.keys())
+            if missing_keys:
+                raise ValueError(f"loss_fn='gspo' is missing required loss_fn_config keys: {missing_keys}.")
+            clip_low = self.loss_fn_config["clip_low_threshold"]
+            clip_high = self.loss_fn_config["clip_high_threshold"]
+            if not 0.0 <= clip_low <= 1.0 <= clip_high:
+                raise ValueError(
+                    "loss_fn='gspo' requires 0 <= clip_low_threshold <= 1 <= clip_high_threshold; "
+                    f"got {clip_low=} and {clip_high=}."
+                )
         return self
 
     def to_types(self) -> types.ForwardBackwardInput:
@@ -771,6 +785,7 @@ class SampleRequest(BaseModel):
 class SaveWeightsRequest(BaseModel):
     model_id: str
     path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
+    seq_id: int | None = None
     type: Literal["save_weights"] | None = None
 
 
@@ -861,6 +876,7 @@ class SupportedModel(BaseModel):
 
 class GetServerCapabilitiesResponse(BaseModel):
     supported_models: list[SupportedModel]
+    supported_loss_fns: list[str]
 
 
 class ListCheckpointsResponse(BaseModel):
@@ -1208,6 +1224,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
             checkpoint_id=checkpoint_id,
             load_optimizer=request.optimizer,
         ),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1231,6 +1248,7 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
         request_type=types.RequestType.SAVE_WEIGHTS,
         model_id=request.model_id,
         request_data=types.SaveWeightsInput(path=request.path),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1276,6 +1294,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
             seq_id=request.seq_id,
             sampling_session_id=sampling_session_id,
         ),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -1364,7 +1383,10 @@ async def get_server_capabilities(request: Request):
     supported_models = [
         SupportedModel(model_name=request.app.state.engine_config.base_model),
     ]
-    return GetServerCapabilitiesResponse(supported_models=supported_models)
+    return GetServerCapabilitiesResponse(
+        supported_models=supported_models,
+        supported_loss_fns=sorted(types.SUPPORTED_LOSS_FNS),
+    )
 
 
 class RetrieveFutureRequest(BaseModel):
