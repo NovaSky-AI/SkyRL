@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import logging
 import socket
@@ -57,9 +56,6 @@ class _Registration:
     cache_salt: Optional[str]
     model: str
     turn_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    dedupe_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    inflight: Dict[str, asyncio.Future] = field(default_factory=dict)
-    completed: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     active_tasks: Set[asyncio.Task] = field(default_factory=set)
     active_requests: int = 0
     closing: bool = False
@@ -231,7 +227,8 @@ class TITOProxy:
             except OpenAIProtocolError as exc:
                 return JSONResponse(content=exc.body, status_code=exc.status_code)
             try:
-                return await self._deduplicated_execute(registration, parsed)
+                async with registration.turn_lock:
+                    return await self._execute_turn(registration, parsed)
             except OpenAIProtocolError as exc:
                 return JSONResponse(content=exc.body, status_code=exc.status_code)
             except aiohttp.ClientResponseError as exc:
@@ -262,47 +259,10 @@ class TITOProxy:
         if registration.active_requests == 0:
             registration.drained.set()
 
-    async def _deduplicated_execute(self, registration: _Registration, parsed) -> Dict[str, Any]:
-        leader = False
-        async with registration.dedupe_lock:
-            cached = registration.completed.get(parsed.request_key)
-            if cached is not None:
-                return copy.deepcopy(cached)
-            future = registration.inflight.get(parsed.request_key)
-            if future is None:
-                # The first handler runs inference; retries await its Future.
-                future = asyncio.get_running_loop().create_future()
-                registration.inflight[parsed.request_key] = future
-                leader = True
-
-        if not leader:
-            return copy.deepcopy(await future)
-
-        try:
-            # Serialize turns within one registration.
-            async with registration.turn_lock:
-                response = await self._execute_turn(registration, parsed)
-            async with registration.dedupe_lock:
-                registration.completed[parsed.request_key] = response
-                registration.inflight.pop(parsed.request_key, None)
-                if not future.done():
-                    future.set_result(response)
-            return copy.deepcopy(response)
-        except BaseException as exc:
-            async with registration.dedupe_lock:
-                registration.inflight.pop(parsed.request_key, None)
-                if not future.done():
-                    future.set_exception(exc)
-                    # The leader raises directly, so consume the Future exception
-                    # when there are no followers.
-                    future.exception()
-            raise
-
     async def _execute_turn(self, registration: _Registration, parsed) -> Dict[str, Any]:
         pending = registration.trace.prepare_turn(
             parsed.messages,
             tools=parsed.tools,
-            request_key=parsed.request_key,
         )
         rendered = None
         if pending.bridge_anchor is not None and pending.new_messages:

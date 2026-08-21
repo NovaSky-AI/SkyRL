@@ -149,7 +149,7 @@ def test_parity_matches_multiple_harbor_segments_to_transitions():
         ([{"role": "user", "content": "next"}], [5, 9], [0, -1], [6], "next-answer"),
     ]
     for index, (messages, prompt, attribution, completion, content) in enumerate(calls):
-        pending = trace.prepare_turn(messages, request_key=str(index))
+        pending = trace.prepare_turn(messages)
         trace.commit(
             pending,
             ModelTurnResult(

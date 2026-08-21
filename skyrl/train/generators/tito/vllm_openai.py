@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, cast
@@ -29,7 +27,6 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 
 from .types import Message, ToolSpec
 
-_TRANSPORT_FIELDS = {"cache_salt", "request_id", "session_id"}
 _SUPPORTED_EXTRA_FIELDS = {"session_id"}
 
 
@@ -55,19 +52,10 @@ class ParsedChatRequest:
     tools: Optional[Tuple[ToolSpec, ...]]
     return_logprobs: bool
     return_token_ids: bool
-    request_key: str
 
     @property
     def model(self) -> str:
         return cast(str, self.request.model)
-
-
-def _canonical_request_key(request: ChatCompletionRequest) -> str:
-    canonical = request.model_dump(mode="json", exclude_none=True)
-    for field in _TRANSPORT_FIELDS:
-        canonical.pop(field, None)
-    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _message_dict(message: Any) -> Dict[str, Any]:
@@ -153,7 +141,6 @@ def parse_chat_request(body: Mapping[str, Any], *, registered_model: str) -> Par
         tools=tools,
         return_logprobs=bool(request.logprobs),
         return_token_ids=bool(request.return_token_ids),
-        request_key=_canonical_request_key(request),
     )
 
 

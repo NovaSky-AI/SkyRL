@@ -100,7 +100,7 @@ async def test_proxy_runs_token_inference_and_commits_trace():
 
 
 @pytest.mark.asyncio
-async def test_identical_concurrent_requests_are_coalesced():
+async def test_identical_concurrent_requests_record_distinct_attempts():
     engine = FakeInferenceEngine()
     engine.delay = 0.05
     proxy = TITOProxy(engine, FakeRenderer())
@@ -116,9 +116,11 @@ async def test_identical_concurrent_requests_are_coalesced():
                 )
 
     assert first.status_code == second.status_code == 200
-    assert first.json() == second.json()
-    assert len(engine.generate_calls) == 1
-    assert len(trace.committed_turns()) == 1
+    assert first.json()["choices"][0]["message"] == second.json()["choices"][0]["message"]
+    assert first.json()["id"] != second.json()["id"]
+    assert len(engine.generate_calls) == 2
+    assert len(trace.committed_turns()) == 2
+    assert len(trace.branches()) == 2
 
 
 @pytest.mark.asyncio

@@ -6,8 +6,8 @@ from skyrl.train.generators.tito.trace import Trace
 from skyrl.train.generators.tito.types import ModelTurnResult, TraceOutcome
 
 
-def _commit(trace, key, messages, prompt, indices, completion, content, reused=0, routed_experts=None):
-    pending = trace.prepare_turn(messages, request_key=key)
+def _commit(trace, _label, messages, prompt, indices, completion, content, reused=0, routed_experts=None):
+    pending = trace.prepare_turn(messages)
     trace.commit(
         pending,
         ModelTurnResult(

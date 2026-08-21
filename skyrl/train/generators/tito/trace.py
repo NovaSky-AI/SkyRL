@@ -83,10 +83,6 @@ class TransitionView:
         return self._record.transition_id
 
     @property
-    def request_key(self) -> str:
-        return self._record.request_key
-
-    @property
     def tools_hash(self) -> str:
         return self._record.tools_hash
 
@@ -228,7 +224,6 @@ class Trace:
         self._transitions: List[TransitionRecord] = []
         self._transition_id_by_assistant_node: Dict[int, int] = {}
         self._tools_by_hash: Dict[str, Optional[Tuple[Dict[str, Any], ...]]] = {}
-        self._commits_by_request_key: Dict[str, CommitResult] = {}
         self._revision = 0
         self._sealed = False
 
@@ -283,7 +278,6 @@ class Trace:
             "transitions": [
                 {
                     "transition_id": transition.transition_id,
-                    "request_key": transition.request_key,
                     "assistant_node_id": transition.assistant_node_id,
                     "messages": list(transition.messages),
                     "assistant_message": transition.assistant_message,
@@ -317,16 +311,12 @@ class Trace:
         messages: Sequence[Mapping[str, Any]],
         *,
         tools: Optional[Sequence[Mapping[str, Any]]] = None,
-        request_key: str,
     ) -> PendingTurn:
         """Find the longest semantic prefix and an exact renderer bridge anchor."""
         if self._sealed:
             raise RuntimeError("Cannot prepare a turn on a sealed trace")
         if not messages:
             raise ValueError("Chat completion request must contain at least one message")
-        if not request_key:
-            raise ValueError("request_key must be non-empty")
-
         canonical_messages = tuple(_canonical_message(message) for message in messages)
         canonical_tools = None
         if tools is not None:
@@ -343,7 +333,6 @@ class Trace:
 
         return PendingTurn(
             trace_revision=self._revision,
-            request_key=request_key,
             messages=canonical_messages,
             tools=canonical_tools,
             tools_hash=tools_hash,
@@ -356,9 +345,6 @@ class Trace:
         """Atomically add one exact inference result to the message graph."""
         if self._sealed:
             raise RuntimeError("Cannot commit to a sealed trace")
-        existing = self._commits_by_request_key.get(pending.request_key)
-        if existing is not None:
-            return existing
         if pending.trace_revision != self._revision:
             raise RuntimeError(
                 f"Stale pending turn: prepared at revision {pending.trace_revision}, current revision is {self._revision}"
@@ -419,7 +405,6 @@ class Trace:
         transition_id = len(self._transitions)
         transition = TransitionRecord(
             transition_id=transition_id,
-            request_key=pending.request_key,
             tools_hash=pending.tools_hash,
             assistant_node_id=assistant_node_id,
             stop_reason=result.stop_reason,
@@ -434,7 +419,6 @@ class Trace:
         self._transition_id_by_assistant_node[assistant_node_id] = transition_id
         self._tools_by_hash.setdefault(pending.tools_hash, pending.tools)
         commit_result = CommitResult(turn_id=transition_id, assistant_node_id=assistant_node_id)
-        self._commits_by_request_key[pending.request_key] = commit_result
         self._revision += 1
         return commit_result
 

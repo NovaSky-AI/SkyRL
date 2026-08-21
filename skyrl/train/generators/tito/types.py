@@ -26,7 +26,6 @@ class PendingTurn:
     """Read-only trace preparation result for one chat completion request."""
 
     trace_revision: int
-    request_key: str
     messages: Tuple[Message, ...]
     tools: Optional[Tuple[ToolSpec, ...]]
     tools_hash: str
@@ -64,7 +63,6 @@ class TransitionRecord:
     """Constant-size reference to one successful inference call."""
 
     transition_id: int
-    request_key: str
     tools_hash: str
     assistant_node_id: int
     stop_reason: str

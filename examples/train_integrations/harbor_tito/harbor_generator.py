@@ -32,7 +32,7 @@ from skyrl.train.generators.tito import (
     TraceOutcome,
     build_trace_generator_output,
 )
-from skyrl.train.generators.tito.proxy import TITOProxy
+from skyrl.train.generators.tito.proxy import TITOProxy, TITOProxyConfig
 from skyrl.train.generators.tito.renderer import PrimeRendererAdapter
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
@@ -122,7 +122,14 @@ class TITOHarborGenerator(HarborGenerator):
             miniters=max(1, len(prompts) // 10),
             mininterval=5,
         )
-        proxy = TITOProxy(self.inference_engine_client, self.renderer)
+        proxy = TITOProxy(
+            self.inference_engine_client,
+            self.renderer,
+            config=TITOProxyConfig(
+                max_model_len=self.max_seq_len,
+                default_max_tokens=self.generator_cfg.sampling_params.max_generate_length,
+            ),
+        )
 
         async def _worker(idx, prompt, trajectory_id):
             output = await self._tito_harbor_agent_loop(
