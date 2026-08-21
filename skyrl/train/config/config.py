@@ -107,11 +107,11 @@ class SkyRLLoraConfig(BaseConfig):
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
     Must be accessible to all workers in distributed setups."""
-    target_modules: str = "all-linear"
+    target_modules: Union[str, List[str]] = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module list
     on Megatron. A list of specific module names can be given instead."""
-    exclude_modules: Optional[str] = None
+    exclude_modules: Optional[Union[str, List[str]]] = None
     """Modules to exclude from LoRA."""
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
@@ -126,6 +126,18 @@ class SkyRLLoraConfig(BaseConfig):
     """Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
     ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
     >= ``max_loras`` if explicitly set."""
+
+
+@dataclass
+class BitsAndBytes4BitConfig(BaseConfig):
+    """bitsandbytes 4-bit base-weight quantization for FSDP QLoRA."""
+
+    enabled: bool = False
+    """Load base weights in 4-bit. Policy training requires LoRA when enabled."""
+    quant_type: Literal["fp4", "nf4"] = "nf4"
+    """4-bit data type. NF4 is recommended for normally distributed pretrained weights."""
+    use_double_quant: bool = True
+    """Quantize first-stage quantization constants to save more memory."""
 
 
 @dataclass
@@ -167,6 +179,7 @@ class ModelConfig(BaseConfig):
     path: Optional[str] = None
     """HuggingFace model path (or local directory) for this model."""
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
+    bitsandbytes_4bit: BitsAndBytes4BitConfig = field(default_factory=BitsAndBytes4BitConfig)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
 
     def __post_init__(self) -> None:
@@ -224,7 +237,8 @@ class FSDPConfig(BaseConfig):
     https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html
     Enabling this replaces SkyRL's manual colocation offload (and makes
     ``optimizer_config.offload_after_step`` inert) rather than stacking with it; see
-    https://docs.skyrl.ai/docs/tutorials/placement for the difference."""
+    https://docs.skyrl.ai/docs/tutorials/placement for the difference. Single-rank 4-bit models are not
+    FSDP-wrapped and must leave this disabled to use manual phase offload."""
     reshard_after_forward: Union[bool, int] = True
     """FSDP2 only.
     Accepts True, False, or an int between 1 and ``fsdp_size``. See
@@ -1519,6 +1533,21 @@ class TrainerConfig(BaseConfig):
                 "`trainer.policy.megatron_config.lora_config.merge_lora=False` so weight "
                 "sync preserves the inference engine's INT4 base weights."
             )
+
+        if self.policy.model.bitsandbytes_4bit.enabled:
+            if self.strategy != "fsdp":
+                raise ValueError(
+                    "`trainer.policy.model.bitsandbytes_4bit.enabled=True` is only supported with "
+                    "`trainer.strategy=fsdp`."
+                )
+            if self.policy.model.lora.rank <= 0:
+                raise ValueError(
+                    "`trainer.policy.model.bitsandbytes_4bit.enabled=True` requires "
+                    "`trainer.policy.model.lora.rank > 0` for QLoRA."
+                )
+
+        if self.ref.model.bitsandbytes_4bit.enabled and self.strategy != "fsdp":
+            raise ValueError("`trainer.ref.model.bitsandbytes_4bit` is only supported with FSDP.")
 
         if self.logprobs_chunk_size is not None and (
             not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0

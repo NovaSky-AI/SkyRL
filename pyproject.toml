@@ -131,6 +131,10 @@ fsdp = [
     "torchvision; sys_platform == 'linux'",
 ]
 
+qlora = [
+    "bitsandbytes>=0.47.0; sys_platform == 'linux'",
+]
+
 megatron = [
     "skyrl[skyrl-train]",
     "transformer-engine[pytorch]==2.16.0; sys_platform == 'linux'",
