@@ -1,7 +1,5 @@
 import asyncio
 import re
-import time
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +66,11 @@ class _TrainingClient:
     def __init__(self):
         self.names = []
         self.checkpoint_types = []
+        self.state_names = []
+
+    def save_state(self, name):
+        self.state_names.append(name)
+        return _Future(SimpleNamespace(path=f"tinker://weights/{name}"))
 
     def save_weights_for_sampler(self, name, *, checkpoint_type=None):
         self.names.append(name)
@@ -227,41 +230,78 @@ async def test_publish_reuses_one_stable_sampler() -> None:
     await runtime.close()
 
 
-def test_resolve_resumable_checkpoint_uses_server_stored_name() -> None:
-    service = _Service()
-    created = datetime.fromtimestamp(time.time(), timezone.utc).isoformat().replace("+00:00", "Z")
-    service.checkpoint_rows = [
-        {
-            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2",
-            "checkpointType": "CHECKPOINT_TYPE_TRAINING",
-            "createTime": created,
-        }
-    ]
-    runtime = _runtime(service=service)
+def test_save_resumable_checkpoint_uses_new_server_stored_name() -> None:
+    class Service(_Service):
+        def __init__(self):
+            super().__init__()
+            self.list_calls = 0
 
-    result = runtime.resolve_resumable_checkpoint(
+        def list_checkpoints(self, job_id):
+            self.list_calls += 1
+            rows = [
+                {
+                    "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-1",
+                    "checkpointType": "CHECKPOINT_TYPE_TRAINING",
+                }
+            ]
+            if self.list_calls > 1:
+                rows.append(
+                    {
+                        "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2",
+                        "checkpointType": "CHECKPOINT_TYPE_TRAINING",
+                    }
+                )
+            return rows
+
+    service = Service()
+    training = _TrainingClient()
+    runtime = _runtime(service=service, training_client=training)
+
+    result = runtime.save_resumable_checkpoint(
         "skyrl-step-2-deadbeef",
-        save_started_at=time.time(),
+        stabilize_s=0,
         poll_s=0,
     )
 
+    assert training.state_names == ["skyrl-step-2-deadbeef"]
+    assert result.provider_path == "tinker://weights/skyrl-step-2-deadbeef"
     assert result.requested_name == "skyrl-step-2-deadbeef"
     assert result.checkpoint_name == "step-2"
     assert result.checkpoint_resource.endswith("/checkpoints/step-2")
     assert result.checkpoint_type == "CHECKPOINT_TYPE_TRAINING"
 
 
-def test_resolve_resumable_checkpoint_keeps_unresolved_save() -> None:
-    runtime = _runtime()
+def test_save_resumable_checkpoint_rejects_ambiguous_new_rows() -> None:
+    class Service(_Service):
+        def __init__(self):
+            super().__init__()
+            self.list_calls = 0
 
-    with pytest.warns(RuntimeWarning, match="visibility timeout"):
-        result = runtime.resolve_resumable_checkpoint(
+        def list_checkpoints(self, job_id):
+            self.list_calls += 1
+            if self.list_calls == 1:
+                return []
+            return [
+                {
+                    "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-1",
+                    "checkpointType": "CHECKPOINT_TYPE_TRAINING",
+                },
+                {
+                    "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2",
+                    "checkpointType": "CHECKPOINT_TYPE_TRAINING",
+                },
+            ]
+
+    runtime = _runtime(service=Service())
+
+    with pytest.warns(RuntimeWarning, match="candidates=2"):
+        result = runtime.save_resumable_checkpoint(
             "skyrl-step-2-deadbeef",
-            save_started_at=time.time(),
-            appear_timeout_s=0,
+            stabilize_s=0,
             poll_s=0,
         )
 
+    assert result.provider_path == "tinker://weights/skyrl-step-2-deadbeef"
     assert result.checkpoint_name == "skyrl-step-2-deadbeef"
     assert result.checkpoint_resource is None
     assert result.checkpoint_type is None

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
 import uuid
 from typing import Any, Optional
 
@@ -168,17 +167,8 @@ class FireworksPolicyDispatch:
         step_match = re.search(r"global_step_(\d+)", ckpt_dir)
         step = step_match.group(1) if step_match else "unknown"
         requested_checkpoint_name = f"skyrl-step-{step}-{uuid.uuid4().hex[:8]}"
-        save_started_at = time.time()
-        result = self.runtime.training_client.save_state(requested_checkpoint_name).result(
-            timeout=self.fireworks_config.request_timeout_s
-        )
-        provider_path = str(getattr(result, "path", "") or "")
-        if not provider_path:
-            raise RuntimeError(f"Fireworks save_state({requested_checkpoint_name!r}) returned no checkpoint path")
-        resumable = self.runtime.resolve_resumable_checkpoint(
-            requested_checkpoint_name,
-            save_started_at=save_started_at,
-        )
+        resumable = self.runtime.save_resumable_checkpoint(requested_checkpoint_name)
+        provider_path = resumable.provider_path
 
         promotable = None
         if self.fireworks_config.save_promotable_checkpoints:
@@ -243,11 +233,7 @@ class FireworksPolicyDispatch:
         source_job_id = manifest.get("source_trainer_job_id")
         if source_job_id and checkpoint_name:
             current_job_id = self.runtime.trainer_job_id
-            if (
-                str(source_job_id) != current_job_id
-                and "checkpoint_resource" in manifest
-                and not manifest.get("checkpoint_resource")
-            ):
+            if str(source_job_id) != current_job_id and not manifest.get("checkpoint_resource"):
                 raise ValueError(
                     f"Fireworks checkpoint has no resolved control-plane identity for cross-job resume: "
                     f"{manifest_path}"
