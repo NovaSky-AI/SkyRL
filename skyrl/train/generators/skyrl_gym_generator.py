@@ -10,7 +10,7 @@ import copy
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 import torch
@@ -73,6 +73,19 @@ class StepWiseOutput:
     # Wall-clock seconds spent in each phase. "llm" is time in inference-engine calls, "env" is
     # time in env.step. Field is None if any loop did not record a split.
     time_splits: Optional[Dict[str, float]] = None
+
+
+# `stop_reason` assigned to placeholder trajectories substituted for rollouts that raised under
+# `generator.skip_failed_rollouts`. Like every other non-"stop" reason, `zero_reward_on_non_stop`
+# and `apply_overlong_filtering` treat it as a trajectory that should not contribute.
+ROLLOUT_ERROR_STOP_REASON = "rollout_error"
+
+
+@dataclass
+class FailedRollout:
+    """Marker returned in place of a rollout that raised under ``skip_failed_rollouts``."""
+
+    exception: Exception
 
 
 @dataclass
@@ -208,6 +221,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
             )
 
+        if generator_cfg.skip_failed_rollouts:
+            if self.batched:
+                raise ValueError("`skip_failed_rollouts` doesn't support `batched=True`")
+
+            # A placeholder trajectory has no routed-expert indices to stand in for.
+            if generator_cfg.inference_engine.enable_return_routed_experts:
+                raise ValueError("`skip_failed_rollouts` doesn't support `enable_return_routed_experts=True`")
+
         if self.generator_cfg.step_wise_trajectories:
             if self.batched:
                 raise ValueError("`step_wise_trajectories` doesn't support `batched=True`")
@@ -323,6 +344,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
+        env = None
         try:
             # NOTE: `custom_chat_template` was mainly for getting accurate loss masks for thinking models.
             # This is no longer needed now given that step wise training is supported
@@ -517,8 +539,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             # Get environment-specific metrics after the episode is done
             env_metrics = env.get_metrics()
-            # Close the environment
-            await self._run_in_executor_if_available(env.close)
 
             prompt_ids = agent_loop_state.input_ids[:initial_prompt_length]
             rollout_logprobs = None
@@ -603,6 +623,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             return agent_loop_output
 
         finally:
+            # Closed here rather than after the last env interaction so that a rollout raising
+            # mid-episode still releases the environment.
+            if env is not None:
+                try:
+                    await self._run_in_executor_if_available(env.close)
+                except Exception as exc:
+                    logger.warning(f"Failed to close the environment for session {session_id}: {exc}")
             await self.inference_engine_client.finish_session(session_id)
 
     def _build_per_token_rewards(
@@ -838,6 +865,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                 prompts, env_classes, env_extras, max_tokens, sampling_params, cache_salt=cache_salt
             )
 
+        if sampling_params is not None:
+            # sampling params will be a dict in the format of the inference engine backend
+            get_logprobs = sampling_params.get("logprobs", None) is not None
+        else:
+            get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
+
         # Async agent loop to generate trajectories in parallel.
         tasks = []
         for i in range(len(prompts)):
@@ -854,6 +887,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
             )
 
+        if self.generator_cfg.skip_failed_rollouts:
+            # `tqdm.gather` inherits `asyncio.gather`'s default semantics, where the first exception
+            # aborts the whole batch. Contain each rollout's exceptions so the rest can finish.
+            tasks = [self._rollout_or_marker(i, task) for i, task in enumerate(tasks)]
+
         all_outputs = await tqdm.gather(
             *tasks,
             desc="Generating Trajectories",
@@ -861,6 +899,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             mininterval=5,
             disable=disable_tqdm,
         )
+
+        if self.generator_cfg.skip_failed_rollouts:
+            all_outputs = self._substitute_failed_rollouts(all_outputs, get_logprobs)
         # Per-trajectory end-to-end generation times (one entry per prompt, preserving input order).
         # ``e2e_time`` is optional for agent loops; if any trajectory did not record it, we omit the
         # field entirely rather than emit a partially-populated list.
@@ -921,12 +962,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             [getattr(output, "image_grid_thw", None) for output in all_outputs] if has_vision_features else None
         )
 
-        if sampling_params is not None:
-            # sampling params will be a dict in the format of the inference engine backend
-            get_logprobs = sampling_params.get("logprobs", None) is not None
-        else:
-            get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
-
         if get_logprobs:
             if self.generator_cfg.step_wise_trajectories:
                 rollout_logprobs = sum(
@@ -984,6 +1019,89 @@ class SkyRLGymGenerator(GeneratorInterface):
             generator_output["image_grid_thw"] = image_grid_thw
 
         return generator_output
+
+    async def _rollout_or_marker(
+        self, index: int, rollout: Awaitable[Union[TrajectoryOutput, StepWiseOutput]]
+    ) -> Union[TrajectoryOutput, StepWiseOutput, FailedRollout]:
+        """Await a single rollout, turning a raised exception into a ``FailedRollout`` marker.
+
+        Catches ``Exception`` rather than ``BaseException`` so that cancellation and keyboard
+        interrupts still propagate and tear down the batch.
+        """
+        try:
+            return await rollout
+        except Exception as exc:
+            logger.warning(
+                f"Rollout {index} failed with {type(exc).__name__}: {exc}. Substituting a placeholder "
+                f"trajectory so the training step can complete."
+            )
+            return FailedRollout(exception=exc)
+
+    def _placeholder_rollout(
+        self, token_level_rewards: bool, get_logprobs: bool
+    ) -> Union[TrajectoryOutput, StepWiseOutput]:
+        """Build a single-token trajectory that contributes neither reward nor loss."""
+        # `validate_generator_output` requires a non-empty response, and equal lengths for the
+        # response, loss mask, token-level rewards and rollout logprobs.
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        trajectory = TrajectoryOutput(
+            response_ids=[pad_token_id],
+            reward=[0.0] if token_level_rewards else 0.0,
+            stop_reason=ROLLOUT_ERROR_STOP_REASON,
+            loss_mask=[0],
+            prompt_ids=[pad_token_id],
+            rollout_logprobs=[0.0] if get_logprobs else None,
+            env_metrics={},
+        )
+        if self.generator_cfg.step_wise_trajectories:
+            return StepWiseOutput(step_outputs=[trajectory])
+        return trajectory
+
+    def _substitute_failed_rollouts(
+        self,
+        all_outputs: List[Union[TrajectoryOutput, StepWiseOutput, FailedRollout]],
+        get_logprobs: bool,
+    ) -> List[Union[TrajectoryOutput, StepWiseOutput]]:
+        """Replace ``FailedRollout`` markers with placeholder trajectories.
+
+        The placeholder's reward matches the shape produced by the rollouts that did succeed, since
+        the trainer requires every reward in a batch to be either trajectory-level or token-level.
+        A fresh placeholder is built per failed rollout so that downstream in-place edits of a
+        trajectory's reward or loss mask cannot alias across trajectories.
+        """
+        failed = [output for output in all_outputs if isinstance(output, FailedRollout)]
+        if not failed:
+            return all_outputs
+
+        succeeded = [output for output in all_outputs if not isinstance(output, FailedRollout)]
+        if not succeeded:
+            raise RuntimeError(
+                f"All {len(failed)} rollouts in the batch failed, so the training step has no data to "
+                f"train on. The first failure is attached as the cause."
+            ) from failed[0].exception
+
+        logger.warning(
+            f"{len(failed)} of {len(all_outputs)} rollouts failed and were replaced with placeholder "
+            f"trajectories with stop_reason={ROLLOUT_ERROR_STOP_REASON!r}."
+        )
+        token_level_rewards = isinstance(self._first_trajectory(succeeded[0]).reward, list)
+        return [
+            (
+                self._placeholder_rollout(token_level_rewards, get_logprobs)
+                if isinstance(output, FailedRollout)
+                else output
+            )
+            for output in all_outputs
+        ]
+
+    @staticmethod
+    def _first_trajectory(output: Union[TrajectoryOutput, StepWiseOutput]) -> TrajectoryOutput:
+        """The first per-step trajectory of a step-wise output, or the trajectory itself."""
+        if isinstance(output, StepWiseOutput):
+            return output.step_outputs[0]
+        return output
 
     def _zero_reward_if_not_stop(
         self, rewards: List[Union[float, List[float]]], stop_reasons: List[str]

@@ -1264,6 +1264,12 @@ class GeneratorConfig(BaseConfig):
     apply_overlong_filtering: bool = False
     """Apply DAPO Overlong Filtering: mask out all tokens in the loss mask for trajectories that
     exceed max length (truncated, no EOS token)."""
+    skip_failed_rollouts: bool = False
+    """Let a training step complete when individual rollouts raise, instead of aborting the whole step.
+    Each failed rollout is replaced by a single-token placeholder trajectory with zero reward, a zeroed
+    loss mask, and ``stop_reason="rollout_error"``. Useful for flaky multi-turn agentic environments.
+    If every rollout in the batch fails, the first exception is re-raised, since the step has no usable
+    data. Not supported with ``batched=True`` or ``enable_return_routed_experts=True``."""
     step_wise_trajectories: bool = False
     """Return outputs step-wise.
     When ``True``, multi-turn generations are returned with each turn's (prompt, response) pair as a separate
