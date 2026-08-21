@@ -24,6 +24,8 @@ Usage:
         skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap
 """
 
+import sys
+
 import torch
 
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
@@ -34,7 +36,15 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_hybrid_fp8_kv_wake import (
     patch_hybrid_fp8_kv_wake,
 )
 
-patch_hybrid_fp8_kv_wake()
+# Trainer processes import this module only to read
+# VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS, and importing vLLM there can crash
+# (e.g. flashinfer resolves tilelang's libcudart stub once mamba_ssm is
+# loaded). vLLM workers resolve this extension class only after
+# vllm.v1.worker.gpu_worker -- and therefore gpu_model_runner -- is imported,
+# so patching only when the target module is already loaded covers every
+# process that needs the patch without importing vLLM anywhere else.
+if "vllm.v1.worker.gpu_model_runner" in sys.modules:
+    patch_hybrid_fp8_kv_wake()
 
 try:
     from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
