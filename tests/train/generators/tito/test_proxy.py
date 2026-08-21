@@ -140,7 +140,33 @@ async def test_proxy_rejects_unsupported_streaming():
                 )
 
     assert response.status_code == 400
-    assert "Streaming" in response.json()["detail"]
+    assert "Streaming" in response.json()["error"]["message"]
+    assert not engine.generate_calls
+
+
+@pytest.mark.asyncio
+async def test_proxy_enforces_configured_model_length():
+    engine = FakeInferenceEngine()
+    proxy = TITOProxy(
+        engine,
+        FakeRenderer(),
+        config=TITOProxyConfig(max_model_len=1),
+    )
+    trace = Trace()
+
+    async with proxy.serving():
+        async with proxy.register(trace, router_session_id="session-1", cache_salt=None, model="model") as handle:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{handle.base_url}/v1/chat/completions",
+                    json={
+                        "model": "model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+
+    assert response.status_code == 400
+    assert "model" in response.json()["error"]["message"]
     assert not engine.generate_calls
 
 

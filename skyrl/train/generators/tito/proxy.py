@@ -15,16 +15,22 @@ from uuid import uuid4
 import aiohttp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
     InferenceEngineInterface,
 )
 
-from .openai import build_chat_response, parse_chat_request
 from .renderer import TITORenderer, convert_routed_experts
 from .trace import Trace
 from .types import ModelTurnResult
+from .vllm_openai import (
+    OpenAIProtocolError,
+    build_chat_response,
+    build_sampling_params,
+    parse_chat_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,8 @@ class TITOProxyConfig:
     port: int = 0
     max_request_bytes: int = 64 * 1024 * 1024
     drain_timeout_seconds: float = 30.0
+    max_model_len: int = 32768
+    default_max_tokens: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -199,7 +207,7 @@ class TITOProxy:
             self._registrations.pop(token, None)
         await self._inference_engine_client.finish_session(router_session_id)
 
-    async def _chat_completions(self, registration_token: str, request: Request) -> Dict[str, Any]:
+    async def _chat_completions(self, registration_token: str, request: Request):
         registration = await self._begin_request(registration_token)
         try:
             content_length = request.headers.get("content-length")
@@ -219,12 +227,13 @@ class TITOProxy:
                 parsed = parse_chat_request(
                     body,
                     registered_model=registration.model,
-                    stop_token_ids=self._renderer.get_stop_token_ids(),
                 )
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except OpenAIProtocolError as exc:
+                return JSONResponse(content=exc.body, status_code=exc.status_code)
             try:
                 return await self._deduplicated_execute(registration, parsed)
+            except OpenAIProtocolError as exc:
+                return JSONResponse(content=exc.body, status_code=exc.status_code)
             except aiohttp.ClientResponseError as exc:
                 raise HTTPException(status_code=exc.status, detail=exc.message) from exc
         finally:
@@ -322,10 +331,17 @@ class TITOProxy:
                 if prompt_message_indices[index] >= 0:
                     prompt_message_indices[index] += offset
 
+        sampling_params = build_sampling_params(
+            parsed,
+            prompt_token_count=len(rendered.token_ids),
+            max_model_len=self._config.max_model_len,
+            renderer_stop_token_ids=self._renderer.get_stop_token_ids(),
+            default_max_tokens=self._config.default_max_tokens,
+        )
         engine_input = InferenceEngineInput(
             prompts=None,
             prompt_token_ids=[list(rendered.token_ids)],
-            sampling_params=parsed.sampling_params,
+            sampling_params=sampling_params,
             session_ids=[registration.router_session_id],
             mm_features=None,
             cache_salt=registration.cache_salt,
@@ -361,21 +377,17 @@ class TITOProxy:
             stop_reason=engine_output["stop_reasons"][0],
             routed_experts=convert_routed_experts(routed_experts),
             model=parsed.model,
-            sampling_params_json=json.dumps(parsed.sampling_params, sort_keys=True, separators=(",", ":")),
+            sampling_params_json=json.dumps(sampling_params, sort_keys=True, separators=(",", ":")),
         )
         # Commit before returning the successful response.
         registration.trace.commit(pending, result)
 
         return build_chat_response(
-            request_id=f"chatcmpl-{uuid4().hex}",
-            model=parsed.model,
+            parsed=parsed,
             assistant_message=assistant_message,
             prompt_token_ids=rendered.token_ids,
             completion_ids=response_ids,
             completion_logprobs=response_logprobs,
             finish_reason=engine_output["stop_reasons"][0],
-            return_logprobs=parsed.return_logprobs,
-            return_token_ids=parsed.return_token_ids,
             decode_token=self._renderer.decode_token,
-            provider_extra={"routed_experts": routed_experts} if routed_experts is not None else None,
         )
