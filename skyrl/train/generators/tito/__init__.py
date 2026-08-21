@@ -3,7 +3,6 @@
 from .composer import build_trace_generator_output
 from .trace import BranchView, Trace, TransitionView
 from .types import (
-    BridgeAnchor,
     CommitResult,
     ModelTurnResult,
     PendingTurn,
@@ -13,7 +12,6 @@ from .types import (
 
 __all__ = [
     "BranchView",
-    "BridgeAnchor",
     "CommitResult",
     "ModelTurnResult",
     "PendingTurn",

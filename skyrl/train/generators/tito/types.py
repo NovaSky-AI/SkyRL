@@ -12,16 +12,6 @@ RoutedExperts = Tuple[RoutedExpertToken, ...]
 
 
 @dataclass(frozen=True)
-class BridgeAnchor:
-    """Exact prior model turn that a renderer may safely extend."""
-
-    node_id: int
-    matched_message_count: int
-    previous_prompt_ids: Tuple[int, ...]
-    previous_completion_ids: Tuple[int, ...]
-
-
-@dataclass(frozen=True)
 class PendingTurn:
     """Read-only trace preparation result for one chat completion request."""
 
@@ -29,9 +19,7 @@ class PendingTurn:
     messages: Tuple[Message, ...]
     tools: Optional[Tuple[ToolSpec, ...]]
     tools_hash: str
-    matched_node_ids: Tuple[int, ...]
-    new_messages: Tuple[Message, ...]
-    bridge_anchor: Optional[BridgeAnchor]
+    bridge_transition_id: Optional[int]
 
 
 @dataclass(frozen=True)

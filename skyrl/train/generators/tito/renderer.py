@@ -11,7 +11,7 @@ import types
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
 
-from .types import BridgeAnchor, Message, RoutedExperts, ToolSpec
+from .types import Message, RoutedExperts, ToolSpec
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,8 @@ class TITORenderer(Protocol):
 
     def bridge(
         self,
-        anchor: BridgeAnchor,
+        previous_prompt_ids: Sequence[int],
+        previous_completion_ids: Sequence[int],
         new_messages: Sequence[Message],
         *,
         tools: Optional[Sequence[ToolSpec]] = None,
@@ -138,22 +139,23 @@ class PrimeRendererAdapter:
 
     def bridge(
         self,
-        anchor: BridgeAnchor,
+        previous_prompt_ids: Sequence[int],
+        previous_completion_ids: Sequence[int],
         new_messages: Sequence[Message],
         *,
         tools: Optional[Sequence[ToolSpec]] = None,
     ) -> Optional[RenderedPrompt]:
         with self._lock:
             rendered = self._renderer.bridge_to_next_turn(
-                list(anchor.previous_prompt_ids),
-                list(anchor.previous_completion_ids),
+                list(previous_prompt_ids),
+                list(previous_completion_ids),
                 list(new_messages),
                 tools=_normalize_tools(tools),
             )
         if rendered is None:
             return None
-        reused_prefix_length = len(anchor.previous_prompt_ids) + len(anchor.previous_completion_ids)
-        expected_prefix = anchor.previous_prompt_ids + anchor.previous_completion_ids
+        reused_prefix_length = len(previous_prompt_ids) + len(previous_completion_ids)
+        expected_prefix = tuple(previous_prompt_ids) + tuple(previous_completion_ids)
         if tuple(rendered.token_ids[:reused_prefix_length]) != expected_prefix:
             raise ValueError("Renderer bridge did not preserve exact previous token IDs")
         return RenderedPrompt(

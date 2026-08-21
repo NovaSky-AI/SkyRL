@@ -264,13 +264,25 @@ class TITOProxy:
             parsed.messages,
             tools=parsed.tools,
         )
+        bridge_transition = (
+            registration.trace.transition(pending.bridge_transition_id)
+            if pending.bridge_transition_id is not None
+            else None
+        )
         rendered = None
-        if pending.bridge_anchor is not None and pending.new_messages:
+        if bridge_transition is not None:
+            matched_message_count = len(bridge_transition.node_ids)
+            new_messages = pending.messages[matched_message_count:]
+        else:
+            matched_message_count = 0
+            new_messages = pending.messages
+        if bridge_transition is not None and new_messages:
             # Preserve prior sampled IDs when the renderer can bridge.
             rendered = await asyncio.to_thread(
                 self._renderer.bridge,
-                pending.bridge_anchor,
-                pending.new_messages,
+                bridge_transition.prompt_token_ids,
+                bridge_transition.completion_ids,
+                new_messages,
                 tools=pending.tools,
             )
         if rendered is None:
@@ -283,13 +295,12 @@ class TITOProxy:
 
         prompt_message_indices = list(rendered.message_indices)
         if rendered.reused_prefix_length:
-            if pending.bridge_anchor is None:
-                raise RuntimeError("Renderer returned a reused prefix without a bridge anchor")
-            offset = pending.bridge_anchor.matched_message_count
+            if bridge_transition is None:
+                raise RuntimeError("Renderer returned a reused prefix without a bridge Transition")
             # Convert tail-relative attribution to full-message indices.
             for index in range(rendered.reused_prefix_length, len(prompt_message_indices)):
                 if prompt_message_indices[index] >= 0:
-                    prompt_message_indices[index] += offset
+                    prompt_message_indices[index] += matched_message_count
 
         sampling_params = build_sampling_params(
             parsed,

@@ -19,7 +19,6 @@ from typing import (
 )
 
 from .types import (
-    BridgeAnchor,
     CommitResult,
     Message,
     ModelTurnResult,
@@ -328,17 +327,14 @@ class Trace:
 
         # Match in message space before the renderer produces prompt IDs.
         matched_node_ids = self._longest_message_prefix(canonical_messages)
-        bridge_anchor = self._find_bridge_anchor(matched_node_ids, tools_hash)
-        matched_message_count = bridge_anchor.matched_message_count if bridge_anchor is not None else 0
+        bridge_transition_id = self._find_bridge_transition_id(matched_node_ids, tools_hash)
 
         return PendingTurn(
             trace_revision=self._revision,
             messages=canonical_messages,
             tools=canonical_tools,
             tools_hash=tools_hash,
-            matched_node_ids=matched_node_ids,
-            new_messages=canonical_messages[matched_message_count:],
-            bridge_anchor=bridge_anchor,
+            bridge_transition_id=bridge_transition_id,
         )
 
     def commit(self, pending: PendingTurn, result: ModelTurnResult) -> CommitResult:
@@ -469,23 +465,20 @@ class Trace:
             candidates = next_candidates
         return best
 
-    def _find_bridge_anchor(self, matched_node_ids: Sequence[int], tools_hash: str) -> Optional[BridgeAnchor]:
+    def _find_bridge_transition_id(
+        self,
+        matched_node_ids: Sequence[int],
+        tools_hash: str,
+    ) -> Optional[int]:
         # Renderer bridging starts from a completed model-call boundary.
-        for message_index in range(len(matched_node_ids) - 1, -1, -1):
-            node_id = matched_node_ids[message_index]
+        for node_id in reversed(matched_node_ids):
             transition_id = self._transition_id_by_assistant_node.get(node_id)
             if transition_id is None:
                 continue
             transition = self._transitions[transition_id]
             if transition.tools_hash != tools_hash:
                 continue
-            view = TransitionView(self, transition)
-            return BridgeAnchor(
-                node_id=node_id,
-                matched_message_count=message_index + 1,
-                previous_prompt_ids=view.prompt_token_ids,
-                previous_completion_ids=view.completion_ids,
-            )
+            return transition_id
         return None
 
     def _validate_result(self, pending: PendingTurn, result: ModelTurnResult) -> None:
@@ -502,12 +495,12 @@ class Trace:
         if result.reused_prefix_length < 0 or result.reused_prefix_length > len(result.prompt_token_ids):
             raise ValueError("reused_prefix_length is outside the prompt token range")
         if result.reused_prefix_length > 0:
-            anchor = pending.bridge_anchor
-            if anchor is None:
-                raise ValueError("A reused prompt prefix requires a bridge anchor")
-            expected_prefix = anchor.previous_prompt_ids + anchor.previous_completion_ids
+            if pending.bridge_transition_id is None:
+                raise ValueError("A reused prompt prefix requires a bridge Transition")
+            bridge_transition = self.transition(pending.bridge_transition_id)
+            expected_prefix = bridge_transition.prompt_token_ids + bridge_transition.completion_ids
             if result.reused_prefix_length != len(expected_prefix):
-                raise ValueError("reused_prefix_length does not match the bridge anchor")
+                raise ValueError("reused_prefix_length does not match the bridge Transition")
             if result.prompt_token_ids[: result.reused_prefix_length] != expected_prefix:
                 raise ValueError("Rendered bridge did not preserve the exact previous prompt and completion IDs")
 
@@ -517,16 +510,17 @@ class Trace:
         result: ModelTurnResult,
     ) -> Tuple[Optional[int], List[Tuple[int, ...]], Tuple[int, ...]]:
         if result.reused_prefix_length:
-            if pending.bridge_anchor is None:
-                raise ValueError("A reused prompt prefix requires a bridge anchor")
-            prefix_node_ids = self._path_to_node(pending.bridge_anchor.node_id)
+            if pending.bridge_transition_id is None:
+                raise ValueError("A reused prompt prefix requires a bridge Transition")
+            bridge_transition = self.transition(pending.bridge_transition_id)
+            prefix_node_ids = bridge_transition.node_ids
             prefix_tokens = self._tokens_for_nodes(prefix_node_ids)
             if prefix_tokens != result.prompt_token_ids[: result.reused_prefix_length]:
                 raise ValueError("Trace node deltas do not match the renderer bridge prefix")
-            parent_id: Optional[int] = pending.bridge_anchor.node_id
+            parent_id: Optional[int] = bridge_transition.assistant_node_id
             tail_tokens = result.prompt_token_ids[result.reused_prefix_length :]
             tail_indices = result.prompt_message_indices[result.reused_prefix_length :]
-            message_start = pending.bridge_anchor.matched_message_count
+            message_start = len(prefix_node_ids)
             message_chunks, assistant_scaffold = self._attribute_prompt_tokens(
                 tail_tokens,
                 tail_indices,

@@ -16,7 +16,7 @@ class _Renderer:
     def render(self, messages, *, tools=None):
         return RenderedPrompt((10, 99), (0, -1))
 
-    def bridge(self, anchor, new_messages, *, tools=None):
+    def bridge(self, previous_prompt_ids, previous_completion_ids, new_messages, *, tools=None):
         return None
 
     def parse_response(self, token_ids, *, tools=None):

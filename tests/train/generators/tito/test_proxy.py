@@ -21,8 +21,8 @@ class FakeRenderer:
         message_indices.append(-1)
         return RenderedPrompt(tuple(token_ids), tuple(message_indices))
 
-    def bridge(self, anchor, new_messages, *, tools=None):
-        token_ids = list(anchor.previous_prompt_ids + anchor.previous_completion_ids)
+    def bridge(self, previous_prompt_ids, previous_completion_ids, new_messages, *, tools=None):
+        token_ids = list(previous_prompt_ids) + list(previous_completion_ids)
         message_indices = [-1] * len(token_ids)
         for index, _ in enumerate(new_messages):
             token_ids.append(30 + index)
@@ -32,7 +32,7 @@ class FakeRenderer:
         return RenderedPrompt(
             tuple(token_ids),
             tuple(message_indices),
-            reused_prefix_length=len(anchor.previous_prompt_ids) + len(anchor.previous_completion_ids),
+            reused_prefix_length=len(previous_prompt_ids) + len(previous_completion_ids),
         )
 
     def parse_response(self, token_ids, *, tools=None):

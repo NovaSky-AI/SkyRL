@@ -36,10 +36,11 @@ def test_linear_bridge_preserves_exact_tokens():
         {"role": "tool", "content": "observation", "tool_call_id": "call-1"},
     ]
     second = trace.prepare_turn(second_messages)
-    assert second.bridge_anchor is not None
-    assert second.bridge_anchor.previous_prompt_ids == (10, 11, 12)
-    assert second.bridge_anchor.previous_completion_ids == (20, 21)
-    assert second.new_messages == (second_messages[-1],)
+    assert second.bridge_transition_id == 0
+    bridge_transition = trace.transition(second.bridge_transition_id)
+    assert bridge_transition.prompt_token_ids == (10, 11, 12)
+    assert bridge_transition.completion_ids == (20, 21)
+    assert second.messages[len(bridge_transition.node_ids) :] == (second_messages[-1],)
 
     trace.commit(
         second,
@@ -154,9 +155,8 @@ def test_later_request_reuses_the_retry_result_present_in_client_history():
         ]
     )
 
-    assert pending.bridge_anchor is not None
-    assert pending.bridge_anchor.previous_completion_ids == (4,)
-    assert pending.bridge_anchor.node_id == trace.transition(1).assistant_node_id
+    assert pending.bridge_transition_id == 1
+    assert trace.transition(pending.bridge_transition_id).completion_ids == (4,)
     assert trace.transition(0).assistant_message == first_assistant
 
 
