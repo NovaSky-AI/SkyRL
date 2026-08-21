@@ -25,12 +25,15 @@ permissions:
 jobs:
   
   skyrl_train_tests:
+    # This job receives repository secrets. Test external contributions from a
+    # reviewed branch in this repository instead of running fork-owned code.
     if: >
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (
         github.event_name == 'pull_request_target' &&
         !github.event.pull_request.draft &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'run_train_gpu_ci')
       )
     runs-on: ubuntu-latest
@@ -44,9 +47,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
           # The Anyscale job uploads this working dir, so we need the PR head.
-          # Fork code only reaches here after a maintainer applies the gating
-          # label above; don't leave the base repo token on disk for it.
-          allow-unsafe-pr-checkout: true
+          # Don't leave the base repo token in the uploaded checkout.
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v5
