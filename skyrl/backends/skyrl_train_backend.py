@@ -145,6 +145,10 @@ class SkyRLTrainBackend(AbstractBackend):
         # New inference infrastructure
         self._server_groups: list = []
         self._inference_router = None
+        # Colocated engines are slept after init and around training ops;
+        # sample paths must wake them (tracked here so wakes are not issued
+        # against already-awake engines).
+        self._engines_asleep = False
 
         # Optional hook invoked on inference-engine state changes (after
         # _create_new_inference_client, on delete_model teardown). The host
@@ -353,6 +357,19 @@ class SkyRLTrainBackend(AbstractBackend):
         except Exception as e:
             logger.warning(f"Inference-state publisher failed (proxy_url={proxy_url!r}): {e}")
 
+    @property
+    def _adapter_only_sync(self) -> bool:
+        """True when sampler syncs ship standalone LoRA adapters to vLLM
+        (megatron + lora.rank>0 + merge_lora=False) instead of broadcasting
+        full weights — the path that never backloads the frozen masters."""
+        lora_cfg = self._cfg.trainer.policy.model.lora
+        return (
+            self._cfg.trainer.strategy == "megatron"
+            and lora_cfg is not None
+            and lora_cfg.rank > 0
+            and not self._cfg.trainer.policy.megatron_config.lora_config.merge_lora
+        )
+
     def _create_new_inference_client(self):
         """Create new HTTP-based inference client."""
         from skyrl.backends.skyrl_train.inference_servers.setup import (
@@ -379,8 +396,19 @@ class SkyRLTrainBackend(AbstractBackend):
         # woken before sampling. sleep() is async with no running loop here, hence
         # asyncio.run. Defaulting to level 2 (the client clamps to level 1 when
         # LoRA weight sync is in use, since level 2 would discard the base model).
-        if is_colocated:
+        #
+        # Adapter-only LoRA sync is the exception: engines are created lazily by
+        # the first save_weights_for_sampler, which exports the adapter from the
+        # always-GPU-resident LoRA buffers and loads it onto *awake* engines —
+        # no trainer backload happens, so nothing needs the GPUs freed. Sleeping
+        # here would back up ~TBs of engine weights to CPU (evicting the frozen-
+        # offload page cache, minutes per node) only for the sync to wake them
+        # right back up. Training paths (forward/optim/checkpoint) sleep the
+        # engines on demand via _sleep_inference_engines(), so skipping the
+        # eager sleep keeps the colocation contract.
+        if is_colocated and not self._adapter_only_sync:
             asyncio.run(client.sleep())
+            self._engines_asleep = True
 
     def _create_render_client(self) -> RendererClientProtocol:
         """Return a client for vLLM's ``/v1/chat/completions/render``.
@@ -416,6 +444,14 @@ class SkyRLTrainBackend(AbstractBackend):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
         if self._inference_engines_initialized:
             return
+
+        # A preceding training op (another tenant's forward/forward_backward)
+        # may have left the trainer GPU-resident; under colocate_all the
+        # engines' startup allocation (gpu_memory_utilization of each GPU)
+        # then OOMs. Offload the trainer before bringing the engines up --
+        # the same order the build path uses (build -> offload -> engines).
+        if self._dispatch is not None:
+            self._dispatch.offload_for_sampling()
 
         self._create_new_inference_client()
 
@@ -786,11 +822,43 @@ class SkyRLTrainBackend(AbstractBackend):
     def _sleep_inference_engines(self):
         """Sleep inference engines to free GPU memory for training."""
         if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
+            if self._engines_asleep:
+                return
             lora_cfg = self._cfg.trainer.policy.model.lora
             # TODO(team): remove once vllm fixes this
             # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
             sleep_level = 1 if lora_cfg and lora_cfg.rank > 0 else 2
+            # For TB-scale models the level-1 CPU backup (~1.3TB/node pinned
+            # for Kimi K2.7) plus the trainer's own offload buffers exceeds
+            # host RAM and NUMA-OOMs the bring-up. SKYRL_LORA_SLEEP_LEVEL=2
+            # opts LoRA runs into discard-and-reload sleeps (weights re-read
+            # from page cache on wake); only set it after verifying wake
+            # output sanity on the deployed vLLM (the linked gibberish bug).
+            _lora_sleep_override = os.environ.get("SKYRL_LORA_SLEEP_LEVEL")
+            if _lora_sleep_override in ("1", "2"):
+                sleep_level = int(_lora_sleep_override)
             asyncio.run(self._inference_engine_client.sleep(level=sleep_level))
+            self._engines_asleep = True
+
+    def _wake_inference_engines_for_sampling(self):
+        """Wake colocated engines before serving sample requests.
+
+        Inverse of :meth:`_sleep_inference_engines`. A cold sample -- base
+        model, or an already-synced adapter, with no interleaved training op
+        -- must not rely on ``save_weights_for_sampler`` having woken the
+        engines: without this, requests queue against sleeping engines and
+        hang. The trainer may be GPU-resident from a preceding forward /
+        optim op, so it is offloaded first to give the engines their VRAM
+        back.
+        """
+        if not (self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all):
+            return
+        if not self._engines_asleep:
+            return
+        self._dispatch.offload_for_sampling()
+        asyncio.run(self._inference_engine_client.wake_up(tags=["weights"]))
+        asyncio.run(self._inference_engine_client.wake_up(tags=["kv_cache"]))
+        self._engines_asleep = False
 
     def _validate_batch_role_and_loss(self, role: str, loss_fn: str):
         if role == "critic" and loss_fn not in {"ppo", "ppo_critic"}:
@@ -1012,21 +1080,25 @@ class SkyRLTrainBackend(AbstractBackend):
         save_weights_for_sampler() explicitly before calling sample() if weights
         have been updated.
         """
-        # 1. Ensure inference engines are initialized
+        # 1. Ensure inference engines are initialized and awake
         self._ensure_inference_engines()
+        self._wake_inference_engines_for_sampling()
 
         # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
         # mixes adapters in one batched sample call (the engine batches across
         # model_ids in find_batchable_sample); we route each request via the
-        # `model` field in _sample_with_remote_client below.
+        # `model` field in _sample_with_remote_client below. An empty model_id
+        # is base-model sampling (create_sampling_client(base_model=...): the
+        # API maps it to model_id "") and must not be treated as unknown --
+        # _sample_with_remote_client routes it to the served base model name.
         unique_models = set(prepared_batch.all_model_ids)
-        unknown = [mid for mid in unique_models if mid not in self._model_ids_to_role]
+        unknown = [mid for mid in unique_models if mid and mid not in self._model_ids_to_role]
         if unknown:
             error = types.ErrorResponse(
                 error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}", status="error"
             )
             return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
-        non_policy = [mid for mid in unique_models if self._model_ids_to_role.get(mid) != "policy"]
+        non_policy = [mid for mid in unique_models if mid and self._model_ids_to_role.get(mid) != "policy"]
         if non_policy:
             error = types.ErrorResponse(
                 error=f"Sampling is only supported for policy models, got non-policy: {sorted(non_policy)}",
@@ -1046,12 +1118,24 @@ class SkyRLTrainBackend(AbstractBackend):
         # Resolve the inference-engine model name per request. With multi-LoRA
         # the adapter name on vLLM IS the Tinker model_id (registered by
         # save_sampler_checkpoint via load_lora_adapter). Single-tenant /
-        # FFT path falls back to resolve_policy_model_name(cfg).
+        # FFT path falls back to resolve_policy_model_name(cfg). An empty
+        # model_id is base-model sampling and must target the served base
+        # model directly: resolve_policy_model_name would return the LoRA
+        # adapter alias under LoRA weight sync, which (a) does not exist on
+        # the engines until the first sampler-weight save and (b) would wrongly
+        # apply adapter deltas to a base-model request.
         fallback_model_name = resolve_policy_model_name(self._cfg)
-        per_request_models = [
-            mid if (self._base_lora_signature is not None and mid in self._model_ids_to_role) else fallback_model_name
-            for mid in prepared_batch.all_model_ids
-        ]
+        base_model_name = (
+            self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
+        )
+        per_request_models = []
+        for mid in prepared_batch.all_model_ids:
+            if not mid:
+                per_request_models.append(base_model_name)
+            elif self._base_lora_signature is not None and mid in self._model_ids_to_role:
+                per_request_models.append(mid)
+            else:
+                per_request_models.append(fallback_model_name)
 
         # Prompt logprobs are a property of the prompt, and all `num_samples`
         # samples of a request share one prompt, so only ask for them on the
@@ -1271,22 +1355,53 @@ class SkyRLTrainBackend(AbstractBackend):
         # Lazily create inference engines on first sampling-related call
         self._ensure_inference_engines()
 
+        adapter_only_sync = self._adapter_only_sync
+        if not adapter_only_sync:
+            # The classic colocated sync dance (wake weights -> broadcast ->
+            # wake KV cache) assumes engines start asleep; a preceding sample
+            # leaves them awake.
+            self._sleep_inference_engines()
+        # The adapter-only path loads the LoRA into the engines wherever they
+        # are: awake engines take the load live (no pointless sleep/wake
+        # cycle), asleep engines get woken by the dispatch.
+
         # Multi-LoRA: pass model_id so the dispatch swaps the right adapter in
         # before broadcasting and the worker registers it on vLLM under that
         # name. None for the FFT / single-tenant path uses legacy behavior.
         sync_id = model_id if self._base_lora_signature is not None else None
-        asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
+        asyncio.run(
+            self._dispatch.save_weights_for_sampler(model_id=sync_id, engines_asleep=self._engines_asleep)
+        )
+        # The colocated sync path leaves the engines awake (weights + KV cache).
+        self._engines_asleep = False
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:
-            # TODO(tyler): For LoRA, only save the adapters instead of the full merged model
-            # Stage on the same (shared) filesystem as output_path so the remote
-            # worker that exports the HF model and the engine that tars it agree
-            # on the path (they may run on different nodes).
-            with tempfile.TemporaryDirectory(dir=self._staging_root(output_path)) as temp_dir:
-                hf_dir = os.path.join(temp_dir, "model")
-                self._dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
-                self._create_tar_from_directory(hf_dir, output_path)
+            if adapter_only_sync:
+                # The sync above just exported the live PEFT adapter files to
+                # the per-node lora_sync_path; tar those (GBs) instead of
+                # streaming a full merged HF export (TBs for Kimi-scale MoE,
+                # and save_hf_model would need the engines slept again for
+                # the trainer backload). The tarred adapter serves directly
+                # via vLLM's load_lora_adapter against the released base.
+                base_sync_path = self._cfg.trainer.policy.model.lora.lora_sync_path
+                adapter_dir = (
+                    os.path.join(base_sync_path, os.path.basename(model_id))
+                    if sync_id is not None
+                    else base_sync_path
+                )
+                self._create_tar_from_directory(adapter_dir, output_path)
+            else:
+                # save_hf_model backloads the trainer; awake colocated engines
+                # must release the GPUs first.
+                self._sleep_inference_engines()
+                # Stage on the same (shared) filesystem as output_path so the remote
+                # worker that exports the HF model and the engine that tars it agree
+                # on the path (they may run on different nodes).
+                with tempfile.TemporaryDirectory(dir=self._staging_root(output_path)) as temp_dir:
+                    hf_dir = os.path.join(temp_dir, "model")
+                    self._dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
+                    self._create_tar_from_directory(hf_dir, output_path)
             logger.info(f"Saved sampler checkpoint for {model_id} to {output_path}")
         else:
             # Hot path: write a lightweight marker so the engine's checkpoint

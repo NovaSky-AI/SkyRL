@@ -193,6 +193,20 @@ class WorkerDispatch:
         if offload_optimizer:
             self._gpu_state[model].optimizer_on_gpu = False
 
+    def offload_for_sampling(self) -> None:
+        """Fully offload every colocated trainer model so inference engines can reclaim VRAM.
+
+        Used by cold sample paths (no preceding weight sync): the engines are
+        woken directly, so any model left GPU-resident by a forward/optim op
+        (policy, critic, ...) must first move to CPU. No-op when nothing is on
+        the GPU.
+        """
+        if not self.colocate_all:
+            return
+        for model, state in self._gpu_state.items():
+            if state.model_on_gpu or state.optimizer_on_gpu:
+                self._offload(model, offload_optimizer=True, offload_model=True)
+
     def mark_all_offloaded(self) -> None:
         """Mark all models as offloaded (call after build_models when colocate_all)."""
         for model in self._actor_groups:
@@ -619,6 +633,13 @@ class WorkerDispatch:
         # Offload optimizer if it's on GPU
         if self._gpu_state["policy"].optimizer_on_gpu:
             self._offload("policy", offload_optimizer=True, offload_model=False)
+        # Release cached allocator blocks before the engines wake their
+        # weights: a preceding forward/optim step can leave tens of GB of
+        # freed-but-cached CUDA blocks in the trainer processes, and for
+        # TB-scale models (trainer masters + vLLM weights near the GPU
+        # capacity) that hoard is the difference between the colocated
+        # wake_up(tags=["weights"]) fitting and OOMing.
+        self.empty_cache("policy")
 
     def _finish_weight_sync(self) -> None:
         """Finish weight sync: offload model weights and optimizer state. Helper for save_weights_for_sampler."""
@@ -626,7 +647,84 @@ class WorkerDispatch:
             return
         self._offload("policy", offload_optimizer=True, offload_model=True)
 
-    async def save_weights_for_sampler(self, model_id: Optional[str] = None) -> None:
+    def _is_lora_no_merge(self) -> bool:
+        """True for the megatron LoRA path that ships standalone adapters to vLLM."""
+        policy_cfg = self.cfg.trainer.policy
+        return (
+            self.cfg.trainer.strategy == "megatron"
+            and policy_cfg.model.lora.rank > 0
+            and not policy_cfg.megatron_config.lora_config.merge_lora
+        )
+
+    async def _sync_lora_adapters_colocated(self, model_id: Optional[str], engines_asleep: bool) -> None:
+        """Adapter-only weight sync for colocated megatron LoRA (merge_lora=false).
+
+        vLLM serves the released base checkpoint and hot-loads the LoRA
+        adapter, so the only bytes that must reach the engines are the adapter
+        tensors (a few GB) — never the TB-scale frozen masters. The bridge
+        export streams straight from the LoRA DDP buffers, which stay
+        GPU-resident through offload (see offload_megatron_model_to_cpu), so
+        the sync never backloads the masters: a cold (fully offloaded)
+        trainer syncs in seconds instead of re-faulting TBs of mmap'd frozen
+        weights through a page cache the engine build just evicted — that
+        re-fault stalled run-start syncs for 15+ minutes and starved client
+        deadlines. Sequence:
+
+        1. export + write the adapter (collective over the GPU-resident
+           adapter tensors only; frozen masters stay offloaded),
+        2. if a preceding phase (forward/optim) left masters or optimizer
+           resident, offload them so the engines fit on the GPUs,
+        3. wake the engines if they were asleep,
+        4. point the engines at the new adapter files (prefix cache reset +
+           load request), issued from this process so the engines are awake
+           when it lands.
+        """
+        self.ensure_active_adapter("policy", model_id)
+        state = self._gpu_state["policy"]
+
+        # 1. Collective adapter export + per-node write (no engine calls).
+        results = ray.get(
+            self._actor_groups["policy"].async_run_ray_method("pass_through", "save_lora_adapters", model_id=model_id)
+        )
+        lora_name, lora_sync_path = results[0]
+
+        # 2. Free the masters/optimizer if a preceding forward/optim phase
+        # left them resident (copies into their existing pinned buffers; the
+        # adapters themselves stay GPU-resident — LoRA DDP buffers are exempt
+        # from offload). A cold sync has nothing resident and skips this.
+        if state.model_on_gpu or state.optimizer_on_gpu:
+            self._offload("policy", offload_optimizer=True, offload_model=True)
+            self.empty_cache("policy")
+
+        # 3. Wake the engines (weights + KV) if needed.
+        if engines_asleep:
+            await self._inference_engine_client.wake_up(tags=["weights"])
+            await self._inference_engine_client.wake_up(tags=["kv_cache"])
+
+        # 4. Invalidate stale prefix cache and (re)load the adapter.
+        await self._load_lora_on_engines(lora_name, lora_sync_path)
+
+    async def _load_lora_on_engines(self, lora_name: str, lora_sync_path: str) -> None:
+        """Reset prefix cache (policy weights changed) and load the adapter files."""
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            RemoteInferenceClient,
+        )
+        from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest
+
+        client = self._inference_engine_client
+        ie_cfg = self.cfg.generator.inference_engine
+        fully_async = self.cfg.trainer.fully_async
+        reset_prefix_cache = ie_cfg.enable_prefix_caching and (
+            not fully_async.enabled or fully_async.clear_kv_cache_on_weight_sync
+        )
+        if reset_prefix_cache:
+            await client.reset_prefix_cache(reset_running_requests=True)
+        if isinstance(client, RemoteInferenceClient):
+            await client.load_lora_adapter(lora_name, lora_sync_path)
+        else:
+            await client.update_named_weights(LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name))
+
+    async def save_weights_for_sampler(self, model_id: Optional[str] = None, engines_asleep: bool = True) -> None:
         """
         Tinker API method to prepare updated parameters for sampling.
 
@@ -634,12 +732,20 @@ class WorkerDispatch:
         provided we ensure the corresponding LoRA adapter is the live one
         before broadcasting, and tell the worker to register the adapter on
         vLLM under ``model_id``.
+
+        ``engines_asleep`` tells the adapter-only fast path whether the
+        colocated engines need waking; the classic full-broadcast path keeps
+        its unconditional wake sequence.
         """
         if self._inference_engine_client is None:
             raise RuntimeError(
                 "Cannot save_weights_for_sampler: no inference_engine_client configured. "
                 "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
             )
+
+        if self.colocate_all and self._is_lora_no_merge():
+            await self._sync_lora_adapters_colocated(model_id, engines_asleep)
+            return
 
         # Sync weights to inference engine
         self._prepare_for_weight_sync()

@@ -202,3 +202,95 @@ class TestSaveWeights:
 
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
+
+
+def _adapter_sync_dispatch(*, model_on_gpu: bool, optimizer_on_gpu: bool = False):
+    """Dispatch wired for the colocated adapter-only sync path
+    (megatron + lora.rank>0 + merge_lora=False + colocate_all)."""
+    from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+    cfg = _fft_dispatch_cfg()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.model.lora.rank = 32
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+
+    dispatch = WorkerDispatch.__new__(WorkerDispatch)
+    dispatch.colocate_all = True
+    dispatch.cfg = cfg
+    dispatch._inference_engine_client = AsyncMock()
+    dispatch.ensure_active_adapter = MagicMock()
+    dispatch._ensure_on_gpu = MagicMock()
+    dispatch._offload = MagicMock()
+    dispatch.empty_cache = MagicMock()
+    dispatch._load_lora_on_engines = AsyncMock()
+    dispatch._gpu_state = {
+        "policy": SimpleNamespace(model_on_gpu=model_on_gpu, optimizer_on_gpu=optimizer_on_gpu)
+    }
+    group = MagicMock()
+    group.async_run_ray_method.return_value = "export-future"
+    dispatch._actor_groups = {"policy": group}
+    return dispatch
+
+
+class TestAdapterOnlyColocatedSync:
+    """Tests for `WorkerDispatch._sync_lora_adapters_colocated`.
+
+    The adapter export streams from the GPU-resident LoRA DDP buffers
+    (exempt from offload), so the TB-scale frozen masters must never be
+    backloaded for a sampler sync — a cold-trainer sync that re-faulted
+    them through an evicted page cache stalled run starts for 15+ minutes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cold_sync_skips_sleep_backload_and_offload(self, monkeypatch):
+        """Fully offloaded trainer + awake engines: the sync must not sleep
+        the engines, not backload the masters, and not offload anything —
+        just export the adapter and load it on the live engines."""
+        from skyrl.backends.skyrl_train.workers import worker_dispatch as wd
+
+        dispatch = _adapter_sync_dispatch(model_on_gpu=False)
+        monkeypatch.setattr(wd.ray, "get", lambda _: [("adapter-m1", "/tmp/lora/m1")])
+
+        await dispatch.save_weights_for_sampler(model_id="m1", engines_asleep=False)
+
+        dispatch._inference_engine_client.sleep.assert_not_awaited()
+        dispatch._ensure_on_gpu.assert_not_called()
+        dispatch._offload.assert_not_called()
+        dispatch._inference_engine_client.wake_up.assert_not_awaited()
+        dispatch._load_lora_on_engines.assert_awaited_once_with("adapter-m1", "/tmp/lora/m1")
+
+    @pytest.mark.asyncio
+    async def test_cold_sync_wakes_asleep_engines_without_backload(self, monkeypatch):
+        """Asleep engines still get the weights+kv wake sequence, but the
+        masters stay offloaded."""
+        from skyrl.backends.skyrl_train.workers import worker_dispatch as wd
+
+        dispatch = _adapter_sync_dispatch(model_on_gpu=False)
+        monkeypatch.setattr(wd.ray, "get", lambda _: [("adapter-m1", "/tmp/lora/m1")])
+
+        await dispatch.save_weights_for_sampler(model_id="m1", engines_asleep=True)
+
+        dispatch._ensure_on_gpu.assert_not_called()
+        dispatch._inference_engine_client.sleep.assert_not_awaited()
+        wake_tags = [c.kwargs["tags"] for c in dispatch._inference_engine_client.wake_up.await_args_list]
+        assert wake_tags == [["weights"], ["kv_cache"]]
+        dispatch._load_lora_on_engines.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_hot_sync_offloads_resident_masters_before_wake(self, monkeypatch):
+        """Post-optim sync (masters resident, engines asleep): masters and
+        optimizer must be offloaded so the engine wake fits, but still no
+        backload."""
+        from skyrl.backends.skyrl_train.workers import worker_dispatch as wd
+
+        dispatch = _adapter_sync_dispatch(model_on_gpu=True, optimizer_on_gpu=True)
+        monkeypatch.setattr(wd.ray, "get", lambda _: [("adapter-m1", "/tmp/lora/m1")])
+
+        await dispatch.save_weights_for_sampler(model_id="m1", engines_asleep=True)
+
+        dispatch._ensure_on_gpu.assert_not_called()
+        dispatch._offload.assert_called_once_with("policy", offload_optimizer=True, offload_model=True)
+        dispatch.empty_cache.assert_called_once_with("policy")
+        wake_tags = [c.kwargs["tags"] for c in dispatch._inference_engine_client.wake_up.await_args_list]
+        assert wake_tags == [["weights"], ["kv_cache"]]
+        dispatch._load_lora_on_engines.assert_awaited_once()
