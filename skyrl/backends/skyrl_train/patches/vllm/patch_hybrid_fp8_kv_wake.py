@@ -43,10 +43,6 @@ def patch_hybrid_fp8_kv_wake() -> bool:
     except ModuleNotFoundError:
         return False
     except Exception as e:
-        # vLLM's import graph can fail for reasons other than a missing
-        # package (e.g. flashinfer resolving tilelang's libcudart stub in a
-        # process that loaded mamba_ssm). The patch only matters in vLLM
-        # worker processes, where this import succeeds; elsewhere skip it.
         logger.warning("Importing vLLM failed; skipping hybrid KV wake patch: {}", e)
         return False
 
