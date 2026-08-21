@@ -48,9 +48,12 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
+    LOSS_MASK_NNZ_KEY,
+    POLICY_ENTROPY_SUM_KEY,
     BaseBatchIterator,
     BatchIterator,
     all_reduce_metrics,
+    compute_masked_sum_and_count,
     compute_minibatch_rollout_logprob_diff_metrics,
     get_microbatch_iterator,
     reduce_metrics,
@@ -908,6 +911,13 @@ class PolicyWorkerBase(Worker):
         dp_group = self.device_mesh.get_group("dp")
         result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
+        # The entropy sum/count are now summed across micro-batches and DP ranks; divide once for
+        # the exact global entropy of this rank's mini-batch portion. The raw _sum/_nnz keys are
+        # kept so the trainer can sum them again across mini-batches and divide once more for the
+        # final global value.
+        if POLICY_ENTROPY_SUM_KEY in result and LOSS_MASK_NNZ_KEY in result:
+            result["policy_entropy"] = result[POLICY_ENTROPY_SUM_KEY] / max(result[LOSS_MASK_NNZ_KEY], 1.0)
+
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
 
     def _forward_backward_micro(
@@ -1060,6 +1070,11 @@ class PolicyWorkerBase(Worker):
                 entropy_BS = output["entropy"]
                 entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
                 entropy = masked_mean(entropy_BS, loss_mask)
+                # Masked per-token sum and its count. Both are summed across micro-batches
+                # and DP ranks (and, at the trainer, mini-batches); the entropy is recovered
+                # with a single final division, so it stays exact under imbalanced shards
+                # instead of being a mean-of-means.
+                entropy_sum, entropy_nnz = compute_masked_sum_and_count(entropy_BS, loss_mask)
 
             if self.cfg.algorithm.use_entropy_loss:
                 entropy_loss_term = entropy * self.cfg.algorithm.entropy_loss_coef
@@ -1113,7 +1128,8 @@ class PolicyWorkerBase(Worker):
             status = {
                 "final_loss": unscaled_loss.item(),
                 "policy_loss": policy_loss.item(),
-                "policy_entropy": entropy.item(),
+                POLICY_ENTROPY_SUM_KEY: entropy_sum,
+                LOSS_MASK_NNZ_KEY: entropy_nnz,
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,

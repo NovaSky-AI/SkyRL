@@ -7,7 +7,6 @@ import torch.distributed as dist
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import TensorBatch, TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
-from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
 
@@ -19,12 +18,23 @@ from skyrl.train.dataset.replay_buffer import Experience
 # Summing it would multiply the reported value by the microbatch (and DP) count -- e.g. a true
 # ~0.5 nats reads as ~44. Keep these averaged regardless of `sum_loss_metrics`.
 MEAN_LOSS_METRICS = frozenset({"mtp_loss", "draft_loss"})
-# Per-micro-batch abs diff between train-step and rollout logprobs. The moments (`_mean`,
-# `_sq_mean`) and `_max`/`_min` reduce correctly across micro-batches, DP ranks, and
-# mini-batches; the std is reconstructed from the moments downstream.
+# Metrics named ``*_sum`` / ``*_nnz`` are masked per-token sums and their counts (number of
+# non-zero loss-mask entries). They are ALWAYS summed -- across micro-batches, DP ranks, and
+# mini-batches -- regardless of ``sum_loss_metrics``, and divided once at the end (in the
+# trainer's finalize step). This recovers the exact metric as if it had been computed on the
+# global mini-batch, instead of a mean-of-means that over-weights under-sampled shards.
+POLICY_ENTROPY_SUM_KEY = "policy_entropy_sum"
+LOSS_MASK_NNZ_KEY = "loss_mask_nnz"
+# Per-micro-batch abs diff between train-step and rollout logprobs. The workers emit the masked
+# sums (``_sum``, ``_sq_sum``) and the count (``_nnz``) instead of means; those sum-reduce
+# exactly across micro-batches, DP ranks, and mini-batches, and the moments / std are derived
+# once downstream in `finalize_minibatch_rollout_logprob_diff_std`. ``_max``/``_min`` reduce
+# correctly as-is.
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX = "minibatch_rollout_logprobs_abs_diff"
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_mean"
-MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_sq_mean"
+MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_sum"
+MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_sq_sum"
+MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_nnz"
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_max"
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_min"
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_std"
@@ -41,27 +51,47 @@ def compute_minibatch_rollout_logprob_diff_metrics(
     Unlike the trainer's forward-pass `rollout_train_logprobs_abs_diff` metric, this uses the
     logprobs the loss actually optimizes against, so it reflects mini-batch drift when
     ``train_batch_size > mini_batch_size``. Masked-out tokens are excluded via the same
-    ``masked_mean`` / ``* loss_mask`` pattern as the off-policy `is_ratio_*` metrics, so the keys
-    are emitted for every micro-batch (a fully-masked one contributes 0) -- keeping them present
-    on every DP rank. Returns ``{}`` only when rollout logprobs are unavailable, which is uniform
-    across DP ranks.
+    ``* loss_mask`` pattern as the off-policy `is_ratio_*` metrics, so the keys are emitted for
+    every micro-batch (a fully-masked one contributes 0) -- keeping them present on every DP
+    rank. The ``_sum``/``_sq_sum`` values and the ``_nnz`` count are all sum-reduced by
+    `reduce_metrics` / `all_reduce_metrics`; the mean / std are derived once from them in
+    `finalize_minibatch_rollout_logprob_diff_std`. Returns ``{}`` only when rollout logprobs are
+    unavailable, which is uniform across DP ranks.
     """
     if rollout_logprobs is None:
         return {}
     abs_diff = (action_log_probs - rollout_logprobs).abs()
     masked_abs_diff = abs_diff if loss_mask is None else abs_diff * loss_mask
+    nnz = abs_diff.numel() if loss_mask is None else loss_mask.sum().item()
     return {
-        MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY: masked_mean(abs_diff, loss_mask).item(),
-        MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY: masked_mean(abs_diff.square(), loss_mask).item(),
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY: masked_abs_diff.sum().item(),
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY: masked_abs_diff.square().sum().item(),
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY: float(nnz),
         MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY: masked_abs_diff.max().item(),
         MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY: masked_abs_diff.min().item(),
     }
 
 
+@torch.no_grad()
+def compute_masked_sum_and_count(tensor: torch.Tensor, mask: Optional[torch.Tensor]) -> tuple[float, float]:
+    """Masked sum and count (number of non-zero mask entries) of a per-token tensor.
+
+    ``sum / count`` reproduces the masked mean for a single tensor, and -- unlike a
+    mean-of-means -- the sum and count each reduce exactly by summation across micro-batches,
+    DP ranks, and mini-batches. They are divided once at the end (in the trainer's finalize
+    step) to recover the exact global mean.
+    """
+    if mask is None:
+        return tensor.sum().item(), float(tensor.numel())
+    return (tensor * mask).sum().item(), mask.sum().item()
+
+
 def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = False) -> Dict[str, float]:
     """Reduce scalar metrics from a list of entries per key with the appropriate reduction.
 
-    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
+    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively,
+    and metrics ending in `_sum` or `_nnz` (masked per-token sums / their counts) are always
+    summed so the exact global mean can be derived with a single final division.
 
     If sum_loss_metrics is True, metrics named 'loss' or ending in `_loss` are summed instead of
     averaged (except those in `MEAN_LOSS_METRICS`, which are always averaged).
@@ -84,6 +114,8 @@ def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = Fal
             reduced_metrics[k] = max(v)
         elif k.endswith("_min"):
             reduced_metrics[k] = min(v)
+        elif k.endswith("_sum") or k.endswith("_nnz"):
+            reduced_metrics[k] = sum(v)
         elif sum_loss_metrics and (k == "loss" or k.endswith("_loss")) and k not in MEAN_LOSS_METRICS:
             reduced_metrics[k] = sum(v)
         else:
@@ -99,8 +131,9 @@ def all_reduce_metrics(
 ) -> Dict[str, float]:
     """All reduce metrics across all processes.
 
-    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
-    If sum_loss_metrics is True, metrics named ``loss`` or ending in ``_loss`` are summed
+    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively,
+    and metrics ending in `_sum` or `_nnz` (masked per-token sums / their counts) are always
+    summed. If sum_loss_metrics is True, metrics named ``loss`` or ending in ``_loss`` are summed
     instead of averaged.
 
     Args:
@@ -115,7 +148,9 @@ def all_reduce_metrics(
     sum_metrics = {
         k: v
         for k, v in metrics.items()
-        if sum_loss_metrics and (k == "loss" or k.endswith("_loss")) and k not in MEAN_LOSS_METRICS
+        if k.endswith("_sum")
+        or k.endswith("_nnz")
+        or (sum_loss_metrics and (k == "loss" or k.endswith("_loss")) and k not in MEAN_LOSS_METRICS)
     }
     mean_metrics = {
         k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics and k not in sum_metrics

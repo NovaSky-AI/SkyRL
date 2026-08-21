@@ -17,9 +17,13 @@ from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_utils import (
+    LOSS_MASK_NNZ_KEY,
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
-    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY,
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY,
+    POLICY_ENTROPY_SUM_KEY,
 )
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
@@ -36,21 +40,49 @@ GLOBAL_STEP_PREFIX = "global_step_"
 
 
 def finalize_minibatch_rollout_logprob_diff_std(metrics: Dict[str, float]) -> None:
-    """Reconstruct the logprob-diff std from its reduced first/second moments, in place.
+    """Reconstruct the logprob-diff std from its reduced sums/count, in place.
 
-    Std can't be mean-reduced across micro-batches/DP/mini-batches, so the workers emit the
-    moments and we derive ``std = sqrt(E[x^2] - E[x]^2)`` here. Replaces the second-moment key
-    with the std; no-op when the moments are absent (e.g. critic training, or no rollout logprobs).
+    Std can't be reduced across micro-batches/DP/mini-batches, so the workers emit the masked
+    sums (``_sum``, ``_sq_sum``) and the count (``_nnz``) -- all of which sum-reduce exactly --
+    and we derive ``mean = sum/nnz``, ``std = sqrt(E[x^2] - E[x]^2)`` here. Replaces the raw
+    keys with the ``_mean``/``_std`` outputs; no-op when the sums are absent (e.g. critic
+    training, or no rollout logprobs).
     """
     if (
-        MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY not in metrics
-        or MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY not in metrics
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY not in metrics
+        or MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY not in metrics
+        or MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY not in metrics
     ):
         return
-    mean = metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY]
-    sq_mean = metrics.pop(MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY)
+    nnz = metrics.pop(MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY)
+    total = metrics.pop(MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY)
+    sq_total = metrics.pop(MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY)
+    if nnz <= 0:
+        metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY] = 0.0
+        metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY] = 0.0
+        return
+    mean = total / nnz
+    sq_mean = sq_total / nnz
+    metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY] = mean
     # max(0, ...) guards tiny negatives from float round-off.
     metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY] = math.sqrt(max(0.0, sq_mean - mean**2))
+
+
+def finalize_policy_entropy(metrics: Dict[str, float]) -> None:
+    """Derive the exact entropy from its reduced masked sum/count, in place.
+
+    The workers emit the per-token masked sum (``policy_entropy_sum``) and the count
+    (``loss_mask_nnz``), both of which are summed across micro-batches, DP ranks, and
+    mini-batches. The entropy is recovered with a single final division, so it equals the
+    exact global masked mean even when shards carry imbalanced token counts (a mean-of-means
+    would over-weight under-sampled shards). No-op when the keys are absent (e.g. SFT or
+    critic training).
+    """
+    if POLICY_ENTROPY_SUM_KEY not in metrics or LOSS_MASK_NNZ_KEY not in metrics:
+        return
+    total = metrics.pop(POLICY_ENTROPY_SUM_KEY)
+    nnz = metrics.pop(LOSS_MASK_NNZ_KEY)
+    metrics["policy_entropy"] = total / nnz if nnz > 0 else 0.0
 
 
 class ResumeMode(Enum):
