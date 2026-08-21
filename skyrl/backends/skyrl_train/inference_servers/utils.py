@@ -4,6 +4,9 @@ import logging
 from argparse import Namespace
 from typing import Any, Dict, List, Optional
 
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    wire_to_engine_quantization,
+)
 from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
     VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS,
 )
@@ -11,6 +14,12 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
 )
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+    BLOCKWISE_FP8,
+    get_serialized_fp8_quantization_config,
+    registered_fp8_spec_names,
+    resolve_fp8_spec,
+)
 from skyrl.train.config import (
     InferenceEngineConfig,
     SkyRLTrainConfig,
@@ -18,6 +27,90 @@ from skyrl.train.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str = BLOCKWISE_FP8) -> list[str]:
+    if not model_path:
+        raise ValueError("A model path is required when FP8 weight sync is enabled")
+    try:
+        from transformers import AutoConfig
+
+        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not inspect the model config required to derive FP8 ignored layers: " f"model_path={model_path!r}"
+        ) from exc
+    spec = resolve_fp8_spec(hf_config)
+    if spec is None:
+        raise ValueError(
+            "FP8 weight sync has no registered model spec for this checkpoint layout "
+            f"(registered specs: {', '.join(registered_fp8_spec_names())}); model_path={model_path!r}"
+        )
+    return spec.ignored_layers(hf_config, wire_format)
+
+
+def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
+    if key in mapping and mapping[key] != expected:
+        raise ValueError(
+            f"{context}.{key} must be {expected!r} when FP8 weight sync is enabled, " f"got {mapping[key]!r}"
+        )
+    mapping[key] = copy.deepcopy(expected)
+
+
+def _apply_serialized_fp8_weight_sync_defaults(
+    ie_cfg: InferenceEngineConfig,
+    engine_kwargs: Dict[str, Any],
+    model_path: Optional[str] = None,
+) -> None:
+    """Configure vLLM for checkpoint-format serialized FP8 weight reloads.
+
+    Wire-format-agnostic apart from ``wire_to_engine_quantization`` and the
+    injected quantization config, both of which key off the concrete wire.
+    """
+
+    mode = ie_cfg.fp8_weight_sync_mode
+    if mode is None:
+        return
+    # wire_to_engine_quantization raises on anything outside WIRE_FORMATS.
+    quant_method = wire_to_engine_quantization(mode)
+    _set_or_validate(engine_kwargs, "quantization", quant_method, context="engine_init_kwargs")
+    # Build FP8 modules without a bootstrap checkpoint; the first full-weight
+    # sync replaces the dummy values.
+    _set_or_validate(engine_kwargs, "load_format", "dummy", context="engine_init_kwargs")
+
+    hf_overrides_value = engine_kwargs.get("hf_overrides")
+    hf_overrides = {} if hf_overrides_value is None else copy.deepcopy(hf_overrides_value)
+    if not isinstance(hf_overrides, dict):
+        raise ValueError("engine_init_kwargs.hf_overrides must be a dict when FP8 weight sync is enabled")
+
+    qcfg_value = hf_overrides.get("quantization_config")
+    qcfg = {} if qcfg_value is None else copy.deepcopy(qcfg_value)
+    if not isinstance(qcfg, dict):
+        raise ValueError(
+            "engine_init_kwargs.hf_overrides.quantization_config must be a dict " "when FP8 weight sync is enabled"
+        )
+
+    ignored_layers = _serialized_fp8_ignored_layers(model_path, mode)
+    if ignored_layers:
+        logger.info(
+            "FP8 weight sync (%s) will leave %d vLLM modules unquantized "
+            "to match the model's FP8 quantization spec.",
+            mode,
+            len(ignored_layers),
+        )
+
+    for key, value in get_serialized_fp8_quantization_config(
+        ignored_layers=ignored_layers,
+        wire_format=mode,
+    ).items():
+        _set_or_validate(
+            qcfg,
+            key,
+            value,
+            context="engine_init_kwargs.hf_overrides.quantization_config",
+        )
+    hf_overrides["quantization_config"] = qcfg
+    engine_kwargs["hf_overrides"] = hf_overrides
 
 
 def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
@@ -155,6 +248,11 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    _apply_serialized_fp8_weight_sync_defaults(
+        ie_cfg,
+        engine_kwargs,
+        cfg.trainer.policy.model.path,
+    )
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
 

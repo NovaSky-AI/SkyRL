@@ -137,7 +137,7 @@ class FakeInt4QatConfig(BaseConfig):
     BF16 masters, enabling this fake-quantizes the frozen expert GEMMs onto the
     same INT4 grid in the forward pass (straight-through backward), removing the
     train/infer weight mismatch. See
-    ``skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat``.
+    ``skyrl.backends.skyrl_train.workers.megatron.quantization.fake_int4_qat``.
     """
 
     enabled: bool = False
@@ -250,6 +250,10 @@ class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
+    fp8_param_gather: bool = False
+    """Keep the DDP parameter all-gather in FP8.
+    Must be ``True`` when training with ``transformer_config_kwargs.fp8_param=true`` so persistent
+    FP8 params stay FP8 through the distributed-optimizer all-gather."""
     average_in_collective: bool = True
 
 
@@ -493,13 +497,37 @@ class MegatronConfig(BaseConfig):
     https://docs.skyrl.ai/docs/examples/megatron for the accepted names and per-field checks.
     ``use_precision_aware_optimizer=True`` can cause checkpointing to fail
     (https://github.com/nvidia/megatron-lm/issues/1820); leaving it ``False`` is recommended."""
+    fp8: Optional[str] = None
+    """TransformerEngine FP8 compute format for linear-layer GEMMs, e.g. ``"e4m3"`` or
+    ``"hybrid"``. ``None`` (default) trains without FP8. Folded into
+    ``transformer_config_kwargs["fp8"]``; an explicit kwarg takes precedence."""
+    fp8_recipe: Optional[str] = None
+    """TransformerEngine FP8 scaling recipe. ``"auto"`` resolves to the architecture-native
+    recipe — ``blockwise``/FP32 scales on Hopper, native MXFP8 on Blackwell/SM100+ (where TE
+    also requires every weight dim to be divisible by 32). Folded into
+    ``transformer_config_kwargs["fp8_recipe"]``; an explicit kwarg takes precedence."""
+    fp8_param: Optional[bool] = None
+    """Store Megatron primary parameters in FP8 (E4M3). Supported with
+    ``fp8_recipe=blockwise`` + FP32 block scales only and requires
+    ``ddp_config.fp8_param_gather=true``. Folded into
+    ``transformer_config_kwargs["fp8_param"]``; an explicit kwarg takes precedence."""
+    fp8_amax_compute_algo: Optional[str] = None
+    """TransformerEngine amax history reduction, e.g. ``"most_recent"`` or ``"max"``. Folded
+    into ``transformer_config_kwargs["fp8_amax_compute_algo"]``; an explicit kwarg takes
+    precedence."""
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
     """Pass-through kwargs for Megatron's ``TransformerConfig``:
     https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py
     Also the place to put HuggingFace config overrides (e.g. ``rope_parameters``) for the Megatron
-    backend, where FSDP would use ``model_config_kwargs``."""
+    backend, where FSDP would use ``model_config_kwargs``.
+
+    FP8 training is configured through the top-level ``fp8``, ``fp8_recipe``, ``fp8_param``, and
+    ``fp8_amax_compute_algo`` fields above, which fold into these kwargs; setting the same keys
+    here directly overrides them. The block-scale env contract
+    (``NVTE_FP8_BLOCK_SCALING_FP32_SCALES``, ``VLLM_USE_DEEP_GEMM_E8M0``) is defaulted and
+    validated per architecture at startup and forwarded to all Ray actors."""
     empty_cuda_cache: Optional[bool] = True
     """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
     This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer."""
@@ -562,6 +590,16 @@ class MegatronConfig(BaseConfig):
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
             self.transformer_config_kwargs = {}
+        # The top-level FP8 fields fold into the TransformerConfig kwargs; explicitly
+        # configured kwargs take precedence.
+        for key, value in (
+            ("fp8", self.fp8),
+            ("fp8_recipe", self.fp8_recipe),
+            ("fp8_param", self.fp8_param),
+            ("fp8_amax_compute_algo", self.fp8_amax_compute_algo),
+        ):
+            if value is not None:
+                self.transformer_config_kwargs.setdefault(key, value)
         for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
             self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
         if self.optimizer_config_kwargs is None:
@@ -1100,6 +1138,23 @@ class InferenceEngineConfig(BaseConfig):
     """Should match the dtype used by the inference engine.
     Also used during full-weight sync, where policy weights are cast to this dtype before being sent
     to the inference engine. The LoRA-adapter sync path exports fp32 instead."""
+    fp8_weight_sync_mode: Optional[str] = None
+    """Optional rollout weight format: ``"blockwise"``, ``"mxfp8"``, or ``"auto"``.
+
+    Sends FP8 checkpoint weights and scales instead of ``model_dtype`` tensors, halving transfer
+    volume and letting vLLM serve FP8. ``"blockwise"`` ships one FP32 scale per 128x128 block;
+    ``"mxfp8"`` ships one E8M0 exponent per 32-element group, matching the recipe Transformer
+    Engine trains with on Blackwell.
+
+    ``"auto"`` selects the format matching the policy's resolved ``fp8_recipe`` -- so trainer and
+    rollout quantize identically. It follows the *recipe*, not the architecture: an explicit
+    ``fp8_recipe="blockwise"`` on Blackwell keeps a blockwise wire.
+
+    Requires ``trainer.strategy="megatron"`` and a model with a registered FP8 spec (see
+    ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The vLLM engine settings
+    this needs (``quantization``, ``load_format="dummy"``, and the matching
+    ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
+    automatically; the first weight sync supplies real weights before any generation."""
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
     When ``False``, point SkyRL at an external HTTP/vLLM deployment via ``external_proxy_url`` and/or
