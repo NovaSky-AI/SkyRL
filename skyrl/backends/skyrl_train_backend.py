@@ -948,7 +948,22 @@ class SkyRLTrainBackend(AbstractBackend):
         )
         batch, pad_size = self._pad_batch(batch, micro_batch_size=micro_bs)
         model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
-        data = self._dispatch.forward(role, batch, model_id=model_id)
+        # Forward must run the SAME pipeline as forward_backward (loss path,
+        # forward_only): the loss-less worker forward takes Megatron's
+        # inference route, which bypasses training-only transforms like
+        # fake-INT4 QAT and the fused LM-head logprob, so its logprobs
+        # diverge from what gradients are computed against. The tinker
+        # FORWARD request always carries a loss_fn; use it (policy roles).
+        loss_fn = prepared_batch.all_loss_fns[0] if prepared_batch.all_loss_fns else None
+        loss_fn_config = next((c for c in prepared_batch.all_loss_fn_configs if c is not None), None)
+        if role != "critic" and loss_fn is not None:
+            self._validate_batch_role_and_loss(role, loss_fn)
+            loss_fn, loss_fn_config = self._normalize_policy_loss_request(role, loss_fn, loss_fn_config)
+            data = self._dispatch.forward(
+                role, batch, loss_fn=loss_fn, loss_fn_config=loss_fn_config, model_id=model_id
+            )
+        else:
+            data = self._dispatch.forward(role, batch, model_id=model_id)
 
         # Workers emit per-sample loss_fn_outputs directly. Trim padding entries.
         per_sample_outputs = data.loss_fn_outputs
