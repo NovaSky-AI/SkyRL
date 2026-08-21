@@ -135,6 +135,15 @@ def test_cleanup_stale_sessions():
             [],
             id="cispo",
         ),
+        pytest.param(
+            "gspo",
+            {"clip_low_threshold": 0.98, "clip_high_threshold": 1.03},
+            [0.1, 0.2, 0.3],
+            [-1.1, -1.0, -0.9],
+            [],
+            [],
+            id="gspo",
+        ),
         pytest.param("ppo_critic", {"value_clip": 0.2}, [], [], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9], id="ppo_critic"),
         pytest.param(
             "dppo",
@@ -418,6 +427,118 @@ def test_find_batchable_model_passes_stops_at_barrier(scheduling_engine):
     model_id, request_data = batchable[str(request_ids[0])]
     assert model_id == "model_a"
     assert request_data.data[0].loss_fn_inputs.target_tokens.data == [1, 2, 3]
+
+
+def test_find_batchable_model_passes_waits_for_next_sdk_sequence(scheduling_engine):
+    """Later chunks must wait for the first chunk that the SDK deliberately submits last."""
+    engine = scheduling_engine
+    payload = forward_backward_payload()
+    with Session(engine.db_engine) as session:
+        session.add(
+            FutureDB(
+                request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
+                model_id="model_a",
+                seq_id=1,
+                request_data={},
+                status=RequestStatus.COMPLETED,
+            )
+        )
+        later_chunks = [
+            FutureDB(
+                request_type=types.RequestType.FORWARD_BACKWARD,
+                model_id="model_a",
+                seq_id=seq_id,
+                request_data=payload,
+                status=RequestStatus.PENDING,
+            )
+            for seq_id in [3, 4]
+        ]
+        session.add_all(later_chunks)
+        session.commit()
+        later_request_ids = [row.request_id for row in later_chunks]
+
+    with Session(engine.db_engine) as session:
+        assert engine.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD) == {}
+
+    with Session(engine.db_engine) as session:
+        first_chunk = FutureDB(
+            request_type=types.RequestType.FORWARD_BACKWARD,
+            model_id="model_a",
+            seq_id=2,
+            request_data=payload,
+            status=RequestStatus.PENDING,
+        )
+        session.add(first_chunk)
+        session.commit()
+        first_request_id = first_chunk.request_id
+
+    with Session(engine.db_engine) as session:
+        batchable = engine.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD)
+
+    assert list(batchable) == [str(first_request_id), *(str(request_id) for request_id in later_request_ids)]
+
+
+def test_find_single_requests_accepts_initial_sdk_sequence(scheduling_engine):
+    engine = scheduling_engine
+    with Session(engine.db_engine) as session:
+        initial_request = FutureDB(
+            request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
+            model_id="model_a",
+            seq_id=1,
+            request_data={},
+            status=RequestStatus.PENDING,
+        )
+        session.add(initial_request)
+        session.commit()
+        initial_request_id = initial_request.request_id
+
+    with Session(engine.db_engine) as session:
+        assert engine.find_single_requests(session) == {
+            str(initial_request_id): (
+                "model_a",
+                types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
+                {},
+            )
+        }
+
+
+def test_find_batchable_model_passes_waits_for_initial_sdk_sequence(scheduling_engine):
+    engine = scheduling_engine
+    payload = forward_backward_payload()
+    with Session(engine.db_engine) as session:
+        later_requests = [
+            FutureDB(
+                request_type=types.RequestType.FORWARD_BACKWARD,
+                model_id="model_a",
+                seq_id=seq_id,
+                request_data=payload,
+                status=RequestStatus.PENDING,
+            )
+            for seq_id in [2, 3]
+        ]
+        session.add_all(later_requests)
+        session.commit()
+        later_request_ids = [request.request_id for request in later_requests]
+
+    with Session(engine.db_engine) as session:
+        assert engine.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD) == {}
+
+    with Session(engine.db_engine) as session:
+        initial_request = FutureDB(
+            request_type=types.RequestType.FORWARD_BACKWARD,
+            model_id="model_a",
+            seq_id=1,
+            request_data=payload,
+            status=RequestStatus.PENDING,
+        )
+        session.add(initial_request)
+        session.commit()
+        expected_request_ids = [initial_request.request_id, *later_request_ids]
+
+    with Session(engine.db_engine) as session:
+        batchable = engine.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD)
+
+    assert list(batchable) == [str(request_id) for request_id in expected_request_ids]
 
 
 def sample_payload(checkpoint_id: str) -> dict:
