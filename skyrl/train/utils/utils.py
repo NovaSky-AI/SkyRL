@@ -270,6 +270,40 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
         }
 
 
+def _validate_mtp_prefix_caching(cfg: SkyRLTrainConfig) -> None:
+    """Reject vLLM MTP with prefix caching on recurrent linear-attention models."""
+    ie_cfg = cfg.generator.inference_engine
+    engine_kwargs = ie_cfg.engine_init_kwargs or {}
+    enable_prefix_caching = engine_kwargs.get("enable_prefix_caching", ie_cfg.enable_prefix_caching)
+    speculative_config = engine_kwargs.get("speculative_config", ie_cfg.speculative_config)
+
+    if not enable_prefix_caching or not speculative_config:
+        return
+
+    method = speculative_config.get("method")
+    if method != "mtp" and not (isinstance(method, str) and method.endswith("_mtp")):
+        return
+
+    from transformers import AutoConfig
+
+    model_config = AutoConfig.from_pretrained(
+        cfg.trainer.policy.model.path,
+        trust_remote_code=engine_kwargs.get("trust_remote_code", True),
+        revision=engine_kwargs.get("revision"),
+    )
+    text_config = model_config.get_text_config(decoder=True)
+    if "linear_attention" not in (getattr(text_config, "layer_types", None) or []):
+        return
+
+    raise ValueError(
+        "MTP speculative decoding with prefix caching is unsafe for models with recurrent "
+        "linear-attention layers. Set generator.inference_engine.enable_prefix_caching=false "
+        "and remove any engine_init_kwargs.enable_prefix_caching override, or disable MTP "
+        "speculative decoding (SKYRL_DISABLE_SPEC=1 for trainer.mtp, or remove speculative_config). See "
+        "vllm-project/vllm#43559 and vllm-project/vllm#50021."
+    )
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -292,6 +326,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
     # side (vLLM MTP speculative decoding) so both stay consistent.
     _apply_mtp_config(cfg)
+    _validate_mtp_prefix_caching(cfg)
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
