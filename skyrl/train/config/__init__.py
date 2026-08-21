@@ -45,6 +45,7 @@ from skyrl.train.config.sft_config import (
     SFTPlacementConfig,
     TrainOnWhat,
     build_skyrl_config_for_sft,
+    validate_fireworks_sft_cfg,
     validate_sft_cfg,
 )
 
@@ -93,5 +94,6 @@ __all__ = [
     "SFTPlacementConfig",
     "TrainOnWhat",
     "build_skyrl_config_for_sft",
+    "validate_fireworks_sft_cfg",
     "validate_sft_cfg",
 ]

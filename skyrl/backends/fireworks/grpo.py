@@ -41,13 +41,9 @@ class GRPODatumSpec:
             "rollout_logprobs": len(self.rollout_logprobs),
             "advantages": len(self.advantages),
         }
-        mismatched = {
-            name: length for name, length in lengths.items() if length != expected
-        }
+        mismatched = {name: length for name, length in lengths.items() if length != expected}
         if mismatched:
-            raise ValueError(
-                f"GRPO datum fields must all have length {expected}, got {mismatched}"
-            )
+            raise ValueError(f"GRPO datum fields must all have length {expected}, got {mismatched}")
 
 
 def _require_matrix(batch: TrainingInputBatch, name: str) -> torch.Tensor:
@@ -55,9 +51,7 @@ def _require_matrix(batch: TrainingInputBatch, name: str) -> torch.Tensor:
     if not isinstance(value, torch.Tensor):
         raise ValueError(f"Fireworks GRPO requires tensor field {name!r}")
     if value.ndim != 2:
-        raise ValueError(
-            f"Fireworks GRPO field {name!r} must be rank 2, got shape {tuple(value.shape)}"
-        )
+        raise ValueError(f"Fireworks GRPO field {name!r} must be rank 2, got shape {tuple(value.shape)}")
     if value.shape[0] != batch.batch_size:
         raise ValueError(
             f"Fireworks GRPO field {name!r} has batch dimension {value.shape[0]}, expected {batch.batch_size}"
@@ -65,9 +59,7 @@ def _require_matrix(batch: TrainingInputBatch, name: str) -> torch.Tensor:
     return value.detach().cpu()
 
 
-def _right_aligned_length(
-    mask: torch.Tensor, *, field_name: str, row_index: int
-) -> int:
+def _right_aligned_length(mask: torch.Tensor, *, field_name: str, row_index: int) -> int:
     present = [bool(value) for value in mask.tolist()]
     count = sum(present)
     expected = [False] * (len(present) - count) + [True] * count
@@ -86,9 +78,7 @@ def _unpadded_tokens(
     count = sum(present)
     expected = [False] * (len(present) - count) + [True] * count
     if present != expected:
-        raise ValueError(
-            f"attention_mask[{row_index}] must describe contiguous left padding"
-        )
+        raise ValueError(f"attention_mask[{row_index}] must describe contiguous left padding")
     return [int(token) for token in sequences[attention_mask.bool()].tolist()]
 
 
@@ -132,18 +122,13 @@ def training_batch_to_grpo_datum_specs(
     ):
         if value.shape[1] != response_width:
             raise ValueError(
-                f"Fireworks GRPO response field {name!r} has width {value.shape[1]}, "
-                f"expected {response_width}"
+                f"Fireworks GRPO response field {name!r} has width {value.shape[1]}, " f"expected {response_width}"
             )
 
     specs: list[GRPODatumSpec] = []
     for row_index in range(batch.batch_size):
-        tokens = _unpadded_tokens(
-            sequences[row_index], attention_mask[row_index], row_index=row_index
-        )
-        response_len = _right_aligned_length(
-            response_mask[row_index], field_name="response_mask", row_index=row_index
-        )
+        tokens = _unpadded_tokens(sequences[row_index], attention_mask[row_index], row_index=row_index)
+        response_len = _right_aligned_length(response_mask[row_index], field_name="response_mask", row_index=row_index)
         if response_len == 0:
             raise ValueError(f"Fireworks GRPO sample {row_index} has an empty response")
 
@@ -162,16 +147,9 @@ def training_batch_to_grpo_datum_specs(
             )
 
         response_slice = slice(response_width - response_len, response_width)
-        response_loss_mask = [
-            float(value) for value in loss_mask[row_index, response_slice].tolist()
-        ]
-        response_advantages = [
-            float(value) for value in advantages[row_index, response_slice].tolist()
-        ]
-        response_logprobs = [
-            float(value)
-            for value in rollout_logprobs[row_index, response_slice].tolist()
-        ]
+        response_loss_mask = [float(value) for value in loss_mask[row_index, response_slice].tolist()]
+        response_advantages = [float(value) for value in advantages[row_index, response_slice].tolist()]
+        response_logprobs = [float(value) for value in rollout_logprobs[row_index, response_slice].tolist()]
 
         masked_advantages: list[float] = []
         masked_logprobs: list[float] = []
@@ -203,12 +181,8 @@ def training_batch_to_grpo_datum_specs(
         specs.append(
             GRPODatumSpec(
                 model_input_token_ids=tuple(model_input_token_ids),
-                target_tokens=tuple(
-                    [0] * prompt_prediction_count + tokens[prompt_len:]
-                ),
-                rollout_logprobs=tuple(
-                    [0.0] * prompt_prediction_count + masked_logprobs
-                ),
+                target_tokens=tuple([0] * prompt_prediction_count + tokens[prompt_len:]),
+                rollout_logprobs=tuple([0.0] * prompt_prediction_count + masked_logprobs),
                 advantages=tuple([0.0] * prompt_prediction_count + masked_advantages),
             )
         )
@@ -228,15 +202,9 @@ def _to_tinker_datum(spec: GRPODatumSpec) -> Any:
     return tinker.Datum(
         model_input=tinker.ModelInput.from_ints(list(spec.model_input_token_ids)),
         loss_fn_inputs={
-            "target_tokens": tinker.TensorData(
-                data=list(spec.target_tokens), dtype="int64"
-            ),
-            "logprobs": tinker.TensorData(
-                data=list(spec.rollout_logprobs), dtype="float32"
-            ),
-            "advantages": tinker.TensorData(
-                data=list(spec.advantages), dtype="float32"
-            ),
+            "target_tokens": tinker.TensorData(data=list(spec.target_tokens), dtype="int64"),
+            "logprobs": tinker.TensorData(data=list(spec.rollout_logprobs), dtype="float32"),
+            "advantages": tinker.TensorData(data=list(spec.advantages), dtype="float32"),
         },
     )
 
@@ -248,7 +216,4 @@ def build_tinker_grpo_datums(
 ) -> list["tinker.Datum"]:
     """Build concrete Tinker datums for Fireworks ``importance_sampling``."""
 
-    return [
-        _to_tinker_datum(spec)
-        for spec in training_batch_to_grpo_datum_specs(batch, max_seq_len=max_seq_len)
-    ]
+    return [_to_tinker_datum(spec) for spec in training_batch_to_grpo_datum_specs(batch, max_seq_len=max_seq_len)]

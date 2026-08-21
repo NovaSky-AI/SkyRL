@@ -143,6 +143,15 @@ source <path_to_venv>/bin/activate
 uv sync --active --extra fsdp
 ```
 
+For hosted Fireworks training, install the Fireworks extra instead. Fireworks owns the GPUs, so this path does not require a local Ray cluster:
+
+```bash
+uv sync --active --extra fireworks
+export FIREWORKS_API_KEY=<your-key>
+```
+
+See the [Fireworks SFT example](../examples/fireworks_sft) for the direct hosted entrypoint and paid-resource safeguards.
+
 With `conda`:
 
 ```bash

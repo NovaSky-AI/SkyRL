@@ -5,6 +5,9 @@
 # Core library tests
 uv run --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu/
 
+# Hosted Fireworks backend (CPU/fake tests)
+uv run --isolated --extra dev --extra fireworks pytest tests/backends/fireworks/ tests/train/test_fireworks_sft_trainer.py tests/train/test_sft_config.py
+
 # JAX / Tinker / Utils
 uv run --extra dev --extra jax pytest tests/tx/ tests/tinker/ tests/utils/
 ```

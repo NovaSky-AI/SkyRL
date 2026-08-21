@@ -13,7 +13,11 @@ from skyrl.train.config import (
     SFTConfig,
     build_skyrl_config_for_sft,
 )
-from skyrl.train.config.sft_config import _normalize_dataset_cfg, validate_sft_cfg
+from skyrl.train.config.sft_config import (
+    _normalize_dataset_cfg,
+    validate_fireworks_sft_cfg,
+    validate_sft_cfg,
+)
 
 
 def _sft_cfg_from_overrides(overrides: list[str]) -> SFTConfig:
@@ -211,6 +215,184 @@ class TestFSDPConfigOverrides:
         )
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         assert skyrl_cfg.trainer.policy.fsdp_config.reshard_after_forward is False
+
+
+class TestFireworksConfig:
+    def _cfg(self) -> SFTConfig:
+        cfg = SFTConfig(
+            strategy="fireworks",
+            max_length=512,
+            remove_microbatch_padding=False,
+            use_sequence_packing=False,
+            enable_ray_gpu_monitor=False,
+            hf_save_interval=0,
+        )
+        cfg.model.path = "Qwen/Qwen3-4B"
+        cfg.model.lora.rank = 8
+        cfg.fireworks.base_model = "accounts/fireworks/models/qwen3-4b"
+        cfg.fireworks.training_shape_id = "accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora"
+        cfg.fireworks.trainer_job_id = "skyrl-smoke-sft-trainer"
+        cfg.fireworks.max_seq_len = 32768
+        return cfg
+
+    def test_valid_config_bridges_fireworks_fields(self):
+        cfg = self._cfg()
+
+        validate_fireworks_sft_cfg(cfg)
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+
+        assert skyrl_cfg.trainer.strategy == "fireworks"
+        assert skyrl_cfg.trainer.fireworks is cfg.fireworks
+        assert cfg.fireworks.save_promotable_checkpoints is False
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("enable_ray_gpu_monitor", True, "enable_ray_gpu_monitor"),
+            ("remove_microbatch_padding", True, "padding removal"),
+            ("use_sequence_packing", True, "use_sequence_packing"),
+            ("hf_save_interval", 1, "Hugging Face export"),
+        ],
+    )
+    def test_local_only_features_are_rejected(self, field, value, message):
+        cfg = self._cfg()
+        setattr(cfg, field, value)
+
+        with pytest.raises((ValueError, AssertionError), match=message):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_deployment_id_is_not_required(self):
+        cfg = self._cfg()
+        cfg.fireworks.deployment_id = None
+
+        validate_fireworks_sft_cfg(cfg)
+
+    @pytest.mark.parametrize("field", ["request_timeout_s", "trainer_timeout_s"])
+    def test_timeouts_must_be_positive(self, field):
+        cfg = self._cfg()
+        setattr(cfg.fireworks, field, 0)
+
+        with pytest.raises(ValueError, match="timeouts must be positive"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_negative_lora_rank_is_rejected(self):
+        cfg = self._cfg()
+        cfg.model.lora.rank = -1
+
+        with pytest.raises(ValueError, match="rank must be non-negative"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_nondefault_lora_fields_are_rejected(self):
+        cfg = self._cfg()
+        cfg.model.lora.alpha = 32
+
+        with pytest.raises(ValueError, match="other LoRA fields must use defaults"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_persistent_checkpointing_is_supported(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.ckpt_interval = 10
+        cfg.resume_from = "latest"
+        cfg.fireworks.cleanup_on_exit = False
+
+        validate_fireworks_sft_cfg(cfg)
+
+    def test_promotable_checkpoint_saves_are_supported(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.fireworks.cleanup_on_exit = False
+        cfg.fireworks.save_promotable_checkpoints = True
+
+        validate_fireworks_sft_cfg(cfg)
+
+    def test_promotable_checkpoint_saves_require_checkpoint_root(self):
+        cfg = self._cfg()
+        cfg.fireworks.save_promotable_checkpoints = True
+
+        with pytest.raises(ValueError, match="ckpt_path when save_promotable_checkpoints=true"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_final_only_checkpoint_is_supported(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.fireworks.cleanup_on_exit = False
+
+        validate_fireworks_sft_cfg(cfg)
+
+    def test_direct_checkpoint_resume_is_supported_without_root(self):
+        cfg = self._cfg()
+        cfg.resume_from = "s3://bucket/sft-checkpoints/run/global_step_10"
+        cfg.fireworks.cleanup_on_exit = False
+
+        validate_fireworks_sft_cfg(cfg)
+
+    @pytest.mark.parametrize(
+        ("field", "value", "match"),
+        [
+            ("ckpt_interval", -1, "ckpt_interval >= 0"),
+            ("ckpt_interval", 1, "ckpt_path when ckpt_interval > 0"),
+            ("resume_from", "latest", "ckpt_path when resume_from='latest'"),
+        ],
+    )
+    def test_invalid_checkpoint_configuration_is_rejected(self, field, value, match):
+        cfg = self._cfg()
+        setattr(cfg, field, value)
+
+        with pytest.raises(ValueError, match=match):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_checkpointing_requires_preserved_trainer(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+
+        with pytest.raises(ValueError, match="checkpoint/resume requires cleanup_on_exit=false"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_cleanup_cannot_be_disabled_without_checkpointing(self):
+        cfg = self._cfg()
+        cfg.fireworks.cleanup_on_exit = False
+
+        with pytest.raises(ValueError, match="without checkpointing requires cleanup_on_exit=true"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_final_model_promotion_is_supported(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.fireworks.cleanup_on_exit = False
+        cfg.fireworks.output_model_id = "sft-final-step-10"
+
+        validate_fireworks_sft_cfg(cfg)
+
+    def test_final_model_promotion_requires_checkpoint_root(self):
+        cfg = self._cfg()
+        cfg.fireworks.output_model_id = "sft-final-step-10"
+
+        with pytest.raises(ValueError, match="ckpt_path when output_model_id is set"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_invalid_output_model_id_is_rejected(self):
+        cfg = self._cfg()
+        cfg.ckpt_path = "s3://bucket/sft-checkpoints/run"
+        cfg.fireworks.cleanup_on_exit = False
+        cfg.fireworks.output_model_id = "Invalid_Model_ID"
+
+        with pytest.raises(ValueError, match="Invalid Fireworks output_model_id"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_checkpoint_retention_is_rejected(self):
+        cfg = self._cfg()
+        cfg.max_ckpts_to_keep = 1
+
+        with pytest.raises(ValueError, match="max_ckpts_to_keep=-1"):
+            validate_fireworks_sft_cfg(cfg)
+
+    def test_local_entrypoint_redirects_fireworks_strategy(self, monkeypatch):
+        from skyrl.train.main_sft import main
+
+        monkeypatch.setattr("sys.argv", ["main_sft", "strategy=fireworks"])
+        with pytest.raises(ValueError, match="main_fireworks_sft"):
+            main()
 
 
 class TestMaxTokensPerMicrobatch:

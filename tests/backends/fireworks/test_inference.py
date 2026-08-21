@@ -47,9 +47,7 @@ class _Sampler:
     async def sample_async(self, *, prompt, num_samples, sampling_params):
         assert num_samples == 1
         self.prompts.append(prompt)
-        sequence = SimpleNamespace(
-            tokens=[7, 8], logprobs=[-0.7, -0.8], stop_reason="stop"
-        )
+        sequence = SimpleNamespace(tokens=[7, 8], logprobs=[-0.7, -0.8], stop_reason="stop")
         return SimpleNamespace(sequences=[sequence])
 
     def close(self):
@@ -60,12 +58,8 @@ class _Service:
     def __init__(self):
         self.sampler = _Sampler()
         self._managed_handle = SimpleNamespace(
-            deployment=SimpleNamespace(
-                inference_model="accounts/test/deployments/rollout"
-            ),
-            deployment_manager=SimpleNamespace(
-                inference_url="https://api.fireworks.ai"
-            ),
+            deployment=SimpleNamespace(inference_model="accounts/test/deployments/rollout"),
+            deployment_manager=SimpleNamespace(inference_url="https://api.fireworks.ai"),
         )
 
     def create_sampling_client(self, **kwargs):
@@ -143,9 +137,7 @@ async def test_generate_requires_published_sampler() -> None:
         tokenizer=_Tokenizer(),
         config=FireworksConfig(),
     )
-    client = FireworksInferenceClient(
-        runtime=runtime, default_sampling_params={"max_tokens": 8}
-    )
+    client = FireworksInferenceClient(runtime=runtime, default_sampling_params={"max_tokens": 8})
 
     with pytest.raises(RuntimeError, match="have not been published"):
         await client.generate(
@@ -171,9 +163,7 @@ async def test_pause_generation_blocks_new_admissions() -> None:
         config=FireworksConfig(),
     )
     await runtime.publish_sampler_weights()
-    client = FireworksInferenceClient(
-        runtime=runtime, default_sampling_params={"max_tokens": 8}
-    )
+    client = FireworksInferenceClient(runtime=runtime, default_sampling_params={"max_tokens": 8})
     await client.pause_generation()
 
     task = asyncio.create_task(

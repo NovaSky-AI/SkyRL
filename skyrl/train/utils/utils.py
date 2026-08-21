@@ -268,8 +268,7 @@ def _validate_fireworks_cfg(cfg: SkyRLTrainConfig) -> None:
 
     if trainer.strategy != "fireworks" or inference.backend != "fireworks":
         raise ValueError(
-            "Fireworks must be selected for both trainer.strategy and "
-            "generator.inference_engine.backend"
+            "Fireworks must be selected for both trainer.strategy and " "generator.inference_engine.backend"
         )
     if not fireworks.base_model:
         raise ValueError("trainer.fireworks.base_model is required")
@@ -297,9 +296,7 @@ def _validate_fireworks_cfg(cfg: SkyRLTrainConfig) -> None:
     if algorithm.advantage_estimator != "grpo":
         raise ValueError("The initial Fireworks backend is GRPO-only")
     if algorithm.policy_loss_type != "rollout_is":
-        raise ValueError(
-            "The initial Fireworks GRPO backend requires trainer.algorithm.policy_loss_type='rollout_is'"
-        )
+        raise ValueError("The initial Fireworks GRPO backend requires trainer.algorithm.policy_loss_type='rollout_is'")
     if algorithm.use_kl_loss or algorithm.use_kl_in_reward:
         raise ValueError("The initial Fireworks GRPO backend requires KL loss and KL reward penalty to be disabled")
     if trainer.critic.model.path:
@@ -323,17 +320,11 @@ def _validate_fireworks_cfg(cfg: SkyRLTrainConfig) -> None:
         raise NotImplementedError("The initial Fireworks backend supports text-only rollouts")
 
     if trainer.resume_mode not in (None, "none", "latest", "from_path"):
-        raise ValueError(
-            "trainer.resume_mode must be null/'none', 'latest', or 'from_path'"
-        )
+        raise ValueError("trainer.resume_mode must be null/'none', 'latest', or 'from_path'")
     if trainer.resume_mode == "from_path" and not trainer.resume_path:
-        raise ValueError(
-            "trainer.resume_path is required when trainer.resume_mode='from_path'"
-        )
+        raise ValueError("trainer.resume_path is required when trainer.resume_mode='from_path'")
     if trainer.hf_save_interval > 0:
-        raise NotImplementedError(
-            "HuggingFace export is not wired to Fireworks yet; set trainer.hf_save_interval=-1"
-        )
+        raise NotImplementedError("HuggingFace export is not wired to Fireworks yet; set trainer.hf_save_interval=-1")
     if trainer.policy.torch_profiler_config.enable:
         raise ValueError("Local torch profiling is unavailable with hosted Fireworks training")
     if trainer.enable_ray_gpu_monitor:
@@ -639,8 +630,7 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     if ie_cfg.backend == "fireworks":
         if cfg.trainer.strategy != "fireworks":
             raise ValueError(
-                "generator.inference_engine.backend='fireworks' currently requires "
-                "trainer.strategy='fireworks'"
+                "generator.inference_engine.backend='fireworks' currently requires " "trainer.strategy='fireworks'"
             )
         return
 
