@@ -6,11 +6,9 @@ which rejects non-finite floats and has no notion of NumPy arrays, so the
 helpers here exist to get sampled logprobs and NumPy side channels across that
 boundary intact.
 
-A side-channel array travels as a ``{data: <base64>, shape: [...], dtype:
-<name>}`` envelope plus any sidecar fields. ``data`` is emitted first so
-``load_packed_body`` can cut the base64 straight out of the raw response bytes
-and hand the decoder a ``memoryview``, sparing orjson the cost of materializing
-a multi-hundred-megabyte Python ``str``.
+Side-channel arrays use ``{data: <base64>, shape: [...], dtype: <name>}``
+envelopes. Keeping ``data`` first lets ``load_packed_body`` decode it from the
+raw response without materializing a large Python ``str``.
 """
 
 import math
@@ -33,11 +31,7 @@ CLAMPED_LOGPROB = -9999.0
 
 
 class PackedArrayKey(StrEnum):
-    """Envelope keys of a packed NumPy array.
-
-    ``DATA`` is emitted first: ``load_packed_body`` locates a blob by byte
-    prefix, so any other order defeats the splice.
-    """
+    """Envelope keys, with ``DATA`` first for ``load_packed_body``."""
 
     DATA = "data"
     SHAPE = "shape"
@@ -52,7 +46,6 @@ class PackedField(StrEnum):
 
 
 PACKED_SIDE_CHANNEL_FIELDS: tuple[str, ...] = tuple(PackedField)
-"""Fields ``load_packed_body`` splices out of a raw response body."""
 
 _ENVELOPE_KEYS = frozenset(PackedArrayKey)
 
@@ -60,8 +53,7 @@ _ROUTED_EXPERTS_NDIM = 3
 
 _QUOTE = b'"'
 
-# Bytes shared by every envelope, and the anchor for the single scan in
-# ``load_packed_body``: base64 contains none of them, so the search skips blobs.
+# Base64 cannot contain this scan anchor.
 _PACKED_DATA_ANCHOR = f':{{"{PackedArrayKey.DATA}":"'.encode()
 
 
@@ -147,11 +139,7 @@ def unpack_ndarray(
     allowed_dtypes: Collection[np.dtype],
     ndim: int,
 ) -> Tuple[np.ndarray, dict[str, Any]]:
-    """Decode a packed envelope into its array and its sidecar fields.
-
-    ``data`` may be base64 in a ``str`` or in any buffer, so ``load_packed_body``
-    can pass a ``memoryview`` into the raw response body.
-    """
+    """Decode an envelope whose base64 ``data`` may be a string or buffer."""
     if not isinstance(payload, Mapping):
         raise TypeError("packed array payload must be an object")
     try:
@@ -165,8 +153,7 @@ def unpack_ndarray(
     if not isinstance(dtype_name, str) or dtype_name not in dtypes:
         raise ValueError(f"packed array {PackedArrayKey.DTYPE} {dtype_name!r} is not one of {sorted(dtypes)}")
     dtype = dtypes[dtype_name]
-    # bool is a subclass of int, so it needs an explicit rejection; np.integer is
-    # accepted for in-process callers, since orjson only ever yields plain ints.
+    # Reject bool, an int subclass; accept np.integer for in-process callers.
     if len(shape) != ndim or any(
         not isinstance(dim, (int, np.integer)) or isinstance(dim, bool) or dim < 0 for dim in shape
     ):
@@ -204,16 +191,10 @@ def _data_prefix(field: str) -> bytes:
 
 
 def load_packed_body(raw: bytes, *, fields: tuple[str, ...] = PACKED_SIDE_CHANNEL_FIELDS) -> dict[str, Any]:
-    """Parse a response body, cutting every registered packed blob out first.
+    """Parse a response after replacing registered base64 blobs with views.
 
-    One scan of ``raw`` finds each envelope, replaces its base64 with an empty
-    string for orjson, and keeps the blob as a ``memoryview`` that
-    ``unpack_ndarray`` decodes in place of a Python ``str``.
-
-    A ``null`` field passes through -- the server sends that when a request
-    captured nothing. Any other layout the scan cannot cut, such as a body
-    re-serialized with a different key order or spacing, raises: parsing the
-    blob as a ``str`` would silently forfeit the whole point of the splice.
+    Null fields pass through. An envelope layout the scan cannot splice raises
+    instead of falling back to materializing the base64 as a Python string.
     """
     prefixes = {field: _data_prefix(field) for field in fields}
     blobs: dict[str, deque[memoryview]] = {field: deque() for field in fields}

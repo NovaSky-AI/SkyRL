@@ -71,7 +71,6 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app.state.finished_sessions = []
     # Number of /get_world_size hits, used to assert client-side caching.
     app.state.world_size_calls = 0
-    # Hits on the packed-body endpoints below, used to assert retry behaviour.
     app.state.drifted_body_calls = 0
     app.state.flaky_body_calls = 0
 
@@ -619,12 +618,7 @@ class TestDataPlane:
 
 
 class TestPackedSideChannelBodies:
-    """``_post(packed_side_channels=True)`` splices packed blobs out of the raw bytes.
-
-    The splice is what keeps a ~121 MiB base64 blob from becoming a Python
-    ``str``; a layout it cannot cut must fail instead of quietly falling back to
-    whole-body parsing.
-    """
+    """Tests for response parsing with packed side channels."""
 
     async def _post_packed(self, client, mock_servers, path: str, **kwargs):
         return await client._get_generate_client()._post(
@@ -636,7 +630,6 @@ class TestPackedSideChannelBodies:
         body = await self._post_packed(client, mock_servers, "/test/packed_body?two_blobs=true")
         choice = body["choices"][0]
 
-        # Both blobs arrive as memoryviews into the raw response, never as strs.
         assert isinstance(choice[PackedField.ROUTED_EXPERTS][PackedArrayKey.DATA], memoryview)
         assert isinstance(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT][PackedArrayKey.DATA], memoryview)
         assert np.array_equal(decode_packed_routed_experts(choice[PackedField.ROUTED_EXPERTS]), _ROUTES)
