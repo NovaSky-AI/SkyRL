@@ -15,23 +15,24 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float, Integer
 
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 
 BasicType = Union[int, float, str, bool]
 
 
-def to(tensor: Union[torch.Tensor, List[torch.Tensor], BasicType], device):
+def to(tensor: Union[torch.Tensor, PackedTensor, List[torch.Tensor], BasicType], device):
     if isinstance(tensor, list):
         return [to(t, device) for t in tensor]
-    elif isinstance(tensor, torch.Tensor):
+    elif isinstance(tensor, (torch.Tensor, PackedTensor)):
         return tensor.to(device)
     else:
         return tensor
 
 
-def pin_memory(tensor: Union[torch.Tensor, List[torch.Tensor], BasicType]):
+def pin_memory(tensor: Union[torch.Tensor, PackedTensor, List[torch.Tensor], BasicType]):
     if isinstance(tensor, list):
         return [pin_memory(t) for t in tensor]
-    elif isinstance(tensor, torch.Tensor):
+    elif isinstance(tensor, (torch.Tensor, PackedTensor)):
         return tensor.pin_memory()
     else:
         return tensor
@@ -67,7 +68,8 @@ class Experience:
     loss_mask: Optional[Integer[torch.LongTensor, "batch response_len"]]
     response_mask: Optional[Integer[torch.Tensor, "batch response_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch response_len"]]
-    rollout_expert_indices: Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]]
+    # Routes packed to real tokens: values [sum(seq_len_i), layer_num, topk] + cu_seqlens.
+    rollout_expert_indices: Optional[PackedTensor]
     num_actions: int
     info: Optional[dict]
     router_padding_mask: Optional[Bool[torch.Tensor, "batch seq_len"]] = None
