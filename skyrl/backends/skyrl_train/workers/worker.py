@@ -1339,8 +1339,7 @@ class PolicyWorkerBase(Worker):
                 temperature=self.cfg.algorithm.temperature,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
-                # The policy ratio is only a ratio if both logprobs renormalize over the
-                # same recorded support, so the recomputed pass replays it too.
+                # Replay the rollout support when recomputing the policy ratio.
                 sample_support=micro_batch.get(SAMPLE_SUPPORT_FIELD) if sample_support_replay else None,
                 loss_mask=micro_batch.get("loss_mask") if sample_support_replay else None,
                 enable_sample_support_replay=sample_support_replay,
@@ -1644,8 +1643,7 @@ class RefWorkerBase(Worker):
                 response_length,
                 attention_mask,
                 return_output=False,
-                # A KL between support-conditioned distributions needs both sides on the same
-                # temperature, which is what the Megatron ref forward already passes.
+                # Match policy temperature for support-conditioned KL.
                 temperature=self.cfg.algorithm.temperature if sample_support_replay else 1.0,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,

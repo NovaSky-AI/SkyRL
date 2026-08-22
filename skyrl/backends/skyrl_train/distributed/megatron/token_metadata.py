@@ -87,13 +87,7 @@ def build_token_metadata_layout(
 
 
 def canonical_token_metadata_layout(attention_mask: torch.Tensor) -> TokenMetadataLayout:
-    """Describe the ``[batch, seq_len]`` rectangle a backend consumes unchanged.
-
-    Megatron re-pads every sequence to its own alignment, which is what
-    ``build_token_metadata_layout`` computes off ``mpu``. A backend that feeds the canonical
-    batch rectangle straight into its forward has no such alignment and no CP sharding, so
-    the layout is fully determined by the attention mask.
-    """
+    """Describe an unsharded ``[batch, seq_len]`` layout."""
     mask = attention_mask.to(torch.bool)
     return TokenMetadataLayout(
         attention_mask=mask,

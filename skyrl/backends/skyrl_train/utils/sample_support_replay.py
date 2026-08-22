@@ -247,12 +247,7 @@ def _trajectory_ids_for_fallback(
     trajectory_ids: torch.Tensor | None,
     num_trajectories: int | None,
 ) -> tuple[torch.Tensor, int]:
-    """Return each model position's trajectory id and the number of fallback slots to reserve.
-
-    A backend that shards or repacks the sequence axis knows the segmentation and states it
-    outright; the two layouts derivable here -- a padded Megatron pack, and a plain
-    ``[trajectory, position]`` rectangle -- are derived instead.
-    """
+    """Return per-position trajectory ids and the required fallback capacity."""
     if trajectory_ids is not None:
         if trajectory_ids.shape != synthetic_eos_mask.shape:
             raise ValueError(
@@ -324,9 +319,7 @@ def synthetic_eos_logprobs(
     trajectory_ids, capacity = _trajectory_ids_for_fallback(
         synthetic_eos_mask, metadata_layout, trajectory_ids, num_trajectories
     )
-    # A sequence-parallel shard is padded up to its slice width, and those positions belong to no
-    # trajectory. They are never loss-bearing, so clamping their id into range is enough to keep
-    # the scatters valid without letting them claim a slot.
+    # Clamp non-loss-bearing sequence-parallel padding ids for scatter operations.
     trajectory_ids = trajectory_ids.clamp(0, capacity - 1)
     flat_mask = synthetic_eos_mask.reshape(-1)
     # Replay permits only the single appended EOS to lack recorded support.
@@ -446,15 +439,9 @@ def score_aligned_sample_support(
     trajectory_ids: torch.Tensor | None = None,
     num_trajectories: int | None = None,
 ) -> SampleSupportScores:
-    """Score positions already in one model layout: the seam every backend enters through.
+    """Score token-aligned support rows and full-vocabulary EOS fallbacks.
 
-    Every argument addresses the same model positions, whatever layout the backend's forward
-    produced -- a Megatron microbatch, a packed FSDP microbatch, or one Ulysses shard of either.
-    Nothing here consults that layout except to segment trajectories for the fixed-capacity
-    fallback, which the caller states rather than this function inferring.
-
-    ``temperature`` divides the fused projection, so it is applied only when the source is hidden
-    states; a caller holding logits has already scaled them.
+    ``temperature`` applies only when ``aligned_source`` contains hidden states.
     """
     scores = sample_support_scores(
         aligned_source,
