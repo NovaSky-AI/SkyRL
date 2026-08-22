@@ -43,20 +43,12 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
     logprobs_from_logits,
 )
 
-# Trajectory id for a sequence-parallel padding position, which belongs to no trajectory.
 _NO_TRAJECTORY = -1
 
 
 @dataclass(frozen=True)
 class _SampleSupportChannels:
-    """Per-token channels that must follow the tokens through every layout transform.
-
-    Replay joins by row id, so the only support payload travelling with the tokens is the
-    int64 channel naming which packed row scores each position -- never the ``[top_k]`` rows
-    themselves. ``loss_mask`` locates the appended EOS the fallback scores densely and
-    ``trajectory_ids`` gives that fallback its per-trajectory capacity, which a packed or
-    sequence-parallel layout can no longer read off the batch dimension.
-    """
+    """Token-aligned metadata transformed alongside model inputs."""
 
     row_ids: torch.Tensor
     loss_mask: torch.Tensor
@@ -70,12 +62,7 @@ class _SampleSupportChannels:
         sample_support: PackedTensor,
         loss_mask: torch.Tensor,
     ) -> "_SampleSupportChannels":
-        """Place every channel in canonical ``[batch, seq_len]`` positions.
-
-        ``row_ids`` already addresses logit positions -- the row scoring the token a position
-        predicts -- while ``loss_mask`` and ``trajectory_ids`` are properties of the token and
-        the position respectively, so only the loss mask is rolled later.
-        """
+        """Place channels in canonical ``[batch, seq_len]`` positions."""
         layout = canonical_token_metadata_layout(attention_mask)
         target_loss_mask = torch.zeros_like(sequences, dtype=torch.bool)
         target_loss_mask[:, sequences.shape[1] - loss_mask.shape[1] :] = loss_mask.to(torch.bool)
@@ -436,9 +423,7 @@ class HFModelWrapper(nn.Module):
         logits_BSV.div_(temperature)
 
         if support_channels is not None:
-            # Unsharded full-vocabulary logits, so the scorer's two null-object escapes both
-            # apply: no tensor-parallel collectives (``tp_group=None``) and no fused LM-head
-            # projection (``lm_head_weight=None``). ``logits_BSV`` is already temperature-scaled.
+            # FSDP supplies unsharded, temperature-scaled logits.
             log_probs = score_aligned_sample_support(
                 logits_BSV,
                 sequences_rolled,

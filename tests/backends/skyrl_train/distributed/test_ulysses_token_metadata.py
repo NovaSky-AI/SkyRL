@@ -1,15 +1,4 @@
-"""Token-aligned side channels through an Ulysses sequence-parallel partition.
-
-Ulysses splits the sequence axis across ranks, so a per-token channel has to take the same
-partition as the tokens -- including the pad to a multiple of the SP degree, where a channel
-whose ``0`` is a real value needs its own sentinel. The all-to-all itself needs a process
-group, so these tests shard by monkeypatching ``slice_input_tensor`` and drive the replay core
-once per rank, which is exactly the split the real forward performs.
-
-Run with:
-uv run --isolated --extra dev --extra skyrl-train pytest \
-    tests/backends/skyrl_train/distributed/test_ulysses_token_metadata.py
-"""
+"""Token-aligned metadata through Ulysses sequence partitions."""
 
 import pytest
 import torch
@@ -147,7 +136,7 @@ def test_sharded_support_scores_match_the_unsharded_pass(sharded):
 
 
 def test_explicit_trajectory_ids_give_a_packed_row_its_own_fallback_slots(sharded):
-    """Two trajectories share one packed row, so the batch dimension no longer segments them."""
+    """Explicit ids segment trajectories after packing removes the batch dimension."""
     logits = torch.randn(1, 6, VOCAB, dtype=torch.float64, requires_grad=True)
     sampled_ids = torch.tensor([[1, 2, 3, 4, 5, 6]])
     row_ids = torch.tensor([[0, 1, SAMPLE_SUPPORT_NO_ROW, 2, 3, SAMPLE_SUPPORT_NO_ROW]])
@@ -187,8 +176,6 @@ def test_explicit_trajectory_ids_give_a_packed_row_its_own_fallback_slots(sharde
 
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(logits.grad, reference_logits.grad)
-    # Without the segmentation the whole row is one trajectory with one slot, so the two
-    # appended EOS rows collide -- the reason the parameter exists rather than being inferred.
     with pytest.raises(ValueError, match="at most one loss-bearing token"):
         _score(reference_logits, sampled_ids, row_ids, loss_mask, support)
 
