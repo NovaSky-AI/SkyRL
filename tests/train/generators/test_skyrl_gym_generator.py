@@ -491,60 +491,6 @@ async def test_agent_loop_uses_incremental_replay_metadata_traces(
 
 
 @pytest.mark.asyncio
-@patch("skyrl_gym.make")
-async def test_agent_loop_skips_sample_support_capture_on_the_eval_path(
-    mock_make,
-    mock_tokenizer,
-    mock_llm,
-    mock_env,
-    generator_cfg,
-    mock_env_cfg,
-):
-    """The eval phase's sampling params (greedy, top_k=-1) cannot satisfy the capture
-    contract; the engine-level flag must not force capture on them."""
-    generator_cfg.batched = False
-    generator_cfg.max_turns = 1
-    generator_cfg.inference_engine.enable_return_sample_support_set = True
-    generator_cfg.sampling_params.top_k = 2
-    mock_make.return_value = mock_env
-    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
-    mock_env.step.side_effect = [
-        BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={}),
-    ]
-    captured = {}
-
-    def generate(input_batch, model=None):
-        captured.update(input_batch)
-        return {
-            "responses": ["mocked output"],
-            "response_ids": [[10, 11]],
-            "stop_reasons": ["stop"],
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=generate)
-    generator = SkyRLGymGenerator(
-        generator_cfg=generator_cfg,
-        skyrl_gym_cfg=mock_env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-    )
-    generator.base_conversation_token_ids = []
-
-    output = await generator.agent_loop(
-        [{"role": "user", "content": "Start"}],
-        mock_env_cfg.env_class,
-        {},
-        max_tokens=32,
-        max_input_length=64,
-        sampling_params={"temperature": 0.0, "top_k": -1, "max_tokens": 32},
-        training_phase=TRAINING_PHASE_EVAL,
-    )
-
-    assert captured["return_sample_support"] is False
-    assert output.rollout_sample_support is None
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [True, False])
 @pytest.mark.parametrize("batch_sampling_params", [{"temperature": 1.0, "top_k": 2, "max_tokens": 32}, None])
 @pytest.mark.parametrize("training_phase", [TRAINING_PHASE_TRAIN, TRAINING_PHASE_EVAL])
@@ -562,13 +508,6 @@ async def test_generate_requests_sample_support_capture_only_for_the_train_phase
     batch_sampling_params,
     batched,
 ):
-    """Capture is requested iff the engine flag is on and the batch is a train-phase batch.
-
-    Both phases supply non-None ``sampling_params`` (train from ``generator.sampling_params``,
-    eval from ``generator.eval_sampling_params``), so ``batch_metadata.training_phase`` is the
-    only usable discriminator -- the presence of ``sampling_params`` is not one. Driven through
-    ``generate`` so both the batched and agent-loop routes are covered.
-    """
     generator_cfg.batched = batched
     generator_cfg.max_turns = 1
     generator_cfg.inference_engine.enable_return_sample_support_set = enable_capture
@@ -601,7 +540,6 @@ async def test_generate_requests_sample_support_capture_only_for_the_train_phase
     )
     generator.base_conversation_token_ids = []
 
-    # Mirrors `prepare_generator_input`: both phases carry explicit sampling params.
     input_batch: GeneratorInput = {
         "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
         "env_classes": [mock_env_cfg.env_class],
@@ -623,8 +561,6 @@ async def test_generate_requests_sample_support_capture_only_for_the_train_phase
 def test_validate_cfg_refuses_routed_experts_without_conversation_multi_turn(
     mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
 ):
-    """The single-turn convention re-appends a loss-active EOS the inference engine never evaluated,
-    so no routed-expert row exists for it and the trace refuses to dummy-pad a loss-active target."""
     generator_cfg.batched = False
     generator_cfg.use_conversation_multi_turn = False
     generator_cfg.inference_engine.enable_return_routed_experts = True
@@ -641,9 +577,6 @@ def test_validate_cfg_refuses_routed_experts_without_conversation_multi_turn(
 def test_validate_cfg_refuses_routed_experts_with_step_wise_trajectories(
     mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
 ):
-    """A step-wise `generate` has no field to put routes in, so without this refusal a generator built
-    outside the entrypoint (which is where `validate_cfg` runs) emits `rollout_expert_indices=None`
-    and trains with routing replay silently disabled."""
     generator_cfg.batched = False
     generator_cfg.step_wise_trajectories = True
     generator_cfg.inference_engine.enable_return_routed_experts = True
@@ -661,7 +594,6 @@ def test_validate_cfg_refuses_routed_experts_with_step_wise_trajectories(
 def test_validate_cfg_refuses_custom_chat_template_with_side_channel_capture(
     capture_routed_experts, capture_sample_support, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
 ):
-    """Refused at config time rather than on the first train batch, after a large model has loaded."""
     generator_cfg.batched = False
     generator_cfg.chat_template = ChatTemplateConfig(source="name", name_or_path="qwen3_without_thinking")
     generator_cfg.inference_engine.enable_return_routed_experts = capture_routed_experts
@@ -679,8 +611,6 @@ def test_validate_cfg_refuses_custom_chat_template_with_side_channel_capture(
 def test_retokenizing_state_update_refuses_a_live_side_channel_trace(
     mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
 ):
-    """The retokenizing state update is the one helper that never feeds a trace, so a trace reaching
-    it would finalize empty (support) or misaligned (routes) instead of failing."""
     generator_cfg.batched = False
     generator_cfg.chat_template = ChatTemplateConfig(source="name", name_or_path="qwen3_without_thinking")
     generator = SkyRLGymGenerator(
@@ -725,8 +655,6 @@ async def test_generate_retains_routed_experts_only_for_the_train_phase(
     training_phase,
     batched,
 ):
-    """Nothing reads an eval trajectory's routes, and the driver holds the whole eval batch at once
-    (~3.9 KB per token at 120B), so eval routes must not be retained."""
     generator_cfg.batched = batched
     generator_cfg.max_turns = 1
     generator_cfg.use_conversation_multi_turn = True
@@ -773,7 +701,6 @@ async def test_generate_retains_routed_experts_only_for_the_train_phase(
         assert output["rollout_expert_indices"] is not None
         assert output["rollout_expert_indices"][0] is not None
         if not batched:
-            # A captured trace also asks the engine where its prompt prefix already ended.
             assert captured["routed_experts_prompt_starts"] == [0]
     else:
         assert output["rollout_expert_indices"] is None
@@ -791,10 +718,6 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
     generator_cfg,
     mock_env_cfg,
 ):
-    """With `use_conversation_multi_turn=False` the generated EOS is sliced off the turn and
-    re-appended to the trajectory as the loss-active token carrying the terminal reward. It keeps
-    the support set it was actually sampled from rather than an all-padding row, which a replay
-    consumer would read as a synthetic EOS and score over the full vocabulary."""
     generator_cfg.batched = False
     generator_cfg.max_turns = 1
     generator_cfg.use_conversation_multi_turn = False
@@ -810,7 +733,6 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
     def generate(input_batch, model=None):
         return {
             "responses": ["mocked output"],
-            # The engine's own EOS (id 4) terminates the turn.
             "response_ids": [[10, 11, 4]],
             "stop_reasons": ["stop"],
             "rollout_sample_support": [np.array([[10, 110], [11, 111], eos_support_row], dtype=np.int32)],
@@ -834,7 +756,6 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
     )
 
     assert output.response_ids == [10, 11, 4]
-    # The re-appended EOS is loss-active and carries the terminal reward.
     assert output.loss_mask == [1, 1, 1]
     assert output.rollout_sample_support == [[10, 110], [11, 111], eos_support_row]
 
@@ -849,8 +770,6 @@ async def test_agent_loop_pads_a_stop_string_eos_support_row_in_single_turn_mode
     generator_cfg,
     mock_env_cfg,
 ):
-    """An EOS the loop appends because generation stopped on a stop string was never sampled, so it
-    gets an all-padding row."""
     generator_cfg.batched = False
     generator_cfg.max_turns = 1
     generator_cfg.use_conversation_multi_turn = False
