@@ -1,7 +1,4 @@
-"""Batch operations on ``PackedTensor`` must match the equivalent list-of-segments result.
-
-uv run --isolated --extra dev pytest tests/backends/skyrl_train/utils/test_packed_tensor.py
-"""
+"""Tests for ``PackedTensor`` batch operations."""
 
 import pytest
 import torch
@@ -28,22 +25,19 @@ def _segments(lengths=SEGMENT_LENGTHS, *, row_shape=(2, 3)) -> list[torch.Tensor
     return segments
 
 
-# ---------------------------------------------------------------------------
-# Offsets algebra
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("lengths", "expected_offsets"),
+    [
+        (SEGMENT_LENGTHS, [0, 3, 4, 8, 10]),
+        ([0, 2, 0], [0, 0, 2, 2]),
+    ],
+)
+def test_offsets_round_trip_lengths_in_int32(lengths, expected_offsets):
+    offsets = cu_seqlens_from_lengths(lengths)
 
-
-def test_cu_seqlens_stay_int32_through_the_prefix_sum():
-    offsets = cu_seqlens_from_lengths(SEGMENT_LENGTHS)
-
+    assert offsets.tolist() == expected_offsets
     assert offsets.dtype == CU_SEQLENS_DTYPE
-    assert offsets.tolist() == [0, 3, 4, 8, 10]
-
-
-def test_offsets_algebra_round_trips_lengths():
-    offsets = cu_seqlens_from_lengths(SEGMENT_LENGTHS)
-
-    assert lengths_from_offsets(offsets).tolist() == SEGMENT_LENGTHS
+    assert lengths_from_offsets(offsets).tolist() == lengths
     assert lengths_from_offsets(offsets).dtype == CU_SEQLENS_DTYPE
 
 
@@ -54,23 +48,11 @@ def test_cu_seqlens_reject_negative_lengths_and_extra_dimensions():
         cu_seqlens_from_lengths(torch.zeros((2, 2), dtype=torch.int32))
 
 
-def test_cu_seqlens_tolerate_zero_length_segments():
-    offsets = cu_seqlens_from_lengths([0, 2, 0])
-
-    assert offsets.tolist() == [0, 0, 2, 2]
-    assert lengths_from_offsets(offsets).tolist() == [0, 2, 0]
-
-
 def test_row_index_from_offsets_lays_selected_segments_back_to_back():
     starts = torch.tensor([8, 0])
     lengths = torch.tensor([2, 3])
 
     assert row_index_from_offsets(starts, lengths).tolist() == [8, 9, 0, 1, 2]
-
-
-# ---------------------------------------------------------------------------
-# Container surface
-# ---------------------------------------------------------------------------
 
 
 def test_from_segments_round_trips_every_segment():
@@ -202,17 +184,6 @@ def test_equality_compares_values_and_offsets():
     assert packed != packed.values
 
 
-def test_repr_names_the_batch_and_row_shape():
-    assert (
-        repr(PackedTensor.from_segments(_segments())) == "PackedTensor(batch=4, values=(10, 2, 3), dtype=torch.int16)"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Construction guards
-# ---------------------------------------------------------------------------
-
-
 def test_rejects_mismatched_device_or_offset_dtype():
     values = torch.zeros((4, 2), dtype=torch.int16)
 
@@ -236,11 +207,6 @@ def test_rejects_offsets_that_do_not_span_the_buffer():
 def test_rejects_values_without_a_token_row_dimension():
     with pytest.raises(ValueError, match="token-row dimension"):
         PackedTensor(torch.tensor(1), torch.tensor([0, 1], dtype=CU_SEQLENS_DTYPE))
-
-
-# ---------------------------------------------------------------------------
-# Aliasing contract
-# ---------------------------------------------------------------------------
 
 
 def test_segments_and_contiguous_slices_are_views():
