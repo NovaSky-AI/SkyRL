@@ -215,14 +215,12 @@ class TestTokenBasedBatchIterator:
         padding = iterator._create_padding_microbatch()
 
         padded_routes = padding["rollout_expert_indices"]
-        # The dummy attention_mask row marks one valid token, so one dummy route per row.
         assert padded_routes.sequence_lengths.tolist() == [1]
         expected = torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(padded_routes.values)
         assert torch.equal(padded_routes.values, expected)
         assert torch.all(padding["router_padding_mask"])
 
     def test_microbatch_selection_gathers_packed_route_segments(self):
-        """Token-based microbatching must select route segments alongside the dense rows."""
         batch = self._make_batch([4, 2], num_actions=2)
         batch["rollout_expert_indices"] = PackedTensor.from_segments(
             [torch.full((4, 2, 3), 1, dtype=torch.int16), torch.full((2, 2, 3), 2, dtype=torch.int16)]

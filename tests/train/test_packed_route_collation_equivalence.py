@@ -1,14 +1,4 @@
-"""Bit-identity of packed R3 route collation against the padded-rectangle path.
-
-The packed buffer plus ``cu_seqlens`` replaces a ``[batch, max_total, layers, topk]``
-rectangle that ``align_token_metadata`` immediately compacted back to ragged. What
-Megatron receives must not change, so both paths are run end to end here -- collation,
-micro-batch padding, layer selection, packing/CP layout, and the TP slice -- and the
-per-layer tensors handed to ``RouterReplay.set_replay_data`` compared.
-
-Run with:
-  uv run --isolated --extra dev pytest tests/train/test_packed_route_collation_equivalence.py
-"""
+"""Compare packed route collation with the padded reference path end to end."""
 
 import sys
 import types
@@ -44,17 +34,12 @@ PAD_TOKEN_ID = 0
 MIN_EXPERT_ID = 300
 
 
-# ---------------------------------------------------------------------------
-# Reference: the padded [batch, max_total, layers, topk] rectangle
-# ---------------------------------------------------------------------------
-
-
 def _reference_padded_routes(
     routes: list[np.ndarray],
     prompt_lens: list[int],
     response_lens: list[int],
 ) -> torch.Tensor:
-    """The pre-change collation: a left-padded batch-major rectangle."""
+    """Collate routes into a left-padded batch-major reference tensor."""
     max_total = max(p + r for p, r in zip(prompt_lens, response_lens))
     dtype = max((entry.dtype for entry in routes), key=lambda d: d.itemsize)
     torch_dtype = torch.from_numpy(np.empty(0, dtype=dtype)).dtype
@@ -78,7 +63,7 @@ def _reference_replay_data(
     tp_size: int,
     tp_rank: int,
 ) -> list[torch.Tensor]:
-    """The pre-change trainer path: gather real tokens out of the padded rectangle."""
+    """Gather real-token routes from the padded reference tensor."""
     layout = build_token_metadata_layout(
         attention_mask,
         padded_routes.device,
@@ -95,11 +80,6 @@ def _reference_replay_data(
         chunk = aligned.shape[1] // tp_size
         aligned = aligned[:, tp_rank * chunk : (tp_rank + 1) * chunk, :, :]
     return _split_replay_indices(aligned)
-
-
-# ---------------------------------------------------------------------------
-# Fixtures and harness
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -227,8 +207,7 @@ def _run_both_paths(
         attention_mask = batch["attention_mask"]
         router_padding_mask = batch["router_padding_mask"]
         packed_routes = batch["rollout_expert_indices"]
-        # The old path copied row 0 into each padding row and filled its routes with
-        # dummies; reproduce exactly that rectangle for the reference.
+        # Match the dummy rows added by batch padding in the packed path.
         padded_routes = torch.cat(
             [
                 padded_routes,
@@ -274,10 +253,6 @@ def _assert_bit_identical(new_data: list[torch.Tensor], reference: list[torch.Te
         assert torch.equal(produced, expected), slot
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
 LENGTH_DISTRIBUTIONS = {
     # No padding at all: the packed and padded layouts coincide.
     "uniform": [(8, 8), (8, 8), (8, 8), (8, 8)],
@@ -306,48 +281,34 @@ def test_packed_routes_match_padded_rectangle(
     _assert_bit_identical(new_data, reference)
 
 
+@pytest.mark.parametrize(
+    ("distribution", "captured_shortfall", "batch_pad_size", "local_layers", "stage_range"),
+    [
+        pytest.param("typical_rl", 3, 0, list(range(NUM_LAYERS)), (0, NUM_LAYERS), id="uncaptured_suffix"),
+        pytest.param("mild_ragged", 0, 2, list(range(NUM_LAYERS)), (0, NUM_LAYERS), id="batch_padding"),
+        pytest.param("typical_rl", 0, 0, [1, 2], (1, 2), id="pipeline_stage_subset"),
+    ],
+)
 @pytest.mark.parametrize("packed", [False, True])
-def test_packed_routes_match_with_uncaptured_suffix(monkeypatch, parallel_state, router_replay, packed):
-    """A trajectory whose trailing tokens have no captured route needs identical dummy rows."""
+def test_packed_routes_match_edge_cases(
+    monkeypatch,
+    parallel_state,
+    router_replay,
+    distribution,
+    captured_shortfall,
+    batch_pad_size,
+    local_layers,
+    stage_range,
+    packed,
+):
     new_data, reference = _run_both_paths(
-        LENGTH_DISTRIBUTIONS["typical_rl"],
+        LENGTH_DISTRIBUTIONS[distribution],
         packed=packed,
         tp_size=1,
-        local_layers=list(range(NUM_LAYERS)),
-        captured_shortfall=3,
-        monkeypatch=monkeypatch,
-        parallel_state=parallel_state,
-        router_replay=router_replay,
-    )
-    _assert_bit_identical(new_data, reference)
-
-
-@pytest.mark.parametrize("packed", [False, True])
-def test_packed_routes_match_under_batch_padding(monkeypatch, parallel_state, router_replay, packed):
-    """``pad_training_input_batch`` rows must land on the same dummy routes."""
-    new_data, reference = _run_both_paths(
-        LENGTH_DISTRIBUTIONS["mild_ragged"],
-        packed=packed,
-        tp_size=1,
-        local_layers=list(range(NUM_LAYERS)),
-        batch_pad_size=2,
-        monkeypatch=monkeypatch,
-        parallel_state=parallel_state,
-        router_replay=router_replay,
-    )
-    _assert_bit_identical(new_data, reference)
-
-
-@pytest.mark.parametrize("packed", [False, True])
-def test_packed_routes_match_on_a_pipeline_stage_subset(monkeypatch, parallel_state, router_replay, packed):
-    """Under PP a stage owns a subset of routers, so layer selection must agree too."""
-    # A stage starting at layer 1 with 2 routers owns captured layers 1 and 2, not 0.
-    new_data, reference = _run_both_paths(
-        LENGTH_DISTRIBUTIONS["typical_rl"],
-        packed=packed,
-        tp_size=1,
-        local_layers=[1, 2],
-        stage_range=(1, 2),
+        local_layers=local_layers,
+        captured_shortfall=captured_shortfall,
+        batch_pad_size=batch_pad_size,
+        stage_range=stage_range,
         monkeypatch=monkeypatch,
         parallel_state=parallel_state,
         router_replay=router_replay,
@@ -371,23 +332,3 @@ def test_packed_routes_match_under_context_parallelism(monkeypatch, parallel_sta
             router_replay=router_replay,
         )
         _assert_bit_identical(new_data, reference)
-
-
-@pytest.mark.parametrize("distribution", sorted(LENGTH_DISTRIBUTIONS))
-def test_packed_collation_allocates_no_padded_rectangle(distribution):
-    """The packed buffer must hold exactly the batch's real tokens."""
-    prompts, responses, rewards, loss_masks, routes = _make_batch(LENGTH_DISTRIBUTIONS[distribution])
-    *_, packed_routes = convert_prompts_responses_to_batch_tensors(
-        PAD_TOKEN_ID,
-        prompts,
-        responses,
-        rewards,
-        loss_masks,
-        rollout_expert_indices=routes,
-    )
-
-    total_real = sum(len(p) + len(r) for p, r in zip(prompts, responses))
-    max_total = max(len(p) + len(r) for p, r in zip(prompts, responses))
-    assert packed_routes.values.shape == (total_real, NUM_LAYERS, TOPK)
-    assert packed_routes.values.numel() <= len(prompts) * max_total * NUM_LAYERS * TOPK
-    assert packed_routes.cu_seqlens.tolist()[-1] == total_real

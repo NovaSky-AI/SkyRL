@@ -34,11 +34,7 @@ def row_index_from_offsets(
     starts: torch.Tensor,
     lengths: torch.Tensor,
 ) -> torch.Tensor:
-    """Return the row ids of the segments at ``starts``, laid out back to back.
-
-    ``starts`` and ``lengths`` name source segments in any order; the result gathers them
-    into one contiguous buffer, so it is the row index a packed gather selects with.
-    """
+    """Return row indices that lay the requested segments back to back."""
     starts = starts.to(torch.long)
     lengths = lengths.to(torch.long)
     total_rows = int(lengths.sum())
@@ -57,12 +53,7 @@ class PackedTensor:
 
     ``values`` is ``[sum(sequence_lengths), *row_shape]`` in canonical batch order and
     ``cu_seqlens`` is the ``[batch + 1]`` exclusive prefix sum of the segment lengths.
-    Every batch operation -- indexing, chunking, concatenation, device transfer --
-    addresses segments, so this drops into a ``TensorBatch`` field wherever a
-    ``[batch, seq_len, ...]`` tensor would otherwise carry per-row padding.
-
-    Segments are contiguous and consecutive, so this describes exactly one ragged level:
-    a row belongs to the segment whose offset range contains it, and nothing else.
+    Indexing and batch operations address segments rather than individual rows.
     """
 
     def __init__(self, values: torch.Tensor, cu_seqlens: torch.Tensor):

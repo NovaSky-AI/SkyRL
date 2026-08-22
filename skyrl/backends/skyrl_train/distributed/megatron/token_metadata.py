@@ -122,15 +122,9 @@ def align_packed_token_metadata(
 ) -> torch.Tensor:
     """Align metadata that already arrives packed as ``[sum(seqlen), *row_shape]``.
 
-    Equivalent to ``align_token_metadata`` on the batch-major padded rectangle the same
-    rows would occupy, without ever materializing it. This relies on the batch being
-    purely LEFT padded, so a trajectory's real tokens are one contiguous run and
-    ``cu_seqlens`` alone locates them -- no per-row mask is needed or consulted.
-
-    Without ``segment_starts`` each segment must hold exactly its trajectory's real tokens,
-    which ``layout.sequence_lengths`` states independently. With it, segment ``i`` covers
-    only part of its trajectory and lands at ``segment_starts[i]`` real tokens in, which is
-    what a response-suffix channel needs.
+    This relies on left padding, which makes each trajectory's real tokens contiguous.
+    Without ``segment_starts``, segments must match ``layout.sequence_lengths``;
+    otherwise each segment is placed at its specified real-token offset.
     """
     if metadata.device != layout.attention_mask.device:
         raise ValueError("Token-aligned metadata and attention_mask must be on the same device")
