@@ -99,8 +99,7 @@ class AgentLoopState:
     done: bool
     routed_expert_trace: Optional[RoutedExpertTrace] = None
     sample_support_trace: Optional[SampleSupportTrace] = None
-    # The support row of the latest turn's own EOS token, which the ``use_conversation_multi_turn=False``
-    # convention slices off the response. ``None`` when the turn did not end in a generated EOS.
+    # Support for an EOS sliced from a single-turn response.
     dropped_eos_sample_support: Optional[SampleSupport] = None
 
 
@@ -116,11 +115,7 @@ class TurnOutput:
     added_eos: bool = False
 
     def get_turn_rollout_sample_support(self) -> Optional[SampleSupport]:
-        """Sample support for this turn's generated tokens, padded over the suffix.
-
-        Mirrors ``get_turn_loss_mask``: a synthetic EOS and the observation tokens were
-        never sampled, so they get all-padding rows.
-        """
+        """Return sample support padded over synthetic EOS and observation tokens."""
         if self.rollout_sample_support is None:
             return None
         padding_count = int(self.added_eos) + len(self.obs_ids)
@@ -272,8 +267,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 "loss-active target."
             )
 
-        # Keyed on `custom_chat_template` rather than the narrower `retokenize_chat_history`, so the inert
-        # `use_conversation_multi_turn=False` + custom-template pair is refused too.
         if self.custom_chat_template is not None:
             if ie_cfg.enable_return_routed_experts:
                 raise ValueError(
@@ -430,16 +423,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             current_sampling_params: dict = (
                 sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
             )
-            # The eval phase's greedy/`top_k=-1` params cannot satisfy the capture contract that
-            # ``SkyRLTrainConfig`` enforces on ``generator.sampling_params``, so capture is requested
-            # per-request keyed on the phase, not by the engine-level flag alone.
+            # Eval uses unbounded top-k sampling and opts out of capture.
             capture_sample_support = (
                 self.generator_cfg.inference_engine.enable_return_sample_support_set
                 and training_phase != TRAINING_PHASE_EVAL
             )
             sample_support_width = current_sampling_params["top_k"] if capture_sample_support else 0
-            # Routes are gated on the same phase: no consumer reads an eval trajectory's routes, and the
-            # driver holds every trajectory of an eval batch at once.
+            # Eval trajectories do not consume routed-expert indices.
             capture_routed_experts = (
                 self.generator_cfg.inference_engine.enable_return_routed_experts
                 and training_phase != TRAINING_PHASE_EVAL
@@ -509,7 +499,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
                 if rollout_expert_indices is not None:
                     rollout_expert_indices = rollout_expert_indices[0]
-                    # `_validate_cfg` refuses this pair; subclasses that replace it must too.
                     assert (
                         self.custom_chat_template is None
                     ), "Rollout expert indices bookkeeping is not supported with custom chat template"
@@ -524,7 +513,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
                 sample_support_rows = None
                 if capture_sample_support:
-                    # `_validate_cfg` refuses this pair; subclasses that replace it must too.
                     assert (
                         self.custom_chat_template is None
                     ), "Sample-support bookkeeping is not supported with custom chat template"
@@ -638,8 +626,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     )
 
                 if sample_support_trace is not None:
-                    # Support rows are 1:1 with the tokens the turn appended to the trajectory, so a state
-                    # update that does not feed the trace is caught here instead of silently emitting None.
+                    # Each appended token must contribute one support row.
                     support_rows_added = sample_support_trace.num_rows - support_rows_before
                     tokens_added = len(agent_loop_state.input_ids) - input_length_before
                     assert support_rows_added == tokens_added, (
@@ -705,9 +692,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     if rollout_logprobs is not None:
                         rollout_logprobs.append(0.0)
                     if agent_loop_state.sample_support_trace is not None:
-                        # The last turn's own EOS was sampled from a real support set, which the
-                        # single-turn convention sliced off; give it back to the token that carries
-                        # the terminal reward. A stop-string EOS was never sampled, so it stays padding.
+                        # Restore support for a sampled EOS; a synthetic EOS remains padding.
                         dropped_row = agent_loop_state.dropped_eos_sample_support
                         if dropped_row is not None:
                             agent_loop_state.sample_support_trace.append(dropped_row, expected_rows=1)
@@ -904,8 +889,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             tokenize=True,
             return_dict=False,
         )
-        # Both side channels are captured only for train batches: eval params cannot satisfy the
-        # sample-support contract, and no consumer reads an eval batch's routes.
+        # Eval batches do not capture per-token side channels.
         capture_sample_support = (
             self.generator_cfg.inference_engine.enable_return_sample_support_set
             and training_phase != TRAINING_PHASE_EVAL
@@ -1009,8 +993,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # every trajectory in this batch shares one salt (the policy version at the start of the batch).
         cache_salt = self._compute_cache_salt()
 
-        # Drives the per-request sample-support capture opt-out. Both phases carry non-None
-        # `sampling_params`, so the phase is the only discriminator available here.
+        # The phase controls per-request sample-support capture.
         batch_metadata = input_batch.get("batch_metadata", None)
         training_phase: TrainingPhase = (
             batch_metadata.training_phase if batch_metadata is not None else TRAINING_PHASE_TRAIN
@@ -1129,12 +1112,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs = None
 
         if self.generator_cfg.step_wise_trajectories:
-            # Step-wise rows carry no routes: `_validate_cfg` refuses R3 with `step_wise_trajectories`.
             expert_indices_values = [None] * len(responses)
         else:
             expert_indices_values = [output.rollout_expert_indices for output in all_outputs]
-        # Keyed on value presence rather than the engine flag, so an eval batch (which captures no
-        # routes) and generator subclasses that leave the field unpopulated emit None.
+        # Preserve None when no trajectory contains routes.
         rollout_expert_indices = (
             expert_indices_values if any(value is not None for value in expert_indices_values) else None
         )

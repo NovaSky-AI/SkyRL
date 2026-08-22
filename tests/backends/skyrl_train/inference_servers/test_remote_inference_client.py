@@ -600,9 +600,6 @@ class TestDataPlane:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("input_batch_opts", [{}, {"return_sample_support": False}])
     async def test_sample_support_capture_is_opt_in_per_request(self, monkeypatch, input_batch_opts):
-        """A request that does not ask for support must not pay for it: callers that never consume it
-        (in-agent tool calls, eval batches) omit the key, and eval's `top_k=-1` would make the server
-        request negative logprobs."""
         client = RemoteInferenceClient(
             proxy_url="http://unused",
             server_urls=["http://unused"],

@@ -180,8 +180,6 @@ def test_sample_support_capture_rejects_unsupported_sampling_modifiers(override,
 
 
 def test_routed_expert_capture_rejects_the_vision_language_generator():
-    """The VLM generator never populates ``rollout_expert_indices``, so without this guard the pair
-    generates a whole batch and then dies in collation on a None route array."""
     with pytest.raises(ValueError, match="vision_language_generator"):
         SkyRLTrainConfig.from_cli_overrides(
             [
@@ -205,8 +203,6 @@ def test_sample_support_capture_accepts_top_k_top_p_and_min_p():
 
 
 def test_sample_support_capture_leaves_greedy_eval_sampling_params_alone():
-    # The five guards deliberately do not reach eval_sampling_params: forcing
-    # temperature > 0 there would change eval semantics. Capture is opted out per request.
     cfg = SkyRLTrainConfig.from_cli_overrides(
         [
             "generator.inference_engine.enable_return_sample_support_set=true",

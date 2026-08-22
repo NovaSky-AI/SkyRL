@@ -62,8 +62,6 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 "SkyRLVLMGymGenerator requires `use_conversation_multi_turn=True` "
                 "because multi-modal observations must be in separate user messages."
             )
-        # The base refusals still apply to this generator; the VLM-specific ones above take precedence
-        # where they overlap.
         super()._validate_cfg(generator_cfg)
 
     async def _render_conversation(self, conversation: ConversationType) -> RenderedConversation:

@@ -65,9 +65,7 @@ def _sample_support_from_flat_logprobs(
 ) -> tuple[list[dict[str, float]], SampleSupport]:
     """Extract sampled scores and post-filter support from vLLM's flat rows.
 
-    vLLM emits ``[sampled token, top-1, ..., top-k]`` per generated token, so column 0
-    carries the sampled-token logprob and columns ``1:`` are the support. Candidates the
-    top-p/min-p filters removed come back at ``-inf`` and become padding.
+    Each row is ``[sampled token, top-1, ..., top-k]``; filtered candidates are ``-inf``.
     """
     row_width = top_k + 1
     token_ids = np.asarray(logprobs.token_ids, dtype=SAMPLE_SUPPORT_DTYPE).reshape(-1, row_width)
@@ -79,12 +77,8 @@ def _sample_support_from_flat_logprobs(
     )
     sampled_logprobs = [{"logprob": value} for value in processed_logprobs[:, 0].tolist()]
 
-    # vLLM's approximate Triton top-k/top-p pivot can leave slightly more than top_k
-    # survivors, so the sampled token can rank just past top_k and be absent from its own
-    # support. Overwrite the row's weakest valid member (vLLM returns top-k descending, so
-    # that is the trailing valid slot) with the sampled id: width stays top_k, the sampled
-    # id appears exactly once so the trainer's renorm denominator is not double-counted,
-    # and trailing padding is untouched. Rows with no valid member at all are left alone.
+    # vLLM's approximate top-k/top-p pivot can omit the sampled token. Replace the
+    # weakest valid candidate while preserving the support width and trailing padding.
     sampled = token_ids[:, 0]
     valid = support_ids >= 0
     present = np.any(support_ids == sampled[:, None], axis=1)
@@ -487,9 +481,7 @@ class VLLMServerActor(ServerActorProtocol):
 
             capture_sample_support = body.get("return_sample_support", False)
             if capture_sample_support:
-                # Sample support is the sampler's bounded top-k set, so an unbounded or degenerate
-                # top_k has no support to return. Reject it here rather than forwarding
-                # `logprobs=top_k` to vLLM, which rejects a negative value with an opaque 500.
+                # Sample support requires a bounded, non-degenerate top-k set.
                 top_k = sampling_params_dict.get("top_k")
                 if not isinstance(top_k, int) or top_k <= 1:
                     raise HTTPException(
