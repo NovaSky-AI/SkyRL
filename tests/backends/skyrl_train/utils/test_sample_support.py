@@ -31,8 +31,6 @@ def test_finalize_rejects_a_trace_shorter_than_the_response():
 
 
 def test_finalize_rejects_an_unexpected_overshoot():
-    """A trailing row count the caller did not declare means the trace and the response disagree
-    about which tokens were sampled, which silent truncation would hide."""
     trace = SampleSupportTrace()
     trace.append(_rows(3), expected_rows=3)
     trace.append_padding(2)

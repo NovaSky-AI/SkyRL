@@ -36,10 +36,7 @@ class InferenceEngineInput(TypedDict):
     # only shared between requests carrying the same salt. See ``GeneratorConfig.use_cache_salt``.
     cache_salt: Optional[str]
     routed_experts_prompt_starts: Optional[List[int]]
-    # Opt a single batch into sample-support capture; requires the engine to have been started with
-    # ``InferenceEngineConfig.enable_return_sample_support_set``. Defaults to not capturing, so
-    # requests that do not consume the support (in-agent tool calls, eval requests whose greedy
-    # ``top_k=-1`` params cannot satisfy the capture contract) do not pay for it.
+    # Per-batch opt-in; the engine must enable sample-support capture at startup.
     return_sample_support: Optional[bool]
 
 

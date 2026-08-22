@@ -1,10 +1,6 @@
-"""Per-token sampler support: the bounded top-k set vLLM actually sampled from.
+"""Per-token bounded sampler support used to renormalize rollout logprobs.
 
-A support row is ``[top-1, ..., top-k]`` vocab IDs for one generated token, so the
-trainer can renormalize its logprobs over the same bounded set the rollout sampler
-drew from instead of the full vocabulary. Rows are dense and right-padded with
-``SAMPLE_SUPPORT_PADDING``; a token with no captured support (prompt tokens,
-observation tokens, a synthetic EOS) is an all-padding row.
+Rows contain top-k vocabulary IDs and use trailing ``SAMPLE_SUPPORT_PADDING``.
 """
 
 from typing import TypeAlias
@@ -22,8 +18,7 @@ SAMPLE_SUPPORT_PADDING = -1
 
 
 def validate_sample_support(sample_support: SampleSupport) -> SampleSupport:
-    """Check the two invariants the generic packed-array codec cannot: no
-    negatives other than the padding sentinel, and padding only ever trailing."""
+    """Validate vocabulary IDs and trailing padding."""
     if not isinstance(sample_support, np.ndarray):
         raise TypeError("sample support must be a NumPy array")
     if sample_support.ndim != 2 or not np.issubdtype(sample_support.dtype, np.integer):
@@ -55,12 +50,7 @@ class SampleSupportTrace:
         self._metadata.append_padding(count, fill=SAMPLE_SUPPORT_PADDING)
 
     def finalize(self, *, token_count: int, extra_rows: int) -> SampleSupport:
-        """Concatenate the trace and cut it to ``token_count`` rows.
-
-        ``extra_rows`` is the trailing row count the response never keeps (the final observation),
-        so the total is checked exactly in both directions and an unexpected overshoot raises
-        instead of being silently truncated away.
-        """
+        """Validate the trace length and discard ``extra_rows`` trailing rows."""
         if self.num_rows != token_count + extra_rows:
             raise ValueError(
                 f"sample-support trace has {self.num_rows} rows for {token_count} tokens plus "

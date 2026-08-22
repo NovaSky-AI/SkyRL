@@ -135,8 +135,6 @@ def _make_mock_llm(tokenizer, response_text: str):
 
 
 def test_vlm_validate_cfg_still_applies_the_base_refusals():
-    """``SkyRLVLMGymGenerator._validate_cfg`` replaces the base method, so it must chain to it;
-    otherwise every base refusal is silently void for this generator."""
     tokenizer = MagicMock()
     tokenizer.apply_chat_template.side_effect = lambda messages, **kwargs: [1, 2, 3, 4]
     tokenizer.eos_token_id = 4

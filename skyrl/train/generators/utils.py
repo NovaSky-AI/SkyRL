@@ -279,8 +279,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
             (e.g. `is_last_step`, `trajectory_ids`, contiguous trajectory ordering).
     """
     assert len(generator_outputs) > 0
-    # Per-token side channels are all-or-nothing across the batches: a partially populated field would
-    # be dropped (or raise a bare TypeError) depending on which batch happened to come first.
+    # Per-token side channels must be populated consistently across batches.
     for all_or_nothing_field in ("rollout_logprobs", "rollout_expert_indices", "rollout_sample_support"):
         present = [output.get(all_or_nothing_field) is not None for output in generator_outputs]
         if any(present) and not all(present):
@@ -790,13 +789,7 @@ def _is_prefix(maybe_prefix: List[int], candidate: List[int]) -> bool:
 def slice_generator_output(
     generator_output: GeneratorOutput, indices: List[int], *, preserve_metrics: bool = True
 ) -> GeneratorOutput:
-    """Slice a GeneratorOutput to keep only the entries at the given indices.
-
-    Generator-specific per-trajectory fields are sliced without naming them here.
-    Prefix-aware merging passes entries that all share one ``TrajectoryID``;
-    dynamic sampling may intentionally select entries from different trajectories.
-    Handles a flat list or a dict-of-lists, slicing each component.
-    """
+    """Slice list and dict-of-list fields at the given indices."""
     assert len(indices) > 0, "indices must be non-empty"
     # Every key except `rollout_metrics` is None, a dict of per-entry lists, or a per-entry list.
     sliced: GeneratorOutput = {}
