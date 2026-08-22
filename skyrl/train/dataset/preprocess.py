@@ -203,18 +203,7 @@ def build_sample_support(
     rollout_sample_support: List[SampleSupport],
     response_lens: np.ndarray,
 ) -> PackedTensor:
-    """Pack per-trajectory sampler support into one ``[sum(response_len_i), top_k]`` buffer.
-
-    Support describes generated tokens only, so it packs to the response tokens rather than to
-    a ``[batch, seq_len, top_k]`` rectangle whose whole prompt region would be padding written
-    on the driver and read back only to be discarded. The outer ragged level is one segment per
-    trajectory, exactly as for packed routes, so the trainer indexes both by segment.
-
-    The wire side establishes the canonical dtype and the trailing-padding invariant, so entries
-    are validated rather than rescanned here. The fill runs from a locally sized thread pool for
-    the same reason route collation does: it touches the whole global batch before DP sharding,
-    on every training step, and is bound by first-touch page faults on a fresh mapping.
-    """
+    """Pack one response-token support segment per trajectory."""
     num_samples = len(rollout_sample_support)
     for sample_index, rows in enumerate(rollout_sample_support):
         if not isinstance(rows, np.ndarray):

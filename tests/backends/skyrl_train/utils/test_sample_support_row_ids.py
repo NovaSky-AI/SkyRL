@@ -1,12 +1,4 @@
-"""Row-id derivation for packed sampler support.
-
-The support payload is never pushed through ``align_packed_token_metadata``: its domain is a
-response suffix shifted one position left, which segment placement alone cannot express. Only
-this int64 row-id channel is aligned, and the scorer gathers ``[top_k]`` rows by id.
-
-Run with:
-uv run --isolated --extra dev --extra skyrl-train pytest tests/backends/skyrl_train/utils/test_sample_support.py
-"""
+"""Row-id derivation for packed sampler support."""
 
 from typing import List, Tuple
 
@@ -29,8 +21,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 )
 
 TOP_K = 3
-# (prompt_len, response_len) per trajectory: anti-correlated, so the support suffixes start at
-# different offsets and a mis-shifted placement cannot pass by coincidence.
+# Anti-correlated lengths exercise different support offsets.
 LENGTHS: List[Tuple[int, int]] = [(2, 3), (4, 2)]
 
 
@@ -71,8 +62,7 @@ def _support(lengths: List[Tuple[int, int]]) -> PackedTensor:
 
 
 def test_row_ids_land_on_the_positions_that_predict_response_tokens():
-    """A trajectory's support covers real tokens ``[p - 1, p + r - 1)``: it includes the last
-    prompt token and excludes the last response token."""
+    """Support includes the last prompt position and excludes the last response position."""
     row_ids = align_sample_support_row_ids(_support(LENGTHS), _layout(LENGTHS))
 
     assert row_ids.dtype == torch.int64
@@ -96,7 +86,7 @@ def test_row_ids_gather_the_support_rows_of_each_response_token():
 
 @pytest.mark.parametrize("align", [1, 4])
 def test_row_ids_follow_megatron_packed_padding(align):
-    """Under sequence packing the channel is one row of ``[seq0, pad0, seq1, pad1, ...]``."""
+    """Sequence packing interleaves each sequence with its alignment padding."""
     row_ids = align_sample_support_row_ids(_support(LENGTHS), _layout(LENGTHS, packed=True, align=align))
 
     padded_lengths = [total + (-total % align) for total in (5, 6)]
@@ -106,31 +96,16 @@ def test_row_ids_follow_megatron_packed_padding(align):
     assert packed[padded_lengths[0] + 3 : padded_lengths[0] + 5] == [3, 4]
 
 
-def test_row_ids_rebase_under_chunk():
-    """``chunk`` rebases the packed row space, so ids carried in the batch would be wrong."""
+@pytest.mark.parametrize("selection", ["chunk", "slice"])
+def test_row_ids_rebase_under_batch_selection(selection):
     support = _support(LENGTHS)
     batch = TrainingInputBatch({"attention_mask": _attention_mask(LENGTHS).long(), SAMPLE_SUPPORT_FIELD: support})
-    full_batch_ids = align_sample_support_row_ids(support, _layout(LENGTHS))
+    selected = batch.chunk(1)[1] if selection == "chunk" else batch.slice(1, 2)
 
-    chunk = batch.chunk(1)[1]
-    chunk_ids = align_sample_support_row_ids(chunk[SAMPLE_SUPPORT_FIELD], _layout(LENGTHS[1:]))
+    row_ids = align_sample_support_row_ids(selected[SAMPLE_SUPPORT_FIELD], _layout(LENGTHS[1:]))
 
-    # The chunk's own row space starts at 0 again, so its ids differ from the batch's.
-    assert chunk_ids[chunk_ids >= 0].tolist() == [0, 1]
-    assert full_batch_ids[1][full_batch_ids[1] >= 0].tolist() == [3, 4]
-    # Gathering with the rebased ids still lands on the same support rows.
-    gathered = chunk[SAMPLE_SUPPORT_FIELD].values[chunk_ids[chunk_ids >= 0]]
-    assert torch.equal(gathered, support.segment(1))
-
-
-def test_row_ids_rebase_under_slice():
-    support = _support(LENGTHS)
-    batch = TrainingInputBatch({"attention_mask": _attention_mask(LENGTHS).long(), SAMPLE_SUPPORT_FIELD: support})
-
-    sliced = batch.slice(1, 2)
-    row_ids = align_sample_support_row_ids(sliced[SAMPLE_SUPPORT_FIELD], _layout(LENGTHS[1:]))
-
-    assert torch.equal(sliced[SAMPLE_SUPPORT_FIELD].values[row_ids[row_ids >= 0]], support.segment(1))
+    assert row_ids[row_ids >= 0].tolist() == [0, 1]
+    assert torch.equal(selected[SAMPLE_SUPPORT_FIELD].values[row_ids[row_ids >= 0]], support.segment(1))
 
 
 def test_row_ids_accept_an_empty_padding_segment():

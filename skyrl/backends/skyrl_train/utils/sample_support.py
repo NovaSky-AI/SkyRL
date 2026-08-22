@@ -1,6 +1,7 @@
 """Per-token bounded sampler support used to renormalize rollout logprobs.
 
 Rows contain top-k vocabulary IDs and use trailing ``SAMPLE_SUPPORT_PADDING``.
+Tokens without captured support use an all-padding row.
 """
 
 from typing import TypeAlias
@@ -20,10 +21,8 @@ SAMPLE_SUPPORT_DTYPE = np.dtype(np.int32)
 SAMPLE_SUPPORT_TORCH_DTYPE = torch.int32
 SAMPLE_SUPPORT_DTYPES = frozenset({SAMPLE_SUPPORT_DTYPE})
 SAMPLE_SUPPORT_PADDING = -1
-# Names the support field in ``GeneratorOutput``, ``TrainingInput`` and ``Experience``.
 SAMPLE_SUPPORT_FIELD = "rollout_sample_support"
-# Row-id channel value for a model position no support row scores. Out of range for any
-# packed row index, so a gather by id cannot silently pick up a real row.
+# Sentinel outside the valid packed-row range.
 SAMPLE_SUPPORT_NO_ROW = -1
 
 
@@ -47,18 +46,11 @@ def align_sample_support_row_ids(
     sample_support: PackedTensor,
     layout: TokenMetadataLayout,
 ) -> torch.Tensor:
-    """Return the per-token channel naming which packed support row scores each model position.
+    """Map model positions to packed support rows.
 
-    The payload itself must not go through ``align_packed_token_metadata``: that places a
-    segment at a fixed offset inside its trajectory's padded region, while support scoring
-    happens one position to the left of the token it describes -- the logit at position ``t``
-    predicts token ``t + 1``. A trajectory's support therefore covers real tokens
-    ``[p_i - 1, p_i + r_i - 1)``, which includes the last prompt token and excludes the last
-    response token. Aligning only these int64 row ids keeps that placement in one place, and
-    the scorer gathers ``[top_k]`` rows by id.
-
-    Row ids index ``sample_support.values``, so they must be derived per micro-batch:
-    ``chunk``, ``slice`` and batch padding all rebase the packed row space.
+    Support for response tokens occupies ``[prompt_len - 1, sequence_len - 1)`` because
+    position ``t`` predicts token ``t + 1``. Derive IDs per micro-batch because slicing and
+    padding rebase the packed row space.
     """
     segment_lengths = sample_support.sequence_lengths.to(torch.long)
     if segment_lengths.numel() != len(layout.sequence_lengths):
@@ -71,7 +63,7 @@ def align_sample_support_row_ids(
         dtype=torch.long,
         device=segment_lengths.device,
     )
-    # p_i = L_i - r_i, and the position predicting the first response token is p_i - 1.
+    # The first response token is predicted at prompt_len - 1.
     segment_starts = trajectory_lengths - segment_lengths - 1
     if segment_lengths.numel() and int(segment_starts.min()) < 0:
         raise ValueError(

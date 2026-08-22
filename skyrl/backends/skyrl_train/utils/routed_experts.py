@@ -37,15 +37,7 @@ class RoutedExpertTrace:
         self._metadata.append(compact_routed_expert_indices(routed_experts), expected_rows=expected_rows)
 
     def finalize(self, *, token_count: int, loss_mask: Sequence[int]) -> RoutedExpertIndices:
-        """Return the captured routes, which cover a prefix of the sequence's real tokens.
-
-        The capture ends short of ``token_count``: the last sampled token has no subsequent
-        decode forward to record its route, and a synthetic EOS is never evaluated at all.
-        The row count is the trace's only report of where the capture stops -- collation
-        dummy-fills the uncovered tail and ``make_router_padding_mask`` excludes exactly those
-        rows from router accounting -- so the trace must not pad the tail itself, which would
-        report fabricated routes as captured ones.
-        """
+        """Return the captured route prefix without fabricating rows for its uncovered tail."""
         if len(loss_mask) != token_count:
             raise ValueError(f"loss mask has {len(loss_mask)} entries, expected {token_count}")
         if self.prompt_start > token_count:
