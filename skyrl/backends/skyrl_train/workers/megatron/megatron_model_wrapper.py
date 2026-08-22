@@ -937,14 +937,11 @@ class MegatronModelWrapper:
             with torch.set_grad_enabled(loss_config.use_entropy_loss):
                 if support_entropy is not None:
                     assert support_entropy_mask is not None
-                    # Already in canonical [batch, seq_len - 1] positions, like token_logprobs.
-                    # The fallback rows carry no support entropy, so valid_mask drops them.
+                    # Both tensors are already in canonical [batch, seq_len - 1] positions.
                     action_entropy_mask = support_entropy_mask[:, -num_actions:] & loss_mask.to(torch.bool)
                     entropy = masked_mean(support_entropy[:, -num_actions:], action_entropy_mask)
                     entropy_for_loss = entropy
                 elif fused_lm_head and loss_config.use_entropy_loss:
-                    # The fused full-vocabulary entropy recomputes logits per chunk and is a
-                    # no-grad metric. Support-conditioned entropy is the differentiable one.
                     raise NotImplementedError(
                         "fused_lm_head_logprob does not support use_entropy_loss=True "
                         "(the fused entropy is a no-grad metric)."

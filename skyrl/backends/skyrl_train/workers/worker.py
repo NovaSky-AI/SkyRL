@@ -1069,8 +1069,7 @@ class PolicyWorkerBase(Worker):
                 entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
                 entropy_mask = loss_mask
                 if SAMPLE_SUPPORT_ENTROPY_MASK_KEY in output:
-                    # Support-conditioned entropy: the appended EOS has no recorded support, so
-                    # it carries no entropy and the metric must not average a zero in for it.
+                    # Exclude appended EOS positions, which have no recorded support.
                     entropy_mask = (
                         loss_mask.to(torch.bool) & output[SAMPLE_SUPPORT_ENTROPY_MASK_KEY][:, -num_actions - 1 : -1]
                     )
