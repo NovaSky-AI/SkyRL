@@ -54,6 +54,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
     get_microbatch_iterator,
     reduce_metrics,
+    restore_microbatch_response_padding,
 )
 from skyrl.env_vars import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
@@ -870,6 +871,7 @@ class PolicyWorkerBase(Worker):
             data,
             micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+            trim_padding=self.cfg.strategy == "fsdp" and not self.cfg.remove_microbatch_padding,
         )
         all_metrics = defaultdict(list)
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
@@ -1174,6 +1176,7 @@ class PolicyWorkerBase(Worker):
                 data,
                 micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
                 max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+                trim_padding=self.cfg.strategy == "fsdp" and not self.cfg.remove_microbatch_padding,
             )
             outputs = [self._forward_micro_batch(micro_batch) for micro_batch in microbatch_iterator]
             output = microbatch_iterator.reorder_and_combine_batches(outputs)
@@ -1187,7 +1190,12 @@ class PolicyWorkerBase(Worker):
         all_metrics = defaultdict(list)
         all_loss_fn_outputs: List[Dict[str, Any]] = []
 
-        for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
+        for micro_batch in BatchIterator(
+            data,
+            micro_batch_size,
+            drop_last=False,
+            trim_padding=self.cfg.strategy == "fsdp" and not self.cfg.remove_microbatch_padding,
+        ):
             metrics = self._forward_micro_with_loss(
                 micro_batch,
                 loss_fn=loss_fn,
@@ -1331,6 +1339,7 @@ class PolicyWorkerBase(Worker):
                 image_grid_thw=image_grid_thw,
             )
         policy_logprob = policy_logprob.to("cpu")
+        policy_logprob = restore_microbatch_response_padding(policy_logprob, micro_batch.metadata)
         output = TrainingOutputBatch(
             {"output": policy_logprob},
         )
@@ -1426,6 +1435,7 @@ class CriticWorkerBase(Worker):
             data,
             micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+            trim_padding=self.cfg.strategy == "fsdp" and not self.cfg.remove_microbatch_padding,
         )
         all_metrics = defaultdict(list)
 
@@ -1555,6 +1565,7 @@ class CriticWorkerBase(Worker):
             )
         self.model.train()  # reset model state
         value = value.to("cpu")
+        value = restore_microbatch_response_padding(value, micro_batch.metadata)
         output = TrainingOutputBatch(
             {"output": value},
         )
@@ -1574,6 +1585,7 @@ class CriticWorkerBase(Worker):
             data,
             micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+            trim_padding=self.cfg.strategy == "fsdp" and not self.cfg.remove_microbatch_padding,
         )
         outputs = [self._forward_micro_batch(micro_batch) for micro_batch in microbatch_iterator]
         output = microbatch_iterator.reorder_and_combine_batches(outputs)
@@ -1605,6 +1617,7 @@ class RefWorkerBase(Worker):
             data,
             micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+            trim_padding=self.cfg.strategy == "fsdp" and not self.cfg.remove_microbatch_padding,
         )
         outputs = [self._forward_micro_batch(micro_batch) for micro_batch in microbatch_iterator]
         output = microbatch_iterator.reorder_and_combine_batches(outputs)
@@ -1632,6 +1645,7 @@ class RefWorkerBase(Worker):
                 image_grid_thw=image_grid_thw,
             )
         log_probs = log_probs.to("cpu")
+        log_probs = restore_microbatch_response_padding(log_probs, micro_batch.metadata)
         output = TrainingOutputBatch(
             {"output": log_probs},
         )

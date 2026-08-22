@@ -9,12 +9,16 @@ uv run --isolated --extra dev --extra skyrl-train pytest tests/backends/skyrl_tr
 
 from typing import List
 
+import pytest
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
+    SampleBasedBatchIterator,
     TokenBasedBatchIterator,
     get_microbatch_iterator,
+    restore_microbatch_response_padding,
+    trim_microbatch_padding,
 )
 from skyrl.train.dataset.bin_packing import make_seq_packer
 
@@ -168,10 +172,6 @@ class TestTokenBasedBatchIterator:
         assert isinstance(it, TokenBasedBatchIterator)
 
         # Sample-based (disabled)
-        from skyrl.backends.skyrl_train.workers.worker_utils import (
-            SampleBasedBatchIterator,
-        )
-
         it = get_microbatch_iterator(batch, micro_batch_size=2, max_tokens_per_microbatch=-1)
         assert isinstance(it, SampleBasedBatchIterator)
 
@@ -232,3 +232,96 @@ class TestTokenBasedBatchIterator:
             assert len(pv) == microbatch["sequences"].shape[0]
             total_pv += len(pv)
         assert total_pv == batch_size  # every sample's pixel_values is accounted for
+
+    def test_trim_padding_uses_final_token_microbatch_widths(self):
+        batch = self._make_left_padded_batch()
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=6, trim_padding=True)
+
+        microbatches = list(iterator)
+        short = next(mb for mb in microbatches if mb["attention_mask"].sum() == 2)
+
+        assert short["sequences"].shape == (1, 2)
+        assert short["sequences"].tolist() == [[11, 12]]
+        assert short["response_mask"].shape == (1, 1)
+        assert short["action_log_probs"].shape == (1, 1)
+        assert short["rollout_expert_indices"].shape == (1, 2, 1, 1)
+        assert short["router_padding_mask"].shape == (1, 2)
+        assert short.metadata["response_length"] == 1
+        assert short.metadata["response_length_before_microbatch_trim"] == 3
+
+        # The controller batch remains the canonical, full-width representation.
+        assert batch["sequences"].shape == (2, 6)
+        assert batch["response_mask"].shape == (2, 3)
+        assert batch.metadata == {"response_length": 3}
+
+    def test_trim_padding_applies_to_sample_microbatches(self):
+        batch = self._make_left_padded_batch()
+        iterator = SampleBasedBatchIterator(batch, sample_batch_size=1, trim_padding=True)
+
+        short = next(iter(iterator))
+
+        assert short["sequences"].shape == (1, 2)
+        assert short["response_mask"].shape == (1, 1)
+        assert short.metadata["response_length"] == 1
+
+    def test_restore_response_padding_preserves_output_contract(self):
+        batch = self._make_left_padded_batch()
+        iterator = SampleBasedBatchIterator(batch, sample_batch_size=1, trim_padding=True)
+        short = next(iter(iterator))
+
+        local_output = torch.tensor([[0.25]])
+        restored = restore_microbatch_response_padding(local_output, short.metadata)
+
+        assert restored.tolist() == [[0.0, 0.0, 0.25]]
+
+    def test_trim_padding_empty_batch_is_noop(self):
+        batch = TrainingInputBatch(
+            {
+                "sequences": torch.empty((0, 6), dtype=torch.long),
+                "attention_mask": torch.empty((0, 6), dtype=torch.long),
+                "response_mask": torch.empty((0, 3), dtype=torch.long),
+            }
+        )
+
+        assert trim_microbatch_padding(batch) is batch
+
+    def test_restore_response_padding_rejects_non_matrix_output(self):
+        with pytest.raises(ValueError, match=r"Expected a \[batch, response\] output"):
+            restore_microbatch_response_padding(
+                torch.zeros((1, 2, 8)),
+                {"response_length_before_microbatch_trim": 3},
+            )
+
+    @staticmethod
+    def _make_left_padded_batch():
+        sequences = torch.tensor(
+            [
+                [0, 0, 0, 0, 11, 12],
+                [21, 22, 23, 24, 25, 26],
+            ]
+        )
+        attention_mask = torch.tensor(
+            [
+                [0, 0, 0, 0, 1, 1],
+                [1, 1, 1, 1, 1, 1],
+            ]
+        )
+        response_mask = torch.tensor(
+            [
+                [0, 0, 1],
+                [1, 1, 1],
+            ]
+        )
+        batch = TrainingInputBatch(
+            {
+                "sequences": sequences,
+                "attention_mask": attention_mask,
+                "response_mask": response_mask,
+                "loss_mask": response_mask.clone(),
+                "action_log_probs": torch.tensor([[0.0, 0.0, 0.1], [0.2, 0.3, 0.4]]),
+                "rollout_expert_indices": torch.arange(12).reshape(2, 6, 1, 1),
+                "router_padding_mask": ~attention_mask.bool(),
+            }
+        )
+        batch.metadata = {"response_length": 3}
+        return batch
