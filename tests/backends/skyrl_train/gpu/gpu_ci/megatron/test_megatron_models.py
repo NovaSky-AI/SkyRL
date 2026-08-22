@@ -143,7 +143,7 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
     if rewards and not isinstance(rewards[0], list):
         rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
 
-    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _ = (
+    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _, _ = (
         convert_prompts_responses_to_batch_tensors(
             pad_token_id=tokenizer.pad_token_id,
             prompts=generator_output["prompt_token_ids"],
