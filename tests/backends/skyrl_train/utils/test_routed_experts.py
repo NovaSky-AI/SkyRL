@@ -69,10 +69,7 @@ def _turn_routes(num_rows):
 
 
 def test_trace_returns_only_the_rows_it_captured():
-    """The row count is what tells the trainer where the capture stops, so the trace never
-    fabricates rows for the tail it did not cover: collation dummy-fills that tail and the
-    router padding mask keeps those rows out of router accounting.
-    """
+    """The row count identifies where capture stops."""
     trace = RoutedExpertTrace()
     trace.record_generation(prompt_token_count=3, generated_token_count=2, routed_experts=_turn_routes(4))
     trace.record_generation(prompt_token_count=7, generated_token_count=2, routed_experts=_turn_routes(4))
@@ -93,9 +90,7 @@ def test_trace_keeps_full_coverage_when_every_token_has_a_route():
 
 
 def test_trace_rejects_an_uncaptured_loss_active_target():
-    """The uncovered tail is only safe because every loss-active target inside it is masked:
-    a forced route at a masked position can perturb nothing but later masked positions.
-    """
+    """Every loss-active target must have a captured route."""
     trace = RoutedExpertTrace()
     trace.record_generation(prompt_token_count=3, generated_token_count=2, routed_experts=_turn_routes(4))
 

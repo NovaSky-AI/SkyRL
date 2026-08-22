@@ -896,9 +896,7 @@ def test_zero_copy_falls_back_for_bfloat16():
 
 # ── packed field padding ─────────────────────────────────────────────────────
 
-# The row each field's padding segments must carry, stated independently of the production
-# rule: distinct experts for Megatron's dropless dispatcher, "no support" for the sampler
-# support. Padding a field with the other's fill would mis-train silently.
+# Expected route and sampler-support padding rows.
 _PACKED_PADDING_EXPECTED_ROW: dict[str, Callable[[PackedTensor], torch.Tensor]] = {
     ROUTE_KEY: lambda field: torch.arange(field.row_shape[-1], dtype=field.dtype),
     SAMPLE_SUPPORT_FIELD: lambda field: torch.full(field.row_shape, SAMPLE_SUPPORT_PADDING, dtype=field.dtype),
@@ -929,7 +927,6 @@ def test_packed_field_padding_carries_that_fields_own_fill(key):
 @pytest.mark.parametrize("key", sorted(PACKED_FIELD_PADDING))
 @pytest.mark.parametrize("pad_count", [1, 3])
 def test_appending_packed_field_padding_keeps_the_real_segments(key, pad_count):
-    """All three batch padding sites append through here, so the round trip is asserted once."""
     field = _ZERO_COPY_PAYLOADS[key]()
 
     padded = append_packed_field_padding(key, field, segment_lengths=[2] * pad_count)
@@ -942,8 +939,6 @@ def test_appending_packed_field_padding_keeps_the_real_segments(key, pad_count):
 
 @pytest.mark.parametrize(("key", "rows_per_dummy_row"), [(ROUTE_KEY, 1), (SAMPLE_SUPPORT_FIELD, 0)])
 def test_dummy_row_segments_cover_the_single_attended_token(key, rows_per_dummy_row):
-    """A synthetic batch row attends one token: a per-token field needs one row for it, a
-    response-token field needs none."""
     field = _ZERO_COPY_PAYLOADS[key]()
 
     segments = packed_dummy_row_segments(key, 3)
