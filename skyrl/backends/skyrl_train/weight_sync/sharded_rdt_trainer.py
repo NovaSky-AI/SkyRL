@@ -1196,7 +1196,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         ray.get(self._server.warmup_nixl.remote())
 
     def _build_worker_init_info(self, server_names: list[str]):
-        from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
             ShardedRDTWeightTransferInitInfo,
         )
 
@@ -1236,7 +1236,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
 
         self.client.start_weight_update()
 
-        from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
             ShardedRDTWeightTransferUpdateInfo,
         )
 
