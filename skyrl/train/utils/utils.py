@@ -217,6 +217,12 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
                 f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
                 "moe_router_fusion=True -- the fused router bypasses replay. Set moe_router_fusion=False."
             )
+            # Interleaved chunks desynchronise each RouterReplay instance's backward FIFO.
+            assert not config.megatron_config.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size"), (
+                f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
+                "virtual_pipeline_model_parallel_size -- interleaved chunks desync the replay FIFO. "
+                "Unset virtual_pipeline_model_parallel_size."
+            )
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert (
@@ -367,6 +373,16 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         # TODO(Charlie): this can be fixed, can revisit later.
         raise ValueError(
             "`token_mean_legacy` loss reduction is not supported with step-wise training. Use `token_mean` instead."
+        )
+
+    if cfg.generator.step_wise_trajectories and cfg.generator.inference_engine.enable_return_routed_experts:
+        raise ValueError(
+            "`generator.inference_engine.enable_return_routed_experts=True` is not supported with "
+            "`generator.step_wise_trajectories=True`. Each step-wise row's prompt is the whole history so "
+            "far, while routes are recorded for that step's generated tokens only. The trainer aligns "
+            "routes from the start of the sequence, so a step's routes would replay onto the first N prompt "
+            "tokens of its row with no length mismatch to assert on, silently training against routing that "
+            "does not match the rollout."
         )
 
     if cfg.generator.merge_stepwise_output and not cfg.generator.step_wise_trajectories:
