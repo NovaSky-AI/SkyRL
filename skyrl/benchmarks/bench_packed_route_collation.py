@@ -1,13 +1,4 @@
-"""Padded-rectangle versus packed R3 route collation.
-
-The old path allocated ``[batch, max_total, layers, topk]`` and filled the left padding with
-dummy routes; the trainer's Megatron layout then compacted it straight back to ragged. This
-measures what that rectangle costs versus writing only the real tokens.
-
-Both fills are carried in a serial and a pooled arm. The pooled padded arm is the real
-baseline -- the trainer already pools -- so a serial packed fill has to beat that, not just
-the serial padded one, to be a win. The pooled arms default to whatever pool size the
-trainer would size on the measuring host; a fixed default measures an arm no trainer runs.
+"""Compare padded and packed route collation with serial and pooled fills.
 
 Production shapes need ~110 GiB of host RAM, so drive this from a cluster harness::
 
@@ -67,12 +58,7 @@ def _sequence_lengths(distribution: str, num_sequences: int, max_seqlen: int, se
 def _make_trajectories(lengths: np.ndarray, num_layers: int, topk: int, seed: int) -> list[np.ndarray]:
     """One route array per trajectory, sized to its full sequence length.
 
-    ``RoutedExpertTrace.finalize`` self-pads to ``token_count``, so a trajectory's route
-    array always covers every real token -- the batch's only padding is left padding.
-
-    The arrays are views over one template buffer. Materializing a distinct 55 GiB of source
-    routes would dwarf the collation under test, and a leading-axis slice is already
-    C-contiguous, so the copies being measured see exactly the layout production hands them.
+    Arrays are views over one template so source allocation does not dominate the benchmark.
     """
     rng = np.random.default_rng(seed + 1)
     template = rng.integers(0, 128, size=(int(lengths.max()), num_layers, topk), dtype=np.int16)
@@ -139,8 +125,7 @@ def _peak_rss_bytes() -> int:
 def _time_cold(fill, shape, trajectories, lengths, iterations: int) -> tuple[float, int]:
     """Median wall clock over a freshly allocated buffer each iteration.
 
-    First-touch page faults on a fresh multi-GiB mapping dominate the fill, so the buffer
-    must be new every time; a reused one measures only the copies.
+    Fresh buffers retain the first-touch allocation cost measured in production.
     """
     durations = []
     for _ in range(iterations):

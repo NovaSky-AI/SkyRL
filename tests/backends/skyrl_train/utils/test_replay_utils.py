@@ -91,13 +91,11 @@ def test_packed_replay_padding_matches_the_reference_row_shape(segment_lengths):
     assert padding.sequence_lengths.tolist() == segment_lengths
     assert padding.row_shape == reference.row_shape
     assert padding.dtype == reference.dtype
-    # Distinct experts per dummy row, as Megatron's dropless dispatcher requires.
     assert torch.equal(padding.values, torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(padding.values))
 
 
 @pytest.mark.parametrize("pad_count", [1, 3])
 def test_appending_replay_padding_keeps_the_real_segments_and_the_arange_invariant(pad_count):
-    """Both batch-padding sites append through here, so the round trip is asserted once."""
     routes = PackedTensor.from_segments(
         [torch.full((4, 2, 3), 9, dtype=torch.int16), torch.full((2, 2, 3), 8, dtype=torch.int16)]
     )

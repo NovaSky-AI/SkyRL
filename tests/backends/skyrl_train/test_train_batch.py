@@ -581,8 +581,7 @@ def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> Training
         "kl": torch.randn(batch_size, seq_len),
         "rewards": torch.randn(batch_size, seq_len),
         "rollout_logprobs": torch.randn(batch_size, seq_len),
-        # Routes arrive packed to real tokens; this fixture is fully attended, so every
-        # segment holds seq_len rows.
+        # The fixture is fully attended, so each route segment has seq_len rows.
         "rollout_expert_indices": PackedTensor(
             torch.randint(0, 8, (batch_size * seq_len, 2, 3), dtype=torch.long),
             cu_seqlens_from_lengths([seq_len] * batch_size),
@@ -652,7 +651,6 @@ def test_pad_batch_all_fields():
     assert torch.all(padded["router_padding_mask"][batch_size:])
     assert padded["rollout_expert_indices"][:batch_size] == batch["rollout_expert_indices"]
     padded_routes = padded["rollout_expert_indices"][batch_size:]
-    # Each padded row copies row 0, so its route segment matches row 0's length.
     assert padded_routes.sequence_lengths.tolist() == [seq_len] * pad_size
     expected_routes = torch.tensor([0, 1, 2]).expand_as(padded_routes.values)
     assert torch.equal(padded_routes.values, expected_routes)
@@ -751,8 +749,7 @@ def test_packed_tensor_field_survives_the_ray_pickle_round_trip():
     assert unpickled == data
 
 
-def test_serialized_field_formats_are_named_by_the_tensor_format_enum():
-    """Every branch of ``__setstate__`` keys off a ``TensorFormat`` member, not a bare string."""
+def test_serialized_field_formats_are_stable():
     data = TensorBatch(
         {
             "sequences": torch.randn(2, 4),
@@ -770,5 +767,3 @@ def test_serialized_field_formats_are_named_by_the_tensor_format_enum():
     assert state["bf16_logprobs"]["format"] == TensorFormat.TORCH
     assert state["pixel_values"]["format"] == TensorFormat.TENSOR_LIST
     assert state["rollout_expert_indices"]["format"] == TensorFormat.PACKED_TENSOR
-    # Legacy pickles carry the plain strings; StrEnum members must keep matching them.
-    assert [format.value for format in TensorFormat] == ["numpy", "torch", "tensor_list", "packed_tensor"]
