@@ -78,8 +78,6 @@ def test_generator_output_concatenation():
     assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1]]
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
     assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
-    # Both per-token side channels are named fields, so the input order cannot decide whether they
-    # survive concatenation.
     assert [rows[0] for rows in concatenated_output["rollout_sample_support"]] == [[1, 2], [3, 4], [5, 6], [7, 8]]
     assert [int(routes.flat[0]) for routes in concatenated_output["rollout_expert_indices"]] == [0, 1, 2, 3]
     reversed_output = concatenate_generator_outputs([generator_output_2, generator_output_1])
@@ -110,9 +108,6 @@ def test_generator_output_concatenation():
 
 @pytest.mark.parametrize("side_channel", ["rollout_expert_indices", "rollout_sample_support"])
 def test_side_channel_concatenation_rejects_a_mix(side_channel):
-    """A batch that captured a side channel cannot be concatenated with one that did not: the
-    consumer packs the field for every trajectory in the batch or for none of them."""
-
     def make_output(value) -> GeneratorOutput:
         return {
             "prompt_token_ids": [[1]],
@@ -132,7 +127,6 @@ def test_side_channel_concatenation_rejects_a_mix(side_channel):
 
 
 def test_slice_generator_output_slices_each_component_of_a_dict_field():
-    """``trajectory_time_splits`` is a dict of per-entry lists rather than a per-entry list."""
     generator_output: GeneratorOutput = {
         "prompt_token_ids": [[1], [2], [3]],
         "response_ids": [[10], [20], [30]],
@@ -589,8 +583,6 @@ class TestMergeStepwiseOutput:
                 assert merged["loss_masks"] == [[1, 0, 1]]
 
     def test_sample_support_observation_deltas_keep_full_width_padding_rows(self):
-        """Every other producer emits dense width-``top_k`` rows, so an observation delta
-        must too -- an empty row here would make the trajectory ragged."""
         tid = _make_tid("support")
         gen_out: GeneratorOutput = {
             "prompt_token_ids": [[10], [10, 20, 30]],
@@ -614,8 +606,6 @@ class TestMergeStepwiseOutput:
         assert {len(row) for row in support} == {3}
 
     def test_native_output_carrying_dict_valued_time_splits(self):
-        """The native step-wise ``GeneratorOutput`` carries ``trajectory_time_splits`` as a dict of
-        per-entry lists; the other fixtures in this file omit the key entirely."""
         tid = _make_tid("timed")
         gen_out: GeneratorOutput = {
             "prompt_token_ids": [[10], [10, 20, 30]],
@@ -636,8 +626,6 @@ class TestMergeStepwiseOutput:
 
         merged = merge_stepwise_output(gen_out)
 
-        # `_merge_single_trajectory` returns a fixed key set that drops the timing fields, so only the
-        # merge itself is asserted here.
         assert merged["response_ids"] == [[20, 30, 40]]
         assert merged["loss_masks"] == [[1, 0, 1]]
         assert merged["rewards"] == [[0.0, 0.0, 1.0]]
@@ -863,8 +851,6 @@ class TestMergeStepwiseOutput:
     @patch("skyrl.train.utils.utils.validate_batch_sizes", new=lambda cfg: None)
     @patch("skyrl.train.utils.utils.validate_generator_cfg", new=lambda cfg: None)
     def test_validate_cfg_refuses_step_wise_with_routed_expert_capture(self):
-        """Refused in `validate_cfg`, which runs before Ray and the engines start, and the message
-        must state why: a step's routes would replay onto the first N prompt tokens of its row."""
         cfg = example_dummy_config()
         cfg.generator.step_wise_trajectories = True
         cfg.generator.inference_engine.enable_return_routed_experts = True
