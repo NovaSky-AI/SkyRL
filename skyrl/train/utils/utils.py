@@ -197,7 +197,8 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.weight_sync_backend in {
         "nccl",
         "delta",
-    }, "only nccl and delta are supported for megatron weight sync"
+        "sharded_rdt",
+    }, "only nccl, delta and sharded_rdt are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
@@ -691,6 +692,19 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
+
+    # Forward HF_HOME so all actors (trainer + inference, any node) share one
+    # model cache (e.g. /mnt/cluster_storage/hf for models larger than local disk).
+    if os.environ.get("HF_HOME"):
+        env_vars["HF_HOME"] = os.environ["HF_HOME"]
+
+    # Forward any SKYRL_* overrides set in the launching shell (e.g.
+    # SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S for very large models
+    # whose weight load exceeds the 600s default) — skyrl.env_vars reads them at
+    # import time in every process, so they must ride the runtime env.
+    for _k, _v in os.environ.items():
+        if _k.startswith("SKYRL_") and _k not in env_vars:
+            env_vars[_k] = _v
 
     # NOTE (erictang000): This should no longer be required since this has been removed in vllm
     # and fixed in NCCL (https://github.com/vllm-project/vllm/pull/24141, https://github.com/NVIDIA/nccl/issues/1234), but empirically seeing OOMs for

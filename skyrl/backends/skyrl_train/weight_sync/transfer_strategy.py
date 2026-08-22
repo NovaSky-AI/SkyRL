@@ -7,9 +7,12 @@ transfer mechanisms (broadcast, CUDA IPC) to be used interchangeably.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Iterable, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, Optional
 
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
+
+if TYPE_CHECKING:
+    import torch
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -36,6 +39,46 @@ class WeightTransferSender(ABC):
     handles_prefix_cache_reset: bool = False
     """Indicates whether the transfer strategy handles resetting prefix cache
         for the inference engines internally."""
+
+    force_disable_expandable_segments: ClassVar[bool] = False
+    """Disable expandable_segments around the send even when NOT colocated.
+
+    The push backends only need it under ``colocate_all`` (CUDA IPC calls
+    cudaIpcGetMemHandle, which VMM addresses break). A backend that shares GPU
+    memory on every run regardless of colocation sets this True."""
+
+    empty_cache_after_send: ClassVar[bool] = True
+    """Whether the worker should ``torch.cuda.empty_cache()`` after the send.
+
+    False for backends whose send buffers are reused by the next step, where
+    scrubbing them back to CUDA is pure cost. A colocated inference engine needs
+    the physical memory regardless, so the worker still empties under
+    ``colocate_all``."""
+
+    async def send(
+        self,
+        weight_extractor: Any,
+        dtype: "torch.dtype",
+        **kwargs,
+    ) -> None:
+        """Send this rank's weights. Called on every training rank.
+
+        The default materializes the extractor's chunk stream plus its metadata
+        and hands both to :meth:`send_chunks` — the push backends' contract.
+        Backends that do not consume a chunk stream override this instead, which
+        is what keeps ``get_weight_metadata`` (a whole-model gather on the
+        Megatron extractor) off their critical path entirely.
+
+        Args:
+            weight_extractor: The worker's extractor, already built.
+            dtype: Inference dtype to convert to.
+            **kwargs: Forwarded to :meth:`send_chunks`.
+        """
+        await self.send_chunks(
+            weight_extractor.extract_weights(dtype),
+            weight_metadata=weight_extractor.get_weight_metadata(dtype),
+            **kwargs,
+        )
 
     @abstractmethod
     async def send_chunks(
@@ -81,6 +124,29 @@ class WeightTransferStrategy(ABC):
     The receiver side lives inside the inference servers (vLLM's native weight
     transfer engine), driven via the inference client's HTTP control plane.
     """
+
+    sender_initializes_receivers: ClassVar[bool] = False
+    """The sender drives the inference-side init itself, so the worker must NOT
+    also call ``init_weight_update_communicator``.
+
+    False for the push backends: worker rank 0 pushes ``init_info`` to the
+    servers, concurrently with ``create_sender`` (broadcast needs both sides in
+    the same process group at once). True for a backend whose own engine owns the
+    handshake."""
+
+    sender_needs_weight_extractor: ClassVar[bool] = False
+    """``create_sender`` takes the worker's ``weight_extractor``.
+
+    Only for backends that must rendezvous at init rather than on the first send,
+    which needs the extractor that early. The worker passes it only when this is
+    True, so the other strategies' signatures are untouched."""
+
+    groups_chunks_by_module: ClassVar[bool] = False
+    """Whether the FSDP extractor should group parameters per module.
+
+    Fused-weight loaders want one chunk per module (CUDA IPC); everything else
+    wants one parameter per name. Read off the strategy class so the extractor's
+    construction does not have to re-derive the backend."""
 
     @staticmethod
     @abstractmethod

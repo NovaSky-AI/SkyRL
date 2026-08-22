@@ -8,6 +8,7 @@ Automatically handles GPU placement:
 The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -60,6 +61,10 @@ class WorkerDispatch:
 
         # Inference engine client for weight sync (optional)
         self._inference_engine_client = inference_engine_client
+
+        # Seconds the last save_weights_for_sampler spent on the transfer itself,
+        # excluding the pause/resume bracket. None until the first sync.
+        self.last_weight_sync_seconds: Optional[float] = None
 
         # Actor groups by name.
         # TODO: Remove these role-specific identifiers. We will move to using model IDs and add support for generic models beyond these.
@@ -600,11 +605,15 @@ class WorkerDispatch:
         registered on vLLM under that name. None preserves single-tenant
         behavior (the legacy ``SKYRL_LORA_ADAPTER_NAME`` path).
         """
+        # Pass None for the client: workers cached it at init_weight_sync_state.
+        # It carries the HF tokenizer (~10MB — 0.13s pickle driver-side, 0.34s
+        # unpickle on EVERY worker), so shipping it per sync costs ~0.5s of the
+        # sync wall even via ray.put (deref still deserializes per worker).
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
                 "broadcast_to_inference_engines",
-                inference_engine_client,
+                None,
                 self.cfg.generator.inference_engine,
                 model_id=model_id,
             )
@@ -641,6 +650,19 @@ class WorkerDispatch:
                 "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
             )
 
+        def _broadcast_and_finish() -> None:
+            """The weight transfer proper, timed on its own.
+
+            ``last_weight_sync_seconds`` is what the trainer reports as
+            ``timing/sync_weights``: the enclosing call also pauses and resumes
+            generation, which under vLLM DP costs seconds of coordinator quiesce
+            that has nothing to do with moving weights.
+            """
+            start = time.perf_counter()
+            self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+            self._finish_weight_sync()
+            self.last_weight_sync_seconds = time.perf_counter() - start
+
         # Sync weights to inference engine
         self._prepare_for_weight_sync()
         # Make the requested adapter live on every worker before broadcasting
@@ -648,8 +670,7 @@ class WorkerDispatch:
         self.ensure_active_adapter("policy", model_id)
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
-            self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-            self._finish_weight_sync()
+            _broadcast_and_finish()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
             strategy = self.cfg.trainer.strategy
@@ -658,8 +679,7 @@ class WorkerDispatch:
                 strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
             ):
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
-                self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                self._finish_weight_sync()
+                _broadcast_and_finish()
             elif self.cfg.generator.inference_engine.offload_kv_for_weight_sync:
                 # Sleep the engine to free GPU memory during the sync (wake weights,
                 # broadcast, wake KV cache) so gpu_memory_utilization can run higher.
@@ -674,8 +694,7 @@ class WorkerDispatch:
                     try:
                         await self._inference_engine_client.sleep_for_weight_sync(offload_kv=offload_kv)
                         await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
-                        self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                        self._finish_weight_sync()
+                        _broadcast_and_finish()
                         await self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"])
                     finally:
                         await self._inference_engine_client.resume_generation()
@@ -686,8 +705,7 @@ class WorkerDispatch:
                     await self._inference_engine_client.sleep()
                     try:
                         await self._inference_engine_client.wake_up(tags=["weights"])
-                        self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                        self._finish_weight_sync()
+                        _broadcast_and_finish()
                     finally:
                         await self._inference_engine_client.wake_up(tags=["kv_cache"])
             else:
@@ -696,13 +714,11 @@ class WorkerDispatch:
                 if self.cfg.generator.inference_engine.weight_sync_backend == "delta":
                     # Delta disk sync performs publish/fetch before pausing and
                     # pauses internally only around the final reload.
-                    self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                    self._finish_weight_sync()
+                    _broadcast_and_finish()
                 else:
                     await self._inference_engine_client.pause_generation()
                     try:
-                        self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                        self._finish_weight_sync()
+                        _broadcast_and_finish()
                     finally:
                         await self._inference_engine_client.resume_generation()
 

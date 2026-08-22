@@ -490,8 +490,17 @@ class RayPPOTrainer:
                                 self.update_ref_with_policy()
 
                         # 10. Prepare weights for sampling
-                        with Timer("sync_weights", self.all_timings):
+                        with Timer("sync_weights_total", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
+                        # `sync_weights` is the transfer alone. The enclosing call
+                        # also pauses and resumes generation, which under vLLM DP
+                        # costs seconds of coordinator quiesce that is not weight
+                        # -sync work; `sync_weights_total` keeps the full bracket.
+                        engine_seconds = getattr(self.dispatch, "last_weight_sync_seconds", None)
+                        if engine_seconds is not None:
+                            self.all_timings["sync_weights"] = (
+                                self.all_timings.get("sync_weights", 0.0) + engine_seconds
+                            )
 
                     # 11. set logs
                     logger.info(status)

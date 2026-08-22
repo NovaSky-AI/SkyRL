@@ -20,6 +20,11 @@ from .delta_strategy import (
     DeltaTransferStrategy,
     DeltaWeightTransferSender,
 )
+from .sharded_rdt_strategy import (
+    ShardedRdtInitInfo,
+    ShardedRdtTransferStrategy,
+    ShardedRdtWeightTransferSender,
+)
 from .transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferSender,
@@ -45,6 +50,8 @@ def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> T
         The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
     """
     strategy = get_transfer_strategy(weight_sync_backend, colocate_all)
+    if strategy == "sharded_rdt":
+        return ShardedRdtTransferStrategy
     if strategy == "delta":
         return DeltaTransferStrategy
     if strategy == "ipc":
@@ -54,6 +61,8 @@ def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> T
 
 def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
     """Get the appropriate transfer strategy string based on config."""
+    if weight_sync_backend in ("sharded_rdt", "rdt"):
+        return "sharded_rdt"
     if weight_sync_backend == "delta":
         return "delta"
     if weight_sync_backend == "nccl" and colocate_all:
@@ -80,5 +89,8 @@ __all__ = [
     "DeltaInitInfo",
     "DeltaTransferStrategy",
     "DeltaWeightTransferSender",
+    "ShardedRdtInitInfo",
+    "ShardedRdtTransferStrategy",
+    "ShardedRdtWeightTransferSender",
     "get_transfer_strategy_cls",
 ]
