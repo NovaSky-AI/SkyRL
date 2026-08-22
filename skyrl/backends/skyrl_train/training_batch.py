@@ -29,12 +29,8 @@ class TensorFormat(StrEnum):
 def _serialize_tensor(value: torch.Tensor, *, zero_copy: bool = False) -> dict:
     """Serialize a single tensor for pickle protocol.
 
-    With ``zero_copy`` the payload carries the numpy array itself rather than a fresh
-    ``bytes`` copy of it. Pickle protocol 5 hands a payload to Ray's plasma out-of-band
-    path only if it reduces to a ``PickleBuffer``, which a C-contiguous array does and
-    ``bytes`` does not; the reader then rebuilds a view onto shared memory instead of
-    copying. That view is read-only, so only fields in ``TensorBatch.ZERO_COPY_KEYS``
-    may take this path.
+    With ``zero_copy``, preserve the numpy array so pickle protocol 5 can send its
+    buffer out of band. The deserialized view may be read-only.
     """
     try:
         # Fast path: direct memory copy via numpy (works for most dtypes)
@@ -70,9 +66,7 @@ def _deserialize_tensor(value: dict) -> torch.Tensor:
         buffer = io.BytesIO(value["data"])
         return torch.load(buffer, weights_only=True)
     elif tensor_format == TensorFormat.NUMPY_VIEW:
-        # Zero-copy path: `data` is already an array, and under Ray it views the plasma
-        # buffer. `torch.from_numpy` warns once per process when that buffer is read-only;
-        # the returned tensor must not be mutated in place.
+        # Under Ray, this array views a read-only plasma buffer.
         return torch.from_numpy(value["data"])
     else:
         # Fast path: reconstruct from numpy bytes
@@ -167,9 +161,7 @@ class TensorBatch(dict, Generic[DictType]):
 
     metadata: Optional[Dict[str, Any]] = None
 
-    # Fields serialized as a zero-copy numpy view rather than a copied `bytes` blob (see
-    # `_serialize_tensor`). Deserialized tensors for these keys can be backed by read-only
-    # shared memory, so a field qualifies only if no consumer mutates it in place.
+    # These fields may be backed by read-only shared memory after deserialization.
     ZERO_COPY_KEYS: frozenset[str] = frozenset({"rollout_expert_indices"})
 
     def __init__(self, *args, **kwargs):
@@ -317,7 +309,7 @@ class TensorBatch(dict, Generic[DictType]):
                 batch_dict[key] = {
                     "format": TensorFormat.PACKED_TENSOR,
                     "values": _serialize_tensor(value.values, zero_copy=zero_copy),
-                    # `cu_seqlens` is [batch + 1] offsets: too small to be worth a plasma buffer.
+                    # Offsets are too small to benefit from an out-of-band buffer.
                     "cu_seqlens": _serialize_tensor(value.cu_seqlens),
                 }
             else:
