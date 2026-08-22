@@ -223,16 +223,34 @@ def apply_fsdp2(model, fsdp_kwargs, config: Union[FSDPConfig, DictConfig]):
 
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
-    modules = []
-    for name, module in model.named_modules():
-        if module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap or (
-            isinstance(module, nn.Embedding) and not model.config.tie_word_embeddings
-        ):
-            modules.append(module)
+    modules = modules_to_wrap_fsdp2(model, fsdp_transformer_layer_cls_to_wrap)
 
     for idx, module in enumerate(modules):
         fully_shard(module, **fsdp_kwargs)
     fully_shard(model, **fsdp_kwargs)  # fsdp2 will not reshard_after_forward for root module
+
+
+def modules_to_wrap_fsdp2(model, transformer_layer_cls_to_wrap) -> list:
+    """Select the modules that get their own fully_shard group.
+
+    Only the INPUT (word) embeddings get a dedicated group, not every
+    nn.Embedding: a per-module group unshards its params in that module's
+    own forward pre-hook, so an embedding whose weight is read RAW from a
+    parent forward is still a sharded DTensor at access time. GLM4V's vision
+    position_embedding is exactly that (modeling_glm4v reads .weight and
+    feeds it to F.grid_sample, which has no DTensor rule -> "aten.
+    grid_sampler_2d.default got mixed torch.Tensor and DTensor"). Left
+    unwrapped, it lands in the root group, whose params are plain unsharded
+    tensors for the whole forward.
+    """
+    input_embeddings = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
+    modules = []
+    for name, module in model.named_modules():
+        if module.__class__.__name__ in transformer_layer_cls_to_wrap or (
+            module is input_embeddings and not model.config.tie_word_embeddings
+        ):
+            modules.append(module)
+    return modules
 
 
 def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinite=False, foreach=None):
