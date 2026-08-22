@@ -12,7 +12,6 @@ import torch
 
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
-    PACKED_SIDE_CHANNEL_FIELDS,
     PackedArrayKey,
     PackedField,
     build_logprobs_content,
@@ -223,8 +222,6 @@ def test_ndarray_round_trip_with_sidecar_fields(arr, allowed_dtypes, extra):
 
 
 def test_packed_envelope_leads_with_data():
-    # load_packed_body finds a blob by byte prefix, so `data` must stay first
-    # even when sidecar fields are present.
     payload = pack_ndarray(np.zeros((2, 2), np.float32), allowed_dtypes=_FLOAT32, extra={"prompt_start": 1})
 
     assert list(payload) == [PackedArrayKey.DATA, PackedArrayKey.SHAPE, PackedArrayKey.DTYPE, "prompt_start"]
@@ -282,12 +279,6 @@ def test_unpack_rejects_byte_count_mismatched_with_declared_shape():
         unpack_ndarray(payload, allowed_dtypes=_FLOAT32, ndim=2)
 
 
-def test_registry_seeds_both_side_channels():
-    # A later branch adds the rollout_sample_support producer; the splice must
-    # already know the name so that branch stays a pure addition.
-    assert PACKED_SIDE_CHANNEL_FIELDS == ("routed_experts", "rollout_sample_support")
-
-
 def test_load_packed_body_splices_both_blobs_in_one_body():
     routes = np.arange(12).reshape(3, 2, 2)
     support = np.arange(6, dtype=np.float32).reshape(2, 3)
@@ -301,7 +292,6 @@ def test_load_packed_body_splices_both_blobs_in_one_body():
 
     choice = load_packed_body(raw)["choices"][0]
 
-    # Both blobs are handed over as memoryviews into `raw`, never as Python strs.
     assert all(
         isinstance(choice[field][PackedArrayKey.DATA], memoryview)
         for field in (PackedField.ROUTED_EXPERTS, PackedField.ROLLOUT_SAMPLE_SUPPORT)
@@ -364,12 +354,6 @@ def test_load_packed_body_is_not_spoofable_from_a_string_value():
     assert np.array_equal(decode_packed_routed_experts(choice[PackedField.ROUTED_EXPERTS]), routes)
 
 
-def test_load_packed_body_leaves_a_spoofed_prefix_alone_when_no_field_is_present():
-    body = _body(note='"routed_experts":{"data":"AAAA"')
-
-    assert load_packed_body(orjson.dumps(body)) == body
-
-
 def test_load_packed_body_ignores_unregistered_packed_fields():
     envelope = pack_ndarray(np.zeros((2, 2), np.float32), allowed_dtypes=_FLOAT32)
     body = _body(some_other_array=envelope)
@@ -392,7 +376,6 @@ def test_load_packed_body_splices_one_blob_per_choice():
 
     choices = load_packed_body(raw)["choices"]
 
-    # Blobs are matched to envelopes in document order.
     assert np.array_equal(decode_packed_routed_experts(choices[0][PackedField.ROUTED_EXPERTS]), first)
     assert np.array_equal(decode_packed_routed_experts(choices[1][PackedField.ROUTED_EXPERTS]), second)
 

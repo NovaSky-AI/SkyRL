@@ -211,12 +211,7 @@ class RemoteGenerateClient:
         *,
         packed_side_channels: bool = False,
     ) -> Any:
-        """POST JSON with retry on transient connection and response-decoding failures.
-
-        ``packed_side_channels`` splices packed arrays out of the raw bytes before
-        parsing; only ``/skyrl/v1/generate`` returns them, and no other caller
-        should pay for the scan.
-        """
+        """POST JSON with retries, optionally splicing packed arrays before parsing."""
         session = await self._get_session()
         last_exc: Optional[Exception] = None
         for attempt in range(_DATA_PLANE_RETRIES):
