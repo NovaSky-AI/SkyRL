@@ -1,15 +1,4 @@
-"""Token-aligned side channels through an Ulysses sequence-parallel partition.
-
-Ulysses splits the sequence axis across ranks, so a per-token channel has to take the same
-partition as the tokens -- including the pad to a multiple of the SP degree, where a channel
-whose ``0`` is a real value needs its own sentinel. The all-to-all itself needs a process
-group, so these tests shard by monkeypatching ``slice_input_tensor`` and drive the replay core
-once per rank, which is exactly the split the real forward performs.
-
-Run with:
-uv run --isolated --extra dev --extra skyrl-train pytest \
-    tests/backends/skyrl_train/distributed/test_ulysses_token_metadata.py
-"""
+"""Token-aligned metadata through Ulysses sequence partitions."""
 
 import pytest
 import torch

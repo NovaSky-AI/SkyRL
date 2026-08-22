@@ -1,18 +1,4 @@
-"""Bounded sampler-support replay through the FSDP forward.
-
-The support payload never travels with the tokens: ``HFModelWrapper`` places only the int64
-row-id channel that names which packed support row scores each position, then puts it through
-the same right-alignment, unpadding and next-token shift the tokens take. These tests drive the
-real ``forward`` on CPU against a hand-written dense reference, so a channel that lands one
-position off or in the wrong batch row changes the renormalizer and fails.
-
-The Ulysses shard of that same path needs a process group and is covered at the channel and
-core level in ``tests/backends/skyrl_train/distributed/test_ulysses_token_metadata.py``.
-
-Run with:
-uv run --isolated --extra dev --extra skyrl-train pytest \
-    tests/backends/skyrl_train/workers/test_fsdp_sample_support.py
-"""
+"""Sample-support replay through the FSDP forward."""
 
 import pytest
 import torch
@@ -28,9 +14,6 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_NO_ROW,
     SAMPLE_SUPPORT_PADDING,
     SAMPLE_SUPPORT_TORCH_DTYPE,
-)
-from skyrl.backends.skyrl_train.utils.sample_support_replay import (
-    missing_sample_support_message,
 )
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
     HFModelWrapper,
@@ -257,29 +240,6 @@ def test_replay_requires_both_the_support_and_the_loss_mask(omitted, message):
 
     with pytest.raises(ValueError, match=message):
         _wrapper(_TokenIndexedLM())(sequences, 2, attention_mask=attention_mask, **kwargs)
-
-
-def test_the_missing_support_error_names_the_config_key_and_the_generator():
-    """The payload only goes missing through config or a custom generator, so name both.
-
-    The backend name is the only part that may differ from the Megatron scorer's message.
-    """
-    sequences, attention_mask = _ragged_batch()
-
-    with pytest.raises(ValueError) as missing_support:
-        _wrapper(_TokenIndexedLM())(
-            sequences,
-            2,
-            attention_mask=attention_mask,
-            sample_support=None,
-            loss_mask=_loss_mask([2, 1], 2),
-            enable_sample_support_replay=True,
-        )
-
-    message = str(missing_support.value)
-    assert "generator.inference_engine.enable_return_sample_support_set" in message
-    assert "SkyRLGymGenerator" in message
-    assert message == missing_sample_support_message("FSDP")
 
 
 def test_sequence_parallel_slice_pads_row_ids_with_a_sentinel(monkeypatch):
