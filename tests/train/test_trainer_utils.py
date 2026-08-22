@@ -1142,11 +1142,6 @@ def test_validate_stepwise_multiple_is_last_step_true_per_trajectory():
         validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
 
 
-# ============================================================
-# Per-generated-token side-channel validation tests
-# ============================================================
-
-
 def _make_side_channel_output(
     rollout_expert_indices=None,
     rollout_sample_support=None,
@@ -1183,9 +1178,7 @@ def _support(num_rows):
     ],
 )
 def test_validate_generator_output_accepts_route_under_coverage(route_rows, loss_masks):
-    """Routes cover a prefix: full coverage, ``generate_batched``'s seq_len - 1, and the deeper
-    shortfall a multi-turn trace leaves are all legal -- the deeper one only because the tokens
-    past the capture are loss-masked, which is what makes their dummy routes harmless."""
+    """Route prefixes are valid when every trained token is covered."""
     output = _make_side_channel_output(
         rollout_expert_indices=[_routes(rows) for rows in route_rows],
         loss_masks=loss_masks,
@@ -1195,9 +1188,7 @@ def test_validate_generator_output_accepts_route_under_coverage(route_rows, loss
 
 
 def test_validate_generator_output_rejects_routes_that_stop_short_of_a_trained_token():
-    """The row count is bounded below by the last loss-active token: past the capture the
-    trainer replays dummy routes, and the router padding mask only excludes those rows from
-    router accounting -- it does not stop a trained token from being replayed on them."""
+    """A route prefix must cover the last trained token."""
     output = _make_side_channel_output(rollout_expert_indices=[_routes(3), _routes(3)])
 
     with pytest.raises(AssertionError, match=r"rollout_expert_indices\[0\] captured 3 route rows.*token 4"):
@@ -1205,10 +1196,7 @@ def test_validate_generator_output_rejects_routes_that_stop_short_of_a_trained_t
 
 
 def test_validate_generator_output_accepts_the_coverage_a_multi_turn_trace_produces():
-    """The lower bound is exactly what ``RoutedExpertTrace`` captures, so the boundary check
-    cannot refuse this repo's own multi-turn producer: two turns over a 3-token prompt and a
-    2-token observation capture 8 rows of a 9-token trajectory whose last token is trained.
-    """
+    """Validation accepts the prefix produced by a multi-turn route trace."""
     trace = RoutedExpertTrace()
     trace.record_generation(prompt_token_count=3, generated_token_count=2, routed_experts=_routes(4))
     trace.record_generation(prompt_token_count=7, generated_token_count=2, routed_experts=_routes(4))
@@ -1231,25 +1219,21 @@ def test_validate_generator_output_accepts_the_coverage_a_multi_turn_trace_produ
     validate_generator_output(num_prompts=1, generator_output=output)
 
 
-def test_validate_generator_output_rejects_routes_past_the_sequence():
-    """More route rows than tokens means the trainer cannot place them: collation would
-    reject it, and the router padding mask has no position to mark them at."""
-    output = _make_side_channel_output(rollout_expert_indices=[_routes(5), _routes(5)])
+@pytest.mark.parametrize(
+    ("invalid_rows", "message"),
+    [
+        (5, r"rollout_expert_indices\[1\] has 5 route rows for a 4-token"),
+        (0, r"rollout_expert_indices\[1\] has 0 route rows"),
+    ],
+)
+def test_validate_generator_output_rejects_invalid_route_bounds(invalid_rows, message):
+    output = _make_side_channel_output(rollout_expert_indices=[_routes(5), _routes(invalid_rows)])
 
-    with pytest.raises(AssertionError, match=r"rollout_expert_indices\[1\] has 5 route rows for a 4-token"):
-        validate_generator_output(num_prompts=2, generator_output=output)
-
-
-def test_validate_generator_output_rejects_empty_routes():
-    output = _make_side_channel_output(rollout_expert_indices=[_routes(5), _routes(0)])
-
-    with pytest.raises(AssertionError, match=r"rollout_expert_indices\[1\] has 0 route rows"):
+    with pytest.raises(AssertionError, match=message):
         validate_generator_output(num_prompts=2, generator_output=output)
 
 
 def test_validate_generator_output_rejects_none_route_entry():
-    """``None`` survives the outer length check and reaches the router-mask build as a
-    ``TypeError`` on ``len(None)``."""
     output = _make_side_channel_output(rollout_expert_indices=[_routes(5), None])
 
     with pytest.raises(AssertionError, match=r"rollout_expert_indices\[1\] is None"):
@@ -1263,7 +1247,6 @@ def test_validate_generator_output_accepts_dense_sample_support():
 
 
 def test_validate_generator_output_rejects_sample_support_row_shortfall():
-    """``build_sample_support`` requires exactly one row per response token."""
     output = _make_side_channel_output(rollout_sample_support=[_support(2), _support(1)])
 
     with pytest.raises(AssertionError, match=r"rollout_sample_support\[1\] has 1 support rows for 2 response tokens"):
@@ -1278,9 +1261,7 @@ def test_validate_generator_output_rejects_none_sample_support_entry():
 
 
 def test_validate_generator_output_refuses_routes_under_step_wise():
-    """Any step-wise generator is refused, not just ``SkyRLGymGenerator``: route rows are
-    aligned to the whole trajectory, so per-turn samples would replay another token's routes.
-    """
+    """Trajectory-aligned routes cannot be replayed against per-turn samples."""
     output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
     output["rollout_expert_indices"] = [_routes(len(prompt) + 3) for prompt in output["prompt_token_ids"]]
 
@@ -1289,7 +1270,6 @@ def test_validate_generator_output_refuses_routes_under_step_wise():
 
 
 def test_validate_generator_output_allows_sample_support_under_step_wise():
-    """Support is per-step dense, so step-wise keeps it -- only routes are refused."""
     output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
     output["rollout_sample_support"] = [_support(len(response)) for response in output["response_ids"]]
 

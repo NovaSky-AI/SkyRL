@@ -328,13 +328,12 @@ class TokenBasedBatchIterator(BaseBatchIterator):
                 "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=device),
             }
         )
-        # Add optional fields such as `rollout_logprobs` and the packed side channels to padding batch
+        # Add optional fields to the padding batch.
         if self.data.get("rollout_logprobs") is not None:
             ref_tensor = self.data["rollout_logprobs"]
             data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
         for key in PACKED_FIELD_PADDING:
-            # The dummy attention_mask row marks one valid token, so a per-token field gets one
-            # dummy row for it while a response-token field gets none.
+            # Per-token fields cover the dummy attended token; response fields do not.
             if self.data.get(key) is not None:
                 data[key] = make_packed_field_padding(
                     key,

@@ -489,7 +489,6 @@ async def test_agent_loop_uses_incremental_replay_metadata_traces(
     )
 
     assert prompt_starts == [0, 5]
-    # One dense int32 block, never a nested list: the payload stays an ndarray to the trainer.
     support = output.rollout_sample_support
     assert support.dtype == SAMPLE_SUPPORT_DTYPE
     np.testing.assert_array_equal(support[:2], np.array([[10, 100], [11, 110]], dtype=SAMPLE_SUPPORT_DTYPE))

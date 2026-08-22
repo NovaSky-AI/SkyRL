@@ -786,9 +786,7 @@ class MegatronWorker:
                 padded[key] = None
                 continue
             if isinstance(value, PackedTensor):
-                # The dummy attention_mask row below marks one valid token, so a per-token field
-                # gets one dummy row for it while a response-token field gets none. A packed field
-                # with no rule raises here rather than falling through as a non-Tensor.
+                # Per-token fields cover the dummy attended token; response fields do not.
                 padded[key] = append_packed_field_padding(
                     key, value, segment_lengths=packed_dummy_row_segments(key, pad_count)
                 )

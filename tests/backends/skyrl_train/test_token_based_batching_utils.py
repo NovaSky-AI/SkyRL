@@ -234,8 +234,7 @@ class TestTokenBasedBatchIterator:
         assert torch.all(padding["router_padding_mask"])
 
     def test_padding_microbatch_sample_support_holds_no_response_rows(self):
-        """The dummy row attends one prompt-side token and generates nothing, so its support
-        segment is empty -- and the route field keeps its own one-row dummy segment."""
+        """A dummy row attends one token but generates no response."""
         batch = self._make_batch([4, 4], num_actions=2)
         self._add_packed_side_channels(batch)
         iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)

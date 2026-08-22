@@ -54,16 +54,9 @@ class GeneratorOutput(TypedDict):
     # e.g. {"llm": [...], "env": [...]}. trajectory_time_splits is None if any trajectory did not
     # record its split.
     trajectory_time_splits: Optional[Dict[str, List[float]]]
-    # Per trajectory, one ``[tokens, layers, topk]`` array of the routes the rollout took over a
-    # prefix of its ``prompt + response`` tokens: no decode forward follows the last sampled token,
-    # and a multi-turn trace ends further short of a synthetic EOS. Collation
-    # dummy-fills the uncovered tail and the router padding mask keeps it out of router accounting,
-    # so the row count is what states where the capture stops.
+    # Per trajectory, routes for a prefix of its prompt and response tokens.
     rollout_expert_indices: Optional[List[RoutedExpertIndices]]
-    # Per trajectory, one dense ``[response_tokens, top_k]`` array of the sampler support each
-    # response token was drawn from, right-padded with ``SAMPLE_SUPPORT_PADDING``. Tokens with no
-    # captured support (observations, a synthetic EOS) are all-padding rows. Stays an ndarray from
-    # the wire to the packed trainer field: nested lists of it cost ~50x the int32 buffer.
+    # Per trajectory, sampler support for each response token; uncaptured rows are padding.
     rollout_sample_support: Optional[List[SampleSupport]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]

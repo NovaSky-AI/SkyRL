@@ -55,8 +55,7 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
-        # Routes cover every token the loss trains: one row short of the sequence, since the last
-        # sampled token has no subsequent forward to record a route for.
+        # Routes cover every trained token.
         "rollout_expert_indices": [np.zeros((3, 1, 2), dtype=np.uint8), np.ones((3, 1, 2), dtype=np.uint8)],
         "rollout_sample_support": [[[1, 2], [1, 2]], [[3, 4], [3, 4]]],
     }
@@ -609,7 +608,6 @@ class TestMergeStepwiseOutput:
         support = merged["rollout_sample_support"][0]
         expected = [[20, 21, -1], [-1, -1, -1], [40, 44, -1], [41, 45, 46]]
         np.testing.assert_array_equal(support, np.array(expected, dtype=SAMPLE_SUPPORT_DTYPE))
-        # One dense ndarray, so the trainer can pack it without a nested-list round trip.
         assert support.shape == (len(merged["response_ids"][0]), 3)
         assert support.dtype == SAMPLE_SUPPORT_DTYPE
 

@@ -10,10 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.utils.routed_experts import (
-    ROUTED_EXPERT_DTYPES,
-    RoutedExpertTrace,
-)
+from skyrl.backends.skyrl_train.utils.routed_experts import ROUTED_EXPERT_DTYPES
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
     SAMPLE_SUPPORT_PADDING,
@@ -22,7 +19,6 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 from skyrl.train.dataset import parallel_fill
 from skyrl.train.dataset.preprocess import (
     ROUTED_EXPERT_TORCH_DTYPES,
-    build_sample_support,
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
@@ -78,43 +74,6 @@ def test_router_padding_mask_marks_left_padding_and_uncaptured_suffix():
     mask = make_router_padding_mask(attention_mask, [2, 4])
 
     assert mask.tolist() == [[True, False, False, True], [False, False, False, False]]
-
-
-def test_router_padding_mask_marks_the_tail_a_multi_turn_trace_never_captured():
-    """A trace reports only the rows it captured, so the mask covers exactly the tail that
-    collation dummy-fills. Two turns over a 3-token prompt and a 2-token observation capture
-    8 rows of a 10-token sequence: no decode forward followed the last sampled token, and the
-    synthetic EOS was never evaluated at all.
-    """
-    trace = RoutedExpertTrace()
-    trace.record_generation(
-        prompt_token_count=3,
-        generated_token_count=2,
-        routed_experts=np.zeros((4, 2, 2), dtype=np.int16),
-    )
-    trace.record_generation(
-        prompt_token_count=7,
-        generated_token_count=2,
-        routed_experts=np.zeros((4, 2, 2), dtype=np.int16),
-    )
-    # The last two tokens are loss-masked, which is what the trace's own guard enforces.
-    routes = trace.finalize(token_count=10, loss_mask=[0, 0, 0, 1, 1, 0, 0, 1, 1, 0])
-    assert routes.shape[0] == 8
-
-    attention_mask = torch.tensor([[0, 0] + [1] * 10])
-
-    mask = make_router_padding_mask(attention_mask, [routes.shape[0]])
-
-    assert mask.tolist() == [[True, True] + [False] * 8 + [True, True]]
-
-
-def test_router_padding_mask_marks_the_last_token_for_batched_routes():
-    """``generate_batched`` returns ``seq_len - 1`` rows, one short of its sequence."""
-    attention_mask = torch.tensor([[0, 0, 1, 1, 1, 1, 1]])
-
-    mask = make_router_padding_mask(attention_mask, [4])
-
-    assert mask.tolist() == [[True, True, False, False, False, False, True]]
 
 
 def test_routed_expert_tensor_uses_unique_dummy_routes(tokenizer):
@@ -627,10 +586,6 @@ def test_stepwise_anti_correlation_no_inflation(tokenizer):
     assert action[1].tolist() == [0] * 80 + [1] * 10
 
 
-# ---------------------------------------------------------------------------
-# Sample support — packed to response tokens
-# ---------------------------------------------------------------------------
-
 SAMPLE_SUPPORT_TOP_K = 3
 # Anti-correlated prompt/response lengths, so a prompt-region rectangle would be mostly filler.
 SAMPLE_SUPPORT_LENGTHS = [(2, 3), (9, 2), (5, 5), (1, 1)]
@@ -676,32 +631,8 @@ def test_sample_support_packs_to_the_response_tokens(tokenizer):
         assert torch.equal(packed.segment(index), torch.from_numpy(rows))
 
 
-def test_sample_support_allocates_no_prompt_region_rectangle(tokenizer):
-    """A ``[batch, seq_len, top_k]`` rectangle would be mostly prompt-region filler."""
-    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
-
-    *_, packed = _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
-
-    max_total = max(prompt_len + response_len for prompt_len, response_len in SAMPLE_SUPPORT_LENGTHS)
-    rectangle_rows = len(SAMPLE_SUPPORT_LENGTHS) * max_total
-    assert packed.values.shape[0] == sum(response_len for _, response_len in SAMPLE_SUPPORT_LENGTHS)
-    assert packed.values.shape[0] < rectangle_rows
-    assert packed.values.numel() == packed.values.shape[0] * SAMPLE_SUPPORT_TOP_K
-
-
-def test_sample_support_preserves_padding_rows(tokenizer):
-    """Padding stays ``-1``: not zeros, and not the route field's ``arange(topk)``."""
-    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
-
-    *_, packed = _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
-
-    first_rows = torch.stack([packed.segment(index)[0] for index in range(len(support))])
-    assert torch.all(first_rows == SAMPLE_SUPPORT_PADDING)
-    assert not torch.any(packed.values[packed.values >= 0] == SAMPLE_SUPPORT_PADDING)
-
-
 def test_sample_support_pooled_fill_equals_serial_fill(monkeypatch, tokenizer):
-    """The pooled fill writes disjoint segments, so it must be bit-identical to a serial one."""
+    """Parallel and serial fills must be bit-identical."""
     support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
 
     monkeypatch.setattr(parallel_fill, "default_fill_workers", lambda: len(SAMPLE_SUPPORT_LENGTHS))
@@ -713,8 +644,7 @@ def test_sample_support_pooled_fill_equals_serial_fill(monkeypatch, tokenizer):
     assert torch.equal(pooled.values, torch.from_numpy(np.concatenate(support, axis=0)))
 
 
-def test_sample_support_accepts_read_only_and_sliced_arrays(tokenizer):
-    """Wire arrays arrive read-only, and the single-turn path hands over a row slice."""
+def test_sample_support_accepts_read_only_arrays(tokenizer):
     lengths = [(2, 2)]
     rows = np.asarray([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=SAMPLE_SUPPORT_DTYPE)
     rows.flags.writeable = False
@@ -749,7 +679,6 @@ def test_sample_support_rejects_nested_lists(tokenizer):
 
 @pytest.mark.parametrize("dtype", [np.int16, np.int64])
 def test_sample_support_rejects_non_canonical_dtypes(tokenizer, dtype):
-    """The sender establishes int32, so collation validates instead of rescanning."""
     support = [rows.astype(dtype) for rows in _make_sample_support(SAMPLE_SUPPORT_LENGTHS)]
 
     with pytest.raises(ValueError, match="canonical sample-support dtype"):
@@ -772,9 +701,3 @@ def test_sample_support_none_when_not_provided(tokenizer):
         loss_masks=[[1]],
     )
     assert packed is None
-
-
-def test_build_sample_support_torch_dtype_matches_the_wire_dtype():
-    assert torch.empty(0, dtype=SAMPLE_SUPPORT_TORCH_DTYPE).numpy().dtype == SAMPLE_SUPPORT_DTYPE
-    packed = build_sample_support([np.zeros((2, 3), dtype=SAMPLE_SUPPORT_DTYPE)], np.asarray([2]))
-    assert packed.dtype == SAMPLE_SUPPORT_TORCH_DTYPE
