@@ -41,6 +41,23 @@ def _new_pinned_like(t: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(t, device="cpu").pin_memory()
 
 
+def _check_resident(t: torch.Tensor, what: str) -> None:
+    """Fail loudly if `t`'s storage has been freed by an offload.
+
+    Megatron offloads DDP buffers in place: `offload_grad_buffers()` /
+    `buffer.offload_to_cpu()` call `storage().resize_(0)` and leave the tensor
+    view intact ("accessing them during offload is undefined behavior").
+    copy_()ing such a tensor hands cudaMemcpyAsync a dangling device pointer,
+    which surfaces as a bare `CUDA error: invalid argument` from whichever
+    line touched it. Say what actually went wrong instead.
+    """
+    if t.numel() > 0 and t.untyped_storage().size() == 0:
+        raise RuntimeError(
+            f"AdapterStore: {what} is offloaded (storage freed); backload the "
+            "policy model *and* optimizer/grad buffers before swapping adapters."
+        )
+
+
 def _expected_lora_param_check(model_chunks) -> None:
     """Sanity-check: every trainable param under DDP buffers is a LoRA adapter param.
 
@@ -230,6 +247,8 @@ class AdapterStore:
     def _snapshot(self, slot: AdapterSlot, model_chunks, optimizer) -> None:
         """Copy live GPU state into `slot` (CPU)."""
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            _check_resident(buf.param_data, f"param buffer {mc_idx}/{buf_idx}")
+            _check_resident(buf.grad_data, f"grad buffer {mc_idx}/{buf_idx}")
             slot.cpu_param_data[mc_idx][buf_idx].copy_(buf.param_data, non_blocking=True)
             slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
@@ -257,6 +276,8 @@ class AdapterStore:
     def _restore(self, slot: AdapterSlot, model_chunks, optimizer) -> None:
         """Copy `slot` (CPU) into live GPU state."""
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            _check_resident(buf.param_data, f"param buffer {mc_idx}/{buf_idx}")
+            _check_resident(buf.grad_data, f"grad buffer {mc_idx}/{buf_idx}")
             buf.param_data.copy_(slot.cpu_param_data[mc_idx][buf_idx], non_blocking=True)
             buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
