@@ -20,7 +20,11 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
     overrides_dict_to_dotlist,
 )
-from skyrl.train.utils.utils import validate_cfg, validate_inference_engine_cfg
+from skyrl.train.utils.utils import (
+    validate_cfg,
+    validate_inference_engine_cfg,
+    validate_megatron_cfg,
+)
 from tests.train.util import example_dummy_config
 
 
@@ -850,3 +854,35 @@ class TestDeltaWeightSyncConfig:
         # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
         assert "my_sync_dir" in cfg.publish_staging_dir
         assert "my_sync_dir" in cfg.local_checkpoint_dir
+
+
+class TestMegatronRouterReplayValidation:
+    @staticmethod
+    def _cfg():
+        cfg = _make_validated_test_config()
+        cfg.trainer.strategy = "megatron"
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
+        return cfg
+
+    @pytest.mark.parametrize("vpp_size", [1, 2])
+    def test_routing_replay_refuses_virtual_pipeline_parallelism(self, vpp_size):
+        cfg = self._cfg()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = vpp_size
+
+        with pytest.raises(AssertionError, match="virtual_pipeline_model_parallel_size"):
+            validate_megatron_cfg(cfg)
+
+    @pytest.mark.parametrize("vpp_size", [None, 0])
+    def test_routing_replay_allows_unset_virtual_pipeline_parallelism(self, vpp_size):
+        cfg = self._cfg()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = vpp_size
+
+        validate_megatron_cfg(cfg)
+
+    def test_virtual_pipeline_parallelism_allowed_without_routing_replay(self):
+        cfg = self._cfg()
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = False
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = 2
+
+        validate_megatron_cfg(cfg)

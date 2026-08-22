@@ -37,6 +37,7 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
 )
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
+    PackedField,
     build_logprobs_content,
     pack_routed_experts,
 )
@@ -469,7 +470,7 @@ class VLLMServerActor(ServerActorProtocol):
                         "token_ids": token_ids_out,
                         "finish_reason": finish_reason,
                         "logprobs": logprobs,
-                        "routed_experts": routed_experts,
+                        PackedField.ROUTED_EXPERTS.value: routed_experts,
                     }
                 ]
             }
