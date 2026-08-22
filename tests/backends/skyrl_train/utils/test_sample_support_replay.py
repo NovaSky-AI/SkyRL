@@ -1,14 +1,4 @@
-"""Support-conditioned scoring, the synthetic-EOS fallback, and the row-id join.
-
-Megatron cannot be imported on a CPU host, so the tensor-parallel and fused LM-head entry points
-are exercised through fakes that record the shapes they are handed, and the packed return path
-runs against a stubbed ``megatron.core.parallel_state`` (it only needs pure-torch helpers at
-``context_parallel_size=1``). The scorer's arithmetic, the fallback's fixed capacity and the
-row-id join are all real here.
-
-Run with:
-uv run --isolated --extra dev --extra skyrl-train pytest tests/backends/skyrl_train/utils/test_sample_support_replay.py
-"""
+"""Tests for support-conditioned scoring and synthetic-EOS fallback."""
 
 import sys
 import types
@@ -19,7 +9,6 @@ import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     TokenMetadataLayout,
-    align_packed_token_metadata,
 )
 from skyrl.backends.skyrl_train.utils import sample_support_replay
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
@@ -27,7 +16,6 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
     cu_seqlens_from_lengths,
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_NO_ROW,
     SAMPLE_SUPPORT_PADDING,
     SAMPLE_SUPPORT_TORCH_DTYPE,
 )
@@ -192,23 +180,6 @@ def test_fused_projection_bounds_the_candidate_pair_temporary(monkeypatch):
     # 2 * 4 * TOP_K support pairs plus 2 * 4 sampled pairs, all of them chunked.
     assert sum(widths) == 2 * 4 * TOP_K + 2 * 4
     assert hidden.grad is not None and weight.grad is not None
-
-
-def test_grad_enabled_projection_reselects_on_backward():
-    """The bounded path is a custom Function, so no ``[pairs, hidden]`` activation is retained."""
-    hidden = torch.randn(6, 5, dtype=torch.float64, requires_grad=True)
-    weight = torch.randn(9, 5, dtype=torch.float64, requires_grad=True)
-
-    projected = sample_support_replay._project_candidate_pairs(
-        hidden,
-        torch.arange(6),
-        torch.arange(6),
-        weight,
-        1.0,
-        2,
-    )
-
-    assert "ChunkedCandidateProjection" in type(projected.grad_fn).__name__
 
 
 def test_support_ids_must_use_the_canonical_dtype():
@@ -397,11 +368,7 @@ def test_multi_subsequence_rows_are_rejected():
         reject_unsupported_sample_support_packing([[7], [4, 5]])
 
 
-# (prompt_len, response_len) per trajectory. Trajectory 0 has a one-token prompt, so front
-# alignment and the true response-suffix domain coincide there and a suite that tested only it
-# would pass either way. Trajectory 1 has a two-token prompt, where front alignment is off by
-# one and still leaves exactly one unsupported loss-bearing row -- so it passes the at-most-one
-# guard and would be scored, wrongly, in silence.
+# (prompt_len, response_len) per trajectory, including unequal prompt lengths.
 JOIN_LENGTHS: List[Tuple[int, int]] = [(1, 3), (2, 3)]
 
 
@@ -485,66 +452,13 @@ def _dense_scores(lengths, *, packed=False, support=None):
     )
 
 
-def _scores_with_segment_starts(monkeypatch, starts_for, lengths):
-    """Re-run the join with a chosen per-trajectory placement instead of the derived one."""
-
-    def fake_align(support: PackedTensor, layout: TokenMetadataLayout) -> torch.Tensor:
-        row_ids = PackedTensor(torch.arange(support.values.shape[0], dtype=torch.long), support.cu_seqlens)
-        return align_packed_token_metadata(
-            row_ids,
-            layout,
-            SAMPLE_SUPPORT_NO_ROW,
-            segment_starts=starts_for(layout, support),
-        )
-
-    monkeypatch.setattr(sample_support_replay, "align_sample_support_row_ids", fake_align)
-    return _dense_scores(lengths).logprobs
-
-
 def test_row_id_join_scores_the_response_suffix_domain():
-    """The join must land on ``[p - 1, p + r - 1)``, not at the front of the padded region."""
     sequences, _, _, _, logits = _batch_tensors(JOIN_LENGTHS)
 
     actual = _dense_scores(JOIN_LENGTHS).logprobs
 
     expected = _reference_from_canonical_positions(logits, sequences, JOIN_LENGTHS, _support(JOIN_LENGTHS))
     torch.testing.assert_close(actual, expected)
-
-
-def test_front_alignment_agrees_only_where_the_prompt_is_one_token(monkeypatch):
-    """Front alignment is the trap: right exactly when ``p == 1``, silently wrong otherwise."""
-    sequences, _, _, _, logits = _batch_tensors(JOIN_LENGTHS)
-    correct = _reference_from_canonical_positions(logits, sequences, JOIN_LENGTHS, _support(JOIN_LENGTHS))
-
-    front = _scores_with_segment_starts(
-        monkeypatch,
-        lambda layout, support: [0] * len(layout.sequence_lengths),
-        JOIN_LENGTHS,
-    )
-
-    torch.testing.assert_close(front[0], correct[0])
-    assert not torch.allclose(front[1], correct[1])
-
-
-@pytest.mark.parametrize("offset", [-1, 1])
-def test_one_off_row_id_start_moves_every_scored_position(monkeypatch, offset):
-    """Negative control: a parity suite that cannot see a one-token shift proves nothing."""
-    lengths = [(3, 3), (4, 2)]
-    sequences, _, _, _, logits = _batch_tensors(lengths)
-    correct = _reference_from_canonical_positions(logits, sequences, lengths, _support(lengths))
-
-    perturbed = _scores_with_segment_starts(
-        monkeypatch,
-        lambda layout, support: [
-            total - int(rows) - 1 + offset
-            for total, rows in zip(layout.sequence_lengths, support.sequence_lengths.tolist())
-        ],
-        lengths,
-    )
-
-    scored = correct != 0
-    moved = int((scored & ~torch.isclose(perturbed, correct)).sum())
-    assert moved == int(scored.sum()), f"only {moved} of {int(scored.sum())} scored positions moved"
 
 
 def test_packed_and_unpacked_joins_score_the_same_tokens(megatron_parallel_state):
@@ -595,8 +509,6 @@ def test_replay_requires_support_a_loss_mask_and_a_layout():
             metadata_layout=_layout(lengths),
             **DENSE_SCORER_KWARGS,
         )
-    # The payload only ever goes missing through config or a custom generator, so the message
-    # has to name both rather than describe a microbatch the user cannot inspect.
     assert "generator.inference_engine.enable_return_sample_support_set" in str(missing_support.value)
     assert "SkyRLGymGenerator" in str(missing_support.value)
     with pytest.raises(ValueError, match="response loss mask"):

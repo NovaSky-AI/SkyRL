@@ -1,17 +1,4 @@
-"""Support-conditioned scores for bounded sampler replay.
-
-The rollout sampler draws every generated token from a bounded top-k support rather than from
-the full vocabulary, so the training-time distribution only matches the sampler's once the
-policy logprob is renormalized over that same recorded set.
-
-Two things ship together here because either alone is unusable. The scorer renormalizes over the
-recorded support; the fallback scores the one loss-bearing token per trajectory that has no
-recorded support -- an EOS SkyRL appends after generation, which vLLM never sampled -- over the
-full vocabulary. Without the fallback such a token would take logprob 0.0, i.e. probability 1.0:
-``scatter_reduce(amin)`` selects exactly one row per trajectory and ``torch.where`` then picks an
-un-scattered zero. That is a silent wrong answer, so any further unsupported loss-bearing row is
-rejected instead.
-"""
+"""Support-conditioned scoring for bounded sampler replay."""
 
 from dataclasses import dataclass
 
@@ -33,10 +20,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 
 
 def missing_sample_support_message(backend: str) -> str:
-    """Error text naming the config key and the generator contract behind an absent payload.
-
-    Both trainer backends raise this, so the wording differs only in ``backend``.
-    """
+    """Describe how to enable and forward a missing support payload."""
     return (
         f"sample-support replay is enabled but the {backend} forward received no "
         f"{SAMPLE_SUPPORT_FIELD!r}. Set generator.inference_engine.enable_return_sample_support_set=true "
@@ -55,12 +39,7 @@ class SampleSupportScores:
 
 
 def reject_unsupported_sample_support_packing(sub_seq_lengths: list[list[int]] | None) -> None:
-    """Refuse a microbatch whose packed rows are not one whole trajectory each.
-
-    Replay maps one support segment onto one trajectory. Controller-side mini-batch packing and
-    SFT global sequence packing both place several sub-sequences in a row, which needs a second
-    packing model rather than a wider condition here.
-    """
+    """Require every packed row to contain one whole trajectory."""
     if sub_seq_lengths is None:
         return
     if any(len(row_lengths) > 1 for row_lengths in sub_seq_lengths):
@@ -186,11 +165,7 @@ def sample_support_scores(
     temperature: float = 1.0,
     chunk_size: int | None = None,
 ) -> SampleSupportScores:
-    """Renormalize each sampled token's score over its own recorded support row.
-
-    Gathers are fixed-shape: every row scores ``top_k`` candidate slots whether or not they are
-    populated, so the tensor program does not depend on how wide any particular support is.
-    """
+    """Renormalize each sampled token's score over its recorded support row."""
     if logits_or_hidden.shape[:-1] != sampled_ids.shape or support_ids.shape[:-1] != sampled_ids.shape:
         raise ValueError(
             "logits, sampled_ids, and support_ids must have matching prefix shapes, got "
@@ -321,11 +296,7 @@ def synthetic_eos_logprobs(
     fused_backend: str = "torch",
     metadata_layout: TokenMetadataLayout | None = None,
 ) -> torch.Tensor:
-    """Score an EOS that SkyRL appended after generation over the full vocabulary.
-
-    Capacity is one device-side candidate slot per trajectory, occupied or not, so the shapes the
-    TP collectives see never depend on how many fallbacks this microbatch happens to hold.
-    """
+    """Score an EOS appended after generation over the full vocabulary."""
     if synthetic_eos_mask.shape != sampled_ids.shape:
         raise ValueError(
             f"synthetic_eos_mask shape {synthetic_eos_mask.shape} does not match sampled ids {sampled_ids.shape}"
@@ -333,8 +304,7 @@ def synthetic_eos_logprobs(
 
     trajectory_ids, capacity = _trajectory_ids_for_fallback(synthetic_eos_mask, metadata_layout)
     flat_mask = synthetic_eos_mask.reshape(-1)
-    # One slot per trajectory can only score one token, so anything beyond the appended EOS has to
-    # be rejected rather than dropped. Reading the count costs one host sync per microbatch.
+    # Replay permits only the single appended EOS to lack recorded support.
     per_trajectory_count = torch.zeros(capacity, dtype=torch.long, device=flat_mask.device).scatter_add_(
         0, trajectory_ids, flat_mask.long()
     )
@@ -363,8 +333,7 @@ def synthetic_eos_logprobs(
     selected_source = flat_source.index_select(0, selected_indices)
     selected_targets = flat_targets.index_select(0, selected_indices)
     if lm_head_weight is None and tp_group is None:
-        # Unsharded full-vocabulary logits: the seam a non-tensor-parallel backend enters through.
-        # Only one row per trajectory is softmaxed, so the dense form costs nothing here.
+        # Only one row per trajectory is softmaxed on the unsharded path.
         selected = selected_source.log_softmax(dim=-1).gather(1, selected_targets.unsqueeze(1)).squeeze(1)
     elif lm_head_weight is None:
         from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
@@ -406,12 +375,7 @@ def synthetic_eos_logprobs(
 
 
 def _row_ids_in_canonical_positions(row_ids: torch.Tensor, layout: TokenMetadataLayout) -> torch.Tensor:
-    """Shift unpacked row ids out of Megatron's left-removed layout into batch positions.
-
-    ``align_sample_support_row_ids`` addresses real-token offsets, which is the layout the model
-    consumes. Without sample packing ``recover_left_padding`` has already returned the logits to
-    ``[batch, seq_len]``, so each row moves right by its own left-padding width.
-    """
+    """Restore left padding to row ids aligned in Megatron's real-token layout."""
     sequence_length = layout.attention_mask.shape[1]
     padding_widths = sequence_length - layout.attention_mask.sum(dim=1).to(torch.long)
     positions = torch.arange(sequence_length, device=row_ids.device).unsqueeze(0) - padding_widths.unsqueeze(1)
@@ -422,7 +386,6 @@ def _gather_support_rows(support: PackedTensor, row_ids: torch.Tensor) -> torch.
     """Gather each model position's ``[top_k]`` support row, by id rather than by placement."""
     top_k = support.values.shape[1]
     if support.values.shape[0] == 0:
-        # An all-padding microbatch generates nothing, so no position has a support row.
         return torch.full(
             (*row_ids.shape, top_k),
             SAMPLE_SUPPORT_PADDING,
@@ -453,13 +416,7 @@ def compute_sample_support_scores(
     chunk_size: int | None,
     fused_backend: str,
 ) -> SampleSupportScores:
-    """Score a microbatch's support-conditioned logprobs in canonical trainer layout.
-
-    The support payload is joined by row id, never by payload alignment: only the int64 channel
-    from :func:`align_sample_support_row_ids` is placed, and the ``[top_k]`` rows are gathered by
-    the ids it names. Row ids index the microbatch's own packed row space, so they are derived
-    here rather than carried in the batch.
-    """
+    """Score support-conditioned logprobs in canonical trainer layout."""
     if sample_support is None:
         raise ValueError(missing_sample_support_message("Megatron"))
     if loss_mask is None:
