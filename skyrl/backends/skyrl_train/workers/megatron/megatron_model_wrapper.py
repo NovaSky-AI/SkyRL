@@ -204,11 +204,7 @@ def _build_replay_metadata_layout(
     packed: bool,
     fp8_enabled: bool,
 ) -> Optional[TokenMetadataLayout]:
-    """Build the shared token layout when a replay channel needs it.
-
-    Sample-support replay needs it on the unpacked path too: the row-id join derives its
-    placement from the layout's own trajectory lengths rather than from a padded rectangle.
-    """
+    """Build the token layout needed by router or sample-support replay."""
     if rollout_expert_indices is None and sample_support is None:
         return None
     return build_token_metadata_layout(
