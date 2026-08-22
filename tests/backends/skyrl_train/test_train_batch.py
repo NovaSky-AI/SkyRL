@@ -772,6 +772,8 @@ def test_serialized_field_formats_are_stable():
     assert state["bf16_logprobs"]["format"] == TensorFormat.TORCH
     assert state["pixel_values"]["format"] == TensorFormat.TENSOR_LIST
     assert state["rollout_expert_indices"]["format"] == TensorFormat.PACKED_TENSOR
+
+
 ROUTE_KEY = "rollout_expert_indices"
 _ZERO_COPY_SEGMENT_LENGTHS = [512, 256, 256]
 _ZERO_COPY_BATCH_SIZE = len(_ZERO_COPY_SEGMENT_LENGTHS)
