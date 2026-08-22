@@ -24,12 +24,7 @@ VOCAB = 12
 
 
 class _TokenIndexedLM(nn.Module):
-    """Logits are a learnable function of the input token id alone.
-
-    Position independence is what lets the packed and unpacked layouts be compared directly,
-    while distinct token ids still make a misplaced side channel change the answer. The gather
-    yields a fresh tensor, which the wrapper's in-place temperature division requires.
-    """
+    """A position-independent model for comparing packed and unpacked layouts."""
 
     def __init__(self, vocab_size: int = VOCAB):
         super().__init__()
