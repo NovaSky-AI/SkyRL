@@ -196,8 +196,7 @@ def test_routed_expert_tensor_rejects_non_canonical_dtypes(tokenizer, dtype):
 
 
 def test_routed_expert_tensor_keeps_the_sender_dtype_after_truncation(tokenizer):
-    """A truncated array keeps the dtype the wire declared; nothing rescans it to retighten."""
-    # int16 on the wire because of the trailing 300, which truncation then drops.
+    # The dropped trailing value required int16 on the sender.
     routes = np.asarray([[[1, 2]], [[3, 4]], [[300, 5]]], dtype=np.int16)
 
     *_, routed = convert_prompts_responses_to_batch_tensors(
@@ -243,7 +242,7 @@ def _numpy_padded_routes(
     prompts: List[List[int]],
     responses: List[List[int]],
 ) -> np.ndarray:
-    """The route collation as NumPy expressed it: broadcast ``arange(topk)``, then write each sample."""
+    """Reference NumPy implementation of route collation."""
     max_total = max(len(prompt) + len(response) for prompt, response in zip(prompts, responses))
     num_layers, topk = routes[0].shape[1:]
     batch_dtype = max((sample.dtype for sample in routes), key=lambda dtype: dtype.itemsize)
@@ -256,11 +255,10 @@ def _numpy_padded_routes(
 
 
 def test_routed_expert_tensor_is_bit_identical_to_numpy_collation(tokenizer):
-    """Left padding, a short route prefix and trailing padding, across a mixed-dtype batch."""
     prompts = [[1, 2], [3, 4, 5, 6]]
     responses = [[10, 11, 12], [20, 21]]
     num_layers, topk = 2, 3
-    # Sample 0 has 5 tokens but only 4 captured route rows, so it pads on both sides.
+    # Sample 0 has fewer route rows than tokens and needs padding on both sides.
     routes = [
         np.arange(4 * num_layers * topk, dtype=np.uint8).reshape(4, num_layers, topk),
         (np.arange(6 * num_layers * topk, dtype=np.int16) + 300).reshape(6, num_layers, topk),
@@ -277,12 +275,10 @@ def test_routed_expert_tensor_is_bit_identical_to_numpy_collation(tokenizer):
 
     assert routed.dtype == torch.int16
     assert torch.equal(routed, torch.from_numpy(_numpy_padded_routes(routes, prompts, responses)))
-    # Padding routes are topk distinct experts, which Megatron's dropless dispatcher requires;
-    # zeros would collapse them onto one expert.
+    # Padding routes must select distinct experts for the dropless dispatcher.
     padding_row = [[0, 1, 2]] * num_layers
     assert routed[0, 0].tolist() == padding_row
     assert routed[0, 5].tolist() == padding_row
-    assert not torch.equal(routed[0, 0], torch.zeros_like(routed[0, 0]))
 
 
 def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):

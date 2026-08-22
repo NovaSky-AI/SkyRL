@@ -604,10 +604,8 @@ class MegatronWorker:
             )
             provider.linear_attention_freq = linear_attention_freq[: provider.num_layers]
 
-        # Checked on the resolved provider because to_megatron_provider() can supply its own VPP
-        # default. Every forward appends its routes to all local RouterReplay instances, but under
-        # VPP only the chunk being forwarded consumes them, so each instance's backward FIFO
-        # desyncs by the chunk count.
+        # Check the resolved provider because it may supply its own VPP default. Interleaved
+        # chunks desynchronise each RouterReplay instance's backward FIFO.
         vpp_size = provider.virtual_pipeline_model_parallel_size
         if provider.moe_enable_routing_replay and vpp_size is not None and vpp_size > 1:
             raise ValueError(

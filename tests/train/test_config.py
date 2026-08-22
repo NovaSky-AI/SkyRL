@@ -1198,8 +1198,6 @@ class TestDeltaWeightSyncConfig:
 
 
 class TestMegatronRouterReplayValidation:
-    """Router replay (R3) incompatibilities refused at submission time."""
-
     @staticmethod
     def _cfg():
         cfg = _make_validated_test_config()

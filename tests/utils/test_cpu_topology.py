@@ -13,7 +13,6 @@ from skyrl.utils.cpu_topology import cgroup_cpu_quota, permitted_cpu_cores, pool
 
 @pytest.fixture
 def cgroup_paths(monkeypatch, tmp_path: Path):
-    """Point every cgroup path at a fixture directory; each file is absent until written."""
     paths = {
         "CGROUP_V2_CPU_MAX_PATH": tmp_path / "cpu.max",
         "CGROUP_V1_CPU_QUOTA_PATH": tmp_path / "cpu.cfs_quota_us",
@@ -24,30 +23,18 @@ def cgroup_paths(monkeypatch, tmp_path: Path):
     return paths
 
 
-def test_cgroup_v2_quota(cgroup_paths):
-    cgroup_paths["CGROUP_V2_CPU_MAX_PATH"].write_text("400000 100000\n")
+@pytest.mark.parametrize(
+    ("version", "quota", "expected"),
+    [(2, "400000", 4), (2, "max", None), (1, "200000", 2), (1, "-1", None)],
+)
+def test_cgroup_quota(cgroup_paths, version, quota, expected):
+    if version == 2:
+        cgroup_paths["CGROUP_V2_CPU_MAX_PATH"].write_text(f"{quota} 100000\n")
+    else:
+        cgroup_paths["CGROUP_V1_CPU_QUOTA_PATH"].write_text(f"{quota}\n")
+        cgroup_paths["CGROUP_V1_CPU_PERIOD_PATH"].write_text("100000\n")
 
-    assert cgroup_cpu_quota() == 4
-
-
-def test_cgroup_v2_max_literal_is_unlimited(cgroup_paths):
-    cgroup_paths["CGROUP_V2_CPU_MAX_PATH"].write_text("max 100000\n")
-
-    assert cgroup_cpu_quota() is None
-
-
-def test_cgroup_v1_quota(cgroup_paths):
-    cgroup_paths["CGROUP_V1_CPU_QUOTA_PATH"].write_text("200000\n")
-    cgroup_paths["CGROUP_V1_CPU_PERIOD_PATH"].write_text("100000\n")
-
-    assert cgroup_cpu_quota() == 2
-
-
-def test_cgroup_v1_negative_quota_is_unlimited(cgroup_paths):
-    cgroup_paths["CGROUP_V1_CPU_QUOTA_PATH"].write_text("-1\n")
-    cgroup_paths["CGROUP_V1_CPU_PERIOD_PATH"].write_text("100000\n")
-
-    assert cgroup_cpu_quota() is None
+    assert cgroup_cpu_quota() == expected
 
 
 def test_missing_cgroup_files(cgroup_paths):
