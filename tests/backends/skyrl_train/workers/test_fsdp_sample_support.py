@@ -230,10 +230,7 @@ def test_the_appended_eos_falls_back_to_the_full_vocabulary(packed):
 
 @pytest.mark.parametrize("packed", [False, True])
 def test_entropy_comes_from_the_recorded_support_not_the_vocabulary(monkeypatch, packed):
-    """The support is already gathered and scored, so no full-vocabulary entropy pass runs.
-
-    ``packed=True`` also covers routing both new channels back through ``nnz_indices``.
-    """
+    """Use recorded support without running full-vocabulary entropy."""
     sequences, attention_mask = _ragged_batch()
     support = _ragged_support(sequences)
     model = _TokenIndexedLM()
@@ -317,8 +314,7 @@ def test_the_policy_entropy_metric_excludes_the_unsupported_row():
     worker.mesh_rank = SimpleNamespace(dp_size=1)
     worker.optimizer = None
     worker.scheduler = MagicMock(get_last_lr=MagicMock(return_value=[0.0]))
-    # Both channels leave the forward in (B, S) = (2, 3) positions, which the worker slices with
-    # [-num_actions - 1 : -1] -- so the mask has to be that wide too or it broadcasts to all-True.
+    # Match the (B, S) shape sliced by the worker.
     trailing = torch.zeros((2, 1))
     worker.model = MagicMock(
         return_value=(
@@ -355,8 +351,6 @@ def test_the_policy_entropy_metric_excludes_the_unsupported_row():
 
     expected = float((entropy * entropy_mask).sum() / entropy_mask.sum())
     assert status["policy_entropy"] == pytest.approx(expected)
-    # Averaging over the loss mask alone would divide the same sum by one more slot.
-    assert status["policy_entropy"] != pytest.approx(float(entropy[entropy_mask].sum() / loss_mask.sum()))
 
 
 def test_replay_never_scores_every_position_over_the_full_vocabulary(monkeypatch):

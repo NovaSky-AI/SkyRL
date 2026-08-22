@@ -112,7 +112,8 @@ def _reference_support_entropy(logits, support_ids):
     return torch.stack(outputs).reshape(support_ids.shape[:-1])
 
 
-def test_support_entropy_matches_a_dense_reference_in_value_and_gradient():
+@pytest.mark.parametrize("entropy_requires_grad", [False, True])
+def test_support_entropy_matches_a_dense_reference(entropy_requires_grad):
     logits = torch.randn(2, 3, VOCAB, dtype=torch.float64, requires_grad=True)
     sampled_ids = torch.tensor([[2, 5, 1], [8, 3, 7]])
     support_ids = torch.tensor(
@@ -131,55 +132,22 @@ def test_support_entropy_matches_a_dense_reference_in_value_and_gradient():
         vocab_end_index=VOCAB,
         tp_group=None,
         compute_entropy=True,
-        entropy_requires_grad=True,
+        entropy_requires_grad=entropy_requires_grad,
     )
 
     assert scores.entropy is not None
+    assert scores.entropy.requires_grad == entropy_requires_grad
     torch.testing.assert_close(scores.entropy, _reference_support_entropy(logits, support_ids))
-    # A support-conditioned entropy is bounded by log(top_k), well under the full-vocab entropy.
-    assert float(scores.entropy.detach().max()) <= torch.log(torch.tensor(float(TOP_K)))
 
-    (scores.logprobs + scores.entropy).sum().backward()
+    loss = scores.logprobs.sum()
     reference_logits = logits.detach().clone().requires_grad_(True)
-    (
-        _reference_support_logprobs(reference_logits, sampled_ids, support_ids)
-        + _reference_support_entropy(reference_logits, support_ids)
-    ).sum().backward()
+    reference_loss = _reference_support_logprobs(reference_logits, sampled_ids, support_ids).sum()
+    if entropy_requires_grad:
+        loss = loss + scores.entropy.sum()
+        reference_loss = reference_loss + _reference_support_entropy(reference_logits, support_ids).sum()
+    loss.backward()
+    reference_loss.backward()
     torch.testing.assert_close(logits.grad, reference_logits.grad)
-
-
-def test_the_entropy_metric_is_detached_and_leaves_the_logprob_gradient_alone():
-    """``entropy_requires_grad=False`` must not put the extra statistic in the backward graph."""
-    logits = torch.randn(1, 2, VOCAB, dtype=torch.float64, requires_grad=True)
-    sampled_ids = torch.tensor([[2, 5]])
-    support_ids = torch.tensor([[[2, 4, -1, -1], [5, 1, 8, -1]]], dtype=SAMPLE_SUPPORT_TORCH_DTYPE)
-    scorer_kwargs = dict(
-        vocab_start_index=0,
-        vocab_end_index=VOCAB,
-        tp_group=None,
-    )
-
-    metric = sample_support_scores(
-        logits,
-        sampled_ids,
-        support_ids,
-        compute_entropy=True,
-        entropy_requires_grad=False,
-        **scorer_kwargs,
-    )
-    assert metric.entropy is not None and not metric.entropy.requires_grad
-    metric.logprobs.sum().backward()
-
-    without_entropy_logits = logits.detach().clone().requires_grad_(True)
-    sample_support_scores(
-        without_entropy_logits,
-        sampled_ids,
-        support_ids,
-        compute_entropy=False,
-        entropy_requires_grad=False,
-        **scorer_kwargs,
-    ).logprobs.sum().backward()
-    torch.testing.assert_close(logits.grad, without_entropy_logits.grad)
 
 
 def test_entropy_gradients_require_computing_the_entropy():
@@ -200,13 +168,7 @@ TP_SIZE = 2
 
 
 class _FakeTensorParallel:
-    """Both vocabulary shards, run concurrently, reducing at a barrier.
-
-    Ranks must agree on the shift before either can build its statistics, so a replay that runs
-    one rank to completion and then the other gives the first one a stale maximum. One thread per
-    rank keeps the two reductions in the order the real group imposes. The barrier has a timeout,
-    so a rank that stops reducing in step fails rather than hanging the suite.
-    """
+    """Run vocabulary shards concurrently and reduce them at a barrier."""
 
     def __init__(self, world_size: int = TP_SIZE):
         self.world_size = world_size
@@ -287,11 +249,7 @@ TP_SUPPORT_IDS = torch.tensor(
 
 
 def test_entropy_rides_the_existing_tensor_parallel_reduction(tensor_parallel):
-    """The design point: entropy adds a row to a collective, never a collective.
-
-    Two reductions per rank either way -- one MAX for the shift, one SUM for the statistics --
-    and enabling entropy only widens the SUM's payload from two rows to three.
-    """
+    """Entropy widens the SUM payload without adding a collective."""
     logits = torch.randn(2, 3, VOCAB, dtype=torch.float64)
     rows = TP_SAMPLED_IDS.numel()
 

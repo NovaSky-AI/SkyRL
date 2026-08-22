@@ -31,12 +31,7 @@ def missing_sample_support_message(backend: str) -> str:
 
 @dataclass(frozen=True)
 class SampleSupportScores:
-    """Support-conditioned scores and the rows a recorded support row backs.
-
-    ``entropy`` is ``None`` unless the caller asked for it. ``valid_mask`` is the mask both
-    channels need: it is the loss mask for the logprobs' synthetic-EOS exception and, for the
-    entropy, the set of rows the statistic is defined on at all.
-    """
+    """Support-conditioned scores and the rows backed by recorded support."""
 
     logprobs: torch.Tensor
     entropy: torch.Tensor | None
@@ -237,14 +232,11 @@ def sample_support_scores(
     local_exp = torch.where(local_members, (local_values - safe_max.unsqueeze(1)).exp(), 0.0)
     local_rows = [local_exp.sum(dim=-1), local_sampled]
     if compute_entropy:
-        # H = log(Z) - E_p[l - max] over the support, and both terms are sums over the same
-        # members that Z is. So the second one is one more row of the reduction below, never a
-        # reduction of its own.
+        # H = log(Z) - E_p[l - max] over the support.
         shifted_values = local_values if entropy_requires_grad else local_values.detach()
         weights = local_exp if entropy_requires_grad else local_exp.detach()
         local_rows.append((weights * torch.where(local_members, shifted_values - safe_max.unsqueeze(1), 0.0)).sum(-1))
-    # Denominator, numerator and the entropy statistic share one SUM collective, so a TP scorer
-    # costs two reductions whether or not entropy is asked for.
+    # Denominator, numerator, and entropy share one SUM collective.
     local_stats = torch.stack(local_rows)
     global_stats = local_stats.detach().clone()
     if tp_group is not None and torch.distributed.get_world_size(tp_group) > 1:

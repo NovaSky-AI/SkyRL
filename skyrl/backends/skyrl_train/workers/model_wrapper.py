@@ -458,10 +458,7 @@ class HFModelWrapper(nn.Module):
         batch_size, seqlen = attention_mask.shape
 
         def to_canonical_batch_positions(values: torch.Tensor) -> torch.Tensor:
-            """Undo the Ulysses slice and then the microbatch unpadding, as ``log_probs`` takes.
-
-            Result is (1, nnz) with packing and no SP, else (B, S).
-            """
+            """Undo the Ulysses slice and microbatch unpadding."""
             if self.sequence_parallel_size > 1:
                 dim = values.ndim - 1
                 values = gather_outputs_and_unpad(values, gather_dim=dim, unpad_dim=dim, padding_size=pad_size)
@@ -478,15 +475,12 @@ class HFModelWrapper(nn.Module):
             if support_entropy is not None:
                 assert support_entropy_mask is not None
                 output["entropy"] = to_canonical_batch_positions(support_entropy)
-                # The gather and the unpad both carry a float payload, so the mask rides as one.
-                # Padding positions score no support row, which is what a zero fill means here.
+                # Carry the mask through float-only gather and unpadding operations.
                 output[SAMPLE_SUPPORT_ENTROPY_MASK_KEY] = (
                     to_canonical_batch_positions(support_entropy_mask.to(support_entropy.dtype)) > 0
                 )
             else:
-                # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
-                # For non-sample packing: pass the attention mask to exclude padding tokens.
-                # attention_mask_fwd may be sliced (if sequence_parallel_size > 1) or full.
+                # Packed entropy is already unpadded; otherwise exclude padding tokens.
                 padding_mask = None if self.remove_microbatch_padding else attention_mask_fwd
                 output["entropy"] = to_canonical_batch_positions(
                     self.chunked_entropy_from_logits_fn(

@@ -24,8 +24,7 @@ SAMPLE_SUPPORT_PADDING = -1
 SAMPLE_SUPPORT_FIELD = "rollout_sample_support"
 # Sentinel outside the valid packed-row range.
 SAMPLE_SUPPORT_NO_ROW = -1
-# Names the forward output naming which positions the support-conditioned entropy is defined on.
-# Its absence is how a consumer tells full-vocabulary entropy, defined everywhere, from this one.
+# Forward-output mask for positions with support-conditioned entropy.
 SAMPLE_SUPPORT_ENTROPY_MASK_KEY = "entropy_mask"
 
 
