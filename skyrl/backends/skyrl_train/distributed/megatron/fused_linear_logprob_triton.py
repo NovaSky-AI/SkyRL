@@ -471,17 +471,7 @@ def efficient_entropy_triton_kernel_epilogue(
         global_logprobs_scalar = tl.sum(global_logprobs, axis=0)
         tl.atomic_add(global_logprobs_scalar_ptr, global_logprobs_scalar)
     elif reduction == 2:
-        # `num_tokens * 1.0`, NOT `num_tokens.to(tl.float32)`. `reduction` is a runtime
-        # argument, so Triton compiles all three branches whichever one runs -- while
-        # `num_tokens` is an unannotated int, which Triton specializes to a Python literal
-        # when its value is 1. `.to()` then raises AttributeError at COMPILE time and takes
-        # down a caller that never asked for a mean. Multiplying promotes whether the
-        # argument arrives as a specialized int or a tl.tensor.
-        #
-        # Reached by any caller whose microbatch holds a single row: sample-support replay's
-        # synthetic-EOS scorer sizes its candidate slots one-per-trajectory, so at
-        # micro_train_batch_size_per_gpu=1 it always compiles with num_tokens=1. That killed
-        # a 192-GPU Nemotron-120B run ~360 s into its first policy_train.
+        # Multiplication promotes both Triton tensors and specialized Python integers.
         global_logprobs_scalar = tl.sum(global_logprobs, axis=0) / (num_tokens * 1.0)
         tl.atomic_add(global_logprobs_scalar_ptr, global_logprobs_scalar)
 
