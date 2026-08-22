@@ -560,20 +560,16 @@ class TrainingOutputBatch(TensorBatch[Dict[str, torch.Tensor]]):
 
 @dataclass(frozen=True)
 class PackedFieldPadding:
-    """How one packed ``TrainingInput`` field fills the segments batch padding appends.
+    """Padding rule for a packed ``TrainingInput`` field.
 
-    ``dummy_row_length`` is the segment length for a synthetic batch row, which carries a
-    single attended token: a field indexed over every real token needs one row for it, a
-    field indexed over response tokens needs none.
+    ``dummy_row_length`` is its segment length for a synthetic one-token batch row.
     """
 
     fill: Callable[[PackedTensor], Union[torch.Tensor, int]]
     dummy_row_length: int
 
 
-# Every packed batch field needs an entry here: the three batch padding sites look its rule
-# up by name, so a field without one raises instead of reaching the trainer short a segment
-# (or, in `_pad_microbatch_to_size`, being skipped as a non-Tensor).
+# Every packed batch field needs a padding rule.
 PACKED_FIELD_PADDING: Dict[str, PackedFieldPadding] = {
     "rollout_expert_indices": PackedFieldPadding(
         # Megatron's dropless `tokens * topk` dispatcher needs topk distinct experts per row.
@@ -637,8 +633,7 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
             padding = TensorList([tensor[0].clone() for _ in range(pad_size)])
             new_tensors[key] = TensorList.cat([tensor, padding])
         elif isinstance(tensor, PackedTensor):
-            # Every other field copies row 0 into the padding rows, so each padded row spans as
-            # many tokens as row 0 and needs a segment of row 0's length.
+            # Padded rows copy row 0, including its segment length.
             new_tensors[key] = append_packed_field_padding(
                 key, tensor, segment_lengths=[len(tensor.segment(0))] * pad_size
             )

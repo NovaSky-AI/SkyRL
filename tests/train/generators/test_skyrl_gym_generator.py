@@ -496,7 +496,6 @@ async def test_agent_loop_uses_incremental_replay_metadata_traces(
     routed = output.rollout_expert_indices
     assert routed is not None and routed.dtype == np.int16
     assert routed[5, 0, 0] == 300
-    # One dense int32 block, never a nested list: the payload stays an ndarray to the trainer.
     support = output.rollout_sample_support
     assert support.dtype == SAMPLE_SUPPORT_DTYPE
     np.testing.assert_array_equal(support[:2], np.array([[10, 100], [11, 110]], dtype=SAMPLE_SUPPORT_DTYPE))

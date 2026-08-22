@@ -844,7 +844,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     out_response_ids: List[List[int]] = []
     out_loss_masks: List[List[int]] = []
     out_logprobs: Optional[List[List[float]]] = [] if has_logprobs else None
-    # One row block per merged turn; concatenated at flush rather than extended row by row.
+    # Keep one block per turn until the merged trajectory is flushed.
     out_sample_support: Optional[List[SampleSupport]] = [] if has_sample_support else None
     # If per-token rewards, we keep appending. If per-turn rewards, we only take from the last turn.
     out_rewards: list = []
