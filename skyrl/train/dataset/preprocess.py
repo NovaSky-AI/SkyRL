@@ -100,12 +100,9 @@ def _collate_rollout_expert_indices(
     pad_lens: np.ndarray,
     max_total: int,
 ) -> Integer[torch.Tensor, "batch seq_len layer_num topk"]:
-    """Pack per-trajectory routes into one left-padded ``[batch, seq_len, layers, topk]`` buffer.
+    """Pack routes into a left-padded ``[batch, seq_len, layers, topk]`` buffer.
 
-    ``pack_routed_experts`` establishes the canonical dtype on the sending side, so entries are
-    validated rather than rescanned here. Every region of the buffer is written exactly once, from
-    a locally sized thread pool: this fill runs on the whole global batch before DP sharding, on
-    every training step, and is bound by first-touch page faults on a fresh multi-GiB mapping.
+    The sender establishes canonical dtypes, so this path validates rather than rescans entries.
     """
     num_samples = len(rollout_expert_indices)
     for sample_index, sample_indices in enumerate(rollout_expert_indices):
@@ -130,7 +127,7 @@ def _collate_rollout_expert_indices(
     if topk < 1:
         raise ValueError("rollout_expert_indices must contain at least one expert per layer")
 
-    # Validate serially so an invalid trajectory raises deterministically rather than from a worker.
+    # Validate before dispatch so errors are deterministic.
     route_ends = []
     for sample_index, sample_indices in enumerate(rollout_expert_indices):
         if sample_indices.ndim != 3 or sample_indices.shape[1:] != (num_layers, topk):
@@ -162,7 +159,7 @@ def _collate_rollout_expert_indices(
     def fill_sample(sample_index: int) -> None:
         sample_indices = rollout_expert_indices[sample_index]
         flags = sample_indices.flags
-        # torch.from_numpy refuses a non-writeable buffer, and decoded wire routes may be read-only.
+        # torch.from_numpy requires a writable buffer.
         if not flags.c_contiguous or not flags.writeable:
             sample_indices = sample_indices.copy(order="C")
         left_pad = int(pad_lens[sample_index])
