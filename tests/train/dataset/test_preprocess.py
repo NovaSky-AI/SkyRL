@@ -256,11 +256,7 @@ def _numpy_padded_routes(
 
 
 def test_routed_expert_tensor_is_bit_identical_to_numpy_collation(tokenizer):
-    """A short route prefix and trailing padding, across a mixed-dtype batch.
-
-    The packed buffer must hold exactly the real-token rows of the rectangle NumPy built,
-    left padding dropped rather than written and read back.
-    """
+    """Packed collation matches the real rows of the padded NumPy reference."""
     prompts = [[1, 2], [3, 4, 5, 6]]
     responses = [[10, 11, 12], [20, 21]]
     num_layers, topk = 2, 3
@@ -289,8 +285,7 @@ def test_routed_expert_tensor_is_bit_identical_to_numpy_collation(tokenizer):
     assert routed.dtype == torch.int16
     assert routed.cu_seqlens.tolist() == [0, 5, 11]
     assert torch.equal(routed.values, torch.from_numpy(real_rows))
-    # Padding routes are topk distinct experts, which Megatron's dropless dispatcher requires;
-    # zeros would collapse them onto one expert.
+    # Padding routes use distinct experts for Megatron's dropless dispatcher.
     padding_row = [[0, 1, 2]] * num_layers
     assert routed.segment(0)[4].tolist() == padding_row
     assert not torch.equal(routed.segment(0)[4], torch.zeros_like(routed.segment(0)[4]))
@@ -510,15 +505,8 @@ def test_max_seq_len_warns_but_does_not_truncate(tokenizer):
     assert action.shape == (2, 50)
 
 
-# ---------------------------------------------------------------------------
-# R3 (Router Replay) — packed rollout_expert_indices tests
-# ---------------------------------------------------------------------------
-
-
 def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
     """Routes pack to [sum(seq_len), layers, topk] with one cu_seqlens segment per trajectory."""
-    # Sample 0: prompt=2, response=3  → total=5
-    # Sample 1: prompt=4, response=2  → total=6
     prompts = [[1, 2], [3, 4, 5, 6]]
     responses = [[10, 11, 12], [20, 21]]
     rewards = [[0.0] * 3, [0.0] * 2]
@@ -526,9 +514,8 @@ def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
 
     num_layers = 2
     topk = 2
-    # rollout_expert_indices[i] has shape [prompt_len_i + response_len_i, num_layers, topk]
-    rei_0 = np.asarray([[[1, 2]] * num_layers for _ in range(5)], dtype=np.uint8)  # 5 tokens
-    rei_1 = np.asarray([[[3, 4]] * num_layers for _ in range(6)], dtype=np.uint8)  # 6 tokens
+    rei_0 = np.asarray([[[1, 2]] * num_layers for _ in range(5)], dtype=np.uint8)
+    rei_1 = np.asarray([[[3, 4]] * num_layers for _ in range(6)], dtype=np.uint8)
 
     seq, attn, action, rew, lm, lp, rei_tensor = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id,
@@ -540,11 +527,8 @@ def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
     )
 
     assert rei_tensor is not None
-    # Packed to the batch's real tokens: 5 + 6, never the 2 x 6 rectangle.
     assert rei_tensor.values.shape == (11, num_layers, topk)
     assert rei_tensor.cu_seqlens.tolist() == [0, 5, 11]
-
-    # Segment lengths match each trajectory's real-token count in the attention mask.
     assert rei_tensor.sequence_lengths.tolist() == attn.sum(dim=1).tolist()
     assert rei_tensor.segment(0).tolist() == [[[1, 2]] * num_layers] * 5
     assert rei_tensor.segment(1).tolist() == [[[3, 4]] * num_layers] * 6

@@ -104,12 +104,7 @@ def _fill_routed_expert_segment(
     rollout_expert_indices: List[RoutedExpertIndices],
     sample_index: int,
 ) -> None:
-    """Write one trajectory's segment of the packed route buffer.
-
-    vLLM may capture no route for a trailing token, so a segment can end with dummy rows.
-    Those hold ``topk`` distinct experts to keep Megatron's dropless dispatcher supplied with
-    one row per token without collapsing its router accounting.
-    """
+    """Write one route segment, using distinct dummy routes for uncaptured trailing tokens."""
     sample_indices = rollout_expert_indices[sample_index]
     flags = sample_indices.flags
     # torch.from_numpy refuses a non-writeable buffer, and decoded wire routes may be read-only.
@@ -172,9 +167,6 @@ def _collate_rollout_expert_indices(
             "Collating rollout_expert_indices as int32, which doubles this buffer. No supported expert count "
             "needs more than int16, so the inference server is not compacting its routes."
         )
-    # Routes stay packed to the real tokens they describe. A [batch, max_total, layers, topk]
-    # rectangle instead reaches ~55 GiB per global batch at a 120B route shape, and the trainer's
-    # Megatron layout compacts it straight back to ragged.
     cu_seqlens = cu_seqlens_from_lengths(total_real)
     packed = torch.empty(
         (int(total_real.sum()), num_layers, topk),
