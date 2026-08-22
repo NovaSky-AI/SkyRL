@@ -116,8 +116,38 @@ def patch_topk_router_expert_bias_padding_mask():
 
 
 def _split_replay_indices(rollout_expert_indices: torch.Tensor) -> list[torch.Tensor]:
-    per_layer = rollout_expert_indices.permute(2, 0, 1, 3).contiguous().to(torch.int32)
+    per_layer = rollout_expert_indices.permute(2, 1, 0, 3).contiguous().to(torch.int32)
     return list(per_layer.flatten(1, 2).unbind(0))
+
+
+def _distribute_replay_padding_indices(
+    rollout_expert_indices: torch.Tensor,
+    router_padding_mask: torch.Tensor,
+    num_experts: int,
+    expert_parallel_size: int,
+) -> None:
+    """Distribute padding routes across experts in model token order."""
+    topk = rollout_expert_indices.shape[-1]
+    if num_experts < topk:
+        raise ValueError(f"Replay topk ({topk}) cannot exceed the number of MoE experts ({num_experts})")
+    if expert_parallel_size < 1 or num_experts % expert_parallel_size:
+        raise ValueError(
+            f"The number of MoE experts ({num_experts}) must be divisible by the expert parallel size "
+            f"({expert_parallel_size})"
+        )
+
+    model_order_indices = rollout_expert_indices.permute(1, 0, 2, 3)
+    model_order_padding_mask = router_padding_mask.transpose(0, 1)
+    flat_padding_mask = model_order_padding_mask.flatten()
+    padding_ordinals = flat_padding_mask.to(torch.long).cumsum(0)[flat_padding_mask] - 1
+    expert_offsets = torch.arange(topk, device=rollout_expert_indices.device)
+    assignment_ordinals = padding_ordinals.unsqueeze(1) * topk + expert_offsets
+    num_local_experts = num_experts // expert_parallel_size
+    # Megatron assigns each EP rank a contiguous expert-ID range. Enumerating
+    # rank before local expert balances every prefix across those ranges.
+    padding_routes = (assignment_ordinals % expert_parallel_size) * num_local_experts
+    padding_routes += (assignment_ordinals // expert_parallel_size) % num_local_experts
+    model_order_indices[model_order_padding_mask] = padding_routes.to(rollout_expert_indices.dtype).unsqueeze(1)
 
 
 def scatter_router_padding_mask_for_model(
@@ -264,17 +294,24 @@ def setup_per_microbatch_replay_forward(
         local_rollout_expert_indices,
         metadata_layout,
         route_padding,
-    )
+    ).to(torch.int32)
 
     # TP splitting: sequence parallelism across the tensor model parallel region
     tp_size = mpu.get_tensor_model_parallel_world_size()
+    local_router_padding_mask = aligned_router_padding_mask
     if tp_size > 1:
         tp_rank = mpu.get_tensor_model_parallel_rank()
         seq_len = aligned_rollout_expert_indices.shape[1]
         chunk_size = seq_len // tp_size
-        aligned_rollout_expert_indices = aligned_rollout_expert_indices[
-            :, tp_rank * chunk_size : (tp_rank + 1) * chunk_size, :, :
-        ]
+        local_slice = slice(tp_rank * chunk_size, (tp_rank + 1) * chunk_size)
+        aligned_rollout_expert_indices = aligned_rollout_expert_indices[:, local_slice, :, :]
+        local_router_padding_mask = local_router_padding_mask[:, local_slice]
+    _distribute_replay_padding_indices(
+        aligned_rollout_expert_indices,
+        local_router_padding_mask,
+        model_config.num_moe_experts,
+        mpu.get_expert_model_parallel_world_size(),
+    )
     RouterReplay.set_replay_data(_split_replay_indices(aligned_rollout_expert_indices))
     RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
