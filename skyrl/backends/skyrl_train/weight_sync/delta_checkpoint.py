@@ -761,8 +761,7 @@ class LocalCheckpointStore:
                         mismatches.append(record.name)
                 del region, patch
 
-            # reserved=0: weight sync is a barrier, so no colocated work needs a core, and an
-            # unconstrained host keeps the pool size it had before the quota became visible.
+            # Weight sync is a barrier, so it need not reserve cores for colocated work.
             workers = min(len(payloads), pool_workers(cap=32, reserved=0))
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="skyrl-delta-mmap-apply") as executor:
                 list(executor.map(apply_one, payloads))
@@ -1080,7 +1079,7 @@ class DeltaCheckpointPublisher:
         }
 
     def _num_publish_workers(self) -> int:
-        # reserved=0: publishing is a barrier like the apply path above.
+        # Publishing is a barrier, like the apply path above.
         default = pool_workers(cap=8, reserved=0)
         return self.publish_num_workers or default
 

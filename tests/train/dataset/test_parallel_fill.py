@@ -9,9 +9,8 @@ import pytest
 from skyrl.train.dataset.parallel_fill import fill_batch_rows
 
 
-@pytest.mark.parametrize("workers", [1, 4, 64])
+@pytest.mark.parametrize("workers", [None, 1, 4, 64])
 def test_every_index_is_filled_exactly_once(workers):
-    """Includes ``workers`` above ``num_rows``, which clamps rather than raising."""
     num_rows = 32
     calls = [0] * num_rows
 
@@ -19,18 +18,6 @@ def test_every_index_is_filled_exactly_once(workers):
         calls[index] += 1
 
     fill_batch_rows(fill_row, num_rows, workers=workers)
-
-    assert calls == [1] * num_rows
-
-
-def test_default_worker_count_fills_every_index():
-    num_rows = 8
-    calls = [0] * num_rows
-
-    def fill_row(index: int) -> None:
-        calls[index] += 1
-
-    fill_batch_rows(fill_row, num_rows)
 
     assert calls == [1] * num_rows
 

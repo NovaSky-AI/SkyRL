@@ -217,9 +217,7 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
                 f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
                 "moe_router_fusion=True -- the fused router bypasses replay. Set moe_router_fusion=False."
             )
-            # Every forward appends its routes to all local RouterReplay instances, but under VPP
-            # only the chunk being forwarded consumes them, so each instance's backward FIFO
-            # desyncs by the chunk count.
+            # Interleaved chunks desynchronise each RouterReplay instance's backward FIFO.
             assert not config.megatron_config.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size"), (
                 f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
                 "virtual_pipeline_model_parallel_size -- interleaved chunks desync the replay FIFO. "
