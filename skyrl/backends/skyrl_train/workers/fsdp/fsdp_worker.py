@@ -200,9 +200,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
-        # Initialize the weight extractor BEFORE super(): a strategy that sets
-        # sender_needs_weight_extractor (sharded_rdt) rendezvouses inside
-        # create_sender and is handed this extractor there. It only depends on
+        # Initialize the weight extractor BEFORE super(): a strategy that
+        # rendezvouses at init (sharded_rdt) is handed this extractor by
+        # create_sender. It only depends on
         # the already-built model, not on super().
         # TODO(haochen): Module grouping for fused-weight loaders is only enabled for CUDA IPC.
         # transfer strategy, we can enable it for other strategies as well.

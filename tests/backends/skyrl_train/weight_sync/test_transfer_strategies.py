@@ -67,20 +67,18 @@ class TestGetTransferStrategyCls:
 
 
 class TestRdtSend:
-    """Tests for the sharded_rdt (NIXL pull) trainer-send glue — no GPU/vLLM.
-
-    RDT bypasses the WeightTransferStrategy/Sender abstraction; the glue lives in
-    ``weight_sync/rdt_send.py`` (``_FsdpWeightSource`` driven by
-    ``RdtWeightSyncSender``). This covers the group-major WeightSource reorder
-    without touching the vendored engine (whose ``trainer_init`` needs Ray + GPU).
-    The synchronous control-plane client is covered in ``test_rdt_control_plane``."""
+    """The sharded_rdt trainer-send glue in ``weight_sync/sharded_rdt/rdt_send.py``
+    (the ``WeightSource`` implementations driven by ``RdtWeightSyncSender``), covered
+    without the vendored engine, whose ``trainer_init`` needs Ray + GPU."""
 
     def test_weight_source_reorders_group_major(self):
         """The FSDP WeightSource reorders metadata into group-major order (pre /
         per-layer / post) so the vendored trainer's group-contiguity check passes."""
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import _FsdpWeightSource
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            _FsdpWeightSource,
+        )
 
         class _FakeExtractor:
             weight_prefix = ""
@@ -116,8 +114,10 @@ class TestRdtSend:
         iteration casts each full tensor to the wire dtype."""
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import MegatronWeightSource
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            MegatronWeightSource,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
             layerwise_groups,
         )
 
@@ -165,7 +165,7 @@ class TestRdtSend:
         """make_weight_source picks Megatron (has .bridge) vs FSDP (has .model)."""
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
             MegatronWeightSource,
             _FsdpWeightSource,
             make_weight_source,
@@ -204,13 +204,13 @@ class TestRdtReplicaConsumerMapping:
         return replica_rank * workers_per_replica + local_index
 
     def test_two_dense_engines_bind_distinct_producers(self):
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common import (
             RdtRouter,
             assign_producer_indices,
         )
 
-        # 2 independent TP=1 engines (the 2x2 e2e): each engine's local index is 0,
-        # replica_rank 0 and 1 => consumer ids 0 and 1 (previously both 0 -> deadlock).
+        # 2 independent TP=1 engines: each engine's local index is 0, so the
+        # replica_rank offset is what separates them into consumer ids 0 and 1.
         num_consumers, num_producers, num_replicas = 2, 2, 2
         cids = [self._consumer_id(r, num_replicas, num_consumers, 0) for r in range(2)]
         assert cids == [0, 1]
@@ -253,7 +253,7 @@ class TestPpLocalOwnership:
         ``held_names`` can be exercised without Megatron or a GPU."""
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
             MegatronStackedWeightSource,
         )
 
@@ -310,7 +310,7 @@ class TestPpLocalOwnership:
         than a pre and a post block. That is still a valid partition — ownership
         follows it, and both sides derive it from the same list — which is why the
         invariant to hold is contiguity, not a canonical pre/layers/post shape."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
             layerwise_groups,
         )
 
@@ -367,10 +367,8 @@ class TestPpLocalOwnership:
     def test_walk_is_reordered_into_partition_order(self):
         """The bridge streams a stage's tasks in ITS order, which need not match the
         partition: at 235B the last stage exports the output block BEFORE its layers,
-        while layerwise_groups places that block last. The gather loop walks the
-        held groups ascending and raises on anything else, so the walk has to be
-        reordered — this is the bug the 235B bench caught (48+48 groups against a
-        95-group reference) before it could fail mid-sync."""
+        while layerwise_groups places that block last. The gather loop walks the held
+        groups ascending and raises on anything else, so the walk must be reordered."""
         stage0 = [("model.embed_tokens.weight", [8, 4]), ("model.layers.0.w", [4, 4])]
         stage1 = [("model.norm.weight", [4]), ("model.layers.1.w", [4, 4])]
         src = self._source(2, 1, [stage0, stage1])
@@ -423,7 +421,7 @@ class TestExpertOwnership:
     def _stub(ep_size=2, my_ep_rank=1, pp_local=False):
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
             MegatronStackedWeightSource,
         )
 
@@ -434,7 +432,24 @@ class TestExpertOwnership:
         src._ep_size = ep_size
         src._my_ep_rank = my_ep_rank
         src._demoted = False
-        src._expert_names = {}
+        # These tests are about the EP ownership grain, not about name resolution:
+        # the source has no bridge, so seed the per-layer expert-name cache with the
+        # Qwen3-MoE layout the assertions below use. (Production always resolves
+        # these through the bridge's mapping registry and raises if it cannot —
+        # there is no synthesized fallback to lean on here.)
+        src._expert_names = {
+            layer: [
+                name
+                for e in range(ep_size * 2)
+                for name in (
+                    f"model.layers.{layer}.mlp.experts.{e}.gate_proj.weight",
+                    f"model.layers.{layer}.mlp.experts.{e}.up_proj.weight",
+                    f"model.layers.{layer}.mlp.experts.{e}.down_proj.weight",
+                )
+            ]
+            for layer in range(8)
+        }
+        src._expert_name_source = "test stub"
         src._layer_geom = {}
         src._phase = {}
         src._phase_prefix = ""
@@ -444,7 +459,9 @@ class TestExpertOwnership:
     def _meta_of(names):
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import ParamMeta
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
+            ParamMeta,
+        )
 
         return [ParamMeta(n, torch.bfloat16, (2, 2)) for n in names]
 
@@ -477,7 +494,9 @@ class TestExpertOwnership:
         other expert's entries are None. Zero collectives on this path."""
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import _ExpertLayer
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            _ExpertLayer,
+        )
 
         class _Task:
             def __init__(self, t):
@@ -513,7 +532,9 @@ class TestExpertOwnership:
         layer's (F, H) before the expert names are emitted."""
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import _ExpertLayer
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            _ExpertLayer,
+        )
 
         class _Task:
             def __init__(self, t):
@@ -546,10 +567,12 @@ class TestHeldNamesComposition:
     def _source(ep_size, my_ep_rank, names, *, pp_local=False, owned=None):
         import torch
 
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
             MegatronStackedWeightSource,
         )
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import ParamMeta
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
+            ParamMeta,
+        )
 
         src = MegatronStackedWeightSource.__new__(MegatronStackedWeightSource)
         src._dtype = torch.bfloat16
@@ -597,6 +620,7 @@ class TestHeldNamesComposition:
         assert self._source(1, 0, names).held_names() is None
 
 
+@pytest.mark.vllm
 class TestStampedYieldValidation:
     """The gather loop checks stamps against yields per group — the ABC's
     truthfulness invariant, enforced where both sit side by side. Without it a
@@ -605,7 +629,7 @@ class TestStampedYieldValidation:
 
     @staticmethod
     def _engine(held):
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
             ShardedRDTTrainerWeightTransferEngine,
         )
 
@@ -669,7 +693,7 @@ class TestQkvIndexDeviceCtx:
         import torch
 
         pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
-        from skyrl.backends.skyrl_train.weight_sync import rdt_send
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
 
         pm, seen = self._fake_modules(monkeypatch)
         weight = torch.empty(2, 2, device="meta")
@@ -683,7 +707,7 @@ class TestQkvIndexDeviceCtx:
         import torch
 
         pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
-        from skyrl.backends.skyrl_train.weight_sync import rdt_send
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
 
         pm, seen = self._fake_modules(monkeypatch)
         with rdt_send._qkv_index_device_ctx():
@@ -696,7 +720,7 @@ class TestQkvIndexDeviceCtx:
         import torch
 
         pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
-        from skyrl.backends.skyrl_train.weight_sync import rdt_send
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
 
         pm, _seen = self._fake_modules(monkeypatch)
         before, real_arange = pm.split_qkv_weights, torch.arange
@@ -708,19 +732,8 @@ class TestQkvIndexDeviceCtx:
         assert torch.arange is real_arange
         assert torch.arange(3).device.type == "cpu"
 
-    def test_disabled_by_env(self, monkeypatch):
-        import torch
 
-        pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
-        from skyrl.backends.skyrl_train.weight_sync import rdt_send
-
-        monkeypatch.setenv("SKYRL_RDT_QKV_DEVICE_FIX", "0")
-        pm, seen = self._fake_modules(monkeypatch)
-        with rdt_send._qkv_index_device_ctx():
-            pm.split_qkv_weights(None, torch.empty(2, 2, device="meta"))
-        assert seen == ["cpu"], "with the fix off, arange must keep its default device"
-
-
+@pytest.mark.vllm
 class TestShardedRdtVllmRegistration:
     """The factory registration (requires the vLLM wheel)."""
 
@@ -730,7 +743,7 @@ class TestShardedRdtVllmRegistration:
         from vllm.config import WeightTransferConfig
         from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 
-        from skyrl.backends.skyrl_train.weight_sync import rdt_vllm_register
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_vllm_register
 
         rdt_vllm_register.ensure_registered()
         assert "sharded_rdt" in WeightTransferEngineFactory._registry
@@ -739,6 +752,22 @@ class TestShardedRdtVllmRegistration:
         assert WeightTransferConfig(backend="sharded_rdt").backend == "sharded_rdt"
         assert WeightTransferConfig(backend="nccl").backend == "nccl"
         assert WeightTransferConfig(backend="ipc").backend == "ipc"
+
+    def test_the_registered_module_path_actually_resolves(self):
+        """`register_engine` stores the engine's module path as a string and imports
+        it only when a worker constructs the backend, so a stale path fails on a real
+        inference worker rather than here. Force the loader to resolve it."""
+        pytest.importorskip("vllm")
+        from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_vllm_register
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
+            ShardedRDTWeightTransferEngine,
+        )
+
+        rdt_vllm_register.ensure_registered()
+        loader = WeightTransferEngineFactory._registry["sharded_rdt"]
+        assert loader() is ShardedRDTWeightTransferEngine
 
 
 class TestCreateInitInfo:

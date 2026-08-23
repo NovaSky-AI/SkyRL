@@ -6,7 +6,6 @@ uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl
 import pytest
 import ray
 import torch
-from ray.util.placement_group import placement_group, remove_placement_group
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
@@ -24,7 +23,6 @@ from skyrl.train.config import (
     TorchProfilerConfig,
 )
 from skyrl.train.utils.utils import (
-    get_ray_pg_ready_with_timeout,
     print_mem,
     validate_cfg,
 )
@@ -121,28 +119,6 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     return data
 
 
-def _reserve_all_but_one_gpu_node():
-    """Force single-node placement by reserving every GPU node except one.
-
-    RDT intra-node validation needs the vLLM engine and the policy on the SAME
-    node so the NIXL transfer stays intra-node (cuda_ipc/NVLink) and avoids the
-    broken cross-node EFA path. With colocate_all=False the harness builds two
-    independent PACK placement groups (one for vLLM, one for the policy) that can
-    land on different nodes. Reserving all-but-one GPU node leaves a single free
-    8-GPU node that both groups must pack into. Returns the reservation PGs so the
-    caller can release them.
-    """
-    gpu_nodes = [n for n in ray.nodes() if n.get("Alive") and n["Resources"].get("GPU", 0) >= 1]
-    reservations = []
-    for node in gpu_nodes[1:]:
-        gpus = int(node["Resources"]["GPU"])
-        pg = placement_group([{"GPU": 1}] * gpus, strategy="STRICT_PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=60)
-        reservations.append(pg)
-    print(f"[rdt-intranode] reserved {len(reservations)} node(s); 1 free GPU node for vLLM+policy")
-    return reservations
-
-
 @pytest.mark.parametrize(
     (
         "weight_sync_backend",
@@ -153,20 +129,25 @@ def _reserve_all_but_one_gpu_node():
         "megatron_ep",
         "megatron_etp",
         "lora",
+        "num_engines",
     ),
     [
-        pytest.param("nccl", True, 4, 2, 2, 1, None, False, id="nccl_colocate_all"),
-        pytest.param("nccl", False, 2, 2, 1, 1, None, False, id="nccl_non_colocated"),
-        pytest.param("nccl", True, 4, 2, 2, 1, None, True, id="nccl_colocate_all_lora"),
-        # sharded_rdt (NIXL pull): non-colocated only. PP=2 exercises the
-        # stacked source's single mode: each stage declares and serves only its
-        # own layers, and on MoE models each rank serves only its own EP
-        # coordinate's experts. The naive whole-model extraction is the fallback
-        # selected by SKYRL_RDT_STACKED_EXPERTS=0.
-        # The harness sets policy world = num_gpus_per_node = inference_tp, so
-        # inference_tp must equal megatron_tp*megatron_pp (=4): 4 dedicated policy
-        # GPUs + 4 inference GPUs = 8, genuinely non-colocated.
-        pytest.param("sharded_rdt", False, 4, 2, 2, 1, None, False, id="sharded_rdt_non_colocated_pp2"),
+        pytest.param("nccl", True, 4, 2, 2, 1, None, False, 1, id="nccl_colocate_all"),
+        pytest.param("nccl", False, 2, 2, 1, 1, None, False, 1, id="nccl_non_colocated"),
+        pytest.param("nccl", True, 4, 2, 2, 1, None, True, 1, id="nccl_colocate_all_lora"),
+        # sharded_rdt (NIXL pull): non-colocated only. Both variants fit 4 GPUs --
+        # policy world = megatron_tp*megatron_pp, engines = inference_tp*num_engines.
+        #
+        #   TP2/TP2:  2 policy + 1 engine x TP2  = 4. Trainer TP gather feeding an
+        #             inference-TP-sharded consumer plan. The model is dense and
+        #             pp == 1, so this covers the plain whole-model weight source.
+        #   TP1/PP2:  2 policy + 2 engines x TP1 = 4. Covers trainer PP>1, so the
+        #             stacked source's PP-local serving engages (each stage declares
+        #             only its own layers via held_names), AND num_engines>1, so the
+        #             consumer ids are offset per deployment by replica_rank -- the
+        #             M:N path that deadlocked before that fix.
+        pytest.param("sharded_rdt", False, 2, 2, 1, 1, None, False, 1, id="sharded_rdt_infer_tp2_trainer_tp2"),
+        pytest.param("sharded_rdt", False, 1, 1, 2, 1, None, False, 2, id="sharded_rdt_infer_tp1_trainer_pp2_2engines"),
     ],
 )
 @pytest.mark.asyncio
@@ -181,16 +162,12 @@ async def test_megatron_policy_weight_sync(
     megatron_ep,
     megatron_etp,
     lora,
+    num_engines,
 ):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
     """
-    reservations = []
     try:
-        # RDT (NIXL) cross-node is currently broken on this cluster's EFA fabric;
-        # pin the whole test to one node so the transfer stays intra-node.
-        if weight_sync_backend == "sharded_rdt":
-            reservations = _reserve_all_but_one_gpu_node()
         cfg = get_test_actor_config(model_name=MODEL_NAME)
         if lora:
             cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
@@ -212,6 +189,7 @@ async def test_megatron_policy_weight_sync(
             model=MODEL_NAME,
             use_local=True,
             backend="vllm",
+            num_inference_engines=num_engines,
             sleep_level=2,  # since we explicitly sync weights
         ) as engines:
             client, pg = engines.client, engines.pg
@@ -221,7 +199,9 @@ async def test_megatron_policy_weight_sync(
                 "policy",
                 shared_pg=pg,
                 colocate_all=cfg.trainer.placement.colocate_all,
-                num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+                # The policy world is what the megatron geometry needs, which is not
+                # necessarily inference_tp (e.g. inference TP1 + trainer PP2).
+                num_gpus_per_node=megatron_tp * megatron_pp,
                 cfg=cfg,
             )
             ray.get(
@@ -251,11 +231,6 @@ async def test_megatron_policy_weight_sync(
 
             print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
-        for pg in reservations:
-            try:
-                remove_placement_group(pg)
-            except Exception:
-                pass
         ray.shutdown()
 
 

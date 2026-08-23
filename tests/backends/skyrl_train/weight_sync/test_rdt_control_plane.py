@@ -17,7 +17,7 @@ from skyrl.backends.skyrl_train.inference_servers.rdt_control_protocol import (
     RDT_START_METHOD,
     RDT_UPDATE_METHOD,
 )
-from skyrl.backends.skyrl_train.weight_sync.rdt_control_plane import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_control_plane import (
     SyncRdtControlPlaneClient,
 )
 

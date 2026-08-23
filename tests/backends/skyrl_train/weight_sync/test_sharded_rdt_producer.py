@@ -27,9 +27,19 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 import pytest
 import torch
 
-import skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer as trainer_mod
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import buffer_alloc_bytes
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer import (
+# The vendored engine/trainer import vllm at module scope, so this module cannot be
+# imported without the wheel. Both guards are needed: the importorskip lets collection
+# survive (a marker cannot -- pytest must import the module to read it), and the marker
+# is what the `-m "vllm"` CI job selects on.
+pytest.importorskip("vllm", reason="the vendored sharded_rdt engine imports vllm at module scope")
+
+pytestmark = pytest.mark.vllm
+
+import skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer as trainer_mod  # noqa: E402
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common import (  # noqa: E402
+    buffer_alloc_bytes,
+)
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (  # noqa: E402
     DEFAULT_GATHER_LOOKAHEAD,
     ShardedRDTTrainerInitInfo,
     ShardedRDTTrainerWeightTransferEngine,
@@ -521,7 +531,7 @@ class TestServedNamesGuard:
 
 
 class TestStallWatchdog:
-    """The bound on the three waits that used to be unbounded.
+    """The bound on the three otherwise-unbounded waits.
 
     Engine-death detection is generation-driven, and no generation is in flight
     during a weight sync, so a consumer that dies INSIDE the sync window has no

@@ -134,13 +134,6 @@ class WeightTransferStrategy(ABC):
     the same process group at once). True for a backend whose own engine owns the
     handshake."""
 
-    sender_needs_weight_extractor: ClassVar[bool] = False
-    """``create_sender`` takes the worker's ``weight_extractor``.
-
-    Only for backends that must rendezvous at init rather than on the first send,
-    which needs the extractor that early. The worker passes it only when this is
-    True, so the other strategies' signatures are untouched."""
-
     groups_chunks_by_module: ClassVar[bool] = False
     """Whether the FSDP extractor should group parameters per module.
 
@@ -187,6 +180,7 @@ class WeightTransferStrategy(ABC):
     def create_sender(
         init_info: WeightSyncInitInfo,
         inference_client: "RemoteInferenceClient",
+        weight_extractor: Optional[Any] = None,
     ) -> WeightTransferSender:
         """Create a sender for the training worker side.
 
@@ -197,6 +191,9 @@ class WeightTransferStrategy(ABC):
         Args:
             init_info: WeightSyncInitInfo containing config-derived args.
             inference_client: Client for coordinating with inference engines.
+            weight_extractor: The worker's extractor. Only backends that
+                rendezvous at init rather than on the first send need it
+                (sharded_rdt); the others ignore it.
 
         Returns:
             A configured WeightTransferSender instance.

@@ -1,31 +1,25 @@
 """``sharded_rdt`` as a :class:`WeightTransferStrategy`.
 
-A thin adapter, not a reimplementation. The transfer itself is the vendored vLLM
-trainer-send stack — a ``WeightSource`` feeding a
-``ShardedRDTTrainerWeightTransferEngine`` that the inference workers pull from —
-driven by :class:`RdtWeightSyncSender` (see ``rdt_send.py``). This module only
-presents that stack through the interface the rest of SkyRL already programs
-against, so the workers hold one sender attribute and one send call instead of a
-backend-conditional branch.
+A thin adapter over the vendored vLLM trainer-send stack — a ``WeightSource`` feeding
+a ``ShardedRDTTrainerWeightTransferEngine`` that the inference workers pull from,
+driven by :class:`RdtWeightSyncSender` (``rdt_send.py``). Presenting it through the
+shared interface keeps the workers to one sender attribute and one send call.
 
-Two places where RDT genuinely does not fit the push backends' shape, both
-expressed as declared capabilities rather than as branches in the workers:
+Two places RDT does not fit the push backends' shape, declared as capabilities so the
+workers hold no backend conditional:
 
-* **The engine owns the handshake.** ``trainer_init`` opens the inference side
-  itself, through the blocking ``SyncRdtControlPlaneClient``, because the bake
-  needs the source metadata and has to run under ``set_current_vllm_config``. So
-  ``sender_initializes_receivers`` is True and worker rank 0 must not also call
-  ``init_weight_update_communicator``.
-* **There is no chunk stream.** The consumers pull the slices they need, so
-  ``send_chunks(chunks, metadata)`` has nothing to say here: this sender
-  overrides :meth:`WeightTransferSender.send` and never materializes either
-  argument. That is load-bearing, not tidiness — ``get_weight_metadata`` on the
-  Megatron extractor is a whole-model ``export_hf_weights`` pass, the exact
-  gather the RDT weight source exists to avoid.
+* ``trainer_init`` opens the inference side itself, through the blocking
+  ``SyncRdtControlPlaneClient``, since the bake needs the source metadata and must run
+  under ``set_current_vllm_config``. ``sender_initializes_receivers`` is True, and
+  worker rank 0 must not also call ``init_weight_update_communicator``.
+* The consumers pull, so there is no chunk stream: this sender overrides
+  :meth:`WeightTransferSender.send` and never materializes chunks or metadata.
+  ``get_weight_metadata`` on the Megatron extractor is a whole-model
+  ``export_hf_weights`` pass, the gather the RDT weight source avoids.
 
-REMOVAL: when SkyRL's pinned vLLM ships trainer-send for NCCL/IPC too, those
-backends collapse into this same shape and the ``WeightTransferStrategy`` layer
-goes away. This adapter is what disappears then; ``rdt_send.py`` stays.
+REMOVAL: when SkyRL's pinned vLLM ships trainer-send for NCCL/IPC too, those backends
+collapse into this shape and the ``WeightTransferStrategy`` layer goes away. This
+adapter is what disappears then; ``rdt_send.py`` stays.
 """
 
 from dataclasses import dataclass
@@ -78,10 +72,10 @@ class ShardedRdtWeightTransferSender(WeightTransferSender):
     # memory makes that export/rebuild 5-10x slower per storage.
     force_disable_expandable_segments = True
 
-    # The publish buffers freed during a sync stay in this process's allocator
-    # cache and are reused by the next training step; returning them to CUDA
-    # measured 0.25-0.53s per rank at 235B for nothing. The worker still empties
-    # under colocate_all, where an inference engine wants the physical memory.
+    # Publish buffers freed during a sync stay in this process's allocator cache and
+    # are reused by the next training step; returning them to CUDA costs 0.25-0.53s
+    # per rank at 235B and buys nothing. The worker still empties under colocate_all,
+    # where an inference engine wants the physical memory.
     empty_cache_after_send = False
 
     def __init__(self, sender: Any) -> None:
@@ -128,9 +122,6 @@ class ShardedRdtTransferStrategy(WeightTransferStrategy):
     # trainer_init drives the inference-side init through the engine's own
     # control-plane client; the worker must not also push init_info.
     sender_initializes_receivers = True
-
-    # The rendezvous is eager, at init, so it needs the extractor that early.
-    sender_needs_weight_extractor = True
 
     @staticmethod
     def create_init_info(
@@ -183,8 +174,10 @@ class ShardedRdtTransferStrategy(WeightTransferStrategy):
                 to build its weight source, so this is a wiring error, not a
                 config one.
         """
-        from skyrl.backends.skyrl_train.weight_sync import rdt_vllm_register
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import RdtWeightSyncSender
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_vllm_register
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            RdtWeightSyncSender,
+        )
 
         if not isinstance(init_info, ShardedRdtInitInfo):
             raise ValueError(f"sharded_rdt requires a ShardedRdtInitInfo, got {type(init_info).__name__}.")
@@ -215,7 +208,7 @@ class ShardedRdtTransferStrategy(WeightTransferStrategy):
         do construct this class, via ``WeightTransferEngineFactory`` under the
         name ``rdt_vllm_register`` registers it as.
         """
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
             ShardedRDTWeightTransferEngine,
         )
 

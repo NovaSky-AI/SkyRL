@@ -18,17 +18,24 @@ skyrl/backends/skyrl_train/weight_sync/
 ├── delta_payload.py        # zstd compress/decompress + uint8 tensor <-> bytes helpers
 ├── weight_extractor.py     # Sharded-param -> dense tensor extraction
 ├── weight_extractor_utils.py
-├── sharded_rdt_strategy.py # sharded_rdt as a WeightTransferStrategy (thin adapter)
-├── rdt_send.py             # sharded_rdt trainer-side driver: WeightSource impls + RdtWeightSyncSender
-├── rdt_control_plane.py    # SyncRdtControlPlaneClient (blocking HTTP to /collective_rpc)
-├── rdt_vllm_register.py    # registers the sharded_rdt engine into vLLM's factory
-├── rdt_libfabric_shim.py   # LIBFABRIC provider shim for NIXL
-├── sharded_rdt_base.py     # vendored: trainer-side ABCs (WeightSource, layerwise_groups)
-├── sharded_rdt_trainer.py  # vendored: trainer engine + the _RDTProducerServer sidecar
-├── sharded_rdt_engine.py   # vendored: consumer engine (runs in the vLLM worker)
-├── sharded_rdt_common.py   # vendored: RdtRouter, op-chain allowlist, buffer sizing
-└── sharded_rdt_fake.py     # vendored: FakeRDTTensor placeholders for the bake
+└── sharded_rdt/            # the sharded_rdt (NIXL pull) backend; __init__ is import-free
+    ├── sharded_rdt_strategy.py # sharded_rdt as a WeightTransferStrategy (thin adapter)
+    ├── rdt_send.py             # trainer-side driver: WeightSource impls + RdtWeightSyncSender
+    ├── rdt_control_plane.py    # SyncRdtControlPlaneClient (blocking HTTP to /collective_rpc)
+    ├── rdt_vllm_register.py    # registers the sharded_rdt engine into vLLM's factory
+    ├── rdt_libfabric_shim.py   # LIBFABRIC provider shim for NIXL
+    ├── sharded_rdt_base.py     # vendored: trainer-side ABCs (WeightSource, layerwise_groups)
+    ├── sharded_rdt_trainer.py  # vendored: trainer engine + the _RDTProducerServer sidecar
+    ├── sharded_rdt_engine.py   # vendored: consumer engine (runs in the vLLM worker)
+    ├── sharded_rdt_common.py   # vendored: RdtRouter, op-chain allowlist, buffer sizing
+    └── sharded_rdt_fake.py     # vendored: FakeRDTTensor placeholders for the bake
 ```
+
+The subpackage's `__init__.py` deliberately imports nothing: `sharded_rdt_engine` and
+`sharded_rdt_trainer` import `vllm` at module scope, so re-exporting from it would pull
+vllm into every `weight_sync` import and break the CPU CI job that runs without the wheel.
+Public names (`ShardedRdtTransferStrategy` and friends) are re-exported from
+`weight_sync/__init__.py`, which only reaches the vllm-free `sharded_rdt_strategy`.
 
 vLLM worker-extension class (loaded via `--worker-extension-cls`):
 
@@ -79,21 +86,20 @@ from `sync_dir` when unset, so consuming classes never invent their own defaults
 ## Sharded RDT (`sharded_rdt`)
 
 `sharded_rdt` is selected through `get_transfer_strategy_cls` like every other backend
-(`ShardedRdtTransferStrategy`, in `weight_sync/sharded_rdt_strategy.py`), but underneath it
+(`ShardedRdtTransferStrategy`, in `weight_sync/sharded_rdt/sharded_rdt_strategy.py`), but underneath it
 is vLLM's *trainer-send* model — a `WeightSource`, a `TrainerWeightTransferEngine` and a
 `VLLMWeightSyncClient` — where the engine owns the whole round trip and the workers pull.
-The strategy is a thin adapter over `RdtWeightSyncSender` (`weight_sync/rdt_send.py`),
+The strategy is a thin adapter over `RdtWeightSyncSender` (`weight_sync/sharded_rdt/rdt_send.py`),
 which is where the real work lives.
 
-Two places where the pull model does not fit the push backends' shape, declared as
-capabilities so the workers hold no backend conditional:
+Where the pull model does not fit the push backends' shape, declared as capabilities
+so the workers hold no backend conditional:
 
 | flag | why |
 |---|---|
 | `sender_initializes_receivers = True` | `trainer_init` opens the inference side itself (the bake needs the source metadata and must run under `set_current_vllm_config`), so worker rank 0 must **not** also call `init_weight_update_communicator`. |
-| `sender_needs_weight_extractor = True` | The rendezvous is eager, inside `create_sender`; deferring it to the first send deadlocks. So `create_sender` is handed the extractor, which both workers build before calling `super()`. |
 | `force_disable_expandable_segments = True` | The sidecar shares gathered tensors over CUDA IPC on every run, not only under colocation. |
-| `empty_cache_after_send = False` | Publish buffers are reused by the next training step (0.25-0.53s/rank at 235B to scrub them for nothing). The worker still empties under `colocate_all`. |
+| `empty_cache_after_send = False` | Publish buffers are reused by the next training step; scrubbing them back to CUDA costs 0.25-0.53s/rank at 235B. The worker still empties under `colocate_all`. |
 
 The sender overrides `WeightTransferSender.send` rather than implementing `send_chunks`:
 there is no chunk stream to push, and the base `send()` would call
@@ -169,7 +175,7 @@ counter on the producer. The pipeline drains pull i before issuing i+K, so
 `seq % K` is provably free; execution order is not, because Ray may start a
 consumer's K concurrent produce calls in any order, and the slot of a pull that
 is still being read then gets repacked. That bug was live and cost 2x on the
-logprob gap -- see `~/default/RDT_WEIGHT_SYNC.md` §8.
+logprob gap.
 
 Pulls and free signals still carry the fleet-GLOBAL consumer id; only the block
 carve uses the intra-deployment index. The producer needs the global id to tell
@@ -203,9 +209,9 @@ timeout, the producer fires the `set_gather_error` channel and the run fails wit
 error. It does not recover; it makes the failure diagnosable. The slot-sharing rendezvous
 waits on the same channel, so a sharer that never arrives fails the same way.
 
-Vendored files (`sharded_rdt_*.py`) mirror
-`~/default/vllm-rdt-weight-sync`; keep both in sync. Entry-point doc:
-`~/default/RDT_WEIGHT_SYNC.md`.
+The `sharded_rdt_*.py` files are vendored from the vLLM RDT fork; keep the two in
+sync, and see each file's header for the removal plan once the pinned vLLM ships
+the trainer-side ABCs natively.
 
 ## Lifecycle (`NewInferenceWorkerWrap`)
 1. `start_weight_update(is_checkpoint_format=True)` — initializes layerwise reload (moves layers to meta device, wraps loaders).

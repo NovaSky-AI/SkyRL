@@ -337,7 +337,7 @@ class Worker(DistributedTorchRayActor):
     def _expandable_segments_disabled_for_sync(self, force: bool = False):
         """Disable expandable_segments for the duration of CUDA-IPC weight sync.
 
-        By default only toggles under ``colocate_all`` (the legacy IPC path, which
+        By default only toggles under ``colocate_all`` (the colocated IPC path, which
         only shares CUDA memory when trainer and inference share GPUs); under
         non-colocated runs the push backends use NCCL broadcast, which has its own
         buffers and is unaffected. ``force`` comes from the sender's
@@ -515,18 +515,15 @@ class Worker(DistributedTorchRayActor):
 
         # Create sender on all ranks
         # Strategy implementations may have different logic for different ranks
-        sender_kwargs = {}
-        if self._transfer_strategy_cls.sender_needs_weight_extractor:
-            # sharded_rdt rendezvouses inside create_sender (eagerly, to avoid a
-            # first-send deadlock), which needs the model. Both workers build the
-            # extractor before calling super(), so it is available here.
-            sender_kwargs["weight_extractor"] = getattr(self, "weight_extractor", None)
+        # The extractor is passed to every strategy; only those that rendezvous at
+        # init rather than on the first send use it (sharded_rdt). Both workers build
+        # it before calling super(), so it is available here.
         tasks = [
             asyncio.to_thread(
                 self._transfer_strategy_cls.create_sender,
                 init_info=init_info,
                 inference_client=inference_engine_client,
-                **sender_kwargs,
+                weight_extractor=getattr(self, "weight_extractor", None),
             ),
         ]
 

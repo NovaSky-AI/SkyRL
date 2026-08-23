@@ -9,26 +9,39 @@ pin the values the engine produces today (chunk boundaries, packed byte offsets,
 recorded op chains) so a refactor that changes them fails loudly instead of
 silently shipping different bytes.
 
-`tests/backends/skyrl_train/weight_sync/test_sharded_rdt_trainer.py` covers the trainer (producer)
-side; `test_sharded_rdt_producer.py` covers its serve-actor protocol.
+`test_sharded_rdt_producer.py` covers the producer's serve-actor protocol, and
+`test_sharded_rdt_source.py` the trainer-side weight source.
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import layerwise_groups
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+# The vendored engine/trainer import vllm at module scope, so this module cannot be
+# imported without the wheel. Both guards are needed: the importorskip lets collection
+# survive (a marker cannot -- pytest must import the module to read it), and the marker
+# is what the `-m "vllm"` CI job selects on.
+pytest.importorskip("vllm", reason="the vendored sharded_rdt engine imports vllm at module scope")
+
+pytestmark = pytest.mark.vllm
+
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (  # noqa: E402
+    layerwise_groups,
+)
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common import (  # noqa: E402
     ALLOWED_OPS,
     SUPPORTED_OPS,
     RdtRouter,
     assign_producer_indices,
     buffer_alloc_bytes,
 )
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (  # noqa: E402
     ShardedRDTWeightTransferEngine,
+    ShardedRDTWeightTransferInitInfo,
     _dtype_from_name,
 )
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_fake import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_fake import (  # noqa: E402
     BakeSink,
     FakeRDTTensor,
     _Scatter,
@@ -298,6 +311,18 @@ class TestBakeRecording:
         torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(fake)
         assert rec.copied_names == {"w"}
         assert dict(rec.copies_by_layer) == {}
+
+    def test_a_broadcasting_copy_is_refused_at_bake(self):
+        """The packed layout sizes each slice from the DESTINATION shape while
+        the producer packs what the chain yields, and nothing downstream can
+        catch a mismatch — the consumer's buffer view is exactly prod(dest.shape)
+        elements, so it reshapes cleanly over bytes laid out at other offsets.
+        So the bake refuses rather than recording a slice it cannot carve."""
+        rec, fake = self._recorder_and_fake(shape=(1, 6))
+        rec.current = (_FakeLayer("broadcast"), "weight")
+        param = torch.empty((4, 6), dtype=torch.bfloat16, device=META)
+        with pytest.raises(_UnsupportedFakeOp, match="broadcasting"):
+            param.copy_(fake)
 
     def test_copies_are_grouped_by_module_in_call_order(self):
         rec, _ = self._recorder_and_fake()
@@ -1258,9 +1283,8 @@ class TestOpAllowlistAgreement:
     replays a chain only if every op is in ``ALLOWED_OPS``. The two must describe
     the same contract, so they are derived from one table.
 
-    They used to be written out twice and had drifted: ``t`` was
-    consumer-emittable but producer-rejected, so a loader calling ``.t()`` baked
-    successfully at init and then failed at first pull with "disallowed op 't'".
+    Derived rather than written out twice: an op that is consumer-emittable but
+    producer-rejected bakes successfully at init and only fails at first pull.
     """
 
     def test_the_two_allowlists_describe_the_same_contract(self):
@@ -1291,3 +1315,91 @@ class TestOpAllowlistAgreement:
         )
         op, _args, _kwargs = fake.t()._key()[1][0]
         assert op in ALLOWED_OPS
+
+
+# ---------------------------------------------------------------------------
+# Consumer identity
+# ---------------------------------------------------------------------------
+
+
+class TestConsumerIdentity:
+    """Every worker in the fleet needs a DISTINCT id in 0..C-1: it selects the
+    worker's producer block and keys the producer's per-consumer serve ring, so
+    a collision silently serves two workers out of one ring."""
+
+    def _engine(self, *, dp_index, rank, world_size):
+        eng = object.__new__(ShardedRDTWeightTransferEngine)
+        eng.parallel_config = SimpleNamespace(data_parallel_index=dp_index, rank=rank, world_size=world_size)
+        return eng
+
+    def _ids(self, *, num_consumers, workers, replica_rank=0, num_replicas=1):
+        """Consumer ids for a DP-only engine whose workers are ``dp_index``es."""
+        info = ShardedRDTWeightTransferInitInfo(
+            num_consumers=num_consumers,
+            replica_rank=replica_rank,
+            num_replicas=num_replicas,
+        )
+        out = []
+        for dp_index in workers:
+            eng = self._engine(dp_index=dp_index, rank=0, world_size=1)
+            eng._num_consumers_override = num_consumers
+            out.append(eng._resolve_consumer_id(info))
+        return out
+
+    def test_one_engine_indexes_by_dp_and_tp(self):
+        """dense-via-TP and MoE-via-DP+EP both flatten to 0..C-1."""
+        eng = self._engine(dp_index=0, rank=3, world_size=8)
+        eng._num_consumers_override = 8
+        info = ShardedRDTWeightTransferInitInfo(num_consumers=8)
+        assert eng._resolve_consumer_id(info) == 3
+
+        eng = self._engine(dp_index=5, rank=0, world_size=1)
+        eng._num_consumers_override = 8
+        assert eng._resolve_consumer_id(info) == 5
+
+    def test_independent_engines_offset_into_distinct_ranges(self):
+        """A fleet of separate engines restarts _global_worker_index at 0 in
+        each, so without the replica offset every engine would claim 0..w-1.
+        The driver sets replica_rank on the payload; these are the ids it buys."""
+        ids = [self._ids(num_consumers=8, workers=range(4), replica_rank=r, num_replicas=2) for r in (0, 1)]
+        assert ids == [[0, 1, 2, 3], [4, 5, 6, 7]]
+        assert len(set(ids[0] + ids[1])) == 8, "every worker distinct fleet-wide"
+
+    def test_the_default_is_a_single_engine_with_no_offset(self):
+        assert self._ids(num_consumers=4, workers=range(4)) == [0, 1, 2, 3]
+
+
+class TestRequiresTheRayExecutor:
+    """The engine's data plane is Ray's, so a non-Ray executor cannot work. The
+    check is at construction because the alternative is an opaque failure during
+    the first handshake, long after the misconfiguration."""
+
+    def _construct(self, backend):
+        cfg = SimpleNamespace(parallel_config=SimpleNamespace(distributed_executor_backend=backend))
+        eng = object.__new__(ShardedRDTWeightTransferEngine)
+        # Only the guard is under test, so stand in for the base __init__.
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(
+                ShardedRDTWeightTransferEngine.__bases__[0],
+                "__init__",
+                lambda self, *a, **k: None,
+            )
+            ShardedRDTWeightTransferEngine.__init__(eng, None, cfg, META, None)
+        return eng
+
+    @pytest.mark.parametrize("backend", ["uni", "mp", "external_launcher"])
+    def test_a_non_ray_executor_is_refused(self, backend):
+        with pytest.raises(ValueError, match="requires distributed_executor"):
+            self._construct(backend)
+
+    def test_ray_is_accepted(self):
+        self._construct("ray")
+
+    def test_a_custom_executor_class_is_left_alone(self):
+        """A `type[Executor]` override is deliberate and unjudgeable here, so it
+        must not be rejected for merely not being the string "ray"."""
+
+        class _CustomExecutor:
+            pass
+
+        self._construct(_CustomExecutor)

@@ -20,7 +20,7 @@ from .delta_strategy import (
     DeltaTransferStrategy,
     DeltaWeightTransferSender,
 )
-from .sharded_rdt_strategy import (
+from .sharded_rdt.sharded_rdt_strategy import (
     ShardedRdtInitInfo,
     ShardedRdtTransferStrategy,
     ShardedRdtWeightTransferSender,

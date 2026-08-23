@@ -18,7 +18,9 @@ from typing import Any
 
 import torch
 
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import SUPPORTED_OPS
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common import (
+    SUPPORTED_OPS,
+)
 
 # ("op_name", positional_args, sorted_kwargs_items). Entries must be hashable so
 # the chain can serve as a FetchKey.
@@ -30,6 +32,15 @@ FetchKey = tuple[str, OpChain]
 def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     """Sort kwargs into a tuple of items for hashable storage in OpSpec."""
     return tuple(sorted(kwargs.items()))
+
+
+class _UnsupportedFakeOp(NotImplementedError):
+    """Raised when a weight loader does something to a FakeRDTTensor that cannot
+    be expressed as a slice request.
+
+    Surfaced as NotImplementedError so callers can distinguish "this backend
+    can't handle this loader" from genuine bugs.
+    """
 
 
 @dataclass
@@ -103,6 +114,20 @@ class BakeSink:
         self.copied_names.add(src._name)
         if self.current is not None:
             layer, param_name = self.current
+            if dest.numel() != src.numel():
+                # The packed layout sizes each slice from the DESTINATION shape,
+                # while the producer packs what the replayed chain produces. A
+                # broadcasting copy_ makes those two lengths differ, and neither
+                # side can notice: the consumer's buffer view is exactly
+                # prod(dest.shape) elements, so it reshapes cleanly over bytes
+                # the producer laid out at different offsets. Refuse at bake.
+                raise _UnsupportedFakeOp(
+                    f"FakeRDTTensor: broadcasting copy_ into {param_name!r} of "
+                    f"{type(layer).__name__} ({src.numel()} elements from "
+                    f"{src._name!r} into {dest.numel()}). The sharded RDT "
+                    "backend sends exactly the slice the loader asks for, so "
+                    "the source and destination must have equal numel."
+                )
             self.copies_by_layer[layer].append(
                 _Scatter(
                     layer=layer,
@@ -116,14 +141,6 @@ class BakeSink:
                 )
             )
         return _meta_copy_(dest, src)
-
-
-class _UnsupportedFakeOp(NotImplementedError):
-    """Raised when a weight loader calls an op we don't support on a FakeRDTTensor.
-
-    Surfaced as NotImplementedError so callers can distinguish "this backend
-    can't handle this loader" from genuine bugs.
-    """
 
 
 class FakeRDTTensor(torch.Tensor):

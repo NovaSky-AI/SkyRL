@@ -27,7 +27,7 @@ syncing; the producer-side stall watchdog IS kept, because the slot-sharing
 rendezvous relies on it as its failure mode.
 
 REMOVAL: delete this module once SkyRL's pinned vLLM ships the trainer-side
-engine, and repoint ``weight_sync/rdt_send.py`` at
+engine, and repoint ``weight_sync/sharded_rdt/rdt_send.py`` at
 ``vllm.distributed.weight_transfer.sharded_rdt_trainer``.
 """
 
@@ -50,10 +50,10 @@ from torch.multiprocessing.reductions import (
 from typing_extensions import Self
 from vllm.logger import init_logger
 
-from skyrl.backends.skyrl_train.weight_sync.rdt_libfabric_shim import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_libfabric_shim import (
     ensure_ray_rdt_libfabric,
 )
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
     ParamMeta,
     TrainerInitInfo,
     TrainerWeightTransferEngine,
@@ -61,7 +61,7 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
     WeightSource,
     layerwise_groups,
 )
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common import (
     ALLOWED_OPS,
     buffer_alloc_bytes,
     check_ray_rdt_version,
@@ -1196,7 +1196,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         ray.get(self._server.warmup_nixl.remote())
 
     def _build_worker_init_info(self, server_names: list[str]):
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
             ShardedRDTWeightTransferInitInfo,
         )
 
@@ -1236,7 +1236,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
 
         self.client.start_weight_update()
 
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
             ShardedRDTWeightTransferUpdateInfo,
         )
 

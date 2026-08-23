@@ -1,29 +1,17 @@
 """Trainer-side driver for the sharded-RDT (NIXL pull) weight-sync backend.
 
-RDT is deliberately kept OUT of SkyRL's ``WeightTransferStrategy`` /
-``WeightTransferSender`` abstraction. That abstraction encodes trainer-side send
-logic for the legacy *push* backends (NCCL broadcast, CUDA IPC), which extract
-weights on the worker and hand chunks to a sender. RDT instead already matches
-vLLM's *new* trainer-send model — a ``WeightSource`` + a
-``TrainerWeightTransferEngine`` + a ``VLLMWeightSyncClient`` — where the engine
-owns the whole round trip and the inference workers pull. Forcing that through
-``send_chunks(chunks, metadata)`` meant ignoring both args and bolting
-RDT-only hooks onto the shared base classes.
+RDT matches vLLM's trainer-send model — a ``WeightSource`` + a
+``TrainerWeightTransferEngine`` + a ``VLLMWeightSyncClient``, where the engine owns
+the round trip and the inference workers pull. ``ShardedRdtTransferStrategy``
+(``sharded_rdt_strategy.py``) presents :class:`RdtWeightSyncSender` through SkyRL's
+``WeightTransferSender`` interface, overriding ``send`` so no chunk stream or
+metadata is ever materialized.
 
-So we bypass the abstraction: ``Worker.init_weight_sync_state`` builds a
-``RdtWeightSyncSender`` for the RDT backend, and ``broadcast_to_inference_engines``
-calls ``.send()`` directly (skipping extraction + ``send_chunks`` entirely). This
-is an intermediate state: when vLLM ships trainer-send for NCCL/IPC too
-(see ``vllm-trainer-send-pr3``), those backends collapse into this same shape and
-the ``WeightTransferStrategy`` layer is deleted — at which point this file's
-``_FsdpWeightSource`` + the ``SyncRdtControlPlaneClient`` glue become the canonical
-path and the vendored ``sharded_rdt_*`` files are dropped in favor of
-``vllm.distributed.weight_transfer``.
-
-Two ``WeightSource`` flavors: ``_FsdpWeightSource`` (FSDP ``FSDPWeightExtractor``,
-all-gather via ``full_tensor()``) and ``MegatronWeightSource`` (Megatron
-``MegatronWeightExtractor``, gather via the Megatron-Bridge ``export_hf_weights``).
-``_trainer_init_blocking`` selects between them by the extractor flavor.
+Three ``WeightSource`` flavors, selected by extractor flavor in
+``make_weight_source``: ``_FsdpWeightSource`` (all-gather via ``full_tensor()``),
+``MegatronStackedWeightSource`` (PP-local + EP-local, stack-granularity gathers) and
+``MegatronWeightSource`` (the whole-model Megatron-Bridge ``export_hf_weights``
+fallback).
 """
 
 import asyncio
@@ -36,10 +24,10 @@ from typing import TYPE_CHECKING, Any, Iterator, List, Optional
 import torch
 from loguru import logger as _loguru
 
-from skyrl.backends.skyrl_train.weight_sync.rdt_control_plane import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_control_plane import (
     SyncRdtControlPlaneClient,
 )
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
     ParamMeta,
     WeightSource,
     layerwise_groups,
@@ -610,8 +598,8 @@ class MegatronStackedWeightSource(WeightSource):
         base = tail.rsplit("weight", 1)[0]
         return head + "layers.{layer}." + base + "weight{e}"
 
-    def _resolved_expert_names(self, lay: "_ExpertLayer", E: int) -> Optional[list]:
-        """Expert HF names straight from the bridge's mapping registry, or None.
+    def _resolved_expert_names(self, lay: "_ExpertLayer", E: int) -> list:
+        """Expert HF names straight from the bridge's mapping registry.
 
         ``megatron_to_hf_lookup`` resolves a Megatron param name to the CONCRETE
         HF name(s) — no model, no collective, pure string work — so whatever the
@@ -620,9 +608,10 @@ class MegatronStackedWeightSource(WeightSource):
         ``GatedMLPMapping`` whose ``hf_param`` names gate/up BY KEY, so the two
         halves are identified rather than assumed.
 
-        Returns None (caller falls back) on any shape we do not recognize, since
-        a wrong name here is SILENT: the consumer never bakes it, so it is
-        skipped rather than raising.
+        Raises on any shape we cannot read, rather than guessing. A wrong name
+        here fails SILENTLY -- the consumer never baked it, so the slice is simply
+        never pulled and that expert keeps its stale weights, with nothing
+        downstream to notice. Failing the sync loudly is the only safe response.
         """
         try:
             # getattr: tests drive this source on instances built without __init__.
@@ -636,45 +625,46 @@ class MegatronStackedWeightSource(WeightSource):
                 fc1 = getattr(reg.megatron_to_hf_lookup(t1.format(layer=lay.layer, e=e)), "hf_param", None)
                 fc2 = getattr(reg.megatron_to_hf_lookup(t2.format(layer=lay.layer, e=e)), "hf_param", None)
                 if not isinstance(fc1, dict) or "gate" not in fc1 or "up" not in fc1 or not isinstance(fc2, str):
-                    return None
+                    raise RuntimeError(
+                        "sharded_rdt could not resolve expert HF names from the "
+                        f"Megatron-Bridge mapping registry for layer {lay.layer} expert {e}: "
+                        f"expected fc1 -> {{'gate': str, 'up': str}} and fc2 -> str, got "
+                        f"fc1={fc1!r} fc2={fc2!r}. Refusing to guess: an unresolved expert "
+                        "name is never baked by the consumer, so that expert would silently "
+                        "keep stale weights."
+                    )
                 names.append(fc1["gate"])
                 names.append(fc1["up"])
                 names.append(fc2)
             return names
-        except Exception:  # noqa: BLE001 - any registry shape we cannot read -> fall back
-            logger.warning("[rdt] expert-name lookup via the bridge failed; using the legacy names", exc_info=True)
-            return None
+        except RuntimeError:
+            raise
+        except Exception as e:  # noqa: BLE001 - add context, then fail the sync
+            raise RuntimeError(
+                "sharded_rdt failed to look up expert HF names via the Megatron-Bridge "
+                f"mapping registry (layer {lay.layer}, {E} experts): {type(e).__name__}: {e}. "
+                "Refusing to fall back to synthesized names, which would silently skip "
+                "these experts."
+            ) from e
 
     def _expert_names_for(self, lay: "_ExpertLayer", E: int) -> list:
         """Per-layer expert HF names in yield order (gate/up/down per expert),
         built once and cached — otherwise ~36k lookups per sync at 235B.
 
-        Resolved through the bridge (see ``_resolved_expert_names``), falling
-        back to the legacy synthesis. That fallback assumed
-        ``model.layers.<L>.mlp.experts.<e>.{gate,up,down}_proj.weight`` — the
-        Qwen3-MoE family's naming, which GLM and DeepSeek share and which
-        Kimi K2.5-VL does NOT: it nests the stack under ``language_model.``, so
-        every expert name missed and the experts silently never synced.
-        Verified on CPU that the bridge reproduces the legacy names exactly for
-        Qwen3-MoE, so this is a no-op wherever it already worked.
+        Always resolved through the bridge (see ``_resolved_expert_names``); names
+        are never synthesized from an assumed layout. Architectures differ (Kimi
+        K2.5-VL nests the stack under ``language_model.`` where Qwen3-MoE, GLM and
+        DeepSeek do not), and a wrong name is never baked by the consumer, so those
+        experts would silently keep stale weights.
         """
         names = self._expert_names.get(lay.layer)
         if names is not None:
             return names
         names = self._resolved_expert_names(lay, E)
-        source = "bridge mapping_registry"
-        if names is None:
-            prefix = f"model.layers.{lay.layer}.mlp.experts"
-            names = []
-            for e in range(E):
-                names.append(f"{prefix}.{e}.gate_proj.weight")
-                names.append(f"{prefix}.{e}.up_proj.weight")
-                names.append(f"{prefix}.{e}.down_proj.weight")
-            source = "legacy synthesis (model.layers.* assumed)"
         if getattr(self, "_expert_name_source", None) is None:
-            # Positive marker, once: which naming path a run actually took.
-            self._expert_name_source = source
-            logger.info("[rdt-config] expert HF names from: %s", source)
+            # Positive marker, once, so a run records where its names came from.
+            self._expert_name_source = "bridge mapping_registry"
+            logger.info("[rdt-config] expert HF names from: bridge mapping_registry")
         self._expert_names[lay.layer] = names
         return names
 
@@ -728,11 +718,9 @@ class MegatronStackedWeightSource(WeightSource):
         degenerate case needs no branch.
 
         The per-expert tensors are views into contiguous stacks —
-        each a contiguous slab (identical storage/offset/stride to the old
-        per-expert ``fc1_stack[e, :F].contiguous()``, which was already a
-        no-copy self-return). ``unbind`` batches the view creation: 3
-        dispatcher calls per layer instead of 3E ``__getitem__`` + 3E no-op
-        ``.contiguous()`` — the old path's main per-tensor cost."""
+        each a contiguous slab. ``unbind`` batches the view creation: 3 dispatcher
+        calls per layer instead of 3E ``__getitem__`` plus 3E no-op
+        ``.contiguous()``."""
         # Recorded BEFORE the expert names are emitted, so metadata() can
         # synthesize foreign experts' shapes (their tensors are None).
         self._layer_geom[lay.layer] = (lay.F, lay.H)
@@ -1297,8 +1285,9 @@ def make_weight_source(weight_extractor: Any, dtype: torch.dtype) -> WeightSourc
 
 
 class RdtWeightSyncSender:
-    """Drives sharded-RDT weight sync through the vendored vLLM trainer-send
-    engine, bypassing SkyRL's ``WeightTransferStrategy`` / ``WeightTransferSender``.
+    """Drives sharded-RDT weight sync through the vendored vLLM trainer-send engine.
+    ``ShardedRdtWeightTransferSender`` wraps this to satisfy SkyRL's
+    ``WeightTransferSender`` interface.
 
     Built once per worker in ``init_weight_sync_state``; ``send()`` is called from
     ``broadcast_to_inference_engines`` each RL step. The heavy ``trainer_init``
@@ -1374,7 +1363,7 @@ class RdtWeightSyncSender:
         """Build the WeightSource + control-plane client + trainer init info and
         rendezvous. Runs in a worker thread (blocks on the Ray spawn, an
         all-gather collective, and — on rank 0 — the inference-side bake)."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_trainer import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
             ShardedRDTTrainerInitInfo,
             ShardedRDTTrainerWeightTransferEngine,
         )

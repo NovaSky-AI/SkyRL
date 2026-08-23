@@ -1,16 +1,8 @@
-"""The sharded-RDT ``WeightTransferStrategy`` adapter.
+"""The sharded-RDT ``WeightTransferStrategy`` adapter: capability flags, init info,
+and that ``send`` never materializes metadata or chunks.
 
-These tests pin the seams the adapter exists to remove, because each one is a
-silent failure rather than a loud one if it regresses:
-
-* the sender is always constructed, so the workers can read policy off it (the
-  attribute being unset is how the pre-adapter code broke the first sync),
-* ``send`` never touches ``get_weight_metadata`` — a whole-model gather on the
-  Megatron extractor, and the exact cost the RDT weight source exists to avoid,
-* the capability flags the workers now branch on instead of the backend string.
-
-The rendezvous itself (Ray actors, NIXL, CUDA IPC) is out of scope here; it is
-covered by the producer/plan suites and the GPU tests.
+The rendezvous itself (Ray actors, NIXL, CUDA IPC) is covered by the producer/plan
+suites and the GPU tests.
 """
 
 from dataclasses import dataclass
@@ -76,7 +68,7 @@ class _FakeRdtSender:
 class TestInitInfo:
     def test_carries_the_config_derived_args(self, monkeypatch):
         monkeypatch.setattr(
-            "skyrl.backends.skyrl_train.weight_sync.sharded_rdt_strategy._ray_namespace",
+            "skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_strategy._ray_namespace",
             lambda: "ns",
         )
         info = ShardedRdtTransferStrategy.create_init_info(_IeCfg(), inference_world_size=16)
@@ -116,13 +108,14 @@ class TestCapabilityFlags:
         assert ShardedRdtTransferStrategy.sender_initializes_receivers is True
         assert get_transfer_strategy_cls("nccl", False).sender_initializes_receivers is False
 
-    def test_the_strategy_asks_for_the_weight_extractor(self):
-        """The rendezvous is eager (deferring it deadlocks), so create_sender needs
-        the model. The push strategies' signatures stay untouched, which is what
-        this flag gates."""
-        assert ShardedRdtTransferStrategy.sender_needs_weight_extractor is True
-        assert get_transfer_strategy_cls("nccl", False).sender_needs_weight_extractor is False
-        assert get_transfer_strategy_cls("nccl", True).sender_needs_weight_extractor is False
+    def test_every_strategy_accepts_the_weight_extractor(self):
+        """The worker passes `weight_extractor` to every strategy uniformly, so all
+        of them must accept the keyword even though only sharded_rdt uses it."""
+        import inspect
+
+        for backend, colocate in (("nccl", False), ("nccl", True), ("sharded_rdt", False)):
+            sig = inspect.signature(get_transfer_strategy_cls(backend, colocate).create_sender)
+            assert "weight_extractor" in sig.parameters, f"{backend}/{colocate} rejects weight_extractor"
 
     def test_expandable_segments_are_forced_off(self):
         """The sidecar shares gathered tensors over CUDA IPC on every run, not only
@@ -131,8 +124,8 @@ class TestCapabilityFlags:
         assert WeightTransferSender.force_disable_expandable_segments is False
 
     def test_the_post_send_empty_cache_is_skipped(self):
-        """Publish buffers are reused by the next training step; returning them to
-        CUDA measured 0.25-0.53s per rank at 235B for nothing."""
+        """Publish buffers are reused by the next training step, so returning them to
+        CUDA costs 0.25-0.53s per rank at 235B and buys nothing."""
         assert ShardedRdtWeightTransferSender.empty_cache_after_send is False
         assert WeightTransferSender.empty_cache_after_send is True
 
@@ -155,10 +148,10 @@ class TestSend:
 
     @pytest.mark.asyncio
     async def test_send_never_materializes_metadata_or_chunks(self):
-        """The load-bearing one. get_weight_metadata on the Megatron extractor is a
-        whole-model export_hf_weights pass -- ~20s at 235B and model-sized memory,
-        which is what the RDT weight source exists to avoid. The push backends'
-        default send() calls it, so this override must not."""
+        """get_weight_metadata on the Megatron extractor is a whole-model
+        export_hf_weights pass -- ~20s at 235B and model-sized memory, which is what
+        the RDT weight source avoids. The push backends' default send() calls it, so
+        this override must not."""
         extractor = _Extractor()
         await ShardedRdtWeightTransferSender(_FakeRdtSender()).send(extractor, "torch.bfloat16")
 
@@ -227,7 +220,7 @@ class TestCreateSender:
                 built["inited"] = weight_extractor
 
         monkeypatch.setattr(
-            "skyrl.backends.skyrl_train.weight_sync.rdt_send.RdtWeightSyncSender",
+            "skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send.RdtWeightSyncSender",
             _Recorder,
         )
         extractor = _Extractor()
@@ -242,12 +235,12 @@ class TestCreateSender:
         assert built["inited"] is extractor
 
 
+@pytest.mark.vllm
 class TestVllmEngineMapping:
     def test_it_returns_the_registered_consumer_engine(self):
-        """Unlike the push strategies' reference mapping, this one is live: the
-        consumers really do construct this class via vLLM's factory."""
+        """The consumers construct this class through vLLM's factory."""
         pytest.importorskip("vllm")
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
             ShardedRDTWeightTransferEngine,
         )
 

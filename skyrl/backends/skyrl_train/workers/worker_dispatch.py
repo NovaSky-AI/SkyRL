@@ -619,6 +619,18 @@ class WorkerDispatch:
             )
         )
 
+    def get_timing_metrics(self) -> Dict[str, float]:
+        """Timing this dispatch measured itself, to merge into the trainer's metrics.
+
+        ``sync_weights_only_transfer`` is the weight transfer alone, reported apart
+        from the trainer's ``sync_weights``, which also brackets the generation
+        pause/resume (seconds of coordinator quiesce under vLLM DP). Empty until the
+        first sync.
+        """
+        if self.last_weight_sync_seconds is None:
+            return {}
+        return {"sync_weights_only_transfer": self.last_weight_sync_seconds}
+
     def _prepare_for_weight_sync(self) -> None:
         """Prepare for weight sync: ensure policy model is on GPU, offload optimizer. Helper for save_weights_for_sampler."""
         if not self.colocate_all:
@@ -653,10 +665,10 @@ class WorkerDispatch:
         def _broadcast_and_finish() -> None:
             """The weight transfer proper, timed on its own.
 
-            ``last_weight_sync_seconds`` is what the trainer reports as
-            ``timing/sync_weights``: the enclosing call also pauses and resumes
-            generation, which under vLLM DP costs seconds of coordinator quiesce
-            that has nothing to do with moving weights.
+            ``last_weight_sync_seconds`` is surfaced as
+            ``timing/sync_weights_only_transfer`` via :meth:`get_timing_metrics`,
+            alongside the trainer's own ``sync_weights`` timer, which wraps the
+            enclosing pause/resume bracket too.
             """
             start = time.perf_counter()
             self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)

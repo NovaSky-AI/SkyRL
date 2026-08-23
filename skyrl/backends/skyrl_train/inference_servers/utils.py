@@ -15,8 +15,8 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 # factory and relaxes WeightTransferConfig.backend so backend="sharded_rdt"
 # validates below. This must run on the driver before the WeightTransferConfig
 # is constructed; the import above already triggers it, this is just explicit.
-from skyrl.backends.skyrl_train.weight_sync import (
-    get_transfer_strategy,
+from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
     rdt_vllm_register,  # noqa: F401,E402
 )
 from skyrl.train.config import (

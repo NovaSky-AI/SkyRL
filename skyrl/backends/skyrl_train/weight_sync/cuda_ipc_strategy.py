@@ -290,6 +290,7 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
     def create_sender(
         init_info: CudaIpcInitInfo,
         inference_client: "RemoteInferenceClient",
+        weight_extractor: Optional[Any] = None,
     ) -> CudaIpcWeightTransferSender:
         """Create a CUDA IPC sender.
 

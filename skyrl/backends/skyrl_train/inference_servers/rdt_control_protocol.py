@@ -6,7 +6,7 @@ under ``set_current_vllm_config``), not vLLM's native weight-transfer endpoints.
 
 Two clients speak it: the async ``RemoteInferenceClient`` (over aiohttp) and the
 trainer-side ``SyncRdtControlPlaneClient`` (over blocking HTTP; see
-``weight_sync/rdt_control_plane.py``). This module is the single source of truth
+``weight_sync/sharded_rdt/rdt_control_plane.py``). This module is the single source of truth
 for the method names and the per-server ``replica_rank`` fan-out so the two can
 never drift. It is intentionally stdlib-only — no ray / torch / vllm — so either
 client can import it without pulling backend deps.

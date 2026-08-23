@@ -15,7 +15,7 @@ Vendored alongside `sharded_rdt_base.py` from the vLLM RDT fork
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_base import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
     ParamMeta,
     WeightSource,
     layerwise_groups,
@@ -136,20 +136,19 @@ class TestHeldNamesDefault:
 
 
 class TestExpertNameResolution:
-    """Expert HF names come from the bridge's mapping registry, not a guess.
+    """Expert HF names come from the bridge's mapping registry, never an assumed
+    layout: architectures differ (Kimi K2.5-VL nests its decoder stack under
+    `language_model.`, Qwen3-MoE does not), and a wrong name is never baked by the
+    consumer, so those experts silently keep stale weights instead of raising.
 
-    The legacy synthesis hardcoded `model.layers.<L>.mlp.experts.<e>.*_proj.weight`
-    — the Qwen3-MoE family's naming. Kimi K2.5-VL nests its decoder stack under
-    `language_model.`, so every synthesized expert name missed; a missed name is
-    never baked by the consumer, so the experts silently never sync rather than
-    raising. `megatron_to_hf_lookup` is pure string work (no model, no CUDA, no
-    collective), which is what lets this be a CPU test.
+    `megatron_to_hf_lookup` is pure string work — no model, no CUDA, no collective —
+    which is what lets this be a CPU test.
     """
 
     def test_template_resubstitutes_both_indices(self):
         """Only the SHAPE of the sample name is kept — a foreign expert this rank
         holds no task for still gets the right name."""
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
             MegatronStackedWeightSource as S,
         )
 
@@ -157,8 +156,8 @@ class TestExpertNameResolution:
         assert t.format(layer=7, e=11) == "decoder.layers.7.mlp.experts.linear_fc1.weight11"
 
     def test_template_keeps_a_nested_stack_prefix(self):
-        """The Kimi case: the prefix must survive, since that is the whole bug."""
-        from skyrl.backends.skyrl_train.weight_sync.rdt_send import (
+        """A nested stack prefix must survive the resubstitution."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
             MegatronStackedWeightSource as S,
         )
 
@@ -179,12 +178,8 @@ class TestExpertNameResolution:
     )
     def test_registry_resolves_expert_names(self, module, cls_hint, mg_prefix, hf_prefix):
         """The registry returns CONCRETE names with both indices substituted, and
-        names gate/up by KEY rather than by position.
-
-        For Qwen3-MoE the result must equal the legacy synthesis exactly — that
-        is the regression guard saying this change is a no-op where it already
-        worked. For Kimi it must carry the `language_model.` prefix the legacy
-        path dropped.
+        names gate/up by KEY rather than by position. Qwen3-MoE resolves under
+        `model.`, Kimi under `language_model.`.
         """
         import importlib
         import inspect

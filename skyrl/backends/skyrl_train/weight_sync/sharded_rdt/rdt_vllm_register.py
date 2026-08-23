@@ -43,7 +43,7 @@ def _register_engine() -> None:
         return
     WeightTransferEngineFactory.register_engine(
         RDT_BACKEND,
-        "skyrl.backends.skyrl_train.weight_sync.sharded_rdt_engine",
+        "skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine",
         "ShardedRDTWeightTransferEngine",
     )
     logger.info("Registered %r weight transfer engine.", RDT_BACKEND)

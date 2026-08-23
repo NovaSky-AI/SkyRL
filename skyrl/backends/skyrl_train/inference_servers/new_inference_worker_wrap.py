@@ -48,8 +48,17 @@ except ModuleNotFoundError:
 # Registering the sharded_rdt engine into vLLM's WeightTransferEngineFactory must
 # happen inside every worker process (GPUWorker.load_model builds the engine via
 # the factory). Importing here — the worker-extension module vLLM loads before
-# model init — guarantees it runs on each worker. No-op if vLLM is absent.
-from skyrl.backends.skyrl_train.weight_sync import rdt_vllm_register  # noqa: F401,E402
+# model init — guarantees it runs on each worker. Guarded like the delta engine
+# above: this module is also imported from processes without the RDT dependencies
+# (e.g. a trainer process), and a missing optional dep must not break them.
+try:
+    from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
+        rdt_vllm_register,  # noqa: F401
+    )
+
+    rdt_vllm_register.ensure_registered()
+except ModuleNotFoundError:
+    pass
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 

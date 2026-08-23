@@ -1385,9 +1385,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 param_group["lr"] = learning_rate
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
-        # Initialize the weight extractor BEFORE super(): a strategy that sets
-        # sender_needs_weight_extractor (sharded_rdt) rendezvouses inside
-        # create_sender and is handed this extractor there. It only depends on
+        # Initialize the weight extractor BEFORE super(): a strategy that
+        # rendezvouses at init (sharded_rdt) is handed this extractor by
+        # create_sender. It only depends on
         # the already-built bridge/actor_module, not on super().
         self.weight_extractor = MegatronWeightExtractor(
             bridge=self.bridge,
@@ -1512,9 +1512,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if cache_reset_task is not None:
             await cache_reset_task
         # A sender whose send buffers are reused next step (sharded_rdt) declares
-        # empty_cache_after_send=False: scrubbing them back to CUDA measured
-        # 0.25-0.53s per rank at 235B for nothing. Under colocation the physical
-        # memory is wanted by an inference engine, so empty regardless.
+        # empty_cache_after_send=False: scrubbing them back to CUDA costs 0.25-0.53s
+        # per rank at 235B and buys nothing. Under colocation the physical memory is
+        # wanted by an inference engine, so empty regardless.
         if self._weight_transfer_sender.empty_cache_after_send or self.cfg.placement.colocate_all:
             torch.cuda.empty_cache()
         torch.distributed.barrier()

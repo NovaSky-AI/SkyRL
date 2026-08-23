@@ -74,12 +74,12 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.logger import init_logger
 
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_common import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common import (
     RdtRouter,
     buffer_alloc_bytes,
     check_ray_rdt_version,
 )
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_fake import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_fake import (
     BakeSink,
     FakeRDTTensor,
     FetchKey,
@@ -89,7 +89,7 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt_fake import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-from skyrl.backends.skyrl_train.weight_sync.rdt_libfabric_shim import (
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_libfabric_shim import (
     ensure_ray_rdt_libfabric,
 )
 
