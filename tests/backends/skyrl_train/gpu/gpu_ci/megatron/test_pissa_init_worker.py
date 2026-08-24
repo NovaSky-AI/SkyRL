@@ -61,11 +61,12 @@ def test_distributed_decomposition_uses_rank_zero_factors(monkeypatch, group_ran
     factors = iter((expected_in, expected_out))
 
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group: group_rank)
-    monkeypatch.setattr(
-        torch.distributed,
-        "broadcast",
-        lambda tensor, group, group_src: tensor.copy_(next(factors)),
-    )
+
+    def broadcast(tensor, group, group_src):
+        assert tensor.is_contiguous()
+        tensor.copy_(next(factors))
+
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
     if group_rank != 0:
         monkeypatch.setattr(
             pissa_init_worker,

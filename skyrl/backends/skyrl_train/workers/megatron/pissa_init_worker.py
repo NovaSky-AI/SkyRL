@@ -110,6 +110,8 @@ def _synchronized_pissa_decompose(
         linear_in = torch.empty((rank, weight.shape[1]), dtype=torch.float32, device=weight.device)
         linear_out = torch.empty((weight.shape[0], rank), dtype=torch.float32, device=weight.device)
 
+    linear_in = linear_in.contiguous()
+    linear_out = linear_out.contiguous()
     torch.distributed.broadcast(linear_in, group=group, group_src=0)
     torch.distributed.broadcast(linear_out, group=group, group_src=0)
     residual = weight.float() - scale * (linear_out @ linear_in)
