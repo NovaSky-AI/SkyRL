@@ -10,8 +10,12 @@ import pytest
 import torch
 from transformers import AutoProcessor, AutoTokenizer
 
+from skyrl.train import sft_trainer as sft_mod
 from skyrl.train.config.sft_config import SFTConfig, TrainOnWhat
-from skyrl.train.generators.utils import get_generation_prompt_ids
+from skyrl.train.generators.utils import (
+    get_generation_prompt_ids,
+    get_response_ids_and_loss_mask_from_messages,
+)
 from skyrl.train.sft_trainer import (
     _normalize_chat_messages,
     collate_sft_batch,
@@ -587,6 +591,206 @@ def test_train_on_what_all_assistants_truncation(tokenizer):
         assert len(result["loss_mask"]) == result["num_actions"]
         # All loss_mask values should be 0 or 1
         assert all(v in (0, 1) for v in result["loss_mask"])
+
+
+def _masked_action_text(result, tokenizer):
+    action_ids = result["input_ids"][-result["num_actions"] :]
+    masked_ids = [token_id for token_id, mask in zip(action_ids, result["loss_mask"]) if mask]
+    return tokenizer.decode(masked_ids, skip_special_tokens=True)
+
+
+def _assistant_generated_text(message, tokenizer):
+    response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages([message], tokenizer)
+    generated_ids = [token_id for token_id, mask in zip(response_ids, loss_mask) if mask]
+    return tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+
+def test_train_on_what_last_n_preserves_tokens_and_selects_tail(tokenizer):
+    messages = [
+        {"role": "user", "content": "Question one"},
+        {"role": "assistant", "content": "Answer one"},
+        {"role": "user", "content": "Question two"},
+        {"role": "assistant", "content": "Answer two"},
+        {"role": "user", "content": "Question three"},
+        {"role": "assistant", "content": "Answer three"},
+        {"role": "user", "content": "Question four"},
+        {"role": "assistant", "content": "Answer four"},
+    ]
+    all_result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+    )
+    last_n_result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_N_ASSISTANT_MESSAGES,
+        train_on_last_n=2,
+    )
+
+    assert all_result is not None
+    assert last_n_result is not None
+    assert last_n_result["input_ids"] == all_result["input_ids"]
+    assert last_n_result["attention_mask"] == all_result["attention_mask"]
+    assert last_n_result["num_actions"] < all_result["num_actions"]
+    assert last_n_result["loss_mask"][0] == 1
+    assistant_messages = [message for message in messages if message["role"] == "assistant"]
+    expected = "".join(_assistant_generated_text(message, tokenizer) for message in assistant_messages[-2:])
+    assert _masked_action_text(last_n_result, tokenizer) == expected
+
+
+def test_train_on_what_last_n_at_least_all_matches_all_assistants(tokenizer):
+    messages = [
+        {"role": "user", "content": "Question one"},
+        {"role": "assistant", "content": "Answer one"},
+        {"role": "user", "content": "Question two"},
+        {"role": "assistant", "content": "Answer two"},
+    ]
+    all_result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+    )
+    last_n_result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_N_ASSISTANT_MESSAGES,
+        train_on_last_n=3,
+    )
+
+    assert last_n_result == all_result
+
+
+def test_train_on_what_last_n_one_matches_last_assistant_span(tokenizer):
+    messages = [
+        {"role": "user", "content": "Question one"},
+        {"role": "assistant", "content": "Answer one"},
+        {"role": "user", "content": "Question two"},
+        {"role": "assistant", "content": "Answer two"},
+    ]
+    last_assistant = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+    )
+    last_n_result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_N_ASSISTANT_MESSAGES,
+        train_on_last_n=1,
+    )
+
+    assert last_assistant is not None
+    assert last_n_result is not None
+    assert (
+        last_n_result["input_ids"][-last_n_result["num_actions"] :]
+        == last_assistant["input_ids"][-last_assistant["num_actions"] :]
+    )
+    assert last_n_result["num_actions"] == len(last_n_result["loss_mask"])
+    assert last_n_result["loss_mask"][0] == 1
+
+
+def test_train_on_what_last_n_masks_tool_observations(tokenizer):
+    messages = [
+        {"role": "user", "content": "Find the weather."},
+        {"role": "assistant", "content": "I will check."},
+        {"role": "tool", "content": "It is sunny."},
+        {"role": "assistant", "content": "The weather is sunny."},
+        {"role": "user", "content": "What about tomorrow?"},
+        {"role": "assistant", "content": "I will check again."},
+        {"role": "tool", "content": "It will rain."},
+        {"role": "assistant", "content": "Tomorrow will be rainy."},
+    ]
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_N_ASSISTANT_MESSAGES,
+        train_on_last_n=2,
+    )
+
+    assert result is not None
+    assistant_messages = [message for message in messages if message["role"] == "assistant"]
+    expected = "".join(_assistant_generated_text(message, tokenizer) for message in assistant_messages[-2:])
+    assert _masked_action_text(result, tokenizer) == expected
+    assert 0 in result["loss_mask"]
+    assert result["loss_mask"][0] == 1
+    assert result["num_actions"] == len(result["loss_mask"])
+
+
+def test_train_on_what_last_n_drops_when_selected_tail_is_truncated(tokenizer):
+    messages = [
+        {"role": "user", "content": "Question one"},
+        {"role": "assistant", "content": "Answer one"},
+        {"role": "user", "content": "Question two"},
+        {"role": "assistant", "content": "Answer two"},
+    ]
+    full_result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        train_on_what=TrainOnWhat.LAST_N_ASSISTANT_MESSAGES,
+        train_on_last_n=1,
+    )
+    assert full_result is not None
+    first_selected_token = len(full_result["input_ids"]) - full_result["num_actions"]
+    drop_stats = {}
+
+    result = tokenize_chat_example(
+        {"messages": messages},
+        tokenizer,
+        max_length=first_selected_token,
+        train_on_what=TrainOnWhat.LAST_N_ASSISTANT_MESSAGES,
+        train_on_last_n=1,
+        _drop_stats=drop_stats,
+    )
+
+    assert result is None
+    assert drop_stats == {"last_n_truncation": 1}
+
+
+def test_last_n_cache_key_depends_on_n():
+    kwargs = {
+        "dataset_name": "dummy/dataset",
+        "dataset_split": "train",
+        "model_path": "dummy/model",
+        "max_length": 128,
+        "messages_key": "messages",
+        "train_on_what": TrainOnWhat.LAST_N_ASSISTANT_MESSAGES.value,
+        "tools_key": "tools",
+        "system_key": "system",
+    }
+    key_n_one = sft_mod._compute_cache_key(**kwargs, train_on_last_n=1)
+    key_n_two = sft_mod._compute_cache_key(**kwargs, train_on_last_n=2)
+    key_n_one_again = sft_mod._compute_cache_key(**kwargs, train_on_last_n=1)
+
+    assert key_n_one != key_n_two
+    assert key_n_one == key_n_one_again
+
+
+def test_train_on_what_last_n_rejects_vlm(vlm_processor):
+    example = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hi"},
+                    {
+                        "type": "image",
+                        "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    },
+                ],
+            },
+            {"role": "assistant", "content": "Hello!"},
+        ]
+    }
+
+    with pytest.raises(NotImplementedError, match="all or the last N assistant messages"):
+        tokenize_chat_example(
+            example,
+            vlm_processor.tokenizer,
+            train_on_what=TrainOnWhat.LAST_N_ASSISTANT_MESSAGES,
+            train_on_last_n=1,
+            processor=vlm_processor,
+        )
 
 
 # ---------------------------------------------------------------------------
