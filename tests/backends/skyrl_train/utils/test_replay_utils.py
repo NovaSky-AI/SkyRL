@@ -34,6 +34,7 @@ def parallel_state(monkeypatch):
     monkeypatch.setattr(mpu, "get_tensor_model_parallel_world_size", lambda: 1, raising=False)
     monkeypatch.setattr(mpu, "get_context_parallel_world_size", lambda: 1, raising=False)
     monkeypatch.setattr(mpu, "get_context_parallel_rank", lambda: 0, raising=False)
+    monkeypatch.setattr(mpu, "get_expert_model_parallel_world_size", lambda: 1, raising=False)
     return mpu
 
 
@@ -93,7 +94,7 @@ def test_replay_has_no_dispatcher_specific_patch():
 
 
 @pytest.mark.parametrize("route_dtype", [torch.uint8, torch.int16, torch.int32])
-def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, parallel_state, route_dtype):
+def test_setup_replay_installs_indices_in_model_order_and_returns_mask(monkeypatch, parallel_state, route_dtype):
     router_replay_module = types.ModuleType("megatron.core.transformer.moe.router_replay")
 
     class RouterReplay:
@@ -131,19 +132,14 @@ def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, paral
 
     monkeypatch.setattr(replay_utils, "align_token_metadata", record_routed_layer_count)
 
-    routes = torch.tensor(
-        [
-            [
-                [[0, 1], [0, 1], [0, 1]],
-                [[10, 11], [1, 2], [20, 21]],
-                [[12, 13], [3, 4], [22, 23]],
-                [[14, 15], [5, 6], [24, 25]],
-            ]
-        ],
-        dtype=route_dtype,
+    monkeypatch.setattr(parallel_state, "get_expert_model_parallel_world_size", lambda: 8)
+
+    routes = torch.arange(240, dtype=torch.int32).reshape(2, 5, 3, 8).to(route_dtype)
+    attention_mask = torch.ones((2, 5), dtype=torch.long)
+    router_padding_mask = torch.tensor(
+        [[False, True, False, True, False], [True, False, True, False, True]],
+        dtype=torch.bool,
     )
-    attention_mask = torch.tensor([[0, 1, 1, 1]])
-    router_padding_mask = torch.tensor([[1, 0, 0, 1]], dtype=torch.bool)
     metadata_layout = build_token_metadata_layout(
         attention_mask,
         routes.device,
@@ -156,15 +152,44 @@ def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, paral
         router_padding_mask,
         attention_mask,
         model=object(),
-        model_config=SimpleNamespace(fp8=None),
+        model_config=SimpleNamespace(fp8=None, num_moe_experts=384),
         metadata_layout=metadata_layout,
     )
 
-    assert RouterReplay.replay_data[0].tolist() == [[1, 2], [3, 4], [5, 6]]
+    installed = RouterReplay.replay_data[0]
+    flat_padding_mask = router_padding_mask.transpose(0, 1).flatten()
+    expected_captured = torch.tensor(
+        [
+            list(range(8, 16)),
+            list(range(152, 160)),
+            list(range(56, 64)),
+            list(range(200, 208)),
+            list(range(104, 112)),
+        ],
+        dtype=torch.int32,
+    )
+    assert torch.equal(installed[~flat_padding_mask], expected_captured)
+    padding_routes = installed[flat_padding_mask]
+    assignment_ordinals = torch.arange(40).reshape(5, 8)
+    expected_padding_routes = (assignment_ordinals % 8) * 48 + assignment_ordinals // 8
+    assert torch.equal(padding_routes, expected_padding_routes)
+    assert padding_routes[0].tolist() == [0, 48, 96, 144, 192, 240, 288, 336]
+    assert torch.all((padding_routes >= 0) & (padding_routes < 384))
+    assert torch.all(padding_routes.sort(dim=1).values.diff(dim=1) > 0)
+    for num_padding_rows in range(1, 6):
+        expert_loads = torch.bincount(padding_routes[:num_padding_rows].flatten(), minlength=384)
+        assert expert_loads.max() - expert_loads.min() <= 1
+        assert torch.equal(
+            expert_loads.reshape(8, 48).sum(dim=1),
+            torch.full((8,), num_padding_rows, dtype=torch.long),
+        )
     assert RouterReplay.replay_data[0].dtype == torch.int32
     assert RouterReplay.action == RouterReplayAction.REPLAY_FORWARD
-    assert model_kwargs["padding_mask"].tolist() == [[False, False, True]]
+    assert torch.equal(model_kwargs["padding_mask"], router_padding_mask)
     assert routed_layer_counts == [1]
+
+    packed_routes = torch.arange(10, dtype=torch.uint8).reshape(1, 5, 1, 2)
+    assert torch.equal(replay_utils._split_replay_indices(packed_routes)[0], packed_routes[0, :, 0].to(torch.int32))
 
 
 @pytest.mark.parametrize("packed", [False, True])
@@ -219,7 +244,7 @@ def test_replay_indices_are_dtype_independent(monkeypatch, parallel_state, packe
             router_padding_mask,
             attention_mask,
             model=object(),
-            model_config=SimpleNamespace(fp8=None, sequence_parallel=False),
+            model_config=SimpleNamespace(fp8=None, sequence_parallel=False, num_moe_experts=4096),
             metadata_layout=layout,
             remove_microbatch_padding=packed,
         )
