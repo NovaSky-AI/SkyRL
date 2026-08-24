@@ -53,7 +53,7 @@ class FSDPWeightExtractor(WeightExtractor):
 
     Args:
         model: FSDP model to extract weights from
-        group_by_module: If True, group parameters by module (e.g., for fused QKV loaders)
+        enable_bucketing: If True, group parameters by module (e.g., for fused QKV loaders)
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
         weight_prefix: Prefix to prepend to all weight names (e.g., ``"language_model."``
             when syncing a CausalLM backbone to a vLLM instance which always uses the namespace of the
@@ -63,12 +63,12 @@ class FSDPWeightExtractor(WeightExtractor):
     def __init__(
         self,
         model: torch.nn.Module,
-        group_by_module: bool = False,
+        enable_bucketing: bool = False,
         batch_size_threshold_gb: float = 0.0,
         weight_prefix: str = "",
     ):
         self.model = model
-        self.group_by_module = group_by_module
+        self.enable_bucketing = enable_bucketing
         self.batch_size_threshold_gb = batch_size_threshold_gb
         self.weight_prefix = weight_prefix
 
@@ -87,7 +87,7 @@ class FSDPWeightExtractor(WeightExtractor):
         if self.weight_prefix:
             params = {f"{self.weight_prefix}{k}": v for k, v in params.items()}
 
-        if not self.group_by_module:
+        if not self.enable_bucketing:
             # Simple path: yield one chunk per parameter
             for name, param in params.items():
                 tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
@@ -98,6 +98,12 @@ class FSDPWeightExtractor(WeightExtractor):
                     tensors=[tensor],
                 )
         else:
+            # NOTE (sumanthrh): By default, when we bucket parameters with FSDP, we group by module
+            # This was done to support the older FlashRL integration where vLLM required
+            # Q,K, V tensors for the same layer to be sent at the same time
+            # Grouping by module is also beneficial because of layerwise reloading in vLLM
+            # We will be able to complete the reload for a full layer in one /update_weights
+            # call and clear the layerwise buffer held for that layer.
             for chunk in yield_module_grouped_chunks(
                 params=params,
                 dtype=dtype,
@@ -206,21 +212,27 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # the already-built model, not on super().
         # TODO(haochen): Module grouping for fused-weight loaders is only enabled for CUDA IPC.
         # transfer strategy, we can enable it for other strategies as well.
-        from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy_cls
+        from skyrl.backends.skyrl_train.weight_sync import (
+            CudaIpcTransferStrategy,
+            get_transfer_strategy_cls,
+        )
 
-        # The strategy declares whether it wants module-grouped chunks. Resolved
-        # here rather than read off self._transfer_strategy_cls because the
-        # extractor must exist before super() sets that.
-        group_by_module = get_transfer_strategy_cls(
-            weight_sync_backend=inference_engine_cfg.weight_sync_backend,
-            colocate_all=self.cfg.placement.colocate_all,
-        ).groups_chunks_by_module
+        # TODO (sumanthrh): bucketing can be enabled for other strategies as well
+        # Historically, this was only enabled for CUDA IPC in order to support
+        # Flash-RL
+        enable_bucketing = (
+            get_transfer_strategy_cls(
+                weight_sync_backend=inference_engine_cfg.weight_sync_backend,
+                colocate_all=self.cfg.placement.colocate_all,
+            )
+            is CudaIpcTransferStrategy
+        )
         weight_prefix = "language_model." if self._is_multimodal_lm_only else ""
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
-            group_by_module=group_by_module,
+            enable_bucketing=enable_bucketing,
             batch_size_threshold_gb=(
-                inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if group_by_module else 0.0
+                inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if enable_bucketing else 0.0
             ),
             weight_prefix=weight_prefix,
         )

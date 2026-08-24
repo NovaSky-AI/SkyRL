@@ -134,13 +134,6 @@ class WeightTransferStrategy(ABC):
     the same process group at once). True for a backend whose own engine owns the
     handshake."""
 
-    groups_chunks_by_module: ClassVar[bool] = False
-    """Whether the FSDP extractor should group parameters per module.
-
-    Fused-weight loaders want one chunk per module (CUDA IPC); everything else
-    wants one parameter per name. Read off the strategy class so the extractor's
-    construction does not have to re-derive the backend."""
-
     @staticmethod
     @abstractmethod
     def create_init_info(

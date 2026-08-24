@@ -45,13 +45,6 @@ class TestGetTransferStrategyCls:
         # still not hand it a push strategy.
         assert get_transfer_strategy_cls("sharded_rdt", True) is ShardedRdtTransferStrategy
 
-    def test_only_cuda_ipc_groups_chunks_by_module(self):
-        """The FSDP extractor reads this off the strategy instead of re-deriving
-        the backend, so a wrong value silently changes the chunk shape."""
-        assert get_transfer_strategy_cls("nccl", True).groups_chunks_by_module is True
-        assert get_transfer_strategy_cls("nccl", False).groups_chunks_by_module is False
-        assert get_transfer_strategy_cls("sharded_rdt", False).groups_chunks_by_module is False
-
     @pytest.mark.parametrize(
         "backend,colocate_all,expected",
         [

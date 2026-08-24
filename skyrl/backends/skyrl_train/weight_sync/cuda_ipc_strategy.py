@@ -271,9 +271,6 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
     All methods are static - no instance state needed.
     """
 
-    # Fused-weight loaders receive one packed chunk per module on this path.
-    groups_chunks_by_module = True
-
     @staticmethod
     def create_init_info(
         ie_cfg: "InferenceEngineConfig",

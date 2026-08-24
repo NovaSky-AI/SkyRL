@@ -209,9 +209,7 @@ timeout, the producer fires the `set_gather_error` channel and the run fails wit
 error. It does not recover; it makes the failure diagnosable. The slot-sharing rendezvous
 waits on the same channel, so a sharer that never arrives fails the same way.
 
-The `sharded_rdt_*.py` files are vendored from the vLLM RDT fork; keep the two in
-sync, and see each file's header for the removal plan once the pinned vLLM ships
-the trainer-side ABCs natively.
+The `sharded_rdt_*.py` files are vendored from the vLLM PR: github.com/vllm-project/vllm/pull/43375; see each file's header for the removal plan once the pinned vLLM ships the trainer-side ABCs natively.
 
 ## Lifecycle (`NewInferenceWorkerWrap`)
 1. `start_weight_update(is_checkpoint_format=True)` — initializes layerwise reload (moves layers to meta device, wraps loaders).
