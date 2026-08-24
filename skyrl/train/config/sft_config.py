@@ -36,10 +36,12 @@ class TrainOnWhat(StrEnum):
     Members:
         LAST_ASSISTANT_MESSAGE: Train only on the final assistant message.
         ALL_ASSISTANT_MESSAGES: Train on every assistant message in the conversation.
+        LAST_N_ASSISTANT_MESSAGES: Train only on the final N assistant messages.
     """
 
     LAST_ASSISTANT_MESSAGE = "last_assistant_message"
     ALL_ASSISTANT_MESSAGES = "all_assistant_messages"
+    LAST_N_ASSISTANT_MESSAGES = "last_n_assistant_messages"
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +260,13 @@ class SFTConfig(BaseConfig):
     # ---- Training target ----
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE
     """Which tokens to compute loss on. See :class:`TrainOnWhat` for options."""
+    train_on_last_n: Optional[int] = None
+    """Number of final assistant messages to train on when using
+    ``LAST_N_ASSISTANT_MESSAGES``. A turn means one assistant message, so
+    tool-calling data with one logical turn spread across several assistant
+    messages counts each message separately. Selection is based on supervised
+    token runs, so an assistant message with no generated tokens has no run
+    and is not counted."""
 
     # ---- Packing ----
     remove_microbatch_padding: bool = True  # Pack multiple sequences per microbatch (requires flash_attn)
@@ -460,6 +469,15 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             raise ValueError(f"num_epochs must be > 0, got {cfg.num_epochs}")
     if not cfg.model.path:
         raise ValueError("model.path must be set")
+    if cfg.train_on_what == TrainOnWhat.LAST_N_ASSISTANT_MESSAGES:
+        if cfg.train_on_last_n is None:
+            raise ValueError("train_on_last_n is required for last_n_assistant_messages")
+        if cfg.train_on_last_n < 1:
+            raise ValueError(f"train_on_last_n must be >= 1, got {cfg.train_on_last_n}")
+    elif cfg.train_on_last_n is not None:
+        raise ValueError(
+            f"train_on_last_n is only valid with train_on_what={TrainOnWhat.LAST_N_ASSISTANT_MESSAGES.value}"
+        )
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
     if cfg.max_training_steps is not None and cfg.max_training_steps <= 0:

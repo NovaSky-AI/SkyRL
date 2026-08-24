@@ -99,6 +99,7 @@ def _tokenize_chat_slice_worker(args):
         max_length,
         messages_key,
         train_on_what_str,
+        train_on_last_n,
         tools_key,
         system_key,
     ) = args
@@ -120,6 +121,7 @@ def _tokenize_chat_slice_worker(args):
 
     # Tokenize and filter inline
     results = []
+    drop_stats = {}
     for example in dataset_slice:
         tokenized = tokenize_chat_example(
             example,
@@ -127,13 +129,15 @@ def _tokenize_chat_slice_worker(args):
             max_length=max_length,
             messages_key=messages_key,
             train_on_what=train_on_what,
+            train_on_last_n=train_on_last_n,
             tools_key=tools_key,
             system_key=system_key,
+            _drop_stats=drop_stats,
         )
         if tokenized is not None:
             results.append(tokenized)
 
-    return results
+    return results, drop_stats.get("last_n_truncation", 0)
 
 
 def _tokenize_alpaca_slice_worker(args):
@@ -177,6 +181,7 @@ def _compute_cache_key(
     train_on_what: str,
     tools_key: Optional[str],
     system_key: Optional[str],
+    train_on_last_n: Optional[int] = None,
 ) -> str:
     """Compute a cache key (hash) for a tokenized dataset.
 
@@ -190,6 +195,7 @@ def _compute_cache_key(
         max_length: Maximum sequence length for truncation
         messages_key: Column name for messages
         train_on_what: Training target (last_assistant_message or all_assistant_messages)
+        train_on_last_n: Number of final assistant messages for the last-N target.
         tools_key: Column name for tools (if applicable)
         system_key: Column name for system prompt (if applicable)
 
@@ -207,6 +213,7 @@ def _compute_cache_key(
             "max_length": max_length,
             "messages_key": messages_key,
             "train_on_what": train_on_what,
+            "train_on_last_n": train_on_last_n,
             "tools_key": tools_key,
             "system_key": system_key,
         },
@@ -441,9 +448,11 @@ def tokenize_chat_example(
     max_length: Optional[int] = None,
     messages_key: str = "messages",
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+    train_on_last_n: Optional[int] = None,
     tools_key: Optional[str] = "tools",
     system_key: Optional[str] = "system",
     processor=None,
+    _drop_stats: Optional[dict[str, int]] = None,
     **tokenizer_kwargs,
 ) -> dict | None:
     """Tokenize a chat-format example with configurable loss targets.
@@ -463,6 +472,7 @@ def tokenize_chat_example(
         max_length: Maximum sequence length (truncation boundary).
         messages_key: Key in *example* that holds the messages list.
         train_on_what: Which tokens to compute loss on.
+        train_on_last_n: Number of final assistant messages for the last-N target.
         tools_key: Key in *example* whose value is the per-row tool schema list
             (or JSON-encoded string thereof). ``None`` disables the lookup.
         system_key: Key in *example* whose value is a system prompt string.
@@ -476,12 +486,18 @@ def tokenize_chat_example(
         window).  Returns ``None`` when the example should be skipped.
     """
     # Validate supported modes
-    _SUPPORTED = {TrainOnWhat.LAST_ASSISTANT_MESSAGE, TrainOnWhat.ALL_ASSISTANT_MESSAGES}
+    _SUPPORTED = {
+        TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+        TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        TrainOnWhat.LAST_N_ASSISTANT_MESSAGES,
+    }
     if train_on_what not in _SUPPORTED:
         raise NotImplementedError(
             f"train_on_what={train_on_what!r} is not yet supported. "
             f"Supported values: {sorted(v.value for v in _SUPPORTED)}"
         )
+    if train_on_what == TrainOnWhat.LAST_N_ASSISTANT_MESSAGES and train_on_last_n is None:
+        raise ValueError("train_on_last_n is required for last_n_assistant_messages")
     messages = list(example[messages_key])
 
     # Trim trailing tool observations with no follow-up assistant response
@@ -511,8 +527,13 @@ def tokenize_chat_example(
         and any(isinstance(d, dict) and d.get("type") == "image" for d in m["content"])
         for m in messages
     )
-    if has_images and train_on_what == TrainOnWhat.ALL_ASSISTANT_MESSAGES:
-        raise NotImplementedError("Training on all assistant messages with vision inputs is not yet supported")
+    if has_images and train_on_what in (
+        TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        TrainOnWhat.LAST_N_ASSISTANT_MESSAGES,
+    ):
+        raise NotImplementedError(
+            "Training on all or the last N assistant messages with vision inputs is not yet supported"
+        )
 
     if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
         return _tokenize_chat_last_assistant(
@@ -520,7 +541,14 @@ def tokenize_chat_example(
         )
     else:
         # ALL_ASSISTANT_MESSAGES
-        return _tokenize_chat_all_assistants(messages, tokenizer, max_length, **tokenizer_kwargs)
+        return _tokenize_chat_all_assistants(
+            messages,
+            tokenizer,
+            max_length,
+            train_on_last_n=train_on_last_n if train_on_what == TrainOnWhat.LAST_N_ASSISTANT_MESSAGES else None,
+            _drop_stats=_drop_stats,
+            **tokenizer_kwargs,
+        )
 
 
 def _unbatch(proc_tok_output):
@@ -623,6 +651,8 @@ def _tokenize_chat_all_assistants(
     messages: list[dict],
     tokenizer,
     max_length: Optional[int] = None,
+    train_on_last_n: Optional[int] = None,
+    _drop_stats: Optional[dict[str, int]] = None,
     **tokenizer_kwargs,
 ) -> dict | None:
     """Tokenize a conversation and compute loss on all assistant messages.
@@ -631,11 +661,18 @@ def _tokenize_chat_all_assistants(
     spans from the first assistant token to the end of the conversation, with
     interior 0s masking out user/system tokens between assistant turns.
 
+    When selecting the last N assistant messages, selection is based on
+    contiguous runs of 1s in that mask. An assistant message with no generated
+    tokens produces no run and is therefore not counted as a turn.
+
     Args:
         messages: Full conversation. May start with system/user messages;
             must contain at least one assistant message.
         tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
         max_length: Optional sequence length cap; truncates to this limit.
+        train_on_last_n: If set, restrict the loss mask to the last N
+            supervised runs. Assistant messages with no generated tokens have
+            no run and are not counted.
         **tokenizer_kwargs: Extra kwargs forwarded to ``apply_chat_template``.
 
     Returns:
@@ -668,13 +705,33 @@ def _tokenize_chat_all_assistants(
     )
     input_ids = initial_token_ids + later_token_ids
 
+    loss_mask_offset = 0
+    if train_on_last_n is not None:
+        if train_on_last_n < 1:
+            raise ValueError(f"train_on_last_n must be >= 1, got {train_on_last_n}")
+        assistant_runs = []
+        run_start = None
+        for index, value in enumerate(loss_mask):
+            if value == 1 and run_start is None:
+                run_start = index
+            elif value == 0 and run_start is not None:
+                assistant_runs.append((run_start, index))
+                run_start = None
+        if run_start is not None:
+            assistant_runs.append((run_start, len(loss_mask)))
+        if len(assistant_runs) > train_on_last_n:
+            loss_mask_offset = assistant_runs[-train_on_last_n][0]
+            loss_mask = loss_mask[loss_mask_offset:]
+
     # truncate
     if max_length is not None:
         input_ids = input_ids[:max_length]
-        max_assistant_length = max(max_length - len(initial_token_ids), 0)
+        max_assistant_length = max(max_length - len(initial_token_ids) - loss_mask_offset, 0)
         loss_mask = loss_mask[:max_assistant_length]
 
     if sum(loss_mask) == 0:
+        if train_on_last_n is not None and loss_mask_offset and _drop_stats is not None:
+            _drop_stats["last_n_truncation"] = _drop_stats.get("last_n_truncation", 0) + 1
         return None  # No assistant tokens survived truncation
 
     num_actions = len(loss_mask)
@@ -1064,6 +1121,7 @@ class SFTTrainer:
                 train_on_what=self.sft_cfg.train_on_what.value,
                 tools_key=tools_key,
                 system_key=system_key,
+                train_on_last_n=self.sft_cfg.train_on_last_n,
             )
             cache_path = _get_cache_path(cache_dir, cache_key)
 
@@ -1092,6 +1150,7 @@ class SFTTrainer:
         # Sequential tokenization path
         if num_workers == 0:
             logger.info("Tokenizing dataset (sequential)...")
+            drop_stats = {}
             if self.sft_cfg.messages_key in columns:
                 tools_key = self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None
                 system_key = self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None
@@ -1102,9 +1161,11 @@ class SFTTrainer:
                         self.sft_cfg.max_length,
                         self.sft_cfg.messages_key,
                         train_on_what=self.sft_cfg.train_on_what,
+                        train_on_last_n=self.sft_cfg.train_on_last_n,
                         tools_key=tools_key,
                         system_key=system_key,
                         processor=self.processor,
+                        _drop_stats=drop_stats,
                     )
                     for ex in dataset
                 ]
@@ -1118,6 +1179,11 @@ class SFTTrainer:
                 )
             tokenized = [ex for ex in tokenized if ex is not None]
             logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
+            if self.sft_cfg.train_on_what == TrainOnWhat.LAST_N_ASSISTANT_MESSAGES:
+                logger.info(
+                    f"Dropped {drop_stats.get('last_n_truncation', 0)} rows because the last "
+                    "assistant messages were truncated."
+                )
 
             # Save to cache if enabled
             if not self.sft_cfg.disable_cache:
@@ -1170,6 +1236,7 @@ class SFTTrainer:
                             self.sft_cfg.max_length,
                             self.sft_cfg.messages_key,
                             self.sft_cfg.train_on_what.value,
+                            self.sft_cfg.train_on_last_n,
                             tools_key,
                             system_key,
                         )
@@ -1209,10 +1276,18 @@ class SFTTrainer:
 
             # Flatten results
             tokenized = []
-            for chunk_results in results:
-                tokenized.extend(chunk_results)
+            dropped_last_n = 0
+            if self.sft_cfg.messages_key in columns:
+                for chunk_results, chunk_dropped in results:
+                    tokenized.extend(chunk_results)
+                    dropped_last_n += chunk_dropped
+            else:
+                for chunk_results in results:
+                    tokenized.extend(chunk_results)
 
             logger.info(f"Tokenized {len(tokenized)} examples (filtered from {dataset_size})")
+            if self.sft_cfg.train_on_what == TrainOnWhat.LAST_N_ASSISTANT_MESSAGES:
+                logger.info(f"Dropped {dropped_last_n} rows because the last assistant messages were truncated.")
 
             # Save to cache if enabled
             if not self.sft_cfg.disable_cache:

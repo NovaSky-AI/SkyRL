@@ -443,6 +443,23 @@ class TestMaxTokensPerMicrobatch:
         assert skyrl_cfg.trainer.micro_train_batch_size_per_gpu == 1
 
 
+@pytest.mark.parametrize("train_on_last_n", [None, 0, -1])
+def test_last_n_assistant_messages_requires_positive_n(train_on_last_n):
+    cfg = SFTConfig(
+        train_on_what="last_n_assistant_messages",
+        train_on_last_n=train_on_last_n,
+    )
+    with pytest.raises(ValueError, match="train_on_last_n"):
+        validate_sft_cfg(cfg)
+
+
+@pytest.mark.parametrize("train_on_what", ["last_assistant_message", "all_assistant_messages"])
+def test_last_n_assistant_messages_rejected_for_other_modes(train_on_what):
+    cfg = SFTConfig(train_on_what=train_on_what, train_on_last_n=1)
+    with pytest.raises(ValueError, match="only valid"):
+        validate_sft_cfg(cfg)
+
+
 class TestDatasetConfigNormalization:
     """Deprecated single-dataset fields translate to the list-based fields (RFC #1875)."""
 
