@@ -56,6 +56,7 @@ from skyrl.train.config.sft_config import (
 from skyrl.train.dataset.pretokenized import load_from_pretokenized
 from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, SFTDataset, TextDataset
 from skyrl.train.generators.utils import (
+    _find_generation_prompt_boundary,
     get_response_ids_and_loss_mask_from_messages,
 )
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
@@ -547,6 +548,11 @@ def _tokenize_chat_last_assistant(
 ) -> dict | None:
     """Tokenize a conversation and compute loss only on the last assistant message.
 
+    The assistant response boundary is located in the full token sequence so
+    tokenizers that merge the generation prompt with leading response
+    whitespace still include the merged token in the supervised window. If
+    the prompt cannot be located, falls back to the length-based boundary.
+
     Args:
         messages: Full conversation (must end with an assistant message).
         tokenizer: HuggingFace tokenizer with ``apply_chat_template``.
@@ -610,9 +616,17 @@ def _tokenize_chat_last_assistant(
             image_grid_thw=full_ids["image_grid_thw"],
         )
 
-    num_actions = len(full_input_ids) - len(full_prompt_ids)
-    if num_actions <= 0:
+    # Truncation can cap both encodings at max_length, leaving no response tokens.
+    if len(full_input_ids) <= len(full_prompt_ids):
         return None
+
+    try:
+        prompt_boundary = _find_generation_prompt_boundary(full_input_ids, full_prompt_ids)
+    except AssertionError:
+        logger.warning("Could not find the generation prompt in the full conversation; using its tokenized length")
+        prompt_boundary = len(full_prompt_ids)
+
+    num_actions = len(full_input_ids) - prompt_boundary
 
     return {
         "input_ids": full_input_ids,
