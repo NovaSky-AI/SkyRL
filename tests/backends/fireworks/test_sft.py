@@ -11,6 +11,8 @@ from skyrl.backends.fireworks.sft import (
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.config import FireworksConfig, OptimizerConfig
 
+tinker = pytest.importorskip("tinker")
+
 
 class _Future:
     def __init__(self, value):
@@ -39,6 +41,16 @@ class _TrainingClient:
         return _Future(SimpleNamespace(metrics={"grad_norm": 0.75}))
 
 
+class _ForwardOnlyClient:
+    def __init__(self, result):
+        self.result_value = result
+
+    def forward(self, datums, loss_fn):
+        self.datums = datums
+        self.loss_fn = loss_fn
+        return _Future(self.result_value)
+
+
 def _batch() -> TrainingInputBatch:
     return TrainingInputBatch(
         {
@@ -64,6 +76,14 @@ def _batch() -> TrainingInputBatch:
                 ]
             ),
         }
+    )
+
+
+def _dispatch_with_forward_result(result):
+    return FireworksSFTDispatch(
+        SimpleNamespace(training_client=_ForwardOnlyClient(result)),
+        FireworksConfig(max_seq_len=4, request_timeout_s=10),
+        OptimizerConfig(lr=2e-5),
     )
 
 
@@ -129,3 +149,41 @@ def test_sft_dispatch_uses_cross_entropy_for_train_and_eval() -> None:
     assert eval_output.metrics["loss"] == pytest.approx(1.5)
     assert client.optim_calls[0][1] == {"grad_accumulation_normalization": None}
     assert grad_norm == pytest.approx(0.75)
+
+
+def test_sft_dispatch_forward_computes_weighted_loss() -> None:
+    result = SimpleNamespace(
+        metrics={},
+        loss_fn_outputs=[
+            {"logprobs": tinker.TensorData(data=[-1.0, -2.0, -3.0, -4.0], dtype="float32")},
+            {"logprobs": {"data": [-1.0, -2.0, -3.0]}},
+        ],
+    )
+    dispatch = _dispatch_with_forward_result(result)
+
+    output = dispatch.forward("policy", _batch(), loss_fn="cross_entropy")
+
+    assert output.metrics["loss"] == pytest.approx(2.75)
+    assert output.loss_fn_outputs == []
+
+
+@pytest.mark.parametrize(
+    "loss_fn_outputs",
+    [
+        None,
+        [],
+        [{"logprobs": tinker.TensorData(data=[-1.0, -2.0, -3.0, -4.0], dtype="float32")}],
+        [{}, {"logprobs": tinker.TensorData(data=[-1.0, -2.0, -3.0], dtype="float32")}],
+        [
+            {"logprobs": tinker.TensorData(data=[-1.0, -2.0, -3.0, -4.0], dtype="float32")},
+            {"logprobs": tinker.TensorData(data=[-1.0, -2.0], dtype="float32")},
+        ],
+    ],
+)
+def test_sft_dispatch_forward_omits_loss_for_invalid_outputs(loss_fn_outputs) -> None:
+    result = SimpleNamespace(metrics={}, loss_fn_outputs=loss_fn_outputs)
+    dispatch = _dispatch_with_forward_result(result)
+
+    output = dispatch.forward("policy", _batch(), loss_fn="cross_entropy")
+
+    assert "loss" not in output.metrics
