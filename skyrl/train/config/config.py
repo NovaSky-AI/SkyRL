@@ -109,8 +109,9 @@ class SkyRLLoraConfig(BaseConfig):
     Must be accessible to all workers in distributed setups."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
-    ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module list
-    on Megatron. A list of specific module names can be given instead."""
+    ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to the supported
+    attention, MLP, and GatedDeltaNet projections on Megatron. A list of specific module names can
+    be given instead."""
     exclude_modules: Optional[str] = None
     """Modules to exclude from LoRA."""
     init_method: str = "kaiming"
