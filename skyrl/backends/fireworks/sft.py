@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from loguru import logger
 
 from skyrl.backends.fireworks.training_backend import FireworksPolicyDispatch
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
@@ -46,6 +48,47 @@ def _tokens(sequences: torch.Tensor, attention_mask: torch.Tensor, row_index: in
     if torch.any(present[:-1] & ~present[1:]):
         raise ValueError(f"attention_mask[{row_index}] must describe contiguous left padding")
     return [int(token) for token in sequences[present].tolist()]
+
+
+def _tensor_data_values(value: Any) -> list[float]:
+    """Convert a tensor-data value to a list of floats."""
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    elif hasattr(value, "to_numpy"):
+        value = value.to_numpy()
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+    else:
+        if isinstance(value, Mapping):
+            value = value.get("data")
+        else:
+            value = getattr(value, "data", value)
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+    return [float(item) for item in value]
+
+
+def _weighted_forward_loss(datums: list[Any], loss_fn_outputs: Any) -> float | None:
+    """Compute weighted negative log likelihood from forward outputs."""
+    if not loss_fn_outputs or len(loss_fn_outputs) != len(datums):
+        return None
+
+    total_loss = 0.0
+    for datum, output in zip(datums, loss_fn_outputs):
+        if not isinstance(output, Mapping) or "logprobs" not in output:
+            return None
+        loss_fn_inputs = getattr(datum, "loss_fn_inputs", None)
+        if not isinstance(loss_fn_inputs, Mapping) or "weights" not in loss_fn_inputs:
+            return None
+        try:
+            weights = _tensor_data_values(loss_fn_inputs["weights"])
+            logprobs = _tensor_data_values(output["logprobs"])
+        except (TypeError, ValueError):
+            return None
+        if len(weights) != len(logprobs):
+            return None
+        total_loss += sum(weight * -logprob for weight, logprob in zip(weights, logprobs))
+    return total_loss
 
 
 def training_batch_to_sft_datum_specs(
@@ -132,6 +175,12 @@ class FireworksSFTDispatch(FireworksPolicyDispatch):
         metrics = {key: float(value) for key, value in (getattr(result, "metrics", None) or {}).items()}
         if "loss:sum" in metrics:
             metrics.setdefault("final_loss" if backward else "loss", metrics["loss:sum"])
+        elif not backward:
+            loss = _weighted_forward_loss(datums, getattr(result, "loss_fn_outputs", None))
+            if loss is None:
+                logger.warning("Unable to compute Fireworks forward loss from per-token logprobs; omitting loss metric")
+            else:
+                metrics.setdefault("loss", loss)
         return WorkerOutput(
             loss_fn_output_type=str(getattr(result, "loss_fn_output_type", "scalar")),
             loss_fn_outputs=[],
