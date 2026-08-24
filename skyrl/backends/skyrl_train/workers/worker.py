@@ -532,6 +532,9 @@ class Worker(DistributedTorchRayActor):
         # because both need to join the same process group to avoid deadlock
         # NOTE: strategies whose sender drives the inference-side handshake itself
         # (sharded_rdt) must NOT be initialized from here as well.
+        # TODO (sumanthrh): `sender_initializes_receivers` is currently used as a workaround for
+        # supporting RDT. We can probably move the inference-side init
+        # as a sender method in all the classes to unify this. RDT doesn't call `init_weight_update_communicator` itself
         if torch.distributed.get_rank() == 0 and not self._transfer_strategy_cls.sender_initializes_receivers:
             tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
 

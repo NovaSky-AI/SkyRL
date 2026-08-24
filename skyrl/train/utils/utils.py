@@ -693,11 +693,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
-    # Forward HF_HOME so all actors (trainer + inference, any node) share one
-    # model cache (e.g. /mnt/cluster_storage/hf for models larger than local disk).
-    if os.environ.get("HF_HOME"):
-        env_vars["HF_HOME"] = os.environ["HF_HOME"]
-
     # Forward any SKYRL_* overrides set in the launching shell (e.g.
     # SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S for very large models
     # whose weight load exceeds the 600s default) — skyrl.env_vars reads them at

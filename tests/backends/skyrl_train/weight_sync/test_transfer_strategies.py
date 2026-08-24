@@ -10,6 +10,7 @@ from skyrl.backends.skyrl_train.weight_sync import (
     DeltaInitInfo,
     DeltaTransferStrategy,
     LoraLoadRequest,
+    ShardedRdtTransferStrategy,
     get_transfer_strategy,
     get_transfer_strategy_cls,
 )
@@ -29,21 +30,15 @@ class TestGetTransferStrategyCls:
             ("gloo", False, BroadcastTransferStrategy),
             ("delta", True, DeltaTransferStrategy),
             ("delta", False, DeltaTransferStrategy),
+            ("sharded_rdt", False, ShardedRdtTransferStrategy),
+            # colocate_all is rejected elsewhere (build_vllm_cli_args); selection
+            # must still never hand sharded_rdt a push strategy.
+            ("sharded_rdt", True, ShardedRdtTransferStrategy),
         ],
     )
     def test_returns_correct_strategy(self, backend, colocate_all, expected_strategy):
         """Should return correct strategy based on backend and colocate_all."""
         assert get_transfer_strategy_cls(backend, colocate_all) is expected_strategy
-
-    def test_sharded_rdt_selects_its_own_strategy(self):
-        """sharded_rdt goes through the strategy layer like every other backend —
-        it must never silently fall back to a push strategy."""
-        from skyrl.backends.skyrl_train.weight_sync import ShardedRdtTransferStrategy
-
-        assert get_transfer_strategy_cls("sharded_rdt", False) is ShardedRdtTransferStrategy
-        # colocate_all is rejected elsewhere (build_vllm_cli_args); selection must
-        # still not hand it a push strategy.
-        assert get_transfer_strategy_cls("sharded_rdt", True) is ShardedRdtTransferStrategy
 
     @pytest.mark.parametrize(
         "backend,colocate_all,expected",
