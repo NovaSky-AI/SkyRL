@@ -555,6 +555,15 @@ def validate_fireworks_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError("fireworks.training_shape_id is required")
     if not cfg.fireworks.trainer_job_id:
         raise ValueError("fireworks.trainer_job_id is required")
+    from fireworks.training.sdk import validate_output_model_id
+
+    errors = validate_output_model_id(cfg.fireworks.trainer_job_id)
+    if errors:
+        raise ValueError("Invalid Fireworks trainer_job_id: " + "; ".join(errors))
+    if cfg.fireworks.deployment_id:
+        errors = validate_output_model_id(cfg.fireworks.deployment_id)
+        if errors:
+            raise ValueError("Invalid Fireworks deployment_id: " + "; ".join(errors))
     if cfg.fireworks.max_seq_len is None or cfg.fireworks.max_seq_len <= 0:
         raise ValueError("fireworks.max_seq_len must be positive")
     if cfg.fireworks.trainer_replica_count != 1:
@@ -595,8 +604,6 @@ def validate_fireworks_sft_cfg(cfg: SFTConfig) -> None:
     if cfg.fireworks.output_model_id:
         if not cfg.ckpt_path:
             raise ValueError("Fireworks SFT requires ckpt_path when output_model_id is set")
-        from fireworks.training.sdk import validate_output_model_id
-
         errors = validate_output_model_id(cfg.fireworks.output_model_id)
         if errors:
             raise ValueError("Invalid Fireworks output_model_id: " + "; ".join(errors))

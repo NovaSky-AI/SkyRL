@@ -245,6 +245,26 @@ class TestFireworksConfig:
         assert skyrl_cfg.trainer.fireworks is cfg.fireworks
         assert cfg.fireworks.save_promotable_checkpoints is False
 
+    def test_valid_fireworks_resource_ids_are_accepted(self):
+        cfg = self._cfg()
+        cfg.fireworks.deployment_id = "skyrl-smoke-sft-rollout"
+
+        validate_fireworks_sft_cfg(cfg)
+
+    @pytest.mark.parametrize(
+        "trainer_job_id",
+        [
+            "skyrl-smoke-sft_invalid-trainer",
+            "skyrl-smoke-" + "a" * 60,
+        ],
+    )
+    def test_invalid_fireworks_trainer_job_id_is_rejected(self, trainer_job_id):
+        cfg = self._cfg()
+        cfg.fireworks.trainer_job_id = trainer_job_id
+
+        with pytest.raises(ValueError, match="Invalid Fireworks trainer_job_id"):
+            validate_fireworks_sft_cfg(cfg)
+
     @pytest.mark.parametrize(
         ("field", "value", "message"),
         [
