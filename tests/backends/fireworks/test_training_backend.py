@@ -5,6 +5,7 @@ import pytest
 import ray
 import torch
 
+from skyrl.backends.fireworks.runtime import ResumableCheckpoint
 from skyrl.backends.fireworks.training_backend import FireworksPolicyDispatch
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.config import SkyRLTrainConfig
@@ -25,6 +26,7 @@ class _TrainingClient:
     def __init__(self):
         self.forward_backward_calls = []
         self.optim_params = []
+        self.optim_kwargs = []
         self.saved_states = []
         self.loaded_states = []
 
@@ -37,8 +39,9 @@ class _TrainingClient:
             )
         )
 
-    def optim_step(self, params):
+    def optim_step(self, params, **kwargs):
         self.optim_params.append(params)
+        self.optim_kwargs.append(kwargs)
         return _Future(SimpleNamespace(metrics={"grad_norm": 0.75}))
 
     def save_state(self, name):
@@ -46,6 +49,8 @@ class _TrainingClient:
         return _Future(SimpleNamespace(path=f"tinker://source/weights/{name}"))
 
     def resolve_checkpoint_path(self, checkpoint_name, source_job_id=None):
+        if source_job_id is None:
+            return checkpoint_name
         return f"cross-job://{source_job_id}/{checkpoint_name}"
 
     def load_state_with_optimizer(self, path):
@@ -63,27 +68,39 @@ def _cfg() -> SkyRLTrainConfig:
     return cfg
 
 
+def _save_resumable(name, **_kwargs):
+    return ResumableCheckpoint(
+        requested_name=name,
+        provider_path=f"tinker://source/weights/{name}",
+        checkpoint_name="step-7",
+        checkpoint_resource="accounts/test/rlorTrainerJobs/source-trainer/checkpoints/step-7",
+        checkpoint_type="CHECKPOINT_TYPE_TRAINING",
+    )
+
+
 def test_policy_dispatch_stages_and_submits_importance_sampling() -> None:
     training_client = _TrainingClient()
-    runtime = SimpleNamespace(
-        training_client=training_client, publish_sampler_weights=None
-    )
+    runtime = SimpleNamespace(training_client=training_client, publish_sampler_weights=None)
     built_batches = []
 
     def datum_builder(batch, *, max_seq_len):
         built_batches.append((batch, max_seq_len))
         return ["datum"] * batch.batch_size
 
-    dispatch = FireworksPolicyDispatch(_cfg(), runtime, datum_builder=datum_builder)
+    cfg = _cfg()
+    dispatch = FireworksPolicyDispatch(
+        runtime,
+        cfg.trainer.fireworks,
+        cfg.trainer.policy.optimizer_config,
+        datum_builder=datum_builder,
+    )
     batch = TrainingInputBatch({"sequences": torch.arange(12).reshape(4, 3)})
     staged = dispatch.stage_data("policy", batch, [(0, 2), (2, 4)])
 
     assert [part.batch_size for part in staged] == [2, 2]
     output = dispatch.forward_backward_from_staged("policy", staged[0])
 
-    assert training_client.forward_backward_calls == [
-        (["datum", "datum"], "importance_sampling")
-    ]
+    assert training_client.forward_backward_calls == [(["datum", "datum"], "importance_sampling")]
     assert built_batches[0][1] == 128
     assert output.metrics["final_loss"] == pytest.approx(1.25)
     assert output.metrics["response_tokens"] == pytest.approx(4.0)
@@ -97,7 +114,9 @@ def test_policy_dispatch_optimizer_uses_skyrl_optimizer_config() -> None:
     cfg.trainer.policy.optimizer_config.max_grad_norm = 2.0
     training_client = _TrainingClient()
     dispatch = FireworksPolicyDispatch(
-        cfg, SimpleNamespace(training_client=training_client)
+        SimpleNamespace(training_client=training_client),
+        cfg.trainer.fireworks,
+        cfg.trainer.policy.optimizer_config,
     )
 
     grad_norm = dispatch.optim_step("policy")
@@ -108,6 +127,7 @@ def test_policy_dispatch_optimizer_uses_skyrl_optimizer_config() -> None:
     assert params.beta2 == pytest.approx(0.9)
     assert params.weight_decay == pytest.approx(0.1)
     assert params.grad_clip_norm == pytest.approx(2.0)
+    assert training_client.optim_kwargs == [{"grad_accumulation_normalization": None}]
     assert grad_norm == pytest.approx(0.75)
 
 
@@ -116,20 +136,24 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
     runtime = SimpleNamespace(
         training_client=training_client,
         trainer_job_id="source-trainer",
+        save_resumable_checkpoint=_save_resumable,
     )
     cfg = _cfg()
     cfg.trainer.fireworks.request_timeout_s = 123
-    dispatch = FireworksPolicyDispatch(cfg, runtime)
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
     ckpt_dir = tmp_path / "global_step_7" / "policy"
 
     dispatch.save_checkpoint("policy", str(ckpt_dir), tokenizer="unused")
 
-    assert len(training_client.saved_states) == 1
-    assert training_client.saved_states[0].startswith("skyrl-step-7-")
     manifest = json.loads((ckpt_dir / "fireworks_checkpoint.json").read_text())
     assert manifest["source_trainer_job_id"] == "source-trainer"
+    assert manifest["requested_checkpoint_name"].startswith("skyrl-step-7-")
+    assert manifest["checkpoint_name"] == "step-7"
+    assert manifest["checkpoint_resource"].endswith("/checkpoints/step-7")
     assert manifest["includes_optimizer_state"] is True
+    assert "promotable_checkpoint" not in manifest
 
+    runtime.trainer_job_id = "target-trainer"
     dispatch.load_checkpoint(
         "policy",
         str(ckpt_dir),
@@ -145,10 +169,98 @@ def test_policy_dispatch_saves_and_cross_job_loads_dcp_checkpoint(tmp_path) -> N
     ]
 
 
+def test_policy_dispatch_saves_promotable_checkpoint_when_enabled(tmp_path) -> None:
+    training_client = _TrainingClient()
+    saved_promotable = []
+
+    def save_promotable(name):
+        saved_promotable.append(name)
+        return SimpleNamespace(
+            snapshot_path=f"snapshot://{name}-cafebabe",
+            checkpoint_resource=f"accounts/test/rlorTrainerJobs/trainer/checkpoints/{name}-cafebabe",
+            checkpoint_type="CHECKPOINT_TYPE_INFERENCE_BASE",
+        )
+
+    runtime = SimpleNamespace(
+        training_client=training_client,
+        trainer_job_id="source-trainer",
+        save_resumable_checkpoint=_save_resumable,
+        save_promotable_checkpoint=save_promotable,
+    )
+    cfg = _cfg()
+    cfg.trainer.fireworks.save_promotable_checkpoints = True
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
+    ckpt_dir = tmp_path / "global_step_7" / "policy"
+
+    dispatch.save_checkpoint("policy", str(ckpt_dir), tokenizer="unused")
+
+    manifest = json.loads((ckpt_dir / "fireworks_checkpoint.json").read_text())
+    requested_name = manifest["requested_checkpoint_name"]
+    assert saved_promotable == [requested_name]
+    assert manifest["promotable_checkpoint"] == {
+        "snapshot_path": f"snapshot://{requested_name}-cafebabe",
+        "checkpoint_resource": (f"accounts/test/rlorTrainerJobs/trainer/checkpoints/{requested_name}-cafebabe"),
+        "checkpoint_type": "CHECKPOINT_TYPE_INFERENCE_BASE",
+    }
+
+
+@pytest.mark.parametrize("include_resource", [True, False])
+def test_policy_dispatch_rejects_unresolved_cross_job_checkpoint(tmp_path, include_resource) -> None:
+    training_client = _TrainingClient()
+    runtime = SimpleNamespace(training_client=training_client, trainer_job_id="target-trainer")
+    cfg = _cfg()
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
+    ckpt_dir = tmp_path / "global_step_2" / "policy"
+    ckpt_dir.mkdir(parents=True)
+    manifest = {
+        "format_version": 1,
+        "checkpoint_name": "skyrl-step-2-deadbeef",
+        "provider_path": "tinker://source/weights/skyrl-step-2-deadbeef",
+        "source_trainer_job_id": "source-trainer",
+    }
+    if include_resource:
+        manifest["checkpoint_resource"] = None
+    (ckpt_dir / "fireworks_checkpoint.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="no resolved control-plane identity"):
+        dispatch.load_checkpoint("policy", str(ckpt_dir))
+
+
+def test_policy_dispatch_loads_same_trainer_checkpoint_by_name(tmp_path) -> None:
+    training_client = _TrainingClient()
+    runtime = SimpleNamespace(training_client=training_client, trainer_job_id="same-trainer")
+    cfg = _cfg()
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
+    ckpt_dir = tmp_path / "global_step_2" / "policy"
+    ckpt_dir.mkdir(parents=True)
+    (ckpt_dir / "fireworks_checkpoint.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "checkpoint_kind": "fireworks_dcp",
+                "checkpoint_name": "step-2",
+                "provider_path": "tinker://same-trainer/weights/step-2",
+                "source_trainer_job_id": "same-trainer",
+                "includes_optimizer_state": True,
+            }
+        )
+    )
+
+    dispatch.load_checkpoint(
+        "policy",
+        str(ckpt_dir),
+        load_optimizer_states=True,
+        load_lr_scheduler_states=True,
+    )
+
+    assert training_client.loaded_states == [("step-2", True)]
+
+
 def test_policy_dispatch_load_falls_back_to_manifest_provider_path(tmp_path) -> None:
     training_client = _TrainingClient()
     runtime = SimpleNamespace(training_client=training_client, trainer_job_id=None)
-    dispatch = FireworksPolicyDispatch(_cfg(), runtime)
+    cfg = _cfg()
+    dispatch = FireworksPolicyDispatch(runtime, cfg.trainer.fireworks, cfg.trainer.policy.optimizer_config)
     ckpt_dir = tmp_path / "global_step_2" / "policy"
     ckpt_dir.mkdir(parents=True)
     provider_path = "tinker://prior-run/weights/step-2"

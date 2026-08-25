@@ -16,6 +16,7 @@ from omegaconf import OmegaConf
 
 from skyrl.train.config import (
     BaseConfig,
+    FireworksConfig,
     FSDPConfig,
     MegatronConfig,
     ModelConfig,
@@ -35,10 +36,12 @@ class TrainOnWhat(StrEnum):
     Members:
         LAST_ASSISTANT_MESSAGE: Train only on the final assistant message.
         ALL_ASSISTANT_MESSAGES: Train on every assistant message in the conversation.
+        LAST_N_ASSISTANT_MESSAGES: Train only on the final N assistant messages.
     """
 
     LAST_ASSISTANT_MESSAGE = "last_assistant_message"
     ALL_ASSISTANT_MESSAGES = "all_assistant_messages"
+    LAST_N_ASSISTANT_MESSAGES = "last_n_assistant_messages"
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +132,7 @@ class SFTConfig(BaseConfig):
         )
     )
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
+    fireworks: FireworksConfig = field(default_factory=FireworksConfig)
 
     # Ulysses sequence parallelism
     sequence_parallel_size: int = 1
@@ -256,6 +260,13 @@ class SFTConfig(BaseConfig):
     # ---- Training target ----
     train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE
     """Which tokens to compute loss on. See :class:`TrainOnWhat` for options."""
+    train_on_last_n: Optional[int] = None
+    """Number of final assistant messages to train on when using
+    ``LAST_N_ASSISTANT_MESSAGES``. A turn means one assistant message, so
+    tool-calling data with one logical turn spread across several assistant
+    messages counts each message separately. Selection is based on supervised
+    token runs, so an assistant message with no generated tokens has no run
+    and is not counted."""
 
     # ---- Packing ----
     remove_microbatch_padding: bool = True  # Pack multiple sequences per microbatch (requires flash_attn)
@@ -308,7 +319,7 @@ class SFTConfig(BaseConfig):
 # ---------------------------------------------------------------------------
 
 
-_VALID_STRATEGIES = ("megatron", "fsdp")
+_VALID_STRATEGIES = ("megatron", "fsdp", "fireworks")
 _VALID_SAMPLERS = ("random", "sequential", "custom")
 
 _DEFAULT_TRAIN_DATASET = "yahma/alpaca-cleaned"
@@ -458,6 +469,15 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             raise ValueError(f"num_epochs must be > 0, got {cfg.num_epochs}")
     if not cfg.model.path:
         raise ValueError("model.path must be set")
+    if cfg.train_on_what == TrainOnWhat.LAST_N_ASSISTANT_MESSAGES:
+        if cfg.train_on_last_n is None:
+            raise ValueError("train_on_last_n is required for last_n_assistant_messages")
+        if cfg.train_on_last_n < 1:
+            raise ValueError(f"train_on_last_n must be >= 1, got {cfg.train_on_last_n}")
+    elif cfg.train_on_last_n is not None:
+        raise ValueError(
+            f"train_on_last_n is only valid with train_on_what={TrainOnWhat.LAST_N_ASSISTANT_MESSAGES.value}"
+        )
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
     if cfg.max_training_steps is not None and cfg.max_training_steps <= 0:
@@ -523,6 +543,83 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         cfg.resolved_bin_capacity()
 
 
+def validate_fireworks_sft_cfg(cfg: SFTConfig) -> None:
+    """Validate the hosted Fireworks SFT capability set."""
+
+    validate_sft_cfg(cfg)
+    if cfg.strategy != "fireworks":
+        raise ValueError("Fireworks SFT requires strategy='fireworks'")
+    if not cfg.fireworks.base_model:
+        raise ValueError("fireworks.base_model is required")
+    if not cfg.fireworks.training_shape_id:
+        raise ValueError("fireworks.training_shape_id is required")
+    if not cfg.fireworks.trainer_job_id:
+        raise ValueError("fireworks.trainer_job_id is required")
+    from fireworks.training.sdk import validate_output_model_id
+
+    errors = validate_output_model_id(cfg.fireworks.trainer_job_id)
+    if errors:
+        raise ValueError("Invalid Fireworks trainer_job_id: " + "; ".join(errors))
+    if cfg.fireworks.deployment_id:
+        errors = validate_output_model_id(cfg.fireworks.deployment_id)
+        if errors:
+            raise ValueError("Invalid Fireworks deployment_id: " + "; ".join(errors))
+    if cfg.fireworks.max_seq_len is None or cfg.fireworks.max_seq_len <= 0:
+        raise ValueError("fireworks.max_seq_len must be positive")
+    if cfg.fireworks.trainer_replica_count != 1:
+        raise ValueError("Fireworks SFT currently supports one trainer replica")
+    if cfg.model.lora.rank < 0:
+        raise ValueError("model.lora.rank must be non-negative")
+    if len(cfg.optimizer_config.adam_betas) != 2:
+        raise ValueError("optimizer_config.adam_betas must contain beta1 and beta2")
+    if cfg.fireworks.request_timeout_s <= 0 or cfg.fireworks.trainer_timeout_s <= 0:
+        raise ValueError("Fireworks request and trainer timeouts must be positive")
+    if cfg.enable_ray_gpu_monitor:
+        raise ValueError("Fireworks SFT requires enable_ray_gpu_monitor=false")
+    if cfg.torch_profiler_config.enable:
+        raise ValueError("Fireworks SFT does not support the local torch profiler")
+    if cfg.model.fake_int4_qat.enabled or cfg.model_config_kwargs or cfg.use_torch_compile or cfg.record_memory:
+        raise ValueError("Fireworks SFT does not support local model transforms or memory recording")
+    lora = cfg.model.lora
+    if (
+        lora.alpha != 16
+        or lora.dropout != 0.0
+        or lora.target_modules != "all-linear"
+        or lora.exclude_modules is not None
+        or lora.init_method != "kaiming"
+    ):
+        raise ValueError("Fireworks SFT currently accepts only model.lora.rank; other LoRA fields must use defaults")
+    if cfg.use_sequence_packing or cfg.remove_microbatch_padding:
+        raise ValueError("Fireworks SFT requires sequence packing and padding removal to be disabled")
+    if cfg.hf_save_interval != 0:
+        raise ValueError("Fireworks SFT does not support Hugging Face export")
+    if cfg.ckpt_interval < 0:
+        raise ValueError("Fireworks SFT requires ckpt_interval >= 0")
+    if cfg.ckpt_interval > 0 and not cfg.ckpt_path:
+        raise ValueError("Fireworks SFT requires ckpt_path when ckpt_interval > 0")
+    if cfg.resume_from == "latest" and not cfg.ckpt_path:
+        raise ValueError("Fireworks SFT requires ckpt_path when resume_from='latest'")
+    if cfg.fireworks.save_promotable_checkpoints and not cfg.ckpt_path:
+        raise ValueError("Fireworks SFT requires ckpt_path when save_promotable_checkpoints=true")
+    if cfg.fireworks.output_model_id:
+        if not cfg.ckpt_path:
+            raise ValueError("Fireworks SFT requires ckpt_path when output_model_id is set")
+        errors = validate_output_model_id(cfg.fireworks.output_model_id)
+        if errors:
+            raise ValueError("Invalid Fireworks output_model_id: " + "; ".join(errors))
+    checkpoint_enabled = bool(cfg.ckpt_path or cfg.resume_from or cfg.ckpt_interval)
+    if checkpoint_enabled and cfg.fireworks.cleanup_on_exit:
+        raise ValueError("Fireworks SFT checkpoint/resume requires cleanup_on_exit=false")
+    if not checkpoint_enabled and not cfg.fireworks.cleanup_on_exit:
+        raise ValueError("Fireworks SFT without checkpointing requires cleanup_on_exit=true")
+    if cfg.max_ckpts_to_keep != -1:
+        raise ValueError("Fireworks SFT requires max_ckpts_to_keep=-1")
+    if cfg.optimizer_config.scheduler != "constant_with_warmup" or cfg.optimizer_config.num_warmup_steps != 0:
+        raise ValueError("Fireworks SFT currently supports a constant learning rate without warmup")
+    if cfg.max_length is not None and cfg.max_length - 1 > cfg.fireworks.max_seq_len:
+        raise ValueError("max_length exceeds the Fireworks model-input limit")
+
+
 # NOTE (sumanthrh): Ideally this is not needed, but our internal abstractions for workers and worker groups depend
 # on the RL configuration dataclass so we add this translation layer.
 def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
@@ -533,6 +630,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
 
     # Strategy
     cfg.trainer.strategy = sft_cfg.strategy
+    cfg.trainer.fireworks = sft_cfg.fireworks
 
     # Model -- direct assignment (same type: ModelConfig)
     cfg.trainer.policy.model = sft_cfg.model

@@ -16,6 +16,9 @@ SkyRL is a full-stack reinforcement learning library for training LLMs, designed
 uv run --extra dev --extra jax pytest tests/tx/ tests/tinker/ tests/utils/
 uv run --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu/
 
+# Hosted Fireworks backend CPU tests
+uv run --isolated --extra dev --extra fireworks pytest tests/backends/fireworks/ tests/train/test_fireworks_sft_trainer.py tests/train/test_sft_config.py
+
 # GPU tests (requires Ray cluster with GPUs)
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_worker.py

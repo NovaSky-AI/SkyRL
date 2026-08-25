@@ -1,0 +1,107 @@
+---
+title: "Fireworks SFT"
+---
+
+SkyRL can run its native supervised fine-tuning loop on a dedicated Fireworks trainer. Fireworks owns model computation and optimizer state; SkyRL continues to own dataset loading, chat templating, assistant-token masks, batching, evaluation, callbacks, and logging.
+
+The hosted entrypoint runs directly in the driver. It does not initialize Ray or require local GPUs, and it provisions no rollout deployment.
+
+## Install
+
+```bash
+uv sync --extra fireworks
+export FIREWORKS_API_KEY=<your-key>
+```
+
+The API key is read from the environment and is not part of SkyRL's serialized configuration. The Fireworks training SDK currently requires Python 3.12 or 3.13.
+
+## Run
+
+The bounded example script prints the paid-resource plan and exits until `FIREWORKS_RUN_CONFIRMED=1` is set:
+
+```bash
+bash examples/train/sft/run_sft_fireworks.sh
+```
+
+To launch directly:
+
+```bash
+uv run --isolated --extra fireworks \
+  -m skyrl.train.entrypoints.main_fireworks_sft \
+  strategy=fireworks \
+  model.path=Qwen/Qwen3-4B \
+  model.lora.rank=8 \
+  fireworks.base_model=accounts/fireworks/models/qwen3-4b \
+  fireworks.training_shape_id=accounts/fireworks/trainingShapes/<validated-shape> \
+  fireworks.trainer_job_id=skyrl-smoke-sft-example-trainer \
+  fireworks.max_seq_len=32768 \
+  fireworks.trainer_replica_count=1 \
+  fireworks.cleanup_on_exit=true \
+  train_datasets="['yahma/alpaca-cleaned']" \
+  train_dataset_splits="['train[:100]']" \
+  max_length=512 \
+  num_steps=10 \
+  batch_size=4 \
+  remove_microbatch_padding=false \
+  use_sequence_packing=false \
+  enable_ray_gpu_monitor=false \
+  hf_save_interval=0
+```
+
+`model.path` supplies the Hugging Face tokenizer and chat template. Select the tokenizer revision documented for `fireworks.base_model`; their vocabulary and special-token IDs must match even though the two resource names use different namespaces.
+
+## Data and evaluation
+
+The hosted backend reuses `SFTTrainer`, so it accepts the same inputs as local SFT:
+
+- chat datasets with a `messages` column;
+- Alpaca `instruction`/`input`/`output` datasets;
+- `last_assistant_message` and `all_assistant_messages` masks;
+- multiple weighted training datasets;
+- evaluation datasets;
+- stateful random, sequential, or custom samplers;
+- W&B or console logging;
+- callbacks when constructing `FireworksSFTTrainer` through the Python API.
+
+## Checkpoints
+
+Fireworks SFT uses the native SkyRL checkpoint lifecycle. A checkpoint combines Fireworks DCP state (model weights and optimizer state) with SkyRL's `global_step`, stateful dataloader position, and configuration metadata.
+
+```bash
+ckpt_path=s3://bucket/path/to/checkpoints \
+ckpt_interval=25 \
+resume_from=latest \
+max_ckpts_to_keep=-1 \
+fireworks.cleanup_on_exit=false
+```
+
+Set `ckpt_path` to storage that survives the driver process. `ckpt_interval=0` disables periodic saves but still writes a final checkpoint when `ckpt_path` is non-empty. Use `resume_from=latest` with the same checkpoint root and the same `fireworks.trainer_job_id`, or pass a specific `global_step_N` directory.
+
+Resumable DCP state belongs to the live trainer namespace. Checkpointed runs require `fireworks.cleanup_on_exit=false` so a later process can reconnect to that trainer ID. Fireworks inactivity cleanup releases idle trainer GPUs, but the caller remains responsible for deleting the trainer after training or final model promotion. Deleting the trainer archives the ID and makes its DCP state unavailable for resume.
+
+Fireworks does not expose checkpoint deletion through the training SDK. `max_ckpts_to_keep` therefore remains `-1`; local checkpoint pruning must not be presented as remote DCP deletion. Checkpoints are training-resume artifacts, not deployable model exports. Keep `hf_save_interval=0`.
+
+## Final model promotion
+
+Set `fireworks.output_model_id` to register the completed SFT result as a durable Fireworks model:
+
+```bash
+fireworks.output_model_id=my-sft-model
+fireworks.delete_trainer_after_promotion=true
+```
+
+After the final optimizer step, SkyRL saves the final DCP, writes a separate `base` sampler checkpoint, waits for its control-plane row to become promotable, and promotes that row. Promotion registers a model but does not deploy it. Full-parameter and LoRA runs both use a `base` sampler checkpoint; the DCP itself is never promoted.
+
+The output model ID must contain 1-63 lowercase letters, digits, or hyphens. SkyRL writes `fireworks_final_model.json` beside the final DCP checkpoint before deleting the trainer. A promotion failure leaves the trainer available for retry.
+
+## Initial limitations
+
+The hosted backend currently supports text-only SFT with one trainer replica and assumes the selected shape contains one accelerator for per-GPU throughput reporting. It rejects:
+
+- VLM examples;
+- controller sequence packing;
+- microbatch padding removal;
+- local torch profiling and Ray GPU monitoring;
+- periodic Hugging Face export.
+
+Local `placement`, microbatch offload, and deployment/sampling fields do not control the hosted trainer; the selected Fireworks training shape owns its topology. Fireworks trainer shapes and pricing are account-specific. Check the available shapes and current [Fireworks pricing page](https://fireworks.ai/pricing) before launching paid resources.

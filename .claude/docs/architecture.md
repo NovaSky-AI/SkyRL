@@ -8,6 +8,7 @@
 ```
 skyrl/                  # Core library
 ├── backends/           # Backend implementations
+│   ├── fireworks/      # Hosted Fireworks training/inference adapters
 │   └── skyrl_train/    # FSDP/Megatron training backend
 │       ├── distributed/        # Dispatch, FSDP/Megatron strategies
 │       ├── inference_servers/  # HTTP inference path (RemoteInferenceClient, vLLM servers, router)
@@ -30,7 +31,7 @@ examples/train/         # Example training scripts per model/backend
 
 ## Key Patterns
 
-- **Ray orchestration**: Training workers and inference engines run as Ray actors.
+- **Ray orchestration**: Local FSDP/Megatron workers and inference engines run as Ray actors. Hosted Fireworks entrypoints run directly in the driver and inject provider dispatch adapters.
 - **Config hierarchy**: `SkyRLTrainConfig` → `TrainerConfig`, `GeneratorConfig`, `DataConfig`, `EnvironmentConfig`. Accessed as `cfg.trainer.*`, `cfg.generator.*`, etc.
 - **CLI**: Config uses OmegaConf + dataclasses — OmegaConf for CLI parsing and merging, loaded into dataclasses for better typing. Pass overrides as `key=value` CLI args.
 - **Backend selection**: `trainer.strategy` chooses backend — `fsdp` (default), `megatron`, or `jax`.

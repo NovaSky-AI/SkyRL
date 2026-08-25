@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from skyrl.backends.fireworks.runtime import FireworksRuntime
+from skyrl.backends.fireworks.runtime import FireworksRuntime, PromotableCheckpoint
 from skyrl.train.config import FireworksConfig
 
 
@@ -31,9 +31,14 @@ class _Sampler:
 
 
 class _Service:
+    trainer_job_id = "trainer"
+    deployment_id = "deployment"
+
     def __init__(self):
         self.samplers = []
         self.hotloads = []
+        self.checkpoint_rows = []
+        self.promotions = []
         self.closed = False
 
     def create_sampling_client(self, *, tokenizer):
@@ -45,6 +50,14 @@ class _Service:
     def hotload_sampler_snapshot(self, path):
         self.hotloads.append(path)
 
+    def list_checkpoints(self, job_id):
+        assert job_id == self.trainer_job_id
+        return list(self.checkpoint_rows)
+
+    def promote_checkpoint(self, **kwargs):
+        self.promotions.append(kwargs)
+        return {"name": f"accounts/test/models/{kwargs['output_model_id']}"}
+
     def close(self):
         self.closed = True
 
@@ -52,10 +65,17 @@ class _Service:
 class _TrainingClient:
     def __init__(self):
         self.names = []
+        self.checkpoint_types = []
+        self.state_names = []
 
-    def save_weights_for_sampler(self, name):
+    def save_state(self, name):
+        self.state_names.append(name)
+        return _Future(SimpleNamespace(path=f"tinker://weights/{name}"))
+
+    def save_weights_for_sampler(self, name, *, checkpoint_type=None):
         self.names.append(name)
-        return _Future(SimpleNamespace(path=f"snapshot://{name}"))
+        self.checkpoint_types.append(checkpoint_type)
+        return _Future(SimpleNamespace(path=f"snapshot://{name}-cafebabe"))
 
 
 def _runtime(
@@ -92,9 +112,7 @@ def test_connect_uses_managed_dedicated_resources(monkeypatch) -> None:
         return service
 
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-key")
-    monkeypatch.setattr(
-        FiretitanServiceClient, "from_firetitan_config", staticmethod(_factory)
-    )
+    monkeypatch.setattr(FiretitanServiceClient, "from_firetitan_config", staticmethod(_factory))
     config = FireworksConfig(
         base_model="accounts/fireworks/models/qwen3-4b",
         max_seq_len=32768,
@@ -128,12 +146,54 @@ def test_connect_uses_managed_dedicated_resources(monkeypatch) -> None:
     assert service.closed is True
 
 
+def test_connect_can_provision_trainer_without_deployment(monkeypatch) -> None:
+    from fireworks.training.sdk import FiretitanServiceClient
+
+    captured = {}
+
+    class ManagedService(_Service):
+        trainer_job_id = "skyrl-smoke-sft-trainer"
+        deployment_id = None
+
+        def create_training_client(self, **kwargs):
+            return _TrainingClient()
+
+    service = ManagedService()
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return service
+
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-key")
+    monkeypatch.setattr(FiretitanServiceClient, "from_firetitan_config", staticmethod(factory))
+    config = FireworksConfig(
+        base_model="accounts/fireworks/models/qwen3-4b",
+        max_seq_len=32768,
+        training_shape_id="accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora",
+        trainer_job_id="skyrl-smoke-sft-trainer",
+    )
+
+    runtime = FireworksRuntime.connect(
+        config=config,
+        tokenizer="tokenizer",
+        tokenizer_model="Qwen/Qwen3-4B",
+        lora_rank=8,
+        learning_rate=1e-5,
+        create_deployment=False,
+    )
+
+    assert captured["create_deployment"] is False
+    assert captured["deployment_id"] is None
+    assert captured["cleanup_deployment_on_close"] is None
+    assert runtime.deployment_id is None
+    asyncio.run(runtime.close())
+    assert service.closed is True
+
+
 def test_runtime_exposes_native_inference_endpoint() -> None:
     service = _Service()
     service._managed_handle = SimpleNamespace(
-        deployment=SimpleNamespace(
-            inference_model="accounts/test/deployments/skyrl-rollout"
-        ),
+        deployment=SimpleNamespace(inference_model="accounts/test/deployments/skyrl-rollout"),
         deployment_manager=SimpleNamespace(inference_url="https://api.fireworks.ai/"),
     )
     runtime = _runtime(service=service)
@@ -170,6 +230,239 @@ async def test_publish_reuses_one_stable_sampler() -> None:
     await runtime.close()
 
 
+def test_save_resumable_checkpoint_uses_new_server_stored_name() -> None:
+    class Service(_Service):
+        def __init__(self):
+            super().__init__()
+            self.list_calls = 0
+
+        def list_checkpoints(self, job_id):
+            self.list_calls += 1
+            rows = [
+                {
+                    "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-1",
+                    "checkpointType": "CHECKPOINT_TYPE_TRAINING",
+                }
+            ]
+            if self.list_calls > 1:
+                rows.append(
+                    {
+                        "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2",
+                        "checkpointType": "CHECKPOINT_TYPE_TRAINING",
+                    }
+                )
+            return rows
+
+    service = Service()
+    training = _TrainingClient()
+    runtime = _runtime(service=service, training_client=training)
+
+    result = runtime.save_resumable_checkpoint(
+        "skyrl-step-2-deadbeef",
+        stabilize_s=0,
+        poll_s=0,
+    )
+
+    assert training.state_names == ["skyrl-step-2-deadbeef"]
+    assert result.provider_path == "tinker://weights/skyrl-step-2-deadbeef"
+    assert result.requested_name == "skyrl-step-2-deadbeef"
+    assert result.checkpoint_name == "step-2"
+    assert result.checkpoint_resource.endswith("/checkpoints/step-2")
+    assert result.checkpoint_type == "CHECKPOINT_TYPE_TRAINING"
+
+
+def test_save_resumable_checkpoint_rejects_ambiguous_new_rows() -> None:
+    class Service(_Service):
+        def __init__(self):
+            super().__init__()
+            self.list_calls = 0
+
+        def list_checkpoints(self, job_id):
+            self.list_calls += 1
+            if self.list_calls == 1:
+                return []
+            return [
+                {
+                    "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-1",
+                    "checkpointType": "CHECKPOINT_TYPE_TRAINING",
+                },
+                {
+                    "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2",
+                    "checkpointType": "CHECKPOINT_TYPE_TRAINING",
+                },
+            ]
+
+    runtime = _runtime(service=Service())
+
+    with pytest.warns(RuntimeWarning, match="candidates=2"):
+        result = runtime.save_resumable_checkpoint(
+            "skyrl-step-2-deadbeef",
+            stabilize_s=0,
+            poll_s=0,
+        )
+
+    assert result.provider_path == "tinker://weights/skyrl-step-2-deadbeef"
+    assert result.checkpoint_name == "skyrl-step-2-deadbeef"
+    assert result.checkpoint_resource is None
+    assert result.checkpoint_type is None
+
+
+def test_save_promotable_checkpoint_uses_base_sampler_and_control_plane_row() -> None:
+    service = _Service()
+    service.checkpoint_rows = [
+        {
+            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2-cafebabe",
+            "promotable": True,
+            "checkpointType": "CHECKPOINT_TYPE_INFERENCE_BASE",
+        }
+    ]
+    training = _TrainingClient()
+    runtime = _runtime(
+        service=service,
+        training_client=training,
+        config=FireworksConfig(request_timeout_s=123),
+    )
+
+    result = runtime.save_promotable_checkpoint("step-2", poll_s=0)
+
+    assert training.names == ["step-2"]
+    assert training.checkpoint_types == ["base"]
+    assert result.snapshot_path == "snapshot://step-2-cafebabe"
+    assert result.checkpoint_resource.endswith("step-2-cafebabe")
+    assert result.checkpoint_type == "CHECKPOINT_TYPE_INFERENCE_BASE"
+
+
+def test_save_promotable_checkpoint_keeps_path_when_control_plane_lags() -> None:
+    runtime = _runtime()
+
+    with pytest.warns(RuntimeWarning, match="visibility timeout"):
+        result = runtime.save_promotable_checkpoint("step-2", appear_timeout_s=0, poll_s=0)
+
+    assert result.snapshot_path == "snapshot://step-2-cafebabe"
+    assert result.checkpoint_resource is None
+    assert result.checkpoint_type is None
+
+
+@pytest.mark.asyncio
+async def test_promote_checkpoint_resource_uses_existing_control_plane_row() -> None:
+    service = _Service()
+    runtime = _runtime(
+        service=service,
+        config=FireworksConfig(base_model="accounts/fireworks/models/qwen3-4b"),
+    )
+    checkpoint = PromotableCheckpoint(
+        snapshot_path="snapshot://step-2-cafebabe",
+        checkpoint_resource="accounts/test/rlorTrainerJobs/trainer/checkpoints/step-2-cafebabe",
+        checkpoint_type="CHECKPOINT_TYPE_INFERENCE_BASE",
+    )
+
+    result = await runtime.promote_checkpoint_resource(
+        checkpoint=checkpoint,
+        output_model_id="sft-step-2",
+    )
+
+    assert service.promotions == [
+        {
+            "name": checkpoint.checkpoint_resource,
+            "output_model_id": "sft-step-2",
+            "base_model": "accounts/fireworks/models/qwen3-4b",
+        }
+    ]
+    assert result["checkpoint_resource"] == checkpoint.checkpoint_resource
+    assert result["model"]["name"] == "accounts/test/models/sft-step-2"
+
+
+@pytest.mark.asyncio
+async def test_promote_final_model_saves_base_sampler_and_uses_control_plane_row() -> None:
+    service = _Service()
+    service.deployment_id = None
+    service.checkpoint_rows = [
+        {
+            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final-step-2-deadbeef",
+            "promotable": True,
+            "checkpointType": "CHECKPOINT_TYPE_INFERENCE_BASE",
+        },
+        {
+            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final-step-2-cafebabe",
+            "promotable": True,
+            "checkpointType": "CHECKPOINT_TYPE_INFERENCE_BASE",
+        },
+    ]
+    training = _TrainingClient()
+    runtime = _runtime(
+        service=service,
+        training_client=training,
+        config=FireworksConfig(base_model="accounts/fireworks/models/qwen3-4b", request_timeout_s=123),
+    )
+
+    result = await runtime.promote_final_model(
+        checkpoint_name="final-step-2",
+        output_model_id="sft-final-step-2",
+        poll_s=0,
+    )
+
+    assert training.names == ["final-step-2"]
+    assert training.checkpoint_types == ["base"]
+    assert service.promotions == [
+        {
+            "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final-step-2-cafebabe",
+            "output_model_id": "sft-final-step-2",
+            "base_model": "accounts/fireworks/models/qwen3-4b",
+        }
+    ]
+    assert result["checkpoint_type"] == "CHECKPOINT_TYPE_INFERENCE_BASE"
+    assert result["model"]["name"] == "accounts/test/models/sft-final-step-2"
+
+
+@pytest.mark.asyncio
+async def test_promote_final_model_retries_control_plane_listing() -> None:
+    class FlakyService(_Service):
+        def __init__(self):
+            super().__init__()
+            self.list_calls = 0
+            self.checkpoint_rows = [
+                {
+                    "name": "accounts/test/rlorTrainerJobs/trainer/checkpoints/final-cafebabe",
+                    "promotable": True,
+                }
+            ]
+
+        def list_checkpoints(self, job_id):
+            self.list_calls += 1
+            if self.list_calls == 1:
+                raise RuntimeError("control plane unavailable")
+            return super().list_checkpoints(job_id)
+
+    service = FlakyService()
+    runtime = _runtime(
+        service=service,
+        config=FireworksConfig(base_model="accounts/fireworks/models/qwen3-4b"),
+    )
+
+    result = await runtime.promote_final_model(
+        checkpoint_name="final",
+        output_model_id="sft-final",
+        appear_timeout_s=1,
+        poll_s=0,
+    )
+
+    assert service.list_calls == 2
+    assert result["checkpoint_resource"].endswith("final-cafebabe")
+
+
+@pytest.mark.asyncio
+async def test_promote_final_model_requires_one_promotable_row() -> None:
+    runtime = _runtime(config=FireworksConfig(base_model="accounts/fireworks/models/qwen3-4b"))
+
+    with pytest.raises(RuntimeError, match="Expected one promotable"):
+        await runtime.promote_final_model(
+            checkpoint_name="missing",
+            output_model_id="sft-final",
+            appear_timeout_s=0,
+            poll_s=0,
+        )
+
+
 @pytest.mark.asyncio
 async def test_active_sample_spans_hotload_on_same_client() -> None:
     started = asyncio.Event()
@@ -194,9 +487,7 @@ async def test_active_sample_spans_hotload_on_same_client() -> None:
         config=FireworksConfig(sampling_timeout_s=1),
     )
     first = await runtime.publish_sampler_weights()
-    sample_task = asyncio.create_task(
-        runtime.sample_async(prompt="prompt", sampling_params="params")
-    )
+    sample_task = asyncio.create_task(runtime.sample_async(prompt="prompt", sampling_params="params"))
     await asyncio.wait_for(started.wait(), timeout=1)
 
     second = await runtime.publish_sampler_weights()
@@ -235,9 +526,7 @@ async def test_failed_hotload_preserves_published_identity_and_client() -> None:
 
 
 def test_snapshot_name_leaves_room_for_provider_suffix() -> None:
-    runtime = _runtime(
-        config=FireworksConfig(snapshot_prefix="skyrl-smoke-" + "long-prefix-" * 8)
-    )
+    runtime = _runtime(config=FireworksConfig(snapshot_prefix="skyrl-smoke-" + "long-prefix-" * 8))
 
     name = runtime._snapshot_name(42)
     prefix, version, random_suffix = name.rsplit("-", 2)
@@ -250,9 +539,7 @@ def test_snapshot_name_leaves_room_for_provider_suffix() -> None:
 
 
 def test_snapshot_name_is_a_lowercase_dns_label() -> None:
-    runtime = _runtime(
-        config=FireworksConfig(snapshot_prefix="My Run_with.dots / and spaces")
-    )
+    runtime = _runtime(config=FireworksConfig(snapshot_prefix="My Run_with.dots / and spaces"))
 
     name = runtime._snapshot_name(0)
 
@@ -282,9 +569,7 @@ async def test_close_waits_for_active_sample() -> None:
         config=FireworksConfig(sampling_timeout_s=1),
     )
     await runtime.publish_sampler_weights()
-    sample_task = asyncio.create_task(
-        runtime.sample_async(prompt="prompt", sampling_params="params")
-    )
+    sample_task = asyncio.create_task(runtime.sample_async(prompt="prompt", sampling_params="params"))
     await asyncio.wait_for(started.wait(), timeout=1)
 
     close_task = asyncio.create_task(runtime.close())

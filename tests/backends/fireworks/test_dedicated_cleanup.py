@@ -64,6 +64,23 @@ def test_cleanup_waits_until_deployment_is_absent(monkeypatch) -> None:
     assert deployment.closed is True
 
 
+def test_cleanup_supports_trainer_without_deployment(monkeypatch) -> None:
+    trainer = _TrainerManager()
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-key")
+    monkeypatch.setattr(cleanup, "TrainerJobManager", lambda *, api_key: trainer)
+    monkeypatch.setattr(
+        cleanup,
+        "DeploymentManager",
+        lambda **kwargs: pytest.fail("deployment manager should not be created"),
+    )
+
+    success = cleanup.cleanup_and_audit(trainer_job_id="skyrl-smoke-sft-trainer")
+
+    assert success is True
+    assert trainer.deleted == ["skyrl-smoke-sft-trainer"]
+    assert trainer.closed is True
+
+
 @pytest.mark.parametrize("resource_id", ["unrelated", "accounts/test/skyrl-smoke-id"])
 def test_cleanup_rejects_non_smoke_or_full_resource_names(resource_id: str) -> None:
     with pytest.raises(argparse.ArgumentTypeError):

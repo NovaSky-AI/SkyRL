@@ -86,9 +86,9 @@ class BasePPOExp:
             num_workers=8,
         )
         # make sure the dataset is large enough to train on
-        assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
-            f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
-        )
+        assert (
+            len(prompts_dataset) >= self.cfg.trainer.train_batch_size
+        ), f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
         return prompts_dataset
 
     def get_eval_dataset(self):
@@ -107,9 +107,7 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(
-        self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S
-    ) -> Optional[ResolvedPlacementGroup]:
+    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> Optional[ResolvedPlacementGroup]:
         """Initializes a placement group for colocated training.
 
         Creates a single placement group with per-GPU bundles for all inference
@@ -125,11 +123,7 @@ class BasePPOExp:
             return None
 
         ie_cfg = self.cfg.generator.inference_engine
-        per_engine_gpu_count = (
-            ie_cfg.tensor_parallel_size
-            * ie_cfg.pipeline_parallel_size
-            * ie_cfg.data_parallel_size
-        )
+        per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
         total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
 
         pg = placement_group(
@@ -253,9 +247,7 @@ class BasePPOExp:
         if is_colocated:
             # Callers must invoke get_inference_client() from a sync context (no running event loop).
             asyncio.run(client.sleep())
-            logger.info(
-                "HTTP Inference: Colocated mode - slept inference engines after startup"
-            )
+            logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client
 
@@ -323,9 +315,7 @@ class BasePPOExp:
                         "fireworks", self.cfg.generator.sampling_params
                     ),
                 )
-                generator = self.get_generator(
-                    self.cfg, self.tokenizer, inference_engine_client
-                )
+                generator = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
                 trainer = self.get_trainer(
                     cfg=self.cfg,
                     tracker=tracker,
@@ -337,7 +327,11 @@ class BasePPOExp:
                     colocate_pg=None,
                 )
                 trainer.trajectory_logger = self.get_trajectory_logger()
-                trainer.dispatch = FireworksPolicyDispatch(self.cfg, runtime)
+                trainer.dispatch = FireworksPolicyDispatch(
+                    runtime,
+                    self.cfg.trainer.fireworks,
+                    self.cfg.trainer.policy.optimizer_config,
+                )
                 self.trainer = trainer
                 return trainer
             except Exception:
@@ -350,9 +344,7 @@ class BasePPOExp:
         tracker = self.get_tracker()
         inference_engine_client = self.get_inference_client()
 
-        generator: GeneratorInterface = self.get_generator(
-            self.cfg, self.tokenizer, inference_engine_client
-        )
+        generator: GeneratorInterface = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
 
         trainer = self.get_trainer(
             cfg=self.cfg,
