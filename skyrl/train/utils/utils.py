@@ -1,3 +1,4 @@
+import faulthandler
 import functools
 import ipaddress
 import logging
@@ -5,6 +6,7 @@ import math
 import os
 import socket
 import sys
+import threading
 import time
 from copy import deepcopy
 from datetime import datetime
@@ -27,6 +29,23 @@ from skyrl.env_vars import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
 )
 from skyrl.train.config.config import SkyRLTrainConfig
+
+
+def _start_ray_init_watchdog(timeout_s: float) -> threading.Event:
+    """Exit the driver if Ray initialization stops making progress."""
+    completed = threading.Event()
+    if timeout_s <= 0:
+        return completed
+
+    def watchdog() -> None:
+        if completed.wait(timeout_s):
+            return
+        logger.error(f"ray.init() did not complete within {timeout_s:g}s; terminating the driver")
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        os._exit(1)
+
+    threading.Thread(target=watchdog, name="skyrl-ray-init-watchdog", daemon=True).start()
+    return completed
 
 
 class Timer:
@@ -913,7 +932,15 @@ def initialize_ray(cfg: SkyRLTrainConfig):
 
     # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
     # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.
-    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
+    ray_init_timeout_s = float(os.environ.get("SKYRL_RAY_INIT_TIMEOUT_IN_S", "0"))
+    logger.info(f"Starting ray.init() (timeout={ray_init_timeout_s:g}s; 0 disables the watchdog)")
+    started_at = time.monotonic()
+    ray_init_completed = _start_ray_init_watchdog(ray_init_timeout_s)
+    try:
+        ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
+    finally:
+        ray_init_completed.set()
+    logger.info(f"ray.init() completed in {time.monotonic() - started_at:.1f}s")
 
     if not verbose_logging:
         logger.info(f"Infrastructure logs will be written to: {log_file}")
