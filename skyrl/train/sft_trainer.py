@@ -53,7 +53,11 @@ from skyrl.train.config.sft_config import (
     _normalize_dataset_cfg,
     build_skyrl_config_for_sft,
 )
-from skyrl.train.dataset.pretokenized import load_from_pretokenized
+from skyrl.train.dataset.pretokenized import (
+    MemoryMappedDataset,
+    load_from_pretokenized,
+    sequence_lengths_from_arrow,
+)
 from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, SFTDataset, TextDataset
 from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
@@ -235,20 +239,23 @@ def _get_cache_path(cache_dir: str, cache_key: str) -> str:
     return os.path.join(cache_dir, cache_key)
 
 
-def _load_from_cache(cache_path: str) -> Optional[list]:
-    """Load tokenized dataset from cache.
+def _load_from_cache(cache_path: str) -> Optional["MemoryMappedDataset"]:
+    """Load tokenized dataset from cache as a memory-mapped dataset.
 
     Reads an arrow-backed HF ``Dataset`` directory written by
-    :func:`_save_to_cache` and materializes it back to the ``list[dict]``
-    representation expected by the trainer (which slices, shuffles, and
-    concatenates the result during the training loop).
+    :func:`_save_to_cache`. Cached rows are already in the trainer's internal
+    form (``input_ids`` / ``attention_mask`` / ``num_actions`` / window
+    ``loss_mask``), so the store is served memory-mapped through the same
+    map-style wrapper as pretokenized stores -- no rows are materialized, and
+    per-row lengths come from arrow offsets. Access-time cost is row
+    extraction only (no transform is attached).
 
     Args:
         cache_path: Path to cached dataset directory.
 
     Returns:
-        List of tokenized examples, or ``None`` if the cache directory
-        does not exist or fails to load.
+        A memory-mapped :class:`MemoryMappedDataset`, or ``None`` if the
+        cache directory does not exist or fails to load.
     """
     if not os.path.isdir(cache_path):
         return None
@@ -256,9 +263,9 @@ def _load_from_cache(cache_path: str) -> Optional[list]:
     try:
         logger.info(f"Loading tokenized dataset from cache: {cache_path}")
         dataset = Dataset.load_from_disk(cache_path)
-        tokenized = dataset.to_list()
-        logger.info(f"Loaded {len(tokenized)} examples from cache")
-        return tokenized
+        lengths = sequence_lengths_from_arrow(dataset)
+        logger.info(f"Loaded {len(dataset)} examples from cache (memory-mapped)")
+        return MemoryMappedDataset(dataset, lengths)
     except Exception as e:
         logger.warning(f"Failed to load cache from {cache_path}: {e}")
         return None
@@ -1029,7 +1036,7 @@ class SFTTrainer:
     # Data
     # ------------------------------------------------------------------ #
 
-    def _load_and_tokenize(self, dataset_name: str, dataset_split: str) -> list:
+    def _load_and_tokenize(self, dataset_name: str, dataset_split: str):
         """Load and tokenize a dataset with caching support.
 
         Auto-detects the dataset format based on column names:
@@ -1052,8 +1059,11 @@ class SFTTrainer:
             dataset_name: HuggingFace dataset name (e.g. ``"yahma/alpaca-cleaned"``).
             dataset_split: Dataset split (e.g. ``"train[:100]"`` or ``"test"``).
 
-        Returns a list of tokenized examples (dicts with ``input_ids``,
-        ``attention_mask``, ``num_actions``).
+        Returns the tokenized examples (dicts with ``input_ids``,
+        ``attention_mask``, ``num_actions``): a memory-mapped
+        :class:`MemoryMappedDataset` served from the arrow cache when caching
+        is enabled (nothing materialized in memory), or a ``list`` when
+        ``disable_cache=True``.
         """
         # Check cache first (unless disabled or force_recache)
         if not self.sft_cfg.disable_cache:
@@ -1126,13 +1136,14 @@ class SFTTrainer:
             tokenized = [ex for ex in tokenized if ex is not None]
             logger.info(f"Tokenized {len(tokenized)} examples (filtered from {len(dataset)})")
 
-            # Save to cache if enabled
+            # With caching enabled, round-trip through the arrow cache so the
+            # returned dataset is memory-mapped rather than the in-memory list
+            # (the list stays resident only when caching is disabled).
             if not self.sft_cfg.disable_cache:
-                # TODO (sumanthrh): Currently we use a simple list instead of dataset + stateful dataloader
-                # for simplicity but for caching we use HF Dataset since file sizes can get large
-                # We should migrate to using HF datasets + a dataloader so that we don't materialize
-                # the full dataset in memory
                 _save_to_cache(cache_path, tokenized)
+                mmapped = _load_from_cache(cache_path)
+                if mmapped is not None:
+                    return mmapped
 
             return tokenized
 
@@ -1221,9 +1232,13 @@ class SFTTrainer:
 
             logger.info(f"Tokenized {len(tokenized)} examples (filtered from {dataset_size})")
 
-            # Save to cache if enabled
+            # Same as the sequential path: serve the arrow cache memory-mapped
+            # when caching is enabled.
             if not self.sft_cfg.disable_cache:
                 _save_to_cache(cache_path, tokenized)
+                mmapped = _load_from_cache(cache_path)
+                if mmapped is not None:
+                    return mmapped
 
             return tokenized
 
@@ -1262,7 +1277,9 @@ class SFTTrainer:
                 source = self._load_and_tokenize(name, split)
                 if len(source) == 0:
                     raise ValueError(f"Training dataset '{name}' (split '{split}') tokenized to 0 examples.")
-                sources.append(TextDataset(source))
+                # Cache-backed sources arrive as memory-mapped SFTDatasets;
+                # only in-memory lists (disable_cache) need the wrapper.
+                sources.append(source if isinstance(source, SFTDataset) else TextDataset(source))
         if len(sources) == 1:
             return sources[0]
         per_dataset = ", ".join(f"{name}={len(source)}" for name, source in zip(source_names, sources))
