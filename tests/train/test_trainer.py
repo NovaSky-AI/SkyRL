@@ -363,6 +363,33 @@ def test_micro_batches_accumulated_initialized():
     assert critic_worker._micro_batches_accumulated == 0
 
 
+def test_remove_tail_data_rejects_batch_smaller_than_prompt_stride(dummy_config):
+    """
+    ``_remove_tail_data`` truncates the prompt batch to a multiple of the prompt stride
+    (``lcm_dp_size // gcd(lcm_dp_size, n_samples_per_prompt)``). A batch below that stride
+    truncates to zero prompts, which is rejected instead of returning an empty batch.
+    """
+    dummy_config.generator.n_samples_per_prompt = 4
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    # Normally built by build_models. lcm_dp_size=6 with n_samples_per_prompt=4 gives a stride of 3.
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.get_lcm_dp_size = MagicMock(return_value=6)
+
+    with pytest.raises(ValueError, match="smaller than the prompt stride"):
+        trainer._remove_tail_data(["p0", "p1"])
+
+    # At or above the stride, the largest multiple of the stride is kept.
+    assert trainer._remove_tail_data(["p0", "p1", "p2", "p3"]) == ["p0", "p1", "p2"]
+
+
 def test_validate_batch_sizes():
     """Test the validate_batch_sizes function with various configurations to trigger all error cases."""
 
@@ -531,6 +558,34 @@ def test_validate_batch_sizes():
         AssertionError, match="critic_train_batch_size_per_gpu .* should be divisible by critic_mini_batch_size_per_gpu"
     ):
         validate_batch_sizes(cfg)
+
+    # Test Case 17: Error case - train_batch_size below the prompt stride. policy_dp_size=6 with
+    # n_samples_per_prompt=4 gives a stride of 3, so a 2-prompt batch truncates to zero prompts.
+    cfg = create_test_config(
+        train_batch_size=2,
+        policy_mini_batch_size=2,
+        policy_num_gpus_per_node=6,
+        micro_train_batch_size_per_gpu=1,
+        micro_forward_batch_size_per_gpu=1,
+        n_samples_per_prompt=4,
+    )
+    with pytest.raises(AssertionError, match="train_batch_size .* should be larger than or equal to the prompt stride"):
+        validate_batch_sizes(cfg)
+
+    # Test Case 18: Valid but lossy configuration - train_batch_size is above the prompt stride of 3
+    # but not a multiple of it, so one prompt per batch is dropped and a warning is emitted.
+    cfg = create_test_config(
+        train_batch_size=4,
+        policy_mini_batch_size=2,
+        policy_num_gpus_per_node=6,
+        micro_train_batch_size_per_gpu=1,
+        micro_forward_batch_size_per_gpu=1,
+        n_samples_per_prompt=4,
+    )
+    with patch("skyrl.train.utils.utils.logger") as mock_logger:
+        validate_batch_sizes(cfg)
+    assert mock_logger.warning.call_count == 1
+    assert "not a multiple of the prompt stride" in mock_logger.warning.call_args[0][0]
 
 
 def test_forward_backward_batch_calculations():

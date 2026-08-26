@@ -646,6 +646,13 @@ class RayPPOTrainer:
             return entries
 
         kept_prompts = (len(entries) // stride) * stride
+        if kept_prompts == 0:
+            raise ValueError(
+                f"Batch of {len(entries)} prompt(s) is smaller than the prompt stride ({stride}) implied by "
+                f"lcm_dp_size={lcm_dp_size} and n_samples_per_prompt={n_samples_per_prompt}, so every prompt would "
+                f"be dropped when truncating to even data parallel shards. Set train_batch_size to a multiple of "
+                f"{stride}, or choose a placement where lcm_dp_size divides n_samples_per_prompt."
+            )
         return entries[:kept_prompts]
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker):
