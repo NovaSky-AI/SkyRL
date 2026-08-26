@@ -282,12 +282,10 @@ class SkyRLTrainBackend(AbstractBackend):
         )
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
 
-        if is_lora and cfg.trainer.strategy == "megatron":
-            # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
-            # the freshly-initialised LoRA into a per-worker pristine slot, then
-            # register the first adapter under `model_id`. Must happen while the
-            # model + optimizer are still GPU-resident (i.e. before the offload).
-            # currently, this is only supported for megatron backend
+        if is_lora and cfg.trainer.strategy in {"fsdp", "megatron"}:
+            # Snapshot the freshly initialized LoRA and optimizer state before
+            # any colocated offload. Both backends keep one adapter live and
+            # swap per-model state from CPU storage.
             ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
             ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))

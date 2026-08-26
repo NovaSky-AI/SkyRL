@@ -33,6 +33,10 @@ from skyrl.backends.skyrl_train.weight_sync import (
 from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import (
     yield_module_grouped_chunks,
 )
+from skyrl.backends.skyrl_train.workers.fsdp.adapter_store import (
+    FSDPAdapterStore,
+    FSDPLoraSignature,
+)
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
     HFModelWrapper,
     get_llm_for_sequence_regression,
@@ -197,6 +201,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             assert (
                 self.optimizer is not None and self.scheduler is not None
             ), "FSDP preparation should create optimizer and scheduler"
+        self.adapter_store = FSDPAdapterStore() if self._is_lora and self.optimizer is not None else None
 
         # Enable expandable_segments after init so model weights stay in IPC-compatible
         # standard CUDA memory; only subsequent activations use expandable segments.
@@ -204,6 +209,43 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         # Created only on profiled ranks.
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
+
+    def prime_optimizer_state(self) -> None:
+        if self.adapter_store is None or self.optimizer is None:
+            raise RuntimeError("FSDP adapter store is only available for trainable LoRA policies")
+        self.adapter_store.prime_optimizer_state(self.model, self.optimizer)
+
+    def register_pristine_adapter(self) -> None:
+        if self.adapter_store is None or self.optimizer is None:
+            raise RuntimeError("FSDP adapter store is only available for trainable LoRA policies")
+        signature = FSDPLoraSignature.from_lora_config(self.cfg.policy.model.lora)
+        self.adapter_store.register_pristine(self.model, self.optimizer, signature)
+
+    def register_adapter(self, model_id: str) -> None:
+        if self.adapter_store is None or self.optimizer is None:
+            raise RuntimeError("FSDP adapter store is only available for trainable LoRA policies")
+        signature = FSDPLoraSignature.from_lora_config(self.cfg.policy.model.lora)
+        self.adapter_store.create(model_id, self.model, self.optimizer, signature)
+
+    def delete_adapter(self, model_id: str) -> None:
+        if self.adapter_store is None:
+            raise RuntimeError("FSDP adapter store is only available for trainable LoRA policies")
+        self.adapter_store.delete(model_id)
+
+    def swap_to_adapter(self, model_id: str) -> None:
+        if self.adapter_store is None or self.optimizer is None:
+            return
+        self.adapter_store.swap_to(model_id, self.model, self.optimizer)
+
+    def adapter_store_state(self) -> dict:
+        if self.adapter_store is None:
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "current_id": self.adapter_store.current_id,
+            "registered": self.adapter_store.registered_ids(),
+            "num_adapters": self.adapter_store.num_adapters(),
+        }
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         # Initialize the weight extractor BEFORE super(): a strategy that
