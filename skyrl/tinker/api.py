@@ -981,6 +981,7 @@ class SaveWeightsRequest(BaseModel):
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
+    optimizer: bool = True
     seq_id: int | None = None
     type: Literal["load_weights"] | None = None
 
@@ -1458,7 +1459,7 @@ async def load_weights(
     req: Request,
     session: AsyncSession = Depends(get_session),
 ):
-    """Loads weights and training state."""
+    """Load weights and training state as the model's first request."""
     await ensure_training_model(req, session, request.model_id)
 
     path = types.TinkerPath.parse(request.path)
@@ -1474,7 +1475,13 @@ async def load_weights(
         )
 
     payload = (
-        types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id).model_dump_json().encode()
+        types.LoadWeightsInput(
+            source_model_id=source_model_id,
+            checkpoint_id=checkpoint_id,
+            load_optimizer=request.optimizer,
+        )
+        .model_dump_json()
+        .encode()
     )
     if (
         request_id := existing_training_operation(
@@ -1485,6 +1492,15 @@ async def load_weights(
             payload,
         )
     ) is None:
+        prior_requests = await session.exec(
+            select(func.count())
+            .select_from(FutureDB)
+            .where(FutureDB.model_id == request.model_id)
+            .where(FutureDB.request_type != types.RequestType.CREATE_MODEL)
+        )
+        if prior_requests.one() > 0 or req.app.state.training_operation_queue.has_operations(request.model_id):
+            seq_id = request.seq_id if request.seq_id is not None else 1
+            raise HTTPException(status_code=400, detail=f"LoadWeights is not permitted with seq_id {seq_id}")
         await validate_checkpoint(req, source_model_id, checkpoint_id, types.CheckpointType.TRAINING, session)
         request_id = enqueue_training_operation(
             req,

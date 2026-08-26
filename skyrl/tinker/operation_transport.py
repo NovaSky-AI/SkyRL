@@ -132,6 +132,14 @@ class TrainingOperationQueue:
     def has_model(self, model_id: str) -> bool:
         return model_id in self._models
 
+    def has_operations(self, model_id: str) -> bool:
+        queue = self._models.get(model_id)
+        if queue is None:
+            return False
+        if queue.retired_through_seq_id > 0:
+            return True
+        return any(operation.model_id == model_id for operation in self._by_request_id.values())
+
     def register_model(self, model_id: str, next_seq_id: int | None) -> None:
         retired_through_seq_id = 0 if next_seq_id is None else max(0, next_seq_id - 1)
         self._models.setdefault(
