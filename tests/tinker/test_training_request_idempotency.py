@@ -3,14 +3,19 @@
 import asyncio
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import types
-from skyrl.tinker.api import create_future
+from skyrl.tinker.api import create_future, open_training_request_write_session
 from skyrl.tinker.db_models import FutureDB, enable_sqlite_wal
+
+
+class LargeTrainingInput(BaseModel):
+    payload: str
 
 
 def optim_input(learning_rate: float = 1e-4) -> types.OptimStepInput:
@@ -128,4 +133,53 @@ async def test_training_requests_without_sequence_numbers_remain_distinct(tmp_pa
     assert second_id != first_id
     assert len(futures) == 2
     assert [future.seq_id for future in futures] == [None, None]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_training_writes_wait_before_connection_checkout(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'tinker.db'}",
+        pool_size=2,
+        max_overflow=0,
+        pool_timeout=0.05,
+    )
+    enable_sqlite_wal(engine.sync_engine)
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+
+    app = FastAPI()
+    app.state.db_engine = engine
+    app.state.training_request_write_lock = asyncio.Lock()
+    request = Request({"type": "http", "app": app})
+    first_write_started = asyncio.Event()
+    release_first_write = asyncio.Event()
+
+    async def write_training_request(seq_id: int) -> None:
+        async with open_training_request_write_session(request) as session:
+            await create_future(
+                session,
+                types.RequestType.FORWARD_BACKWARD,
+                "model_1",
+                LargeTrainingInput(payload="x" * 100_000),
+                seq_id=seq_id,
+            )
+            if seq_id == 0:
+                first_write_started.set()
+                await release_first_write.wait()
+            await session.commit()
+
+    writes = [asyncio.create_task(write_training_request(seq_id)) for seq_id in range(32)]
+    await first_write_started.wait()
+
+    async with AsyncSession(engine) as heartbeat_session:
+        count = await asyncio.wait_for(heartbeat_session.exec(select(func.count()).select_from(FutureDB)), timeout=0.1)
+    assert count.one() == 1
+
+    release_first_write.set()
+    await asyncio.gather(*writes)
+
+    async with AsyncSession(engine) as session:
+        count = await session.exec(select(func.count()).select_from(FutureDB))
+    assert count.one() == 32
     await engine.dispose()
