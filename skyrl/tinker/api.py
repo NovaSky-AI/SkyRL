@@ -246,6 +246,8 @@ async def lifespan(app: FastAPI):
     app.state.db_write_lock = asyncio.Lock()
     app.state.sampling_model_cache = {}
     app.state.sampling_model_cache_lock = asyncio.Lock()
+    app.state.validated_sampler_checkpoints = set()
+    app.state.sampler_checkpoint_validation_lock = asyncio.Lock()
 
     # Setup external inference client if configured.
     #
@@ -1346,6 +1348,32 @@ async def get_sampling_model(
         return sampling_model
 
 
+async def validate_sampler_checkpoint_once(
+    request: Request,
+    model_id: str,
+    checkpoint_id: str,
+    session: AsyncSession,
+) -> None:
+    """Validate an immutable sampler checkpoint once before serving it."""
+    key = (model_id, checkpoint_id)
+    validated = request.app.state.validated_sampler_checkpoints
+    if key in validated:
+        return
+
+    async with request.app.state.sampler_checkpoint_validation_lock:
+        if key in validated:
+            return
+        await get_model(session, model_id)
+        await validate_checkpoint(
+            request,
+            model_id,
+            checkpoint_id,
+            types.CheckpointType.SAMPLER,
+            session,
+        )
+        validated.add(key)
+
+
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
@@ -1373,9 +1401,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
                 status_code=400,
                 detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
             )
-        await get_model(session, model_id)
-        # Validate that the checkpoint exists and is ready
-        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
+        await validate_sampler_checkpoint_once(req, model_id, checkpoint_id, session)
 
     sample_input = types.SampleInput(
         base_model=base_model,
@@ -1401,8 +1427,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             model_id=model_id,
             request_data=sample_input,
         )
-
-    await session.commit()
+        await session.commit()
 
     if req.app.state.external_inference_client:
         asyncio.create_task(
