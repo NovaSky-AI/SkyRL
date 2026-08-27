@@ -45,6 +45,7 @@ from skyrl.tinker.db_models import (
     enable_sqlite_wal,
     get_async_database_url,
 )
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.tinker.extra import (
     ExternalInferenceClient,
     SkyRLTrainInferenceForwardingClient,
@@ -241,6 +242,7 @@ async def lifespan(app: FastAPI):
 
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
+    app.state.external_future_store = None
 
     # Setup external inference client if configured.
     #
@@ -265,8 +267,10 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
+        app.state.external_future_store = ExternalFutureStore(app.state.db_engine)
+        await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
-            app.state.engine_config, app.state.db_engine
+            app.state.engine_config, app.state.db_engine, app.state.external_future_store
         )
         logger.info(
             "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
@@ -318,6 +322,9 @@ async def lifespan(app: FastAPI):
     app.state.future_poller.cancel()
     with suppress(asyncio.CancelledError):
         await app.state.future_poller
+
+    if app.state.external_future_store is not None:
+        await app.state.external_future_store.close()
 
     # Close the forwarding client's persistent httpx connection pool if we
     # installed one. Cheap no-op when external_inference_client doesn't own
@@ -1340,26 +1347,30 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
-    request_id = await create_future(
-        session=session,
-        request_type=(
-            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-        ),
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
-            # A positive topk implies prompt logprobs: both are read off the same
-            # prompt forward pass, so asking for one asks for the other.
-            prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
-            topk_prompt_logprobs=request.topk_prompt_logprobs,
-            seq_id=request.seq_id,
-            sampling_session_id=request.sampling_session_id,
-        ),
+    sample_input = types.SampleInput(
+        base_model=base_model,
+        prompt=request.prompt.to_types(),
+        sampling_params=request.sampling_params.to_types(),
+        num_samples=request.num_samples,
+        checkpoint_id=checkpoint_id,
+        # A positive topk implies prompt logprobs: both are read off the same
+        # prompt forward pass, so asking for one asks for the other.
+        prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+        topk_prompt_logprobs=request.topk_prompt_logprobs,
+        seq_id=request.seq_id,
+        sampling_session_id=request.sampling_session_id,
     )
+    if req.app.state.external_future_store is not None:
+        request_id = req.app.state.external_future_store.create(model_id, sample_input)
+    else:
+        request_id = await create_future(
+            session=session,
+            request_type=(
+                types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
+            ),
+            model_id=model_id,
+            request_data=sample_input,
+        )
 
     await session.commit()
 
@@ -1391,10 +1402,19 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     request_id = int(request.request_id)
 
-    try:
-        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Future not found")
+    found_in_memory = False
+    external_future_store = req.app.state.external_future_store
+    if external_future_store is not None:
+        try:
+            row = await external_future_store.wait(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+            found_in_memory = True
+        except KeyError:
+            pass
+    if not found_in_memory:
+        try:
+            row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Future not found")
 
     if row is None:
         raise HTTPException(status_code=408, detail="Timeout waiting for result")
