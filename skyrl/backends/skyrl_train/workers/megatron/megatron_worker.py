@@ -1268,6 +1268,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
+        if use_token_batching and microbatch_iterator is not None and all_loss_fn_outputs:
+            all_loss_fn_outputs = microbatch_iterator.restore_padded_microbatch_order(all_loss_fn_outputs, micro_bsz)
+
         # Reduce across microbatches and all-reduce metrics across DP ranks
         # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
         # NOTE: Sum loss metrics because scaling is already applied before the worker reduction.

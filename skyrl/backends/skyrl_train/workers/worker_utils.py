@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -28,6 +28,8 @@ MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_P
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_max"
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_min"
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_std"
+
+T = TypeVar("T")
 
 
 @torch.no_grad()
@@ -423,6 +425,20 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         reordered_batch = type(ref_microbatch)(reordered_data)
         reordered_batch.metadata = ref_microbatch.metadata
         return reordered_batch
+
+    def restore_padded_microbatch_order(self, values: List[T], padded_microbatch_size: int) -> List[T]:
+        """Restore flattened padded microbatch values to the input sample order."""
+        expected_values = len(self) * padded_microbatch_size
+        if len(values) != expected_values:
+            raise ValueError(f"Expected {expected_values} microbatch values, got {len(values)}.")
+
+        values_by_original_index = {}
+        for microbatch_idx, original_indices in enumerate(self._microbatches):
+            microbatch_start = microbatch_idx * padded_microbatch_size
+            for sample_idx, original_idx in enumerate(original_indices):
+                values_by_original_index[original_idx] = values[microbatch_start + sample_idx]
+
+        return [values_by_original_index[i] for i in range(len(self._token_counts))]
 
 
 def get_microbatch_iterator(
