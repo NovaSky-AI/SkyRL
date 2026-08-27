@@ -119,11 +119,13 @@ class InMemoryFutureStore:
         if key is not None and (request_id := self._request_ids.get(key)) is not None:
             existing = self._futures[request_id]
             if existing.request_type != request_type or existing.request_data != serialized_request:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Training request sequence number was reused",
-                )
-            return request_id
+                if existing.status == RequestStatus.PENDING:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Training request sequence number was reused",
+                    )
+            else:
+                return request_id
 
         request_id = next(self._next_id)
         self._futures[request_id] = InMemoryFuture(
@@ -161,7 +163,9 @@ class InMemoryFutureStore:
         future = self._futures.pop(request_id, None)
         if future is None or future.model_id is None or future.seq_id is None:
             return
-        self._request_ids.pop((future.model_id, future.seq_id), None)
+        key = (future.model_id, future.seq_id)
+        if self._request_ids.get(key) == request_id:
+            self._request_ids.pop(key)
 
 
 def raw_json_response(payload: str | None) -> Response:

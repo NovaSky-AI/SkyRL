@@ -114,6 +114,20 @@ async def test_in_memory_future_store_expires_completed_requests() -> None:
 
 
 @pytest.mark.asyncio
+async def test_in_memory_future_store_allows_sequence_reuse_after_completion() -> None:
+    store = InMemoryFutureStore(retention_sec=0.01)
+    first_id = store.create(types.RequestType.EXTERNAL, "model_a", 7, DummyRequest(value=1))
+    store.complete(first_id, RequestStatus.COMPLETED, SAMPLE_RESULT.model_dump_json())
+
+    second_id = store.create(types.RequestType.EXTERNAL, "model_a", 7, DummyRequest(value=2))
+    assert second_id != first_id
+
+    await asyncio.sleep(0.02)
+
+    assert store.create(types.RequestType.EXTERNAL, "model_a", 7, DummyRequest(value=2)) == second_id
+
+
+@pytest.mark.asyncio
 async def test_in_memory_future_store_handles_512_concurrent_results() -> None:
     store = InMemoryFutureStore(retention_sec=60)
     request_ids = [
