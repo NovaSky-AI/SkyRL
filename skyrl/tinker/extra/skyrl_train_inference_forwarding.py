@@ -21,6 +21,8 @@ from skyrl.utils.log import logger
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
+    _PROXY_URL_POLL_INTERVAL_SEC = 0.25
+
     def __init__(self, engine_config: EngineConfig, db_engine, future_store=None):
         self.engine_config = engine_config
         self.db_engine = db_engine
@@ -57,10 +59,20 @@ class SkyRLTrainInferenceForwardingClient:
             return self._cached_proxy_url
         async with self._cache_lock:
             if force_refresh or self._cached_proxy_url is None:
-                url = await self._read_proxy_url_from_db()
-                if url is None:
-                    raise RuntimeError("inference engine not ready: no proxy URL published to EngineStateDB")
-                self._cached_proxy_url = url
+                if force_refresh:
+                    self._cached_proxy_url = None
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + self.engine_config.forwarding_inference_timeout_sec
+                while self._cached_proxy_url is None:
+                    self._cached_proxy_url = await self._read_proxy_url_from_db()
+                    if self._cached_proxy_url is not None:
+                        break
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise RuntimeError(
+                            "inference engine not ready: timed out waiting for a proxy URL in EngineStateDB"
+                        )
+                    await asyncio.sleep(min(self._PROXY_URL_POLL_INTERVAL_SEC, remaining))
             return self._cached_proxy_url
 
     async def call_and_store_result(
