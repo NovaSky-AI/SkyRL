@@ -11,6 +11,8 @@ from starlette.requests import Request
 from skyrl.tinker import api, types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import (
+    CheckpointDB,
+    CheckpointStatus,
     FutureDB,
     ModelDB,
     RequestStatus,
@@ -228,7 +230,7 @@ async def test_two_full_rollout_waves_complete_and_persist(future_store):
 
 
 @pytest.mark.asyncio
-async def test_sustained_rollouts_training_futures_and_heartbeats(future_store):
+async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(future_store):
     store, engine, db_write_lock = future_store
     forwarder = _CompletingForwarder(store)
     sample_request = SimpleNamespace(
@@ -236,9 +238,12 @@ async def test_sustained_rollouts_training_futures_and_heartbeats(future_store):
             state=SimpleNamespace(
                 external_future_store=store,
                 external_inference_client=forwarder,
+                engine_config=EngineConfig(base_model="model_a"),
                 db_write_lock=db_write_lock,
                 sampling_model_cache={},
                 sampling_model_cache_lock=asyncio.Lock(),
+                validated_sampler_checkpoints=set(),
+                sampler_checkpoint_validation_lock=asyncio.Lock(),
             )
         )
     )
@@ -257,7 +262,7 @@ async def test_sustained_rollouts_training_futures_and_heartbeats(future_store):
                 sampling_session_id="session_a",
                 session_id="session_a",
                 sampling_session_seq_id=0,
-                base_model="model_a",
+                model_path="tinker://model_a/sampler_weights/weights_a",
             )
         )
         session.add(
@@ -268,6 +273,14 @@ async def test_sustained_rollouts_training_futures_and_heartbeats(future_store):
                 status="ready",
                 request_id=0,
                 session_id="session_a",
+            )
+        )
+        session.add(
+            CheckpointDB(
+                model_id="model_a",
+                checkpoint_id="weights_a",
+                checkpoint_type=types.CheckpointType.SAMPLER,
+                status=CheckpointStatus.COMPLETED,
             )
         )
         await session.commit()
@@ -327,6 +340,9 @@ async def test_sustained_rollouts_training_futures_and_heartbeats(future_store):
     assert persisted_by_type[types.RequestType.FORWARD_BACKWARD] == 2048
     assert session_db is not None
     assert session_db.heartbeat_count == 128
+    assert sample_request.app.state.validated_sampler_checkpoints == {
+        ("model_a", "weights_a")
+    }
 
 
 @pytest.mark.asyncio
