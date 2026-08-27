@@ -31,8 +31,9 @@ class ExternalFutureStore:
     _PERSIST_BATCH_SIZE = 64
     _PERSIST_QUEUE_SIZE = 2048
 
-    def __init__(self, db_engine):
+    def __init__(self, db_engine, db_write_lock: asyncio.Lock):
         self.db_engine = db_engine
+        self.db_write_lock = db_write_lock
         self._entries: dict[int, ExternalFuture] = {}
         self._persist_queue: asyncio.Queue[ExternalFuture] = asyncio.Queue(
             maxsize=self._PERSIST_QUEUE_SIZE
@@ -126,23 +127,24 @@ class ExternalFutureStore:
                     self._persist_queue.task_done()
 
     async def _persist(self, entries: list[ExternalFuture]) -> None:
-        async with AsyncSession(self.db_engine) as session:
-            session.add_all(
-                [
-                    FutureDB(
-                        request_id=entry.request_id,
-                        request_type=types.RequestType.EXTERNAL,
-                        model_id=entry.model_id,
-                        request_data=entry.request_data.model_dump(mode="json"),
-                        result_data=entry.result_data,
-                        status=entry.status,
-                        created_at=entry.created_at,
-                        completed_at=entry.completed_at,
-                    )
-                    for entry in entries
-                ]
-            )
-            await session.commit()
+        async with self.db_write_lock:
+            async with AsyncSession(self.db_engine) as session:
+                session.add_all(
+                    [
+                        FutureDB(
+                            request_id=entry.request_id,
+                            request_type=types.RequestType.EXTERNAL,
+                            model_id=entry.model_id,
+                            request_data=entry.request_data.model_dump(mode="json"),
+                            result_data=entry.result_data,
+                            status=entry.status,
+                            created_at=entry.created_at,
+                            completed_at=entry.completed_at,
+                        )
+                        for entry in entries
+                    ]
+                )
+                await session.commit()
 
     def _remove_finished_entry(self, entry: ExternalFuture) -> None:
         if entry.persisted and entry.retrieved:
