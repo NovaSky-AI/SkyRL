@@ -243,6 +243,9 @@ async def lifespan(app: FastAPI):
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
     app.state.external_future_store = None
+    app.state.db_write_lock = asyncio.Lock()
+    app.state.sampling_model_cache = {}
+    app.state.sampling_model_cache_lock = asyncio.Lock()
 
     # Setup external inference client if configured.
     #
@@ -267,7 +270,9 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
-        app.state.external_future_store = ExternalFutureStore(app.state.db_engine)
+        app.state.external_future_store = ExternalFutureStore(
+            app.state.db_engine, app.state.db_write_lock
+        )
         await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
             app.state.engine_config, app.state.db_engine, app.state.external_future_store
@@ -932,14 +937,19 @@ async def create_session(request: CreateSessionRequest, session: AsyncSession = 
 
 
 @app.post("/api/v1/session_heartbeat", response_model=SessionHeartbeatResponse)
-async def session_heartbeat(request: SessionHeartbeatRequest, session: AsyncSession = Depends(get_session)):
+async def session_heartbeat(
+    request: SessionHeartbeatRequest,
+    raw_request: Request,
+    session: AsyncSession = Depends(get_session),
+):
     """Heartbeat for an active session to keep it alive."""
-    session_db = await session.get(SessionDB, request.session_id)
-    if session_db is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session_db.last_heartbeat_at = datetime.now(timezone.utc)
-    session_db.heartbeat_count += 1
-    await session.commit()
+    async with raw_request.app.state.db_write_lock:
+        session_db = await session.get(SessionDB, request.session_id)
+        if session_db is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        session_db.last_heartbeat_at = datetime.now(timezone.utc)
+        session_db.heartbeat_count += 1
+        await session.commit()
     return SessionHeartbeatResponse()
 
 
@@ -1305,15 +1315,36 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
-async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (str | None, str | None):
+async def get_sampling_model(
+    request: SampleRequest,
+    req: Request,
+    session: AsyncSession,
+) -> tuple[str | None, str | None]:
     """Return (base_model, model_path) for a sampling request."""
-    # Resolve model/base from sampling_session_id if provided
-    if request.sampling_session_id is not None:
-        sampling_session = await session.get(SamplingSessionDB, request.sampling_session_id)
+    sampling_session_id = request.sampling_session_id
+    if sampling_session_id is None:
+        return (request.base_model, request.model_path)
+
+    cache = req.app.state.sampling_model_cache
+    cached = cache.get(sampling_session_id)
+    if cached is not None:
+        return cached
+
+    async with req.app.state.sampling_model_cache_lock:
+        cached = cache.get(sampling_session_id)
+        if cached is not None:
+            return cached
+        sampling_session = await session.get(
+            SamplingSessionDB, sampling_session_id
+        )
         if sampling_session is None:
             raise HTTPException(status_code=404, detail="Sampling session not found")
-        return (sampling_session.base_model, sampling_session.model_path)
-    return (request.base_model, request.model_path)
+        sampling_model = (
+            sampling_session.base_model,
+            sampling_session.model_path,
+        )
+        cache[sampling_session_id] = sampling_model
+        return sampling_model
 
 
 @app.post("/api/v1/asample", response_model=FutureResponse)
@@ -1325,7 +1356,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             detail="sampling_session_id must not contain ':' (the routing-key delimiter)",
         )
 
-    base_model, model_path = await get_sampling_model(request, session)
+    base_model, model_path = await get_sampling_model(request, req, session)
 
     if base_model:
         model_id = checkpoint_id = ""

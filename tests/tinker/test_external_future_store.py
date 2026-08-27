@@ -13,6 +13,7 @@ from skyrl.tinker.db_models import (
     FutureDB,
     RequestStatus,
     SamplingSessionDB,
+    SessionDB,
     enable_sqlite_wal,
     get_async_database_url,
 )
@@ -39,7 +40,6 @@ def _sample_input(seq_id: int) -> types.SampleInput:
 class _CompletingForwarder:
     def __init__(self, store: ExternalFutureStore):
         self.store = store
-        self.gate = asyncio.Event()
 
     async def call_and_store_result(
         self,
@@ -49,7 +49,6 @@ class _CompletingForwarder:
         checkpoint_id: str,
         base_model: str | None = None,
     ) -> None:
-        await self.gate.wait()
         await self.store.complete(
             request_id,
             types.SampleOutput(sequences=[]),
@@ -60,33 +59,47 @@ class _CompletingForwarder:
 @pytest_asyncio.fixture()
 async def future_store(tmp_path):
     db_url = get_async_database_url(f"sqlite:///{tmp_path / 'tinker.db'}")
-    engine = create_async_engine(db_url, pool_size=1, max_overflow=0)
+    engine = create_async_engine(
+        db_url, pool_size=5, max_overflow=10, pool_timeout=0.1
+    )
     enable_sqlite_wal(engine.sync_engine)
     async with engine.begin() as connection:
         await connection.run_sync(SQLModel.metadata.create_all)
 
-    store = ExternalFutureStore(engine)
+    db_write_lock = asyncio.Lock()
+    store = ExternalFutureStore(engine, db_write_lock)
     await store.start()
-    yield store, engine
+    yield store, engine, db_write_lock
     await store.close()
     await engine.dispose()
 
 
 @pytest.mark.asyncio
 async def test_two_full_rollout_waves_complete_and_persist(future_store):
-    store, engine = future_store
+    store, engine, db_write_lock = future_store
     forwarder = _CompletingForwarder(store)
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 external_future_store=store,
                 external_inference_client=forwarder,
+                db_write_lock=db_write_lock,
+                sampling_model_cache={},
+                sampling_model_cache_lock=asyncio.Lock(),
             )
         )
     )
     result_data = types.SampleOutput(sequences=[]).model_dump_json()
 
     async with AsyncSession(engine) as session:
+        session.add(
+            SessionDB(
+                session_id="session_a",
+                tags=[],
+                user_metadata={},
+                sdk_version="test",
+            )
+        )
         session.add(
             SamplingSessionDB(
                 sampling_session_id="session_a",
@@ -98,8 +111,6 @@ async def test_two_full_rollout_waves_complete_and_persist(future_store):
         await session.commit()
 
     for wave in range(2):
-        forwarder.gate.clear()
-
         async def create_sample(index: int) -> int:
             async with AsyncSession(engine) as session:
                 response = await api.asample(
@@ -118,9 +129,19 @@ async def test_two_full_rollout_waves_complete_and_persist(future_store):
                 )
             return int(response.request_id)
 
-        request_ids = await asyncio.gather(
-            *(create_sample(index) for index in range(512))
+        async def heartbeat() -> None:
+            async with AsyncSession(engine) as session:
+                await api.session_heartbeat(
+                    api.SessionHeartbeatRequest(session_id="session_a"),
+                    request,
+                    session,
+                )
+
+        responses = await asyncio.gather(
+            *(create_sample(index) for index in range(512)),
+            *(heartbeat() for _ in range(32)),
         )
+        request_ids = responses[:512]
         waiters = [
             asyncio.create_task(store.wait(request_id, timeout=5))
             for request_id in request_ids
@@ -136,7 +157,6 @@ async def test_two_full_rollout_waves_complete_and_persist(future_store):
             ).one()
         assert pending_after_creation == 0
 
-        forwarder.gate.set()
         results = await asyncio.gather(*waiters)
 
         assert all(
@@ -156,14 +176,17 @@ async def test_two_full_rollout_waves_complete_and_persist(future_store):
                 .where(FutureDB.status == RequestStatus.PENDING)
             )
         ).one()
+        session_db = await session.get(SessionDB, "session_a")
 
     assert persisted == 1024
     assert pending == 0
+    assert session_db is not None
+    assert session_db.heartbeat_count == 64
 
 
 @pytest.mark.asyncio
 async def test_forwarding_client_completes_in_memory_future(future_store, monkeypatch):
-    store, engine = future_store
+    store, engine, _ = future_store
     request_id = store.create("model_a", _sample_input(1))
     result = types.SampleOutput(
         sequences=[
@@ -203,7 +226,7 @@ async def test_retrieve_future_serializes_in_memory_result_as_proto(future_store
     from tinker import SampleResponse
     from tinker.proto.response_conv import deserialize_proto_response
 
-    store, engine = future_store
+    store, engine, _ = future_store
     request_id = store.create("model_a", _sample_input(1))
     result = types.SampleOutput(
         sequences=[
