@@ -6,11 +6,13 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
+from starlette.requests import Request
 
 from skyrl.tinker import api, types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import (
     FutureDB,
+    ModelDB,
     RequestStatus,
     SamplingSessionDB,
     SessionDB,
@@ -54,6 +56,47 @@ class _CompletingForwarder:
             types.SampleOutput(sequences=[]),
             RequestStatus.COMPLETED,
         )
+
+
+def _forward_backward_request(seq_id: int, db_write_lock: asyncio.Lock) -> Request:
+    body = api.ForwardBackwardRequest(
+        model_id="model_a",
+        seq_id=seq_id,
+        forward_backward_input=api.ForwardBackwardInput(
+            data=[
+                api.Datum(
+                    model_input=api.ModelInput(
+                        chunks=[api.EncodedTextChunk(tokens=[1, 2])]
+                    ),
+                    loss_fn_inputs={
+                        "target_tokens": api.TensorData(data=[2, 3]),
+                        "weights": api.TensorData(data=[1.0, 1.0]),
+                    },
+                )
+            ],
+            loss_fn="cross_entropy",
+        ),
+    ).model_dump_json().encode()
+    body_sent = False
+
+    async def receive():
+        nonlocal body_sent
+        if body_sent:
+            return {"type": "http.disconnect"}
+        body_sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    app = SimpleNamespace(state=SimpleNamespace(db_write_lock=db_write_lock))
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/forward_backward",
+            "headers": [(b"content-type", b"application/json")],
+            "app": app,
+        },
+        receive,
+    )
 
 
 @pytest_asyncio.fixture()
@@ -182,6 +225,108 @@ async def test_two_full_rollout_waves_complete_and_persist(future_store):
     assert pending == 0
     assert session_db is not None
     assert session_db.heartbeat_count == 64
+
+
+@pytest.mark.asyncio
+async def test_sustained_rollouts_training_futures_and_heartbeats(future_store):
+    store, engine, db_write_lock = future_store
+    forwarder = _CompletingForwarder(store)
+    sample_request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                external_future_store=store,
+                external_inference_client=forwarder,
+                db_write_lock=db_write_lock,
+                sampling_model_cache={},
+                sampling_model_cache_lock=asyncio.Lock(),
+            )
+        )
+    )
+
+    async with AsyncSession(engine) as session:
+        session.add(
+            SessionDB(
+                session_id="session_a",
+                tags=[],
+                user_metadata={},
+                sdk_version="test",
+            )
+        )
+        session.add(
+            SamplingSessionDB(
+                sampling_session_id="session_a",
+                session_id="session_a",
+                sampling_session_seq_id=0,
+                base_model="model_a",
+            )
+        )
+        session.add(
+            ModelDB(
+                model_id="model_a",
+                base_model="model_a",
+                lora_config={},
+                status="ready",
+                request_id=0,
+                session_id="session_a",
+            )
+        )
+        await session.commit()
+
+    for wave in range(4):
+        async def create_sample(index: int) -> None:
+            async with AsyncSession(engine) as session:
+                await api.asample(
+                    api.SampleRequest(
+                        prompt=api.ModelInput(
+                            chunks=[api.EncodedTextChunk(tokens=[index])]
+                        ),
+                        sampling_params=api.SamplingParams(
+                            temperature=0.0, max_tokens=1, seed=index
+                        ),
+                        sampling_session_id="session_a",
+                        seq_id=wave * 512 + index,
+                    ),
+                    sample_request,
+                    session,
+                )
+
+        async def create_training_future(index: int) -> None:
+            async with AsyncSession(engine) as session:
+                await api.forward_backward(
+                    _forward_backward_request(wave * 512 + index, db_write_lock),
+                    session,
+                )
+
+        async def heartbeat() -> None:
+            async with AsyncSession(engine) as session:
+                await api.session_heartbeat(
+                    api.SessionHeartbeatRequest(session_id="session_a"),
+                    sample_request,
+                    session,
+                )
+
+        await asyncio.gather(
+            *(create_sample(index) for index in range(512)),
+            *(create_training_future(index) for index in range(512)),
+            *(heartbeat() for _ in range(32)),
+        )
+
+    await store.flush()
+    async with AsyncSession(engine) as session:
+        persisted_by_type = dict(
+            (
+                await session.exec(
+                    select(FutureDB.request_type, func.count())
+                    .group_by(FutureDB.request_type)
+                )
+            ).all()
+        )
+        session_db = await session.get(SessionDB, "session_a")
+
+    assert persisted_by_type[types.RequestType.EXTERNAL] == 2048
+    assert persisted_by_type[types.RequestType.FORWARD_BACKWARD] == 2048
+    assert session_db is not None
+    assert session_db.heartbeat_count == 128
 
 
 @pytest.mark.asyncio

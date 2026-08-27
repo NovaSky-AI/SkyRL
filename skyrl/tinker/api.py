@@ -1145,17 +1145,16 @@ async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackw
 async def forward_backward(request: Request, session: AsyncSession = Depends(get_session)):
     """Compute and accumulate gradients (or run forward-only when the proto body asks for it)."""
     req, forward_only = await _read_forward_backward_request(request)
-    await get_model(session, req.model_id)
-
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
-        model_id=req.model_id,
-        request_data=req.forward_backward_input.to_types(),
-        seq_id=req.seq_id,
-    )
-
-    await session.commit()
+    async with request.app.state.db_write_lock:
+        await get_model(session, req.model_id)
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
+            model_id=req.model_id,
+            request_data=req.forward_backward_input.to_types(),
+            seq_id=req.seq_id,
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
