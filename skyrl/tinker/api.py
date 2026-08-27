@@ -6,9 +6,9 @@ import re
 import shutil
 import signal
 import threading
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
+from typing import Annotated, Any, AsyncGenerator, Awaitable, ClassVar, Literal
 from uuid import uuid4
 
 import fastapi
@@ -183,6 +183,40 @@ async def poll_futures(
         await asyncio.sleep(poll_interval_sec)
 
 
+def _finish_forwarding_task(tasks: set[asyncio.Task], task: asyncio.Task) -> None:
+    tasks.discard(task)
+    if task.cancelled():
+        return
+    if error := task.exception():
+        logger.error("Forwarding task failed: %r", error)
+
+
+def _start_forwarding_task(app: FastAPI, operation: Awaitable[None]) -> None:
+    task = asyncio.create_task(operation)
+    app.state.forwarding_tasks.add(task)
+    task.add_done_callback(lambda done: _finish_forwarding_task(app.state.forwarding_tasks, done))
+
+
+async def _close_external_inference(app: FastAPI) -> None:
+    if app.state.forwarding_tasks:
+        await asyncio.gather(*tuple(app.state.forwarding_tasks), return_exceptions=True)
+
+    inference_client = getattr(app.state, "external_inference_client", None)
+    aclose = getattr(inference_client, "aclose", None)
+    if aclose is not None:
+        with suppress(Exception):
+            await aclose()
+
+    if app.state.external_future_store is not None:
+        await app.state.external_future_store.close()
+
+
+def _get_db_write_context(db_engine):
+    if db_engine.dialect.name == "sqlite":
+        return asyncio.Lock()
+    return nullcontext()
+
+
 def _get_parent_uv_run_args(parent_cmd: list[str]) -> list[str]:
     """Extract parent `uv run <uv run args>` flags for the engine launch given the parent process's startup command
 
@@ -242,8 +276,9 @@ async def lifespan(app: FastAPI):
 
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
+    app.state.forwarding_tasks = set()
     app.state.external_future_store = None
-    app.state.db_write_lock = asyncio.Lock()
+    app.state.db_write_lock = _get_db_write_context(app.state.db_engine)
     app.state.sampling_model_cache = {}
     app.state.sampling_model_cache_lock = asyncio.Lock()
     app.state.validated_sampler_checkpoints = set()
@@ -272,9 +307,7 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
-        app.state.external_future_store = ExternalFutureStore(
-            app.state.db_engine, app.state.db_write_lock
-        )
+        app.state.external_future_store = ExternalFutureStore(app.state.db_engine, app.state.db_write_lock)
         await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
             app.state.engine_config, app.state.db_engine, app.state.external_future_store
@@ -330,17 +363,7 @@ async def lifespan(app: FastAPI):
     with suppress(asyncio.CancelledError):
         await app.state.future_poller
 
-    if app.state.external_future_store is not None:
-        await app.state.external_future_store.close()
-
-    # Close the forwarding client's persistent httpx connection pool if we
-    # installed one. Cheap no-op when external_inference_client doesn't own
-    # an httpx client (ExternalInferenceClient creates one per call).
-    inference_client = getattr(app.state, "external_inference_client", None)
-    aclose = getattr(inference_client, "aclose", None)
-    if aclose is not None:
-        with suppress(Exception):
-            await aclose()
+    await _close_external_inference(app)
 
     logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
     with suppress(ProcessLookupError):
@@ -1335,9 +1358,7 @@ async def get_sampling_model(
         cached = cache.get(sampling_session_id)
         if cached is not None:
             return cached
-        sampling_session = await session.get(
-            SamplingSessionDB, sampling_session_id
-        )
+        sampling_session = await session.get(SamplingSessionDB, sampling_session_id)
         if sampling_session is None:
             raise HTTPException(status_code=404, detail="Sampling session not found")
         sampling_model = (
@@ -1430,10 +1451,11 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         await session.commit()
 
     if req.app.state.external_inference_client:
-        asyncio.create_task(
+        _start_forwarding_task(
+            req.app,
             req.app.state.external_inference_client.call_and_store_result(
                 request_id, request, model_id, checkpoint_id, base_model=base_model
-            )
+            ),
         )
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
@@ -1679,19 +1701,24 @@ async def delete_checkpoint(
             ),
         )
 
-    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
-    if not checkpoint_db:
-        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
+    sampler_checkpoint = resolved_checkpoint_type == types.CheckpointType.SAMPLER
+    validation_context = request.app.state.sampler_checkpoint_validation_lock if sampler_checkpoint else nullcontext()
+    async with validation_context:
+        checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
+        if not checkpoint_db:
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
-    if checkpoint_db.status == CheckpointStatus.PENDING:
-        raise HTTPException(status_code=425, detail="Checkpoint is still being created")
+        if checkpoint_db.status == CheckpointStatus.PENDING:
+            raise HTTPException(status_code=425, detail="Checkpoint is still being created")
 
-    # Commit the row deletion before unlinking the artifact. If the commit fails we
-    # leave an orphaned file (GC-able) rather than a row that lists a checkpoint whose
-    # archive is gone, which would make every subsequent download 500.
-    path = checkpoint_file_path(request, unique_id, checkpoint_id, resolved_checkpoint_type)
-    await session.delete(checkpoint_db)
-    await session.commit()
+        # Commit the row deletion before unlinking the artifact. If the commit fails we
+        # leave an orphaned file (GC-able) rather than a row that lists a checkpoint whose
+        # archive is gone, which would make every subsequent download 500.
+        path = checkpoint_file_path(request, unique_id, checkpoint_id, resolved_checkpoint_type)
+        await session.delete(checkpoint_db)
+        await session.commit()
+        if sampler_checkpoint:
+            request.app.state.validated_sampler_checkpoints.discard((unique_id, checkpoint_id))
     await asyncio.to_thread(delete_checkpoint_file, path)
 
 

@@ -31,9 +31,7 @@ def _sample_input(seq_id: int) -> types.SampleInput:
     return types.SampleInput(
         base_model="model_a",
         prompt=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[seq_id])]),
-        sampling_params=types.SamplingParams(
-            temperature=0.0, max_tokens=1, seed=seq_id
-        ),
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=1, seed=seq_id),
         num_samples=1,
         checkpoint_id="",
         prompt_logprobs=False,
@@ -61,24 +59,26 @@ class _CompletingForwarder:
 
 
 def _forward_backward_request(seq_id: int, db_write_lock: asyncio.Lock) -> Request:
-    body = api.ForwardBackwardRequest(
-        model_id="model_a",
-        seq_id=seq_id,
-        forward_backward_input=api.ForwardBackwardInput(
-            data=[
-                api.Datum(
-                    model_input=api.ModelInput(
-                        chunks=[api.EncodedTextChunk(tokens=[1, 2])]
-                    ),
-                    loss_fn_inputs={
-                        "target_tokens": api.TensorData(data=[2, 3]),
-                        "weights": api.TensorData(data=[1.0, 1.0]),
-                    },
-                )
-            ],
-            loss_fn="cross_entropy",
-        ),
-    ).model_dump_json().encode()
+    body = (
+        api.ForwardBackwardRequest(
+            model_id="model_a",
+            seq_id=seq_id,
+            forward_backward_input=api.ForwardBackwardInput(
+                data=[
+                    api.Datum(
+                        model_input=api.ModelInput(chunks=[api.EncodedTextChunk(tokens=[1, 2])]),
+                        loss_fn_inputs={
+                            "target_tokens": api.TensorData(data=[2, 3]),
+                            "weights": api.TensorData(data=[1.0, 1.0]),
+                        },
+                    )
+                ],
+                loss_fn="cross_entropy",
+            ),
+        )
+        .model_dump_json()
+        .encode()
+    )
     body_sent = False
 
     async def receive():
@@ -104,9 +104,7 @@ def _forward_backward_request(seq_id: int, db_write_lock: asyncio.Lock) -> Reque
 @pytest_asyncio.fixture()
 async def future_store(tmp_path):
     db_url = get_async_database_url(f"sqlite:///{tmp_path / 'tinker.db'}")
-    engine = create_async_engine(
-        db_url, pool_size=5, max_overflow=10, pool_timeout=0.1
-    )
+    engine = create_async_engine(db_url, pool_size=5, max_overflow=10, pool_timeout=0.1)
     enable_sqlite_wal(engine.sync_engine)
     async with engine.begin() as connection:
         await connection.run_sync(SQLModel.metadata.create_all)
@@ -120,124 +118,17 @@ async def future_store(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_two_full_rollout_waves_complete_and_persist(future_store):
-    store, engine, db_write_lock = future_store
-    forwarder = _CompletingForwarder(store)
-    request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                external_future_store=store,
-                external_inference_client=forwarder,
-                db_write_lock=db_write_lock,
-                sampling_model_cache={},
-                sampling_model_cache_lock=asyncio.Lock(),
-            )
-        )
-    )
-    result_data = types.SampleOutput(sequences=[]).model_dump_json()
-
-    async with AsyncSession(engine) as session:
-        session.add(
-            SessionDB(
-                session_id="session_a",
-                tags=[],
-                user_metadata={},
-                sdk_version="test",
-            )
-        )
-        session.add(
-            SamplingSessionDB(
-                sampling_session_id="session_a",
-                session_id="session_a",
-                sampling_session_seq_id=0,
-                base_model="model_a",
-            )
-        )
-        await session.commit()
-
-    for wave in range(2):
-        async def create_sample(index: int) -> int:
-            async with AsyncSession(engine) as session:
-                response = await api.asample(
-                    api.SampleRequest(
-                        prompt=api.ModelInput(
-                            chunks=[api.EncodedTextChunk(tokens=[index])]
-                        ),
-                        sampling_params=api.SamplingParams(
-                            temperature=0.0, max_tokens=1, seed=index
-                        ),
-                        sampling_session_id="session_a",
-                        seq_id=wave * 512 + index,
-                    ),
-                    request,
-                    session,
-                )
-            return int(response.request_id)
-
-        async def heartbeat() -> None:
-            async with AsyncSession(engine) as session:
-                await api.session_heartbeat(
-                    api.SessionHeartbeatRequest(session_id="session_a"),
-                    request,
-                    session,
-                )
-
-        responses = await asyncio.gather(
-            *(create_sample(index) for index in range(512)),
-            *(heartbeat() for _ in range(32)),
-        )
-        request_ids = responses[:512]
-        waiters = [
-            asyncio.create_task(store.wait(request_id, timeout=5))
-            for request_id in request_ids
-        ]
-
-        async with AsyncSession(engine) as session:
-            pending_after_creation = (
-                await session.exec(
-                    select(func.count())
-                    .select_from(FutureDB)
-                    .where(FutureDB.status == RequestStatus.PENDING)
-                )
-            ).one()
-        assert pending_after_creation == 0
-
-        results = await asyncio.gather(*waiters)
-
-        assert all(
-            result == (RequestStatus.COMPLETED, types.RequestType.EXTERNAL, result_data)
-            for result in results
-        )
-
-    await store.flush()
-    async with AsyncSession(engine) as session:
-        persisted = (
-            await session.exec(select(func.count()).select_from(FutureDB))
-        ).one()
-        pending = (
-            await session.exec(
-                select(func.count())
-                .select_from(FutureDB)
-                .where(FutureDB.status == RequestStatus.PENDING)
-            )
-        ).one()
-        session_db = await session.get(SessionDB, "session_a")
-
-    assert persisted == 1024
-    assert pending == 0
-    assert session_db is not None
-    assert session_db.heartbeat_count == 64
-
-
-@pytest.mark.asyncio
 async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(future_store):
     store, engine, db_write_lock = future_store
     forwarder = _CompletingForwarder(store)
     sample_request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
+                db_engine=engine,
                 external_future_store=store,
                 external_inference_client=forwarder,
+                forwarding_tasks=set(),
+                future_waiters={},
                 engine_config=EngineConfig(base_model="model_a"),
                 db_write_lock=db_write_lock,
                 sampling_model_cache={},
@@ -245,7 +136,8 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
                 validated_sampler_checkpoints=set(),
                 sampler_checkpoint_validation_lock=asyncio.Lock(),
             )
-        )
+        ),
+        headers={},
     )
 
     async with AsyncSession(engine) as session:
@@ -285,54 +177,68 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
         )
         await session.commit()
 
-    for wave in range(4):
-        async def create_sample(index: int) -> None:
-            async with AsyncSession(engine) as session:
-                await api.asample(
-                    api.SampleRequest(
-                        prompt=api.ModelInput(
-                            chunks=[api.EncodedTextChunk(tokens=[index])]
+    future_poller = asyncio.create_task(
+        api.poll_futures(engine, sample_request.app.state.future_waiters, poll_interval_sec=0.001)
+    )
+    expected_sample = types.SampleOutput(sequences=[]).model_dump_json().encode()
+    try:
+        request_ids = []
+        for wave in range(4):
+
+            async def create_sample(index: int) -> int:
+                async with AsyncSession(engine) as session:
+                    response = await api.asample(
+                        api.SampleRequest(
+                            prompt=api.ModelInput(chunks=[api.EncodedTextChunk(tokens=[index])]),
+                            sampling_params=api.SamplingParams(temperature=0.0, max_tokens=1, seed=index),
+                            sampling_session_id="session_a",
+                            seq_id=wave * 512 + index,
                         ),
-                        sampling_params=api.SamplingParams(
-                            temperature=0.0, max_tokens=1, seed=index
-                        ),
-                        sampling_session_id="session_a",
-                        seq_id=wave * 512 + index,
-                    ),
-                    sample_request,
-                    session,
-                )
+                        sample_request,
+                        session,
+                    )
+                return int(response.request_id)
 
-        async def create_training_future(index: int) -> None:
-            async with AsyncSession(engine) as session:
-                await api.forward_backward(
-                    _forward_backward_request(wave * 512 + index, db_write_lock),
-                    session,
-                )
+            async def create_training_future(index: int) -> None:
+                async with AsyncSession(engine) as session:
+                    await api.forward_backward(
+                        _forward_backward_request(wave * 512 + index, db_write_lock),
+                        session,
+                    )
 
-        async def heartbeat() -> None:
-            async with AsyncSession(engine) as session:
-                await api.session_heartbeat(
-                    api.SessionHeartbeatRequest(session_id="session_a"),
-                    sample_request,
-                    session,
-                )
+            async def heartbeat() -> None:
+                async with AsyncSession(engine) as session:
+                    await api.session_heartbeat(
+                        api.SessionHeartbeatRequest(session_id="session_a"),
+                        sample_request,
+                        session,
+                    )
 
-        await asyncio.gather(
-            *(create_sample(index) for index in range(512)),
-            *(create_training_future(index) for index in range(512)),
-            *(heartbeat() for _ in range(32)),
-        )
+            responses = await asyncio.gather(
+                *(create_sample(index) for index in range(512)),
+                *(create_training_future(index) for index in range(512)),
+                *(heartbeat() for _ in range(32)),
+            )
+            request_ids = responses[:512]
+            retrievals = await asyncio.gather(
+                *(
+                    api.retrieve_future(api.RetrieveFutureRequest(request_id=str(request_id)), sample_request)
+                    for request_id in request_ids
+                )
+            )
+            assert all(response.body == expected_sample for response in retrievals)
+            assert not store._entries
+
+        repeated = await api.retrieve_future(api.RetrieveFutureRequest(request_id=str(request_ids[-1])), sample_request)
+        assert repeated.body == expected_sample
+    finally:
+        future_poller.cancel()
+        await asyncio.gather(future_poller, return_exceptions=True)
 
     await store.flush()
     async with AsyncSession(engine) as session:
         persisted_by_type = dict(
-            (
-                await session.exec(
-                    select(FutureDB.request_type, func.count())
-                    .group_by(FutureDB.request_type)
-                )
-            ).all()
+            (await session.exec(select(FutureDB.request_type, func.count()).group_by(FutureDB.request_type))).all()
         )
         session_db = await session.get(SessionDB, "session_a")
 
@@ -340,9 +246,159 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
     assert persisted_by_type[types.RequestType.FORWARD_BACKWARD] == 2048
     assert session_db is not None
     assert session_db.heartbeat_count == 128
-    assert sample_request.app.state.validated_sampler_checkpoints == {
-        ("model_a", "weights_a")
-    }
+    assert sample_request.app.state.validated_sampler_checkpoints == {("model_a", "weights_a")}
+    assert not sample_request.app.state.forwarding_tasks
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
+    release_forwarding = asyncio.Event()
+    events = []
+
+    class ClosingClient:
+        async def aclose(self) -> None:
+            events.append("client_closed")
+
+    class ClosingStore:
+        async def close(self) -> None:
+            events.append("store_closed")
+
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            external_inference_client=ClosingClient(),
+            external_future_store=ClosingStore(),
+            forwarding_tasks=set(),
+        )
+    )
+
+    async def finish_forwarding() -> None:
+        await release_forwarding.wait()
+        events.append("future_completed")
+
+    api._start_forwarding_task(app, finish_forwarding())
+    shutdown = asyncio.create_task(api._close_external_inference(app))
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+
+    release_forwarding.set()
+    await shutdown
+
+    assert events == ["future_completed", "client_closed", "store_closed"]
+    assert not app.state.forwarding_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("dialect", "serializes"), [("sqlite", True), ("postgresql", False)])
+async def test_db_write_context_serializes_only_sqlite(dialect, serializes):
+    context = api._get_db_write_context(SimpleNamespace(dialect=SimpleNamespace(name=dialect)))
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_writer() -> None:
+        async with context:
+            first_entered.set()
+            await release_first.wait()
+
+    async def second_writer() -> None:
+        await first_entered.wait()
+        async with context:
+            second_entered.set()
+
+    first = asyncio.create_task(first_writer())
+    second = asyncio.create_task(second_writer())
+    await first_entered.wait()
+    await asyncio.sleep(0)
+    assert second_entered.is_set() is not serializes
+
+    release_first.set()
+    await asyncio.gather(first, second)
+    assert second_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sampler_checkpoint_delete_waits_for_validation_and_invalidates_cache(future_store, monkeypatch):
+    _, engine, _ = future_store
+    validation_started = asyncio.Event()
+    release_validation = asyncio.Event()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                engine_config=EngineConfig(base_model="model_a"),
+                sampler_checkpoint_validation_lock=asyncio.Lock(),
+                validated_sampler_checkpoints=set(),
+            )
+        )
+    )
+
+    async with AsyncSession(engine) as session:
+        session.add(
+            SessionDB(
+                session_id="session_a",
+                tags=[],
+                user_metadata={},
+                sdk_version="test",
+            )
+        )
+        session.add(
+            ModelDB(
+                model_id="model_a",
+                base_model="model_a",
+                lora_config={},
+                status="ready",
+                request_id=0,
+                session_id="session_a",
+            )
+        )
+        session.add(
+            CheckpointDB(
+                model_id="model_a",
+                checkpoint_id="weights_a",
+                checkpoint_type=types.CheckpointType.SAMPLER,
+                status=CheckpointStatus.COMPLETED,
+            )
+        )
+        await session.commit()
+
+    async def hold_validation(*args) -> None:
+        validation_started.set()
+        await release_validation.wait()
+
+    monkeypatch.setattr(api, "validate_checkpoint", hold_validation)
+    async with AsyncSession(engine) as validation_session, AsyncSession(engine) as deletion_session:
+        validation = asyncio.create_task(
+            api.validate_sampler_checkpoint_once(
+                request,
+                "model_a",
+                "weights_a",
+                validation_session,
+            )
+        )
+        await validation_started.wait()
+        deletion = asyncio.create_task(
+            api.delete_checkpoint(
+                request,
+                "model_a",
+                "weights_a",
+                types.CheckpointType.SAMPLER,
+                deletion_session,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not deletion.done()
+
+        release_validation.set()
+        await asyncio.gather(validation, deletion)
+
+    assert not request.app.state.validated_sampler_checkpoints
+    async with AsyncSession(engine) as session:
+        assert (
+            await session.get(
+                CheckpointDB,
+                ("model_a", "weights_a", types.CheckpointType.SAMPLER),
+            )
+            is None
+        )
 
 
 @pytest.mark.asyncio
@@ -350,15 +406,9 @@ async def test_forwarding_client_completes_in_memory_future(future_store, monkey
     store, engine, _ = future_store
     request_id = store.create("model_a", _sample_input(1))
     result = types.SampleOutput(
-        sequences=[
-            types.GeneratedSequence(
-                stop_reason="stop", tokens=[1, 2], logprobs=[-0.5, -1.0]
-            )
-        ]
+        sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1, 2], logprobs=[-0.5, -1.0])]
     )
-    client = SkyRLTrainInferenceForwardingClient(
-        EngineConfig(base_model="model_a"), engine, store
-    )
+    client = SkyRLTrainInferenceForwardingClient(EngineConfig(base_model="model_a"), engine, store)
 
     async def forward(*args, **kwargs):
         return result
@@ -383,6 +433,23 @@ async def test_forwarding_client_completes_in_memory_future(future_store, monkey
 
 
 @pytest.mark.asyncio
+async def test_persistence_failure_is_reported_to_waiter(future_store, monkeypatch):
+    store, _, _ = future_store
+    request_id = store.create("model_a", _sample_input(1))
+
+    async def fail_persistence(entries):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "_persist", fail_persistence)
+    await store.complete(request_id, types.SampleOutput(sequences=[]), RequestStatus.COMPLETED)
+
+    with pytest.raises(RuntimeError, match=f"Failed to persist external future {request_id}"):
+        await store.wait(request_id, timeout=1)
+    with pytest.raises(RuntimeError, match="External future persistence failed"):
+        await store.flush()
+
+
+@pytest.mark.asyncio
 async def test_retrieve_future_serializes_in_memory_result_as_proto(future_store):
     from tinker import SampleResponse
     from tinker.proto.response_conv import deserialize_proto_response
@@ -390,25 +457,15 @@ async def test_retrieve_future_serializes_in_memory_result_as_proto(future_store
     store, engine, _ = future_store
     request_id = store.create("model_a", _sample_input(1))
     result = types.SampleOutput(
-        sequences=[
-            types.GeneratedSequence(
-                stop_reason="stop", tokens=[1, 2], logprobs=[-0.5, -1.0]
-            )
-        ]
+        sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1, 2], logprobs=[-0.5, -1.0])]
     )
     await store.complete(request_id, result, RequestStatus.COMPLETED)
 
     request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                db_engine=engine, external_future_store=store, future_waiters={}
-            )
-        ),
+        app=SimpleNamespace(state=SimpleNamespace(db_engine=engine, external_future_store=store, future_waiters={})),
         headers={"accept": "application/x-protobuf, application/json"},
     )
-    response = await api.retrieve_future(
-        api.RetrieveFutureRequest(request_id=str(request_id)), request
-    )
+    response = await api.retrieve_future(api.RetrieveFutureRequest(request_id=str(request_id)), request)
 
     assert response.media_type == "application/x-protobuf"
     result = deserialize_proto_response(response.body, SampleResponse)

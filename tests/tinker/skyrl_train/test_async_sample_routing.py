@@ -241,9 +241,9 @@ def test_sample_uses_external_path(server_db_path):
         timeout_sec=10,
         poll_interval_sec=0.1,
     )
-    assert found_new_future, (
-        "expected a new EXTERNAL future after the sample call; async sample routing may not be active"
-    )
+    assert (
+        found_new_future
+    ), "expected a new EXTERNAL future after the sample call; async sample routing may not be active"
 
 
 def test_sample_concurrent_with_training_is_fast(server_db_path):
