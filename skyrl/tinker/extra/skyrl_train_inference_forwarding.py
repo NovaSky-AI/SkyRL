@@ -32,7 +32,7 @@ class SkyRLTrainInferenceForwardingClient:
         max_conn = engine_config.forwarding_inference_max_connections
         max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(engine_config.forwarding_inference_timeout_sec, connect=10.0),
             limits=httpx.Limits(
                 max_connections=max_conn,
                 max_keepalive_connections=max_keepalive,

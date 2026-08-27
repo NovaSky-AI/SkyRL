@@ -58,6 +58,15 @@ class EngineConfig(BaseModel):
         ),
         json_schema_extra={"argparse_type": lambda v: None if v == "None" else int(v)},
     )
+    forwarding_inference_timeout_sec: float = Field(
+        default=1800.0,
+        gt=0,
+        description=(
+            "Read timeout in seconds for sample requests forwarded to the "
+            "engine-managed vLLM. Long-context generations can take longer "
+            "than the previous hard-coded 300-second timeout."
+        ),
+    )
     session_cleanup_interval_sec: int = Field(
         default=60,
         description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",
