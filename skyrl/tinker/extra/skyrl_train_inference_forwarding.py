@@ -21,9 +21,10 @@ from skyrl.utils.log import logger
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    def __init__(self, engine_config: EngineConfig, db_engine, future_store=None):
         self.engine_config = engine_config
         self.db_engine = db_engine
+        self.future_store = future_store
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
@@ -80,6 +81,15 @@ class SkyRLTrainInferenceForwardingClient:
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
+        result_data = result.model_dump_json()
+        if self.future_store is not None:
+            if not self.future_store.complete(request_id, status, result_data):
+                logger.warning(
+                    "In-memory future %s missing on completion write — skipping",
+                    request_id,
+                )
+            return
+
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
             if future is None:
@@ -88,7 +98,7 @@ class SkyRLTrainInferenceForwardingClient:
                 logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
                 return
             # `result_data` is a text column holding pre-serialized JSON.
-            future.result_data = result.model_dump_json()
+            future.result_data = result_data
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()

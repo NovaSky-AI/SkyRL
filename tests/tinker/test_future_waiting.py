@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import Session, SQLModel, create_engine
 
 from skyrl.tinker import types
-from skyrl.tinker.api import poll_futures, wait_for_future
+from skyrl.tinker.api import (
+    IN_MEMORY_FUTURE_ID_START,
+    InMemoryFutureStore,
+    poll_futures,
+    wait_for_future,
+)
 from skyrl.tinker.db_models import (
     FutureDB,
     RequestStatus,
@@ -71,6 +76,58 @@ def insert_pending(sync_engine, count: int = 1) -> list[int]:
 # A completed sample request's payload. Stored and asserted on as the real type,
 # so these tests break if the round trip through the column stops preserving it.
 SAMPLE_RESULT = types.SampleOutput(sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1], logprobs=[-0.5])])
+
+
+class DummyRequest(BaseModel):
+    value: int
+
+
+@pytest.mark.asyncio
+async def test_in_memory_future_store_completes_without_database() -> None:
+    store = InMemoryFutureStore(retention_sec=60)
+    request_id = store.create(types.RequestType.EXTERNAL, "model_a", 7, DummyRequest(value=1))
+
+    assert request_id >= IN_MEMORY_FUTURE_ID_START
+    assert store.create(types.RequestType.EXTERNAL, "model_a", 7, DummyRequest(value=1)) == request_id
+
+    waiter = asyncio.create_task(store.wait(request_id, timeout=5))
+    assert store.complete(request_id, RequestStatus.COMPLETED, SAMPLE_RESULT.model_dump_json())
+    status, request_type, result_data = await waiter
+
+    assert (status, request_type, types.SampleOutput.model_validate_json(result_data)) == (
+        RequestStatus.COMPLETED,
+        types.RequestType.EXTERNAL,
+        SAMPLE_RESULT,
+    )
+
+
+@pytest.mark.asyncio
+async def test_in_memory_future_store_expires_completed_requests() -> None:
+    store = InMemoryFutureStore(retention_sec=0.01)
+    request_id = store.create(types.RequestType.EXTERNAL, None, None, DummyRequest(value=1))
+    store.complete(request_id, RequestStatus.COMPLETED, SAMPLE_RESULT.model_dump_json())
+
+    await asyncio.sleep(0.02)
+
+    with pytest.raises(KeyError):
+        await store.wait(request_id, timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_in_memory_future_store_handles_512_concurrent_results() -> None:
+    store = InMemoryFutureStore(retention_sec=60)
+    request_ids = [
+        store.create(types.RequestType.EXTERNAL, "model_a", seq_id, DummyRequest(value=seq_id)) for seq_id in range(512)
+    ]
+    waiters = [asyncio.create_task(store.wait(request_id, timeout=5)) for request_id in request_ids]
+
+    for request_id in request_ids:
+        assert store.complete(request_id, RequestStatus.COMPLETED, SAMPLE_RESULT.model_dump_json())
+
+    results = await asyncio.gather(*waiters)
+
+    assert len(results) == 512
+    assert all(status == RequestStatus.COMPLETED for status, _, _ in results)
 
 
 def mark_completed(sync_engine, request_id: int, result: BaseModel, status=RequestStatus.COMPLETED) -> None:

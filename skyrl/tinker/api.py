@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import json
 import os
 import random
@@ -7,6 +8,7 @@ import shutil
 import signal
 import threading
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
 from uuid import uuid4
@@ -77,6 +79,89 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 
 # Statuses a request never moves out of, i.e. the ones a waiter resolves on.
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
+
+# Keep in-process request ids disjoint from database autoincrement ids.
+IN_MEMORY_FUTURE_ID_START = 1 << 62
+
+
+@dataclass
+class InMemoryFuture:
+    request_type: types.RequestType
+    model_id: str | None
+    seq_id: int | None
+    request_data: dict[str, Any]
+    status: RequestStatus = RequestStatus.PENDING
+    result_data: str | None = None
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+class InMemoryFutureStore:
+    """Store high-concurrency external inference futures without SQLite fan-out."""
+
+    def __init__(self, retention_sec: float = RETRIEVE_FUTURE_TIMEOUT_SECONDS * 2):
+        self.retention_sec = retention_sec
+        self._next_id = itertools.count(IN_MEMORY_FUTURE_ID_START)
+        self._futures: dict[int, InMemoryFuture] = {}
+        self._request_ids: dict[tuple[str, int], int] = {}
+
+    def owns_id(self, request_id: int) -> bool:
+        return request_id >= IN_MEMORY_FUTURE_ID_START
+
+    def create(
+        self,
+        request_type: types.RequestType,
+        model_id: str | None,
+        seq_id: int | None,
+        request_data: BaseModel,
+    ) -> int:
+        serialized_request = request_data.model_dump(mode="json")
+        key = (model_id, seq_id) if model_id is not None and seq_id is not None else None
+        if key is not None and (request_id := self._request_ids.get(key)) is not None:
+            existing = self._futures[request_id]
+            if existing.request_type != request_type or existing.request_data != serialized_request:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Training request sequence number was reused",
+                )
+            return request_id
+
+        request_id = next(self._next_id)
+        self._futures[request_id] = InMemoryFuture(
+            request_type=request_type,
+            model_id=model_id,
+            seq_id=seq_id,
+            request_data=serialized_request,
+        )
+        if key is not None:
+            self._request_ids[key] = request_id
+        return request_id
+
+    async def wait(self, request_id: int, timeout: float) -> tuple[RequestStatus, types.RequestType, str | None] | None:
+        future = self._futures.get(request_id)
+        if future is None:
+            raise KeyError(request_id)
+        if future.status == RequestStatus.PENDING:
+            try:
+                await asyncio.wait_for(future.event.wait(), timeout)
+            except asyncio.TimeoutError:
+                return None
+        return future.status, future.request_type, future.result_data
+
+    def complete(self, request_id: int, status: RequestStatus, result_data: str) -> bool:
+        future = self._futures.get(request_id)
+        if future is None:
+            return False
+        future.status = status
+        future.result_data = result_data
+        future.event.set()
+        asyncio.get_running_loop().call_later(self.retention_sec, self._expire, request_id)
+        return True
+
+    def _expire(self, request_id: int) -> None:
+        future = self._futures.pop(request_id, None)
+        if future is None or future.model_id is None or future.seq_id is None:
+            return
+        self._request_ids.pop((future.model_id, future.seq_id), None)
 
 
 def raw_json_response(payload: str | None) -> Response:
@@ -240,6 +325,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(SQLModel.metadata.create_all)
 
     app.state.future_waiters = {}
+    app.state.external_future_store = None
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
 
     # Setup external inference client if configured.
@@ -265,8 +351,11 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
+        app.state.external_future_store = InMemoryFutureStore()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
-            app.state.engine_config, app.state.db_engine
+            app.state.engine_config,
+            app.state.db_engine,
+            app.state.external_future_store,
         )
         logger.info(
             "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
@@ -1340,26 +1429,30 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
-    request_id = await create_future(
-        session=session,
-        request_type=(
-            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-        ),
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
-            # A positive topk implies prompt logprobs: both are read off the same
-            # prompt forward pass, so asking for one asks for the other.
-            prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
-            topk_prompt_logprobs=request.topk_prompt_logprobs,
-            seq_id=request.seq_id,
-            sampling_session_id=request.sampling_session_id,
-        ),
+    request_type = types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
+    sample_input = types.SampleInput(
+        base_model=base_model,
+        prompt=request.prompt.to_types(),
+        sampling_params=request.sampling_params.to_types(),
+        num_samples=request.num_samples,
+        checkpoint_id=checkpoint_id,
+        # A positive topk implies prompt logprobs: both are read off the same
+        # prompt forward pass, so asking for one asks for the other.
+        prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+        topk_prompt_logprobs=request.topk_prompt_logprobs,
+        seq_id=request.seq_id,
+        sampling_session_id=request.sampling_session_id,
     )
+    external_future_store = req.app.state.external_future_store
+    if external_future_store is not None:
+        request_id = external_future_store.create(request_type, model_id, request.seq_id, sample_input)
+    else:
+        request_id = await create_future(
+            session=session,
+            request_type=request_type,
+            model_id=model_id,
+            request_data=sample_input,
+        )
 
     await session.commit()
 
@@ -1392,7 +1485,11 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     request_id = int(request.request_id)
 
     try:
-        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        external_future_store = getattr(req.app.state, "external_future_store", None)
+        if external_future_store is not None and external_future_store.owns_id(request_id):
+            row = await external_future_store.wait(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        else:
+            row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
     except KeyError:
         raise HTTPException(status_code=404, detail="Future not found")
 
