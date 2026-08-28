@@ -73,6 +73,14 @@ API_SERVER_STARTUP_ARGS = ["-m", "skyrl.tinker.api"]
 # Timeout for graceful shutdown when engine crashes
 SHUTDOWN_TIMEOUT_SECONDS = 10
 
+# Forwarded HTTP requests can use the 30-minute inference timeout, but pod
+# shutdown must finish inside its termination grace period.
+FORWARDING_DRAIN_TIMEOUT_SECONDS = 5
+FORWARDING_CANCEL_TIMEOUT_SECONDS = 5
+EXTERNAL_INFERENCE_CLOSE_TIMEOUT_SECONDS = 5
+FORCED_SHUTDOWN_TASK_GRACE_SECONDS = 0.1
+EXTERNAL_INFERENCE_SHUTDOWN_TIMEOUT_SECONDS = 8
+
 # How long retrieve_future waits for a result before returning 408
 RETRIEVE_FUTURE_TIMEOUT_SECONDS = 300
 
@@ -83,6 +91,32 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 
 # Statuses a request never moves out of, i.e. the ones a waiter resolves on.
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
+
+_SQLITE_API_WRITE_PATHS = frozenset(
+    {
+        "/api/v1/create_session",
+        "/api/v1/create_sampling_session",
+        "/api/v1/create_model",
+        "/api/v1/unload_model",
+        "/api/v1/optim_step",
+        "/api/v1/load_weights",
+        "/api/v1/save_weights",
+        "/api/v1/save_weights_for_sampler",
+    }
+)
+
+
+def _uses_sqlite_api_write_lock(request: Request) -> bool:
+    if request.app.state.db_engine.dialect.name != "sqlite":
+        return False
+    path = request.url.path
+    if request.method == "DELETE" and path.startswith("/api/v1/training_runs/"):
+        return "/checkpoints/" in path
+    if request.method != "POST":
+        return False
+    if path == "/api/v1/asample":
+        return request.app.state.external_future_store is None
+    return path in _SQLITE_API_WRITE_PATHS
 
 
 def raw_json_response(payload: str | None) -> Response:
@@ -212,17 +246,59 @@ def _start_forwarding_task(app: FastAPI, operation: Awaitable[None]) -> None:
 
 
 async def _close_external_inference(app: FastAPI) -> None:
+    shutdown_error: Exception | None = None
+    loop = asyncio.get_running_loop()
+    shutdown_deadline = loop.time() + EXTERNAL_INFERENCE_SHUTDOWN_TIMEOUT_SECONDS
+
+    def remaining(stage_timeout: float) -> float:
+        return min(stage_timeout, max(0.0, shutdown_deadline - loop.time()))
+
     if app.state.forwarding_tasks:
-        await asyncio.gather(*tuple(app.state.forwarding_tasks), return_exceptions=True)
+        tasks = tuple(app.state.forwarding_tasks)
+        _, pending = await asyncio.wait(tasks, timeout=remaining(FORWARDING_DRAIN_TIMEOUT_SECONDS))
+        if pending:
+            logger.warning("Cancelling %s forwarded inference requests that did not drain", len(pending))
+            for task in pending:
+                task.cancel()
+            _, pending = await asyncio.wait(pending, timeout=remaining(FORWARDING_CANCEL_TIMEOUT_SECONDS))
+            if pending:
+                logger.error("Forced shutdown of %s forwarded inference requests blocked in cleanup", len(pending))
+                shutdown_error = RuntimeError("Forwarded inference cleanup exceeded the shutdown deadline")
+                for task in pending:
+                    task.cancel()
+                await asyncio.wait(pending, timeout=FORCED_SHUTDOWN_TASK_GRACE_SECONDS)
 
     inference_client = getattr(app.state, "external_inference_client", None)
     aclose = getattr(inference_client, "aclose", None)
     if aclose is not None:
-        with suppress(Exception):
-            await aclose()
+        close_client = asyncio.create_task(aclose())
+        done, _ = await asyncio.wait((close_client,), timeout=remaining(EXTERNAL_INFERENCE_CLOSE_TIMEOUT_SECONDS))
+        if close_client not in done:
+            logger.error("Forced shutdown of external inference HTTP client")
+            close_client.cancel()
+            await asyncio.wait((close_client,), timeout=FORCED_SHUTDOWN_TASK_GRACE_SECONDS)
+            shutdown_error = shutdown_error or RuntimeError("External inference client close timed out")
+        elif close_client.cancelled():
+            shutdown_error = shutdown_error or RuntimeError("External inference client close was cancelled")
+        elif error := close_client.exception():
+            logger.error("External inference HTTP client close failed error_type=%s", type(error).__name__)
+            shutdown_error = shutdown_error or error
 
     if app.state.external_future_store is not None:
-        await app.state.external_future_store.close()
+        close_store = asyncio.create_task(app.state.external_future_store.close())
+        done, _ = await asyncio.wait((close_store,), timeout=remaining(EXTERNAL_INFERENCE_CLOSE_TIMEOUT_SECONDS))
+        if close_store not in done:
+            logger.error("Forced shutdown of external future persistence")
+            close_store.cancel()
+            await asyncio.wait((close_store,), timeout=FORCED_SHUTDOWN_TASK_GRACE_SECONDS)
+            shutdown_error = shutdown_error or RuntimeError("External future persistence close timed out")
+        elif close_store.cancelled():
+            shutdown_error = shutdown_error or RuntimeError("External future persistence close was cancelled")
+        elif error := close_store.exception():
+            raise error
+
+    if shutdown_error is not None:
+        raise shutdown_error
 
 
 async def _close_runtime(app: FastAPI, background_engine: asyncio.subprocess.Process) -> None:
@@ -405,6 +481,9 @@ async def log_database_request_failure(request: Request, call_next):
     """Add endpoint and pool context to database failures."""
     started = monotonic()
     try:
+        if _uses_sqlite_api_write_lock(request):
+            async with request.app.state.db_write_lock:
+                return await call_next(request)
         return await call_next(request)
     except SQLAlchemyError as error:
         logger.error(
@@ -1224,19 +1303,22 @@ async def forward_backward(request: Request, session: AsyncSession = Depends(get
 
 
 @app.post("/api/v1/forward", response_model=FutureResponse)
-async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_session)):
+async def forward(
+    request: ForwardRequest,
+    raw_request: Request,
+    session: AsyncSession = Depends(get_session),
+):
     """Forward pass to obtain logprobs without accumulating gradients"""
-    await get_model(session, request.model_id)
-
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.FORWARD,
-        model_id=request.model_id,
-        request_data=request.forward_input.to_types(),
-        seq_id=request.seq_id,
-    )
-
-    await session.commit()
+    async with raw_request.app.state.db_write_lock:
+        await get_model(session, request.model_id)
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.FORWARD,
+            model_id=request.model_id,
+            request_data=request.forward_input.to_types(),
+            seq_id=request.seq_id,
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -1477,7 +1559,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         sampling_session_id=request.sampling_session_id,
     )
     if req.app.state.external_future_store is not None:
-        request_id = req.app.state.external_future_store.create(model_id, sample_input)
+        request_id = await req.app.state.external_future_store.create(model_id, sample_input)
     else:
         request_id = await create_future(
             session=session,

@@ -78,7 +78,7 @@ async def _create_forwarder_fixture(tmp_path, pool_size=5, pool_timeout=30.0):
         sampling_session_id="sampling_a",
         seq_id=7,
     )
-    request_id = store.create("model_a", stored_request)
+    request_id = await store.create("model_a", stored_request)
 
     client = object.__new__(SkyRLTrainInferenceForwardingClient)
     client.db_engine = engine
@@ -231,7 +231,7 @@ async def test_api_boundary_logs_database_failure(monkeypatch, tmp_path):
     request = SimpleNamespace(
         method="POST",
         url=SimpleNamespace(path="/api/v1/asample"),
-        app=SimpleNamespace(state=SimpleNamespace(db_engine=engine)),
+        app=SimpleNamespace(state=SimpleNamespace(db_engine=engine, external_future_store=object())),
     )
 
     async def fail_request(_request):

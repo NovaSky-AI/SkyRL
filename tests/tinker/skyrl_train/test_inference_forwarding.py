@@ -2,8 +2,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.extra.skyrl_train_inference_forwarding import (
+    InferenceForwardingError,
     SkyRLTrainInferenceForwardingClient,
 )
 
@@ -51,4 +53,38 @@ async def test_proxy_resolution_fails_after_forwarding_timeout(monkeypatch) -> N
     with pytest.raises(RuntimeError, match="timed out waiting for a proxy URL"):
         await client._resolve_proxy_url()
 
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forwarding_retries_transient_no_worker_503(monkeypatch) -> None:
+    client = _create_client(EngineConfig(base_model="test-model"))
+    expected = types.SampleOutput(sequences=[])
+    client._resolve_proxy_url = AsyncMock(return_value="http://inference-proxy")
+    client._forward = AsyncMock(
+        side_effect=[
+            InferenceForwardingError(503, "No available workers"),
+            expected,
+        ]
+    )
+    monkeypatch.setattr(client, "_TRANSIENT_RETRY_INITIAL_DELAY_SEC", 0)
+
+    result = await client._forward_with_retry(object(), "model", base_model=None)
+
+    assert result is expected
+    assert client._forward.await_count == 2
+    assert client._resolve_proxy_url.await_args_list[1].kwargs == {"force_refresh": True}
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forwarding_does_not_retry_other_http_errors() -> None:
+    client = _create_client(EngineConfig(base_model="test-model"))
+    client._resolve_proxy_url = AsyncMock(return_value="http://inference-proxy")
+    client._forward = AsyncMock(side_effect=InferenceForwardingError(500, "internal error"))
+
+    with pytest.raises(InferenceForwardingError, match="returned 500"):
+        await client._forward_with_retry(object(), "model", base_model=None)
+
+    assert client._forward.await_count == 1
     await client.aclose()

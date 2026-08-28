@@ -20,6 +20,9 @@ from omegaconf import OmegaConf
 from transformers import AutoConfig
 
 from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
+from skyrl.backends.skyrl_train.distributed.megatron.lora_utils import (
+    remap_qwen_megatron_lora_state_for_vllm,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
 )
@@ -1422,6 +1425,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         adapter_state = {}
         for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
             adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
+        adapter_state = remap_qwen_megatron_lora_state_for_vllm(
+            adapter_state,
+            include_mtp=os.environ.get("SKYRL_MTP_NUM_SPECULATIVE_TOKENS", "0") != "0",
+        )
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)

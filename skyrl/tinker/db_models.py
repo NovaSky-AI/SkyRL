@@ -113,6 +113,15 @@ class FutureDB(SQLModel, table=True):
     completed_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
 
 
+class ExternalFutureIdSequenceDB(SQLModel, table=True):
+    """Durable allocator state for client-visible external future IDs."""
+
+    __tablename__ = "external_future_id_sequence"
+
+    singleton_id: int = Field(default=1, primary_key=True)
+    next_request_id: int
+
+
 class CheckpointDB(SQLModel, table=True):
     __tablename__ = "checkpoints"
 
