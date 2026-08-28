@@ -8,10 +8,10 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
-from sqlmodel.ext.asyncio.session import AsyncSession
 
-from skyrl.tinker import api, db_observability, types
-from skyrl.tinker.db_models import FutureDB, RequestStatus
+from skyrl.tinker import api, db_observability, external_future_store, types
+from skyrl.tinker.db_models import RequestStatus
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.tinker.extra import skyrl_train_inference_forwarding
 from skyrl.tinker.extra.skyrl_train_inference_forwarding import (
     SkyRLTrainInferenceForwardingClient,
@@ -66,38 +66,43 @@ async def _create_forwarder_fixture(tmp_path, pool_size=5, pool_timeout=30.0):
     )
     async with engine.begin() as connection:
         await connection.run_sync(SQLModel.metadata.create_all)
-    async with AsyncSession(engine) as session:
-        future = FutureDB(
-            request_type=types.RequestType.EXTERNAL,
-            model_id="model_a",
-            seq_id=7,
-            request_data={},
-        )
-        session.add(future)
-        await session.commit()
-        await session.refresh(future)
+
+    store = ExternalFutureStore(engine, asyncio.Lock())
+    await store.start()
+    stored_request = types.SampleInput(
+        prompt=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=4, seed=7),
+        num_samples=1,
+        checkpoint_id="weights_a",
+        prompt_logprobs=False,
+        sampling_session_id="sampling_a",
+        seq_id=7,
+    )
+    request_id = store.create("model_a", stored_request)
 
     client = object.__new__(SkyRLTrainInferenceForwardingClient)
     client.db_engine = engine
+    client.external_future_store = store
     sample_request = SimpleNamespace(
         prompt=SimpleNamespace(chunks=[SimpleNamespace(tokens=[1, 2, 3])]),
         sampling_params=SimpleNamespace(max_tokens=4),
         sampling_session_id="sampling_a",
         seq_id=7,
     )
-    return engine, client, sample_request, future.request_id
+    return engine, store, client, sample_request, request_id
 
 
 @pytest.mark.asyncio
 async def test_forwarding_failure_logs_request_dimensions(monkeypatch, tmp_path):
-    engine, client, sample_request, request_id = await _create_forwarder_fixture(tmp_path)
-    timestamps = iter([10.0, 12.0, 12.0, 12.0, 12.1])
+    engine, store, client, sample_request, request_id = await _create_forwarder_fixture(tmp_path)
+    timestamps = iter([10.0, 12.0])
     logger = Mock()
     client._forward_with_retry = AsyncMock(side_effect=httpx.ReadTimeout("connection reset"))
     monkeypatch.setattr(skyrl_train_inference_forwarding, "monotonic", lambda: next(timestamps))
     monkeypatch.setattr(skyrl_train_inference_forwarding, "logger", logger)
 
     await client.call_and_store_result(request_id, sample_request, "model_a", "weights_a")
+    status, _, result_data = await store.wait(request_id, timeout=1)
 
     assert logger.exception.call_count == 1
     assert logger.exception.call_args.args[1:7] == (
@@ -108,89 +113,80 @@ async def test_forwarding_failure_logs_request_dimensions(monkeypatch, tmp_path)
         3,
         4,
     )
-    async with AsyncSession(engine) as session:
-        future = await session.get(FutureDB, request_id)
-        assert future.status == RequestStatus.FAILED
-        assert "connection reset" in future.result_data
+    assert status == RequestStatus.FAILED
+    assert "connection reset" in result_data
+    await store.close()
     await engine.dispose()
 
 
 @pytest.mark.asyncio
 async def test_proxy_database_failure_has_distinct_stage(monkeypatch, tmp_path):
-    engine, client, sample_request, request_id = await _create_forwarder_fixture(tmp_path)
+    engine, store, client, sample_request, request_id = await _create_forwarder_fixture(tmp_path)
     logger = Mock()
     client._forward_with_retry = AsyncMock(side_effect=SQLAlchemyTimeoutError("proxy pool exhausted"))
     monkeypatch.setattr(skyrl_train_inference_forwarding, "logger", logger)
 
     await client.call_and_store_result(request_id, sample_request, "model_a", "weights_a")
+    status, _, result_data = await store.wait(request_id, timeout=1)
 
     assert logger.error.call_count == 1
     assert "failure_stage=proxy_database" in logger.error.call_args.args[0]
     assert "Pool size" in logger.error.call_args.args[8]
     assert logger.error.call_args.args[9] == "TimeoutError"
     assert "proxy pool exhausted" not in str(logger.error.call_args)
-    async with AsyncSession(engine) as session:
-        future = await session.get(FutureDB, request_id)
-        assert future.status == RequestStatus.FAILED
-        assert "proxy pool exhausted" in future.result_data
+    assert status == RequestStatus.FAILED
+    assert "proxy pool exhausted" in result_data
+    await store.close()
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_slow_completion_write_logs_pool_and_timing(monkeypatch, tmp_path):
-    engine, client, sample_request, request_id = await _create_forwarder_fixture(tmp_path)
-    timestamps = iter([10.0, 10.1, 10.1, 11.5])
+async def test_slow_external_future_persistence_logs_batch_and_pool(monkeypatch, tmp_path):
+    engine, store, client, sample_request, request_id = await _create_forwarder_fixture(tmp_path)
+    timestamps = iter([10.0, 11.5])
     logger = Mock()
     client._forward_with_retry = AsyncMock(return_value=types.SampleOutput(sequences=[]))
-    monkeypatch.setattr(skyrl_train_inference_forwarding, "monotonic", lambda: next(timestamps))
-    monkeypatch.setattr(skyrl_train_inference_forwarding, "logger", logger)
+    monkeypatch.setattr(external_future_store, "monotonic", lambda: next(timestamps))
+    monkeypatch.setattr(external_future_store, "logger", logger)
 
     await client.call_and_store_result(request_id, sample_request, "model_a", "weights_a")
+    await store.wait(request_id, timeout=1)
 
     assert logger.warning.call_count == 1
-    assert logger.warning.call_args.args[1:8] == (
-        request_id,
-        "model_a",
-        7,
-        RequestStatus.COMPLETED.value,
-        3,
-        pytest.approx(0.1),
-        pytest.approx(1.4),
-    )
-    assert "Pool size" in logger.warning.call_args.args[8]
+    assert logger.warning.call_args.args[1:4] == (1, 0, pytest.approx(1.5))
+    assert "Pool size" in logger.warning.call_args.args[4]
+    await store.close()
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_pool_exhaustion_logs_failing_future(monkeypatch, tmp_path):
-    engine, client, sample_request, request_id = await _create_forwarder_fixture(
+async def test_pool_exhaustion_logs_external_future_persistence(monkeypatch, tmp_path):
+    engine, store, client, sample_request, request_id = await _create_forwarder_fixture(
         tmp_path,
         pool_size=1,
         pool_timeout=0.01,
     )
     logger = Mock()
     client._forward_with_retry = AsyncMock(return_value=types.SampleOutput(sequences=[]))
-    monkeypatch.setattr(skyrl_train_inference_forwarding, "logger", logger)
+    monkeypatch.setattr(external_future_store, "logger", logger)
 
-    with pytest.raises(SQLAlchemyTimeoutError):
-        async with engine.connect():
-            await client.call_and_store_result(
-                request_id,
-                sample_request,
-                "model_a",
-                "weights_a",
-            )
+    async with engine.connect():
+        await client.call_and_store_result(
+            request_id,
+            sample_request,
+            "model_a",
+            "weights_a",
+        )
+        with pytest.raises(RuntimeError, match=f"Failed to persist external future {request_id}"):
+            await store.wait(request_id, timeout=1)
 
     assert logger.error.call_count == 1
-    assert logger.error.call_args.args[1:6] == (
-        request_id,
-        "model_a",
-        7,
-        RequestStatus.COMPLETED.value,
-        3,
-    )
-    assert "Pool size: 1" in logger.error.call_args.args[8]
-    assert logger.error.call_args.args[9] == "TimeoutError"
+    assert logger.error.call_args.args[1:3] == (1, 0)
+    assert "Pool size: 1" in logger.error.call_args.args[4]
+    assert logger.error.call_args.args[5] == "TimeoutError"
+    assert "pool exhausted" not in str(logger.error.call_args)
+    with pytest.raises(RuntimeError, match="External future persistence failed"):
+        await store.close()
     await engine.dispose()
 
 

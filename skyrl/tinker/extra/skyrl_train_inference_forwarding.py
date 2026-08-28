@@ -5,7 +5,6 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
-from datetime import datetime, timezone
 from time import monotonic
 
 import httpx
@@ -16,11 +15,8 @@ from skyrl.backends.renderer import render_model_input
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
-from skyrl.tinker.db_observability import (
-    SLOW_DATABASE_SECONDS,
-    database_pool_status,
-)
+from skyrl.tinker.db_models import EngineStateDB, RequestStatus
+from skyrl.tinker.db_observability import database_pool_status
 from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.utils.log import logger
 
@@ -28,11 +24,13 @@ from skyrl.utils.log import logger
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
+    _PROXY_URL_POLL_INTERVAL_SEC = 0.25
+
     def __init__(
         self,
         engine_config: EngineConfig,
         db_engine,
-        external_future_store: ExternalFutureStore | None = None,
+        external_future_store: ExternalFutureStore,
     ):
         self.engine_config = engine_config
         self.db_engine = db_engine
@@ -45,7 +43,7 @@ class SkyRLTrainInferenceForwardingClient:
         max_conn = engine_config.forwarding_inference_max_connections
         max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(engine_config.forwarding_inference_timeout_sec, connect=10.0),
             limits=httpx.Limits(
                 max_connections=max_conn,
                 max_keepalive_connections=max_keepalive,
@@ -69,10 +67,20 @@ class SkyRLTrainInferenceForwardingClient:
             return self._cached_proxy_url
         async with self._cache_lock:
             if force_refresh or self._cached_proxy_url is None:
-                url = await self._read_proxy_url_from_db()
-                if url is None:
-                    raise RuntimeError("inference engine not ready: no proxy URL published to EngineStateDB")
-                self._cached_proxy_url = url
+                if force_refresh:
+                    self._cached_proxy_url = None
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + self.engine_config.forwarding_inference_timeout_sec
+                while self._cached_proxy_url is None:
+                    self._cached_proxy_url = await self._read_proxy_url_from_db()
+                    if self._cached_proxy_url is not None:
+                        break
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise RuntimeError(
+                            "inference engine not ready: timed out waiting for a proxy URL in EngineStateDB"
+                        )
+                    await asyncio.sleep(min(self._PROXY_URL_POLL_INTERVAL_SEC, remaining))
             return self._cached_proxy_url
 
     async def call_and_store_result(
@@ -84,7 +92,7 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and write the result to FutureDB."""
+        """Forward a sample request to vLLM and complete its external future."""
         forward_started = monotonic()
         prompt_tokens = sum(len(chunk.tokens) for chunk in sample_req.prompt.chunks if hasattr(chunk, "tokens"))
         try:
@@ -124,57 +132,7 @@ class SkyRLTrainInferenceForwardingClient:
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
-        if self.external_future_store is not None:
-            await self.external_future_store.complete(request_id, result, status)
-            return
-
-        forward_elapsed = monotonic() - forward_started
-        persistence_started = monotonic()
-        try:
-            async with AsyncSession(self.db_engine) as session:
-                future = await session.get(FutureDB, request_id)
-                if future is None:
-                    # Row was deleted between scheduling and completion (cancelled
-                    # request, stale-session GC). Nothing to write back.
-                    logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
-                    return
-                # `result_data` is a text column holding pre-serialized JSON.
-                future.result_data = result.model_dump_json()
-                future.status = status
-                future.completed_at = datetime.now(timezone.utc)
-                await session.commit()
-        except SQLAlchemyError as error:
-            logger.error(
-                "Forwarded sample failed failure_stage=persistence request_id=%s model_id=%s "
-                "seq_id=%s status=%s prompt_tokens=%s forward_seconds=%.3f "
-                "persistence_seconds=%.3f pool=%s error_type=%s",
-                request_id,
-                model_id,
-                sample_req.seq_id,
-                status.value,
-                prompt_tokens,
-                forward_elapsed,
-                monotonic() - persistence_started,
-                database_pool_status(self.db_engine),
-                type(error).__name__,
-            )
-            raise
-
-        persistence_elapsed = monotonic() - persistence_started
-        if persistence_elapsed >= SLOW_DATABASE_SECONDS:
-            logger.warning(
-                "Slow forwarded sample persistence failure_stage=persistence request_id=%s "
-                "model_id=%s seq_id=%s status=%s prompt_tokens=%s forward_seconds=%.3f "
-                "persistence_seconds=%.3f pool=%s",
-                request_id,
-                model_id,
-                sample_req.seq_id,
-                status.value,
-                prompt_tokens,
-                forward_elapsed,
-                persistence_elapsed,
-                database_pool_status(self.db_engine),
-            )
+        await self.external_future_store.complete(request_id, result, status)
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
         # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.

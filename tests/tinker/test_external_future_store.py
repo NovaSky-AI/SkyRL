@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import pytest_asyncio
@@ -8,7 +9,7 @@ from sqlmodel import SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from starlette.requests import Request
 
-from skyrl.tinker import api, types
+from skyrl.tinker import api, external_future_store, types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import (
     CheckpointDB,
@@ -251,6 +252,35 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
 
 
 @pytest.mark.asyncio
+async def test_terminal_futures_are_persisted_in_batches(future_store, monkeypatch):
+    store, _, _ = future_store
+    first_persistence_started = asyncio.Event()
+    release_first_persistence = asyncio.Event()
+    persisted_batch_sizes = []
+    persist = store._persist
+
+    async def record_batch(entries) -> None:
+        persisted_batch_sizes.append(len(entries))
+        if len(persisted_batch_sizes) == 1:
+            first_persistence_started.set()
+            await release_first_persistence.wait()
+        await persist(entries)
+
+    monkeypatch.setattr(store, "_persist", record_batch)
+    result = types.SampleOutput(sequences=[])
+    first_request_id = store.create("model_a", _sample_input(0))
+    await store.complete(first_request_id, result, RequestStatus.COMPLETED)
+    await first_persistence_started.wait()
+
+    request_ids = [store.create("model_a", _sample_input(index)) for index in range(1, 65)]
+    await asyncio.gather(*(store.complete(request_id, result, RequestStatus.COMPLETED) for request_id in request_ids))
+    release_first_persistence.set()
+    await store.flush()
+
+    assert persisted_batch_sizes == [1, 64]
+
+
+@pytest.mark.asyncio
 async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
     release_forwarding = asyncio.Event()
     events = []
@@ -440,10 +470,16 @@ async def test_forwarding_client_completes_in_memory_future(future_store, monkey
         return result
 
     monkeypatch.setattr(client, "_forward_with_retry", forward)
+    sample_request = SimpleNamespace(
+        prompt=SimpleNamespace(chunks=[SimpleNamespace(tokens=[1])]),
+        sampling_params=SimpleNamespace(max_tokens=1),
+        sampling_session_id="sampling_a",
+        seq_id=1,
+    )
     try:
         await client.call_and_store_result(
             request_id,
-            SimpleNamespace(),
+            sample_request,
             model_id="model_a",
             checkpoint_id="",
         )
@@ -459,7 +495,29 @@ async def test_forwarding_client_completes_in_memory_future(future_store, monkey
 
 
 @pytest.mark.asyncio
-async def test_persistence_failure_is_reported_to_waiter(future_store, monkeypatch):
+async def test_persistence_failure_is_reported_without_logging_values(future_store, monkeypatch):
+    store, _, _ = future_store
+    request_id = store.create("model_a", _sample_input(1))
+    logger = Mock()
+
+    async def fail_persistence(entries):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "_persist", fail_persistence)
+    monkeypatch.setattr(external_future_store, "logger", logger)
+    await store.complete(request_id, types.SampleOutput(sequences=[]), RequestStatus.COMPLETED)
+
+    with pytest.raises(RuntimeError, match=f"Failed to persist external future {request_id}"):
+        await store.wait(request_id, timeout=1)
+    with pytest.raises(RuntimeError, match="External future persistence failed"):
+        await store.flush()
+    assert logger.error.call_count == 1
+    assert logger.error.call_args.args[5] == "RuntimeError"
+    assert "database unavailable" not in str(logger.error.call_args)
+
+
+@pytest.mark.asyncio
+async def test_close_stops_worker_after_persistence_failure(future_store, monkeypatch):
     store, _, _ = future_store
     request_id = store.create("model_a", _sample_input(1))
 
@@ -468,11 +526,13 @@ async def test_persistence_failure_is_reported_to_waiter(future_store, monkeypat
 
     monkeypatch.setattr(store, "_persist", fail_persistence)
     await store.complete(request_id, types.SampleOutput(sequences=[]), RequestStatus.COMPLETED)
+    worker = store._persist_worker
+    assert worker is not None
 
-    with pytest.raises(RuntimeError, match=f"Failed to persist external future {request_id}"):
-        await store.wait(request_id, timeout=1)
     with pytest.raises(RuntimeError, match="External future persistence failed"):
-        await store.flush()
+        await store.close()
+
+    assert worker.done()
 
 
 @pytest.mark.asyncio

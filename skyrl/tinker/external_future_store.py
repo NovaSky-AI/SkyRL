@@ -2,6 +2,7 @@ import asyncio
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from time import monotonic
 
 from pydantic import BaseModel
 from sqlmodel import func, select
@@ -9,6 +10,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import types
 from skyrl.tinker.db_models import FutureDB, RequestStatus
+from skyrl.tinker.db_observability import SLOW_DATABASE_SECONDS, database_pool_status
 from skyrl.utils.log import logger
 
 
@@ -100,19 +102,35 @@ class ExternalFutureStore:
                     entries.append(self._persist_queue.get_nowait())
                 except asyncio.QueueEmpty:
                     break
+            persistence_started = monotonic()
             try:
                 await self._persist(entries)
             except Exception as error:
+                persistence_elapsed = monotonic() - persistence_started
                 self._persist_error = error
-                logger.exception(
-                    "External future persistence failed request_ids=%s..%s",
-                    entries[0].request_id,
-                    entries[-1].request_id,
+                logger.error(
+                    "External future persistence failed failure_stage=persistence batch_size=%s "
+                    "queue_depth=%s persistence_seconds=%.3f pool=%s error_type=%s",
+                    len(entries),
+                    self._persist_queue.qsize(),
+                    persistence_elapsed,
+                    database_pool_status(self.db_engine),
+                    type(error).__name__,
                 )
                 for entry in entries:
                     entry.persistence_error = error
                     entry.event.set()
             else:
+                persistence_elapsed = monotonic() - persistence_started
+                if persistence_elapsed >= SLOW_DATABASE_SECONDS:
+                    logger.warning(
+                        "Slow external future persistence failure_stage=persistence batch_size=%s "
+                        "queue_depth=%s persistence_seconds=%.3f pool=%s",
+                        len(entries),
+                        self._persist_queue.qsize(),
+                        persistence_elapsed,
+                        database_pool_status(self.db_engine),
+                    )
                 for entry in entries:
                     entry.event.set()
                     self._entries.pop(entry.request_id, None)
