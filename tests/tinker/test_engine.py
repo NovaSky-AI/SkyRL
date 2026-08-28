@@ -6,8 +6,9 @@ import pytest
 from cloudpathlib import AnyPath
 from sqlmodel import Session, SQLModel
 
+from skyrl.tinker import engine as engine_module
 from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig
+from skyrl.tinker.config import EngineConfig, uses_managed_inference_forwarding
 from skyrl.tinker.db_models import FutureDB, ModelDB, RequestStatus, SessionDB
 from skyrl.tinker.engine import (
     TinkerEngine,
@@ -63,8 +64,9 @@ def test_process_unload_model():
     assert not engine.backend.has_model(model_id)
 
 
-def test_cleanup_stale_sessions():
-    """Test that cleanup_stale_sessions unloads models from expired sessions."""
+@pytest.mark.parametrize("colocate_all", [False, True], ids=["managed_forwarding", "colocated"])
+def test_cleanup_stale_sessions(colocate_all, monkeypatch):
+    """Test stale cleanup's managed-forwarding fail-safe and colocated path."""
     config = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
@@ -74,6 +76,12 @@ def test_cleanup_stale_sessions():
     )
     engine = TinkerEngine(config)
     SQLModel.metadata.create_all(engine.db_engine)
+    engine.config = config.model_copy(
+        update={
+            "backend": "megatron",
+            "backend_config": {"trainer.placement.colocate_all": colocate_all},
+        }
+    )
 
     model_id = "stale_model"
     session_id = "stale_session"
@@ -107,9 +115,53 @@ def test_cleanup_stale_sessions():
         )
         session.commit()
 
-    # Run cleanup and assert one model was unloaded
-    assert engine.cleanup_stale_sessions() == 1
-    assert not engine.backend.has_model(model_id)
+    cleanup_logger = MagicMock()
+    monkeypatch.setattr(engine_module, "logger", cleanup_logger)
+    unloaded_count = engine.cleanup_stale_sessions()
+
+    with Session(engine.db_engine) as session:
+        model = session.get(ModelDB, model_id)
+        session_db = session.get(SessionDB, session_id)
+
+    assert model is not None
+    assert session_db is not None
+    if colocate_all:
+        assert unloaded_count == 1
+        assert not engine.backend.has_model(model_id)
+        assert model.status == "unloaded"
+        assert session_db.status == "expired"
+        cleanup_logger.warning.assert_not_called()
+    else:
+        assert unloaded_count == 0
+        assert engine.backend.has_model(model_id)
+        assert model.status == "ready"
+        assert session_db.status == "active"
+        cleanup_logger.warning.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("backend", "colocate_all", "external_inference_url", "expected"),
+    [
+        ("megatron", False, None, True),
+        ("fsdp", False, None, True),
+        ("megatron", True, None, False),
+        ("megatron", None, None, False),
+        ("jax", False, None, False),
+        ("megatron", False, "http://inference", False),
+    ],
+)
+def test_uses_managed_inference_forwarding(backend, colocate_all, external_inference_url, expected):
+    backend_config = {}
+    if colocate_all is not None:
+        backend_config["trainer.placement.colocate_all"] = colocate_all
+    config = EngineConfig(
+        base_model=BASE_MODEL,
+        backend=backend,
+        backend_config=backend_config,
+        external_inference_url=external_inference_url,
+    )
+
+    assert uses_managed_inference_forwarding(config) is expected
 
 
 @pytest.mark.parametrize(

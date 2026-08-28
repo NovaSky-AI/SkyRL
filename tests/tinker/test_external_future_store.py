@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -60,6 +60,30 @@ class _CompletingForwarder:
             types.SampleOutput(sequences=[]),
             RequestStatus.COMPLETED,
         )
+
+
+def _forwarding_app(store: ExternalFutureStore, client) -> SimpleNamespace:
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            db_engine=store.db_engine,
+            external_inference_client=client,
+            external_future_store=store,
+            forwarding_tasks=set(),
+            forwarding_tasks_by_model={},
+            draining_forwarding_models=set(),
+            forwarding_model_locks={},
+            db_write_lock=store.db_write_lock,
+        )
+    )
+
+
+def _model_sample_request(model_id: str, seq_id: int) -> api.SampleRequest:
+    return api.SampleRequest(
+        prompt=api.ModelInput(chunks=[api.EncodedTextChunk(tokens=[seq_id])]),
+        sampling_params=api.SamplingParams(temperature=0.0, max_tokens=1, seed=seq_id),
+        model_path=f"tinker://{model_id}/sampler_weights/weights_a",
+        seq_id=seq_id,
+    )
 
 
 def _forward_backward_request(seq_id: int, db_write_lock: asyncio.Lock) -> Request:
@@ -132,6 +156,9 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
                 external_future_store=store,
                 external_inference_client=forwarder,
                 forwarding_tasks=set(),
+                forwarding_tasks_by_model={},
+                draining_forwarding_models=set(),
+                forwarding_model_locks={},
                 future_waiters={},
                 engine_config=EngineConfig(base_model="model_a"),
                 db_write_lock=db_write_lock,
@@ -452,6 +479,348 @@ async def test_transient_persistence_failure_retries_before_waking_waiter(future
 
 
 @pytest.mark.asyncio
+async def test_model_unload_fences_admission_without_future_task_gap(future_store, monkeypatch):
+    store, engine, _ = future_store
+    client = SkyRLTrainInferenceForwardingClient(EngineConfig(base_model="base"), engine, store)
+    forwarding_started = asyncio.Event()
+    create_started = asyncio.Event()
+    release_create = asyncio.Event()
+    durability_checked = asyncio.Event()
+    created_request_ids = []
+    create = store.create
+    create_future = api.create_future
+
+    async def block_forwarding(*args, **kwargs):
+        forwarding_started.set()
+        await asyncio.Event().wait()
+
+    async def block_create(*args, **kwargs):
+        create_started.set()
+        await release_create.wait()
+        request_id = await create(*args, **kwargs)
+        created_request_ids.append(request_id)
+        return request_id
+
+    async def assert_terminal_before_unload(*args, **kwargs):
+        if kwargs["request_type"] == types.RequestType.UNLOAD_MODEL:
+            async with AsyncSession(engine) as persistence_session:
+                row = await persistence_session.get(FutureDB, created_request_ids[0])
+            assert row is not None
+            assert row.status == RequestStatus.FAILED
+            durability_checked.set()
+        return await create_future(*args, **kwargs)
+
+    monkeypatch.setattr(client, "_forward_with_retry", block_forwarding)
+    monkeypatch.setattr(store, "create", block_create)
+    monkeypatch.setattr(api, "create_future", assert_terminal_before_unload)
+    monkeypatch.setattr(api, "validate_sampler_checkpoint_once", AsyncMock())
+    app = _forwarding_app(store, client)
+    raw_request = SimpleNamespace(app=app)
+
+    async with AsyncSession(engine) as session:
+        session.add(
+            SessionDB(
+                session_id="session_a",
+                tags=[],
+                user_metadata={},
+                sdk_version="test",
+            )
+        )
+        session.add(
+            FutureDB(
+                request_id=1,
+                request_type=types.RequestType.CREATE_MODEL,
+                model_id="model_a",
+                request_data={},
+                status=RequestStatus.COMPLETED,
+            )
+        )
+        session.add(
+            ModelDB(
+                model_id="model_a",
+                base_model="base",
+                lora_config={},
+                status="ready",
+                request_id=1,
+                session_id="session_a",
+            )
+        )
+        await session.commit()
+
+    async def unload():
+        async with AsyncSession(engine) as session:
+            return await api.unload_model(
+                api.UnloadModelRequest(model_id="model_a"),
+                raw_request,
+                session,
+            )
+
+    admission = asyncio.create_task(api.asample(_model_sample_request("model_a", 1), raw_request, AsyncMock()))
+    await create_started.wait()
+    unload_task = asyncio.create_task(unload())
+    await asyncio.sleep(0)
+
+    # The future creation and task registration are one admission critical
+    # section, so unload cannot install its fence in the middle.
+    assert "model_a" not in app.state.draining_forwarding_models
+    release_create.set()
+    sample_response = await admission
+    await forwarding_started.wait()
+    unload_response = await unload_task
+
+    next_request_id = store._next_request_id
+    with pytest.raises(api.HTTPException) as rejected:
+        await api.asample(_model_sample_request("model_a", 2), raw_request, AsyncMock())
+    assert rejected.value.status_code == 409
+    assert store._next_request_id == next_request_id
+
+    async with AsyncSession(engine) as session:
+        row = await session.get(FutureDB, int(sample_response.request_id))
+        unload_row = await session.get(FutureDB, int(unload_response.request_id))
+        model = await session.get(ModelDB, "model_a")
+    await client.aclose()
+
+    assert durability_checked.is_set()
+    assert row is not None
+    assert row.status == RequestStatus.FAILED
+    assert row.result_data is not None
+    assert "cancelled during model drain or shutdown" in row.result_data
+    assert unload_row is not None
+    assert unload_row.request_type == types.RequestType.UNLOAD_MODEL
+    assert model is not None
+    assert model.status == "unloading"
+    assert not app.state.forwarding_tasks
+    assert not store._entries
+
+
+@pytest.mark.asyncio
+async def test_model_unload_drain_isolated_from_other_models(future_store, monkeypatch):
+    store, engine, _ = future_store
+    client = SkyRLTrainInferenceForwardingClient(EngineConfig(base_model="base"), engine, store)
+    started = {model_id: asyncio.Event() for model_id in ("model_a", "model_b")}
+    release = {model_id: asyncio.Event() for model_id in ("model_a", "model_b")}
+    cancelled = {model_id: asyncio.Event() for model_id in ("model_a", "model_b")}
+
+    async def forward(*args, **kwargs):
+        model_id = args[1]
+        started[model_id].set()
+        try:
+            await release[model_id].wait()
+        except asyncio.CancelledError:
+            cancelled[model_id].set()
+            raise
+        return types.SampleOutput(sequences=[])
+
+    monkeypatch.setattr(client, "_forward_with_retry", forward)
+    monkeypatch.setattr(api, "validate_sampler_checkpoint_once", AsyncMock())
+    app = _forwarding_app(store, client)
+    raw_request = SimpleNamespace(app=app)
+
+    a = await api.asample(_model_sample_request("model_a", 1), raw_request, AsyncMock())
+    b = await api.asample(_model_sample_request("model_b", 2), raw_request, AsyncMock())
+    await asyncio.gather(*(event.wait() for event in started.values()))
+    await api._drain_model_forwarding(app, "model_a")
+
+    assert cancelled["model_a"].is_set()
+    assert not cancelled["model_b"].is_set()
+    assert "model_a" not in app.state.forwarding_tasks_by_model
+    assert app.state.forwarding_tasks_by_model["model_b"]
+    assert app.state.draining_forwarding_models == {"model_a"}
+
+    # Model B stays admissible and its pending future does not hold up A's
+    # model-scoped durability barrier.
+    b2 = await api.asample(_model_sample_request("model_b", 3), raw_request, AsyncMock())
+    b_tasks = tuple(app.state.forwarding_tasks_by_model["model_b"])
+    release["model_b"].set()
+    await asyncio.gather(*b_tasks)
+    await store.flush_model("model_b")
+
+    async with AsyncSession(engine) as session:
+        rows = {
+            request_id: await session.get(FutureDB, int(request_id))
+            for request_id in (a.request_id, b.request_id, b2.request_id)
+        }
+    await client.aclose()
+
+    assert rows[a.request_id].status == RequestStatus.FAILED
+    assert rows[b.request_id].status == RequestStatus.COMPLETED
+    assert rows[b2.request_id].status == RequestStatus.COMPLETED
+    assert not app.state.forwarding_tasks
+
+
+@pytest.mark.asyncio
+async def test_model_unload_timeout_leaves_adapter_loaded(future_store, monkeypatch):
+    store, engine, _ = future_store
+    client = SkyRLTrainInferenceForwardingClient(EngineConfig(base_model="base"), engine, store)
+    forwarding_started = asyncio.Event()
+    persistence_started = asyncio.Event()
+    release_persistence = asyncio.Event()
+
+    async def block_forwarding(*args, **kwargs):
+        forwarding_started.set()
+        await asyncio.Event().wait()
+
+    async def block_persistence(*args, **kwargs):
+        persistence_started.set()
+        await release_persistence.wait()
+
+    monkeypatch.setattr(client, "_forward_with_retry", block_forwarding)
+    monkeypatch.setattr(store, "complete", block_persistence)
+    monkeypatch.setattr(api, "MODEL_FORWARDING_DRAIN_TIMEOUT_SECONDS", 0.01)
+    app = _forwarding_app(store, client)
+    request_id = await store.create("model_a", _sample_input(1))
+    sample_request = SimpleNamespace(
+        prompt=SimpleNamespace(chunks=[SimpleNamespace(tokens=[1])]),
+        sampling_params=SimpleNamespace(max_tokens=1),
+        sampling_session_id="sampling_a",
+        seq_id=1,
+    )
+    async with api._get_model_forwarding_lock(app, "model_a"):
+        await api._start_forwarding_task(
+            app,
+            "model_a",
+            client.call_and_store_result(request_id, sample_request, "model_a", "weights_a"),
+        )
+    tasks = tuple(app.state.forwarding_tasks_by_model["model_a"])
+    await forwarding_started.wait()
+
+    async with AsyncSession(engine) as session:
+        session.add(
+            SessionDB(
+                session_id="session_a",
+                tags=[],
+                user_metadata={},
+                sdk_version="test",
+            )
+        )
+        session.add(
+            ModelDB(
+                model_id="model_a",
+                base_model="base",
+                lora_config={},
+                status="ready",
+                request_id=0,
+                session_id="session_a",
+            )
+        )
+        await session.commit()
+
+        with pytest.raises(api.HTTPException) as failed_unload:
+            await api.unload_model(
+                api.UnloadModelRequest(model_id="model_a"),
+                SimpleNamespace(app=app),
+                session,
+            )
+
+    assert failed_unload.value.status_code == 503
+    assert persistence_started.is_set()
+    assert app.state.draining_forwarding_models == {"model_a"}
+
+    async with AsyncSession(engine) as session:
+        model = await session.get(ModelDB, "model_a")
+        unloads = (
+            await session.exec(select(FutureDB).where(FutureDB.request_type == types.RequestType.UNLOAD_MODEL))
+        ).all()
+    assert model is not None
+    assert model.status == "ready"
+    assert not unloads
+
+    release_persistence.set()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    store._entries.pop(request_id)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_model_unload_drain_releases_database_connection(tmp_path, monkeypatch):
+    db_url = get_async_database_url(f"sqlite:///{tmp_path / 'single_connection.db'}")
+    engine = create_async_engine(db_url, pool_size=1, max_overflow=0, pool_timeout=0.05)
+    enable_sqlite_wal(engine.sync_engine)
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+
+    db_write_lock = asyncio.Lock()
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            db_engine=engine,
+            db_write_lock=db_write_lock,
+            external_inference_client=object(),
+            external_future_store=SimpleNamespace(flush_model=AsyncMock()),
+            forwarding_tasks=set(),
+            forwarding_tasks_by_model={},
+            draining_forwarding_models=set(),
+            forwarding_model_locks={},
+        )
+    )
+    drain_started = asyncio.Event()
+    release_drain = asyncio.Event()
+
+    async def forwarding() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            drain_started.set()
+            await release_drain.wait()
+            raise
+
+    async with api._get_model_forwarding_lock(app, "model_a"):
+        await api._start_forwarding_task(app, "model_a", forwarding())
+
+    async with AsyncSession(engine) as session:
+        session.add(
+            SessionDB(
+                session_id="session_a",
+                tags=[],
+                user_metadata={},
+                sdk_version="test",
+            )
+        )
+        session.add(
+            ModelDB(
+                model_id="model_a",
+                base_model="base",
+                lora_config={},
+                status="ready",
+                request_id=0,
+                session_id="session_a",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(api, "MODEL_FORWARDING_DRAIN_TIMEOUT_SECONDS", 1)
+
+    async def unload():
+        async with AsyncSession(engine) as session:
+            return await api.unload_model(
+                api.UnloadModelRequest(model_id="model_a"),
+                SimpleNamespace(app=app),
+                session,
+            )
+
+    unload_task = asyncio.create_task(unload())
+    await drain_started.wait()
+
+    # The only pool connection remains available during the slow model drain.
+    async with AsyncSession(engine) as session:
+        await api.session_heartbeat(
+            api.SessionHeartbeatRequest(session_id="session_a"),
+            SimpleNamespace(app=app),
+            session,
+        )
+
+    release_drain.set()
+    response = await unload_task
+
+    async with AsyncSession(engine) as session:
+        session_db = await session.get(SessionDB, "session_a")
+    await engine.dispose()
+
+    assert response.model_id == "model_a"
+    assert session_db is not None
+    assert session_db.heartbeat_count == 1
+
+
+@pytest.mark.asyncio
 async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
     release_forwarding = asyncio.Event()
     events = []
@@ -469,6 +838,9 @@ async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
             external_inference_client=ClosingClient(),
             external_future_store=ClosingStore(),
             forwarding_tasks=set(),
+            forwarding_tasks_by_model={},
+            draining_forwarding_models=set(),
+            forwarding_model_locks={},
         )
     )
 
@@ -476,7 +848,7 @@ async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
         await release_forwarding.wait()
         events.append("future_completed")
 
-    api._start_forwarding_task(app, finish_forwarding())
+    await api._start_forwarding_task(app, "model_a", finish_forwarding())
     shutdown = asyncio.create_task(api._close_external_inference(app))
     await asyncio.sleep(0)
     assert not shutdown.done()
@@ -505,6 +877,9 @@ async def test_shutdown_cancels_forwarding_that_exceeds_drain_deadline(monkeypat
             external_inference_client=ClosingClient(),
             external_future_store=ClosingStore(),
             forwarding_tasks=set(),
+            forwarding_tasks_by_model={},
+            draining_forwarding_models=set(),
+            forwarding_model_locks={},
         )
     )
 
@@ -515,7 +890,7 @@ async def test_shutdown_cancels_forwarding_that_exceeds_drain_deadline(monkeypat
             events.append("forward_cancelled")
 
     monkeypatch.setattr(api, "FORWARDING_DRAIN_TIMEOUT_SECONDS", 0)
-    api._start_forwarding_task(app, never_finishes())
+    await api._start_forwarding_task(app, "model_a", never_finishes())
     await api._close_external_inference(app)
 
     assert events == ["forward_cancelled", "client_closed", "store_closed"]
@@ -546,6 +921,9 @@ async def test_shutdown_is_bounded_when_cancelled_forwarding_blocks_on_persisten
             external_inference_client=ClosingClient(),
             external_future_store=store,
             forwarding_tasks=set(),
+            forwarding_tasks_by_model={},
+            draining_forwarding_models=set(),
+            forwarding_model_locks={},
         )
     )
 
@@ -560,7 +938,7 @@ async def test_shutdown_is_bounded_when_cancelled_forwarding_blocks_on_persisten
     monkeypatch.setattr(api, "FORWARDING_CANCEL_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(api, "EXTERNAL_INFERENCE_CLOSE_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(api, "FORCED_SHUTDOWN_TASK_GRACE_SECONDS", 0.01)
-    api._start_forwarding_task(app, forwarding())
+    await api._start_forwarding_task(app, "model_a", forwarding())
     started = asyncio.get_running_loop().time()
 
     with pytest.raises(RuntimeError, match="cleanup exceeded"):
@@ -601,10 +979,14 @@ async def test_shutdown_aborts_real_forwarding_when_persistence_queue_is_full(fu
             external_inference_client=client,
             external_future_store=store,
             forwarding_tasks=set(),
+            forwarding_tasks_by_model={},
+            draining_forwarding_models=set(),
+            forwarding_model_locks={},
         )
     )
-    api._start_forwarding_task(
+    await api._start_forwarding_task(
         app,
+        "model_a",
         client.call_and_store_result(
             request_id,
             sample_request,
@@ -895,7 +1277,7 @@ async def test_cancelled_forwarding_persists_terminal_failure(future_store, monk
         )
     )
     await forwarding_started.wait()
-    waiter = asyncio.create_task(store.wait(request_id, timeout=1))
+    waiter = asyncio.create_task(store.wait(request_id, timeout=5))
     forwarding.cancel()
     await asyncio.gather(forwarding, return_exceptions=True)
     status, request_type, result_data = await waiter
@@ -904,7 +1286,7 @@ async def test_cancelled_forwarding_persists_terminal_failure(future_store, monk
     assert status == RequestStatus.FAILED
     assert request_type == types.RequestType.EXTERNAL
     assert result_data is not None
-    assert "cancelled during shutdown" in result_data
+    assert "cancelled during model drain or shutdown" in result_data
 
 
 @pytest.mark.asyncio

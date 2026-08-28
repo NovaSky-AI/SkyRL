@@ -115,6 +115,15 @@ class ExternalFutureStore:
             error, self._persist_error = self._persist_error, None
             raise RuntimeError("External future persistence failed") from error
 
+    async def flush_model(self, model_id: str) -> None:
+        """Wait until every accepted future for ``model_id`` is durable."""
+        entries = tuple(entry for entry in self._entries.values() if entry.model_id == model_id)
+        if entries:
+            await asyncio.gather(*(entry.event.wait() for entry in entries))
+        for entry in entries:
+            if entry.persistence_error is not None:
+                raise RuntimeError(f"Failed to persist external future {entry.request_id}") from entry.persistence_error
+
     async def close(self) -> None:
         try:
             await self.flush()

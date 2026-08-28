@@ -80,6 +80,15 @@ class EngineConfig(BaseModel):
     )
 
 
+def uses_managed_inference_forwarding(config: EngineConfig) -> bool:
+    """Return whether the API forwards samples to SkyRL-Train-managed inference."""
+    return (
+        config.external_inference_url is None
+        and config.backend in ("megatron", "fsdp")
+        and config.backend_config.get("trainer.placement.colocate_all") is False
+    )
+
+
 def convert_env_var(env_name: str, env_value: str, expected_type: type):
     """Convert environment variable to expected type."""
     if expected_type is bool:

@@ -34,7 +34,12 @@ from sqlmodel import SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig, add_model, config_to_argv
+from skyrl.tinker.config import (
+    EngineConfig,
+    add_model,
+    config_to_argv,
+    uses_managed_inference_forwarding,
+)
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
@@ -77,6 +82,7 @@ SHUTDOWN_TIMEOUT_SECONDS = 10
 # shutdown must finish inside its termination grace period.
 FORWARDING_DRAIN_TIMEOUT_SECONDS = 5
 FORWARDING_CANCEL_TIMEOUT_SECONDS = 5
+MODEL_FORWARDING_DRAIN_TIMEOUT_SECONDS = 30
 EXTERNAL_INFERENCE_CLOSE_TIMEOUT_SECONDS = 5
 FORCED_SHUTDOWN_TASK_GRACE_SECONDS = 0.1
 EXTERNAL_INFERENCE_SHUTDOWN_TIMEOUT_SECONDS = 8
@@ -97,7 +103,6 @@ _SQLITE_API_WRITE_PATHS = frozenset(
         "/api/v1/create_session",
         "/api/v1/create_sampling_session",
         "/api/v1/create_model",
-        "/api/v1/unload_model",
         "/api/v1/optim_step",
         "/api/v1/load_weights",
         "/api/v1/save_weights",
@@ -231,18 +236,105 @@ async def poll_futures(
         await asyncio.sleep(poll_interval_sec)
 
 
-def _finish_forwarding_task(tasks: set[asyncio.Task], task: asyncio.Task) -> None:
-    tasks.discard(task)
+def _finish_forwarding_task(app: FastAPI, model_id: str, task: asyncio.Task) -> None:
+    app.state.forwarding_tasks.discard(task)
+    model_tasks = app.state.forwarding_tasks_by_model.get(model_id)
+    if model_tasks is not None:
+        model_tasks.discard(task)
+        if not model_tasks:
+            del app.state.forwarding_tasks_by_model[model_id]
     if task.cancelled():
         return
     if error := task.exception():
-        logger.error("Forwarding task failed: %r", error)
+        logger.error(
+            "Forwarding task failed failure_stage=forwarding_task model_id=%s error_type=%s",
+            model_id,
+            type(error).__name__,
+        )
 
 
-def _start_forwarding_task(app: FastAPI, operation: Awaitable[None]) -> None:
-    task = asyncio.create_task(operation)
+async def _start_forwarding_task(app: FastAPI, model_id: str, operation: Awaitable[None]) -> None:
+    """Start an operation after its caller acquires the model admission lock."""
+    started = asyncio.Event()
+
+    async def run() -> None:
+        started.set()
+        await operation
+
+    task = asyncio.create_task(run())
     app.state.forwarding_tasks.add(task)
-    task.add_done_callback(lambda done: _finish_forwarding_task(app.state.forwarding_tasks, done))
+    app.state.forwarding_tasks_by_model.setdefault(model_id, set()).add(task)
+    task.add_done_callback(lambda done: _finish_forwarding_task(app, model_id, done))
+    await started.wait()
+
+
+class ModelForwardingDrainError(RuntimeError):
+    """A model cannot be unloaded without risking an in-flight completion."""
+
+
+def _get_model_forwarding_lock(app: FastAPI, model_id: str) -> asyncio.Lock:
+    """Return the admission/drain lock for one model."""
+    lock = app.state.forwarding_model_locks.get(model_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        app.state.forwarding_model_locks[model_id] = lock
+    return lock
+
+
+async def _drain_model_forwarding(app: FastAPI, model_id: str) -> None:
+    """Fence a model, cancel its forwarded samples, and persist their outcomes."""
+    loop = asyncio.get_running_loop()
+    drain_started = loop.time()
+    deadline = drain_started + MODEL_FORWARDING_DRAIN_TIMEOUT_SECONDS
+
+    async with _get_model_forwarding_lock(app, model_id):
+        app.state.draining_forwarding_models.add(model_id)
+        tasks = tuple(app.state.forwarding_tasks_by_model.get(model_id, ()))
+
+    for task in tasks:
+        if not task.done() and not task.cancelling():
+            task.cancel()
+
+    if tasks:
+        _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
+        if pending:
+            logger.error(
+                "Model forwarding drain timed out failure_stage=forwarding_drain model_id=%s "
+                "forwarding_tasks=%s pending_tasks=%s",
+                model_id,
+                len(tasks),
+                len(pending),
+            )
+            raise ModelForwardingDrainError("Forwarded inference tasks did not reach terminal state")
+
+    store = app.state.external_future_store
+    if store is None:
+        return
+
+    try:
+        async with asyncio.timeout_at(deadline):
+            await store.flush_model(model_id)
+    except TimeoutError as error:
+        logger.error(
+            "Model forwarding persistence timed out failure_stage=forwarding_persistence model_id=%s",
+            model_id,
+        )
+        raise ModelForwardingDrainError("Forwarded inference results did not become durable") from error
+
+    except Exception as error:
+        logger.error(
+            "Model forwarding persistence failed failure_stage=forwarding_persistence model_id=%s error_type=%s",
+            model_id,
+            type(error).__name__,
+        )
+        raise ModelForwardingDrainError("Forwarded inference results did not become durable") from error
+
+    logger.info(
+        "Model forwarding drain completed model_id=%s forwarding_tasks=%s drain_seconds=%.3f",
+        model_id,
+        len(tasks),
+        loop.time() - drain_started,
+    )
 
 
 async def _close_external_inference(app: FastAPI) -> None:
@@ -384,6 +476,9 @@ async def lifespan(app: FastAPI):
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
     app.state.forwarding_tasks = set()
+    app.state.forwarding_tasks_by_model = {}
+    app.state.draining_forwarding_models = set()
+    app.state.forwarding_model_locks = {}
     app.state.external_future_store = None
     app.state.db_write_lock = _get_db_write_context(app.state.db_engine)
     app.state.sampling_model_cache = {}
@@ -405,15 +500,10 @@ async def lifespan(app: FastAPI):
     # The colocated path stays on the engine because vLLM is asleep during
     # training and only the engine's synchronous sample path knows how to
     # wake it (save_weights_for_sampler → broadcast → sample).
-    backend_name = app.state.engine_config.backend
-    backend_cfg = app.state.engine_config.backend_config or {}
-    # SkyRL-Train default is colocate_all=True; only opt into forwarding
-    # when the operator explicitly sets it to False.
-    is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
     if app.state.engine_config.external_inference_url:
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
-    elif backend_name in ("megatron", "fsdp") and not is_colocated:
+    elif uses_managed_inference_forwarding(app.state.engine_config):
         app.state.external_future_store = ExternalFutureStore(app.state.db_engine, app.state.db_write_lock)
         await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
@@ -421,7 +511,7 @@ async def lifespan(app: FastAPI):
         )
         logger.info(
             "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
-            backend_name,
+            app.state.engine_config.backend,
         )
     else:
         app.state.external_inference_client = None
@@ -1184,25 +1274,43 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
 
 
 @app.post("/api/v1/unload_model", response_model=UnloadModelResponse)
-async def unload_model(request: UnloadModelRequest, session: AsyncSession = Depends(get_session)):
+async def unload_model(
+    request: UnloadModelRequest,
+    raw_request: Request,
+    session: AsyncSession = Depends(get_session),
+):
     """Unload a model and free all associated resources."""
-    # Validate model exists
-    model_db = await session.get(ModelDB, request.model_id)
-    if model_db is None:
-        raise HTTPException(status_code=404, detail="Model not found")
+    # Scope the existence read separately so no database connection or
+    # transaction remains checked out while inference drains.
+    async with raw_request.app.state.db_write_lock:
+        async with AsyncSession(raw_request.app.state.db_engine) as validation_session:
+            if await validation_session.get(ModelDB, request.model_id) is None:
+                raise HTTPException(status_code=404, detail="Model not found")
 
-    # Update model status
-    model_db.status = "unloading"
+    if raw_request.app.state.external_future_store is not None:
+        try:
+            await _drain_model_forwarding(raw_request.app, request.model_id)
+        except ModelForwardingDrainError as error:
+            raise HTTPException(
+                status_code=503,
+                detail="Model unload could not safely drain forwarded inference",
+            ) from error
 
-    # Create future request
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.UNLOAD_MODEL,
-        model_id=request.model_id,
-        request_data=types.UnloadModelInput(),
-    )
+    # Keep the database lock out of the inference drain: terminal external
+    # futures use the same lock while becoming durable.
+    async with raw_request.app.state.db_write_lock:
+        model_db = await session.get(ModelDB, request.model_id)
+        if model_db is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+        model_db.status = "unloading"
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.UNLOAD_MODEL,
+            model_id=request.model_id,
+            request_data=types.UnloadModelInput(),
+        )
 
-    await session.commit()
+        await session.commit()
 
     return UnloadModelResponse(request_id=str(request_id), model_id=request.model_id)
 
@@ -1559,26 +1667,35 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         seq_id=request.seq_id,
         sampling_session_id=request.sampling_session_id,
     )
-    if req.app.state.external_future_store is not None:
-        request_id = await req.app.state.external_future_store.create(model_id, sample_input)
+    if req.app.state.external_inference_client:
+        async with _get_model_forwarding_lock(req.app, model_id):
+            if model_id in req.app.state.draining_forwarding_models:
+                raise HTTPException(status_code=409, detail="Model is unloading")
+            if req.app.state.external_future_store is not None:
+                request_id = await req.app.state.external_future_store.create(model_id, sample_input)
+            else:
+                request_id = await create_future(
+                    session=session,
+                    request_type=types.RequestType.EXTERNAL,
+                    model_id=model_id,
+                    request_data=sample_input,
+                )
+                await session.commit()
+            await _start_forwarding_task(
+                req.app,
+                model_id,
+                req.app.state.external_inference_client.call_and_store_result(
+                    request_id, request, model_id, checkpoint_id, base_model=base_model
+                ),
+            )
     else:
         request_id = await create_future(
             session=session,
-            request_type=(
-                types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-            ),
+            request_type=types.RequestType.SAMPLE,
             model_id=model_id,
             request_data=sample_input,
         )
         await session.commit()
-
-    if req.app.state.external_inference_client:
-        _start_forwarding_task(
-            req.app,
-            req.app.state.external_inference_client.call_and_store_result(
-                request_id, request, model_id, checkpoint_id, base_model=base_model
-            ),
-        )
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 

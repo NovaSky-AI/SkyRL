@@ -123,7 +123,9 @@ class SkyRLTrainInferenceForwardingClient:
         except asyncio.CancelledError:
             await self.external_future_store.complete(
                 request_id,
-                types.ErrorResponse(error="Forwarded inference cancelled during shutdown", status="failed"),
+                types.ErrorResponse(
+                    error="Forwarded inference cancelled during model drain or shutdown", status="failed"
+                ),
                 RequestStatus.FAILED,
                 cancellation_safe=False,
             )
