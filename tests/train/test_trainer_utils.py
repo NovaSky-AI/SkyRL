@@ -31,6 +31,7 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
+from skyrl.train.utils.utils import prepare_runtime_environment
 from tests.train.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
@@ -39,6 +40,16 @@ BasicType = Union[int, float, str, bool, type(None)]
 @pytest.fixture
 def dummy_config():
     return example_dummy_config()
+
+
+def test_prepare_runtime_environment_forwards_cudnn_cudart_selector(dummy_config, monkeypatch):
+    cudart_path = "/opt/skyrl-env/SkyRL/.venv/lib/python3.12/site-packages/nvidia/cu13/lib/libcudart.so.13"
+    monkeypatch.setenv("CUDNN_FRONTEND_CUDART_LIB_NAME", cudart_path)
+
+    with patch("skyrl.train.utils.utils.peer_access_supported", return_value=True):
+        env_vars = prepare_runtime_environment(dummy_config)
+
+    assert env_vars["CUDNN_FRONTEND_CUDART_LIB_NAME"] == cudart_path
 
 
 def test_run_on_node_local_rank_0():
