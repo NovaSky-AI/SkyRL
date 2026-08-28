@@ -288,6 +288,32 @@ async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
 
 
 @pytest.mark.asyncio
+async def test_shutdown_stops_engine_when_future_persistence_failed(monkeypatch):
+    events = []
+
+    class BackgroundEngine:
+        pid = 123
+
+        def terminate(self) -> None:
+            events.append("engine_terminated")
+
+        async def wait(self) -> int:
+            events.append("engine_waited")
+            return 0
+
+    async def fail_external_close(_app) -> None:
+        events.append("external_close_failed")
+        raise RuntimeError("persistence failed")
+
+    monkeypatch.setattr(api, "_close_external_inference", fail_external_close)
+
+    with pytest.raises(RuntimeError, match="persistence failed"):
+        await api._close_runtime(SimpleNamespace(), BackgroundEngine())
+
+    assert events == ["external_close_failed", "engine_terminated", "engine_waited"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("dialect", "serializes"), [("sqlite", True), ("postgresql", False)])
 async def test_db_write_context_serializes_only_sqlite(dialect, serializes):
     context = api._get_db_write_context(SimpleNamespace(dialect=SimpleNamespace(name=dialect)))
