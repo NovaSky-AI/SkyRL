@@ -6,8 +6,10 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 
 import asyncio
 from datetime import datetime, timezone
+from time import monotonic
 
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.backends.renderer import render_model_input
@@ -15,6 +17,10 @@ from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
+from skyrl.tinker.db_observability import (
+    SLOW_DATABASE_SECONDS,
+    database_pool_status,
+)
 from skyrl.utils.log import logger
 
 
@@ -72,26 +78,92 @@ class SkyRLTrainInferenceForwardingClient:
         base_model: str | None = None,
     ):
         """Forward a sample request to vLLM and write the result to FutureDB."""
+        forward_started = monotonic()
+        prompt_tokens = sum(len(chunk.tokens) for chunk in sample_req.prompt.chunks if hasattr(chunk, "tokens"))
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
+        except SQLAlchemyError as e:
+            logger.error(
+                "Backend-forwarded sample failed failure_stage=proxy_database request_id=%s "
+                "model_id=%s sampling_session_id=%s seq_id=%s prompt_tokens=%s max_tokens=%s "
+                "elapsed_seconds=%.3f pool=%s error_type=%s",
+                request_id,
+                model_id,
+                sample_req.sampling_session_id,
+                sample_req.seq_id,
+                prompt_tokens,
+                sample_req.sampling_params.max_tokens,
+                monotonic() - forward_started,
+                database_pool_status(self.db_engine),
+                type(e).__name__,
+            )
+            result = types.ErrorResponse(error=str(e), status="failed")
+            status = RequestStatus.FAILED
         except Exception as e:
-            logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
+            logger.exception(
+                "Backend-forwarded sample failed failure_stage=forward request_id=%s model_id=%s "
+                "sampling_session_id=%s seq_id=%s prompt_tokens=%s max_tokens=%s "
+                "elapsed_seconds=%.3f error_type=%s",
+                request_id,
+                model_id,
+                sample_req.sampling_session_id,
+                sample_req.seq_id,
+                prompt_tokens,
+                sample_req.sampling_params.max_tokens,
+                monotonic() - forward_started,
+                type(e).__name__,
+            )
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
-        async with AsyncSession(self.db_engine) as session:
-            future = await session.get(FutureDB, request_id)
-            if future is None:
-                # Row was deleted between scheduling and completion (cancelled
-                # request, stale-session GC). Nothing to write back.
-                logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
-                return
-            # `result_data` is a text column holding pre-serialized JSON.
-            future.result_data = result.model_dump_json()
-            future.status = status
-            future.completed_at = datetime.now(timezone.utc)
-            await session.commit()
+        forward_elapsed = monotonic() - forward_started
+        persistence_started = monotonic()
+        try:
+            async with AsyncSession(self.db_engine) as session:
+                future = await session.get(FutureDB, request_id)
+                if future is None:
+                    # Row was deleted between scheduling and completion (cancelled
+                    # request, stale-session GC). Nothing to write back.
+                    logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
+                    return
+                # `result_data` is a text column holding pre-serialized JSON.
+                future.result_data = result.model_dump_json()
+                future.status = status
+                future.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+        except SQLAlchemyError as error:
+            logger.error(
+                "Forwarded sample failed failure_stage=persistence request_id=%s model_id=%s "
+                "seq_id=%s status=%s prompt_tokens=%s forward_seconds=%.3f "
+                "persistence_seconds=%.3f pool=%s error_type=%s",
+                request_id,
+                model_id,
+                sample_req.seq_id,
+                status.value,
+                prompt_tokens,
+                forward_elapsed,
+                monotonic() - persistence_started,
+                database_pool_status(self.db_engine),
+                type(error).__name__,
+            )
+            raise
+
+        persistence_elapsed = monotonic() - persistence_started
+        if persistence_elapsed >= SLOW_DATABASE_SECONDS:
+            logger.warning(
+                "Slow forwarded sample persistence failure_stage=persistence request_id=%s "
+                "model_id=%s seq_id=%s status=%s prompt_tokens=%s forward_seconds=%.3f "
+                "persistence_seconds=%.3f pool=%s",
+                request_id,
+                model_id,
+                sample_req.seq_id,
+                status.value,
+                prompt_tokens,
+                forward_elapsed,
+                persistence_elapsed,
+                database_pool_status(self.db_engine),
+            )
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
         # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.
