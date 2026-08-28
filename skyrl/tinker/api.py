@@ -211,6 +211,22 @@ async def _close_external_inference(app: FastAPI) -> None:
         await app.state.external_future_store.close()
 
 
+async def _close_runtime(app: FastAPI, background_engine: asyncio.subprocess.Process) -> None:
+    try:
+        await _close_external_inference(app)
+    finally:
+        logger.info(f"Stopping background engine (PID {background_engine.pid})")
+        with suppress(ProcessLookupError):
+            background_engine.terminate()
+            try:
+                await asyncio.wait_for(background_engine.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
+                background_engine.kill()
+                await background_engine.wait()
+        logger.info("Background engine stopped")
+
+
 def _get_db_write_context(db_engine):
     if db_engine.dialect.name == "sqlite":
         return asyncio.Lock()
@@ -363,18 +379,7 @@ async def lifespan(app: FastAPI):
     with suppress(asyncio.CancelledError):
         await app.state.future_poller
 
-    await _close_external_inference(app)
-
-    logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
-    with suppress(ProcessLookupError):
-        background_engine.terminate()
-        try:
-            await asyncio.wait_for(background_engine.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
-            background_engine.kill()
-            await background_engine.wait()
-    logger.info("Background engine stopped")
+    await _close_runtime(app, background_engine)
 
 
 app = FastAPI(title="Tinker API Mock", version="0.0.1", lifespan=lifespan)
