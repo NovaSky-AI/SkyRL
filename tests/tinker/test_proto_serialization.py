@@ -35,6 +35,16 @@ def roundtrip_forward_backward(result_data: dict) -> ForwardBackwardOutput:
     )
 
 
+@pytest.mark.asyncio
+async def test_client_config_advertises_proto_forward_backward_compression():
+    response = await api.client_config()
+
+    assert response.model_dump() == {
+        "pjwt_auth_enabled": False,
+        "proto_compress_fwdbwd": True,
+    }
+
+
 def test_sample_sequences():
     result_data = {
         "sequences": [

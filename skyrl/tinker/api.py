@@ -1049,6 +1049,7 @@ class WeightsInfoResponse(BaseModel):
 
 class ClientConfigResponse(BaseModel):
     pjwt_auth_enabled: bool = False
+    proto_compress_fwdbwd: bool = True
 
 
 @app.post("/api/v1/client/config", response_model=ClientConfigResponse)

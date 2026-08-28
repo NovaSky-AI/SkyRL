@@ -62,9 +62,10 @@ class EngineConfig(BaseModel):
         default=1800.0,
         gt=0,
         description=(
-            "Read timeout in seconds for sample requests forwarded to the "
-            "engine-managed vLLM. Long-context generations can take longer "
-            "than the previous hard-coded 300-second timeout."
+            "Absolute timeout in seconds for a sample request forwarded to the "
+            "engine-managed vLLM, including proxy resolution, retry backoff, and HTTP. "
+            "Long-context generations can take longer than the previous hard-coded "
+            "300-second timeout."
         ),
     )
     session_cleanup_interval_sec: int = Field(

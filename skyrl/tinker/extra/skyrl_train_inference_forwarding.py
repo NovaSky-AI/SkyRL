@@ -28,6 +28,17 @@ class InferenceForwardingError(RuntimeError):
         super().__init__(f"vLLM /v1/completions returned {status_code}: {response_text}")
 
 
+class InferenceForwardingTimeoutError(TimeoutError):
+    """The absolute inference-forwarding operation deadline expired."""
+
+
+def _safe_failure_message(error: Exception) -> str:
+    """Describe a forwarding failure without persisting request or response data."""
+    if isinstance(error, InferenceForwardingError):
+        return f"{type(error).__name__}: HTTP {error.status_code}"
+    return f"{type(error).__name__}: inference forwarding failed"
+
+
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
@@ -71,7 +82,7 @@ class SkyRLTrainInferenceForwardingClient:
                 return None
             return row.inference_proxy_url
 
-    async def _resolve_proxy_url(self, *, force_refresh: bool = False) -> str:
+    async def _resolve_proxy_url(self, *, force_refresh: bool = False, deadline: float | None = None) -> str:
         # Skip the lock when the cache is warm so concurrent samples don't serialize.
         if not force_refresh and self._cached_proxy_url is not None:
             return self._cached_proxy_url
@@ -80,7 +91,8 @@ class SkyRLTrainInferenceForwardingClient:
                 if force_refresh:
                     self._cached_proxy_url = None
                 loop = asyncio.get_running_loop()
-                deadline = loop.time() + self.engine_config.forwarding_inference_timeout_sec
+                if deadline is None:
+                    deadline = loop.time() + self.engine_config.forwarding_inference_timeout_sec
                 while self._cached_proxy_url is None:
                     self._cached_proxy_url = await self._read_proxy_url_from_db()
                     if self._cached_proxy_url is not None:
@@ -131,10 +143,10 @@ class SkyRLTrainInferenceForwardingClient:
                 database_pool_status(self.db_engine),
                 type(e).__name__,
             )
-            result = types.ErrorResponse(error=str(e), status="failed")
+            result = types.ErrorResponse(error=_safe_failure_message(e), status="failed")
             status = RequestStatus.FAILED
         except Exception as e:
-            logger.exception(
+            logger.error(
                 "Backend-forwarded sample failed failure_stage=forward request_id=%s model_id=%s "
                 "sampling_session_id=%s seq_id=%s prompt_tokens=%s max_tokens=%s "
                 "elapsed_seconds=%.3f error_type=%s",
@@ -147,42 +159,63 @@ class SkyRLTrainInferenceForwardingClient:
                 monotonic() - forward_started,
                 type(e).__name__,
             )
-            result = types.ErrorResponse(error=str(e), status="failed")
+            result = types.ErrorResponse(error=_safe_failure_message(e), status="failed")
             status = RequestStatus.FAILED
 
         await self.external_future_store.complete(request_id, result, status)
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        for attempt in range(self._TRANSIENT_503_MAX_ATTEMPTS):
-            caught_error: Exception | None = None
-            try:
-                proxy_url = await self._resolve_proxy_url(force_refresh=attempt > 0)
-                return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-            except httpx.RequestError as error:
-                caught_error = error
-                # A 30-minute read timeout is expensive; preserve the existing
-                # single retry for transport errors rather than multiplying it.
-                retry = attempt == 0
-            except InferenceForwardingError as error:
-                caught_error = error
-                retry = error.status_code == 503 and "No available workers" in error.response_text
-            assert caught_error is not None
-            if not retry or attempt + 1 == self._TRANSIENT_503_MAX_ATTEMPTS:
-                raise caught_error
-            delay = min(
-                self._TRANSIENT_RETRY_INITIAL_DELAY_SEC * 2**attempt,
-                self._TRANSIENT_RETRY_MAX_DELAY_SEC,
-            )
-            logger.warning(
-                "Transient inference forwarding failure; refreshing proxy URL and retrying "
-                "attempt=%s max_attempts=%s retry_delay_seconds=%.1f error_type=%s",
-                attempt + 1,
-                self._TRANSIENT_503_MAX_ATTEMPTS,
-                delay,
-                type(caught_error).__name__,
-            )
-            await asyncio.sleep(delay)
-        raise AssertionError("unreachable")
+        loop = asyncio.get_running_loop()
+        timeout_sec = self.engine_config.forwarding_inference_timeout_sec
+        deadline = loop.time() + timeout_sec
+        connect_attempt = 0
+        no_worker_attempt = 0
+        force_refresh = False
+
+        try:
+            async with asyncio.timeout_at(deadline):
+                while True:
+                    caught_error: Exception
+                    try:
+                        proxy_url = await self._resolve_proxy_url(force_refresh=force_refresh, deadline=deadline)
+                        return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+                    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as error:
+                        connect_attempt += 1
+                        caught_error = error
+                        max_attempts = 2
+                        retry = connect_attempt < max_attempts
+                        retry_attempt = connect_attempt
+                    except InferenceForwardingError as error:
+                        caught_error = error
+                        retry = error.status_code == 503 and "No available workers" in error.response_text
+                        if not retry:
+                            raise
+                        no_worker_attempt += 1
+                        max_attempts = self._TRANSIENT_503_MAX_ATTEMPTS
+                        retry = no_worker_attempt < max_attempts
+                        retry_attempt = no_worker_attempt
+
+                    if not retry:
+                        raise caught_error
+                    delay = min(
+                        self._TRANSIENT_RETRY_INITIAL_DELAY_SEC * 2 ** (retry_attempt - 1),
+                        self._TRANSIENT_RETRY_MAX_DELAY_SEC,
+                        max(0.0, deadline - loop.time()),
+                    )
+                    logger.warning(
+                        "Transient inference forwarding failure; refreshing proxy URL and retrying "
+                        "attempt=%s max_attempts=%s retry_delay_seconds=%.1f error_type=%s",
+                        retry_attempt,
+                        max_attempts,
+                        delay,
+                        type(caught_error).__name__,
+                    )
+                    force_refresh = True
+                    await asyncio.sleep(delay)
+        except TimeoutError as error:
+            raise InferenceForwardingTimeoutError(
+                f"inference forwarding exceeded its {timeout_sec:g}-second operation timeout"
+            ) from error
 
     async def _forward(
         self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None

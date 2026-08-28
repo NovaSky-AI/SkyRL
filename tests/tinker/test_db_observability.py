@@ -104,8 +104,8 @@ async def test_forwarding_failure_logs_request_dimensions(monkeypatch, tmp_path)
     await client.call_and_store_result(request_id, sample_request, "model_a", "weights_a")
     status, _, result_data = await store.wait(request_id, timeout=1)
 
-    assert logger.exception.call_count == 1
-    assert logger.exception.call_args.args[1:7] == (
+    assert logger.error.call_count == 1
+    assert logger.error.call_args.args[1:7] == (
         request_id,
         "model_a",
         "sampling_a",
@@ -113,8 +113,11 @@ async def test_forwarding_failure_logs_request_dimensions(monkeypatch, tmp_path)
         3,
         4,
     )
+    logger.exception.assert_not_called()
+    assert "connection reset" not in str(logger.error.call_args)
     assert status == RequestStatus.FAILED
-    assert "connection reset" in result_data
+    assert "ReadTimeout: inference forwarding failed" in result_data
+    assert "connection reset" not in result_data
     await store.close()
     await engine.dispose()
 
@@ -135,7 +138,8 @@ async def test_proxy_database_failure_has_distinct_stage(monkeypatch, tmp_path):
     assert logger.error.call_args.args[9] == "TimeoutError"
     assert "proxy pool exhausted" not in str(logger.error.call_args)
     assert status == RequestStatus.FAILED
-    assert "proxy pool exhausted" in result_data
+    assert "TimeoutError: inference forwarding failed" in result_data
+    assert "proxy pool exhausted" not in result_data
     await store.close()
     await engine.dispose()
 
