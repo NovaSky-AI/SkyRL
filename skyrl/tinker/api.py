@@ -6,7 +6,9 @@ import re
 import shutil
 import signal
 import threading
+from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
 from uuid import uuid4
@@ -81,6 +83,32 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 
 # Statuses a request never moves out of, i.e. the ones a waiter resolves on.
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
+
+
+@dataclass(frozen=True)
+class ReadySamplingRoute:
+    model_id: str
+    checkpoint_id: str
+
+
+class ReadySamplingRoutes:
+    """Bounded hot-path cache for sampler sessions returned by completed weight saves."""
+
+    def __init__(self, max_entries: int = 10_000):
+        self._routes: OrderedDict[str, ReadySamplingRoute] = OrderedDict()
+        self._max_entries = max_entries
+
+    def remember(self, sampling_session_id: str, model_id: str, checkpoint_id: str) -> None:
+        self._routes[sampling_session_id] = ReadySamplingRoute(model_id, checkpoint_id)
+        self._routes.move_to_end(sampling_session_id)
+        while len(self._routes) > self._max_entries:
+            self._routes.popitem(last=False)
+
+    def get(self, sampling_session_id: str) -> ReadySamplingRoute | None:
+        route = self._routes.get(sampling_session_id)
+        if route is not None:
+            self._routes.move_to_end(sampling_session_id)
+        return route
 
 
 def raw_json_response(payload: str | None) -> Response:
@@ -274,11 +302,13 @@ async def lifespan(app: FastAPI):
     # when the operator explicitly sets it to False.
     is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
     app.state.external_future_store = None
+    app.state.ready_sampling_routes = None
     if app.state.engine_config.external_inference_url:
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
         app.state.external_future_store = ExternalFutureStore()
+        app.state.ready_sampling_routes = ReadySamplingRoutes()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
             app.state.engine_config,
             app.state.db_engine,
@@ -1292,7 +1322,11 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
 
 
 @app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
-async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, session: AsyncSession = Depends(get_session)):
+async def save_weights_for_sampler(
+    request: SaveWeightsForSamplerRequest,
+    req: Request,
+    session: AsyncSession = Depends(get_session),
+):
     """Saves weights in a format compatible with sampling/inference servers."""
     # Get the model (validates it exists and gives us the session_id)
     model = await get_model(session, request.model_id)
@@ -1333,6 +1367,12 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 
     await session.commit()
 
+    ready_sampling_routes = req.app.state.ready_sampling_routes
+    if sampling_session_id is not None and ready_sampling_routes is not None:
+        # The SDK only learns this random id from the completed save future, after
+        # the checkpoint is ready. Its samples can therefore bypass three DB reads.
+        ready_sampling_routes.remember(sampling_session_id, request.model_id, checkpoint_id)
+
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
@@ -1356,27 +1396,41 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             detail="sampling_session_id must not contain ':' (the routing-key delimiter)",
         )
 
-    base_model, model_path = await get_sampling_model(request, session)
-
-    if base_model:
-        model_id = checkpoint_id = ""
+    ready_sampling_routes = req.app.state.ready_sampling_routes
+    ready_route = (
+        ready_sampling_routes.get(request.sampling_session_id)
+        if ready_sampling_routes is not None and request.sampling_session_id is not None
+        else None
+    )
+    used_database = False
+    if ready_route is not None:
+        base_model = None
+        model_id = ready_route.model_id
+        checkpoint_id = ready_route.checkpoint_id
     else:
-        assert model_path is not None
-        path = types.TinkerPath.parse(model_path)
-        if (
-            not path
-            # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
-            or path.kind not in ("", "sampler_weights")
-            or not (model_id := path.primary_id)
-            or not (checkpoint_id := path.secondary_id)
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
-            )
-        await get_model(session, model_id)
-        # Validate that the checkpoint exists and is ready
-        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
+        base_model, model_path = await get_sampling_model(request, session)
+        used_database = request.sampling_session_id is not None
+
+        if base_model:
+            model_id = checkpoint_id = ""
+        else:
+            assert model_path is not None
+            path = types.TinkerPath.parse(model_path)
+            if (
+                not path
+                # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
+                or path.kind not in ("", "sampler_weights")
+                or not (model_id := path.primary_id)
+                or not (checkpoint_id := path.secondary_id)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
+                )
+            await get_model(session, model_id)
+            # Validate that the checkpoint exists and is ready
+            await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
+            used_database = True
 
     sample_input = types.SampleInput(
         base_model=base_model,
@@ -1411,8 +1465,10 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             model_id=model_id,
             request_data=sample_input,
         )
+        used_database = True
 
-    await session.commit()
+    if used_database:
+        await session.commit()
 
     if req.app.state.external_inference_client:
         asyncio.create_task(
