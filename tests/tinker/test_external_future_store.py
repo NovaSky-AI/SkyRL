@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -251,6 +253,60 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
 
 
 @pytest.mark.asyncio
+async def test_retrieve_future_bounds_protobuf_serialization_off_event_loop(monkeypatch):
+    event_loop_thread_id = threading.get_ident()
+    serialization_thread_ids = []
+    serialization_state_lock = threading.Lock()
+    active_serializations = 0
+    max_active_serializations = 0
+
+    class CompletedStore:
+        async def wait(self, request_id, timeout):
+            return (
+                RequestStatus.COMPLETED,
+                types.RequestType.EXTERNAL,
+                types.SampleOutput(sequences=[]).model_dump_json(),
+            )
+
+    def serialize_result_in_thread(request_type, result_data):
+        nonlocal active_serializations, max_active_serializations
+        serialization_thread_ids.append(threading.get_ident())
+        with serialization_state_lock:
+            active_serializations += 1
+            max_active_serializations = max(max_active_serializations, active_serializations)
+        try:
+            time.sleep(0.01)
+            return b"serialized"
+        finally:
+            with serialization_state_lock:
+                active_serializations -= 1
+
+    monkeypatch.setattr(api, "serialize_result", serialize_result_in_thread)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                external_future_store=CompletedStore(),
+                future_waiters={},
+                proto_serialization_lock=asyncio.Lock(),
+            )
+        ),
+        headers={"accept": api.PROTO_CONTENT_TYPE},
+    )
+
+    responses = await asyncio.gather(
+        *(
+            api.retrieve_future(api.RetrieveFutureRequest(request_id=str(-request_id)), request)
+            for request_id in range(1, 9)
+        )
+    )
+
+    assert all(response.body == b"serialized" for response in responses)
+    assert len(serialization_thread_ids) == len(responses)
+    assert all(thread_id != event_loop_thread_id for thread_id in serialization_thread_ids)
+    assert max_active_serializations == 1
+
+
+@pytest.mark.asyncio
 async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
     release_forwarding = asyncio.Event()
     events = []
@@ -488,7 +544,14 @@ async def test_retrieve_future_serializes_in_memory_result_as_proto(future_store
     await store.complete(request_id, result, RequestStatus.COMPLETED)
 
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(db_engine=engine, external_future_store=store, future_waiters={})),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                db_engine=engine,
+                external_future_store=store,
+                future_waiters={},
+                proto_serialization_lock=asyncio.Lock(),
+            )
+        ),
         headers={"accept": "application/x-protobuf, application/json"},
     )
     response = await api.retrieve_future(api.RetrieveFutureRequest(request_id=str(request_id)), request)

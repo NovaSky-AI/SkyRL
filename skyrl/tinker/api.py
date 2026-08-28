@@ -191,6 +191,10 @@ def _finish_forwarding_task(tasks: set[asyncio.Task], task: asyncio.Task) -> Non
         logger.error("Forwarding task failed: %r", error)
 
 
+def _serialize_proto_result(request_type: types.RequestType, result_data: str) -> bytes:
+    return serialize_result(request_type, json.loads(result_data))
+
+
 def _start_forwarding_task(app: FastAPI, operation: Awaitable[None]) -> None:
     task = asyncio.create_task(operation)
     app.state.forwarding_tasks.add(task)
@@ -299,6 +303,7 @@ async def lifespan(app: FastAPI):
     app.state.sampling_model_cache_lock = asyncio.Lock()
     app.state.validated_sampler_checkpoints = set()
     app.state.sampler_checkpoint_validation_lock = asyncio.Lock()
+    app.state.proto_serialization_lock = asyncio.Lock()
 
     # Setup external inference client if configured.
     #
@@ -1510,10 +1515,13 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
             types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
             and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
         ):
-            return Response(
-                content=serialize_result(types.RequestType(request_type), json.loads(result_data)),
-                media_type=PROTO_CONTENT_TYPE,
-            )
+            async with req.app.state.proto_serialization_lock:
+                content = await asyncio.to_thread(
+                    _serialize_proto_result,
+                    types.RequestType(request_type),
+                    result_data,
+                )
+            return Response(content=content, media_type=PROTO_CONTENT_TYPE)
         return raw_json_response(result_data)
 
     # Return 400 for handled errors (validation, etc.), 500 for unexpected failures.
