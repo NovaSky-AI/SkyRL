@@ -8,6 +8,7 @@ import signal
 import threading
 from contextlib import asynccontextmanager, nullcontext, suppress
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 from typing import Annotated, Any, AsyncGenerator, Awaitable, ClassVar, Literal
 from uuid import uuid4
 
@@ -27,7 +28,7 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -44,6 +45,10 @@ from skyrl.tinker.db_models import (
     SessionDB,
     enable_sqlite_wal,
     get_async_database_url,
+)
+from skyrl.tinker.db_observability import (
+    database_pool_status,
+    enable_database_observability,
 )
 from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.tinker.extra import (
@@ -177,6 +182,15 @@ async def poll_futures(
                             waiter.set_result(outcome)
         except asyncio.CancelledError:
             raise
+        except SQLAlchemyError as error:
+            # Cursor events cannot observe a timeout waiting for pool checkout.
+            logger.error(
+                "Future poller database failure failure_stage=future_poller awaited_futures=%s "
+                "pool=%s error_type=%s",
+                len(waiters),
+                database_pool_status(db_engine),
+                type(error).__name__,
+            )
         except Exception:
             # Keep the poller alive; waiters fall back on their own timeouts.
             logger.exception("Future poller iteration failed")
@@ -286,6 +300,7 @@ async def lifespan(app: FastAPI):
     db_url = get_async_database_url(app.state.engine_config.database_url)
     app.state.db_engine = create_async_engine(db_url, echo=False)
     enable_sqlite_wal(app.state.db_engine.sync_engine)
+    enable_database_observability(app.state.db_engine)
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
@@ -383,6 +398,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Tinker API Mock", version="0.0.1", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def log_database_request_failure(request: Request, call_next):
+    """Add endpoint and pool context to database failures."""
+    started = monotonic()
+    try:
+        return await call_next(request)
+    except SQLAlchemyError as error:
+        logger.error(
+            "API database failure failure_stage=api_database method=%s path=%s "
+            "elapsed_seconds=%.3f pool=%s error_type=%s",
+            request.method,
+            request.url.path,
+            monotonic() - started,
+            database_pool_status(request.app.state.db_engine),
+            type(error).__name__,
+        )
+        raise
 
 
 async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
