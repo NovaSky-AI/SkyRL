@@ -9,8 +9,8 @@ bypassing the engine subprocess's serial scheduling loop.
 Coverage:
   - test_engine_state_published: after ``save_weights_for_sampler``, the
     engine's vLLM proxy URL is written to ``EngineStateDB``.
-  - test_sample_uses_external_path: an issued sample creates a future of
-    type ``EXTERNAL`` (not ``SAMPLE``) and resolves successfully.
+  - test_sample_bypasses_future_database: an issued sample resolves through
+    the forwarding path without creating a database-backed future.
   - test_sample_concurrent_with_training_is_fast: the central
     parallelism test. While a long-running stream of ``forward_backward``
     + ``optim_step`` calls is in flight, a sample request resolves in
@@ -169,21 +169,6 @@ def _read_engine_state(db_path: str):
         engine.dispose()
 
 
-def _read_future_request_type(db_path: str, request_id: int) -> str:
-    """Read the request_type of a single future from the test server's DB."""
-    from sqlmodel import Session, create_engine
-
-    from skyrl.tinker.db_models import FutureDB
-
-    engine = create_engine(f"sqlite:///{db_path}", echo=False)
-    try:
-        with Session(engine) as session:
-            row = session.get(FutureDB, request_id)
-            return None if row is None else str(row.request_type)
-    finally:
-        engine.dispose()
-
-
 def _train_one_step(tc, tok):
     """Run one tiny forward_backward + optim_step. Used for warm-up."""
     data = [_make_datum(tok, "Hello", "world")]
@@ -210,12 +195,8 @@ def test_engine_state_published(server_db_path):
     ), f"expected an http(s) proxy URL, got {row.inference_proxy_url!r}"
 
 
-def test_sample_uses_external_path(server_db_path):
-    """A sample issued through the SDK creates a FutureDB row of type EXTERNAL.
-
-    This is the "test" half of the design: the API hoists the sample off
-    the engine's serial loop and into the API process's asyncio loop.
-    """
+def test_sample_bypasses_future_database(server_db_path):
+    """A forwarded sample resolves without creating a FutureDB row."""
     from sqlmodel import Session, create_engine, func, select
 
     from skyrl.tinker import types as skyrl_types
@@ -229,8 +210,7 @@ def test_sample_uses_external_path(server_db_path):
     _train_one_step(tc, tok)
     sampler = tc.save_weights_and_get_sampling_client(name="external_path_a")
 
-    # Snapshot the max future_id before submitting our sample so we can
-    # filter out any EXTERNAL futures from earlier tests.
+    # Snapshot the max future_id before submitting the sample.
     eng = create_engine(f"sqlite:///{db_path}", echo=False)
     try:
         with Session(eng) as s:
@@ -245,8 +225,8 @@ def test_sample_uses_external_path(server_db_path):
     ).result()
     assert len(out.sequences) == 1
 
-    # Look for an EXTERNAL future with id > max_before. If async routing
-    # is on, every sample creates exactly one such row.
+    # Forwarded samples use the in-process store instead of the shared
+    # database, so no new EXTERNAL row is created.
     eng = create_engine(f"sqlite:///{db_path}", echo=False)
     try:
         with Session(eng) as s:
@@ -259,10 +239,7 @@ def test_sample_uses_external_path(server_db_path):
     finally:
         eng.dispose()
 
-    assert len(rows) >= 1, (
-        f"expected at least one EXTERNAL future to be created by the sample call, "
-        f"found {len(rows)}; async sample routing may not be active"
-    )
+    assert rows == []
 
 
 def test_sample_concurrent_with_training_is_fast(server_db_path):

@@ -6,6 +6,7 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 
 import asyncio
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import httpx
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -17,13 +18,22 @@ from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
 from skyrl.utils.log import logger
 
+if TYPE_CHECKING:
+    from skyrl.tinker.external_future_store import ExternalFutureStore
+
 
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    def __init__(
+        self,
+        engine_config: EngineConfig,
+        db_engine,
+        external_future_store: "ExternalFutureStore | None" = None,
+    ):
         self.engine_config = engine_config
         self.db_engine = db_engine
+        self.external_future_store = external_future_store
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
@@ -71,7 +81,7 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and write the result to FutureDB."""
+        """Forward a sample request to vLLM and resolve its future."""
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
@@ -79,6 +89,12 @@ class SkyRLTrainInferenceForwardingClient:
             logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
+
+        result_data = result.model_dump_json()
+        if self.external_future_store is not None and self.external_future_store.complete(
+            request_id, status, result_data
+        ):
+            return
 
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
@@ -88,7 +104,7 @@ class SkyRLTrainInferenceForwardingClient:
                 logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
                 return
             # `result_data` is a text column holding pre-serialized JSON.
-            future.result_data = result.model_dump_json()
+            future.result_data = result_data
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()

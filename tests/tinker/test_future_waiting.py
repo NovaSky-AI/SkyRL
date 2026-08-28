@@ -17,6 +17,7 @@ from skyrl.tinker.db_models import (
     enable_sqlite_wal,
     get_async_database_url,
 )
+from skyrl.tinker.external_future_store import ExternalFutureStore
 
 
 @pytest.fixture()
@@ -187,11 +188,22 @@ async def test_query_count_does_not_scale_with_waiters(waiters, sync_engine, asy
     assert 0 < len(statements) < 50
 
 
-def _stub_request(async_engine, waiters, headers: dict | None = None):
+def _stub_request(
+    async_engine,
+    waiters,
+    headers: dict | None = None,
+    external_future_store: ExternalFutureStore | None = None,
+):
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(db_engine=async_engine, future_waiters=waiters)),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                db_engine=async_engine,
+                external_future_store=external_future_store,
+                future_waiters=waiters,
+            )
+        ),
         headers=headers or {},
     )
 
@@ -260,6 +272,35 @@ async def test_retrieve_future_serves_proto_when_accepted(waiters, async_engine,
     result = await api.retrieve_future(
         api.RetrieveFutureRequest(request_id=str(request_id)),
         _stub_request(async_engine, waiters, headers={"accept": "application/x-protobuf, application/json"}),
+    )
+
+    assert result.media_type == "application/x-protobuf"
+    response = deserialize_proto_response(result.body, SampleResponse)
+    assert response.sequences[0].tokens == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_external_future_serves_proto_when_accepted(waiters, async_engine):
+    from tinker import SampleResponse
+    from tinker.proto.response_conv import deserialize_proto_response
+
+    from skyrl.tinker import api
+
+    store = ExternalFutureStore()
+    request_id = store.create(types.RequestType.EXTERNAL, "model_a", {"prompt": [1]})
+    result_data = types.SampleOutput(
+        sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1, 2], logprobs=[-0.5, -1.0])]
+    ).model_dump_json()
+    store.complete(request_id, RequestStatus.COMPLETED, result_data)
+
+    result = await api.retrieve_future(
+        api.RetrieveFutureRequest(request_id=str(request_id)),
+        _stub_request(
+            async_engine,
+            waiters,
+            headers={"accept": "application/x-protobuf, application/json"},
+            external_future_store=store,
+        ),
     )
 
     assert result.media_type == "application/x-protobuf"
