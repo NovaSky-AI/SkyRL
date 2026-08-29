@@ -91,6 +91,25 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 )
 
 
+def _gdn_in_proj_lora_is_safe(bridge) -> bool:
+    """Whether LoRA on GatedDeltaNet ``in_proj`` can round-trip through weight sync.
+
+    False for models whose bridge maps ``in_proj`` to two fused HF tensors
+    (``in_proj_qkvz``/``in_proj_ba``, e.g. Qwen3-Next): peft_bridge has no
+    fused-adapter split for that layout, so a merged export fails on a shape
+    mismatch and an unmerged export silently drops the ``in_proj_ba`` half.
+    True for the separate ``in_proj_qkv/z/b/a`` layout (e.g. Qwen3.5) and for
+    models without GDN layers (where ``in_proj`` matches nothing).
+    """
+    mapping = bridge._model_bridge.mapping_registry().megatron_to_hf_lookup(
+        # Layer 0 stands in for the wildcard in the bridge's mapping patterns.
+        "decoder.layers.0.self_attention.in_proj.weight"
+    )
+    if mapping is None:
+        return True
+    return isinstance(mapping.hf_param, dict) and set(mapping.hf_param) == {"qkv", "z", "b", "a"}
+
+
 class MegatronWeightExtractor(WeightExtractor):
     """Extracts weights from Megatron model-parallel models.
 
@@ -545,13 +564,29 @@ class MegatronWorker:
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+        if lora_config.target_modules == "all-linear":
+            if lora_type == "lora":
+                target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
+            else:
+                target_modules = [
+                    "linear_q",
+                    "linear_k",
+                    "linear_v",
+                    "linear_proj",
+                    "linear_fc1_up",
+                    "linear_fc1_gate",
+                    "linear_fc2",
+                    "in_proj",
+                    "out_proj",
+                ]
+            if not _gdn_in_proj_lora_is_safe(self.bridge):
+                target_modules.remove("in_proj")
+        else:
+            target_modules = lora_config.target_modules
+
         if lora_type == "lora":
             self.lora_cls = LoRA(
-                target_modules=(
-                    ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-                    if lora_config.target_modules == "all-linear"
-                    else lora_config.target_modules
-                ),
+                target_modules=target_modules,
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
@@ -562,19 +597,7 @@ class MegatronWorker:
             )
         elif lora_type == "canonical_lora":
             self.lora_cls = CanonicalLoRA(
-                target_modules=(
-                    [
-                        "linear_q",
-                        "linear_k",
-                        "linear_v",
-                        "linear_proj",
-                        "linear_fc1_up",
-                        "linear_fc1_gate",
-                        "linear_fc2",
-                    ]
-                    if lora_config.target_modules == "all-linear"
-                    else lora_config.target_modules
-                ),
+                target_modules=target_modules,
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
