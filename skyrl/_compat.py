@@ -5,10 +5,11 @@ Imported from ``skyrl/__init__.py`` so the shims are installed before any
 """
 
 import sys
+from importlib.metadata import PackageNotFoundError, version
 
 
 def disable_flash_attn_cute() -> None:
-    """Make ``flash_attn.cute`` (FA4) unimportable instead of AttributeError-y.
+    """Disable the incompatible FA4 code bundled with flash-attn 2.8.3.
 
     flash-attn 2.8.3 bundles ``flash_attn/cute`` against the nvidia-cutlass-dsl
     4.0/4.1 API, but vLLM 0.26 hard-pins ``nvidia-cutlass-dsl==4.6.0`` where
@@ -18,6 +19,14 @@ def disable_flash_attn_cute() -> None:
     ``megatron.core.transformer.attention`` import (i.e. all of megatron-core).
 
     Poisoning the module entry turns the probe into a plain ImportError, so
-    megatron-core falls back to ``HAVE_FA4 = False``. Nothing in SkyRL uses FA4.
+    megatron-core falls back to ``HAVE_FA4 = False``. A separately installed
+    flash-attn-4 distribution owns a compatible implementation and must remain
+    importable.
     """
+    try:
+        version("flash-attn-4")
+    except PackageNotFoundError:
+        pass
+    else:
+        return
     sys.modules.setdefault("flash_attn.cute", None)
