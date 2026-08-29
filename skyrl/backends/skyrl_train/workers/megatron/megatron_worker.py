@@ -27,6 +27,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     _convert_moe_experts_lora_to_vllm,
     broadcast_object_across_pp_ranks,
     freeze_moe_router,
+    gdn_in_proj_lora_is_safe,
     get_model_config,
     get_moe_metrics,
     print_model_size,
@@ -89,25 +90,6 @@ import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
     maybe_force_qwen35_text_bridge,
 )
-
-
-def _gdn_in_proj_lora_is_safe(bridge) -> bool:
-    """Whether LoRA on GatedDeltaNet ``in_proj`` can round-trip through weight sync.
-
-    False for models whose bridge maps ``in_proj`` to two fused HF tensors
-    (``in_proj_qkvz``/``in_proj_ba``, e.g. Qwen3-Next): peft_bridge has no
-    fused-adapter split for that layout, so a merged export fails on a shape
-    mismatch and an unmerged export silently drops the ``in_proj_ba`` half.
-    True for the separate ``in_proj_qkv/z/b/a`` layout (e.g. Qwen3.5) and for
-    models without GDN layers (where ``in_proj`` matches nothing).
-    """
-    mapping = bridge._model_bridge.mapping_registry().megatron_to_hf_lookup(
-        # Layer 0 stands in for the wildcard in the bridge's mapping patterns.
-        "decoder.layers.0.self_attention.in_proj.weight"
-    )
-    if mapping is None:
-        return True
-    return isinstance(mapping.hf_param, dict) and set(mapping.hf_param) == {"qkv", "z", "b", "a"}
 
 
 class MegatronWeightExtractor(WeightExtractor):
@@ -579,7 +561,7 @@ class MegatronWorker:
                     "in_proj",
                     "out_proj",
                 ]
-            if not _gdn_in_proj_lora_is_safe(self.bridge):
+            if not gdn_in_proj_lora_is_safe(self.bridge):
                 target_modules.remove("in_proj")
         else:
             target_modules = lora_config.target_modules
