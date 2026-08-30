@@ -1328,7 +1328,7 @@ class RayPPOTrainer:
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size response_len"]
             - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
         """
-        fwd_keys = ["sequences", "attention_mask"]
+        fwd_keys = ["sequences", "attention_mask", "response_mask"]
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")
         if training_input.get("router_padding_mask") is not None:

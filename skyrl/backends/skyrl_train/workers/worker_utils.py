@@ -11,6 +11,30 @@ from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
 
+_SEQUENCE_FIELDS = frozenset(
+    {
+        "sequences",
+        "attention_mask",
+        "rollout_expert_indices",
+        "router_padding_mask",
+    }
+)
+_RESPONSE_FIELDS = frozenset(
+    {
+        "action_log_probs",
+        "base_action_log_probs",
+        "values",
+        "returns",
+        "advantages",
+        "kl",
+        "rewards",
+        "loss_mask",
+        "response_mask",
+        "rollout_logprobs",
+    }
+)
+_PADDED_RESPONSE_LENGTH = "response_length_before_microbatch_trim"
+
 # Metrics that end in `_loss` but are plain per-token MEANS, not pre-scaled minibatch sums.
 # The `sum_loss_metrics` convention sums every `_loss` key because the *policy* losses are
 # pre-scaled (by num_microbatches * dp_size) so that summing recovers the correct minibatch
@@ -130,11 +154,87 @@ def all_reduce_metrics(
     return status_mean
 
 
+def trim_microbatch_padding(batch: TrainingInputBatch) -> TrainingInputBatch:
+    """Project a left-padded batch to the final microbatch's local widths.
+
+    The controller keeps one rectangular representation for advantage calculation,
+    dispatch, and replay metadata. Dense FSDP forwards do not remove padding inside
+    the model, so they should receive a view padded only to the longest sequence and
+    response in the final microbatch.
+
+    Packed rows and batches without an explicit ``response_mask`` retain their
+    original representation because their response boundary cannot be recovered
+    from ``loss_mask`` (which may contain semantic zeros).
+    """
+    attention_mask = batch.get("attention_mask")
+    response_mask = batch.get("response_mask")
+    if (
+        attention_mask is None
+        or response_mask is None
+        or len(batch) == 0
+        or batch.get("sub_seq_lengths") is not None
+        or (batch.metadata or {}).get("is_padding_batch", False)
+    ):
+        return batch
+    if attention_mask.ndim != 2 or response_mask.ndim != 2:
+        raise ValueError(
+            "Expected 2D attention_mask and response_mask for microbatch trimming, "
+            f"got {attention_mask.shape} and {response_mask.shape}"
+        )
+
+    sequence_length = int(attention_mask.sum(dim=1).max().item())
+    response_length = int(response_mask.sum(dim=1).max().item())
+    if sequence_length <= 0 or response_length <= 0:
+        return batch
+    if sequence_length < response_length + 1:
+        raise ValueError(
+            f"Microbatch sequence length ({sequence_length}) must exceed response length ({response_length})"
+        )
+
+    sequence_width = attention_mask.shape[1]
+    response_width = response_mask.shape[1]
+    if sequence_length == sequence_width and response_length == response_width:
+        return batch
+
+    projected = {}
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor) and key in _SEQUENCE_FIELDS:
+            projected[key] = value[:, -sequence_length:]
+        elif isinstance(value, torch.Tensor) and key in _RESPONSE_FIELDS:
+            projected[key] = value[:, -response_length:]
+        else:
+            projected[key] = value
+
+    microbatch = TrainingInputBatch(projected)
+    microbatch.metadata = dict(batch.metadata or {})
+    microbatch.metadata[_PADDED_RESPONSE_LENGTH] = response_width
+    microbatch.metadata["response_length"] = response_length
+    return microbatch
+
+
+def restore_microbatch_response_padding(tensor: torch.Tensor, metadata: Optional[dict]) -> torch.Tensor:
+    """Restore a microbatch output to the controller batch's response width."""
+    if metadata is None or _PADDED_RESPONSE_LENGTH not in metadata:
+        return tensor
+    if tensor.ndim != 2:
+        raise ValueError(f"Expected a [batch, response] output, got shape {tuple(tensor.shape)}")
+    padded_length = metadata[_PADDED_RESPONSE_LENGTH]
+    if tensor.shape[-1] > padded_length:
+        raise ValueError(f"Cannot restore response width {tensor.shape[-1]} to smaller width {padded_length}")
+    if tensor.shape[-1] == padded_length:
+        return tensor
+    return torch.nn.functional.pad(tensor, (padded_length - tensor.shape[-1], 0))
+
+
 class BaseBatchIterator:
     """Base class for batch iterators that chunk a TrainingInputBatch into microbatches."""
 
-    def __init__(self, data: TrainingInputBatch):
+    def __init__(self, data: TrainingInputBatch, trim_padding: bool = False):
         self.data = data
+        self.trim_padding = trim_padding
+
+    def _project(self, batch: TrainingInputBatch) -> TrainingInputBatch:
+        return trim_microbatch_padding(batch) if self.trim_padding else batch
 
     def __len__(self):
         raise NotImplementedError
@@ -186,8 +286,14 @@ class BatchIterator(BaseBatchIterator):
     This is the original sample-based iterator. Kept as an alias for SampleBasedBatchIterator.
     """
 
-    def __init__(self, data: TrainingInputBatch, sample_batch_size: int, drop_last: bool = False):
-        super().__init__(data)
+    def __init__(
+        self,
+        data: TrainingInputBatch,
+        sample_batch_size: int,
+        drop_last: bool = False,
+        trim_padding: bool = False,
+    ):
+        super().__init__(data, trim_padding=trim_padding)
         self.sample_batch_size = sample_batch_size
         self.total_batch_size = data.batch_size
         self.drop_last = drop_last
@@ -206,7 +312,7 @@ class BatchIterator(BaseBatchIterator):
 
     def __next__(self) -> Experience:
         try:
-            batch = next(self._iter)
+            batch = self._project(next(self._iter))
             exp = self.batch_to_experience(batch)
             return exp
         except StopIteration:
@@ -224,8 +330,14 @@ class SampleBasedBatchIterator(BaseBatchIterator):
     Yields TrainingInputBatch objects (not Experience), unlike the legacy BatchIterator.
     """
 
-    def __init__(self, data: TrainingInputBatch, sample_batch_size: int, drop_last: bool = False):
-        super().__init__(data)
+    def __init__(
+        self,
+        data: TrainingInputBatch,
+        sample_batch_size: int,
+        drop_last: bool = False,
+        trim_padding: bool = False,
+    ):
+        super().__init__(data, trim_padding=trim_padding)
         self.sample_batch_size = sample_batch_size
         self.total_batch_size = data.batch_size
         self.drop_last = drop_last
@@ -238,7 +350,7 @@ class SampleBasedBatchIterator(BaseBatchIterator):
         return self.num_micro_batches
 
     def __iter__(self) -> Iterator[TrainingInputBatch]:
-        return iter(self._chunks)
+        return (self._project(chunk) for chunk in self._chunks)
 
     def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
         """Concatenate output batches. No reordering needed for sample-based splitting."""
@@ -257,13 +369,14 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         self,
         data: TrainingInputBatch,
         max_tokens_per_microbatch: int,
+        trim_padding: bool = False,
     ):
         """
         Args:
             data: The training input batch to chunk.
             max_tokens_per_microbatch: Maximum number of tokens per microbatch.
         """
-        super().__init__(data)
+        super().__init__(data, trim_padding=trim_padding)
         self._max_tokens_per_microbatch = max_tokens_per_microbatch
 
         # Compute token counts per sample using attention_mask
@@ -291,7 +404,7 @@ class TokenBasedBatchIterator(BaseBatchIterator):
                 selected_data[key] = value[indices_tensor]
         microbatch = TrainingInputBatch(selected_data)
         microbatch.metadata = self.data.metadata
-        return microbatch
+        return self._project(microbatch)
 
     def _create_padding_microbatch(self) -> TrainingInputBatch:
         """Create a padding microbatch with loss_mask=0 so it doesn't affect the loss."""
@@ -426,7 +539,10 @@ class TokenBasedBatchIterator(BaseBatchIterator):
 
 
 def get_microbatch_iterator(
-    data: TrainingInputBatch, micro_batch_size: int, max_tokens_per_microbatch: int
+    data: TrainingInputBatch,
+    micro_batch_size: int,
+    max_tokens_per_microbatch: int,
+    trim_padding: bool = False,
 ) -> BaseBatchIterator:
     """Factory function to get the appropriate microbatch iterator.
 
@@ -434,11 +550,21 @@ def get_microbatch_iterator(
         data: The training input batch.
         micro_batch_size: Number of samples per microbatch (used if max_tokens_per_microbatch <= 0).
         max_tokens_per_microbatch: Maximum tokens per microbatch. If > 0, uses token-based batching.
+        trim_padding: Whether to project each microbatch to its local sequence and response widths.
 
     Returns:
         A BaseBatchIterator instance.
     """
     if max_tokens_per_microbatch > 0:
-        return TokenBasedBatchIterator(data, max_tokens_per_microbatch=max_tokens_per_microbatch)
+        return TokenBasedBatchIterator(
+            data,
+            max_tokens_per_microbatch=max_tokens_per_microbatch,
+            trim_padding=trim_padding,
+        )
     else:
-        return SampleBasedBatchIterator(data, sample_batch_size=micro_batch_size, drop_last=False)
+        return SampleBasedBatchIterator(
+            data,
+            sample_batch_size=micro_batch_size,
+            drop_last=False,
+            trim_padding=trim_padding,
+        )
