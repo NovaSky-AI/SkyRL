@@ -107,6 +107,9 @@ class SkyRLLoraConfig(BaseConfig):
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
     Must be accessible to all workers in distributed setups."""
+    preserve_export_dtype: bool = False
+    """Preserve Megatron adapter tensor dtypes when exporting LoRA weights.
+    By default, Megatron adapters are exported as float32 for backward compatibility."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
