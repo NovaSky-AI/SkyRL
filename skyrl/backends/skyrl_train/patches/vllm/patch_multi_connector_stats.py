@@ -1,6 +1,6 @@
 """Runtime patch: don't crash on KV-connector stats without Prometheus metrics.
 
-vLLM 0.23's ``MultiKVConnectorPromMetrics.observe`` asserts that every child
+vLLM 0.26's ``MultiKVConnectorPromMetrics.observe`` asserts that every child
 connector reporting transfer stats is registered with a Prometheus metrics
 class. Some connectors (e.g. ``MooncakeConnector``) produce ``KVConnectorStats``
 but expose no prom-metrics class, so with a ``MultiConnector`` stack like
