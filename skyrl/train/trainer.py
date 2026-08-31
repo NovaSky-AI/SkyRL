@@ -651,7 +651,9 @@ class RayPPOTrainer:
             return entries
 
         kept_prompts = (len(entries) // stride) * stride
-        if kept_prompts == 0:
+        # An already-empty batch is passed through unchanged: zero prompts shard
+        # evenly, and it is not the truncation failure this error is about.
+        if entries and kept_prompts == 0:
             raise ValueError(
                 f"Batch of {len(entries)} prompts cannot be sharded evenly: with the combined "
                 f"data-parallel size of the enabled models (lcm_dp_size={lcm_dp_size}) and "

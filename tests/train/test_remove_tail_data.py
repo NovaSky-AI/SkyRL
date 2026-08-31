@@ -49,3 +49,10 @@ def test_raises_when_batch_is_smaller_than_stride():
     stub = _stub_trainer(lcm_dp_size=6, n_samples_per_prompt=4)
     with pytest.raises(ValueError, match="train_batch_size"):
         RayPPOTrainer._remove_tail_data(stub, list(range(2)))
+
+
+def test_empty_batch_passes_through():
+    # An empty batch shards evenly and is not the truncation failure above,
+    # so it keeps its previous behaviour of being returned unchanged.
+    stub = _stub_trainer(lcm_dp_size=6, n_samples_per_prompt=4)
+    assert RayPPOTrainer._remove_tail_data(stub, []) == []
