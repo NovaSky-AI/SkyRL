@@ -20,17 +20,12 @@
 # never got GPUs and we resubmit; if it failed with one, the tests really failed and
 # we report it as-is.
 #
-# A CLI call failing is NOT that signal either, and this is the subtle one. Every job
-# lookup goes through `_resolve_to_job_model`, which rewrites *any* exception out of
-# `get_job` into `RuntimeError: Job with name '<name>' was not found.` -- including
-# `ValueError: Rate limit exceeded (user scope)`, which the client raises with no
-# retry of its own whenever enough GPU workflows poll concurrently. A rate-limited
-# `job wait` therefore returns instantly, looking exactly like a cluster that died in
-# STARTING. So control-plane calls are retried with backoff here (`anyscale_retry`),
-# an unreadable state is never treated as a dead job, and -- because `job terminate`
-# rate-limits the same way -- a resubmit only happens after the previous job is
-# *confirmed* terminal. Fire-and-forget termination is how one H100 run ended up with
-# four clusters queued against the same scarce instance type at once.
+# A failed CLI call is not that signal either. `_resolve_to_job_model` rewrites any
+# exception out of `get_job` -- including the `ValueError: Rate limit exceeded (user
+# scope)` that concurrent GPU workflows provoke -- into `RuntimeError: Job with name
+# '<name>' was not found.` A rate-limited `job wait` returns instantly and looks just
+# like a cluster that died in STARTING. Hence the retries below, and the rule that we
+# only resubmit once the previous job is confirmed terminal.
 #
 # Usage: ci/submit_anyscale_job.sh <config-file> <job-name> <run-timeout-s> [start-timeout-s]
 #
@@ -44,7 +39,7 @@
 #   ANYSCALE_CLOUD           cloud to submit to (default sky-anyscale-aws-us-east-1)
 #   CAPACITY_MAX_ATTEMPTS    submissions before giving up (default 5)
 #   CAPACITY_RETRY_DELAY_S   sleep between attempts (default 300)
-#   ANYSCALE_API_ATTEMPTS    tries per control-plane call before it is inconclusive
+#   ANYSCALE_API_ATTEMPTS    tries per control-plane call (default 6)
 
 set -euo pipefail
 
@@ -75,10 +70,8 @@ UNKNOWN_POLL_LIMIT="${ANYSCALE_UNKNOWN_POLL_LIMIT:-10}"
 API_ERR_LOG="$(mktemp)"
 trap 'rm -f "$API_ERR_LOG"' EXIT
 
-# Run a control-plane command, retrying transient failures with exponential backoff.
-# The rate limit the CLI hits under concurrent CI advertises a retry-after of a few
-# seconds, so a handful of tries clears it. stdout is forwarded only on success --
-# callers parse it as JSON, so stderr is kept out of it.
+# Retry a control-plane call with exponential backoff; the rate limit advertises a
+# retry-after of a few seconds. Only stdout is forwarded, since callers parse it as JSON.
 anyscale_retry() {
     local out delay=5 i
     for ((i = 1; i <= API_ATTEMPTS; i++)); do
@@ -98,11 +91,9 @@ anyscale_retry() {
     return 1
 }
 
-# Echoes "<state> <run-count>" for a job. A run is created when the entrypoint is
-# submitted to a live cluster, so zero runs means provisioning never finished. Both
-# come from one status call: the decision below needs both, and halving the request
-# count is the difference between tripping the rate limit and not. Unreadable status
-# yields "UNKNOWN unknown" -- an answer of "we don't know", never "the job is gone".
+# Echoes "<state> <run-count>". A run is created once the entrypoint is submitted to a
+# live cluster, so zero runs means provisioning never finished. Both come from a single
+# status call to halve the request count. Unreadable status is "UNKNOWN unknown".
 job_status() {
     local json
     if ! json="$(anyscale_retry anyscale job status --cloud "$CLOUD" --name "$1" --json)"; then
@@ -154,11 +145,9 @@ entrypoint_ran() {
     fi
 }
 
-# Wait for a job to settle, resuming the wait when the CLI call -- not the job --
-# is what failed. `anyscale job wait` exits non-zero for a terminal state, for its
-# own timeout, and for a rate-limited lookup alike; only the job's actual state
-# tells them apart. Returns 0 if <target> was reached (empty target = any terminal
-# state), non-zero if the job settled elsewhere or the deadline passed.
+# Wait for a job to settle, resuming when the CLI call rather than the job is what
+# failed: `job wait` exits non-zero for a terminal state, its own timeout and a
+# rate-limited lookup alike. Returns 0 if <target> (empty = any terminal state) is hit.
 wait_for_state() {
     local name="$1" target="$2" timeout_s="$3"
     local deadline=$((SECONDS + timeout_s))
@@ -178,15 +167,10 @@ wait_for_state() {
         if is_terminal "$state"; then
             return 1
         fi
-        # STARTING/RUNNING (the wait call itself broke) or UNKNOWN (the control
-        # plane is unreachable). Either way the job is not known to be dead, so
-        # back off and keep waiting rather than abandoning a live cluster.
+        # The wait call broke (STARTING/RUNNING) or the control plane is unreachable
+        # (UNKNOWN). Neither means the job is dead, so keep waiting -- but bound the
+        # unreadable case so a down control plane can't hold us for the full timeout.
         if [[ "$state" == "UNKNOWN" ]]; then
-            # Bounded separately: a state we can read means real progress is being
-            # observed, but a control plane that stays unreadable would otherwise
-            # hold us here for the whole timeout. Give up on waiting instead --
-            # the caller still has to confirm the job is terminal before it can
-            # resubmit, so bailing early leaks nothing.
             unreadable=$((unreadable + 1))
             if ((unreadable >= UNKNOWN_POLL_LIMIT)); then
                 echo "Job ${name} state unreadable ${unreadable}x in a row; stopping the wait." >&2
@@ -200,9 +184,9 @@ wait_for_state() {
     done
 }
 
-# Drive a job to a terminal state, verifying that it got there. Required before any
-# resubmit: a `job wait` timeout leaves the job running -- it only stops the client
-# polling -- and `job terminate` can silently no-op under a rate limit.
+# Drive a job to a terminal state and verify it got there. Required before a resubmit:
+# a `job wait` timeout only stops the client polling, and `job terminate` can no-op
+# under a rate limit.
 ensure_terminal() {
     local name="$1" state i
     for ((i = 1; i <= TERMINATE_ATTEMPTS; i++)); do
@@ -251,9 +235,8 @@ for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     echo "treating this as a GPU capacity failure." >&2
 
     if ! ensure_terminal "$run_name"; then
-        echo "Could not confirm ${run_name} is terminated. Refusing to resubmit: a second" >&2
-        echo "cluster would compete for the same scarce instance type and run tests whose" >&2
-        echo "result nobody reads. Terminate it by hand if it is still alive." >&2
+        echo "Could not confirm ${run_name} is terminated; refusing to resubmit and" >&2
+        echo "leave a second cluster competing for the same instance type." >&2
         exit 1
     fi
 
