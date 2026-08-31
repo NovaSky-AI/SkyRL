@@ -53,8 +53,8 @@ class RayJaxBackendImpl:
         self.backend = JaxBackendImpl(self.base_model, self.config, self.process_id)
         logger.info(f"Worker {self.process_id} JaxBackendImpl initialized.")
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        self.backend.create_model(model_id, lora_config)
+    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+        self.backend.create_model(model_id, lora_config, model_role)
 
     def forward_backward(self, prepared_batch: types.PreparedModelPassBatch):
         return self.backend.forward_backward(prepared_batch)
@@ -71,8 +71,8 @@ class RayJaxBackendImpl:
     def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         self.backend.save_checkpoint(output_path, model_id)
 
-    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
-        self.backend.load_checkpoint(checkpoint_path, model_id)
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, load_optimizer: bool) -> None:
+        self.backend.load_checkpoint(checkpoint_path, model_id, load_optimizer)
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
         self.backend.save_sampler_checkpoint(output_path, model_id, persist)
@@ -155,8 +155,8 @@ class RayJaxBackend(AbstractBackend):
     def metrics(self) -> types.EngineMetrics:
         return ray.get(self.workers[0].get_metrics.remote())
 
-    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        ray.get([w.create_model.remote(model_id, lora_config) for w in self.workers])
+    def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
+        ray.get([w.create_model.remote(model_id, lora_config, model_role) for w in self.workers])
 
     def delete_model(self, model_id: str) -> None:
         ray.get([w.delete_model.remote(model_id) for w in self.workers])
@@ -182,8 +182,8 @@ class RayJaxBackend(AbstractBackend):
         results = ray.get([w.sample.remote(prepared_batch) for w in self.workers])
         return results[0]
 
-    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
-        ray.get([w.load_checkpoint.remote(checkpoint_path, model_id) for w in self.workers])
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, load_optimizer: bool) -> None:
+        ray.get([w.load_checkpoint.remote(checkpoint_path, model_id, load_optimizer) for w in self.workers])
 
     def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         ray.get([w.save_checkpoint.remote(output_path, model_id) for w in self.workers])

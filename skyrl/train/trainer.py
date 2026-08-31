@@ -40,6 +40,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     LOSSES_WITHOUT_OLD_LOGPROBS,
     AdaptiveKLController,
     FixedKLController,
+    PolicyLossType,
     apply_loss_reduction_to_advantages_minibatch,
     compute_approx_kl,
     get_kl_controller,
@@ -55,6 +56,7 @@ from skyrl.train.dataset.preprocess import (
     compute_prompt_boundaries,
     compute_prompt_mini_batch_boundaries,
     convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
 )
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
 from skyrl.train.generators.base import (
@@ -490,6 +492,11 @@ class RayPPOTrainer:
                         # 10. Prepare weights for sampling
                         with Timer("sync_weights", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
+                        # `sync_weights` above is the full bracket: it also pauses and
+                        # resumes generation, which under vLLM DP costs seconds of
+                        # coordinator quiesce that is not weight-sync work. The
+                        # dispatch reports the transfer on its own alongside it.
+                        self.all_timings.update(self.dispatch.get_timing_metrics())
 
                     # 11. set logs
                     logger.info(status)
@@ -581,6 +588,13 @@ class RayPPOTrainer:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
+
+        # Drain any in-flight async checkpoint write before teardown. Unconditional:
+        # a save may have happened outside the periodic path. No-op when nothing is pending.
+        self.dispatch.finalize_pending_saves("policy")
+        if self.has_critic:
+            self.dispatch.finalize_pending_saves("critic")
+
         if self._vllm_metrics_scraper is not None:
             await self._vllm_metrics_scraper.aclose()
 
@@ -863,9 +877,7 @@ class RayPPOTrainer:
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
-        rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
-            "rollout_expert_indices", None
-        )
+        rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
@@ -889,7 +901,7 @@ class RayPPOTrainer:
             rollout_logprobs_tensor,
             rollout_expert_indices_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
-            self.tokenizer,
+            self.tokenizer.pad_token_id,
             prompt_ids,
             response_ids,
             rewards,
@@ -898,6 +910,12 @@ class RayPPOTrainer:
             rollout_expert_indices,
             max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
         )
+        router_padding_mask = None
+        if rollout_expert_indices is not None:
+            router_padding_mask = make_router_padding_mask(
+                attention_masks_tensor,
+                [len(indices) for indices in rollout_expert_indices],
+            )
 
         # sanity check for off_policy_correction
         off_policy_correction = self.cfg.trainer.algorithm.off_policy_correction
@@ -919,6 +937,7 @@ class RayPPOTrainer:
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
+                "router_padding_mask": router_padding_mask,
                 "pixel_values": pixel_values,
                 "image_grid_thw": image_grid_thw,
             },
@@ -1112,16 +1131,16 @@ class RayPPOTrainer:
 
         Expects:
             - `["sequences"]`: Integer[torch.Tensor, "batch_size seqlen"]
-            - `["response_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
-            - `["loss_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
-            - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["response_mask"]`: Integer[torch.Tensor, "batch_size response_len"]
+            - `["loss_mask"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["rewards"]`: Float[torch.Tensor, "batch_size response_len"]
             - `.metadata["uids"]`: List[str]
             - `.metadata["is_last_step"]`: List[bool] for step-wise training
 
         Adds:
-            - `["advantages"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["returns"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["advantages"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["returns"]`: Float[torch.Tensor, "batch_size response_len"]
         """
         token_level_rewards = data["rewards"]
 
@@ -1137,11 +1156,11 @@ class RayPPOTrainer:
             # Shapes:
             #   traj_ids, (batch_size,):         trajectory id per step (cumsum of shifted is_last_step)
             #   last_step_advantages/returns,
-            #       (num_traj, seqlen):          scalar advantage/return per trajectory at every position
+            #       (num_traj, response_len):          scalar advantage/return per trajectory at every position
             #   last_step_advantages/returns[traj_ids],
-            #       (batch_size, seqlen):        broadcast to every step of the owning trajectory
+            #       (batch_size, response_len):        broadcast to every step of the owning trajectory
             #   response_mask_float,
-            #       (batch_size, seqlen):        per-step response mask
+            #       (batch_size, response_len):        per-step response mask
             last_step_response_mask = data["response_mask"][is_last_step]
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards[is_last_step],
@@ -1268,10 +1287,22 @@ class RayPPOTrainer:
         Safe only when the loss optimizes against rollout logprobs and nothing else reads the
         old logprobs: rollout logprobs are present (these losses fall back to old logprobs
         without them), the KL reward penalty is off, and off-policy correction is disabled.
+
+        `cispo` is anchor-dependent: with `cispo.cispo_anchor="rollout"` it optimizes against the
+        rollout logprobs (like `rollout_is`) and never reads the old logprobs, so the forward can
+        be skipped; with the default `"old"` anchor it needs them and must not be skipped. The check
+        is anchor-aware here rather than a static membership in LOSSES_WITHOUT_OLD_LOGPROBS, which is
+        keyed by policy_loss_type and cannot distinguish the two CISPO anchors.
         """
         algorithm = self.cfg.trainer.algorithm
+        if algorithm.policy_loss_type == PolicyLossType.CISPO:
+            # CISPO reads old logprobs only with the default "old" anchor; "rollout" optimizes against
+            # the rollout logprobs (like rollout_is) and never touches them.
+            loss_without_old_logprobs = algorithm.cispo.cispo_anchor == "rollout"
+        else:
+            loss_without_old_logprobs = algorithm.policy_loss_type in LOSSES_WITHOUT_OLD_LOGPROBS
         return (
-            algorithm.policy_loss_type in LOSSES_WITHOUT_OLD_LOGPROBS
+            loss_without_old_logprobs
             and training_input.get("rollout_logprobs", None) is not None
             and not algorithm.use_kl_in_reward
             and not off_policy_correction_enabled(algorithm.off_policy_correction)
@@ -1293,13 +1324,15 @@ class RayPPOTrainer:
             - `.metadata["response_length"]`: Int
 
         Adds:
-            - `["base_action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["base_action_log_probs"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["action_log_probs"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
         """
         fwd_keys = ["sequences", "attention_mask"]
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")
+        if training_input.get("router_padding_mask") is not None:
+            fwd_keys.append("router_padding_mask")
         if training_input.get("pixel_values") is not None:
             fwd_keys.append("pixel_values")
         if training_input.get("image_grid_thw") is not None:
@@ -1390,7 +1423,7 @@ class RayPPOTrainer:
 
         # single batched computation
         with torch.no_grad():
-            kl: Float[torch.Tensor, "batch_size seqlen"] = compute_approx_kl(  # type: ignore
+            kl: Float[torch.Tensor, "batch_size response_len"] = compute_approx_kl(  # type: ignore
                 action_log_probs,
                 base_action_log_probs,
                 loss_mask=loss_masks_all,

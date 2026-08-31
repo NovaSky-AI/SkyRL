@@ -2,6 +2,7 @@
 uv run --isolated --extra dev pytest -s tests/train/test_config.py
 """
 
+import pathlib
 import typing
 from dataclasses import dataclass, field
 from enum import Enum
@@ -12,12 +13,23 @@ from omegaconf import OmegaConf
 
 from skyrl.train.config.config import (
     BaseConfig,
+    DeltaWeightSyncConfig,
     SkyRLTrainConfig,
+    TrainerConfig,
     _resolve_class_type,
     build_nested_dataclass,
+    overrides_dict_to_dotlist,
 )
 from skyrl.train.utils.utils import validate_cfg, validate_inference_engine_cfg
 from tests.train.util import example_dummy_config
+
+
+def _get_nested_attr(cfg, dotted_path: str):
+    """Resolve a dot-notation config path to its value."""
+    node = cfg
+    for part in dotted_path.split("."):
+        node = getattr(node, part)
+    return node
 
 
 def _make_validated_test_config():
@@ -126,6 +138,20 @@ def test_cli_overrides_empty_args():
     cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
     assert cfg.trainer.seed == 42
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("vocab_entropy_chunk_size", -1),
+        ("vocab_entropy_chunk_size", True),
+        ("vocab_entropy_chunk_memory_mb", 0),
+        ("vocab_entropy_chunk_memory_mb", True),
+    ],
+)
+def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value):
+    with pytest.raises(ValueError, match=field_name):
+        TrainerConfig(**{field_name: value})
 
 
 def test_cli_overrides_plus_prefix_rejected():
@@ -367,6 +393,43 @@ def test_valid_pd_role_init_kwargs_passes():
     validate_inference_engine_cfg(cfg)
 
 
+def test_offload_kv_for_weight_sync_rejects_colocated():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    with pytest.raises(AssertionError, match="non-colocated weight sync only"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_offload_kv_for_weight_sync_rejects_lora():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    cfg.trainer.policy.model.lora.rank = 8
+    with pytest.raises(AssertionError, match="does not support LoRA"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_offload_kv_for_weight_sync_sync_trainer_ok():
+    # Non-fully-async (synchronous trainer) is supported: plain sleep, no in-flight.
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.fully_async.enabled = False
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("clear_kv_cache", [False, True])
+def test_offload_kv_for_weight_sync_async_ok(clear_kv_cache):
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+    cfg.trainer.fully_async.enabled = True
+    cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = clear_kv_cache
+    # Both clear_kv_cache settings are supported now.
+    validate_inference_engine_cfg(cfg)
+
+
 def test_temperature_propagation():
     """Test that temperature is copied from generator to algorithm config in __post_init__."""
     cfg = SkyRLTrainConfig.from_cli_overrides(["generator.sampling_params.temperature=0.7"])
@@ -447,6 +510,191 @@ def test_fake_int4_qat_requires_unmerged_lora_sync():
                 "trainer.policy.model.fake_int4_qat.enabled=true",
             ]
         )
+
+
+class TestOverridesDictToDotlist:
+    """``overrides_dict_to_dotlist`` emits values that ``OmegaConf.from_cli`` parses
+    back to the same Python object. See https://github.com/NovaSky-AI/SkyRL/issues/1567.
+    """
+
+    @pytest.mark.parametrize(
+        ("value", "expected_arg"),
+        [
+            pytest.param(None, "k=null", id="none"),
+            pytest.param(True, "k=true", id="bool-true"),
+            pytest.param(False, "k=false", id="bool-false"),
+            pytest.param(7, "k=7", id="int"),
+            pytest.param(1.5, "k=1.5", id="float"),
+            pytest.param("hello", 'k="hello"', id="str"),
+            pytest.param("null", 'k="null"', id="str-null"),
+            pytest.param("", 'k=""', id="str-empty"),
+            pytest.param("a,b", 'k="a,b"', id="str-comma"),
+            pytest.param("a: b", 'k="a: b"', id="str-colon"),
+            pytest.param(["a", None], 'k=["a", null]', id="list"),
+            pytest.param({"a": 1}, 'k={"a": 1}', id="dict"),
+            # Non-ASCII stays literal: \\uXXXX escaping splits astral-plane
+            # characters into surrogate halves that OmegaConf decodes separately.
+            pytest.param("café", 'k="café"', id="non-ascii-bmp"),
+            pytest.param("run-\U0001f600", 'k="run-\U0001f600"', id="non-ascii-astral"),
+        ],
+    )
+    def test_serialization(self, value, expected_arg):
+        assert overrides_dict_to_dotlist({"k": value}) == [expected_arg]
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            True,
+            7,
+            1.5,
+            "hello",
+            "null",
+            "true",
+            "",
+            "1e5",
+            "on",
+            "a,b",
+            "a: b",
+            "[a]",
+            "{a: b}",
+            'say "hi"',
+            "a\nb",
+            "a\\b",
+            "café",
+            "run-\U0001f600",
+            ["http://a:1", "http://b:2"],
+            [],
+            {"a": 1, "b": "x"},
+            {},
+        ],
+    )
+    def test_values_round_trip_through_omegaconf(self, value):
+        (arg,) = overrides_dict_to_dotlist({"k": value})
+        parsed = OmegaConf.to_container(OmegaConf.from_cli([arg]), resolve=False)["k"]
+        assert parsed == value
+        assert type(parsed) is type(value)
+        if isinstance(parsed, str):
+            # Lone surrogates only surface on encode.
+            parsed.encode("utf-8")
+
+    def test_multiple_keys_preserve_order(self):
+        assert overrides_dict_to_dotlist({"a": 1, "b": None}) == ["a=1", "b=null"]
+
+    def test_non_json_serializable_values_fall_back_to_str(self):
+        assert overrides_dict_to_dotlist({"k": pathlib.Path("/tmp/x")}) == ["k=/tmp/x"]
+
+    def test_circular_reference_falls_back_to_str(self):
+        value = {}
+        value["self"] = value
+        (arg,) = overrides_dict_to_dotlist({"k": value})
+        assert arg.startswith("k={")
+
+
+class TestCliOverridesFromDict:
+    """Dict overrides round-trip by type rather than through YAML re-parsing.
+
+    The dict path serializes values into ``key=value`` strings for
+    ``OmegaConf.from_cli``, which re-parses each value with YAML scalar rules.
+    See https://github.com/NovaSky-AI/SkyRL/issues/1567.
+    """
+
+    def test_none_values_stay_none(self):
+        """``None`` values arrive as ``None``, not the string ``"None"``."""
+        cfg = SkyRLTrainConfig.from_cli_overrides(
+            {
+                "generator.inference_engine.external_server_urls": None,
+                "generator.inference_engine.external_proxy_url": None,
+                "generator.inference_engine.served_model_name": None,
+            }
+        )
+        ie_cfg = cfg.generator.inference_engine
+        assert ie_cfg.external_server_urls is None
+        assert ie_cfg.external_proxy_url is None
+        assert ie_cfg.served_model_name is None
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "null",  # YAML null
+            "true",  # YAML bool
+            "false",
+            "",  # empty scalar -> YAML null
+            "[not-a-list]",  # YAML flow sequence
+            "{not: a-dict}",  # YAML flow mapping
+            "name: with colon",  # YAML block mapping
+            "1e5",  # YAML float
+            "on",  # YAML 1.1 bool
+        ],
+    )
+    def test_string_values_stay_strings(self, value):
+        """A ``str`` value stays a ``str``, even when it looks like YAML."""
+        cfg = SkyRLTrainConfig.from_cli_overrides({"generator.inference_engine.served_model_name": value})
+        assert cfg.generator.inference_engine.served_model_name == value
+
+    def test_scalar_and_container_values_keep_their_types(self):
+        cfg = SkyRLTrainConfig.from_cli_overrides(
+            {
+                "generator.inference_engine.max_num_seqs": 512,
+                "generator.sampling_params.temperature": 0.7,
+                "generator.inference_engine.enforce_eager": True,
+                "generator.inference_engine.enable_prefix_caching": False,
+                "generator.inference_engine.external_server_urls": ["http://a:1", "http://b:2"],
+                "generator.inference_engine.engine_init_kwargs": {"a": 1, "b": "x"},
+                "trainer.policy.model.path": "Qwen/Qwen2.5-1.5B-Instruct",
+            }
+        )
+        ie_cfg = cfg.generator.inference_engine
+        assert ie_cfg.max_num_seqs == 512
+        assert cfg.generator.sampling_params.temperature == 0.7
+        assert ie_cfg.enforce_eager is True
+        assert ie_cfg.enable_prefix_caching is False
+        assert ie_cfg.external_server_urls == ["http://a:1", "http://b:2"]
+        assert ie_cfg.engine_init_kwargs == {"a": 1, "b": "x"}
+        assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
+
+    def test_non_json_serializable_values_fall_back_to_str(self):
+        """Values ``json.dumps`` cannot handle serialize via ``str()``."""
+        cfg = SkyRLTrainConfig.from_cli_overrides({"trainer.export_path": pathlib.Path("/tmp/export")})
+        assert cfg.trainer.export_path == "/tmp/export"
+
+    @pytest.mark.parametrize(
+        ("key", "dict_value", "dotlist_arg", "expected"),
+        [
+            pytest.param(
+                "generator.inference_engine.external_server_urls",
+                None,
+                "generator.inference_engine.external_server_urls=null",
+                None,
+                id="none",
+            ),
+            pytest.param(
+                "generator.inference_engine.served_model_name",
+                "null",
+                "generator.inference_engine.served_model_name='null'",
+                "null",
+                id="str-null",
+            ),
+            pytest.param(
+                "generator.inference_engine.external_server_urls",
+                ["http://a:1"],
+                "generator.inference_engine.external_server_urls=['http://a:1']",
+                ["http://a:1"],
+                id="list",
+            ),
+        ],
+    )
+    def test_dict_and_dotlist_paths_agree(self, key, dict_value, dotlist_arg, expected):
+        """A dict override matches the dotlist spelling of the same value."""
+        from_dict = SkyRLTrainConfig.from_cli_overrides({key: dict_value})
+        from_list = SkyRLTrainConfig.from_cli_overrides([dotlist_arg])
+        assert _get_nested_attr(from_dict, key) == expected
+        assert _get_nested_attr(from_list, key) == expected
+
+    def test_plus_prefix_rejected_from_dict(self):
+        """``'+'``-prefixed keys are rejected on the dict path."""
+        with pytest.raises(ValueError, match="The '\\+' prefix"):
+            SkyRLTrainConfig.from_cli_overrides({"+new_field": "value"})
 
 
 class TestTrainerUseSamplePackingAlias:
@@ -643,3 +891,15 @@ class TestTorchProfilerConfigValidation:
         cfg.trainer.policy.torch_profiler_config.save_path = "/tmp/skyrl_prof_test"
         cfg.trainer.policy.fsdp_config.cpu_offload = True
         validate_cfg(cfg)
+
+
+class TestDeltaWeightSyncConfig:
+    """Tests for `DeltaWeightSyncConfig`"""
+
+    def test_delta_weight_sync_defaults(self):
+        cfg = DeltaWeightSyncConfig(sync_dir="my_sync_dir", publish_staging_dir=None, local_checkpoint_dir=None)
+        assert cfg.publish_staging_dir is not None
+        assert cfg.local_checkpoint_dir is not None
+        # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
+        assert "my_sync_dir" in cfg.publish_staging_dir
+        assert "my_sync_dir" in cfg.local_checkpoint_dir

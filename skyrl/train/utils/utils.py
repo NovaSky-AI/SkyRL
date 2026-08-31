@@ -194,7 +194,11 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
-    assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
+    assert ie_cfg.weight_sync_backend in {
+        "nccl",
+        "delta",
+        "sharded_rdt",
+    }, "only nccl, delta and sharded_rdt are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
@@ -205,6 +209,15 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
+        # Megatron's fused top-k returns before compute_topk consults router_replay
+        # (moe_utils.topk_routing_with_score_function), so the replayed experts are
+        # silently discarded while R3 still pays its full cost. Refuse the pair rather
+        # than train against routing that does not match the rollout.
+        if config.megatron_config.moe_enable_routing_replay:
+            assert not config.megatron_config.transformer_config_kwargs.get("moe_router_fusion"), (
+                f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
+                "moe_router_fusion=True -- the fused router bypasses replay. Set moe_router_fusion=False."
+            )
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert (
@@ -432,6 +445,14 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
 
+        # delta weight sync is not yet supported
+        # TODO (sumanthrh): Delta weight sync should be naturally supported for `merge_lora=true`, we should
+        # test and enable this in a follow-up. `merge_lora=false` needs bookkeeping of per-LoRA safetensors
+        # on the inference side.
+        assert (
+            cfg.generator.inference_engine.weight_sync_backend != "delta"
+        ), "Delta weight sync is not yet supported for LoRA"
+
     # Validate placement
     if cfg.trainer.placement.colocate_all:
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -590,6 +611,20 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         raise ValueError(
             "Each inference engine DP rank (TP*PP workers) must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
         )
+
+    # Validate the non-colocated sleep-during-weight-sync option.
+    if ie_cfg.offload_kv_for_weight_sync:
+        assert not cfg.trainer.placement.colocate_all, (
+            "offload_kv_for_weight_sync is for non-colocated weight sync only; "
+            "colocated mode already sleeps the engines and wakes weights/KV cache around sync."
+        )
+        assert cfg.trainer.policy.model.lora.rank == 0, (
+            "offload_kv_for_weight_sync does not support LoRA weight sync "
+            "(the in-place LoRA adapter swap path does not go through the sleep/wake broadcast)."
+        )
+        assert (
+            ie_cfg.weight_sync_backend != "delta"
+        ), "Offloading KV cache during weight sync is not supported for delta weight sync"
 
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
@@ -796,10 +831,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
-    if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
-        logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
-        env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
-
     # Forward uv's project-environment selection to the workers. Ray's uv runtime-env hook makes each
     # worker re-run `uv run ... --extra <backend>`, and that subprocess must resolve to the SAME venv
     # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a
@@ -823,13 +854,14 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
             env_vars[var_name] = value
 
-    # Health-check timeout for the inference server actor. Forwarded so `VLLMServerActor.start`
-    # sees the override.
-    if health_timeout := os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"):
-        logger.info(
-            f"Exporting `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` to ray runtime env: {health_timeout}"
-        )
-        env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
+    # Forward any SKYRL_* overrides set in the launching shell (e.g.
+    # SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S for very large models
+    # whose weight load exceeds the 600s default) — skyrl.env_vars reads them at
+    # import time in every process, so they must ride the runtime env.
+    forwarded = {k: v for k, v in os.environ.items() if k.startswith("SKYRL_") and k not in env_vars}
+    if forwarded:
+        logger.info(f"Exporting SKYRL_* overrides to ray runtime env: {sorted(forwarded)}")
+    env_vars.update(forwarded)
 
     return env_vars
 

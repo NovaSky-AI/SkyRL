@@ -33,6 +33,22 @@ Prefill-Decode disaggregation:
   kwargs (e.g. a different `all2all_backend`, or per-role `kv_role`) applied on top of the base args by
   `get_pd_cli_args`. They are **mutually exclusive** with `engine_init_kwargs` and require `enable_pd=true`; when used,
   both must be set and each must carry its own `kv_transfer_config` (enforced in `validate_inference_engine_cfg`).
+- **Troubleshooting — configuring Mooncake GPU memory registration.** `WITH_NVIDIA_PEERMEM` selects how Mooncake pins
+  KV-cache GPU memory. Decide with:
+
+  ```
+  lsmod | grep nvidia_peermem                          # is peer-memory available?
+  cat /sys/class/infiniband/*/ports/1/link_layer       # InfiniBand | Ethernet (= RoCE)
+  ```
+
+  1. **`nvidia_peermem` loaded** (IB or RoCE alike) → leave the default. Mooncake registers via `ibv_reg_mr()`.
+  2. **`nvidia_peermem` absent or unloadable** — module not shipped, or the container lacks `CAP_SYS_MODULE`
+     (e.g. GKE/COS nodes, driver 580+) → set **`WITH_NVIDIA_PEERMEM=0`** to use the dmabuf path
+     (`cuMemGetHandleForAddressRange` + `ibv_reg_dmabuf_mr`). Requires a GPU/driver with dma-buf support.
+  3. **Got it wrong?** Symptom is a *silent hang, not an error*: hundreds of
+     `Failed to register memory ...: Bad address [14]` at engine startup, servers still report healthy, then the first
+     request stalls forever with `Memory region not registered by any active device(s)`.
+
 
 ## Key Config Knobs
 

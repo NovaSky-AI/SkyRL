@@ -10,7 +10,15 @@ from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap impo
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+
+# Importing the weight_sync package registers the sharded_rdt engine into vLLM's
+# factory and relaxes WeightTransferConfig.backend so backend="sharded_rdt"
+# validates below. This must run on the driver before the WeightTransferConfig
+# is constructed; the import above already triggers it, this is just explicit.
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
+    rdt_vllm_register,  # noqa: F401,E402
+)
 from skyrl.train.config import (
     InferenceEngineConfig,
     SkyRLTrainConfig,
@@ -97,7 +105,9 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         max_num_batched_tokens=ie_cfg.max_num_batched_tokens,
         enable_expert_parallel=ie_cfg.expert_parallel_size > 1,
         max_num_seqs=ie_cfg.max_num_seqs,
-        enable_sleep_mode=cfg.trainer.placement.colocate_all,
+        # Sleep mode is required for colocated (offload/backload each step) and also when
+        # non-colocated weight sync opts into offloading the KV cache around the sync.
+        enable_sleep_mode=cfg.trainer.placement.colocate_all or ie_cfg.offload_kv_for_weight_sync,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         weight_transfer_config=WeightTransferConfig(
             backend=get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
@@ -120,6 +130,17 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     )
     for key, value in overrides.items():
         setattr(args, key, value)
+
+    # The sharded_rdt backend pulls weight slices from a named trainer actor over
+    # Ray's NIXL tensor transport, so the inference workers MUST be Ray actors.
+    if get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all) == "sharded_rdt":
+        if cfg.trainer.placement.colocate_all:
+            raise ValueError(
+                "weight_sync_backend='sharded_rdt' requires non-colocated training/"
+                "inference (placement.colocate_all=false); workers pull from a "
+                "separate named trainer actor over NIXL."
+            )
+        args.distributed_executor_backend = "ray"
 
     # Enable LoRA on the inference engine only when the trainer will sync
     # LoRA adapters (not merged weights).  Megatron merges by default

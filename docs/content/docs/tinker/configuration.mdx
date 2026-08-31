@@ -2,10 +2,6 @@
 title: "Configuration"
 ---
 
-<Callout type="warn">
-The backend configuration organization is undergoing a migration to simplify and reorganize these options. The keys and structure described below may change in a future release.
-</Callout>
-
 This page describes how to configure the SkyRL Tinker backend, including GPU allocation, training parameters, and inference settings.
 
 When spinning up the Tinker server, the `--backend-config` flag accepts a JSON dictionary of dot-notation overrides that are applied to the underlying SkyRL-Train configuration. For example:
@@ -16,7 +12,9 @@ uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
     --backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.inference_engine.num_engines": 4}'
 ```
 
-Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/configuration/config) can be overridden this way (see [`SkyRLTrainConfig` in `skyrl/train/config/config.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py) for all available keys and defaults). The most commonly used options are listed below.
+Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/api-ref/skyrl/config) can be overridden this way (see [`SkyRLTrainConfig` in `skyrl/train/config/config.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py) for all available keys and defaults). The most commonly used options are listed below.
+
+JSON types are preserved exactly, so use JSON literals rather than strings: `null` for an unset field, `true`/`false` for booleans, and `4` rather than `"4"` for numbers.
 
 ### GPU and Parallelism
 
@@ -75,4 +73,4 @@ See [Multi-tenancy](./multi_tenancy) for the full operator contract and SFT/RL q
 
 ## Full Config Reference
 
-For the complete list of configuration options, see the [SkyRL-Train configuration docs](https://docs.skyrl.ai/docs/configuration/config) and the [`SkyRLTrainConfig` dataclass](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py).
+For the complete list of configuration options, see the [SkyRL-Train configuration API reference](https://docs.skyrl.ai/docs/api-ref/skyrl/config) and the [`SkyRLTrainConfig` dataclass](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py).
