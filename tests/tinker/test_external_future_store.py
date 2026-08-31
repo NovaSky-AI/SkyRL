@@ -532,6 +532,27 @@ async def test_persistence_failure_is_reported_to_waiter(future_store, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_create_future_accepts_request_id_zero_after_negative_rows(future_store):
+    # SQLite assigns max(rowid)+1, so when the table holds only the store's
+    # negative request_ids the first autoincremented FutureDB row gets id 0.
+    store, engine, _ = future_store
+    request_id = store.create("model_a", _sample_input(1))
+    assert request_id < 0
+    await store.complete(request_id, types.SampleOutput(sequences=[]), RequestStatus.COMPLETED)
+    await store.flush()
+
+    async with AsyncSession(engine) as session:
+        created_id = await api.create_future(
+            session,
+            types.RequestType.SAMPLE,
+            model_id=None,
+            request_data=_sample_input(2),
+        )
+        await session.commit()
+    assert created_id == 0
+
+
+@pytest.mark.asyncio
 async def test_retrieve_future_serializes_in_memory_result_as_proto(future_store):
     from tinker import SampleResponse
     from tinker.proto.response_conv import deserialize_proto_response

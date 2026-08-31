@@ -451,7 +451,7 @@ async def create_future(
         if request_id is None:
             raise
         return request_id
-    assert future_db.request_id
+    assert future_db.request_id is not None
     return future_db.request_id
 
 
