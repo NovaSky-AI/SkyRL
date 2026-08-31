@@ -175,12 +175,12 @@ python -m skyrl.train.main_sft [key=value overrides...]
 See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI entrypoint and
 [`skyrl/train/sft_trainer.py`](../../../skyrl/train/sft_trainer.py) for the full implementation.
 
-## Minibatch packing (controller-level FFD, Megatron only)
+## Minibatch packing (controller-level MFFD, Megatron only)
 
 When `use_sequence_packing=true`, `SFTTrainer` collates with
 `PackedDataCollator` instead of `DefaultCollator`. Every training step:
 
-1. The controller's collator runs FFD bin-packing over the global
+1. The controller's collator runs MFFD bin-packing over the global
    mini-batch using `max_length` as the bin capacity.
 2. The bin count is forced to a multiple of `dp_size` via empty-bin
    padding (`min_bin_count`/`bin_count_multiple` knobs in

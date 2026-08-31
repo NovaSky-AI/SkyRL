@@ -1,4 +1,4 @@
-"""Unit tests for the FFD bin-packing module.
+"""Unit tests for the bin-packing module.
 
 Run with:
   uv run --extra dev -- pytest tests/backends/skyrl_train/distributed/test_bin_packing.py
@@ -8,6 +8,7 @@ import pytest
 
 from skyrl.train.dataset.bin_packing import (
     FirstFitDecreasing,
+    ModifiedFirstFitDecreasing,
     PackingStrategy,
     make_seq_packer,
 )
@@ -97,6 +98,39 @@ class TestFirstFitDecreasing:
             FirstFitDecreasing(bin_capacity=100, min_bin_count=5).pack([10, 20])
 
 
+class TestModifiedFirstFitDecreasing:
+    def test_matches_mffd_phases(self):
+        packer = ModifiedFirstFitDecreasing(bin_capacity=100)
+
+        assert packer.pack([60, 55, 45, 40, 30, 25, 20, 10, 5]) == [
+            [0, 3],
+            [1, 2],
+            [4, 5, 6, 7, 8],
+        ]
+
+    def test_deterministic_and_preserves_all_indices(self):
+        lengths = [55, 48, 34, 31, 29, 22, 16, 9, 7, 4]
+        packer = ModifiedFirstFitDecreasing(bin_capacity=100)
+
+        first = packer.pack(lengths)
+        second = packer.pack(lengths)
+
+        assert first == second
+        assert sorted(index for bin_indices in first for index in bin_indices) == list(range(len(lengths)))
+        assert all(sum(lengths[index] for index in bin_indices) <= 100 for bin_indices in first)
+
+    def test_leftovers_use_first_fit_not_least_loaded(self):
+        packer = ModifiedFirstFitDecreasing(bin_capacity=100)
+
+        bins = packer.pack([14, 91, 25, 37, 33, 22, 34, 99, 30])
+
+        assert bins == [[7], [1], [3, 6, 2], [4, 8, 5, 0]]
+
+    def test_rejects_nonpositive_lengths(self):
+        with pytest.raises(ValueError, match="sequence lengths must be positive"):
+            ModifiedFirstFitDecreasing(bin_capacity=100).pack([0])
+
+
 class TestMakeSeqPackerFactory:
     def test_enum_value(self):
         packer = make_seq_packer(PackingStrategy.FIRST_FIT_DECREASING, bin_capacity=100)
@@ -109,6 +143,11 @@ class TestMakeSeqPackerFactory:
     def test_string_case_insensitive(self):
         packer = make_seq_packer("FIRST_FIT_DECREASING", bin_capacity=100)
         assert isinstance(packer, FirstFitDecreasing)
+
+    def test_modified_first_fit_decreasing(self):
+        packer = make_seq_packer(PackingStrategy.MODIFIED_FIRST_FIT_DECREASING, bin_capacity=100)
+
+        assert isinstance(packer, ModifiedFirstFitDecreasing)
 
     def test_unknown_algorithm(self):
         with pytest.raises(ValueError, match="Unknown packing algorithm"):
