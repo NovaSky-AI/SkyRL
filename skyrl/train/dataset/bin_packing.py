@@ -26,8 +26,6 @@ from abc import ABC, abstractmethod
 from bisect import bisect_left
 from typing import List, Optional, Tuple
 
-import numpy as np
-
 
 class PackingStrategy(enum.Enum):
     """Supported sequence packing algorithms."""
@@ -306,22 +304,17 @@ class ModifiedFirstFitDecreasing(SeqPacker):
 
         # MFFD requires true first-fit placement in bin creation order.
         leftover_bins: List[List[Tuple[int, int]]] = []
-        leftover_bin_lengths = np.empty(len(remaining_items), dtype=np.int64)
+        leftover_bin_lengths: List[int] = []
         for item in remaining_items:
             size = item[1]
-            bin_count = len(leftover_bins)
-            if bin_count:
-                fitting_bins = np.flatnonzero(leftover_bin_lengths[:bin_count] <= self.bin_capacity - size)
+            for bin_index, bin_length in enumerate(leftover_bin_lengths):
+                if bin_length + size <= self.bin_capacity:
+                    leftover_bins[bin_index].append(item)
+                    leftover_bin_lengths[bin_index] += size
+                    break
             else:
-                fitting_bins = np.empty(0, dtype=np.int64)
-
-            if fitting_bins.size:
-                bin_index = int(fitting_bins[0])
-                leftover_bins[bin_index].append(item)
-                leftover_bin_lengths[bin_index] += size
-            else:
-                leftover_bin_lengths[bin_count] = size
                 leftover_bins.append([item])
+                leftover_bin_lengths.append(size)
         bins.extend(leftover_bins)
 
         return [[index for index, _ in bin_items] for bin_items in bins if bin_items]
