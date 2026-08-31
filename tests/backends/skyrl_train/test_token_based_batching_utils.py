@@ -12,6 +12,15 @@ from typing import List
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.packed_tensor import (
+    PackedTensor,
+    cu_seqlens_from_lengths,
+)
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_PADDING,
+    SAMPLE_SUPPORT_TORCH_DTYPE,
+)
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     TokenBasedBatchIterator,
     get_microbatch_iterator,
@@ -199,17 +208,72 @@ class TestTokenBasedBatchIterator:
         # Padding rows must not contribute to the loss.
         assert padding["loss_mask"].sum().item() == 0
 
+    def _add_packed_side_channels(self, batch: TrainingInputBatch) -> None:
+        """Attach both packed side channels: routes over real tokens, support over responses."""
+        batch["rollout_expert_indices"] = PackedTensor(
+            torch.full((8, 2, 3), 7, dtype=torch.int16),
+            cu_seqlens_from_lengths([4, 4]),
+        )
+        batch["router_padding_mask"] = torch.zeros((2, 4), dtype=torch.bool)
+        batch[SAMPLE_SUPPORT_FIELD] = PackedTensor(
+            torch.full((4, 5), 11, dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
+            cu_seqlens_from_lengths([2, 2]),
+        )
+
     def test_padding_microbatch_uses_unique_dummy_routes(self):
         batch = self._make_batch([4, 4], num_actions=2)
-        batch["rollout_expert_indices"] = torch.full((2, 4, 2, 3), 7, dtype=torch.int16)
-        batch["router_padding_mask"] = torch.zeros((2, 4), dtype=torch.bool)
+        self._add_packed_side_channels(batch)
         iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)
 
         padding = iterator._create_padding_microbatch()
 
-        expected = torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(padding["rollout_expert_indices"])
-        assert torch.equal(padding["rollout_expert_indices"], expected)
+        padded_routes = padding["rollout_expert_indices"]
+        assert padded_routes.sequence_lengths.tolist() == [1]
+        expected = torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(padded_routes.values)
+        assert torch.equal(padded_routes.values, expected)
         assert torch.all(padding["router_padding_mask"])
+
+    def test_padding_microbatch_sample_support_holds_no_response_rows(self):
+        """A dummy row attends one token but generates no response."""
+        batch = self._make_batch([4, 4], num_actions=2)
+        self._add_packed_side_channels(batch)
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)
+
+        padding = iterator._create_padding_microbatch()
+
+        padded_support = padding[SAMPLE_SUPPORT_FIELD]
+        assert len(padded_support) == 1
+        assert padded_support.sequence_lengths.tolist() == [0]
+        assert padded_support.values.shape == (0, 5)
+        assert padded_support.dtype == SAMPLE_SUPPORT_TORCH_DTYPE
+        assert padding["rollout_expert_indices"].sequence_lengths.tolist() == [1]
+
+    def test_microbatch_selection_gathers_packed_sample_support_segments(self):
+        batch = self._make_batch([4, 2], num_actions=2)
+        batch[SAMPLE_SUPPORT_FIELD] = PackedTensor.from_segments(
+            [
+                torch.full((2, 5), 1, dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
+                torch.full((1, 5), SAMPLE_SUPPORT_PADDING, dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
+            ]
+        )
+
+        microbatch = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)._create_microbatch_from_indices([1])
+
+        support = microbatch[SAMPLE_SUPPORT_FIELD]
+        assert support.sequence_lengths.tolist() == [1]
+        assert torch.all(support.segment(0) == SAMPLE_SUPPORT_PADDING)
+
+    def test_microbatch_selection_gathers_packed_route_segments(self):
+        batch = self._make_batch([4, 2], num_actions=2)
+        batch["rollout_expert_indices"] = PackedTensor.from_segments(
+            [torch.full((4, 2, 3), 1, dtype=torch.int16), torch.full((2, 2, 3), 2, dtype=torch.int16)]
+        )
+
+        microbatch = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)._create_microbatch_from_indices([1])
+
+        routes = microbatch["rollout_expert_indices"]
+        assert routes.sequence_lengths.tolist() == [2]
+        assert torch.equal(routes.segment(0), torch.full((2, 2, 3), 2, dtype=torch.int16))
 
     def test_multimodal_tensorlist_microbatching(self):
         """Token-based microbatching must gather TensorList fields (multi-modal pixel_values /

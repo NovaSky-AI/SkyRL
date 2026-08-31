@@ -128,6 +128,11 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         # Overridable via generator.inference_engine.engine_init_kwargs.trust_remote_code below.
         trust_remote_code=True,
     )
+    # Sample-support capture asks for one logprob per top-k candidate, post-filter, so the
+    # -inf entries that mark filtered candidates survive to the capture path.
+    if ie_cfg.enable_return_sample_support_set:
+        overrides["max_logprobs"] = cfg.generator.sampling_params.top_k
+        overrides["logprobs_mode"] = "processed_logprobs"
     for key, value in overrides.items():
         setattr(args, key, value)
 

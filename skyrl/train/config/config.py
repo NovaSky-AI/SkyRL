@@ -1144,6 +1144,8 @@ class InferenceEngineConfig(BaseConfig):
     enable_return_routed_experts: bool = False
     """Return per-layer expert routing indices, for rollout router replay (R3) when training an MoE model.
     Used together with ``trainer.policy.megatron_config.moe_enable_routing_replay``."""
+    enable_return_sample_support_set: bool = False
+    """Return the bounded sampler support used to renormalize rollout logprobs."""
     max_num_batched_tokens: int = 8192
     """vLLM continuous-batching parameter: maximum number of tokens to pack into a batch."""
     enforce_eager: bool = False
@@ -1738,6 +1740,24 @@ class SkyRLTrainConfig(BaseConfig):
         # so workers can access it without needing the generator config
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
+        # Eval requests opt out of capture and do not use these constraints.
+        if self.generator.inference_engine.enable_return_sample_support_set:
+            sampling_params = self.generator.sampling_params
+            if sampling_params.temperature <= 0:
+                raise ValueError("sample-support capture requires generator.sampling_params.temperature > 0")
+            if sampling_params.top_k <= 1:
+                raise ValueError("sample-support capture requires generator.sampling_params.top_k > 1")
+            if sampling_params.repetition_penalty != 1.0:
+                raise ValueError("sample-support capture requires repetition_penalty=1.0")
+            if sampling_params.additional_kwargs:
+                raise ValueError("sample-support capture does not support sampling_params.additional_kwargs")
+            if self.generator.vision_language_generator:
+                raise ValueError("sample-support capture does not support vision_language_generator")
+
+        # The VLM generator does not populate routed-expert indices.
+        if self.generator.inference_engine.enable_return_routed_experts and self.generator.vision_language_generator:
+            raise ValueError("rollout router replay (r3) does not support vision_language_generator")
 
         if self.data.dataloader.num_workers is None:
             self.data.dataloader.num_workers = 8

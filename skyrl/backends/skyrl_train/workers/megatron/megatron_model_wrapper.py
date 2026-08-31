@@ -42,6 +42,7 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     unpadded_vocab_shard_width,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
@@ -132,7 +133,7 @@ def _build_packed_valid_mask(
 
 def _copy_tensor_tree_to_device(value: Any, device: int) -> Any:
     """Move all tensors in a nested microbatch to a CUDA device."""
-    if torch.is_tensor(value) or isinstance(value, TensorList):
+    if torch.is_tensor(value) or isinstance(value, (TensorList, PackedTensor)):
         return value.to(device=device, non_blocking=True)
     if isinstance(value, dict):
         return {key: _copy_tensor_tree_to_device(item, device) for key, item in value.items()}
