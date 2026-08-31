@@ -192,6 +192,9 @@ wait_for_state() {
         fi
         state="$(job_state "$name")"
         if is_terminal "$state"; then
+            if [[ -z "$target" ]]; then
+                return 0
+            fi
             return 1
         fi
         # The wait call broke (STARTING/RUNNING) or the control plane is unreachable
