@@ -37,23 +37,12 @@ def _iter_buffers(model_chunks) -> Iterable[Tuple[int, int, Any]]:
 
 
 def _new_pinned_like(t: torch.Tensor) -> torch.Tensor:
-    """Allocate a pinned-CPU tensor with the same shape/dtype as t.
-
-    Safe to call on an offloaded buffer: only shape/dtype metadata is read,
-    which survives ``storage().resize_(0)``.
-    """
+    """Allocate a pinned-CPU tensor with the same shape/dtype as t."""
     return torch.empty_like(t, device="cpu").pin_memory()
 
 
 def _is_resident(t: Optional[torch.Tensor]) -> bool:
-    """True when ``t`` still owns storage we can copy to/from.
-
-    Megatron's offload path frees GPU buffers with ``storage().resize_(0)``
-    (see ``_ParamAndGradBuffer.offload_to_cpu``) and leaves the tensor object
-    — full shape and all — pointing at a zero-sized storage. Copying from it
-    raises ``cudaErrorInvalidValue``, so every read/write of a DDP buffer has
-    to be gated on this.
-    """
+    """True when ``t`` still owns storage we can copy to/from."""
     return t is not None and t.untyped_storage().size() > 0
 
 
