@@ -214,8 +214,9 @@ def test_fused_lm_head_uses_tensor_parallel_grad_path(monkeypatch, sequence_para
     )
 
     output = fused_lm_head_output_processor(hidden_states=hidden_states, output_layer=output_layer, context={})
+    transposed_hidden_states = hidden_states.transpose(0, 1).contiguous()
 
-    assert torch.equal(output, hidden_states.transpose(0, 1))
+    assert torch.equal(output, transposed_hidden_states)
     if sequence_parallel:
         gather.assert_called_once_with(
             hidden_states,
@@ -224,5 +225,41 @@ def test_fused_lm_head_uses_tensor_parallel_grad_path(monkeypatch, sequence_para
         )
         copy.assert_not_called()
     else:
-        copy.assert_called_once_with(hidden_states, group="tp-group")
+        copy.assert_called_once()
+        assert torch.equal(copy.call_args.args[0], transposed_hidden_states)
+        assert copy.call_args.args[0].is_contiguous()
+        assert copy.call_args.kwargs == {"group": "tp-group"}
         gather.assert_not_called()
+
+
+def test_fused_lm_head_allreduce_dgrad_receives_contiguous_gradient(monkeypatch):
+    tensor_parallel = types.ModuleType("megatron.core.tensor_parallel")
+    backward_state = {}
+
+    class CopyToTensorModelParallelRegion(torch.autograd.Function):
+        @staticmethod
+        def forward(_ctx, tensor):
+            return tensor
+
+        @staticmethod
+        def backward(_ctx, grad_output):
+            backward_state["is_contiguous"] = grad_output.is_contiguous()
+            return grad_output
+
+    def copy_to_tensor_model_parallel_region(tensor, group=None):
+        assert group == "tp-group"
+        return CopyToTensorModelParallelRegion.apply(tensor)
+
+    tensor_parallel.copy_to_tensor_model_parallel_region = copy_to_tensor_model_parallel_region
+    monkeypatch.setitem(sys.modules, "megatron.core.tensor_parallel", tensor_parallel)
+
+    hidden_states = torch.ones((2, 1, 3), requires_grad=True)
+    output_layer = SimpleNamespace(
+        allreduce_dgrad=True,
+        sequence_parallel=False,
+        tp_group="tp-group",
+        weight=torch.ones(1),
+    )
+
+    output = fused_lm_head_output_processor(hidden_states=hidden_states, output_layer=output_layer, context={})
+    output.backward(torch.randn_like(output))

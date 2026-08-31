@@ -25,12 +25,15 @@ def fused_lm_head_output_processor(
             tensor_parallel_output_grad=True,
             group=output_layer.tp_group,
         )
-    elif output_layer.allreduce_dgrad:
+
+    hidden_states = hidden_states.transpose(0, 1).contiguous()
+
+    if not output_layer.sequence_parallel and output_layer.allreduce_dgrad:
         from megatron.core.tensor_parallel import copy_to_tensor_model_parallel_region
 
         hidden_states = copy_to_tensor_model_parallel_region(hidden_states, group=output_layer.tp_group)
 
-    return hidden_states.transpose(0, 1).contiguous()
+    return hidden_states
 
 
 def call_model_with_fused_lm_head(
