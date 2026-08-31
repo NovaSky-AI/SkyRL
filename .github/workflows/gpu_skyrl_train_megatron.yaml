@@ -24,16 +24,30 @@ permissions:
   checks: write   # for status checks to appear
   contents: read
 
+# `types: [labeled]` delivers one event per label added, so applying several at
+# once starts several runs of this workflow. The label gate below drops the ones
+# fired by an unrelated label; this drops the rest -- a re-label while a run is
+# still going supersedes it instead of queueing a second GPU cluster. Keyed on the
+# PR, since `github.ref` is the *base* branch for pull_request_target and would
+# collide across every open PR.
+concurrency:
+  group: skyrl-gpu-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   
   skyrl_train_tests_megatron:
+    # Gate on the label that fired *this* event, not on the label set. With
+    # `contains(...labels.*.name, ...)` every `labeled` event whose payload
+    # happens to include the gating label passes, so adding N labels at once
+    # launched N identical GPU runs.
     if: >
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (
         github.event_name == 'pull_request_target' &&
         !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci')
+        github.event.label.name == 'run_train_megatron_gpu_ci'
       )
     runs-on: ubuntu-latest
     defaults:
