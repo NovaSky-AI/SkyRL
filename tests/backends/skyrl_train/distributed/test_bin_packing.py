@@ -7,6 +7,7 @@ Run with:
 import pytest
 
 from skyrl.train.dataset.bin_packing import (
+    Balanced,
     FirstFitDecreasing,
     PackingStrategy,
     make_seq_packer,
@@ -96,6 +97,41 @@ class TestFirstFitDecreasing:
         with pytest.raises(ValueError, match="Cannot create"):
             FirstFitDecreasing(bin_capacity=100, min_bin_count=5).pack([10, 20])
 
+    def test_sequence_length_multiple_uses_aligned_footprints(self):
+        packer = FirstFitDecreasing(bin_capacity=16, sequence_length_multiple=8)
+
+        assert packer.pack([9, 7]) == [[0], [1]]
+
+    def test_aligned_oversized_sequence_raises(self):
+        with pytest.raises(ValueError, match="exceeds bin capacity"):
+            FirstFitDecreasing(bin_capacity=15, sequence_length_multiple=8).pack([9])
+
+    def test_packed_length_multiple_is_paid_once_per_bin(self):
+        packer = FirstFitDecreasing(bin_capacity=16, packed_length_multiple=16)
+
+        assert packer.pack([9, 7]) == [[0, 1]]
+
+    def test_aggregate_padding_can_make_sequence_oversized(self):
+        with pytest.raises(ValueError, match="exceeds bin capacity"):
+            FirstFitDecreasing(bin_capacity=15, packed_length_multiple=16).pack([9])
+
+
+class TestBalanced:
+    def test_sequence_length_multiple_uses_aligned_footprints(self):
+        packer = Balanced(bin_capacity=16, sequence_length_multiple=8)
+
+        assert packer.pack([9, 7]) == [[0], [1]]
+
+    def test_aligned_oversized_sequence_keeps_soft_cap(self):
+        packer = Balanced(bin_capacity=15, sequence_length_multiple=8)
+
+        assert packer.pack([9]) == [[0]]
+
+    def test_packed_length_multiple_is_paid_once_per_bin(self):
+        packer = Balanced(bin_capacity=16, packed_length_multiple=16)
+
+        assert packer.pack([9, 7]) == [[0, 1]]
+
 
 class TestMakeSeqPackerFactory:
     def test_enum_value(self):
@@ -120,7 +156,19 @@ class TestMakeSeqPackerFactory:
             bin_capacity=100,
             min_bin_count=4,
             bin_count_multiple=2,
+            sequence_length_multiple=8,
+            packed_length_multiple=16,
         )
         assert packer.bin_capacity == 100
         assert packer.min_bin_count == 4
         assert packer.bin_count_multiple == 2
+        assert packer.sequence_length_multiple == 8
+        assert packer.packed_length_multiple == 16
+
+    def test_rejects_nonpositive_sequence_length_multiple(self):
+        with pytest.raises(ValueError, match="sequence_length_multiple must be positive"):
+            make_seq_packer("first_fit_decreasing", bin_capacity=100, sequence_length_multiple=0)
+
+    def test_rejects_nonpositive_packed_length_multiple(self):
+        with pytest.raises(ValueError, match="packed_length_multiple must be positive"):
+            make_seq_packer("first_fit_decreasing", bin_capacity=100, packed_length_multiple=0)

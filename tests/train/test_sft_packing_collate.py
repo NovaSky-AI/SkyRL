@@ -196,34 +196,31 @@ class TestPackingCollator:
         row_widths = [batch["sequences"][r].shape[0] for r in range(batch.batch_size)]
         assert len(set(row_widths)) == 1
 
-    def test_tp_alignment_pads_each_sub_seq(self):
-        """With tp_size > 1, each sub-seq's footprint in the row is
-        rounded up to a multiple of tp_size."""
+    def test_tp_alignment_pads_the_aggregate(self):
+        """Without CP, TP alignment is paid once for the packed row."""
         # Need num_gpus % (tp*pp*cp) == 0; use 4 GPUs with tp=4 -> dp=1.
         collator = _make_collator(num_gpus=4, batch_size=2, max_length=128, tp=4)
         examples = [
-            _make_example(7, 3),  # 7 tokens -> rounded to 8
-            _make_example(5, 3),  # 5 tokens -> rounded to 8
+            _make_example(7, 3),
+            _make_example(5, 3),
         ]
         batch = collator(examples, batch_size=2)
-        # BF16/layout-only path: two sub-seqs each padded to 8.
-        assert batch["sequences"].shape[1] == 16
+        assert batch["sequences"].shape[1] == 12
         # Both seqs are in the same row.
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
         assert sum(subseq_lengths) == 12  # raw, un-padded
 
-    def test_fp8_tp_alignment_cost_prevents_overpacking(self):
-        """Packing uses each sequence's aligned FP8/TP footprint."""
+    def test_fp8_tp_alignment_pads_the_aggregate(self):
+        """FP8 rounds the combined TP-only row once at the aggregate boundary."""
         collator = _make_collator(num_gpus=4, batch_size=2, max_length=128, tp=4, fp8="hybrid")
         examples = [
             _make_example(7, 3),
             _make_example(5, 3),
         ]
         batch = collator(examples, batch_size=2)
-        # TP4 gives each sequence a 512-token footprint, so the 128-token budget
-        # expands to one footprint without packing both sequences together.
-        assert batch["sequences"].shape == (2, 512)
-        assert sorted(lengths.tolist() for lengths in batch["sub_seq_lengths"]) == [[5], [7]]
+        assert batch["sequences"].shape == (1, 512)
+        subseq_lengths = batch["sub_seq_lengths"][0].tolist()
+        assert sum(subseq_lengths) == 12
 
     def test_bf16_cp_alignment_does_not_apply_fp8_padding(self):
         """With CP>1 and BF16, keep only TP/CP layout padding."""
@@ -237,25 +234,41 @@ class TestPackingCollator:
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
         assert sorted(subseq_lengths) == [5, 6]
 
-    def test_fp8_cp_alignment_pads_each_sub_seq(self):
-        """With cp_size > 1, each sub-seq's footprint is rounded up to a
-        multiple that leaves each CP rank's local shard 16-aligned."""
-        # tp=1, cp=2 -> align_size = lcm(1*2*2, 16*2) = 32.
+    def test_aligned_subsequences_respect_bin_capacity(self):
+        """FFD budgets the TP/CP-aligned footprint, not only raw tokens."""
+        tokenizer = MagicMock()
+        tokenizer.pad_token_id = 0
+        collator = PackedDataCollator(
+            tokenizer=tokenizer,
+            batch_size=2,
+            max_tokens_per_microbatch=32,
+            tp_size=4,
+            pp_size=1,
+            cp_size=2,
+            dp_size=1,
+            micro_train_batch_size_per_gpu=1,
+        )
+        examples = [_make_example(17, 8), _make_example(15, 7)]
+
+        batch = collator(examples, batch_size=2)
+
+        assert batch.batch_size == 2
+        assert batch["sequences"].shape[1] == 32
+        assert sorted(lengths.item() for lengths in batch["sub_seq_lengths"]) == [15, 17]
+
+    def test_fp8_cp_alignment_pads_the_aggregate(self):
+        """FP8 padding is paid once after CP-aligning each sub-sequence."""
+        # tp=1, cp=2 -> per-sequence layout alignment 4, aggregate alignment 32.
         collator = _make_collator(num_gpus=2, batch_size=2, max_length=128, cp=2, fp8="hybrid")
         examples = [
-            _make_example(6, 3),  # 6 tokens -> rounded up to 32
-            _make_example(5, 3),  # 5 tokens -> rounded up to 32
+            _make_example(6, 3),
+            _make_example(5, 3),
         ]
         batch = collator(examples, batch_size=2)
-        # Both sub-seqs in one row (dp=1), each padded to 32 -> row width >= 64.
-        assert batch["sequences"].shape[1] >= 64
+        # Per-sequence footprints are 8 + 8; the aggregate is padded once to 32.
+        assert batch["sequences"].shape[1] == 32
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
         assert sorted(subseq_lengths) == [5, 6]  # raw, un-padded
-        # Each sub-seq's padded footprint must produce 16-aligned local CP rank
-        # slabs after dividing by cp_size=2.
-        for s in subseq_lengths:
-            padded = ((s + 31) // 32) * 32
-            assert (padded // 2) % 16 == 0
 
     def test_fp8_alignment_is_conditional(self):
         examples = [
@@ -271,8 +284,8 @@ class TestPackingCollator:
 
         fp8 = _make_collator(num_gpus=1, batch_size=2, max_length=64, fp8=True)
         fp8_batch = fp8(examples, batch_size=2)
-        assert fp8_batch["sequences"].shape[1] == 32
-        fp8_chunks = [fp8_batch["sequences"][0, :3].tolist(), fp8_batch["sequences"][0, 16:19].tolist()]
+        assert fp8_batch["sequences"].shape[1] == 16
+        fp8_chunks = [fp8_batch["sequences"][0, :3].tolist(), fp8_batch["sequences"][0, 3:6].tolist()]
         assert sorted(fp8_chunks) == [[100, 101, 102], [200, 201, 202]]
 
     def test_tp_gt_1_fp8_alignment_uses_local_128(self):
@@ -285,8 +298,8 @@ class TestPackingCollator:
         fp8 = _make_collator(num_gpus=2, batch_size=2, max_length=512, tp=2, fp8=True)
         fp8_batch = fp8(examples, batch_size=2)
 
-        assert fp8_batch["sequences"].shape[1] == 512
-        fp8_chunks = [fp8_batch["sequences"][0, :3].tolist(), fp8_batch["sequences"][0, 256:259].tolist()]
+        assert fp8_batch["sequences"].shape[1] == 256
+        fp8_chunks = [fp8_batch["sequences"][0, :3].tolist(), fp8_batch["sequences"][0, 3:6].tolist()]
         assert sorted(fp8_chunks) == [[100, 101, 102], [200, 201, 202]]
 
     def test_eval_path_falls_back_to_super(self):
