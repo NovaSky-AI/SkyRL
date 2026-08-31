@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packed_seq_align_size,
+    get_packing_align_size_sequence,
 )
 
 
@@ -92,10 +92,6 @@ def _mock_mpu(tp_size: int = 1, cp_size: int = 1, cp_rank: int = 0):
     return mock
 
 
-def _get_align_size(tp_size: int, cp_size: int, fp8_enabled: bool = False) -> int:
-    return get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
-
-
 class TestSubSeqLengths:
     """preprocess_packed_seqs with sub_seq_lengths enumerates every sub-seq."""
 
@@ -155,13 +151,13 @@ class TestSubSeqLengths:
         batch_size = 1
 
         # Bin row contains two sub-seqs of length 3 and 4 concatenated.
-        align_size = _get_align_size(tp_size=1, cp_size=1, fp8_enabled=True)
+        packing_align_size_sequence = get_packing_align_size_sequence(tp_size=1, cp_size=1)
         input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
         input_ids[0, :3] = torch.tensor([11, 12, 13])
-        input_ids[0, align_size : align_size + 4] = torch.tensor([21, 22, 23, 24])
+        input_ids[0, 3:7] = torch.tensor([21, 22, 23, 24])
         attention_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool)
         attention_mask[0, :3] = True
-        attention_mask[0, align_size : align_size + 4] = True
+        attention_mask[0, 3:7] = True
 
         with patch(
             "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
@@ -175,21 +171,15 @@ class TestSubSeqLengths:
                 fp8_enabled=True,
             )
 
-        assert params.cu_seqlens_q.tolist() == [0, 16, 32]
-        assert params.total_tokens == 32
-        assert packed.shape == (1, 32)
+        assert packing_align_size_sequence == 1
+        assert params.cu_seqlens_q.tolist() == [0, 3, 16]
+        assert params.total_tokens == 16
+        assert packed.shape == (1, 16)
         assert packed[0, :3].tolist() == [11, 12, 13]
-        assert packed[0, 16:20].tolist() == [21, 22, 23, 24]
+        assert packed[0, 3:7].tolist() == [21, 22, 23, 24]
 
-    def test_multiseq_with_tp_alignment(self):
-        """Each sub-seq is independently padded to a multiple of tp_size.
-
-        The intra-row offsets read by preprocess must match the
-        collator's row layout, which advances ``row_offset += round_up(s,
-        align_size)`` between sub-seqs. So with sub-seqs of length 3 and
-        5 and tp_size=4, the collator places sub-seq 1 at row column 16
-        (after the FP8/TP alignment pad gap), NOT row column 3.
-        """
+    def test_multiseq_with_tp_and_fp8_aggregate_alignment(self):
+        """TP and FP8 align the aggregate slab when CP is disabled."""
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
             preprocess_packed_seqs,
         )
@@ -197,20 +187,13 @@ class TestSubSeqLengths:
         seq_len = 48
         batch_size = 1
 
-        # Two sub-seqs of length 3 and 5; tp_size=4 still pads each to 16
-        # for Transformer Engine FP8 compatibility.
-        align_size = _get_align_size(tp_size=4, cp_size=1, fp8_enabled=True)
-        # Row layout mirrors what PackedDataCollator produces:
-        # row[0:3]   = sub-seq 0 tokens
-        # row[3:16]  = alignment pad (zero)
-        # row[16:21] = sub-seq 1 tokens
-        # row[21:32] = alignment pad (zero)
+        # The valid sequences are contiguous; padding follows the final one.
         input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
         input_ids[0, :3] = torch.tensor([1, 2, 3])
-        input_ids[0, align_size : align_size + 5] = torch.tensor([10, 11, 12, 13, 14])
+        input_ids[0, 3:8] = torch.tensor([10, 11, 12, 13, 14])
         attention_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool)
         attention_mask[0, :3] = True
-        attention_mask[0, align_size : align_size + 5] = True
+        attention_mask[0, 3:8] = True
 
         with patch(
             "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
@@ -224,11 +207,11 @@ class TestSubSeqLengths:
                 fp8_enabled=True,
             )
 
-        assert params.cu_seqlens_q.tolist() == [0, 16, 32]
-        assert packed.shape == (1, 32)
+        assert params.cu_seqlens_q.tolist() == [0, 3, 16]
+        assert packed.shape == (1, 16)
         assert packed[0, :3].tolist() == [1, 2, 3]
-        assert packed[0, 3:16].tolist() == [0] * 13
-        assert packed[0, 16:21].tolist() == [10, 11, 12, 13, 14]
+        assert packed[0, 3:8].tolist() == [10, 11, 12, 13, 14]
+        assert packed[0, 8:16].tolist() == [0] * 8
 
     def test_multiple_bin_rows(self):
         """Two bin rows, each with two sub-seqs, produce 4+1 cu_seqlens entries."""
@@ -239,17 +222,16 @@ class TestSubSeqLengths:
         seq_len = 48
         batch_size = 2
 
-        align_size = _get_align_size(tp_size=1, cp_size=1, fp8_enabled=True)
         input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
         input_ids[0, :2] = torch.tensor([1, 2])
-        input_ids[0, align_size : align_size + 3] = torch.tensor([3, 4, 5])
+        input_ids[0, 2:5] = torch.tensor([3, 4, 5])
         input_ids[1, :4] = torch.tensor([10, 11, 12, 13])
-        input_ids[1, align_size : align_size + 2] = torch.tensor([20, 21])
+        input_ids[1, 4:6] = torch.tensor([20, 21])
         attention_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool)
         attention_mask[0, :2] = True
-        attention_mask[0, align_size : align_size + 3] = True
+        attention_mask[0, 2:5] = True
         attention_mask[1, :4] = True
-        attention_mask[1, align_size : align_size + 2] = True
+        attention_mask[1, 4:6] = True
 
         with patch(
             "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
@@ -263,12 +245,12 @@ class TestSubSeqLengths:
                 fp8_enabled=True,
             )
 
-        assert params.cu_seqlens_q.tolist() == [0, 16, 32, 48, 64]
-        assert packed.shape == (1, 64)
+        assert params.cu_seqlens_q.tolist() == [0, 2, 5, 9, 16]
+        assert packed.shape == (1, 16)
         assert packed[0, :2].tolist() == [1, 2]
-        assert packed[0, 16:19].tolist() == [3, 4, 5]
-        assert packed[0, 32:36].tolist() == [10, 11, 12, 13]
-        assert packed[0, 48:50].tolist() == [20, 21]
+        assert packed[0, 2:5].tolist() == [3, 4, 5]
+        assert packed[0, 5:9].tolist() == [10, 11, 12, 13]
+        assert packed[0, 9:11].tolist() == [20, 21]
 
 
 class TestMultiSeqCPLayout:
@@ -283,11 +265,11 @@ class TestMultiSeqCPLayout:
     @staticmethod
     def _build_batch(tp_size, cp_size, sub_seq_lengths, seq_len=64, fp8_enabled=True):
         """Build (input_ids, attention_mask) whose row layout matches the
-        PackedDataCollator: each sub-seq padded to align_size,
+        PackedDataCollator: each sub-seq padded to its layout alignment,
         laid out back-to-back from column 0. Real tokens get unique nonzero
         ids so reassembly is exactly verifiable.
         """
-        align_size = _get_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
+        align_size = get_packing_align_size_sequence(tp_size, cp_size)
 
         def round_up(x, m):
             return ((x + m - 1) // m) * m
@@ -320,7 +302,7 @@ class TestMultiSeqCPLayout:
 
         # ---- ground truth: the full (un-sharded) padded THD layout ----
         # Under the identity model, analytically reassembling each row's
-        # sub-seqs (each padded to align_size) back-to-back from column 0 with
+        # sub-seqs (each padded to layout align_size) back-to-back from column 0 with
         # the rest zero should recover ``input_ids`` cast to float.
         # NOTE: we deliberately do NOT use the cp_size==1 path as ground truth
         # here -- the cp==1 and cp>1 paths use different divisors, so the two
@@ -395,7 +377,7 @@ class TestMultiSeqCPLayout:
         return output
 
     def test_roundtrip_recovers_full_layout_cp2(self):
-        # tp=1, cp=2 -> align_size=32. Sub-seq lengths chosen so each row has
+        # tp=1, cp=2 -> layout align_size=4. Sub-seq lengths chosen so each row has
         # multiple sub-seqs of differing lengths.
         gt, recovered = self._run_roundtrip(tp_size=1, cp_size=2, sub_seq_lengths=[[6, 5], [7, 3]])
         assert torch.equal(recovered, gt), (
@@ -415,12 +397,12 @@ class TestMultiSeqCPLayout:
         assert torch.equal(recovered, gt)
 
     def test_roundtrip_recovers_full_layout_tp2_cp2(self):
-        # tp=2, cp=2 -> align_size=32.
+        # tp=2, cp=2 -> layout align_size=8.
         gt, recovered = self._run_roundtrip(tp_size=2, cp_size=2, sub_seq_lengths=[[5, 9], [3, 6]])
         assert torch.equal(recovered, gt)
 
     def test_roundtrip_cp4(self):
-        # tp=1, cp=4 -> align_size=64. Exercises >2 CP ranks so the per-rank
+        # tp=1, cp=4 -> layout align_size=8. Exercises >2 CP ranks so the per-rank
         # zigzag chunk assignment (ranks 0..3 hold chunks {0,7},{1,6},{2,5},{3,4})
         # is genuinely tested, not just the symmetric cp=2 case.
         gt, recovered = self._run_roundtrip(tp_size=1, cp_size=4, sub_seq_lengths=[[10, 6], [13, 3]])
@@ -440,11 +422,11 @@ class TestMultiSeqCPLayout:
         sub_seq_lengths = [[6, 5], [7, 3]]
         _, recovered = self._run_roundtrip(tp_size, cp_size, sub_seq_lengths)
 
-        # align_size=32: row0 starts sub-seqs at offsets 0 and 32; row1 does
+        # layout align_size=4: row0 starts sub-seqs at offsets 0 and 8; row1 does
         # the same with its own token ids.
         assert recovered[0, 0:6].tolist() == [1.0, 2, 3, 4, 5, 6]
-        assert recovered[0, 6:32].tolist() == [0.0] * 26
-        assert recovered[0, 32:37].tolist() == [7.0, 8, 9, 10, 11]
+        assert recovered[0, 6:8].tolist() == [0.0] * 2
+        assert recovered[0, 8:13].tolist() == [7.0, 8, 9, 10, 11]
         assert recovered[1, 0:7].tolist() == [12.0, 13, 14, 15, 16, 17, 18]
-        assert recovered[1, 7:32].tolist() == [0.0] * 25
-        assert recovered[1, 32:35].tolist() == [19.0, 20, 21]
+        assert recovered[1, 7:8].tolist() == [0.0]
+        assert recovered[1, 8:11].tolist() == [19.0, 20, 21]

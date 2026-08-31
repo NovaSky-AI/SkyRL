@@ -38,7 +38,8 @@ from megatron.core.transformer.moe.moe_utils import (
 from megatron.core.utils import get_attr_wrapped_model, unwrap_model
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packed_seq_align_size,
+    get_packing_align_size_sequence,
+    get_packing_align_size_total,
     get_unpacked_seq_align_size,
 )
 
@@ -438,12 +439,9 @@ def preprocess_packed_seqs(
       per row. This is the historical SkyRL behavior used by the RL path
       and the existing SFT path without mini-batch packing.
     - ``sub_seq_lengths is not None``: each row may contain multiple
-      sub-sequences concatenated end-to-end. ``sub_seq_lengths[r]`` lists
-      the per-sub-sequence valid token counts for row ``r``. Tokens
-      ``input_ids[r, :sum(sub_seq_lengths[r])]`` are assumed to be the
-      concatenated sub-sequences in order; any trailing tokens in the row
-      are pad. ``cu_seqlens`` enumerates every sub-sequence across every
-      row.
+      sub-sequences. They are laid out in order with any required CP gaps
+      between them; aggregate TP/FP8 padding follows the final sequence.
+      ``cu_seqlens`` enumerates every sub-sequence across every row.
 
     CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0
     gets first and last chunks, GPU1 gets second and second last chunks,
@@ -453,7 +451,8 @@ def preprocess_packed_seqs(
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
-    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
+    packing_align_size_sequence = get_packing_align_size_sequence(tp_size, cp_size)
+    packing_align_size_total = get_packing_align_size_total(tp_size, cp_size, fp8_enabled=fp8_enabled)
 
     batch_size = input_ids.shape[0]
 
@@ -467,7 +466,7 @@ def preprocess_packed_seqs(
         # Per-row, per-sub-seq starting column within the original padded row.
         # We need this to gather sub-seq tokens from the padded input_ids.
         # NOTE: the controller-side collator (``PackedDataCollator``)
-        # advances ``row_offset += round_up(length, align_size)`` between
+        # advances ``row_offset += round_up(length, packing_align_size_sequence)`` between
         # consecutive sub-sequences in the same row so that flash-attn varlen
         # sees TP/CP-aligned segment boundaries. We MUST mirror that here —
         # otherwise sub-seq i (for i > 0) would be read starting inside the
@@ -481,9 +480,11 @@ def preprocess_packed_seqs(
                 flat_seqlens.append(length_int)
                 row_index_of_subseq.append(r)
                 intra_row_offset_of_subseq.append(running)
-                # Pad each sub-seq independently to align_size, matching the
+                # Pad each sub-seq independently to packing_align_size_sequence, matching the
                 # collator's row layout.
-                pad = (align_size - length_int % align_size) % align_size
+                pad = (
+                    packing_align_size_sequence - length_int % packing_align_size_sequence
+                ) % packing_align_size_sequence
                 running += length_int + pad
 
         seqlens_in_batch = torch.tensor(flat_seqlens, dtype=torch.int32, device=input_ids.device)
@@ -492,8 +493,14 @@ def preprocess_packed_seqs(
         seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
         num_subseqs = batch_size
 
-    pad_size = (align_size - seqlens_in_batch % align_size) % align_size
+    pad_size = (
+        packing_align_size_sequence - seqlens_in_batch % packing_align_size_sequence
+    ) % packing_align_size_sequence
     seqlens_in_batch_padded = seqlens_in_batch + pad_size
+    # TP and FP8 operate on the aggregate local token slab. Attach their tail
+    # padding once to the final sequence rather than to every sequence.
+    aggregate_pad_size = (-seqlens_in_batch_padded.sum()) % packing_align_size_total
+    seqlens_in_batch_padded[-1] += aggregate_pad_size
 
     cu_seqlens = torch.zeros(num_subseqs + 1, dtype=torch.int32, device=input_ids.device)
     cu_seqlens[1:] = torch.cumsum(seqlens_in_batch, dim=0)

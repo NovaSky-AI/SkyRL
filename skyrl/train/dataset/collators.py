@@ -25,7 +25,8 @@ import torch
 from loguru import logger
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packed_seq_align_size,
+    get_packing_align_size_sequence,
+    get_packing_align_size_total,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 
@@ -132,20 +133,19 @@ class PackedDataCollator:
         tp_size = self.tp_size
         pp_size = self.pp_size
         cp_size = self.cp_size
-        # Each sub-seq's padded length must satisfy these divisibility
-        # constraints, which is why ``align_size`` carries all factors:
-        #   - Sequence Parallelism (auto-on when tp>1) shards along the seq
-        #     dim, so each segment must be divisible by ``tp_size``.
+        # CP/SP layout constraints apply independently to each sub-sequence.
+        # TP without CP and FP8 constrain only the final packed token slab.
         #   - Context Parallelism splits each segment into ``2*cp_size`` equal
-        #     load-balanced causal chunks, so each segment must be divisible by
-        #     ``2*cp_size``.
+        #     load-balanced causal chunks. With SP, each chunk is also sharded
+        #     across ``tp_size``.
         #   - When FP8 is enabled, Transformer Engine GEMMs require each CP
-        #     rank's local token slab to be 16-aligned; globally this means
-        #     ``16*cp_size``.
+        #     rank's aggregate token slab to be 16-aligned; globally this means
+        #     the final packed length is divisible by ``16*cp_size``.
         # This MUST stay in lockstep with the worker's preprocess_packed_seqs
         # (megatron_utils.py): if the divisors drift, the per-rank CP/SP
         # gather/scatter offsets silently corrupt loss/grads (no crash).
-        align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=self.fp8_enabled)
+        packing_align_size_sequence = get_packing_align_size_sequence(tp_size, cp_size)
+        packing_align_size_total = get_packing_align_size_total(tp_size, cp_size, fp8_enabled=self.fp8_enabled)
 
         dp_size = self.dp_size
 
@@ -185,6 +185,8 @@ class PackedDataCollator:
             bin_capacity=bin_capacity,
             min_bin_count=bin_count_multiple,
             bin_count_multiple=bin_count_multiple,
+            sequence_length_multiple=packing_align_size_sequence,
+            packed_length_multiple=packing_align_size_total,
         )
         bins: List[List[int]] = packer.pack(seq_lengths)
 
@@ -203,8 +205,8 @@ class PackedDataCollator:
             flat_bins.extend(shard_bins[shard_idx])
 
         # ------------------------------------------------------------------
-        # 3. Compute packed-row lengths (with align_size padding per sub-seq)
-        #    and the global max packed length (for PP > 1 uniform padding).
+        # 3. Compute packed-row lengths with per-sequence layout padding and
+        #    one aggregate tail pad, plus the global max packed length.
         # ------------------------------------------------------------------
         def _round_up(x: int, m: int) -> int:
             return ((x + m - 1) // m) * m
@@ -213,9 +215,8 @@ class PackedDataCollator:
         bin_subseq_lengths: List[List[int]] = []  # one list per bin row
         for bin_indices in flat_bins:
             subseq_lens = [seq_lengths[idx] for idx in bin_indices]
-            # Each sub-seq's length is independently aligned to align_size
-            # (matches preprocess_packed_seqs behavior).
-            packed_len = sum(_round_up(s, align_size) for s in subseq_lens)
+            sequence_aligned_len = sum(_round_up(s, packing_align_size_sequence) for s in subseq_lens)
+            packed_len = _round_up(sequence_aligned_len, packing_align_size_total)
             bin_packed_lengths.append(packed_len)
             bin_subseq_lengths.append(subseq_lens)
 
@@ -223,8 +224,7 @@ class PackedDataCollator:
             # Pad all packed rows to the global max so Megatron's
             # pipeline schedule sees uniform shapes.
             max_packed_len = max(bin_packed_lengths) if bin_packed_lengths else 0
-            # Also align the global max to align_size to keep layouts uniform.
-            max_packed_len = _round_up(max_packed_len, align_size)
+            max_packed_len = _round_up(max_packed_len, packing_align_size_total)
         else:
             max_packed_len = max(bin_packed_lengths) if bin_packed_lengths else 0
 
@@ -270,9 +270,7 @@ class PackedDataCollator:
                     if n_write > 0:
                         loss_mask_np[row_idx, row_offset:write_end] = full_loss_masks[ex_idx][1 : 1 + n_write]
 
-                # Advance row_offset, padding sub-seq to the TP/CP layout
-                # multiple, plus FP8's 16-token local-rank multiple when active.
-                row_offset += _round_up(s, align_size)
+                row_offset += _round_up(s, packing_align_size_sequence)
 
         # Count response-token loss slots before normalization. The vectorized
         # build makes this exact, so no post-hoc reconciliation is needed.

@@ -9,8 +9,15 @@ def is_fp8_enabled(fp8: Any) -> bool:
     return bool(fp8)
 
 
-def get_packed_seq_align_size(tp_size: int, cp_size: int, fp8_enabled: bool = False) -> int:
-    """Return global per-subsequence padding needed for TP/CP layout."""
+def get_packing_align_size_sequence(tp_size: int, cp_size: int) -> int:
+    """Return the alignment required independently for each packed sequence."""
+    if cp_size > 1:
+        return tp_size * cp_size * 2
+    return 1
+
+
+def get_packing_align_size_total(tp_size: int, cp_size: int, fp8_enabled: bool = False) -> int:
+    """Return the alignment required for the aggregate packed token slab."""
     if cp_size > 1:
         layout_align = tp_size * cp_size * 2
     else:

@@ -104,8 +104,8 @@ def _build_packed_valid_mask(
 ) -> torch.Tensor:
     """Build a ``[1, T]`` real-token mask aligned to the packed (THD) logits layout.
 
-    1.0 for real tokens, 0.0 for the per-segment alignment padding that ``preprocess_packed_seqs``
-    inserts between sub-sequences. This is the packed counterpart of the ``[batch, seq]``
+    1.0 for real tokens, 0.0 for the layout gaps and aggregate tail padding that
+    ``preprocess_packed_seqs`` inserts. This is the packed counterpart of the ``[batch, seq]``
     ``attention_mask`` the decoupled MTP draft loss uses to mask invalid positions; mirrors the
     index math of :func:`_build_packed_targets` but scatters ones instead of token ids.
     """

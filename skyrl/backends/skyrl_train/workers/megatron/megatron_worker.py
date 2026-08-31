@@ -37,6 +37,11 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packing_align_size_sequence,
+    get_packing_align_size_total,
+    is_fp8_enabled,
+)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
@@ -330,6 +335,19 @@ class MegatronWeightExtractor(WeightExtractor):
 
 
 class MegatronWorker:
+    def _packed_sequence_length_multiples(self) -> tuple[int, int]:
+        """Return per-sequence and aggregate packed THD alignments."""
+        if not self.cfg.remove_microbatch_padding:
+            return 1, 1
+        model_config = get_model_config(self.actor_module[0])
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+        cp_size = mpu.get_context_parallel_world_size()
+        return get_packing_align_size_sequence(tp_size, cp_size), get_packing_align_size_total(
+            tp_size,
+            cp_size,
+            fp8_enabled=is_fp8_enabled(model_config.fp8),
+        )
+
     def _maybe_setup_fake_int4_qat(self):
         """Wire up INT4-served training and return the BF16 bridge-weights path.
 
@@ -644,10 +662,13 @@ class MegatronWorker:
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
         if use_token_batching:
+            sequence_length_multiple, packed_length_multiple = self._packed_sequence_length_multiples()
             microbatch_iterator = get_microbatch_iterator(
                 data,
                 micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
                 max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+                sequence_length_multiple=sequence_length_multiple,
+                packed_length_multiple=packed_length_multiple,
             )
         else:
             microbatch_iterator = None
@@ -1150,10 +1171,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
         if use_token_batching:
+            sequence_length_multiple, packed_length_multiple = self._packed_sequence_length_multiples()
             microbatch_iterator = get_microbatch_iterator(
                 data,
                 micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
                 max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+                sequence_length_multiple=sequence_length_multiple,
+                packed_length_multiple=packed_length_multiple,
             )
         else:
             microbatch_iterator = None

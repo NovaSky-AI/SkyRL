@@ -257,11 +257,17 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         self,
         data: TrainingInputBatch,
         max_tokens_per_microbatch: int,
+        sequence_length_multiple: int = 1,
+        packed_length_multiple: int = 1,
     ):
         """
         Args:
             data: The training input batch to chunk.
             max_tokens_per_microbatch: Maximum number of tokens per microbatch.
+            sequence_length_multiple: Round each sequence's packing footprint
+                up to this multiple.
+            packed_length_multiple: Round the aggregate microbatch footprint
+                up to this multiple.
         """
         super().__init__(data)
         self._max_tokens_per_microbatch = max_tokens_per_microbatch
@@ -273,7 +279,12 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         # Create microbatches based on token count. The "balanced" packer treats
         # the token budget as a soft cap: a sequence longer than the budget gets
         # its own (over-budget) microbatch rather than raising.
-        packer = make_seq_packer("balanced", bin_capacity=self._max_tokens_per_microbatch)
+        packer = make_seq_packer(
+            "balanced",
+            bin_capacity=self._max_tokens_per_microbatch,
+            sequence_length_multiple=sequence_length_multiple,
+            packed_length_multiple=packed_length_multiple,
+        )
         self._microbatches = packer.pack(self._token_counts)
 
         # Synchronize the number of microbatches across all DP workers
@@ -426,7 +437,11 @@ class TokenBasedBatchIterator(BaseBatchIterator):
 
 
 def get_microbatch_iterator(
-    data: TrainingInputBatch, micro_batch_size: int, max_tokens_per_microbatch: int
+    data: TrainingInputBatch,
+    micro_batch_size: int,
+    max_tokens_per_microbatch: int,
+    sequence_length_multiple: int = 1,
+    packed_length_multiple: int = 1,
 ) -> BaseBatchIterator:
     """Factory function to get the appropriate microbatch iterator.
 
@@ -434,11 +449,20 @@ def get_microbatch_iterator(
         data: The training input batch.
         micro_batch_size: Number of samples per microbatch (used if max_tokens_per_microbatch <= 0).
         max_tokens_per_microbatch: Maximum tokens per microbatch. If > 0, uses token-based batching.
+        sequence_length_multiple: Round each sequence's packing footprint up
+            to this multiple for token-based batching.
+        packed_length_multiple: Round each aggregate microbatch footprint up
+            to this multiple for token-based batching.
 
     Returns:
         A BaseBatchIterator instance.
     """
     if max_tokens_per_microbatch > 0:
-        return TokenBasedBatchIterator(data, max_tokens_per_microbatch=max_tokens_per_microbatch)
+        return TokenBasedBatchIterator(
+            data,
+            max_tokens_per_microbatch=max_tokens_per_microbatch,
+            sequence_length_multiple=sequence_length_multiple,
+            packed_length_multiple=packed_length_multiple,
+        )
     else:
         return SampleBasedBatchIterator(data, sample_batch_size=micro_batch_size, drop_last=False)
