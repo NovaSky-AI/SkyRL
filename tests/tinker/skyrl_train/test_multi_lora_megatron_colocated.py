@@ -1,21 +1,10 @@
-"""Multi-LoRA tests for the *colocated* Megatron path (``colocate_all=True``).
+"""Multi-LoRA tests for the colocated Megatron path (colocate_all=True).
 
-Sibling of ``test_multi_lora_megatron.py``, which pins
-``trainer.placement.colocate_all=False``. Colocation is the SkyRL-Train
-default (and what the Tinker API assumes when the operator passes no
-override), and it changes the memory lifecycle underneath every adapter
-swap:
-
-  * ``WorkerDispatch._prepare_for_weight_sync`` offloads the optimizer and
-    the DDP grad buffers before syncing weights to vLLM.
-  * ``forward``/``forward_from_staged`` only backload the *model*, so the
-    optimizer + grad buffers stay offloaded across a pure forward.
-  * Megatron's ``offload_grad_buffers`` frees ``grad_data`` outright
-    (``storage().resize_(0)``) and ``restore_grad_buffers`` zero-fills it.
-
-So on this path a swap runs against partially-offloaded state, and any
-grads the live adapter accumulated but has not yet consumed in
-``optim_step`` are destroyed by the offload. Both are exercised below.
+Sibling of test_multi_lora_megatron.py, which pins colocate_all=False.
+Colocation offloads policy state between requests, so adapter swaps here run
+against partially-offloaded state: _prepare_for_weight_sync offloads the
+optimizer and grad buffers, forward only backloads the model, and Megatron's
+grad offload frees grad_data (reload zero-fills it) rather than saving it.
 
 Run with:
   uv run --extra tinker --extra megatron --with pytest --with pytest-timeout \\
@@ -49,9 +38,9 @@ from tests.tinker.skyrl_train.test_multi_lora_megatron import (  # noqa: E402
 
 TEST_PORT = 8021
 
-# Same tiny config as the non-colocated module, but colocated: the policy
-# worker and the single vLLM engine share one GPU, so the dispatch offloads
-# policy state to CPU around every sample.
+# Same tiny config as the non-colocated module. The policy worker and the
+# single vLLM engine share one GPU, so the dispatch offloads policy state to
+# CPU around every sample.
 BACKEND_CONFIG = {
     "strategy": "megatron",
     "trainer.placement.policy_num_gpus_per_node": 1,
@@ -80,18 +69,13 @@ def service_client(server):
 
 
 def test_sample_non_live_adapter_colocated(service_client):
-    """Minimal repro: sampling an adapter that isn't the live one.
+    """Sample an adapter that isn't the live one.
 
-    After ``create_lora_training_client`` for A then B, A is the live
-    adapter on the workers and (under colocation) the optimizer + grad
-    buffers are offloaded. ``save_weights_for_sampler(B)`` then swaps
-    A -> B while ``grad_data`` has been freed, so the AdapterStore's
-    snapshot copies from a zero-sized CUDA storage:
-
-        cpu_grad_data[...].copy_(buf.grad_data)
-        torch.AcceleratorError: CUDA error: invalid argument
-
-    No training required — the offload after ``init_model`` is enough.
+    A is live after the two create calls, with the optimizer and grad buffers
+    offloaded. save_weights_for_sampler(B) swaps A -> B while grad_data is
+    freed, so the snapshot copies from a zero-sized CUDA storage and raises
+    "CUDA error: invalid argument". No training needed; the offload after
+    init_model is enough.
     """
     a = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
     b = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
@@ -104,18 +88,15 @@ def test_sample_non_live_adapter_colocated(service_client):
 def test_pending_grads_survive_other_tenant_sample(service_client):
     """A's un-consumed grads must survive another tenant's sample.
 
-    The Tinker request stream interleaves tenants at request granularity, so
-    ``A.forward_backward`` / ``A.optim_step`` can straddle a ``B.sample``.
-    Under colocation that sample offloads the grad buffers, and Megatron's
-    grad offload *drops* the grads (reload zero-fills). If they aren't parked
-    in A's adapter slot, A's ``optim_step`` applies an all-zero gradient.
+    Requests from different tenants interleave, so A.forward_backward and
+    A.optim_step can straddle a B.sample. That sample offloads the grad
+    buffers, which drops the grads unless they were parked in A's slot, and
+    A's step then applies an all-zero gradient.
 
-    Measured against an undisturbed control adapter C that runs the same
-    single step from pristine on the same data: A's post-step loss has to
-    land on C's. Asserting only ``post < pre`` on A is not enough — Adam
-    still applies weight decay to a zero gradient, which drifts the loss by
-    ~1e-6 and would satisfy a bare inequality while the step itself was a
-    no-op (the real step moves it by ~1e-2).
+    Compared against an undisturbed control adapter C taking the same step
+    from pristine on the same data. Asserting post < pre on A alone is not
+    enough: weight decay on a zero gradient still drifts the loss by ~1e-6,
+    against ~1e-2 for a real step.
     """
     a = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
     b = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
@@ -150,8 +131,8 @@ def test_pending_grads_survive_other_tenant_sample(service_client):
 
     assert pre_a == pre_c, f"A and C were not equally pristine: {pre_a!r} vs {pre_c!r}"
     assert improvement_c > 0, f"control adapter C did not learn (pre={pre_c!r}, post={post_c!r}); test is inconclusive"
-    # Tolerance scales with the control's own step, so this stays meaningful
-    # whatever the tiny model happens to do.
+    # Tolerance scales with the control's own step, so the bound stays
+    # meaningful whatever the tiny model happens to do.
     assert abs(post_a - post_c) <= 0.05 * improvement_c, (
         f"A's step diverged from the undisturbed control: A post={post_a!r}, C post={post_c!r} "
         f"(C improved by {improvement_c:.6e}). A's pending grads were dropped by the grad-buffer "
@@ -160,11 +141,10 @@ def test_pending_grads_survive_other_tenant_sample(service_client):
 
 
 def test_two_adapters_train_and_sample_colocated(service_client):
-    """Colocated analog of ``test_two_adapters_sample_independently``.
+    """Colocated analog of test_two_adapters_sample_independently.
 
-    Full interleaving of training and sampling across two tenants: every
-    sample round-trips through offload -> swap -> broadcast -> offload, and
-    every training request backloads and swaps back.
+    Every sample round-trips through offload -> swap -> broadcast -> offload,
+    and every training request backloads and swaps back.
     """
     a = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
     b = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)

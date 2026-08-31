@@ -42,7 +42,11 @@ def _new_pinned_like(t: torch.Tensor) -> torch.Tensor:
 
 
 def _is_resident(t: Optional[torch.Tensor]) -> bool:
-    """True when ``t`` still owns storage we can copy to/from."""
+    """True when `t` still owns storage we can copy to/from.
+
+    Megatron's offload frees GPU buffers with storage().resize_(0), leaving the
+    tensor object intact but unreadable.
+    """
     return t is not None and t.untyped_storage().size() > 0
 
 
@@ -154,9 +158,8 @@ class AdapterStore:
         self._pristine: Optional[AdapterSlot] = None
         self._current_id: Optional[str] = None
         self._signature: Optional[LoraSignature] = None
-        # True while the DDP grad buffers are offloaded, i.e. each adapter's
-        # grads live only in its CPU slot. Set by park_grads, cleared by
-        # unpark_grads.
+        # Set while grads live only in the CPU slots, i.e. the DDP grad
+        # buffers are offloaded.
         self._grads_parked: bool = False
         # True when the live GPU state mirrors a *deleted* adapter (deleting
         # the current adapter clears current_id without restoring anything).
@@ -237,14 +240,11 @@ class AdapterStore:
 
     @staticmethod
     def _require_param_residency(buf, mc_idx: int, buf_idx: int) -> None:
-        """Fail loudly when a swap is attempted with model params offloaded.
+        """Require GPU-resident params for a swap.
 
-        Callers must backload the model before swapping (the dispatch does
-        this via ``_ensure_on_gpu(..., need_model=True)``). Grads are allowed
-        to be offloaded — see :meth:`park_grads` — but params are not, because
-        the CPU mirror Megatron keeps for them (``param_data_cpu``) is not
-        per-adapter and would hand the next backload the wrong tenant's
-        weights.
+        Megatron's `param_data_cpu` mirror is shared across adapters, so swapping
+        while offloaded would hand the next backload the wrong tenant's weights.
+        Offloaded grads are fine, see park_grads.
         """
         if not _is_resident(buf.param_data):
             raise RuntimeError(
@@ -258,9 +258,8 @@ class AdapterStore:
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
             self._require_param_residency(buf, mc_idx, buf_idx)
             slot.cpu_param_data[mc_idx][buf_idx].copy_(buf.param_data, non_blocking=True)
-            # Skip grads while the grad buffers are offloaded: their GPU
-            # storage is freed, and the slot's copy — parked by park_grads()
-            # just before the offload — is already the authoritative one.
+            # Offloaded grads have no GPU storage to read; the slot's copy,
+            # parked just before the offload, is already the current one.
             if _is_resident(buf.grad_data):
                 slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
@@ -290,9 +289,8 @@ class AdapterStore:
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
             self._require_param_residency(buf, mc_idx, buf_idx)
             buf.param_data.copy_(slot.cpu_param_data[mc_idx][buf_idx], non_blocking=True)
-            # Offloaded grad buffers have no storage to restore into; the
-            # incoming adapter's grads stay parked in its slot and are
-            # re-materialised by unpark_grads() on the next backload.
+            # Nothing to restore into while offloaded. The incoming adapter's
+            # grads stay in its slot until unpark_grads() on the next backload.
             if _is_resident(buf.grad_data):
                 buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
@@ -420,16 +418,11 @@ class AdapterStore:
 
     @torch.no_grad()
     def park_grads(self, model_chunks) -> None:
-        """Save the live adapter's grads into its slot before a grad offload.
+        """Copy the live adapter's grads to its slot, just before an offload.
 
-        Megatron frees ``grad_data`` on offload and zero-fills it on reload,
-        so grads accumulated by a ``forward_backward`` that hasn't reached its
-        ``optim_step`` yet are destroyed outright. Under colocation another
-        tenant's request (a sample, a forward) offloads in exactly that gap,
-        so the grads have to be parked per-adapter instead.
-
-        Call immediately before the strategy's offload. No-op when the grad
-        buffers are already offloaded or no adapter is live.
+        Megatron frees grad_data on offload and zero-fills it on reload, so
+        grads from a forward_backward whose optim_step hasn't arrived yet are
+        lost. Under colocation another tenant's request offloads in that gap.
         """
         if self._current_id is None or self._current_id not in self._slots:
             return
@@ -446,21 +439,15 @@ class AdapterStore:
 
     @torch.no_grad()
     def unpark_grads(self, model_chunks) -> None:
-        """Re-materialise the live adapter's grads after a grad backload.
+        """Copy grads back from the slot, just after a backload.
 
-        Mirror of :meth:`park_grads`. Restores the adapter that is live *now*,
-        which need not be the one that was live at park time — a swap in the
-        offload window only moves CPU slots around, and this is where the
-        result lands back on the GPU.
-
-        Call immediately after the strategy's backload. No-op unless grads
-        were parked and the buffers are resident again.
+        Restores whichever adapter is live now, not necessarily the parked one:
+        a swap during the offload window only moves CPU slots around.
         """
         if not self._grads_parked:
             return
         if self._current_id is None or self._current_id not in self._slots:
-            # Live adapter was deleted while offloaded: nothing to restore,
-            # and the reloaded buffers are already zeroed.
+            # Adapter deleted while offloaded; reloaded buffers are already zeroed.
             self._grads_parked = False
             return
         slot = self._slots[self._current_id]
@@ -506,10 +493,9 @@ class AdapterStore:
         do not need barriers because the swap is identical-shape on all
         ranks within those groups (LoRA signature is fixed).
 
-        Model params must be GPU-resident; the DDP grad buffers and the
-        DistributedOptimizer state need not be (colocation offloads them
-        between requests). Offloaded grads are left parked in their slots —
-        see :meth:`park_grads`.
+        Params must be on GPU. The grad buffers and optimizer state need not be,
+        since colocation offloads them between requests; offloaded grads stay
+        parked in their slots.
         """
         if model_id not in self._slots:
             raise KeyError(f"AdapterStore: unknown adapter '{model_id}'")

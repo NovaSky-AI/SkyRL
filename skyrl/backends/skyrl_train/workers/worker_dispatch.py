@@ -91,13 +91,10 @@ class WorkerDispatch:
         No-op when ``model_id is None`` (single-tenant / FFT path) or when
         the workers don't have an AdapterStore (non-LoRA strategies).
 
-        The swap copies the DDP param buffers, so the model must be resident
-        before it runs. Callers generally arrive here right after their own
-        ``_ensure_on_gpu``; we repeat it (a no-op against dispatch-local
-        state) so paths that only need the optimizer — ``set_lr``, say —
-        can't hand the AdapterStore freed param storage. The optimizer and
-        grad buffers are allowed to stay offloaded: the store copies the
-        optimizer's CPU tensors in place and leaves parked grads alone.
+        The swap copies the DDP param buffers, so the model has to be resident.
+        Most callers just ran _ensure_on_gpu; repeating it here is a no-op for
+        them and covers the paths that only need the optimizer, like set_lr.
+        Grad buffers and optimizer state may stay offloaded.
         """
         if model_id is None or role not in self._actor_groups:
             return
@@ -429,11 +426,9 @@ class WorkerDispatch:
 
         For multi-tenant LoRA training, ``model_id`` is used to ensure the correct adapter is used.
 
-        The residency check is not redundant with ``forward_backward``'s under
-        multi-tenancy: another tenant's request (e.g. a sample, which offloads
-        the optimizer) can land between this model's forward_backward and its
-        optim_step, so the state this step writes to may have been offloaded
-        in the gap.
+        The residency check is not redundant with forward_backward's: under
+        multi-tenancy another tenant's request can offload the optimizer
+        between the two calls.
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)

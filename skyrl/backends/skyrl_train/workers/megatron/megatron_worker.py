@@ -1599,26 +1599,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.adapter_store.swap_to(model_id, self.actor_module, self.optimizer)
 
     def offload_to_cpu(self, offload_optimizer: bool = True, offload_model: bool = True):
-        """Offload worker state, parking the live adapter's grads first.
+        """Park the live adapter's grads before offloading.
 
-        The optimizer half of the offload frees the DDP grad buffers outright
-        (Megatron's reload zero-fills them), which would silently drop grads a
-        tenant accumulated in a ``forward_backward`` whose ``optim_step``
-        hasn't arrived yet — under colocation another tenant's sample lands in
-        exactly that gap. Parking moves them into the adapter's CPU slot,
-        where they survive both the offload and any swap that happens while
-        offloaded.
+        The optimizer half of the offload frees the DDP grad buffers, dropping
+        any grads still waiting on an optim_step. Parked grads survive the
+        offload and any swap that happens while offloaded.
         """
         if offload_optimizer and self.adapter_store is not None and self.actor_module is not None:
             self.adapter_store.park_grads(self.actor_module)
         super().offload_to_cpu(offload_optimizer=offload_optimizer, offload_model=offload_model)
 
     def backload_to_gpu(self, backload_optimizer: bool = True, backload_model: bool = True):
-        """Backload worker state, re-materialising the live adapter's grads.
+        """Unpark the live adapter's grads after backloading.
 
-        Counterpart to :meth:`offload_to_cpu`. Restores whichever adapter is
-        live at this point, which may differ from the one parked if a swap
-        happened while offloaded.
+        The live adapter may differ from the parked one if a swap happened in
+        between.
         """
         super().backload_to_gpu(backload_optimizer=backload_optimizer, backload_model=backload_model)
         if backload_optimizer and self.adapter_store is not None and self.actor_module is not None:
