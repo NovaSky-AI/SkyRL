@@ -563,6 +563,43 @@ async def test_persistence_failure_is_reported_to_waiter(future_store, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_batch_persist_failure_does_not_poison_other_entries(future_store, monkeypatch):
+    store, engine, _ = future_store
+    good_ids = [store.create("model_a", _sample_input(1)), store.create("model_a", _sample_input(3))]
+    bad_id = store.create("model_a", _sample_input(2))
+
+    async def persist_rejecting_bad_entry(entries):
+        if any(entry.request_id == bad_id for entry in entries):
+            raise RuntimeError("database unavailable")
+        await ExternalFutureStore._persist(store, entries)
+
+    monkeypatch.setattr(store, "_persist", persist_rejecting_bad_entry)
+
+    # complete() never suspends on a non-full queue, so all three entries are
+    # enqueued before the persist worker wakes and drains them as one batch.
+    result = types.SampleOutput(sequences=[])
+    for request_id in (good_ids[0], bad_id, good_ids[1]):
+        await store.complete(request_id, result, RequestStatus.COMPLETED)
+
+    for good_id in good_ids:
+        assert await store.wait(good_id, timeout=1) == (
+            RequestStatus.COMPLETED,
+            types.RequestType.EXTERNAL,
+            result.model_dump_json(),
+        )
+    with pytest.raises(RuntimeError, match=f"Failed to persist external future {bad_id}"):
+        await store.wait(bad_id, timeout=1)
+
+    async with AsyncSession(engine) as session:
+        statement = select(FutureDB.request_id).where(FutureDB.request_id.in_(good_ids + [bad_id]))
+        persisted = set((await session.exec(statement)).all())
+    assert persisted == set(good_ids)
+
+    with pytest.raises(RuntimeError, match="External future persistence failed"):
+        await store.flush()
+
+
+@pytest.mark.asyncio
 async def test_create_future_accepts_request_id_zero_after_negative_rows(future_store):
     # SQLite assigns max(rowid)+1, so when the table holds only the store's
     # negative request_ids the first autoincremented FutureDB row gets id 0.

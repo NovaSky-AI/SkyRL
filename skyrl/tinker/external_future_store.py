@@ -102,16 +102,25 @@ class ExternalFutureStore:
                     break
             try:
                 await self._persist(entries)
-            except Exception as error:
-                self._persist_error = error
+            except Exception:
+                # One bad row or transient error must not poison the whole
+                # batch: retry each entry on its own and fail only the ones
+                # that cannot be persisted individually.
                 logger.exception(
-                    "External future persistence failed request_ids=%s..%s",
+                    "Batched external future persistence failed request_ids=%s..%s, retrying individually",
                     entries[0].request_id,
                     entries[-1].request_id,
                 )
                 for entry in entries:
-                    entry.persistence_error = error
+                    try:
+                        await self._persist([entry])
+                    except Exception as error:
+                        self._persist_error = error
+                        entry.persistence_error = error
+                        logger.exception("External future persistence failed request_id=%s", entry.request_id)
                     entry.event.set()
+                    if entry.persistence_error is None:
+                        self._entries.pop(entry.request_id, None)
             else:
                 for entry in entries:
                     entry.event.set()
