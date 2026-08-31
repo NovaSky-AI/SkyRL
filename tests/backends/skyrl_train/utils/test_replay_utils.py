@@ -3,7 +3,6 @@ import sys
 import types
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
@@ -11,10 +10,13 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     build_token_metadata_layout,
 )
 from skyrl.backends.skyrl_train.utils import replay_utils
-from skyrl.backends.skyrl_train.utils.replay_utils import (
-    make_replay_padding_indices,
-    make_replay_padding_indices_np,
-)
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
+
+
+def _pack_routes(routes: torch.Tensor, attention_mask: torch.Tensor) -> PackedTensor:
+    """Pack a ``[batch, seq_len, layers, topk]`` fixture to its real tokens."""
+    return PackedTensor.from_segments([routes[row][attention_mask[row].bool()] for row in range(routes.shape[0])])
 
 
 @pytest.fixture
@@ -70,22 +72,10 @@ def test_replay_padding_indices_are_unique(dtype):
     assert torch.equal(padding, torch.tensor([0, 1, 2], dtype=dtype).expand_as(padding))
 
 
-@pytest.mark.parametrize("dtype", [np.uint8, np.int16, np.int32])
-def test_numpy_replay_padding_matches_torch(dtype):
-    torch_dtype = getattr(torch, np.dtype(dtype).name)
-    padding = make_replay_padding_indices_np((2, 3, 4, 3), dtype=np.dtype(dtype))
-
-    assert padding.dtype == dtype
-    assert torch.equal(
-        torch.from_numpy(padding),
-        make_replay_padding_indices((2, 3, 4, 3), dtype=torch_dtype),
-    )
-
-
 @pytest.mark.parametrize("shape", [(), (2, 3, 4, 0)])
-def test_numpy_replay_padding_rejects_missing_topk(shape):
+def test_replay_padding_rejects_missing_topk(shape):
     with pytest.raises(ValueError, match="positive topk"):
-        make_replay_padding_indices_np(shape, dtype=np.dtype(np.uint8))
+        make_replay_padding_indices(shape, dtype=torch.uint8)
 
 
 def test_replay_has_no_dispatcher_specific_patch():
@@ -121,15 +111,14 @@ def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, paral
         "scatter_router_padding_mask_for_model",
         lambda mask, model, model_config: mask,
     )
-    apply_layout = replay_utils.align_token_metadata
+    apply_layout = replay_utils.align_packed_token_metadata
     routed_layer_counts = []
 
     def record_routed_layer_count(metadata, layout, padding_value):
-        if metadata.ndim == 4:
-            routed_layer_counts.append(metadata.shape[2])
+        routed_layer_counts.append(metadata.row_shape[0])
         return apply_layout(metadata, layout, padding_value)
 
-    monkeypatch.setattr(replay_utils, "align_token_metadata", record_routed_layer_count)
+    monkeypatch.setattr(replay_utils, "align_packed_token_metadata", record_routed_layer_count)
 
     routes = torch.tensor(
         [
@@ -152,7 +141,7 @@ def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, paral
     )
 
     model_kwargs = replay_utils.setup_per_microbatch_replay_forward(
-        routes,
+        _pack_routes(routes, attention_mask),
         router_padding_mask,
         attention_mask,
         model=object(),
@@ -215,7 +204,7 @@ def test_replay_indices_are_dtype_independent(monkeypatch, parallel_state, packe
             fp8_enabled=False,
         )
         replay_utils.setup_per_microbatch_replay_forward(
-            routes,
+            _pack_routes(routes, attention_mask),
             router_padding_mask,
             attention_mask,
             model=object(),
