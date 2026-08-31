@@ -481,7 +481,7 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
             trainer = SFTTrainer(sft_cfg, skyrl_cfg=skyrl_cfg)
             trainer.collator = trainer._build_collator(tokenizer)
             collated = trainer.collate_batch(examples, batch_size=GLOBAL_BATCH_SIZE)
-            # Recompute flat_bins + align_size deterministically (same FFD call).
+            # Recompute flat_bins + align_size deterministically (same MFFD call).
             flat_bins = _recompute_flat_bins(trainer, examples)
             tp = 1
             transformer_config_kwargs = sft_cfg.megatron_config.transformer_config_kwargs or {}
@@ -579,9 +579,10 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
 
 
 def _recompute_flat_bins(trainer: SFTTrainer, examples: List[dict]) -> List[List[int]]:
-    """Reproduce the collator's flat_bins permutation (shard-major FFD order)
+    """Reproduce the collator's flat_bins permutation (shard-major MFFD order)
     so we can invert the example reordering for the comparison."""
     from skyrl.train.dataset.bin_packing import (
+        PackingStrategy,
         make_seq_packer,
     )
 
@@ -589,7 +590,7 @@ def _recompute_flat_bins(trainer: SFTTrainer, examples: List[dict]) -> List[List
     dp_size = trainer._dp_size()
     bin_count_multiple = dp_size
     packer = make_seq_packer(
-        "first_fit_decreasing",
+        PackingStrategy.MODIFIED_FIRST_FIT_DECREASING,
         bin_capacity=trainer.sft_cfg.resolved_bin_capacity(),
         min_bin_count=bin_count_multiple,
         bin_count_multiple=bin_count_multiple,
