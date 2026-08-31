@@ -45,16 +45,30 @@ def extract_solution(solution_str, method="strict"):
 def compute_score_components(
     solution_str: str,
     ground_truth: str,
+    max_response_chars: int,
     method: str = "strict",
-    format_score: float = 1.0,
-    score: float = 1.0,
+    condition_length_on_correct: bool = False,
 ) -> Dict[str, float]:
-    """Score GSM8k as two separate objectives: ``format`` for emitting an answer in the expected
-    ``#### <number>`` form, and ``correct`` for that answer matching the ground truth."""
+    """Score GSM8k as three separate objectives.
+
+    Args:
+        solution_str: the solution text
+        ground_truth: the ground truth
+        max_response_chars: length budget for the ``length`` objective
+        method: the method to extract the solution, choices are 'strict' and 'flexible'
+        condition_length_on_correct: award ``length`` only to correct responses
+
+    Returns:
+        ``correct`` for matching the ground truth, ``format`` for emitting an answer in the
+        ``#### <number>`` form, and ``length`` for staying within ``max_response_chars``.
+    """
     answer = extract_solution(solution_str=solution_str, method=method)
+    is_correct = answer is not None and answer == ground_truth
+    within_length = len(solution_str) <= max_response_chars
     return {
-        "format": format_score if answer is not None else 0.0,
-        "correct": score if answer is not None and answer == ground_truth else 0.0,
+        "correct": 1.0 if is_correct else 0.0,
+        "format": 1.0 if answer is not None else 0.0,
+        "length": 1.0 if within_length and (is_correct or not condition_length_on_correct) else 0.0,
     }
 
 
