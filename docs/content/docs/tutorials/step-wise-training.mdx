@@ -71,7 +71,10 @@ class GeneratorOutput(TypedDict):
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
     trajectory_ids: Optional[List[TrajectoryID]]
-    rollout_expert_indices: Optional[List[List[List[List[int]]]]]
+    trajectory_generation_times: Optional[List[float]]
+    trajectory_time_splits: Optional[Dict[str, List[float]]]
+    rollout_expert_indices: Optional[List[RoutedExpertIndices]]
+    rollout_sample_support: Optional[List[List[List[int]]]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
 ```
@@ -85,6 +88,8 @@ When `step_wise_trajectories=True`, some related fields:
 | `is_last_step` | `List[bool]` | Marks the final step of each trajectory. Must have at least one `True`, and the last element must be `True`. |
 | `trajectory_ids` | `List[TrajectoryID]` | Associates each step-sample with its parent trajectory. All steps of the same trajectory share the same `TrajectoryID`. |
 | `rollout_logprobs` | `List[List[float]]` | Per-token logprobs from the inference engine, aligned with `response_ids`. Required for TIS. |
+| `rollout_sample_support` | `List[List[List[int]]]` | Per generated token, the bounded top-k vocab IDs the sampler drew from, right-padded with `SAMPLE_SUPPORT_PADDING` (`-1`). One dense `[tokens, top_k]` block per row, aligned with `response_ids`. Every position must be present: an observation token or a synthetic (loop-appended) EOS carries an all-padding row rather than being absent, so the block stays rectangular and aligned. Enabled with `generator.inference_engine.enable_return_sample_support_set`, and requested per request (train batches only — eval's greedy `top_k=-1` params cannot satisfy the capture contract). |
+| `rollout_expert_indices` | `Optional[List[RoutedExpertIndices]]` | Per token, the `[layers, topk]` MoE routes vLLM recorded, as one `[tokens, layers, topk]` integer array per trajectory (rollout router replay, R3). **Refused with `step_wise_trajectories=True`**: each step-wise row's prompt is the whole history so far while routes are recorded for that step's generated tokens only, so a step's routes would replay onto the first N prompt tokens of its row with no length mismatch to assert on, silently training against routing that does not match the rollout. |
 
 ### Concrete Example
 
