@@ -222,8 +222,16 @@ def test_training_workflow(service_client):
     # The third example omits weights (auto-filled with 1s), so all losses should be non-zero
     assert all(v != 0.0 for v in fwdbwd_result.loss_fn_outputs[2]["elementwise_loss"].data)
 
-    # Load the optimizer state and verify another forward_backward pass has the same loss
-    training_client.load_state(resume_path)
+    # Matching the Tinker service, LoadWeights is only permitted as a model's first
+    # request; this client has already saved and trained, so both load flavors are rejected.
+    with pytest.raises(Exception, match="LoadWeights is not permitted"):
+        training_client.load_state(resume_path).result()
+    with pytest.raises(Exception, match="LoadWeights is not permitted"):
+        training_client.load_state_with_optimizer(resume_path).result()
+
+    # Restore the run on a fresh client instead (weights-only load as its first request)
+    # and verify a forward_backward pass reproduces the pre-optim-step losses.
+    training_client = service_client.create_training_client_from_state(resume_path)
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert_loss_fn_outputs_equal(fwdbwd_result2.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
     # Also check that custom loss function produces the same loss
@@ -232,10 +240,9 @@ def test_training_workflow(service_client):
     ).result()
     assert_loss_fn_outputs_equal(fwdbwd_result_custom.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
 
-    # Test that we can restore the training run
-    training_client = service_client.create_training_client_from_state(resume_path)
-    # Verify the restored client has the same state by running forward_backward again
-    fwdbwd_result3 = training_client.forward_backward(processed_examples, "cross_entropy").result()
+    # Restoring with optimizer state also loads as a fresh client's first request
+    training_client_opt = service_client.create_training_client_from_state_with_optimizer(resume_path)
+    fwdbwd_result3 = training_client_opt.forward_backward(processed_examples, "cross_entropy").result()
     assert_loss_fn_outputs_equal(fwdbwd_result3.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
 
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
@@ -418,6 +425,46 @@ def test_sample_top_k(service_client):
     # top_k=-1 (disabled) should vary with different seeds
     results_no_top_k = sample_with_top_k(top_k=-1)
     assert not all(seq == results_no_top_k[0] for seq in results_no_top_k), "Without top_k, outputs should vary"
+
+
+def test_sample_prompt_logprobs(service_client):
+    """Test that prompt logprob requests reach the backend and come back populated."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    prompt_tokens = tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True)
+    prompt = types.ModelInput.from_ints(prompt_tokens)
+    sampling_params = types.SamplingParams(temperature=0.0, max_tokens=4, seed=42)
+
+    result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=sampling_params,
+        num_samples=1,
+        include_prompt_logprobs=True,
+    ).result()
+    assert result.prompt_logprobs is not None
+    assert all(lp is None or isinstance(lp, float) for lp in result.prompt_logprobs)
+    # Not requested, so the field stays unset rather than being invented.
+    assert result.topk_prompt_logprobs is None
+
+    # Without the flag the backend must not pay for prompt logprobs at all.
+    assert (
+        sampling_client.sample(prompt=prompt, sampling_params=sampling_params, num_samples=1).result().prompt_logprobs
+        is None
+    )
+
+    # topk needs a full per-position distribution, which the JAX generator does
+    # not produce; the request must fail loudly instead of silently dropping it.
+    # The SkyRL-Train backend (megatron/fsdp) does support it -- the full
+    # contract runs end-to-end on megatron + vLLM in
+    # tests/tinker/skyrl_train/test_multi_lora_megatron.py::test_sample_prompt_logprobs.
+    with pytest.raises(ValueError, match="topk_prompt_logprobs is not supported"):
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            num_samples=1,
+            include_prompt_logprobs=True,
+            topk_prompt_logprobs=4,
+        ).result()
 
 
 def test_sample_with_stop_strings(service_client):

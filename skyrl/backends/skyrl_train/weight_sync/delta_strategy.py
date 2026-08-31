@@ -177,6 +177,7 @@ class DeltaTransferStrategy(WeightTransferStrategy):
     def create_sender(
         init_info: DeltaInitInfo,
         inference_client: "RemoteInferenceClient",
+        weight_extractor: Optional[Any] = None,
     ) -> DeltaWeightTransferSender:
         return DeltaWeightTransferSender(init_info=init_info, inference_client=inference_client)
 

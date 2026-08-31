@@ -492,6 +492,11 @@ class RayPPOTrainer:
                         # 10. Prepare weights for sampling
                         with Timer("sync_weights", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
+                        # `sync_weights` above is the full bracket: it also pauses and
+                        # resumes generation, which under vLLM DP costs seconds of
+                        # coordinator quiesce that is not weight-sync work. The
+                        # dispatch reports the transfer on its own alongside it.
+                        self.all_timings.update(self.dispatch.get_timing_metrics())
 
                     # 11. set logs
                     logger.info(status)
@@ -896,7 +901,7 @@ class RayPPOTrainer:
             rollout_logprobs_tensor,
             rollout_expert_indices_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
-            self.tokenizer,
+            self.tokenizer.pad_token_id,
             prompt_ids,
             response_ids,
             rewards,
@@ -1126,16 +1131,16 @@ class RayPPOTrainer:
 
         Expects:
             - `["sequences"]`: Integer[torch.Tensor, "batch_size seqlen"]
-            - `["response_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
-            - `["loss_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
-            - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["response_mask"]`: Integer[torch.Tensor, "batch_size response_len"]
+            - `["loss_mask"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["rewards"]`: Float[torch.Tensor, "batch_size response_len"]
             - `.metadata["uids"]`: List[str]
             - `.metadata["is_last_step"]`: List[bool] for step-wise training
 
         Adds:
-            - `["advantages"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["returns"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["advantages"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["returns"]`: Float[torch.Tensor, "batch_size response_len"]
         """
         token_level_rewards = data["rewards"]
 
@@ -1151,11 +1156,11 @@ class RayPPOTrainer:
             # Shapes:
             #   traj_ids, (batch_size,):         trajectory id per step (cumsum of shifted is_last_step)
             #   last_step_advantages/returns,
-            #       (num_traj, seqlen):          scalar advantage/return per trajectory at every position
+            #       (num_traj, response_len):          scalar advantage/return per trajectory at every position
             #   last_step_advantages/returns[traj_ids],
-            #       (batch_size, seqlen):        broadcast to every step of the owning trajectory
+            #       (batch_size, response_len):        broadcast to every step of the owning trajectory
             #   response_mask_float,
-            #       (batch_size, seqlen):        per-step response mask
+            #       (batch_size, response_len):        per-step response mask
             last_step_response_mask = data["response_mask"][is_last_step]
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards[is_last_step],
@@ -1319,9 +1324,9 @@ class RayPPOTrainer:
             - `.metadata["response_length"]`: Int
 
         Adds:
-            - `["base_action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["base_action_log_probs"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["action_log_probs"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
         """
         fwd_keys = ["sequences", "attention_mask"]
         if training_input.get("rollout_expert_indices") is not None:
@@ -1418,7 +1423,7 @@ class RayPPOTrainer:
 
         # single batched computation
         with torch.no_grad():
-            kl: Float[torch.Tensor, "batch_size seqlen"] = compute_approx_kl(  # type: ignore
+            kl: Float[torch.Tensor, "batch_size response_len"] = compute_approx_kl(  # type: ignore
                 action_log_probs,
                 base_action_log_probs,
                 loss_mask=loss_masks_all,

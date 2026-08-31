@@ -48,6 +48,7 @@ def get_test_actor_config(
     cfg.generator.inference_engine.run_engines_locally = True
     cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.gpu_memory_utilization = 0.6
 
     if strategy == "megatron":
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2

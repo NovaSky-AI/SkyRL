@@ -102,6 +102,17 @@ def test_datum_to_types_preserves_values_and_returns():
     assert datum.loss_fn_inputs.returns.data == [0.4, 0.5, 0.6]
 
 
+@pytest.mark.parametrize("optimizer", [False, True])
+def test_load_weights_request_preserves_optimizer_choice(optimizer):
+    request = api.LoadWeightsRequest(
+        model_id="model_test",
+        path="tinker://source_model/weights/checkpoint",
+        optimizer=optimizer,
+    )
+
+    assert request.optimizer is optimizer
+
+
 # --- ModelInputChunk discriminator tests (api) ---
 
 _api_adapter = TypeAdapter(api.ModelInputChunk)

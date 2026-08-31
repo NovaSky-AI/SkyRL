@@ -209,15 +209,57 @@ class MegatronModelWrapper:
                 "packing path, or set trainer.remove_microbatch_padding=False."
             )
 
+        # Pending grad-sync request recorded by `_defer_finalize_model_grads`, replayed
+        # by `run_pending_grad_sync`. See those methods for why the sync is deferred.
+        self._pending_grad_sync: Optional[dict] = None
+
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
-        # use the build in finalize_model_grads function to all reduce gradients across parallelism dimensions
-        config.finalize_model_grads_func = finalize_model_grads
+        # use the built-in finalize_model_grads function to all reduce gradients across
+        # parallelism dimensions -- but deferred to optim_step rather than run per
+        # forward_backward. See `_defer_finalize_model_grads`.
+        config.finalize_model_grads_func = self._defer_finalize_model_grads
         # Wire up the optimizer's loss scaler so Megatron's pipeline schedule can scale
         # the loss before backward (critical for fp16 dynamic loss scaling, MoE aux loss
         # scaling, and any explicit loss_scale configuration).
         if actor_optimizer is not None:
             config.grad_scale_func = actor_optimizer.scale_loss
+
+    def _defer_finalize_model_grads(self, model, num_tokens=None, **kwargs) -> None:
+        """Record Megatron's end-of-schedule grad sync instead of running it.
+
+        Megatron's pipeline schedules call ``finalize_model_grads_func`` at the end of
+        every ``forward_backward_func``, which is correct when one call == one optimizer
+        step. SkyRL lets a logical batch span several ``forward_backward`` calls (Tinker
+        splits large batches into multiple requests; callers may accumulate), and the
+        sync is *not* idempotent: the DP reduce-scatter writes the reduced result into
+        this rank's own shard of ``grad_data`` while leaving peer regions holding
+        un-reduced local values, so reducing a second time folds already-reduced
+        gradients back in. The layernorm/embedding all-reduces double-count the same way.
+
+        So we record the request here and replay it exactly once from
+        :meth:`run_pending_grad_sync`, called by the worker's ``optim_step``.
+
+        ``num_tokens`` is only non-None under ``calculate_per_token_loss`` (never set by
+        SkyRL, whose loss scaling assumes the per-microbatch path); accumulate it across
+        calls so the deferred sync divides by the whole window's token count if it ever is.
+        """
+        del model, kwargs  # replayed against self.actor_module with default process groups
+        pending = self._pending_grad_sync
+        if pending is not None and pending["num_tokens"] is not None and num_tokens is not None:
+            num_tokens = pending["num_tokens"] + num_tokens
+        self._pending_grad_sync = {"num_tokens": num_tokens}
+
+    def run_pending_grad_sync(self) -> None:
+        """Reduce gradients across DP/TP/PP exactly once for the accumulated window.
+
+        Always runs the collective, even when this rank recorded nothing: a DP rank
+        whose ``forward_backward`` got no microbatches never reaches the schedule's
+        finalize hook, and skipping the reduce here would hang the ranks that do run it.
+        """
+        pending = self._pending_grad_sync
+        self._pending_grad_sync = None
+        finalize_model_grads(self.actor_module, pending["num_tokens"] if pending else None)
 
     def train(self):
         [module.train() for module in self.actor_module]
@@ -572,7 +614,7 @@ class MegatronModelWrapper:
             advantages = data["advantages"]
             loss_mask = data["loss_mask"]
             rollout_action_logprobs = data["rollout_action_logprobs"]
-            action_mask = data.get("action_mask")
+            response_mask = data.get("response_mask")
             num_microbatches = data.get("num_microbatches")
             # Number of microbatches carrying real samples (excludes fully-padding
             # microbatches added by token-based batching). Used to normalize the
@@ -770,8 +812,8 @@ class MegatronModelWrapper:
                     # syncs per micro-batch (item()/cpu()/tolist() inside the loop).
                     batch_size = action_log_probs.shape[0]
                     seq_len = action_log_probs.shape[1]
-                    if action_mask is not None:
-                        valid_lens_t = action_mask.sum(dim=-1).long()
+                    if response_mask is not None:
+                        valid_lens_t = response_mask.sum(dim=-1).long()
                     elif loss_mask is not None:
                         valid_lens_t = (loss_mask > 0).sum(dim=-1).long()
                     else:
@@ -910,8 +952,8 @@ class MegatronModelWrapper:
             batch_size = action_log_probs.shape[0]
             seq_len = action_log_probs.shape[1]
 
-            if action_mask is not None:
-                valid_lens = action_mask.sum(dim=1).int().tolist()
+            if response_mask is not None:
+                valid_lens = response_mask.sum(dim=1).int().tolist()
             elif loss_mask is not None:
                 valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
             else:

@@ -40,7 +40,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -57,7 +56,6 @@ jobs:
         run: |
           envsubst < ci/anyscale_gpu_ci.yaml > ci/anyscale_gpu_ci_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="skyrl-tx-gpu-ci-${COMMIT_SHA:0:7}-${{ github.run_id }}"
-          anyscale job submit -f ci/anyscale_gpu_ci_envsubst.yaml --name "$JOB_NAME" --timeout 10000
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name "$JOB_NAME" --timeout 10000
+          JOB_NAME="skyrl-tx-gpu-ci-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_envsubst.yaml "$JOB_NAME" 10000
           rm -f ci/anyscale_gpu_ci_envsubst.yaml

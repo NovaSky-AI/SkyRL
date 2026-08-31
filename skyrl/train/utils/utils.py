@@ -197,7 +197,8 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.weight_sync_backend in {
         "nccl",
         "delta",
-    }, "only nccl and delta are supported for megatron weight sync"
+        "sharded_rdt",
+    }, "only nccl, delta and sharded_rdt are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
@@ -804,13 +805,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
-    if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
-        logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
-        env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
-
-    if worker_nccl_timeout := os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S"):
-        logger.info(f"Exporting `SKYRL_WORKER_NCCL_TIMEOUT_IN_S` to ray runtime env: {worker_nccl_timeout}")
-        env_vars["SKYRL_WORKER_NCCL_TIMEOUT_IN_S"] = worker_nccl_timeout
     # Forward uv's project-environment selection to the workers. Ray's uv runtime-env hook makes each
     # worker re-run `uv run ... --extra <backend>`, and that subprocess must resolve to the SAME venv
     # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a
@@ -834,13 +828,14 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
             env_vars[var_name] = value
 
-    # Health-check timeout for the inference server actor. Forwarded so `VLLMServerActor.start`
-    # sees the override.
-    if health_timeout := os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"):
-        logger.info(
-            f"Exporting `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` to ray runtime env: {health_timeout}"
-        )
-        env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
+    # Forward any SKYRL_* overrides set in the launching shell (e.g.
+    # SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S for very large models
+    # whose weight load exceeds the 600s default) — skyrl.env_vars reads them at
+    # import time in every process, so they must ride the runtime env.
+    forwarded = {k: v for k, v in os.environ.items() if k.startswith("SKYRL_") and k not in env_vars}
+    if forwarded:
+        logger.info(f"Exporting SKYRL_* overrides to ray runtime env: {sorted(forwarded)}")
+    env_vars.update(forwarded)
 
     return env_vars
 

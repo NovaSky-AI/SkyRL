@@ -128,8 +128,8 @@ class AdapterSlot:
           (mc.buffers + mc.expert_parallel_buffers).
       cpu_grad_data[mc_idx]  -> same shape as cpu_param_data; mirrors
           buffer.grad_data so that grads accumulated by an interrupted
-          forward_backward aren't lost when another tenant runs in the
-          gap before this adapter's optim_step.
+          forward_backward aren't lost when another tenant runs before
+          this adapter's optim_step.
       cpu_main_param[opt_idx][g] -> list[Tensor], shapes matching
           opt.shard_fp32_from_float16_groups[g].
       cpu_opt_state[opt_idx][g][i] -> dict[str, Tensor], mirroring
@@ -169,6 +169,10 @@ class AdapterStore:
         # grads live only in its CPU slot. Set by park_grads, cleared by
         # unpark_grads.
         self._grads_parked: bool = False
+        # True when the live GPU state mirrors a *deleted* adapter (deleting
+        # the current adapter clears current_id without restoring anything).
+        # While set, live state must not be treated as pristine.
+        self._live_stale = False
 
     @property
     def current_id(self) -> Optional[str]:
@@ -201,9 +205,8 @@ class AdapterStore:
     def _allocate_empty_slot(self, model_chunks, optimizer) -> AdapterSlot:
         slot = AdapterSlot()
         # Param data + grad data: one pinned bf16 tensor each per (mc, buffer).
-        # Grads must travel with the slot — otherwise an interleaved tenant's
-        # forward_backward will clobber unconsumed grads via zero_grad_buffer
-        # at the top of forward_backward. See docs/.../multi_lora_design.mdx.
+        # Grads must travel with the slot so forward_backward calls accumulate
+        # into the correct adapter even when requests from tenants interleave.
         for mc_idx, _buf_idx, buf in _iter_buffers(model_chunks):
             while len(slot.cpu_param_data) <= mc_idx:
                 slot.cpu_param_data.append([])
@@ -377,12 +380,15 @@ class AdapterStore:
             raise ValueError(f"AdapterStore: adapter '{model_id}' already registered")
 
         slot = self._allocate_empty_slot(model_chunks, optimizer)
-        if self._current_id is None:
+        if self._current_id is None and not self._live_stale:
             # First adapter: live state IS pristine; slot will be filled on
             # the next snapshot (i.e. swap-away). Treat live as authoritative.
             self._current_id = model_id
         else:
-            # Seed the new slot from pristine.
+            # Seed the new slot from pristine. When live is stale (the
+            # previously-current adapter was deleted), current_id stays None
+            # so the next swap_to restores this pristine copy instead of the
+            # deleted adapter's leftover live state.
             self._copy_slot(self._pristine, slot)
         self._slots[model_id] = slot
 
@@ -492,6 +498,7 @@ class AdapterStore:
         del self._slots[model_id]
         if self._current_id == model_id:
             self._current_id = None
+            self._live_stale = True
 
     @torch.no_grad()
     def swap_to(self, model_id: str, model_chunks, optimizer) -> None:
@@ -534,6 +541,7 @@ class AdapterStore:
         torch.cuda.current_stream().synchronize()
 
         self._current_id = model_id
+        self._live_stale = False
 
         if dist.is_available() and dist.is_initialized():
             dist.barrier(group=dp_group)
