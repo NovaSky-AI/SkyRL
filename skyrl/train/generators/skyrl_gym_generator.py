@@ -761,6 +761,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         truncated_responses = []
         rewards = []
+        reward_components: List[Dict[str, float]] = []
         loss_masks = []
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
@@ -771,6 +772,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             reward = env_step_output["reward"]
             rewards.append(reward)
+            step_reward_components = env_step_output.get("reward_components")
+            if step_reward_components is not None:
+                reward_components.append(step_reward_components)
 
             if len(response) > max_tokens:
                 response = response[:max_tokens]
@@ -795,10 +799,17 @@ class SkyRLGymGenerator(GeneratorInterface):
             # set loss mask to 0 if the stop reason is not "stop"
             loss_masks = apply_overlong_filtering(loss_masks, stop_reasons)
 
+        if reward_components and len(reward_components) != len(rewards):
+            raise ValueError(
+                f"Only {len(reward_components)} of {len(rewards)} environments returned `reward_components`. "
+                "Either every environment in the batch must return them, or none."
+            )
+
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
             "response_ids": truncated_responses,
             "rewards": rewards,
+            "reward_components": reward_components or None,
             "loss_masks": loss_masks,
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,

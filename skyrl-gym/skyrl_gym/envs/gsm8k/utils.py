@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import re
+from typing import Dict
 
 
 def extract_solution(solution_str, method="strict"):
@@ -39,6 +40,22 @@ def extract_solution(solution_str, method="strict"):
                 if final_answer not in invalid_str:
                     break
     return final_answer
+
+
+def compute_score_components(
+    solution_str: str,
+    ground_truth: str,
+    method: str = "strict",
+    format_score: float = 1.0,
+    score: float = 1.0,
+) -> Dict[str, float]:
+    """Score GSM8k as two separate objectives: ``format`` for emitting an answer in the expected
+    ``#### <number>`` form, and ``correct`` for that answer matching the ground truth."""
+    answer = extract_solution(solution_str=solution_str, method=method)
+    return {
+        "format": format_score if answer is not None else 0.0,
+        "correct": score if answer is not None and answer == ground_truth else 0.0,
+    }
 
 
 def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0):

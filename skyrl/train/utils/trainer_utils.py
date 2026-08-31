@@ -705,6 +705,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "is_last_step",
             "pixel_values",
             "image_grid_thw",
+            "reward_components",
         ]:
             assert len(generator_output[key]) == len(generator_output["response_ids"]), (
                 f"Generator output {key} length must be equal to response_ids length, "
@@ -746,6 +747,16 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
         assert all(
             not isinstance(reward, list) for reward in rewards
         ), "rewards must be `List[float]` or `List[List[float]]`"
+
+    reward_components = generator_output.get("reward_components")
+    if reward_components is not None:
+        names = set(reward_components[0])
+        assert names, "reward_components entries must be non-empty"
+        for i, components in enumerate(reward_components):
+            assert set(components) == names, (
+                f"Every response must carry the same reward components, "
+                f"but sample {i} has {sorted(components)} and sample 0 has {sorted(names)}"
+            )
 
     if step_wise:
         _validate_step_wise_fields(generator_output, num_responses)

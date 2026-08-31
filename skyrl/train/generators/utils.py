@@ -185,13 +185,22 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n`, and `mean_positive_reward` from generator output.
 
+    Thin wrapper over `get_metrics_from_rewards` for the batch's primary `rewards` field.
+    """
+    return get_metrics_from_rewards(generator_output["rewards"], uids)
+
+
+@torch.no_grad()
+def get_metrics_from_rewards(rewards: Union[List[float], List[List[float]]], uids: List[str]) -> MetricsOutput:
+    """
+    Get `mean_raw_reward` (or avg_score), `pass_at_n`, and `mean_positive_reward` for one reward signal.
+
     The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
-    calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
-    unique examples.
+    calculated as `len(rewards) / len(uids)`, where `len(uids)` is the number of unique examples.
 
     Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
+    Multi-reward runs call this once per objective to get per-objective metrics.
     """
-    rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
@@ -288,6 +297,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),
         "response_ids": _flatten_field(generator_outputs, "response_ids"),
         "rewards": _flatten_field(generator_outputs, "rewards"),
+        "reward_components": _concat_optional_field(generator_outputs, "reward_components"),
         "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
         "stop_reasons": _concat_optional_field(generator_outputs, "stop_reasons"),
         "rollout_logprobs": _concat_optional_field(generator_outputs, "rollout_logprobs"),
@@ -943,6 +953,7 @@ def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
     assert (
         generator_output.get("pixel_values") is None and generator_output.get("image_grid_thw") is None
     ), "pixel_values and image_grid_thw not supported for step-wise training merging"
+    assert generator_output.get("reward_components") is None, "reward_components not supported for prefix-aware merging"
 
     # Split into per-trajectory GeneratorOutputs using is_last_step boundaries
     # (contiguity is guaranteed by validate_generator_output with step_wise=True)
