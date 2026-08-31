@@ -5,7 +5,7 @@ layouts for:
 
 * RL: :func:`convert_prompts_responses_to_batch_tensors`
 * SFT (unpacked): :func:`collate_sft_batch` / ``DefaultCollator``
-* SFT (Megatron FFD packing): ``PackedDataCollator``
+* SFT (Megatron MFFD packing): ``PackedDataCollator``
 
 Run with:
   uv run --isolated --extra dev --extra megatron -- \
@@ -257,7 +257,7 @@ def test_sft_collate_bit_identical(seed):
 
 
 # ---------------------------------------------------------------------------
-# SFT packed: PackedDataCollator (Megatron FFD)
+# SFT packed: PackedDataCollator (Megatron MFFD)
 # ---------------------------------------------------------------------------
 
 
@@ -344,11 +344,16 @@ def test_packed_collator_bit_identical(seed, tp, pp, cp, dp):
 
     batch = collator(examples, batch_size=batch_size)
 
-    # Re-derive FFD rows independently before running the loop reference.
-    from skyrl.train.dataset.bin_packing import make_seq_packer
+    # Re-derive MFFD rows independently before running the loop reference.
+    from skyrl.train.dataset.bin_packing import PackingStrategy, make_seq_packer
 
     seq_lengths = [len(ex["input_ids"]) for ex in examples]
-    packer = make_seq_packer("first_fit_decreasing", bin_capacity=bin_capacity, min_bin_count=dp, bin_count_multiple=dp)
+    packer = make_seq_packer(
+        PackingStrategy.MODIFIED_FIRST_FIT_DECREASING,
+        bin_capacity=bin_capacity,
+        min_bin_count=dp,
+        bin_count_multiple=dp,
+    )
     bins = packer.pack(seq_lengths)
     shard_bins: List[List[List[int]]] = [[] for _ in range(dp)]
     for bin_idx, bi in enumerate(bins):
