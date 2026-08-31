@@ -5,7 +5,7 @@ Pins the two facts the ``all-linear`` remap in ``configure_lora`` relies on:
 1. The bridges' GDN ``in_proj`` mappings keep their hf_param layouts
    (four separate tensors for Qwen3.5's ``GDNLinearMappingSeparate``, two
    fused tensors for Qwen3-Next's ``GDNLinearMapping``), and
-   ``_gdn_in_proj_lora_is_safe`` classifies them accordingly.
+   ``gdn_in_proj_lora_is_safe`` classifies them accordingly.
 2. peft_bridge still cannot handle a fused-layout (Qwen3-Next) ``in_proj``
    adapter: the merged export shape-mismatches and the unmerged export has no
    fused-adapter split for it. If these assertions start failing after a
@@ -30,8 +30,8 @@ from megatron.bridge.models.conversion.peft_bridge import (
     MegatronPeftBridge,
 )
 
-from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-    _gdn_in_proj_lora_is_safe,
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    gdn_in_proj_lora_is_safe,
 )
 
 pytestmark = pytest.mark.megatron
@@ -79,7 +79,7 @@ def test_in_proj_lora_unsafe_for_qwen3_next_style_registry():
             ba="model.layers.*.linear_attn.in_proj_ba.weight",
         ),
     )
-    assert not _gdn_in_proj_lora_is_safe(_bridge_with_registry(registry))
+    assert not gdn_in_proj_lora_is_safe(_bridge_with_registry(registry))
 
 
 def test_in_proj_lora_safe_for_qwen35_style_registry():
@@ -92,13 +92,13 @@ def test_in_proj_lora_safe_for_qwen35_style_registry():
             a="model.layers.*.linear_attn.in_proj_a.weight",
         ),
     )
-    assert _gdn_in_proj_lora_is_safe(_bridge_with_registry(registry))
+    assert gdn_in_proj_lora_is_safe(_bridge_with_registry(registry))
 
 
 def test_in_proj_lora_safe_for_non_gdn_registry():
     # No GDN layers: in_proj matches nothing, so keeping it in the target
     # list is harmless.
-    assert _gdn_in_proj_lora_is_safe(_bridge_with_registry(MegatronMappingRegistry()))
+    assert gdn_in_proj_lora_is_safe(_bridge_with_registry(MegatronMappingRegistry()))
 
 
 def test_peft_bridge_recognizes_only_the_separate_gdn_layout():
