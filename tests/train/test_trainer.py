@@ -314,6 +314,37 @@ def test_normalize_advantages_batch_normalize_masks_padding(dummy_config):
     assert z_scores.pow(2).mean().sqrt().item() == approx(1.0, abs=1e-4)
 
 
+def test_normalize_advantages_batch_normalize_all_zero_mask(dummy_config):
+    """An all-zero response mask (no trainable tokens) must not produce NaNs.
+
+    Without clamping ``num_actions``, ``std / num_actions`` is 0 / 0 = NaN, which
+    ``clamp`` does not remove, corrupting the advantages and everything downstream.
+    """
+    dummy_config.trainer.algorithm.advantage_batch_normalize = True
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    batch_size = 2
+    response_mask = torch.zeros((batch_size, 5), dtype=torch.int32)
+    data = TrainingInputBatch(
+        {
+            "advantages": torch.randn(batch_size, 5),
+            "response_mask": response_mask,
+            "loss_mask": response_mask.clone(),
+        }
+    )
+    normalized = trainer._normalize_advantages(data, [(0, batch_size)])["advantages"]
+    assert torch.isfinite(normalized).all()
+
+
 def test_flush_pending_metrics_logs_and_clears(dummy_config):
     """Metrics accumulated for an in-flight step are flushed to the tracker."""
     trainer = RayPPOTrainer(
