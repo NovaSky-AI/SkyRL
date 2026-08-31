@@ -371,6 +371,13 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "trainer.algorithm.advantage_batch_normalize=false."
         )
 
+    if cfg.trainer.algorithm.advantage_estimator == "gdpo" and cfg.trainer.algorithm.use_kl_in_reward:
+        raise ValueError(
+            "advantage_estimator='gdpo' scores the individual reward components, which the "
+            "use_kl_in_reward penalty (applied to the summed reward) never reaches, so the penalty "
+            "would be silently ignored. Use trainer.algorithm.use_kl_loss=true instead."
+        )
+
     if cfg.generator.step_wise_trajectories and cfg.trainer.algorithm.loss_reduction == "token_mean_legacy":
         # TODO(Charlie): this can be fixed, can revisit later.
         raise ValueError(

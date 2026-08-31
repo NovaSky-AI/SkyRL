@@ -832,6 +832,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     is_token_level_rewards = isinstance(gen_out["rewards"][0], list)
     has_logprobs = gen_out.get("rollout_logprobs") is not None
     has_stop_reasons = gen_out.get("stop_reasons") is not None
+    has_reward_components = gen_out.get("reward_components") is not None
 
     # Per-field output accumulators.
     # Fields that we take from all the entries in the merge group
@@ -844,6 +845,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
 
     # Fields that we only take from the last turn in the merge group
     out_stop_reasons: Optional[List[str]] = [] if has_stop_reasons else None
+    out_reward_components: Optional[List[Dict[str, float]]] = [] if has_reward_components else None
     out_trajectory_ids: list = []
     out_is_last_step: List[bool] = []
 
@@ -865,6 +867,8 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         out_rewards.append(acc_rewards_tokens if is_token_level_rewards else gen_out["rewards"][last])
         if has_stop_reasons:
             out_stop_reasons.append(gen_out["stop_reasons"][last])
+        if has_reward_components:
+            out_reward_components.append(gen_out["reward_components"][last])
         out_trajectory_ids.append(gen_out["trajectory_ids"][last])
         out_is_last_step.append(gen_out["is_last_step"][last])
 
@@ -912,6 +916,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         "prompt_token_ids": out_prompt_ids,
         "response_ids": out_response_ids,
         "rewards": out_rewards,
+        "reward_components": out_reward_components,
         "loss_masks": out_loss_masks,
         "stop_reasons": out_stop_reasons,
         "rollout_logprobs": out_logprobs,
@@ -953,7 +958,6 @@ def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
     assert (
         generator_output.get("pixel_values") is None and generator_output.get("image_grid_thw") is None
     ), "pixel_values and image_grid_thw not supported for step-wise training merging"
-    assert generator_output.get("reward_components") is None, "reward_components not supported for prefix-aware merging"
 
     # Split into per-trajectory GeneratorOutputs using is_last_step boundaries
     # (contiguity is guaranteed by validate_generator_output with step_wise=True)

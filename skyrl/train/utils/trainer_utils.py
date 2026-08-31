@@ -749,7 +749,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
         ), "rewards must be `List[float]` or `List[List[float]]`"
 
     reward_components = generator_output.get("reward_components")
-    if reward_components is not None:
+    if reward_components:
         names = set(reward_components[0])
         assert names, "reward_components entries must be non-empty"
         for i, components in enumerate(reward_components):

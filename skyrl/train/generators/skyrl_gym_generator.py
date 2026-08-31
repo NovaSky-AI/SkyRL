@@ -52,6 +52,7 @@ class TrajectoryOutput:
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     rollout_expert_indices: Optional[RoutedExpertIndices] = None
+    reward_components: Optional[Dict[str, float]] = None
     pixel_values: Optional[torch.Tensor] = None
     image_grid_thw: Optional[torch.Tensor] = None
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
@@ -366,6 +367,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
             per_step_rewards: List[Tuple[float, Optional[int]]] = []
+            per_step_reward_components: List[Dict[str, float]] = []
 
             is_step_wise = self.generator_cfg.step_wise_trajectories
 
@@ -448,6 +450,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 time_splits["env"] += time.monotonic() - env_step_start_time
                 new_obs = env_step_output["observations"]
                 step_reward: float = env_step_output["reward"]
+                step_reward_components = env_step_output.get("reward_components")
                 agent_loop_state.done = env_step_output["done"]
 
                 if env_step_output.get("postprocessed_action", None) is not None:
@@ -486,6 +489,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     per_step_output = TrajectoryOutput(
                         response_ids=turn_response_ids,
                         reward=step_reward,
+                        reward_components=step_reward_components,
                         loss_mask=turn_loss_mask,
                         prompt_ids=turn_prompt_ids,
                         rollout_logprobs=turn_response_logprobs,
@@ -514,6 +518,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                     )
 
                 per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
+                if step_reward_components is not None:
+                    per_step_reward_components.append(step_reward_components)
 
             # Get environment-specific metrics after the episode is done
             env_metrics = env.get_metrics()
@@ -582,9 +588,22 @@ class SkyRLGymGenerator(GeneratorInterface):
             else:
                 reward_out = self._build_per_token_rewards(per_step_rewards, response_ids, appended_eos_token)
 
+                trajectory_reward_components = None
+                if per_step_reward_components:
+                    if len(per_step_reward_components) != len(per_step_rewards):
+                        raise ValueError(
+                            f"Only {len(per_step_reward_components)} of {len(per_step_rewards)} turns returned "
+                            "`reward_components`. Either every turn must return them, or none."
+                        )
+                    trajectory_reward_components = {
+                        name: sum(step[name] for step in per_step_reward_components)
+                        for name in per_step_reward_components[0]
+                    }
+
                 agent_loop_output = TrajectoryOutput(
                     response_ids=response_ids,
                     reward=reward_out,
+                    reward_components=trajectory_reward_components,
                     stop_reason=stop_reason,
                     loss_mask=loss_mask,
                     prompt_ids=prompt_ids,
@@ -883,6 +902,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         if self.generator_cfg.step_wise_trajectories:
             responses = []
             rewards = []
+            reward_components = []
             stop_reasons = []
             loss_masks = []
             prompt_token_ids = []
@@ -896,6 +916,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 for j, step_output in enumerate(output.step_outputs):
                     responses.append(step_output.response_ids)
                     rewards.append(step_output.reward)
+                    if step_output.reward_components is not None:
+                        reward_components.append(step_output.reward_components)
                     stop_reasons.append(step_output.stop_reason)
                     loss_masks.append(step_output.loss_mask)
                     prompt_token_ids.append(step_output.prompt_ids)
@@ -914,6 +936,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             responses = [output.response_ids for output in all_outputs]
             rewards = [output.reward for output in all_outputs]
+            reward_components = [o.reward_components for o in all_outputs if o.reward_components is not None]
             stop_reasons = [output.stop_reason for output in all_outputs]
             loss_masks = [output.loss_mask for output in all_outputs]
             prompt_token_ids = [output.prompt_ids for output in all_outputs]
@@ -969,15 +992,26 @@ class SkyRLGymGenerator(GeneratorInterface):
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
             rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)
+            reward_components = [
+                {name: 0.0 for name in components} if stop_reason != "stop" else components
+                for components, stop_reason in zip(reward_components, stop_reasons)
+            ]
 
         if self.generator_cfg.apply_overlong_filtering:
             # set loss mask to 0 if the stop reason is not "stop"
             loss_masks = apply_overlong_filtering(loss_masks, stop_reasons)
 
+        if reward_components and len(reward_components) != len(rewards):
+            raise ValueError(
+                f"Only {len(reward_components)} of {len(rewards)} trajectories returned `reward_components`. "
+                "Either every trajectory must return them, or none."
+            )
+
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
             "response_ids": responses,
             "rewards": rewards,
+            "reward_components": reward_components or None,
             "loss_masks": loss_masks,
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
