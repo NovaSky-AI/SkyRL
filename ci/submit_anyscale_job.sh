@@ -40,6 +40,8 @@
 #   CAPACITY_MAX_ATTEMPTS    submissions before giving up (default 5)
 #   CAPACITY_RETRY_DELAY_S   sleep between attempts (default 300)
 #   ANYSCALE_API_ATTEMPTS    tries per control-plane call (default 6)
+#   ANYSCALE_JOBS_FILE       where submitted job names are recorded, for
+#                            ci/terminate_anyscale_jobs.sh to clean up after a cancel
 
 set -euo pipefail
 
@@ -68,7 +70,32 @@ TERMINATE_ATTEMPTS="${ANYSCALE_TERMINATE_ATTEMPTS:-5}"
 UNKNOWN_POLL_LIMIT="${ANYSCALE_UNKNOWN_POLL_LIMIT:-10}"
 
 API_ERR_LOG="$(mktemp)"
+
+# Every name we submit, so a cancelled run can still be cleaned up. Cancelling a
+# workflow (`cancel-in-progress`, the UI button, a job timeout) kills this script,
+# not the cluster it is waiting on -- the GPUs stay allocated until someone
+# terminates the job.
+JOBS_FILE="${ANYSCALE_JOBS_FILE:-${RUNNER_TEMP:-/tmp}/anyscale-submitted-jobs.txt}"
+: > "$JOBS_FILE"
+
+CURRENT_RUN_NAME=""
+
+# Best-effort terminate on the way out. The runner allows only a short grace period
+# after signalling, so this gets two quick tries rather than the usual backoff; the
+# `if: cancelled()` cleanup step in the workflow is the reliable backstop.
+on_signal() {
+    trap - INT TERM
+    if [[ -n "$CURRENT_RUN_NAME" ]]; then
+        echo "Interrupted -- terminating ${CURRENT_RUN_NAME}." >&2
+        anyscale job terminate --cloud "$CLOUD" --name "$CURRENT_RUN_NAME" \
+            || anyscale job terminate --cloud "$CLOUD" --name "$CURRENT_RUN_NAME" \
+            || echo "Terminate failed; ci/terminate_anyscale_jobs.sh must finish the job off." >&2
+    fi
+    exit 143
+}
+
 trap 'rm -f "$API_ERR_LOG"' EXIT
+trap on_signal INT TERM
 
 # Retry a control-plane call with exponential backoff; the rate limit advertises a
 # retry-after of a few seconds. Only stdout is forwarded, since callers parse it as JSON.
@@ -208,6 +235,10 @@ for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     fi
 
     echo "--- Anyscale job attempt ${attempt}/${MAX_ATTEMPTS}: ${run_name}"
+    # Recorded before submitting: a submit that times out client-side may still have
+    # created the job, and an unrecorded job is one nobody will clean up.
+    echo "$run_name" >> "$JOBS_FILE"
+    CURRENT_RUN_NAME="$run_name"
     anyscale job submit -f "$CONFIG_FILE" --name "$run_name" --timeout "$RUN_TIMEOUT_S"
 
     if wait_for_state "$run_name" RUNNING "$START_TIMEOUT_S"; then
@@ -234,7 +265,9 @@ for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     echo "Job ${run_name} failed (state: ${state}) without ever running its entrypoint:" >&2
     echo "treating this as a GPU capacity failure." >&2
 
-    if ! ensure_terminal "$run_name"; then
+    if ensure_terminal "$run_name"; then
+        CURRENT_RUN_NAME=""
+    else
         echo "Could not confirm ${run_name} is terminated; refusing to resubmit and" >&2
         echo "leave a second cluster competing for the same instance type." >&2
         exit 1

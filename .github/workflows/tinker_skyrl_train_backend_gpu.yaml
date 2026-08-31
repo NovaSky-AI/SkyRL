@@ -25,11 +25,14 @@ permissions:
   checks: write   # for status checks to appear
   contents: read
 
-# A re-label while a run is still going supersedes it rather than queueing a second
-# GPU cluster. Keyed on the PR, since `github.ref` is the base branch under
-# pull_request_target and would collide across every open PR.
+# Re-applying the gating label supersedes a run that is still going rather than
+# queueing a second GPU cluster. The group must include the label: a run started by
+# *another* label is skipped by the gate below, and without the label in the key it
+# would cancel the in-flight GPU job on its way to skipping. Keyed on the PR because
+# `github.ref` is the base branch under pull_request_target.
 concurrency:
-  group: skyrl-gpu-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: >-
+    skyrl-gpu-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.label.name }}
   cancel-in-progress: true
 
 jobs:
@@ -85,3 +88,11 @@ jobs:
           JOB_NAME="tinker-skyrl-train-backend-gpu-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
           bash ci/submit_anyscale_job.sh ci/anyscale_tinker_skyrl_train_backend_gpu_envsubst.yaml "$JOB_NAME" 5000
           rm -f ci/anyscale_tinker_skyrl_train_backend_gpu_envsubst.yaml
+      # Cancelling the run stops the runner, not the cluster. GitHub still runs
+      # `if: cancelled()` steps, so this is where an orphaned GPU job gets reaped.
+      - name: Terminate Anyscale jobs on cancellation
+        if: cancelled()
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+        run: bash ci/terminate_anyscale_jobs.sh
