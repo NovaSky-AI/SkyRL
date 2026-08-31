@@ -71,6 +71,9 @@ SHUTDOWN_TIMEOUT_SECONDS = 10
 # How long retrieve_future waits for a result before returning 408
 RETRIEVE_FUTURE_TIMEOUT_SECONDS = 300
 
+# How long shutdown waits for in-flight forwarding tasks before cancelling them
+FORWARDING_SHUTDOWN_TIMEOUT_SECONDS = 10
+
 # How often poll_futures looks for newly finished requests. A single query
 # covers every waiter, so this can stay tight without the load scaling up with
 # the number of in-flight requests.
@@ -203,7 +206,14 @@ def _start_forwarding_task(app: FastAPI, operation: Awaitable[None]) -> None:
 
 async def _close_external_inference(app: FastAPI) -> None:
     if app.state.forwarding_tasks:
-        await asyncio.gather(*tuple(app.state.forwarding_tasks), return_exceptions=True)
+        # Bounded wait: a hung inference backend must not stall shutdown for the
+        # full httpx timeout (with retries, ~10 minutes per task).
+        _, pending = await asyncio.wait(tuple(app.state.forwarding_tasks), timeout=FORWARDING_SHUTDOWN_TIMEOUT_SECONDS)
+        if pending:
+            logger.warning(f"Cancelling {len(pending)} forwarding tasks still in flight at shutdown")
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     inference_client = getattr(app.state, "external_inference_client", None)
     aclose = getattr(inference_client, "aclose", None)

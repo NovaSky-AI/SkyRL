@@ -344,6 +344,37 @@ async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
 
 
 @pytest.mark.asyncio
+async def test_shutdown_cancels_hung_forwarding_tasks(monkeypatch):
+    monkeypatch.setattr(api, "FORWARDING_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+    events = []
+
+    class ClosingStore:
+        async def close(self) -> None:
+            events.append("store_closed")
+
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            external_inference_client=None,
+            external_future_store=ClosingStore(),
+            forwarding_tasks=set(),
+        )
+    )
+
+    async def hang_forever() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("forwarding_cancelled")
+            raise
+
+    api._start_forwarding_task(app, hang_forever())
+    await asyncio.wait_for(api._close_external_inference(app), timeout=5)
+
+    assert events == ["forwarding_cancelled", "store_closed"]
+    assert not app.state.forwarding_tasks
+
+
+@pytest.mark.asyncio
 async def test_shutdown_stops_engine_when_future_persistence_failed(monkeypatch):
     events = []
 
