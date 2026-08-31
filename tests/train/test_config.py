@@ -20,7 +20,11 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
     overrides_dict_to_dotlist,
 )
-from skyrl.train.utils.utils import validate_cfg, validate_inference_engine_cfg
+from skyrl.train.utils.utils import (
+    validate_cfg,
+    validate_inference_engine_cfg,
+    validate_megatron_cfg,
+)
 from tests.train.util import example_dummy_config
 
 
@@ -152,6 +156,93 @@ def test_cli_overrides_empty_args():
 def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value):
     with pytest.raises(ValueError, match=field_name):
         TrainerConfig(**{field_name: value})
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("generator.sampling_params.temperature=0", "temperature > 0"),
+        ("generator.sampling_params.top_k=1", "top_k > 1"),
+        ("generator.sampling_params.repetition_penalty=1.1", "repetition_penalty=1.0"),
+        ("generator.sampling_params.additional_kwargs.foo=bar", "additional_kwargs"),
+        ("generator.vision_language_generator=true", "vision_language_generator"),
+    ],
+)
+def test_sample_support_capture_rejects_unsupported_sampling_modifiers(override, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+                override,
+            ]
+        )
+
+
+def test_routed_expert_capture_rejects_the_vision_language_generator():
+    with pytest.raises(ValueError, match="vision_language_generator"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_routed_experts=true",
+                "generator.vision_language_generator=true",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (["trainer.strategy=megatron"], "enable_return_sample_support_set"),
+        (
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+            ],
+            "trainer.strategy=megatron",
+        ),
+    ],
+)
+def test_sample_support_replay_requires_capture_and_megatron(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.enable_sample_support_replay=true", *overrides])
+
+
+def test_sample_support_replay_accepts_capture_on_megatron():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.enable_sample_support_replay=true",
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            "trainer.strategy=megatron",
+        ]
+    )
+
+    assert cfg.trainer.algorithm.enable_sample_support_replay
+
+
+def test_sample_support_capture_accepts_top_k_top_p_and_min_p():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            "generator.sampling_params.top_p=0.9",
+            "generator.sampling_params.min_p=0.05",
+        ]
+    )
+
+    assert cfg.generator.inference_engine.enable_return_sample_support_set
+
+
+def test_sample_support_capture_leaves_greedy_eval_sampling_params_alone():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+        ]
+    )
+
+    assert cfg.generator.eval_sampling_params.temperature == 0.0
+    assert cfg.generator.eval_sampling_params.top_k == -1
 
 
 def test_cli_overrides_plus_prefix_rejected():
@@ -850,3 +941,35 @@ class TestDeltaWeightSyncConfig:
         # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
         assert "my_sync_dir" in cfg.publish_staging_dir
         assert "my_sync_dir" in cfg.local_checkpoint_dir
+
+
+class TestMegatronRouterReplayValidation:
+    @staticmethod
+    def _cfg():
+        cfg = _make_validated_test_config()
+        cfg.trainer.strategy = "megatron"
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
+        return cfg
+
+    @pytest.mark.parametrize("vpp_size", [1, 2])
+    def test_routing_replay_refuses_virtual_pipeline_parallelism(self, vpp_size):
+        cfg = self._cfg()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = vpp_size
+
+        with pytest.raises(AssertionError, match="virtual_pipeline_model_parallel_size"):
+            validate_megatron_cfg(cfg)
+
+    @pytest.mark.parametrize("vpp_size", [None, 0])
+    def test_routing_replay_allows_unset_virtual_pipeline_parallelism(self, vpp_size):
+        cfg = self._cfg()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = vpp_size
+
+        validate_megatron_cfg(cfg)
+
+    def test_virtual_pipeline_parallelism_allowed_without_routing_replay(self):
+        cfg = self._cfg()
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = False
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = 2
+
+        validate_megatron_cfg(cfg)
