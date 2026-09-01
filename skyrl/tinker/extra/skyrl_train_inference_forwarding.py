@@ -5,6 +5,7 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
+import os
 from datetime import datetime, timezone
 
 import httpx
@@ -29,6 +30,9 @@ class SkyRLTrainInferenceForwardingClient:
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
         # Default `forwarding_inference_max_connections=None` is unlimited;
         # the only cost is file descriptors (raise `ulimit -n` accordingly).
+        self._fanout_sema = asyncio.Semaphore(
+            int(os.environ.get("SKYRL_FORWARDING_MAX_CONCURRENCY", "256"))
+        )
         max_conn = engine_config.forwarding_inference_max_connections
         max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
@@ -73,7 +77,8 @@ class SkyRLTrainInferenceForwardingClient:
     ):
         """Forward a sample request to vLLM and write the result to FutureDB."""
         try:
-            result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
+            async with self._fanout_sema:
+                result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
         except Exception as e:
             logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
