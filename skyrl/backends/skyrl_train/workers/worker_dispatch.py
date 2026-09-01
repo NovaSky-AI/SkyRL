@@ -640,20 +640,20 @@ class WorkerDispatch:
         return {"sync_weights_only_transfer": self.last_weight_sync_seconds}
 
     def _prepare_for_weight_sync(self) -> None:
-        """Prepare for weight sync: ensure policy model is on GPU, offload optimizer. Helper for save_weights_for_sampler."""
+        """Load policy weights and apply the configured optimizer offload policy."""
         if not self.colocate_all:
             return
         offload_optimizer = self.cfg.trainer.policy.optimizer_config.offload_after_step
         self._ensure_on_gpu(
             "policy",
-            need_optimizer=not offload_optimizer,
+            need_optimizer=False,
             need_model=True,
         )
         if offload_optimizer and self._gpu_state["policy"].optimizer_on_gpu:
             self._offload("policy", offload_optimizer=True, offload_model=False)
 
     def _finish_weight_sync(self) -> None:
-        """Finish weight sync: offload model weights and optimizer state. Helper for save_weights_for_sampler."""
+        """Offload policy weights and conditionally offload optimizer state."""
         if not self.colocate_all:
             return
         self._offload(

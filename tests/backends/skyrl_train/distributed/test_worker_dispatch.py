@@ -224,7 +224,7 @@ def test_weight_sync_honors_optimizer_offload_policy(offload_after_step):
 
     dispatch._ensure_on_gpu.assert_called_once_with(
         "policy",
-        need_optimizer=not offload_after_step,
+        need_optimizer=False,
         need_model=True,
     )
     if offload_after_step:
