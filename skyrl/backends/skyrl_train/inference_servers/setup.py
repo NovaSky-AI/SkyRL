@@ -31,6 +31,7 @@ from .utils import (
 from .vllm_router import VLLMRouter
 
 NIXL_SIDE_CHANNEL_BASE_PORT = 5600
+MOONCAKE_BOOTSTRAP_BASE_PORT = 50052
 VLLM_START_PORT = 8000
 
 
@@ -123,6 +124,7 @@ def create_inference_servers(
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
                 nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + i * servers_per_group,
+                mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT + i * servers_per_group,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
                 use_expandable_segments=ie_cfg.use_expandable_segments,
@@ -143,6 +145,7 @@ def create_inference_servers(
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
                 nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + (num_prefill + i) * servers_per_group,
+                mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT + (num_prefill + i) * servers_per_group,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
                 use_expandable_segments=ie_cfg.use_expandable_segments,
@@ -178,9 +181,7 @@ def create_inference_servers(
         if p2p_connector == "MooncakeConnector":
             pd_kv_connector = "mooncake"
             prefill_bootstrap_ports = [
-                NIXL_SIDE_CHANNEL_BASE_PORT + i * servers_per_group + j
-                for i in range(num_prefill)
-                for j in range(servers_per_group)
+                info.mooncake_bootstrap_server_port for g in prefill_server_groups for info in g.server_infos
             ]
 
         router_args = build_router_args(

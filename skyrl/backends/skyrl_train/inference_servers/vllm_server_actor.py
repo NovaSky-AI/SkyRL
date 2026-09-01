@@ -101,6 +101,7 @@ class VLLMServerActor(ServerActorProtocol):
         # PD disaggregation settings
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
+        mooncake_bootstrap_base_port: int = 50052,
         colocated_training: bool = False,
         distributed_executor_backend: str = "ray",
         mp_cuda_visible_devices: Optional[str] = None,
@@ -122,6 +123,7 @@ class VLLMServerActor(ServerActorProtocol):
             dp_rpc_port: DP RPC port (for non-rank-0 servers)
             enable_pd: Enable prefill-decode disaggregation
             nixl_side_channel_base: Base port for NIXL side channel to start searching for a free port
+            mooncake_bootstrap_base_port: Base port for Mooncake bootstrap server to start searching for a free port
             colocated_training: Whether the server is colocated with training workers
             distributed_executor_backend: vLLM distributed executor backend.
                 ``"ray"`` spawns TP/PP workers as Ray tasks (default).
@@ -173,6 +175,9 @@ class VLLMServerActor(ServerActorProtocol):
         # connector (NIXL side channel or Mooncake bootstrap server).
         self._nixl_port_reservation = None
         self._nixl_side_channel_base = None
+        # Mooncake bootstrap server base port and reservation
+        self._mooncake_bootstrap_server_port = None
+        self._mooncake_port_reservation = None
         if enable_pd:
             from skyrl.backends.skyrl_train.inference_servers.utils import (
                 get_pd_p2p_connector_name,
@@ -192,17 +197,17 @@ class VLLMServerActor(ServerActorProtocol):
             if p2p_connector == "MooncakeConnector":
                 # Each external-LB instance launches its own bootstrap HTTP
                 # server bound at exactly VLLM_MOONCAKE_BOOTSTRAP_PORT
-                # (get_mooncake_bootstrap_addr — no rank offset), so the port
-                # must be unique per server on a node: group base + server_idx.
                 # The router is given the same port per prefill server
-                # (computed in create_inference_servers).
-                mooncake_bootstrap_port = nixl_side_channel_base + server_idx
-                os.environ["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(mooncake_bootstrap_port)
-                logger.info(f"Server {server_idx}: Mooncake PD bootstrap port {mooncake_bootstrap_port}")
+                # via server info returned by `.start`
+                self._mooncake_bootstrap_server_port, self._mooncake_port_reservation = find_and_reserve_port(
+                    mooncake_bootstrap_base_port
+                )
+                os.environ["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(self._mooncake_bootstrap_server_port)
+                logger.info(f"Server {server_idx}: Mooncake PD bootstrap port {self._mooncake_bootstrap_server_port}")
             else:
-                # use nixl_side_channel_base + server_idx as convention for the start port for this server
+                # use nixl_side_channel_base to start searching for a free port for this server
                 self._nixl_side_channel_base, self._nixl_port_reservation = find_and_reserve_port(
-                    nixl_side_channel_base + server_idx
+                    nixl_side_channel_base
                 )
                 self._setup_nixl_side_channel(self._nixl_side_channel_base)
 
@@ -299,7 +304,11 @@ class VLLMServerActor(ServerActorProtocol):
 
     def get_server_info(self) -> ServerInfo:
         """Get the server's IP and port info."""
-        return ServerInfo(ip=self._ip, port=self._port)
+        return ServerInfo(
+            ip=self._ip,
+            port=self._port,
+            mooncake_bootstrap_server_port=self._mooncake_bootstrap_server_port,
+        )
 
     def get_dp_info(self) -> Tuple[str, int]:
         """Get the DP master address and RPC port (for server 0 to share with others)."""
@@ -357,6 +366,10 @@ class VLLMServerActor(ServerActorProtocol):
         if self._nixl_port_reservation is not None:
             self._nixl_port_reservation.close()
             self._nixl_port_reservation = None
+
+        if self._mooncake_port_reservation is not None:
+            self._mooncake_port_reservation.close()
+            self._mooncake_port_reservation = None
 
         await _build_and_serve_vllm_server(
             self._cli_args,
