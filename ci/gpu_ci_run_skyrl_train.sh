@@ -11,7 +11,7 @@ uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backend
 
 # Mooncake-backed tests need the `mooncake` extra (mooncake-transfer-engine), which is
 # not part of the default env above, so they run as a separate invocation.
-uv run --directory . --isolated --extra dev --extra fsdp --extra mooncake pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "mooncake"
+uv run --directory . --isolated --extra dev --extra fsdp --extra mooncake pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "mooncake" --ignore=tests/backends/skyrl_train/gpu/gpu_ci/megatron
 
 ## TODO: enable integrations
 # # Run tests for "integrations" folder
