@@ -32,7 +32,7 @@ class SkyRLTrainInferenceForwardingClient:
         max_conn = engine_config.forwarding_inference_max_connections
         max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(engine_config.forwarding_inference_timeout_sec, connect=10.0),
             limits=httpx.Limits(
                 max_connections=max_conn,
                 max_keepalive_connections=max_keepalive,
@@ -94,14 +94,15 @@ class SkyRLTrainInferenceForwardingClient:
             await session.commit()
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.
-        # HTTP 4xx/5xx surfaces as RuntimeError below and is NOT retried.
+        # Retry only failures that occur before a request can reach vLLM. Read
+        # and write failures are ambiguous: vLLM may still be executing the
+        # request, so retrying would duplicate generation load.
         try:
             proxy_url = await self._resolve_proxy_url()
             return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-        except httpx.RequestError as e:
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             logger.warning(
-                "Network error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
+                "Connection error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
                 self._cached_proxy_url,
                 type(e).__name__,
                 e,
