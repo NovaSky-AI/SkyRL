@@ -384,6 +384,7 @@ markers = [
     "vllm: requires the vllm package (present under the fsdp/megatron extras)",
     "megatron: requires the megatron extra",
     "megatron_models: long-running Megatron model-parity tests",
+    "b300: opt-in tests that require B300 GPUs",
     "integrations: third-party integration tests with extra install steps",
     "mooncake: requires the mooncake extra (mooncake-transfer-engine)",
 ]
