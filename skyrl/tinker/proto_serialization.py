@@ -104,6 +104,28 @@ def parse_forward_backward_request(body: bytes) -> tuple[dict, bool]:
     return request_dict, msg.forward_only
 
 
+def parse_forward_backward_metadata(body: bytes) -> tuple[str, int | None, bool]:
+    """Read ordering fields without expanding tensor bytes into Python lists."""
+    msg = pb.ForwardBackwardRequest()
+    msg.ParseFromString(body)
+    return msg.model_id, msg.seq_id or None, msg.forward_only
+
+
+def parse_forward_backward_input(body: bytes) -> types.ForwardBackwardInput:
+    """Parse a protobuf request into the type consumed by training backends."""
+    request_dict, _ = parse_forward_backward_request(body)
+    forward_backward_input = request_dict["forward_backward_input"]
+    for datum in forward_backward_input["data"]:
+        loss_fn_inputs = datum["loss_fn_inputs"]
+        target_tokens = loss_fn_inputs["target_tokens"]["data"]
+        loss_fn_inputs.setdefault("weights", {"data": [1.0] * len(target_tokens)})
+        loss_fn_inputs.setdefault("advantages", {"data": []})
+        loss_fn_inputs.setdefault("logprobs", {"data": []})
+        loss_fn_inputs.setdefault("values", {"data": []})
+        loss_fn_inputs.setdefault("returns", {"data": []})
+    return types.ForwardBackwardInput.model_validate(forward_backward_input)
+
+
 def _tensor_from_proto(tensor: pb.Tensor) -> dict:
     np_dtype = _PROTO_DTYPE_TO_NUMPY.get(tensor.dtype)
     if np_dtype is None:
