@@ -40,6 +40,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
+    patch_dsa_index_share,
+)
 from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
@@ -633,6 +636,12 @@ class MegatronWorker:
         # TE patch to allow FA2 for head_dim 256 on SM103 (B300)
         # Delete along with the patch module once the TE pin includes NVIDIA/TransformerEngine#3360.
         patch_fa2_head_dim_allowlist()
+
+        # Isolate the DSA index-share holder per checkpointed forward (GLM 5 and
+        # other DSA models under activation recompute on the non-packed path).
+        # Delete along with the patch module once the megatron-core pin includes
+        # NVIDIA/Megatron-LM#6793.
+        patch_dsa_index_share()
 
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type)
