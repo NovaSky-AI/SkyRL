@@ -25,8 +25,7 @@ Prefill-Decode disaggregation:
   `MooncakeStoreConnector` for KV offloading):
     - `NixlConnector` — pull-based default (NIXL side channel; the actor reserves `nixl_side_channel_base + server_idx`).
     - `MooncakeConnector` — push-based (bootstrap-server handshake). The router runs in `kv_connector=mooncake` mode and
-      is given each prefill server's `VLLM_MOONCAKE_BOOTSTRAP_PORT` (`nixl_side_channel_base + server_idx`, not
-      reserved, so it must be free). The `MultiKVConnectorPromMetrics.observe` monkeypatch
+      is given each prefill server's mooncake bootstrap server port. The `MultiKVConnectorPromMetrics.observe` monkeypatch
       (`patches/vllm/patch_multi_connector_stats.py`) is applied to avoid an assert-crash when a child connector
       reports stats without Prometheus metrics.
 - **Role-specific engine kwargs**: `prefill_init_kwargs` and `decode_init_kwargs` are per-role pass-through vLLM engine
