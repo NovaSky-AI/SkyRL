@@ -2,18 +2,23 @@
 Utility functions for MoE Router Replay.
 """
 
+from collections.abc import Sequence
 from contextlib import contextmanager
 
-import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     TokenMetadataLayout,
+    align_packed_token_metadata,
     align_token_metadata,
+)
+from skyrl.backends.skyrl_train.utils.packed_tensor import (
+    PackedTensor,
+    cu_seqlens_from_lengths,
 )
 
 
-def _replay_padding_row(
+def replay_padding_row(
     topk: int,
     *,
     dtype: torch.dtype,
@@ -40,25 +45,35 @@ def make_replay_padding_indices(
     """Return dummy routes with ``topk`` distinct experts in every row."""
     if not shape:
         raise ValueError(f"Replay route padding requires a positive topk dimension, got {shape}")
-    padding_row = _replay_padding_row(shape[-1], dtype=dtype, device=device)
+    padding_row = replay_padding_row(shape[-1], dtype=dtype, device=device)
     return padding_row.expand(shape).clone()
 
 
-def make_replay_padding_indices_np(shape: tuple[int, ...], *, dtype: np.dtype) -> np.ndarray:
-    """NumPy sibling of :func:`make_replay_padding_indices`.
+def make_packed_replay_padding(
+    reference: PackedTensor,
+    *,
+    segment_lengths: Sequence[int],
+) -> PackedTensor:
+    """Return dummy-route segments matching ``reference``'s row shape and dtype.
 
-    Preprocessing builds the padded route array in NumPy before handing it to
-    ``torch.from_numpy``, so it needs the same distinct-expert padding rows
-    without a round trip through torch.
+    Batch padding rows exist only to give Megatron a uniform micro-batch size; their
+    tokens are loss-masked, so one dummy route per token is all they need.
     """
-    if not shape:
-        raise ValueError(f"Replay route padding requires a positive topk dimension, got {shape}")
-    topk = shape[-1]
-    if topk < 1:
-        raise ValueError(f"Replay route padding requires a positive topk dimension, got {topk}")
-    padded = np.empty(shape, dtype=dtype)
-    padded[...] = np.arange(topk, dtype=dtype)
-    return padded
+    padding = make_replay_padding_indices(
+        (sum(segment_lengths), *reference.row_shape),
+        dtype=reference.dtype,
+        device=reference.device,
+    )
+    return PackedTensor(padding, cu_seqlens_from_lengths(segment_lengths, device=reference.device))
+
+
+def append_packed_replay_padding(
+    routes: PackedTensor,
+    *,
+    segment_lengths: Sequence[int],
+) -> PackedTensor:
+    """Extend ``routes`` with one dummy-route segment per batch padding row."""
+    return PackedTensor.cat([routes, make_packed_replay_padding(routes, segment_lengths=segment_lengths)])
 
 
 def patch_topk_router_layer_number():
@@ -187,7 +202,7 @@ def _get_local_router_layer_indices(model_config, global_num_layers: int, instan
 
 
 def setup_per_microbatch_replay_forward(
-    rollout_expert_indices: torch.Tensor,
+    rollout_expert_indices: PackedTensor,
     router_padding_mask: torch.Tensor | None,
     attention_mask: torch.Tensor,
     model,
@@ -197,8 +212,9 @@ def setup_per_microbatch_replay_forward(
 ) -> dict[str, torch.Tensor]:
     """Set up router replay and return its model-facing keyword arguments.
 
-    Replay indices and the router padding mask start in the same batch layout and
-    undergo matching padding removal or packing and CP sharding. Their destinations
+    Replay indices arrive packed to their real tokens (``[sum(seqlen), layers, topk]`` plus
+    ``cu_seqlens``) while the router padding mask arrives batch-major; both undergo matching
+    padding removal or packing and CP sharding against the shared layout. Their destinations
     then differ: indices are TP-sliced and installed into per-layer ``RouterReplay``
     instances, while the mask follows Megatron's model-specific sequence-parallel
     path and is passed to the model as ``padding_mask``.
@@ -232,8 +248,8 @@ def setup_per_microbatch_replay_forward(
 
     if router_padding_mask is None:
         raise ValueError("router_padding_mask is required with rollout_expert_indices")
-    if rollout_expert_indices.dim() != 4:
-        raise ValueError(f"Expected 4D replay indices, got shape {rollout_expert_indices.shape}")
+    if len(rollout_expert_indices.row_shape) != 2:
+        raise ValueError(f"Expected [tokens, layers, topk] replay indices, got {rollout_expert_indices!r}")
 
     if router_padding_mask.shape != attention_mask.shape:
         raise ValueError(
@@ -243,24 +259,28 @@ def setup_per_microbatch_replay_forward(
     if router_padding_mask.device != rollout_expert_indices.device:
         raise ValueError("rollout_expert_indices and router_padding_mask must be on the same device")
 
+    num_captured_layers, topk = rollout_expert_indices.row_shape
     instances = RouterReplay.global_router_replay_instances
     local_layer_indices = _get_local_router_layer_indices(
         model_config,
-        rollout_expert_indices.shape[2],
+        num_captured_layers,
         instances,
     )
     layer_index = torch.tensor(local_layer_indices, dtype=torch.long, device=rollout_expert_indices.device)
-    local_rollout_expert_indices = rollout_expert_indices.index_select(2, layer_index)
+    local_rollout_expert_indices = PackedTensor(
+        rollout_expert_indices.values.index_select(1, layer_index),
+        rollout_expert_indices.cu_seqlens,
+    )
 
     if (metadata_layout.padded_sequence_lengths is not None) != remove_microbatch_padding:
         raise ValueError("Shared token metadata layout does not match the model packing mode")
     aligned_router_padding_mask = align_token_metadata(router_padding_mask.to(torch.bool), metadata_layout, True)
-    route_padding = _replay_padding_row(
-        rollout_expert_indices.shape[-1],
+    route_padding = replay_padding_row(
+        topk,
         dtype=rollout_expert_indices.dtype,
-        device=local_rollout_expert_indices.device,
+        device=rollout_expert_indices.device,
     )
-    aligned_rollout_expert_indices = align_token_metadata(
+    aligned_rollout_expert_indices = align_packed_token_metadata(
         local_rollout_expert_indices,
         metadata_layout,
         route_padding,
