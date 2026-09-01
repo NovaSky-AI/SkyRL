@@ -131,4 +131,4 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.run_name="nemotron_3_5_lightning_30b_a3b_grpo_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$CKPT_DIR" \
-  $@
+  "$@"
