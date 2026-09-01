@@ -36,6 +36,32 @@ def _fft_dispatch_cfg(weight_sync_backend: str = "nccl") -> SimpleNamespace:
 _has_megatron = "megatron" in sys.modules or __import__("importlib").util.find_spec("megatron") is not None
 
 
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+def test_release_megatron_model_cpu_copy():
+    from skyrl.backends.skyrl_train.distributed.megatron import megatron_utils
+
+    class FakeDDP:
+        def __init__(self):
+            self.buffers = [SimpleNamespace(param_data_cpu=object())]
+            self.expert_parallel_buffers = [SimpleNamespace(param_data_cpu=object())]
+            self.param = SimpleNamespace(
+                _offload_cpu_data=object(),
+                _offload_cuda_numel=1,
+            )
+
+        def named_parameters(self):
+            return [("weight", self.param)]
+
+    model = FakeDDP()
+    with patch.object(megatron_utils, "DDP", FakeDDP):
+        megatron_utils.release_megatron_model_cpu_copy([model])
+
+    for buffer in model.buffers + model.expert_parallel_buffers:
+        assert buffer.param_data_cpu is None
+    assert not hasattr(model.param, "_offload_cpu_data")
+    assert not hasattr(model.param, "_offload_cuda_numel")
+
+
 # ---------------------------------------------------------------------------
 # C1: grad_scale_func fix
 # ---------------------------------------------------------------------------
