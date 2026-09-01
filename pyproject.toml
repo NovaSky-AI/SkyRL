@@ -125,9 +125,9 @@ fsdp = [
     "causal-conv1d==1.6.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
     "flash-attn==2.8.3+cu.13.0.torch.2.11; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.14; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.14; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.14; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -158,14 +158,14 @@ megatron = [
     # into the image for a module the shim would never load).
     "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.14; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     # megatron-bridge requires Python 3.12+; pin megatron-core to the same
     # constraint so both packages are consistently available (or absent).
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
-    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.14; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.14; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
     "fast-hadamard-transform; sys_platform == 'linux'",
 ]
@@ -250,15 +250,14 @@ override-dependencies = [
     # so it doesn't pull a second, unused CUDA runtime in alongside the cu13 one.
     "nixl-cu12; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our pin. vLLM 0.26.0's metadata asks for 0.6.14, but flashinfer-cubin was
-    # never released at 0.6.14 and flashinfer hard-errors when cubin's version
-    # differs from its own, so all three are held at 0.6.13 -- the version vLLM
-    # 0.26.0 was developed against. It must be >=0.6.13: older flashinfer rejects
-    # the `layout_code` vLLM's allreduce+RMS fusion pass hands the MNNVL backend
+    # our pin. Keep the Python, JIT-cache, and cubin packages aligned at 0.6.14,
+    # which provides the routed-MoE output-buffer API required by vLLM 0.26.0.
+    # It must also remain >=0.6.13: earlier versions reject the `layout_code`
+    # used by vLLM's allreduce+RMS fusion pass for the MNNVL backend.
     # ("MNNVL AllReduce does not support quantization fusion").
-    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.14; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.14; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.14; sys_platform == 'linux' and platform_machine == 'x86_64'",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
     # vLLM 0.26.0 pins tilelang==0.1.9 and apache-tvm-ffi==0.1.10. Both overrides
     # hold these at the versions the lock already resolved to before mamba-ssm moved
@@ -318,6 +317,7 @@ explicit = true
 skyrl-gym = { path = "./skyrl-gym", editable = true }
 # Match torch's CUDA variant (cu130).
 flashinfer-jit-cache = { index = "flashinfer-cu130", marker = "sys_platform == 'linux'" }
+flashinfer-cubin = { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.14/flashinfer_cubin-0.6.14-py3-none-any.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 
 # torch-2.11 builds of these aren't published on PyPI, so they come from Astral's
 # prebuilt GPU index instead of wheels built by hand on personal forks. Astral
