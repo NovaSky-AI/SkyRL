@@ -202,3 +202,36 @@ class TestSaveWeights:
 
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
+
+
+@pytest.mark.parametrize("offload_after_step", [False, True])
+def test_weight_sync_honors_optimizer_offload_policy(offload_after_step):
+    from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+    cfg = _fft_dispatch_cfg()
+    cfg.trainer.policy.optimizer_config = SimpleNamespace(offload_after_step=offload_after_step)
+
+    dispatch = WorkerDispatch.__new__(WorkerDispatch)
+    dispatch.colocate_all = True
+    dispatch.cfg = cfg
+    dispatch._gpu_state = {
+        "policy": SimpleNamespace(optimizer_on_gpu=True),
+    }
+    dispatch._ensure_on_gpu = MagicMock()
+    dispatch._offload = MagicMock()
+
+    dispatch._prepare_for_weight_sync()
+
+    dispatch._ensure_on_gpu.assert_called_once_with(
+        "policy",
+        need_optimizer=not offload_after_step,
+        need_model=True,
+    )
+    if offload_after_step:
+        dispatch._offload.assert_called_once_with("policy", offload_optimizer=True, offload_model=False)
+    else:
+        dispatch._offload.assert_not_called()
+
+    dispatch._offload.reset_mock()
+    dispatch._finish_weight_sync()
+    dispatch._offload.assert_called_once_with("policy", offload_optimizer=offload_after_step, offload_model=True)
