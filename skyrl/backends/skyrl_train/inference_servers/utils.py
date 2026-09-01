@@ -221,24 +221,22 @@ def get_pd_cli_args(
     role: str = "prefill",
     role_init_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Namespace:
-    """Build PD-specific CLI args by injecting ``kv_role=kv_both``.
+    """Build PD-specific CLI args.
 
     Applies *role_init_kwargs* (``prefill_init_kwargs`` / ``decode_init_kwargs``
     pass-through, mutually exclusive with ``engine_init_kwargs``) on top of the
-    base args, then reads ``kv_transfer_config`` from the resulting namespace and
-    injects ``kv_role=kv_both``. ``VLLMServerActor._setup_nixl_side_channel``
-    later enriches the dict with ``engine_id``.
+    base args, then reads ``kv_transfer_config`` from the resulting namespace.
+    Sets ``kv_role=kv_both`` if `kv_role` is not set.
 
     Args:
         cli_args: Base CLI args from :func:`build_vllm_cli_args`.
-        role: Currently only used for error messages (kv_role is always
-            ``kv_both``).
+        role: Engine role (prefill/decode). currently only used for error messages.
         role_init_kwargs: Role-specific vLLM engine kwargs to apply on top of the
             base args (e.g. a different ``all2all_backend`` for prefill vs decode).
 
     Returns:
         A deep copy of *cli_args* with *role_init_kwargs* applied and
-        ``kv_transfer_config`` as a dict containing ``kv_role=kv_both``.
+        ``kv_transfer_config`` as a dict.
     """
     args = copy.deepcopy(cli_args)
 

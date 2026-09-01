@@ -31,8 +31,8 @@ from .utils import (
 from .vllm_router import VLLMRouter
 
 NIXL_SIDE_CHANNEL_BASE_PORT = 5600
-MOONCAKE_BOOTSTRAP_BASE_PORT = 50052
 VLLM_START_PORT = 8000
+MOONCAKE_BOOTSTRAP_BASE_PORT = 12_000
 
 
 @dataclass
