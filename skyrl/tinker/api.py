@@ -1205,19 +1205,23 @@ async def forward_backward(request: Request, session: AsyncSession = Depends(get
 
 
 @app.post("/api/v1/forward", response_model=FutureResponse)
-async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_session)):
+async def forward(request: ForwardRequest, raw_request: Request, session: AsyncSession = Depends(get_session)):
     """Forward pass to obtain logprobs without accumulating gradients"""
-    await get_model(session, request.model_id)
+    # Serialize before the first SQL statement: AsyncSession checks out its
+    # pool connection lazily, so waiters queue on the lock holding nothing and
+    # a burst of forwards cannot exhaust the connection pool.
+    async with raw_request.app.state.db_write_lock:
+        await get_model(session, request.model_id)
 
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.FORWARD,
-        model_id=request.model_id,
-        request_data=request.forward_input.to_types(),
-        seq_id=request.seq_id,
-    )
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.FORWARD,
+            model_id=request.model_id,
+            request_data=request.forward_input.to_types(),
+            seq_id=request.seq_id,
+        )
 
-    await session.commit()
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
