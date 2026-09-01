@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import random
 import re
@@ -12,14 +13,18 @@ from uuid import uuid4
 
 import fastapi
 import psutil
-from fastapi import Depends, FastAPI, HTTPException, Request
+import zstandard
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError as FastAPIRequestValidationError
 from fastapi.responses import RedirectResponse, StreamingResponse
+from google.protobuf.message import DecodeError
 from pydantic import (
     Base64Bytes,
     BaseModel,
     Discriminator,
     Field,
     Tag,
+    ValidationError,
     model_validator,
 )
 from sqlalchemy.exc import IntegrityError
@@ -43,6 +48,12 @@ from skyrl.tinker.db_models import (
 from skyrl.tinker.extra import (
     ExternalInferenceClient,
     SkyRLTrainInferenceForwardingClient,
+)
+from skyrl.tinker.proto_serialization import (
+    PROTO_CONTENT_TYPE,
+    PROTO_SERIALIZABLE_REQUEST_TYPES,
+    parse_forward_backward_request,
+    serialize_result,
 )
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
@@ -68,10 +79,27 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
 
 
+def raw_json_response(payload: str | None) -> Response:
+    """Return already-serialized JSON without routing it through FastAPI's encoder.
+
+    Returning a dict makes FastAPI walk the whole structure with
+    ``jsonable_encoder`` and then ``json.dumps`` it again. For a multi-MB
+    numeric payload that is ~300ms of event-loop time per request, which
+    serializes every other caller behind it. The stored text is already valid
+    JSON, so hand it back as-is.
+    """
+    # `null` keeps the response valid JSON when a completed future stored no
+    # result body, matching what encoding `None` would have produced.
+    return Response(content=payload if payload is not None else "null", media_type="application/json")
+
+
 async def wait_for_future(
     waiters: dict[int, set[asyncio.Future]], request_id: int, timeout: float
-) -> tuple[RequestStatus, dict | None] | None:
-    """Wait for ``request_id`` to finish, returning its ``(status, result_data)``.
+) -> tuple[RequestStatus, types.RequestType, str | None] | None:
+    """Wait for ``request_id`` to finish, returning its ``(status, request_type, result_data)``.
+
+    ``result_data`` is the JSON text stored for the request, not a decoded
+    object -- see :class:`FutureDB`.
 
     Returns None if ``timeout`` elapses first, and raises KeyError if the request
     does not exist -- :func:`poll_futures` reports both.
@@ -109,6 +137,12 @@ async def poll_futures(
     rather than from a dedicated lookup in the endpoint makes it free: it rides
     the query already in flight instead of costing a connection checkout on every
     call, which at a few thousand simultaneous calls is a burst the pool feels.
+
+    ``result_data`` is stored as JSON text and handed to the waiters that way:
+    results may carry big numeric payloads (e.g. top-k prompt logprobs for every
+    prompt token, a few MB per request), and decoding them into Python objects
+    only to have FastAPI re-encode them would cost hundreds of milliseconds of
+    event-loop time per call. See :func:`raw_json_response`.
     """
     while True:
         try:
@@ -118,15 +152,15 @@ async def poll_futures(
                     # The awaited ids go in as bound parameters, capped at 32766
                     # by SQLite (since 3.32) and 65535 by Postgres -- far above
                     # any plausible number of in-flight requests.
-                    statement = select(FutureDB.request_id, FutureDB.status, FutureDB.result_data).where(
-                        FutureDB.request_id.in_(awaited)
-                    )
+                    statement = select(
+                        FutureDB.request_id, FutureDB.status, FutureDB.request_type, FutureDB.result_data
+                    ).where(FutureDB.request_id.in_(awaited))
                     rows = (await session.exec(statement)).all()
 
                 # Pending requests are left alone to be picked up on a later tick.
-                outcomes: dict[int, tuple[RequestStatus, dict | None] | KeyError] = {
-                    request_id: (status, result_data)
-                    for request_id, status, result_data in rows
+                outcomes: dict[int, tuple[RequestStatus, types.RequestType, str | None] | KeyError] = {
+                    request_id: (status, request_type, result_data)
+                    for request_id, status, request_type, result_data in rows
                     if status in TERMINAL_STATUSES
                 }
                 for request_id in set(awaited) - {request_id for request_id, *_ in rows}:
@@ -578,13 +612,14 @@ class ForwardBackwardInput(BaseModel):
         "cross_entropy": set(),
         "importance_sampling": set(),
         "ppo": {"clip_low_threshold", "clip_high_threshold", "value_clip"},
+        "gspo": {"clip_low_threshold", "clip_high_threshold"},
         "cispo": {"clip_low_threshold", "clip_high_threshold"},
         "ppo_critic": {"value_clip"},
         "dppo": {"delta_low", "delta_high"},
     }
 
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic", "dppo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "gspo", "cispo", "ppo_critic", "dppo"]
     loss_fn_config: dict[str, float] | None = None
 
     @model_validator(mode="after")
@@ -743,6 +778,8 @@ class SaveWeightsRequest(BaseModel):
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
+    optimizer: bool = True
+    seq_id: int | None = None
     type: Literal["load_weights"] | None = None
 
 
@@ -1049,17 +1086,56 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
     )
 
 
+# Upper bound for a decompressed forward_backward body. Far above any
+# legitimate payload (requests are chunked client-side well below this), but
+# it keeps a small crafted body from ballooning into an arbitrarily large
+# allocation.
+_MAX_FWDBWD_BODY_BYTES = 1 << 30  # 1 GiB
+
+
+async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackwardRequest, bool]:
+    """Read a forward_backward body in either wire format.
+
+    tinker SDK >= 0.25.0 submits the body as protobuf and routes forward-only
+    passes here via the proto's ``forward_only`` flag instead of calling
+    ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
+    Large proto bodies may arrive zstd-compressed (``Content-Encoding: zstd``);
+    ASGI servers do not decode request bodies, so decompress here.
+    """
+    body = await request.body()
+    if request.headers.get("content-encoding", "").strip().lower() == "zstd":
+        try:
+            body = zstandard.ZstdDecompressor().decompress(body, max_output_size=_MAX_FWDBWD_BODY_BYTES)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"failed to zstd-decompress request body: {exc}") from exc
+    if PROTO_CONTENT_TYPE in request.headers.get("content-type", "").lower():
+        try:
+            request_dict, forward_only = parse_forward_backward_request(body)
+        except (DecodeError, ValueError) as e:
+            raise HTTPException(status_code=422, detail=f"Invalid proto forward_backward body: {e}")
+    else:
+        request_dict, forward_only = None, False
+    try:
+        if request_dict is not None:
+            return ForwardBackwardRequest.model_validate(request_dict), forward_only
+        return ForwardBackwardRequest.model_validate_json(body), forward_only
+    except ValidationError as e:
+        # Match FastAPI's native body validation error shape (422).
+        raise FastAPIRequestValidationError(e.errors())
+
+
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
-async def forward_backward(request: ForwardBackwardRequest, session: AsyncSession = Depends(get_session)):
-    """Compute and accumulate gradients."""
-    await get_model(session, request.model_id)
+async def forward_backward(request: Request, session: AsyncSession = Depends(get_session)):
+    """Compute and accumulate gradients (or run forward-only when the proto body asks for it)."""
+    req, forward_only = await _read_forward_backward_request(request)
+    await get_model(session, req.model_id)
 
     request_id = await create_future(
         session=session,
-        request_type=types.RequestType.FORWARD_BACKWARD,
-        model_id=request.model_id,
-        request_data=request.forward_backward_input.to_types(),
-        seq_id=request.seq_id,
+        request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
+        model_id=req.model_id,
+        request_data=req.forward_backward_input.to_types(),
+        seq_id=req.seq_id,
     )
 
     await session.commit()
@@ -1105,8 +1181,25 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
 
 @app.post("/api/v1/load_weights", response_model=FutureResponse)
 async def load_weights(request: LoadWeightsRequest, req: Request, session: AsyncSession = Depends(get_session)):
-    """Loads weights and training state."""
+    """Loads weights and training state.
+
+    Matching the Tinker service, LoadWeights is only permitted as a model's first
+    request: any prior request for the model (forward_backward, save_weights, a
+    previous load_weights, ...) makes further loads a 400. Load into a freshly
+    created model instead (create_training_client_from_state[_with_optimizer]).
+    """
     await get_model(session, request.model_id)
+
+    prior_requests = await session.exec(
+        select(func.count())
+        .select_from(FutureDB)
+        .where(FutureDB.model_id == request.model_id)
+        .where(FutureDB.request_type != types.RequestType.CREATE_MODEL)
+    )
+    prior_count = prior_requests.one()
+    if prior_count > 0:
+        seq_id = request.seq_id if request.seq_id is not None else prior_count + 1
+        raise HTTPException(status_code=400, detail=f"LoadWeights is not permitted with seq_id {seq_id}")
 
     path = types.TinkerPath.parse(request.path)
     if (
@@ -1125,7 +1218,11 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
         session=session,
         request_type=types.RequestType.LOAD_WEIGHTS,
         model_id=request.model_id,
-        request_data=types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id),
+        request_data=types.LoadWeightsInput(
+            source_model_id=source_model_id,
+            checkpoint_id=checkpoint_id,
+            load_optimizer=request.optimizer,
+        ),
     )
 
     await session.commit()
@@ -1302,14 +1399,29 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     if row is None:
         raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
-    status, result_data = row
+    status, request_type, result_data = row
     if status == RequestStatus.COMPLETED:
-        return result_data
+        # The SDK retrieves sample/forward/forward_backward results in proto
+        # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
+        # for these types. Errors and other result types stay JSON.
+        if (
+            types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
+            and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
+        ):
+            return Response(
+                content=serialize_result(types.RequestType(request_type), json.loads(result_data)),
+                media_type=PROTO_CONTENT_TYPE,
+            )
+        return raw_json_response(result_data)
 
-    # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-    if result_data and "error" in result_data:
-        raise HTTPException(status_code=400, detail=result_data["error"])
-    raise HTTPException(status_code=500, detail="Unknown error")
+    # Return 400 for handled errors (validation, etc.), 500 for unexpected failures.
+    # Every writer of a FAILED row stores a types.ErrorResponse, so decode it as
+    # one; anything else is not an error we can report, and falls through to 500.
+    try:
+        error = types.ErrorResponse.model_validate_json(result_data)
+    except ValidationError:
+        raise HTTPException(status_code=500, detail="Unknown error")
+    raise HTTPException(status_code=400, detail=error.error)
 
 
 @app.post("/api/v1/telemetry", response_model=TelemetryResponse)

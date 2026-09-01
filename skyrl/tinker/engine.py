@@ -641,7 +641,7 @@ class TinkerEngine:
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
         )
 
-        self.backend.load_checkpoint(checkpoint_path, model_id)
+        self.backend.load_checkpoint(checkpoint_path, model_id, load_optimizer=request_data.load_optimizer)
 
         return types.LoadWeightsOutput(type="load_weights")
 
@@ -709,7 +709,12 @@ class TinkerEngine:
         params = [
             {
                 "request_id": int(request_id),
-                "result_data": result.model_dump(),
+                # `result_data` holds JSON text, so serialize straight to it:
+                # sample results may carry top-k logprobs for every prompt token,
+                # and the dict `model_dump()` builds would only exist for
+                # `json.dumps` to walk again -- several times the cost of
+                # `model_dump_json()`.
+                "result_data": result.model_dump_json(),
                 "status": RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED,
                 "completed_at": completed_at,
             }

@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import DateTime, UniqueConstraint, event
+from sqlalchemy import DateTime, Text, UniqueConstraint, event
 from sqlalchemy.engine import url as sqlalchemy_url
 from sqlmodel import JSON, Field, SQLModel
 
@@ -102,7 +102,12 @@ class FutureDB(SQLModel, table=True):
     model_id: str | None = Field(default=None, index=True)
     seq_id: int | None = Field(default=None)
     request_data: dict = Field(sa_type=JSON)  # this is of type types.{request_type}Input
-    result_data: dict | None = Field(default=None, sa_type=JSON)  # this is of type types.{request_type}Output
+    # Pre-serialized JSON text for a types.{request_type}Output. Deliberately not a
+    # JSON column: results may carry big numeric payloads (top-k logprobs for
+    # every prompt token, a few MB per request) that are written straight from
+    # `model_dump_json()` and handed to the client verbatim, so a JSON column's
+    # decode-on-read/encode-on-write would only be undone at both ends.
+    result_data: str | None = Field(default=None, sa_type=Text)
     status: RequestStatus = Field(default=RequestStatus.PENDING, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
     completed_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))

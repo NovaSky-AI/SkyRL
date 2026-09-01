@@ -235,6 +235,7 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     def create_sender(
         init_info: BroadcastInitInfo,
         inference_client: "RemoteInferenceClient",
+        weight_extractor: Optional[Any] = None,
     ) -> BroadcastWeightTransferSender:
         """Create a broadcast sender.
 

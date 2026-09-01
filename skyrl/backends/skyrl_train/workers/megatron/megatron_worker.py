@@ -27,6 +27,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     _convert_moe_experts_lora_to_vllm,
     broadcast_object_across_pp_ranks,
     freeze_moe_router,
+    gdn_in_proj_lora_is_safe,
     get_model_config,
     get_moe_metrics,
     print_model_size,
@@ -38,6 +39,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
+)
+from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
+    patch_fa2_head_dim_allowlist,
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
@@ -82,7 +86,7 @@ if TYPE_CHECKING:
     )
     from skyrl.train.config.config import InferenceEngineConfig
 
-import skyrl.backends.skyrl_train.workers.megatron.model_bridges as _  # noqa: F401  # register extra bridges
+import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
     maybe_force_qwen35_text_bridge,
 )
@@ -565,13 +569,29 @@ class MegatronWorker:
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+        if lora_config.target_modules == "all-linear":
+            if lora_type == "lora":
+                target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
+            else:
+                target_modules = [
+                    "linear_q",
+                    "linear_k",
+                    "linear_v",
+                    "linear_proj",
+                    "linear_fc1_up",
+                    "linear_fc1_gate",
+                    "linear_fc2",
+                    "in_proj",
+                    "out_proj",
+                ]
+            if not gdn_in_proj_lora_is_safe(self.bridge):
+                target_modules.remove("in_proj")
+        else:
+            target_modules = lora_config.target_modules
+
         if lora_type == "lora":
             self.lora_cls = LoRA(
-                target_modules=(
-                    ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]
-                    if lora_config.target_modules == "all-linear"
-                    else lora_config.target_modules
-                ),
+                target_modules=target_modules,
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
@@ -582,19 +602,7 @@ class MegatronWorker:
             )
         elif lora_type == "canonical_lora":
             self.lora_cls = CanonicalLoRA(
-                target_modules=(
-                    [
-                        "linear_q",
-                        "linear_k",
-                        "linear_v",
-                        "linear_proj",
-                        "linear_fc1_up",
-                        "linear_fc1_gate",
-                        "linear_fc2",
-                    ]
-                    if lora_config.target_modules == "all-linear"
-                    else lora_config.target_modules
-                ),
+                target_modules=target_modules,
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
@@ -617,6 +625,10 @@ class MegatronWorker:
         from megatron.core.distributed.distributed_data_parallel_config import (
             DistributedDataParallelConfig,
         )
+
+        # TE patch to allow FA2 for head_dim 256 on SM103 (B300)
+        # Delete along with the patch module once the TE pin includes NVIDIA/TransformerEngine#3360.
+        patch_fa2_head_dim_allowlist()
 
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type)
@@ -1401,10 +1413,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 param_group["lr"] = learning_rate
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
-        # Call super first to set _transfer_strategy_cls and create sender/receivers
-        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
-
-        # Initialize weight extractor with bucketing enabled for all strategies
+        # Initialize the weight extractor BEFORE super(): a strategy that
+        # rendezvouses at init (sharded_rdt) is handed this extractor by
+        # create_sender. It only depends on
+        # the already-built bridge/actor_module, not on super().
         self.weight_extractor = MegatronWeightExtractor(
             bridge=self.bridge,
             actor_module=self.actor_module,
@@ -1412,6 +1424,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
         )
+
+        # super picks the strategy and creates the sender (for sharded_rdt that
+        # includes the eager rendezvous + bake, which is why the extractor is
+        # built first).
+        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
     async def _save_lora_adapters_and_sync(
         self, lora_sync_path, inference_engine_client, lora_name: str = SKYRL_LORA_ADAPTER_NAME
@@ -1480,6 +1497,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         inference_engine_cfg: "InferenceEngineConfig",
         model_id: Optional[str] = None,
     ):
+        if inference_engine_client is None:
+            inference_engine_client = self._weight_sync_inference_client
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
@@ -1504,21 +1523,28 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         else:
-            # Extract and send weights using the sender created at init time.
-            # Disable expandable_segments around the send: under colocate_all the
-            # CUDA-IPC path calls cudaIpcGetMemHandle, which is incompatible with the
-            # VMM addresses expandable segments uses.
-            with self._expandable_segments_disabled_for_sync():
-                weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
-                await self._weight_transfer_sender.send_chunks(
-                    self.weight_extractor.extract_weights(generator_dtype),
-                    weight_metadata=weight_metadata,
+            # Send with the sender created at init time. Disable expandable_segments
+            # around it: under colocate_all the CUDA-IPC path calls
+            # cudaIpcGetMemHandle, which is incompatible with the VMM addresses
+            # expandable segments uses, and some senders (sharded_rdt) share GPU
+            # memory on every run and ask for the toggle unconditionally.
+            with self._expandable_segments_disabled_for_sync(
+                force=self._weight_transfer_sender.force_disable_expandable_segments
+            ):
+                await self._weight_transfer_sender.send(
+                    self.weight_extractor,
+                    generator_dtype,
                     **send_chunks_kwargs,
                 )
 
         if cache_reset_task is not None:
             await cache_reset_task
-        torch.cuda.empty_cache()
+        # A sender whose send buffers are reused next step (sharded_rdt) declares
+        # empty_cache_after_send=False: scrubbing them back to CUDA costs 0.25-0.53s
+        # per rank at 235B and buys nothing. Under colocation the physical memory is
+        # wanted by an inference engine, so empty regardless.
+        if self._weight_transfer_sender.empty_cache_after_send or self.cfg.placement.colocate_all:
+            torch.cuda.empty_cache()
         torch.distributed.barrier()
 
     def _set_pad_token_id(self, pad_token_id):
@@ -1594,6 +1620,27 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.adapter_store is None:
             return  # FFT path: no-op
         self.adapter_store.swap_to(model_id, self.actor_module, self.optimizer)
+
+    def offload_to_cpu(self, offload_optimizer: bool = True, offload_model: bool = True):
+        """Park the live adapter's grads before offloading.
+
+        The optimizer half of the offload frees the DDP grad buffers, dropping
+        any grads still waiting on an optim_step. Parked grads survive the
+        offload and any swap that happens while offloaded.
+        """
+        if offload_optimizer and self.adapter_store is not None and self.actor_module is not None:
+            self.adapter_store.park_grads(self.actor_module)
+        super().offload_to_cpu(offload_optimizer=offload_optimizer, offload_model=offload_model)
+
+    def backload_to_gpu(self, backload_optimizer: bool = True, backload_model: bool = True):
+        """Unpark the live adapter's grads after backloading.
+
+        The live adapter may differ from the parked one if a swap happened in
+        between.
+        """
+        super().backload_to_gpu(backload_optimizer=backload_optimizer, backload_model=backload_model)
+        if backload_optimizer and self.adapter_store is not None and self.actor_module is not None:
+            self.adapter_store.unpark_grads(self.actor_module)
 
     def adapter_store_state(self) -> dict:
         """Diagnostic: return current_id + registered model_ids. Cheap; useful

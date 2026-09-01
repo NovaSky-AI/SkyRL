@@ -17,8 +17,25 @@ skyrl/backends/skyrl_train/weight_sync/
 ├── delta_engine.py         # DeltaWeightTransferEngine (receive side, runs in the vLLM worker)
 ├── delta_payload.py        # zstd compress/decompress + uint8 tensor <-> bytes helpers
 ├── weight_extractor.py     # Sharded-param -> dense tensor extraction
-└── weight_extractor_utils.py
+├── weight_extractor_utils.py
+└── sharded_rdt/            # the sharded_rdt (NIXL pull) backend; __init__ is import-free
+    ├── sharded_rdt_strategy.py # sharded_rdt as a WeightTransferStrategy (thin adapter)
+    ├── rdt_send.py             # trainer-side driver: WeightSource impls + RdtWeightSyncSender
+    ├── rdt_control_plane.py    # SyncRdtControlPlaneClient (blocking HTTP to /collective_rpc)
+    ├── rdt_vllm_register.py    # registers the sharded_rdt engine into vLLM's factory
+    ├── rdt_libfabric_shim.py   # LIBFABRIC provider shim for NIXL
+    ├── sharded_rdt_base.py     # vendored: trainer-side ABCs (WeightSource, layerwise_groups)
+    ├── sharded_rdt_trainer.py  # vendored: trainer engine + the _RDTProducerServer sidecar
+    ├── sharded_rdt_engine.py   # vendored: consumer engine (runs in the vLLM worker)
+    ├── sharded_rdt_common.py   # vendored: RdtRouter, op-chain allowlist, buffer sizing
+    └── sharded_rdt_fake.py     # vendored: FakeRDTTensor placeholders for the bake
 ```
+
+The subpackage's `__init__.py` deliberately imports nothing: `sharded_rdt_engine` and
+`sharded_rdt_trainer` import `vllm` at module scope, so re-exporting from it would pull
+vllm into every `weight_sync` import and break the CPU CI job that runs without the wheel.
+Public names (`ShardedRdtTransferStrategy` and friends) are re-exported from
+`weight_sync/__init__.py`, which only reaches the vllm-free `sharded_rdt_strategy`.
 
 vLLM worker-extension class (loaded via `--worker-extension-cls`):
 
@@ -31,6 +48,12 @@ The weight sync implementation relies on the native vLLM weight sync APIs - `Wei
 - **Broadcast** (`BroadcastTransferStrategy`): NCCL collective. Used for **non-colocated** setups. Training and inference are on different GPUs; weights cross the wire over a dedicated process group.
 - **CUDA IPC** (`CudaIpcTransferStrategy`): Per-chunk packed buffer + one IPC handle per rank. Used for **colocated** setups (`colocate_all=true`). Both sides live on the same GPU; the receiver maps the sender's CUDA allocation directly.
 - **Delta** (`DeltaTransferStrategy`): Weights travel as compressed XOR deltas against the base checkpoint, through a shared filesystem or object store instead of the network fabric. Selected with `generator.inference_engine.weight_sync_backend=delta`; intended for **non-colocated** setups where the two sides are not NCCL-reachable (separate clusters, PD-disaggregated serving). Not supported with LoRA (`validate_cfg` rejects it).
+- **Sharded RDT** (`sharded_rdt`): the inference workers **pull** the slices they consume from
+  the trainer ranks over NIXL/RDMA, instead of the trainer pushing every tensor to every
+  worker. Selected with `generator.inference_engine.weight_sync_backend=sharded_rdt`;
+  non-colocated only (`placement.colocate_all=false`), Megatron or FSDP, and it forces
+  `distributed_executor_backend=ray` because the workers dial named trainer actors. See
+  the dedicated section below for the capabilities it declares.
 
 Strategy choice is decided by the sender (`get_transfer_strategy_cls`). The init info is expanded per server via `for_servers()` / `to_api_payload()` and pushed to the servers through the HTTP control plane (`init_weight_update_communicator` → vLLM's native `/init_weight_transfer_engine`); the receive side is vLLM's native weight-transfer engine, driven by `NewInferenceWorkerWrap`.
 
@@ -60,6 +83,134 @@ re-read even for an empty delta.
 `DeltaWeightSyncConfig.__post_init__` derives `local_checkpoint_dir` and `publish_staging_dir`
 from `sync_dir` when unset, so consuming classes never invent their own defaults.
 
+## Sharded RDT (`sharded_rdt`)
+
+`sharded_rdt` is selected through `get_transfer_strategy_cls` like every other backend
+(`ShardedRdtTransferStrategy`, in `weight_sync/sharded_rdt/sharded_rdt_strategy.py`), but underneath it
+is vLLM's *trainer-send* model — a `WeightSource`, a `TrainerWeightTransferEngine` and a
+`VLLMWeightSyncClient` — where the engine owns the whole round trip and the workers pull.
+The strategy is a thin adapter over `RdtWeightSyncSender` (`weight_sync/sharded_rdt/rdt_send.py`),
+which is where the real work lives.
+
+Where the pull model does not fit the push backends' shape, declared as capabilities
+so the workers hold no backend conditional:
+
+| flag | why |
+|---|---|
+| `sender_initializes_receivers = True` | `trainer_init` opens the inference side itself (the bake needs the source metadata and must run under `set_current_vllm_config`), so worker rank 0 must **not** also call `init_weight_update_communicator`. |
+| `force_disable_expandable_segments = True` | The sidecar shares gathered tensors over CUDA IPC on every run, not only under colocation. |
+| `empty_cache_after_send = False` | Publish buffers are reused by the next training step; scrubbing them back to CUDA costs 0.25-0.53s/rank at 235B. The worker still empties under `colocate_all`. |
+
+The sender overrides `WeightTransferSender.send` rather than implementing `send_chunks`:
+there is no chunk stream to push, and the base `send()` would call
+`get_weight_metadata`, which on the Megatron extractor is a whole-model
+`export_hf_weights` pass — the exact gather the RDT weight source exists to avoid.
+`send_chunks` raises here.
+
+This is still intermediate: when the pinned vLLM ships trainer-send for NCCL/IPC too,
+those backends collapse into this shape and the strategy layer goes away — the adapter is
+what disappears, not `rdt_send.py`.
+
+Three kinds of process: the **trainer ranks** (each builds a `WeightSource` and a
+`ShardedRDTTrainerWeightTransferEngine`), one **producer sidecar** Ray actor per trainer
+rank (pinned to that rank's GPU, sharing its memory over CUDA IPC — this is the NIXL serve
+surface), and the **consumers** (a `ShardedRDTWeightTransferEngine` inside each vLLM
+worker).
+
+Init is **eager**, in `init_weight_sync_state`, not deferred to the first send: rank 0
+would otherwise block in the inference-side init RPC while the other ranks spin in gather
+collectives, and the sidecars could not finish NIXL agent creation because libfabric's
+CUDA probe blocks behind the spinning kernels. Consumers **bake** a static pull plan at
+init by driving `model.load_weights` against `FakeRDTTensor` placeholders, so per-sync
+`update_info` is empty.
+
+Per sync the trainer walks its owned gather groups (`layerwise_groups`, one group per
+decoder layer); each group is gathered, packed into a CUDA-IPC ring slot and published to
+the sidecar. Consumers pull packed chunks into a ring of receive buffers, scatter them into
+the vLLM params, and signal `free_group` at every owner of the group. The producer counts
+signals against the consumer total and releases the group, which is the trainer's credit to
+gather the next one — so the loop self-paces to the consumers' pull rate with at most
+`gather_lookahead + 1` groups resident.
+
+Knobs are `SKYRL_RDT_*` env vars, forwarded to every Ray worker by
+`prepare_runtime_environment`: `SKYRL_RDT_LOOKAHEAD` (gather credit depth, default 1),
+`SKYRL_RDT_NUM_BUFFERS` (ring depth K, default 2), `SKYRL_RDT_STACKED_EXPERTS`,
+`SKYRL_RDT_EXPORT_RING`, `SKYRL_RDT_GC_FREEZE`, `SKYRL_RDT_SHARE_SLOTS`,
+`SKYRL_RDT_STALL_TIMEOUT_S`, `SKYRL_RDT_BUFFER_PRESIZE_GB`, and
+`SKYRL_RDT_VERIFY_STACKED=1` (a one-off numeric check of the stacked source's
+expert tensors against the bridge's per-expert export, on the first iteration).
+The
+sidecar does **not** inherit them (it is a Ray actor inheriting the raylet's environment),
+which is why the ring / lookahead / timeout knobs ride the init info instead.
+
+RDT receive buffers live **outside** `gpu_memory_utilization`: K x the largest chunk, per
+rank. `use_expandable_segments` must stay off on the engine (NIXL cannot register
+VMM-backed allocations) and is force-disabled around the sync on the trainer.
+
+## Slot sharing across replicas (`sharded_rdt`)
+
+With several inference deployments, consumers whose ids differ by a multiple of
+`workers_per_replica` (= `num_consumers // num_replicas`) are the same worker of
+different deployments: same parallel config, same baked plan, same chunk sequence,
+byte-identical pack layout. They are served out of ONE registered serve slot on
+each producer instead of one ring each, because NIXL reads are one-sided and
+non-destructive. Two halves, both required:
+
+```
+[routing]  RdtRouter.producer_for carves the owner-set block over ONE deployment
+             (consumer_id % workers_per_replica), so worker w of every deployment
+             resolves the SAME producer -> the R copies meet somewhere to merge.
+             One deployment => width is the fleet => the historical rule exactly.
+[sender]   workers_per_replica -> ShardedRDTTrainerInitInfo -> the sidecar
+             SKYRL_RDT_SHARE_SLOTS=0 sets it to 0, i.e. sharing off
+[consumer] _preregister_at_init: reserve_serve_buffer(cid, max_bytes, plan_digest)
+             one ring per GROUP, and the digest is where mismatched deployments fail
+[producer] rdt_produce_weights_batched: the group's sharers rendezvous per chunk
+             (keyed by `seq`), the LAST arrival packs, all return that blob
+             and the slot is `seq % ring_depth`
+```
+
+The serve slot is chosen from the consumer's ISSUE index, never from a per-call
+counter on the producer. The pipeline drains pull i before issuing i+K, so
+`seq % K` is provably free; execution order is not, because Ray may start a
+consumer's K concurrent produce calls in any order, and the slot of a pull that
+is still being read then gets repacked. That bug was live and cost 2x on the
+logprob gap.
+
+Pulls and free signals still carry the fleet-GLOBAL consumer id; only the block
+carve uses the intra-deployment index. The producer needs the global id to tell
+the sharers of a slot apart and count their arrivals separately.
+
+What makes the slot safe is the same inference the unshared path makes: a consumer
+issues the pull that reuses its own ring slot only after draining the pull K
+earlier, so a sharer's arrival proves it finished reading whatever it saw K
+arrivals ago. A generation's slot returns to the group's free list only once every
+sharer that arrived at it is K arrivals past it, so at most K generations hold a
+slot and the K slots always suffice.
+
+One deployment (`workers_per_replica == num_consumers`) makes every group a
+singleton, which is the previous serve path exactly — same rotation over K slots,
+and the request signature is not even computed. `begin_sync` takes the consumer
+IDS alongside the count, because a rendezvous is a specific set of ids where the
+free barrier only needs a total.
+
+Producer-side cost this addresses (235B, 4 nodes, K=2, largest chunk 1.16 GiB):
+5.0 GiB of serve rings per trainer GPU at one deployment, and without these
+changes 14 at two, 28 at four, 54 at eight. Both together hold it at 5.0 for any
+count, with the pack work flat too. Sharing alone would be 12/22/40 -- at R>1 most
+of a producer's ring count comes from distinct worker indices, not from replicas
+of one, which is what the overlay fixes.
+
+`_RDTProducerServer` carries a **stall watchdog** (`stall_timeout_s`, default 300s,
+`SKYRL_RDT_STALL_TIMEOUT_S`). Without it, a consumer that stops pulling mid-sync never
+sends its `free_group` signals, the three waits block forever, and every trainer rank
+wedges in NCCL with no exception anywhere. On no publish/serve/free progress for the
+timeout, the producer fires the `set_gather_error` channel and the run fails with a real
+error. It does not recover; it makes the failure diagnosable. The slot-sharing rendezvous
+waits on the same channel, so a sharer that never arrives fails the same way.
+
+The `sharded_rdt_*.py` files are vendored from the vLLM PR: github.com/vllm-project/vllm/pull/43375; see each file's header for the removal plan once the pinned vLLM ships the trainer-side ABCs natively.
+
 ## Lifecycle (`NewInferenceWorkerWrap`)
 1. `start_weight_update(is_checkpoint_format=True)` — initializes layerwise reload (moves layers to meta device, wraps loaders).
 2. `update_weights_chunk(update_info)` — called repeatedly. Unpacks the SkyRL packed CUDA-IPC payload, slices the contiguous buffer per param, calls `model.load_weights(weights=...)` under `set_current_vllm_config`.
@@ -86,8 +237,9 @@ Validated in `validate_inference_engine_cfg`. vLLM-version coupled (mirrors `GPU
 ## Tests
 
 ```bash
-# CPU — chunk packing, transfer strategy unit tests
-uv run --extra dev pytest tests/backends/skyrl_train/weight_sync/ -v
+# CPU — chunk packing, transfer strategies, and the sharded_rdt pull plan /
+# producer sidecar / weight source / control plane
+uv run --extra dev --extra fsdp pytest tests/backends/skyrl_train/weight_sync/ -v
 
 # GPU — end-to-end weight sync (NCCL + CUDA IPC paths, TP=1 and TP=2)
 uv run --isolated --extra dev --extra fsdp \

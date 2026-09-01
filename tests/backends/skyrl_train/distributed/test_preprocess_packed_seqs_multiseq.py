@@ -28,6 +28,7 @@ class _PackedSeqParams:
     max_seqlen_kv: Any = None
     cu_seqlens_q_padded: Any = None
     cu_seqlens_kv_padded: Any = None
+    total_tokens: Any = None
 
 
 _MEGATRON_MODULES = [
@@ -175,6 +176,7 @@ class TestSubSeqLengths:
             )
 
         assert params.cu_seqlens_q.tolist() == [0, 16, 32]
+        assert params.total_tokens == 32
         assert packed.shape == (1, 32)
         assert packed[0, :3].tolist() == [11, 12, 13]
         assert packed[0, 16:20].tolist() == [21, 22, 23, 24]
@@ -344,6 +346,8 @@ class TestMultiSeqCPLayout:
                 )
             per_rank_out.append(packed_r.to(torch.float32))
             params_cp = params_r  # cu_seqlens are global, identical across ranks
+
+        assert params_cp.total_tokens == params_cp.cu_seqlens_q_padded[-1]
 
         # Every rank's local buffer must be the same length (== total/cp).
         for r in range(1, cp_size):

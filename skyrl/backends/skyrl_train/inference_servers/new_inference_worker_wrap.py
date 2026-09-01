@@ -24,12 +24,20 @@ Usage:
         skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap
 """
 
+import sys
+
 import torch
 
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
     _empty_cuda_cache_rocm,
 )
+from skyrl.backends.skyrl_train.patches.vllm.patch_hybrid_fp8_kv_wake import (
+    patch_hybrid_fp8_kv_wake,
+)
+
+if "vllm.v1.worker.gpu_model_runner" in sys.modules:
+    patch_hybrid_fp8_kv_wake()
 
 try:
     from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
@@ -37,6 +45,21 @@ try:
     )
 
     register_delta_weight_transfer_engine()
+except ModuleNotFoundError:
+    pass
+
+# Registering the sharded_rdt engine into vLLM's WeightTransferEngineFactory must
+# happen inside every worker process (GPUWorker.load_model builds the engine via
+# the factory). Importing here — the worker-extension module vLLM loads before
+# model init — guarantees it runs on each worker. Guarded like the delta engine
+# above: this module is also imported from processes without the RDT dependencies
+# (e.g. a trainer process), and a missing optional dep must not break them.
+try:
+    from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
+        rdt_vllm_register,  # noqa: F401
+    )
+
+    rdt_vllm_register.ensure_registered()
 except ModuleNotFoundError:
     pass
 
@@ -278,3 +301,58 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
             post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
             if post_wake is not None:
                 post_wake()
+
+    def init_weight_transfer_engine_rdt(self, init_info: dict) -> None:
+        """
+        Initialize + bake the sharded_rdt weight-transfer engine.
+
+        GPUWorker.load_model already constructed the engine via the factory (the
+        sharded_rdt backend is registered in rdt_vllm_register); here we run its
+        one-time bake. Routed through this skyrl wrap (rather than vLLM's native
+        /init_weight_transfer_engine endpoint) so the bake runs under
+        set_current_vllm_config + torch.device(self.device): the bake drives
+        model.load_weights against meta params, and process_weights_after_loading
+        on MoE models reads get_current_vllm_config() to build kernels.
+
+        Args:
+            init_info: asdict(ShardedRDTWeightTransferInitInfo) — trainer actor
+                name/namespace, produce method name, M:N + ring knobs, and the
+                group-major names/dtype_names/shapes/group_lens the bake plans over.
+        """
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Set weight_transfer_config with "
+                "backend='sharded_rdt' to enable the RDT weight-transfer engine."
+            )
+
+        from vllm.config import set_current_vllm_config
+
+        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+
+    def update_weights_rdt(self, update_info: dict) -> None:
+        """
+        Pull this worker's consumed slices via the sharded_rdt engine.
+
+        Called once per sync (the engine pre-built its static whole-model plan at
+        init, so update_info is empty). The engine pulls every slice over NIXL,
+        pipelined across its receive-buffer ring, and DEFERS the GPU
+        post-processing (materialize/scatter/quant/kernel-copy) to background
+        threads — so, unlike the ipc/nccl paths, we do NOT synchronize here.
+        skyrl_finish_weight_update drains the deferred work before finalize.
+        """
+        if not getattr(self, "_skyrl_weight_update_active", False):
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_rdt.")
+
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Set weight_transfer_config with "
+                "backend='sharded_rdt' to enable the RDT weight-transfer engine."
+            )
+
+        from vllm.config import set_current_vllm_config
+
+        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            self.weight_transfer_engine.receive_weights(typed_update_info)

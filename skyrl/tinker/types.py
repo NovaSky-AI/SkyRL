@@ -160,7 +160,7 @@ class Datum(BaseModel):
 
 class ForwardBackwardInput(BaseModel):
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic", "dppo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "gspo", "cispo", "ppo_critic", "dppo"]
     loss_fn_config: dict[str, float] | None = None
 
 
@@ -208,6 +208,7 @@ class SaveWeightsOutput(BaseModel):
 class LoadWeightsInput(BaseModel):
     source_model_id: str
     checkpoint_id: str
+    load_optimizer: bool = True
 
 
 class LoadWeightsOutput(BaseModel):
@@ -341,6 +342,7 @@ SUPPORTED_LOSS_FNS = {
     "cross_entropy",
     "importance_sampling",
     "ppo",
+    "gspo",
     "cispo",
     "ppo_critic",
     "dppo",
