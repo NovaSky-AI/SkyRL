@@ -733,3 +733,19 @@ def to_te_attention_mask(attention_mask: Optional[torch.Tensor]) -> Optional[tor
     if attention_mask is None or attention_mask.dim() != 2:
         return attention_mask
     return (~attention_mask.bool())[:, None, None, :]
+
+
+def _clear_mtp_hybrid_pattern(provider) -> None:
+    """Drop the MTP block from a hybrid provider's layer pattern.
+
+    Setting ``mtp_num_layers = None`` is not enough for hybrid (Mamba/attention/MoE)
+    models such as NemotronH.  ``HybridModelProvider.finalize()`` appends
+    ``mtp_hybrid_override_pattern`` to ``hybrid_layer_pattern`` whenever that field is
+    set -- and because ``mtp_use_repeated_layer`` defaults to True it appends one copy
+    even for ``mtp_num_layers=None`` -- then re-infers the depth back out of the
+    combined pattern, undoing the disable.  Clearing the pattern too keeps the guard in
+    ``finalize()`` false so the head is never built.  No-op on providers without the
+    field (GPTModel-based MTP models like DeepSeek/GLM honor ``mtp_num_layers``).
+    """
+    if getattr(provider, "mtp_hybrid_override_pattern", None):
+        provider.mtp_hybrid_override_pattern = None

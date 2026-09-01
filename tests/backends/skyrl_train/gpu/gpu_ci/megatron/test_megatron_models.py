@@ -78,6 +78,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     is_large_moe = (
         ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower())
         or ("nemotron-3-nano" in model_name.lower())
+        or ("nemotron-3.5-lightning" in model_name.lower())
         or ("glm-4.7-flash" in model_name.lower())
     )
     if is_large_moe:
@@ -97,10 +98,12 @@ def _extra_env_vars_for_model(model_name: str) -> dict[str, str] | None:
 def _engine_overrides_for_model(model_name: str) -> dict:
     """Per-model overrides for vLLM engine init."""
     overrides = {"engine_init_kwargs": {}, "gpu_memory_utilization": 0.9}
-    if "Nemotron-3-Nano" in model_name:
+    if "Nemotron-3-Nano" in model_name or "Nemotron-3.5-Lightning" in model_name:
+        # Both default to a 262k context, which would size the KV pool far past
+        # what is left next to the colocated Megatron policy shard. Megatron
+        # policy init also needs room alongside vLLM on the same GPU, so lower
+        # vLLM's pool footprint too.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
-        # Megatron policy init also needs room alongside vLLM on the same
-        # GPU, so lower vLLM's pool footprint.
         overrides["gpu_memory_utilization"] = 0.5
     # Large MoE: Megatron policy init also needs room alongside vLLM on the
     # same GPU, so lower vLLM's pool footprint.
@@ -244,13 +247,18 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             id="qwen3.5-0.8b-dense_tp2",
         ),
-        # Nemotron-3-Nano (30B MoE, bf16) on 4xH100-80G. Mesh: TP=4 EP=4
-        # ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs (colocated).
-        # TP=1 OOMed in the EP alltoall because dense layers were replicated
-        # on every GPU; TP=4 shards them 4-way and matches the qwen3.5-35b
-        # layout below. AdamW optimizer is skipped entirely via is_large_moe
-        # in get_test_actor_config (forward-only test), and vLLM gmu is
-        # lowered to 0.5 so the policy shard + vLLM pool fit on each H100.
+        # Nemotron-3.5-Lightning (30B MoE, bf16) on 4xH100-80G. Same
+        # NemotronH hybrid Mamba/attention/MoE backbone and layer pattern as
+        # Nemotron-3-Nano above, so it reuses that mesh (TP=4 EP=4 ETP=1 ->
+        # DP=1, vLLM TP=4 colocated) and the same forward-only treatment.
+        # Two config-level differences: the HF config declares the layer
+        # pattern as `layers_block_type`/`mtp_layers_block_type` lists rather
+        # than `hybrid_override_pattern` strings (transformers' NemotronHConfig
+        # exposes the string form as a derived property, which is what both
+        # megatron-bridge and vLLM read), and it ships one MTP head
+        # (`num_nextn_predict_layers=1`). MegatronWorker drops the MTP head
+        # (enable_mtp=False -> provider.mtp_num_layers=None) and vLLM skips the
+        # `mtp.*` weights, so neither side carries it through weight sync.
         pytest.param(
             4,
             1,
@@ -259,10 +267,10 @@ async def construct_training_input_from_generator_output(generator_output, token
             1,
             4,
             4,
-            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
             5e-1,
             5e-2,
-            id="nemotron3-nano_tp4_ep4_h100",
+            id="nemotron3.5-lightning_tp4_ep4_h100",
             marks=pytest.mark.h100,
         ),
         # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. Mesh:
