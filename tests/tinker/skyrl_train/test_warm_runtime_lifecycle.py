@@ -138,16 +138,17 @@ def test_delete_skips_inference_unload_for_unsynced_adapter():
     backend._inference_engine_client.unload_lora_adapter.assert_not_awaited()
 
 
-def test_delete_proceeds_when_inference_unload_fails():
+def test_delete_preserves_adapter_when_inference_unload_fails():
     backend = _backend(keep_runtime_warm=True)
     backend._inference_adapter_ids.add("model-a")
     backend._inference_engine_client.unload_lora_adapter.side_effect = RuntimeError("vLLM unreachable")
 
-    backend.delete_model("model-a")
+    with pytest.raises(RuntimeError, match="vLLM unreachable"):
+        backend.delete_model("model-a")
 
-    backend._dispatch.delete_adapter.assert_called_once_with("policy", "model-a")
-    assert backend._model_ids_to_role == {}
-    assert backend._inference_adapter_ids == set()
+    backend._dispatch.delete_adapter.assert_not_called()
+    assert backend._model_ids_to_role == {"model-a": "policy"}
+    assert backend._inference_adapter_ids == {"model-a"}
 
 
 def test_create_model_registers_fresh_adapter_against_warm_runtime():

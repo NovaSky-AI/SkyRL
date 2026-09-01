@@ -555,19 +555,10 @@ class SkyRLTrainBackend(AbstractBackend):
         return ResolvedPlacementGroup(pg)
 
     def _unload_inference_adapter(self, model_id: str) -> None:
-        """Drop a deleted tenant's LoRA adapter from the inference engines.
-
-        Only adapters actually registered on vLLM (via save_sampler_checkpoint)
-        are unloaded. Best-effort: vLLM may have LRU-evicted the adapter
-        already, and an inference-side failure must not block the tenant's
-        removal from the training runtime.
-        """
+        """Drop a deleted tenant's LoRA adapter from the inference engines."""
         if model_id not in self._inference_adapter_ids:
             return
-        try:
-            asyncio.run(self._inference_engine_client.unload_lora_adapter(model_id))
-        except Exception as e:
-            logger.warning(f"Failed to unload LoRA adapter '{model_id}' from inference engines: {e}")
+        asyncio.run(self._inference_engine_client.unload_lora_adapter(model_id))
         self._inference_adapter_ids.discard(model_id)
 
     def delete_model(self, model_id: str) -> None:

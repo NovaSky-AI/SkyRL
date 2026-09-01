@@ -1319,11 +1319,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
     async def unload_lora_adapter(self, lora_name: str) -> Dict[str, Any]:
         """
-        Unload a previously-loaded LoRA adapter on all backend servers via /v1/unload_lora_adapter.
+        Unload a previously-loaded LoRA adapter on all backend servers.
 
         After unloading, ``lora_name`` is no longer accepted as a ``model``
-        target on any server. The underlying CPU/GPU LRU entries on vLLM age
-        out naturally as new adapters are loaded.
+        target on any server.
 
         Args:
             lora_name: Name of the adapter to unload.
@@ -1338,7 +1337,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         session = await self._get_session()
 
         async def _unload_on_server(server_url: str):
-            url = f"{server_url}/v1/unload_lora_adapter"
+            url = f"{server_url}/skyrl/v1/unload_lora_adapter"
             async with session.post(url, json=payload) as resp:
                 if resp.status >= 400:
                     body = await resp.json()

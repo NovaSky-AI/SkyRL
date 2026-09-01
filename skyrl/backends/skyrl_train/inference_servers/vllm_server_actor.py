@@ -50,6 +50,17 @@ from skyrl.env_vars import (
 logger = logging.getLogger(__name__)
 
 
+async def _remove_lora_adapter(models, lora_name: str) -> int:
+    async with models.lora_resolver_lock[lora_name]:
+        lora_request = models.lora_requests.get(lora_name)
+        if lora_request is None:
+            raise HTTPException(status_code=404, detail=f"LoRA adapter '{lora_name}' cannot be found.")
+
+        await models.engine_client.remove_lora(lora_request.lora_int_id)
+        del models.lora_requests[lora_name]
+        return lora_request.lora_int_id
+
+
 class VLLMServerActor(ServerActorProtocol):
     """
     Ray actor that runs a vLLM OpenAI-compatible API server.
@@ -410,6 +421,26 @@ class VLLMServerActor(ServerActorProtocol):
                 lora_request.load_inplace = False
                 models.lora_requests[lora_name] = lora_request
 
+            return {
+                "status": "ok",
+                "lora_name": lora_name,
+                "lora_int_id": lora_int_id,
+            }
+
+        @app.post("/skyrl/v1/unload_lora_adapter")
+        async def _skyrl_unload_lora_adapter(request: Request):
+            """Remove both serving and engine state for a LoRA adapter.
+
+            TODO: use vLLM's native endpoint once
+            https://github.com/vllm-project/vllm/pull/42634 is released.
+            """
+            body = await request.json()
+            lora_name = body.get("lora_name")
+            if not lora_name:
+                raise HTTPException(status_code=400, detail="'lora_name' must be provided.")
+
+            models = request.app.state.openai_serving_models
+            lora_int_id = await _remove_lora_adapter(models, lora_name)
             return {
                 "status": "ok",
                 "lora_name": lora_name,

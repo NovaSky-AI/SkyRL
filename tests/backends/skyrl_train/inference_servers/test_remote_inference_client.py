@@ -285,7 +285,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         app.state.lora_registry[lora_name] = lora_path
         return PlainTextResponse(f"Success: LoRA adapter '{lora_name}' added successfully on server {server_id}.")
 
-    @app.post("/v1/unload_lora_adapter")
+    @app.post("/skyrl/v1/unload_lora_adapter")
     async def unload_lora_adapter(request: Request):
         body = await request.json()
         lora_name = body.get("lora_name")
