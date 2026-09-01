@@ -91,11 +91,14 @@ class WorkerDispatch:
         No-op when ``model_id is None`` (single-tenant / FFT path) or when
         the workers don't have an AdapterStore (non-LoRA strategies).
 
-        Must be called *after* ``_ensure_on_gpu(role, ...)`` so the model
-        and optimizer storages are live before we tensor.copy_() into them.
+        The swap copies the DDP param buffers, so the model has to be resident.
+        Most callers just ran _ensure_on_gpu; repeating it here is a no-op for
+        them and covers the paths that only need the optimizer, like set_lr.
+        Grad buffers and optimizer state may stay offloaded.
         """
         if model_id is None or role not in self._actor_groups:
             return
+        self._ensure_on_gpu(role, need_optimizer=False, need_model=True)
         ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
 
     def register_adapter(self, role: str, model_id: str) -> None:
@@ -422,7 +425,12 @@ class WorkerDispatch:
         """Run optimizer step. For single-tenant training, the model should already be on GPU from forward_backward.
 
         For multi-tenant LoRA training, ``model_id`` is used to ensure the correct adapter is used.
+
+        The residency check is not redundant with forward_backward's: under
+        multi-tenancy another tenant's request can offload the optimizer
+        between the two calls.
         """
+        self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
         refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
         grad_norms = ray.get(refs)
@@ -632,20 +640,27 @@ class WorkerDispatch:
         return {"sync_weights_only_transfer": self.last_weight_sync_seconds}
 
     def _prepare_for_weight_sync(self) -> None:
-        """Prepare for weight sync: ensure policy model is on GPU, offload optimizer. Helper for save_weights_for_sampler."""
+        """Load policy weights and apply the configured optimizer offload policy."""
         if not self.colocate_all:
             return
-        # Ensure policy model is on GPU (will offload others in colocation group)
-        self._ensure_on_gpu("policy", need_optimizer=False, need_model=True)
-        # Offload optimizer if it's on GPU
-        if self._gpu_state["policy"].optimizer_on_gpu:
+        offload_optimizer = self.cfg.trainer.policy.optimizer_config.offload_after_step
+        self._ensure_on_gpu(
+            "policy",
+            need_optimizer=False,
+            need_model=True,
+        )
+        if offload_optimizer and self._gpu_state["policy"].optimizer_on_gpu:
             self._offload("policy", offload_optimizer=True, offload_model=False)
 
     def _finish_weight_sync(self) -> None:
-        """Finish weight sync: offload model weights and optimizer state. Helper for save_weights_for_sampler."""
+        """Offload policy weights and conditionally offload optimizer state."""
         if not self.colocate_all:
             return
-        self._offload("policy", offload_optimizer=True, offload_model=True)
+        self._offload(
+            "policy",
+            offload_optimizer=self.cfg.trainer.policy.optimizer_config.offload_after_step,
+            offload_model=True,
+        )
 
     async def save_weights_for_sampler(self, model_id: Optional[str] = None) -> None:
         """

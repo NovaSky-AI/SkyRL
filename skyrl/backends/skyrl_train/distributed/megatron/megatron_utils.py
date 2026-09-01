@@ -198,6 +198,31 @@ def _convert_moe_experts_lora_to_vllm(
     return converted
 
 
+def gdn_in_proj_lora_is_safe(bridge) -> bool:
+    """Whether LoRA on GatedDeltaNet ``in_proj`` can round-trip through weight sync.
+
+    False for models whose bridge maps ``in_proj`` to two fused HF tensors
+    (``in_proj_qkvz``/``in_proj_ba``, e.g. Qwen3-Next): peft_bridge has no
+    fused-adapter split for that layout, so a merged export fails on a shape
+    mismatch and an unmerged export silently drops the ``in_proj_ba`` half.
+    True for the separate ``in_proj_qkv/z/b/a`` layout (e.g. Qwen3.5) and for
+    models without GDN layers (where ``in_proj`` matches nothing).
+    """
+    # `_model_bridge` hands each fresh bridge only the raw HF config; some
+    # bridges' `mapping_registry` inspect the checkpoint through
+    # `hf_pretrained.state` (GLM-4.5's fused-expert probe), so install the
+    # AutoBridge's weights-backed `hf_pretrained` first.
+    model_bridge = bridge._model_bridge
+    model_bridge.hf_pretrained = bridge.hf_pretrained
+    mapping = model_bridge.mapping_registry().megatron_to_hf_lookup(
+        # Layer 0 stands in for the wildcard in the bridge's mapping patterns.
+        "decoder.layers.0.self_attention.in_proj.weight"
+    )
+    if mapping is None:
+        return True
+    return isinstance(mapping.hf_param, dict) and set(mapping.hf_param) == {"qkv", "z", "b", "a"}
+
+
 @torch.no_grad()
 def offload_megatron_grads_to_cpu(models):
     for model_chunk in models:
@@ -632,7 +657,7 @@ def get_model_config(model):
     return get_attr_wrapped_model(model, "config", allow_none=False)
 
 
-def broadcast_object_across_pp_ranks(obj):
+def broadcast_object_across_pp_ranks(obj, allow_missing: bool = False):
     """Broadcast an object across pipeline parallel ranks.
 
     From Nemo-RL: https://github.com/NVIDIA-NeMo/RL/blob/0a769cc3553a265dd1ca4648de0a7d0b1ad5ece6/nemo_rl/models/policy/megatron_policy_worker.py#L136
@@ -643,12 +668,18 @@ def broadcast_object_across_pp_ranks(obj):
 
     Args:
         obj: The object to broadcast. Can be None on ranks that don't own it.
+        allow_missing: If True, return None when *no* rank owns the object instead
+            of raising. Callers enumerating conversion tasks need this: since
+            megatron-bridge 0.7.0 a mapping registry can describe parameters that
+            the built model does not contain (see ``_init_param_buckets``).
 
     Returns:
-        The object on all ranks (either the original or the broadcast copy).
+        The object on all ranks (either the original or the broadcast copy), or
+        None if no rank owns it and ``allow_missing`` is set.
 
     Raises:
-        ValueError: If the object doesn't exist on any pipeline parallel rank.
+        ValueError: If the object doesn't exist on any pipeline parallel rank and
+            ``allow_missing`` is False.
     """
     pp_size = mpu.get_pipeline_model_parallel_world_size()
     pp_group = mpu.get_pipeline_model_parallel_group()
@@ -673,6 +704,8 @@ def broadcast_object_across_pp_ranks(obj):
             break
 
     if src_rank is None:
+        if allow_missing:
+            return None
         raise ValueError("Object must exist on at least one PP rank")
 
     # ------------------------------------------------------------------
