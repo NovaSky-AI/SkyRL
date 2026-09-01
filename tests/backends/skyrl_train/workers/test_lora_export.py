@@ -8,9 +8,7 @@ from skyrl.train.config import SkyRLTrainConfig
 
 
 def test_preserve_export_dtype_cli_override_is_typed() -> None:
-    config = SkyRLTrainConfig.from_cli_overrides(
-        ["trainer.policy.model.lora.preserve_export_dtype=true"]
-    )
+    config = SkyRLTrainConfig.from_cli_overrides(["trainer.policy.model.lora.preserve_export_dtype=true"])
 
     assert config.trainer.policy.model.lora.preserve_export_dtype is True
 
@@ -23,9 +21,7 @@ def test_preserve_export_dtype_cli_override_is_typed() -> None:
         (torch.float32, False, torch.float32),
     ],
 )
-def test_build_lora_adapter_state_preserves_values_and_peft_names(
-    source_dtype, preserve_dtype, expected_dtype
-):
+def test_build_lora_adapter_state_preserves_values_and_peft_names(source_dtype, preserve_dtype, expected_dtype):
     source = torch.tensor([1.25, -2.5], dtype=source_dtype)
     adapter_state = build_lora_adapter_state(
         [("decoder.layers.0.linear.adapter.weight", source)],
