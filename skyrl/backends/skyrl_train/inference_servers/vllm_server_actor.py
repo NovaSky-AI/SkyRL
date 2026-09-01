@@ -41,6 +41,9 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     build_logprobs_content,
     pack_routed_experts,
 )
+from skyrl.backends.skyrl_train.inference_servers.lora_reload import (
+    replace_lora_adapter,
+)
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.env_vars import (
     SKYRL_HTTP_CONNECTION_LIMIT,
@@ -432,13 +435,7 @@ class VLLMServerActor(ServerActorProtocol):
 
         @app.post("/skyrl/v1/load_lora_adapter")
         async def _skyrl_load_lora_adapter(request: Request):
-            """Load a LoRA adapter from disk, replacing any existing adapter
-            under the same name in place. Used by RemoteInferenceClient.update_lora_from_disk.
-
-            TODO(aaron): remove this endpoint and route update_lora_from_disk back
-            through /v1/load_lora_adapter once the upstream fix in
-            https://github.com/vllm-project/vllm/pull/41482 lands in a vLLM release we depend on.
-            """
+            """Load a LoRA adapter from disk under a fresh engine id."""
             body = await request.json()
             lora_name = body.get("lora_name")
             lora_path = body.get("lora_path")
@@ -449,21 +446,7 @@ class VLLMServerActor(ServerActorProtocol):
                 )
 
             models = request.app.state.openai_serving_models
-            async with models.lora_resolver_lock[lora_name]:
-                lora_int_id = (
-                    models.lora_requests[lora_name].lora_int_id
-                    if lora_name in models.lora_requests
-                    else models.lora_id_counter.inc(1)
-                )
-                lora_request = LoRARequest(
-                    lora_name=lora_name,
-                    lora_int_id=lora_int_id,
-                    lora_path=lora_path,
-                    load_inplace=True,
-                )
-                await models.engine_client.add_lora(lora_request)
-                lora_request.load_inplace = False
-                models.lora_requests[lora_name] = lora_request
+            lora_int_id = await replace_lora_adapter(models, lora_name, lora_path, LoRARequest)
 
             return {
                 "status": "ok",
