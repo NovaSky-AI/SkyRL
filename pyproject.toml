@@ -273,7 +273,7 @@ override-dependencies = [
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
-fast-hadamard-transform = ["torch==2.11.0"]
+fast-hadamard-transform = ["torch==2.11.0", "ninja"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -359,7 +359,15 @@ vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
 ]
-fast-hadamard-transform = { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux'" }
+# NOTE (etang): upstream publishes wheels only up to cu13torch2.10, so torch 2.11 + CUDA 13 falls back
+# to a source build, which needs a local CUDA 13 toolkit. These are built from the pinned rev below with
+# nvcc 13.0.88 and torch 2.11.0+cu130 (sm_75-sm_121, glibc >= 2.35): rebuild if the torch pin moves, and
+# drop them once upstream ships cu13torch2.11. Other platforms/python versions still build from source.
+fast-hadamard-transform = [
+    { url = "https://github.com/erictang000/fast-hadamard-transform/releases/download/v1.1.0.post2-cu13torch2.11/fast_hadamard_transform-1.1.0%2Bcu13torch2.11cxx11abitrue-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/erictang000/fast-hadamard-transform/releases/download/v1.1.0.post2-cu13torch2.11/fast_hadamard_transform-1.1.0%2Bcu13torch2.11cxx11abitrue-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and (platform_machine != 'x86_64' or python_full_version < '3.12' or python_full_version >= '3.14')" },
+]
 
 
 [tool.black]
