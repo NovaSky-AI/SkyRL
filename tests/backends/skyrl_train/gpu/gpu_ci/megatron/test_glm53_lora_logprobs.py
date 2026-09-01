@@ -23,6 +23,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
 )
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInput
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
@@ -36,15 +37,12 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
 )
 from skyrl.train.config import SamplingParams, SkyRLLoraConfig, SkyRLTrainConfig
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
-from skyrl.train.generators.base import GeneratorInput
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
 from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
-    get_test_generator_input,
     init_worker_with_type,
 )
 
@@ -52,13 +50,19 @@ MODEL = "zai-org/GLM-5.3"
 SMALL_DRY_RUN_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 POLICY_GPUS = 8
 INFERENCE_TP = 8
-NUM_PROMPTS = 4
 MAX_GENERATE_LENGTH = 128
 MEGATRON_MEAN_DIFF_THRESHOLD = 5e-2
 VLLM_MEAN_DIFF_THRESHOLD = 3e-1
 LORA_NOISE_SEED = 42
 LORA_NOISE_STD = 1e-3
 MIN_UPDATED_LOGPROB_DIFF = 1e-5
+
+TEST_PROMPTS = [
+    "What is 2 + 3? Answer with only the number.",
+    "Name the largest planet in our solar system. Answer briefly.",
+    "Complete the sequence: 1, 1, 2, 3, 5, __.",
+    "Write one short sentence explaining why ice floats on water.",
+]
 
 MEGATRON_LORA_TARGET_MODULES = [
     "linear_q_down_proj",
@@ -257,15 +261,19 @@ def _get_glm53_lora_config(model: str, lora_sync_path: str) -> SkyRLTrainConfig:
     return cfg
 
 
-async def _generate(generator, model: str, tokenizer):
-    input_batch: GeneratorInput = get_test_generator_input(
-        model=model,
-        num_prompts=NUM_PROMPTS,
-        n_samples_per_prompt=1,
-        max_prompt_length=512,
-        env_class="gsm8k",
+def _get_prompt_token_ids(tokenizer) -> list[list[int]]:
+    conversations = [[{"role": "user", "content": prompt}] for prompt in TEST_PROMPTS]
+    return tokenizer.apply_chat_template(
+        conversations,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=False,
     )
-    input_batch["sampling_params"] = get_sampling_params_for_backend(
+
+
+async def _generate(client, tokenizer, model: str | None = None):
+    prompt_token_ids = _get_prompt_token_ids(tokenizer)
+    sampling_params = get_sampling_params_for_backend(
         "vllm",
         SamplingParams(
             temperature=0.0,
@@ -278,23 +286,27 @@ async def _generate(generator, model: str, tokenizer):
     )
 
     with Timer("generate_with_vllm"):
-        output = await generator.generate(input_batch)
+        output = await client.generate(
+            InferenceEngineInput(
+                prompt_token_ids=prompt_token_ids, sampling_params=sampling_params
+            ),
+            model=model,
+        )
 
     responses = output["response_ids"]
-    rewards = output["rewards"]
-    if rewards and not isinstance(rewards[0], list):
-        rewards = [
-            [reward] * len(response) for reward, response in zip(rewards, responses)
-        ]
+    rollout_logprobs = output["response_logprobs"]
+    assert rollout_logprobs is not None
+    rewards = [[0.0] * len(response) for response in responses]
+    loss_masks = [[1] * len(response) for response in responses]
 
     sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _ = (
         convert_prompts_responses_to_batch_tensors(
             pad_token_id=tokenizer.pad_token_id,
-            prompts=output["prompt_token_ids"],
+            prompts=prompt_token_ids,
             responses=responses,
             rewards=rewards,
-            loss_masks=output["loss_masks"],
-            logprobs=output["rollout_logprobs"],
+            loss_masks=loss_masks,
+            logprobs=rollout_logprobs,
         )
     )
     assert logprobs_t is not None
@@ -387,11 +399,11 @@ def _init_perturbable_policy(cfg, client, policy_gpus):
 @pytest.mark.asyncio
 @pytest.mark.megatron
 @pytest.mark.b300
-async def test_glm53_lora_at_init_matches_vllm(glm53_ray_init_fixture):
+async def test_glm53_lora_init_and_dummy_update_match_vllm(glm53_ray_init_fixture):
     model = os.environ.get("SKYRL_GLM53_MODEL", MODEL)
     policy_gpus, inference_tp = _get_test_topology(model)
     shared_dir = Path(os.environ["SKYRL_GLM53_SHARED_DIR"])
-    lora_sync_path = shared_dir / f"glm53-lora-init-{uuid.uuid4().hex}"
+    lora_sync_path = shared_dir / f"glm53-lora-parity-{uuid.uuid4().hex}"
     lora_sync_path.mkdir(parents=True)
 
     assert ray.cluster_resources().get("GPU", 0) >= policy_gpus + inference_tp, (
@@ -415,32 +427,10 @@ async def test_glm53_lora_at_init_matches_vllm(glm53_ray_init_fixture):
             client = engines.client
             adapter_loaded = False
             try:
-                base_generator = SkyRLGymGenerator(
-                    generator_cfg=cfg.generator,
-                    skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                    inference_engine_client=client,
-                    tokenizer=tokenizer,
-                )
                 base_responses, base_mask, base_logprobs, base_input = await _generate(
-                    base_generator, model, tokenizer
+                    client, tokenizer
                 )
-
-                policy = init_worker_with_type(
-                    "policy",
-                    shared_pg=None,
-                    colocate_all=False,
-                    num_nodes=1,
-                    num_gpus_per_node=policy_gpus,
-                    cfg=cfg,
-                )
-                ray.get(
-                    policy.async_run_ray_method(
-                        "pass_through",
-                        "init_weight_sync_state",
-                        client,
-                        cfg.generator.inference_engine,
-                    )
-                )
+                policy = _init_perturbable_policy(cfg, client, policy_gpus)
 
                 initial_megatron_logprobs = _get_megatron_logprobs(policy, base_input)
                 _assert_logprobs_match(
@@ -463,15 +453,9 @@ async def test_glm53_lora_at_init_matches_vllm(glm53_ray_init_fixture):
                 adapter_loaded = True
                 await client.reset_prefix_cache()
 
-                lora_generator = SkyRLGymGenerator(
-                    generator_cfg=cfg.generator,
-                    skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                    inference_engine_client=client,
-                    tokenizer=tokenizer,
-                    policy_model_name=resolve_policy_model_name(cfg),
-                )
+                adapter_name = resolve_policy_model_name(cfg)
                 lora_responses, lora_mask, lora_logprobs, lora_input = await _generate(
-                    lora_generator, model, tokenizer
+                    client, tokenizer, adapter_name
                 )
                 assert base_responses == lora_responses
                 assert torch.equal(base_mask, lora_mask)
@@ -491,56 +475,6 @@ async def test_glm53_lora_at_init_matches_vllm(glm53_ray_init_fixture):
                     lora_mask,
                     MEGATRON_MEAN_DIFF_THRESHOLD,
                 )
-            finally:
-                if adapter_loaded:
-                    await client.unload_lora_adapter(resolve_policy_model_name(cfg))
-    finally:
-        shutil.rmtree(lora_sync_path)
-
-
-@pytest.mark.asyncio
-@pytest.mark.megatron
-@pytest.mark.b300
-async def test_glm53_lora_after_dummy_update_matches_vllm(glm53_ray_init_fixture):
-    model = os.environ.get("SKYRL_GLM53_MODEL", MODEL)
-    policy_gpus, inference_tp = _get_test_topology(model)
-    shared_dir = Path(os.environ["SKYRL_GLM53_SHARED_DIR"])
-    lora_sync_path = shared_dir / f"glm53-lora-noise-{uuid.uuid4().hex}"
-    lora_sync_path.mkdir(parents=True)
-
-    assert ray.cluster_resources().get("GPU", 0) >= policy_gpus + inference_tp, (
-        f"LoRA parity requires {policy_gpus + inference_tp} GPUs in the connected Ray cluster"
-    )
-
-    cfg = _get_glm53_lora_config(model, str(lora_sync_path))
-    tokenizer = get_tokenizer(model)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    try:
-        async with InferenceEngineState.create(
-            cfg=cfg,
-            model=model,
-            use_local=True,
-            colocate_all=False,
-            backend="vllm",
-            enable_lora=True,
-        ) as engines:
-            client = engines.client
-            adapter_loaded = False
-            try:
-                base_generator = SkyRLGymGenerator(
-                    generator_cfg=cfg.generator,
-                    skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                    inference_engine_client=client,
-                    tokenizer=tokenizer,
-                )
-                _, base_mask, _, base_input = await _generate(
-                    base_generator, model, tokenizer
-                )
-
-                policy = _init_perturbable_policy(cfg, client, policy_gpus)
-                initial_logprobs = _get_megatron_logprobs(policy, base_input)
 
                 with Timer("apply_dummy_lora_update"):
                     update_receipts = ray.get(
@@ -556,13 +490,13 @@ async def test_glm53_lora_after_dummy_update_matches_vllm(glm53_ray_init_fixture
                     assert receipt["updated_elements"] > 0
                     assert receipt["delta_norm"] > 0
 
-                updated_logprobs = _get_megatron_logprobs(policy, base_input)
+                updated_logprobs = _get_megatron_logprobs(policy, lora_input)
                 _assert_logprobs_changed(
-                    initial_logprobs,
-                    updated_logprobs,
-                    base_mask,
+                    lora_megatron_logprobs, updated_logprobs, lora_mask
                 )
 
+                await client.unload_lora_adapter(adapter_name)
+                adapter_loaded = False
                 with Timer("publish_dummy_updated_lora"):
                     ray.get(
                         policy.async_run_ray_method(
@@ -575,22 +509,17 @@ async def test_glm53_lora_after_dummy_update_matches_vllm(glm53_ray_init_fixture
                 adapter_loaded = True
                 await client.reset_prefix_cache()
 
-                lora_generator = SkyRLGymGenerator(
-                    generator_cfg=cfg.generator,
-                    skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                    inference_engine_client=client,
-                    tokenizer=tokenizer,
-                    policy_model_name=resolve_policy_model_name(cfg),
+                _, updated_mask, updated_vllm_logprobs, updated_input = await _generate(
+                    client, tokenizer, adapter_name
                 )
-                _, lora_mask, lora_logprobs, lora_input = await _generate(
-                    lora_generator, model, tokenizer
+                updated_megatron_logprobs = _get_megatron_logprobs(
+                    policy, updated_input
                 )
-                lora_megatron_logprobs = _get_megatron_logprobs(policy, lora_input)
                 _assert_logprobs_match(
                     "dummy-updated vLLM LoRA vs Megatron LoRA",
-                    lora_logprobs,
-                    lora_megatron_logprobs,
-                    lora_mask,
+                    updated_vllm_logprobs,
+                    updated_megatron_logprobs,
+                    updated_mask,
                     MEGATRON_MEAN_DIFF_THRESHOLD,
                 )
             finally:
