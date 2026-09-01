@@ -7,6 +7,9 @@ pytest -s -m b300 tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_glm53_lora
 
 For a two-GPU Qwen dry run, also set:
 SKYRL_GLM53_MODEL=Qwen/Qwen2.5-1.5B-Instruct
+
+For a prestarted multi-node Ray cluster, also set:
+SKYRL_GLM53_RAY_ADDRESS=auto
 """
 
 import hashlib
@@ -135,7 +138,10 @@ _PerturbablePolicyWorker = ray.remote(num_gpus=1)(_PerturbableMegatronPolicyWork
 
 @pytest.fixture
 def glm53_ray_init_fixture():
-    with ray_init(extra_env_vars={"NVTE_FUSED_ATTN": "1"}):
+    with ray_init(
+        extra_env_vars={"NVTE_FUSED_ATTN": "1"},
+        address=os.environ.get("SKYRL_GLM53_RAY_ADDRESS"),
+    ):
         yield
 
 
