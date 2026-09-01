@@ -391,7 +391,7 @@ def ray_init_for_tests():
         env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
-    env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH")
+    env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH", "")
     ray.init(runtime_env={"env_vars": env_vars})
 
 
