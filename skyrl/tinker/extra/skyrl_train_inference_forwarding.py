@@ -78,7 +78,11 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and write the result to FutureDB."""
+        """Forward a sample request to vLLM and resolve its future.
+
+        With an ExternalFutureStore the result stays in memory; without one it
+        is written back to the request's FutureDB row.
+        """
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED

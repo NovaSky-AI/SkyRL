@@ -338,7 +338,7 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
-        app.state.external_future_store = ExternalFutureStore(app.state.db_engine, app.state.db_write_lock)
+        app.state.external_future_store = ExternalFutureStore()
         await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
             app.state.engine_config, app.state.db_engine, app.state.external_future_store

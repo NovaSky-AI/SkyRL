@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -112,7 +113,7 @@ async def future_store(tmp_path):
         await connection.run_sync(SQLModel.metadata.create_all)
 
     db_write_lock = asyncio.Lock()
-    store = ExternalFutureStore(engine, db_write_lock)
+    store = ExternalFutureStore()
     await store.start()
     yield store, engine, db_write_lock
     await store.close()
@@ -229,7 +230,7 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
                 )
             )
             assert all(response.body == expected_sample for response in retrievals)
-            assert not store._entries
+            assert all(store._entries[request_id].retrieved_at is not None for request_id in request_ids)
 
         repeated = await api.retrieve_future(api.RetrieveFutureRequest(request_id=str(request_ids[-1])), sample_request)
         assert repeated.body == expected_sample
@@ -237,14 +238,14 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
         future_poller.cancel()
         await asyncio.gather(future_poller, return_exceptions=True)
 
-    await store.flush()
     async with AsyncSession(engine) as session:
         persisted_by_type = dict(
             (await session.exec(select(FutureDB.request_type, func.count()).group_by(FutureDB.request_type))).all()
         )
         session_db = await session.get(SessionDB, "session_a")
 
-    assert persisted_by_type[types.RequestType.EXTERNAL] == 2048
+    # External sample futures live purely in memory — nothing reaches the DB.
+    assert types.RequestType.EXTERNAL not in persisted_by_type
     assert persisted_by_type[types.RequestType.FORWARD_BACKWARD] == 2048
     assert session_db is not None
     assert session_db.heartbeat_count == 128
@@ -546,68 +547,68 @@ async def test_forwarding_client_completes_in_memory_future(future_store, monkey
 
 
 @pytest.mark.asyncio
-async def test_persistence_failure_is_reported_to_waiter(future_store, monkeypatch):
+async def test_sweep_evicts_entries_by_ttl(future_store):
     store, _, _ = future_store
-    request_id = store.create("model_a", _sample_input(1))
+    result = types.SampleOutput(sequences=[])
 
-    async def fail_persistence(entries):
-        raise RuntimeError("database unavailable")
+    retrieved_id = store.create("model_a", _sample_input(1))
+    await store.complete(retrieved_id, result, RequestStatus.COMPLETED)
+    await store.wait(retrieved_id, timeout=1)
+    completed_id = store.create("model_a", _sample_input(2))
+    await store.complete(completed_id, result, RequestStatus.COMPLETED)
+    pending_id = store.create("model_a", _sample_input(3))
 
-    monkeypatch.setattr(store, "_persist", fail_persistence)
-    await store.complete(request_id, types.SampleOutput(sequences=[]), RequestStatus.COMPLETED)
+    now = datetime.now(timezone.utc)
+    store._sweep(now)
+    assert set(store._entries) == {retrieved_id, completed_id, pending_id}
 
-    with pytest.raises(RuntimeError, match=f"Failed to persist external future {request_id}"):
-        await store.wait(request_id, timeout=1)
-    with pytest.raises(RuntimeError, match="External future persistence failed"):
-        await store.flush()
+    store._sweep(now + timedelta(seconds=ExternalFutureStore._RETRIEVED_TTL_SECONDS + 1))
+    assert set(store._entries) == {completed_id, pending_id}
+
+    store._sweep(now + timedelta(seconds=ExternalFutureStore._COMPLETED_TTL_SECONDS + 1))
+    assert set(store._entries) == {pending_id}
+
+    store._sweep(now + timedelta(seconds=ExternalFutureStore._PENDING_TTL_SECONDS + 1))
+    assert not store._entries
+
+    # A forwarding task finishing after its entry was swept is dropped, not an error.
+    await store.complete(pending_id, result, RequestStatus.COMPLETED)
 
 
 @pytest.mark.asyncio
-async def test_batch_persist_failure_does_not_poison_other_entries(future_store, monkeypatch):
-    store, engine, _ = future_store
-    good_ids = [store.create("model_a", _sample_input(1)), store.create("model_a", _sample_input(3))]
-    bad_id = store.create("model_a", _sample_input(2))
+async def test_request_ids_do_not_repeat_across_restarts(monkeypatch):
+    import skyrl.tinker.external_future_store as store_module
 
-    async def persist_rejecting_bad_entry(entries):
-        if any(entry.request_id == bad_id for entry in entries):
-            raise RuntimeError("database unavailable")
-        await ExternalFutureStore._persist(store, entries)
+    monkeypatch.setattr(store_module.time, "time", lambda: 1_000.0)
+    first_boot = ExternalFutureStore()
+    first_ids = [first_boot.create("model_a", _sample_input(index)) for index in range(3)]
 
-    monkeypatch.setattr(store, "_persist", persist_rejecting_bad_entry)
+    monkeypatch.setattr(store_module.time, "time", lambda: 1_000.001)
+    second_boot = ExternalFutureStore()
+    second_ids = [second_boot.create("model_a", _sample_input(index)) for index in range(3)]
 
-    # complete() never suspends on a non-full queue, so all three entries are
-    # enqueued before the persist worker wakes and drains them as one batch.
-    result = types.SampleOutput(sequences=[])
-    for request_id in (good_ids[0], bad_id, good_ids[1]):
-        await store.complete(request_id, result, RequestStatus.COMPLETED)
-
-    for good_id in good_ids:
-        assert await store.wait(good_id, timeout=1) == (
-            RequestStatus.COMPLETED,
-            types.RequestType.EXTERNAL,
-            result.model_dump_json(),
-        )
-    with pytest.raises(RuntimeError, match=f"Failed to persist external future {bad_id}"):
-        await store.wait(bad_id, timeout=1)
-
-    async with AsyncSession(engine) as session:
-        statement = select(FutureDB.request_id).where(FutureDB.request_id.in_(good_ids + [bad_id]))
-        persisted = set((await session.exec(statement)).all())
-    assert persisted == set(good_ids)
-
-    with pytest.raises(RuntimeError, match="External future persistence failed"):
-        await store.flush()
+    assert all(request_id < 0 for request_id in first_ids + second_ids)
+    # A later boot starts below every id the earlier process handed out, so a
+    # client polling a pre-restart id can never receive another request's result.
+    assert max(second_ids) < min(first_ids)
 
 
 @pytest.mark.asyncio
 async def test_create_future_accepts_request_id_zero_after_negative_rows(future_store):
-    # SQLite assigns max(rowid)+1, so when the table holds only the store's
-    # negative request_ids the first autoincremented FutureDB row gets id 0.
-    store, engine, _ = future_store
-    request_id = store.create("model_a", _sample_input(1))
-    assert request_id < 0
-    await store.complete(request_id, types.SampleOutput(sequences=[]), RequestStatus.COMPLETED)
-    await store.flush()
+    # SQLite assigns max(rowid)+1, so when the table holds only negative
+    # request_ids (written by a pre-memory-only server version) the first
+    # autoincremented FutureDB row gets id 0.
+    _, engine, _ = future_store
+    async with AsyncSession(engine) as session:
+        session.add(
+            FutureDB(
+                request_id=-1,
+                request_type=types.RequestType.EXTERNAL,
+                request_data={},
+                status=RequestStatus.COMPLETED,
+            )
+        )
+        await session.commit()
 
     async with AsyncSession(engine) as session:
         created_id = await api.create_future(

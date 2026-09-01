@@ -9,8 +9,9 @@ bypassing the engine subprocess's serial scheduling loop.
 Coverage:
   - test_engine_state_published: after ``save_weights_for_sampler``, the
     engine's vLLM proxy URL is written to ``EngineStateDB``.
-  - test_sample_uses_external_path: an issued sample creates a future of
-    type ``EXTERNAL`` (not ``SAMPLE``) and resolves successfully.
+  - test_sample_uses_external_path: an issued sample resolves successfully
+    without writing any ``FutureDB`` row — external sample futures live
+    purely in the API process's in-memory store.
   - test_sample_concurrent_with_training_is_fast: the central
     parallelism test. While a long-running stream of ``forward_backward``
     + ``optim_step`` calls is in flight, a sample request resolves in
@@ -212,10 +213,12 @@ def test_engine_state_published(server_db_path):
 
 
 def test_sample_uses_external_path(server_db_path):
-    """A sample issued through the SDK creates a FutureDB row of type EXTERNAL.
+    """A sample issued through the SDK resolves without writing any FutureDB row.
 
     This is the "test" half of the design: the API hoists the sample off
-    the engine's serial loop and into the API process's asyncio loop.
+    the engine's serial loop and into the API process's in-memory store, so
+    the sample never touches the database. A regression that re-routes
+    samples through the DB path would leave a new EXTERNAL row behind.
     """
     proc, db_path, _ = server_db_path
     sc = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_PORT}/", api_key=TINKER_API_KEY)
@@ -234,16 +237,15 @@ def test_sample_uses_external_path(server_db_path):
     ).result()
     assert len(out.sequences) == 1
 
-    # Terminal rows flush asynchronously, and in-memory futures use negative IDs
-    # so they cannot collide with the database's positive autoincrement sequence.
-    found_new_future = wait_for_condition(
-        lambda: bool(_read_external_future_ids(db_path) - future_ids_before),
-        timeout_sec=10,
-        poll_interval_sec=0.1,
+    # The result was delivered (asserted above), so if the store path were
+    # inactive the fallback DB row would already be terminal — give any stray
+    # write a moment to land, then require that none appeared.
+    time.sleep(2)
+    new_future_ids = _read_external_future_ids(db_path) - future_ids_before
+    assert not new_future_ids, (
+        f"expected no new EXTERNAL FutureDB rows after the sample call, found {new_future_ids}; "
+        "samples should resolve purely from the in-memory store"
     )
-    assert (
-        found_new_future
-    ), "expected a new EXTERNAL future after the sample call; async sample routing may not be active"
 
 
 def test_sample_concurrent_with_training_is_fast(server_db_path):
