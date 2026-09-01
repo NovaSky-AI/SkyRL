@@ -747,5 +747,5 @@ def _clear_mtp_hybrid_pattern(provider) -> None:
     ``finalize()`` false so the head is never built.  No-op on providers without the
     field (GPTModel-based MTP models like DeepSeek/GLM honor ``mtp_num_layers``).
     """
-    if getattr(provider, "mtp_hybrid_override_pattern", None):
+    if hasattr(provider, "mtp_hybrid_override_pattern"):
         provider.mtp_hybrid_override_pattern = None
