@@ -178,6 +178,12 @@ miniswe = [
 harbor = [
     "harbor[daytona,modal]; python_version >= '3.12'",
 ]
+# Mooncake distributed KV for vLLM: the store connector (MooncakeStoreConnector,
+# KV-cache offloading) and P2P PD transfer (MooncakeConnector). Provides the python
+# bindings and the `mooncake_master` binary. Off-the-shelf PyPI wheel; Linux-only.
+mooncake = [
+    "mooncake-transfer-engine-cuda13; sys_platform == 'linux'",
+]
 
 dev = [
     "mkdocs",
@@ -370,6 +376,17 @@ vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
 ]
 
+
+[tool.pytest.ini_options]
+# Registering markers silences PytestUnknownMarkWarning and makes `-m` selection
+# in ci/gpu_ci_run_*.sh explicit rather than relying on free-form names.
+markers = [
+    "vllm: requires the vllm package (present under the fsdp/megatron extras)",
+    "megatron: requires the megatron extra",
+    "megatron_models: long-running Megatron model-parity tests",
+    "integrations: third-party integration tests with extra install steps",
+    "mooncake: requires the mooncake extra (mooncake-transfer-engine)",
+]
 
 [tool.black]
 line-length = 120
