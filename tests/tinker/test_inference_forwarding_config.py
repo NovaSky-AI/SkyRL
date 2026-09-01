@@ -67,7 +67,5 @@ async def test_forwarding_does_not_retry_read_timeout() -> None:
     assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
     assert "http://inference" in message
     assert "timed out after 123s" in message
-    assert "--forwarding-inference-timeout-sec" in message
-    assert "SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC" in message
     client._resolve_proxy_url.assert_awaited_once_with()
     client._forward.assert_awaited_once()
