@@ -3,6 +3,7 @@ vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -191,7 +192,17 @@ class VLLMServerActor(ServerActorProtocol):
             # metrics; patch before the engine is built in this process.
             apply_multi_connector_stats_patch()
 
-            kv_config = getattr(self._cli_args, "kv_transfer_config", None) or {}
+            # Handle both dict and JSON string formats for kv_transfer_config
+            kv_config = getattr(self._cli_args, "kv_transfer_config", None)
+            if kv_config is not None and isinstance(kv_config, str):
+                try:
+                    kv_config = json.loads(kv_config)
+                except (json.JSONDecodeError, TypeError) as e:
+                    raise ValueError(
+                        f"Invalid kv_transfer_config: expected valid JSON string or dict, "
+                        f"got {type(kv_config).__name__}: {e}"
+                    ) from e
+                self._cli_args.kv_transfer_config = kv_config
             p2p_connector = get_pd_p2p_connector_name(kv_config) if kv_config else "NixlConnector"
 
             if p2p_connector == "MooncakeConnector":
@@ -202,8 +213,7 @@ class VLLMServerActor(ServerActorProtocol):
                 self._mooncake_bootstrap_server_port, self._mooncake_port_reservation = find_and_reserve_port(
                     mooncake_bootstrap_base_port
                 )
-                os.environ["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(self._mooncake_bootstrap_server_port)
-                logger.info(f"Server {server_idx}: Mooncake PD bootstrap port {self._mooncake_bootstrap_server_port}")
+                self._setup_mooncake_port(self._mooncake_bootstrap_server_port)
             else:
                 # use nixl_side_channel_base to start searching for a free port for this server
                 self._nixl_side_channel_base, self._nixl_port_reservation = find_and_reserve_port(
@@ -276,7 +286,6 @@ class VLLMServerActor(ServerActorProtocol):
 
         Each server instance needs a unique side channel port for KV transfer handshake.
         """
-        import json
 
         os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(side_channel_port)
         os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = self._ip
@@ -285,21 +294,27 @@ class VLLMServerActor(ServerActorProtocol):
 
         if hasattr(self._cli_args, "kv_transfer_config") and self._cli_args.kv_transfer_config:
             kv_config = self._cli_args.kv_transfer_config
-            # Handle both dict and JSON string formats
-            if isinstance(kv_config, str):
-                try:
-                    kv_config = json.loads(kv_config)
-                except (json.JSONDecodeError, TypeError) as e:
-                    raise ValueError(
-                        f"Invalid kv_transfer_config: expected valid JSON string or dict, "
-                        f"got {type(self._cli_args.kv_transfer_config).__name__}: {e}"
-                    ) from e
             kv_config["engine_id"] = engine_id
             self._cli_args.kv_transfer_config = kv_config
 
         logger.info(
             f"Server {self._server_idx}: NIXL side channel configured - "
             f"host={self._ip}, port={side_channel_port}, engine_id={engine_id}"
+        )
+
+    def _setup_mooncake_port(self, mooncake_server_port: int) -> None:
+        """Setup Mooncake bootstrap server port for P/D"""
+        os.environ["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(mooncake_server_port)
+        engine_id = f"server-{self._server_idx}-{self._ip}-{mooncake_server_port}"
+
+        if hasattr(self._cli_args, "kv_transfer_config") and self._cli_args.kv_transfer_config:
+            kv_config = self._cli_args.kv_transfer_config
+            kv_config["engine_id"] = engine_id
+            self._cli_args.kv_transfer_config = kv_config
+
+        logger.info(
+            f"Server {self._server_idx}: Mooncake PD bootstrap port configured -"
+            f"host={self._ip}, port={mooncake_server_port}, engine_id={engine_id}"
         )
 
     def get_server_info(self) -> ServerInfo:

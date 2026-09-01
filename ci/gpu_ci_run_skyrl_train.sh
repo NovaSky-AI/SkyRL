@@ -7,7 +7,11 @@ uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 uv run examples/train/search/searchr1_dataset.py --local_dir $HOME/data/searchR1 --split test
 
 # Run all non-megatron tests
-uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "not (integrations or megatron)" --ignore=tests/backends/skyrl_train/gpu/gpu_ci/megatron
+uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "not (integrations or megatron or mooncake)" --ignore=tests/backends/skyrl_train/gpu/gpu_ci/megatron
+
+# Mooncake-backed tests need the `mooncake` extra (mooncake-transfer-engine), which is
+# not part of the default env above, so they run as a separate invocation.
+uv run --directory . --isolated --extra dev --extra fsdp --extra mooncake pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "mooncake"
 
 ## TODO: enable integrations
 # # Run tests for "integrations" folder

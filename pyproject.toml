@@ -364,6 +364,17 @@ vllm-router = [
 ]
 
 
+[tool.pytest.ini_options]
+# Registering markers silences PytestUnknownMarkWarning and makes `-m` selection
+# in ci/gpu_ci_run_*.sh explicit rather than relying on free-form names.
+markers = [
+    "vllm: requires the vllm package (present under the fsdp/megatron extras)",
+    "megatron: requires the megatron extra",
+    "megatron_models: long-running Megatron model-parity tests",
+    "integrations: third-party integration tests with extra install steps",
+    "mooncake: requires the mooncake extra (mooncake-transfer-engine)",
+]
+
 [tool.black]
 line-length = 120
 include = '\.pyi?$'
