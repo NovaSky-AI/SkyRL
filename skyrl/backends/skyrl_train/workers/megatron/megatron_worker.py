@@ -1425,11 +1425,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         from safetensors.torch import save_file
 
+        rank = torch.distributed.get_rank()
+
         adapter_state = {}
         for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
-            adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
+            if rank == 0:
+                adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
 
-        rank = torch.distributed.get_rank()
         remote_client = False
         lora_request = None
         if rank == 0:
@@ -1535,8 +1537,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # wanted by an inference engine, so empty regardless.
         if self._weight_transfer_sender.empty_cache_after_send or self.cfg.placement.colocate_all:
             torch.cuda.empty_cache()
-        if not (self._is_lora and not self.cfg.policy.megatron_config.lora_config.merge_lora):
-            torch.distributed.barrier()
+        torch.distributed.barrier()
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method
