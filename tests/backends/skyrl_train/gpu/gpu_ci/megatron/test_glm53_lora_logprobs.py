@@ -212,7 +212,7 @@ def _get_glm53_lora_config(model: str, lora_sync_path: str) -> SkyRLTrainConfig:
     cfg.trainer.flash_attn = False
     cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.fused_lm_head_logprob = True
-    max_sequence_length = 4096 if model == SMALL_DRY_RUN_MODEL else 32768
+    max_sequence_length = 1024 if model == SMALL_DRY_RUN_MODEL else 32768
     cfg.trainer.max_tokens_per_microbatch = max_sequence_length
     cfg.trainer.logprobs_chunk_size = min(8192, max_sequence_length)
     cfg.trainer.micro_forward_batch_size_per_gpu = 1
@@ -244,6 +244,7 @@ def _get_glm53_lora_config(model: str, lora_sync_path: str) -> SkyRLTrainConfig:
         "trust_remote_code": True,
     }
     if model == SMALL_DRY_RUN_MODEL:
+        inference.enforce_eager = True
         inference.engine_init_kwargs = {
             "max_model_len": max_sequence_length,
             "disable_custom_all_reduce": True,
@@ -428,7 +429,7 @@ async def test_glm53_lora_init_and_dummy_update_match_vllm(glm53_ray_init_fixtur
             adapter_loaded = False
             try:
                 base_responses, base_mask, base_logprobs, base_input = await _generate(
-                    client, tokenizer
+                    client, tokenizer, model
                 )
                 policy = _init_perturbable_policy(cfg, client, policy_gpus)
 
