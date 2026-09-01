@@ -6,9 +6,10 @@ import re
 import shutil
 import signal
 import threading
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
+from time import monotonic
+from typing import Annotated, Any, AsyncGenerator, Awaitable, ClassVar, Literal
 from uuid import uuid4
 
 import fastapi
@@ -27,13 +28,18 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig, add_model, config_to_argv
+from skyrl.tinker.config import (
+    EngineConfig,
+    add_model,
+    config_to_argv,
+    uses_managed_inference_forwarding,
+)
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
@@ -45,6 +51,11 @@ from skyrl.tinker.db_models import (
     enable_sqlite_wal,
     get_async_database_url,
 )
+from skyrl.tinker.db_observability import (
+    database_pool_status,
+    enable_database_observability,
+)
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.tinker.extra import (
     ExternalInferenceClient,
     SkyRLTrainInferenceForwardingClient,
@@ -67,6 +78,15 @@ API_SERVER_STARTUP_ARGS = ["-m", "skyrl.tinker.api"]
 # Timeout for graceful shutdown when engine crashes
 SHUTDOWN_TIMEOUT_SECONDS = 10
 
+# Forwarded HTTP requests can use the 30-minute inference timeout, but pod
+# shutdown must finish inside its termination grace period.
+FORWARDING_DRAIN_TIMEOUT_SECONDS = 5
+FORWARDING_CANCEL_TIMEOUT_SECONDS = 5
+MODEL_FORWARDING_DRAIN_TIMEOUT_SECONDS = 30
+EXTERNAL_INFERENCE_CLOSE_TIMEOUT_SECONDS = 5
+FORCED_SHUTDOWN_TASK_GRACE_SECONDS = 0.1
+EXTERNAL_INFERENCE_SHUTDOWN_TIMEOUT_SECONDS = 8
+
 # How long retrieve_future waits for a result before returning 408
 RETRIEVE_FUTURE_TIMEOUT_SECONDS = 300
 
@@ -77,6 +97,31 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 
 # Statuses a request never moves out of, i.e. the ones a waiter resolves on.
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
+
+_SQLITE_API_WRITE_PATHS = frozenset(
+    {
+        "/api/v1/create_session",
+        "/api/v1/create_sampling_session",
+        "/api/v1/create_model",
+        "/api/v1/optim_step",
+        "/api/v1/load_weights",
+        "/api/v1/save_weights",
+        "/api/v1/save_weights_for_sampler",
+    }
+)
+
+
+def _uses_sqlite_api_write_lock(request: Request) -> bool:
+    if request.app.state.db_engine.dialect.name != "sqlite":
+        return False
+    path = request.url.path
+    if request.method == "DELETE" and path.startswith("/api/v1/training_runs/"):
+        return "/checkpoints/" in path
+    if request.method != "POST":
+        return False
+    if path == "/api/v1/asample":
+        return request.app.state.external_future_store is None
+    return path in _SQLITE_API_WRITE_PATHS
 
 
 def raw_json_response(payload: str | None) -> Response:
@@ -176,10 +221,198 @@ async def poll_futures(
                             waiter.set_result(outcome)
         except asyncio.CancelledError:
             raise
+        except SQLAlchemyError as error:
+            # Cursor events cannot observe a timeout waiting for pool checkout.
+            logger.error(
+                "Future poller database failure failure_stage=future_poller awaited_futures=%s "
+                "pool=%s error_type=%s",
+                len(waiters),
+                database_pool_status(db_engine),
+                type(error).__name__,
+            )
         except Exception:
             # Keep the poller alive; waiters fall back on their own timeouts.
             logger.exception("Future poller iteration failed")
         await asyncio.sleep(poll_interval_sec)
+
+
+def _finish_forwarding_task(app: FastAPI, model_id: str, task: asyncio.Task) -> None:
+    app.state.forwarding_tasks.discard(task)
+    model_tasks = app.state.forwarding_tasks_by_model.get(model_id)
+    if model_tasks is not None:
+        model_tasks.discard(task)
+        if not model_tasks:
+            del app.state.forwarding_tasks_by_model[model_id]
+    if task.cancelled():
+        return
+    if error := task.exception():
+        logger.error(
+            "Forwarding task failed failure_stage=forwarding_task model_id=%s error_type=%s",
+            model_id,
+            type(error).__name__,
+        )
+
+
+async def _start_forwarding_task(app: FastAPI, model_id: str, operation: Awaitable[None]) -> None:
+    """Start an operation after its caller acquires the model admission lock."""
+    started = asyncio.Event()
+
+    async def run() -> None:
+        started.set()
+        await operation
+
+    task = asyncio.create_task(run())
+    app.state.forwarding_tasks.add(task)
+    app.state.forwarding_tasks_by_model.setdefault(model_id, set()).add(task)
+    task.add_done_callback(lambda done: _finish_forwarding_task(app, model_id, done))
+    await started.wait()
+
+
+class ModelForwardingDrainError(RuntimeError):
+    """A model cannot be unloaded without risking an in-flight completion."""
+
+
+def _get_model_forwarding_lock(app: FastAPI, model_id: str) -> asyncio.Lock:
+    """Return the admission/drain lock for one model."""
+    lock = app.state.forwarding_model_locks.get(model_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        app.state.forwarding_model_locks[model_id] = lock
+    return lock
+
+
+async def _drain_model_forwarding(app: FastAPI, model_id: str) -> None:
+    """Fence a model, cancel its forwarded samples, and persist their outcomes."""
+    loop = asyncio.get_running_loop()
+    drain_started = loop.time()
+    deadline = drain_started + MODEL_FORWARDING_DRAIN_TIMEOUT_SECONDS
+
+    async with _get_model_forwarding_lock(app, model_id):
+        app.state.draining_forwarding_models.add(model_id)
+        tasks = tuple(app.state.forwarding_tasks_by_model.get(model_id, ()))
+
+    for task in tasks:
+        if not task.done() and not task.cancelling():
+            task.cancel()
+
+    if tasks:
+        _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
+        if pending:
+            logger.error(
+                "Model forwarding drain timed out failure_stage=forwarding_drain model_id=%s "
+                "forwarding_tasks=%s pending_tasks=%s",
+                model_id,
+                len(tasks),
+                len(pending),
+            )
+            raise ModelForwardingDrainError("Forwarded inference tasks did not reach terminal state")
+
+    store = app.state.external_future_store
+    if store is None:
+        return
+
+    try:
+        async with asyncio.timeout_at(deadline):
+            await store.flush_model(model_id)
+    except TimeoutError as error:
+        logger.error(
+            "Model forwarding persistence timed out failure_stage=forwarding_persistence model_id=%s",
+            model_id,
+        )
+        raise ModelForwardingDrainError("Forwarded inference results did not become durable") from error
+
+    except Exception as error:
+        logger.error(
+            "Model forwarding persistence failed failure_stage=forwarding_persistence model_id=%s error_type=%s",
+            model_id,
+            type(error).__name__,
+        )
+        raise ModelForwardingDrainError("Forwarded inference results did not become durable") from error
+
+    logger.info(
+        "Model forwarding drain completed model_id=%s forwarding_tasks=%s drain_seconds=%.3f",
+        model_id,
+        len(tasks),
+        loop.time() - drain_started,
+    )
+
+
+async def _close_external_inference(app: FastAPI) -> None:
+    shutdown_error: Exception | None = None
+    loop = asyncio.get_running_loop()
+    shutdown_deadline = loop.time() + EXTERNAL_INFERENCE_SHUTDOWN_TIMEOUT_SECONDS
+
+    def remaining(stage_timeout: float) -> float:
+        return min(stage_timeout, max(0.0, shutdown_deadline - loop.time()))
+
+    if app.state.forwarding_tasks:
+        tasks = tuple(app.state.forwarding_tasks)
+        _, pending = await asyncio.wait(tasks, timeout=remaining(FORWARDING_DRAIN_TIMEOUT_SECONDS))
+        if pending:
+            logger.warning("Cancelling %s forwarded inference requests that did not drain", len(pending))
+            for task in pending:
+                task.cancel()
+            _, pending = await asyncio.wait(pending, timeout=remaining(FORWARDING_CANCEL_TIMEOUT_SECONDS))
+            if pending:
+                logger.error("Forced shutdown of %s forwarded inference requests blocked in cleanup", len(pending))
+                shutdown_error = RuntimeError("Forwarded inference cleanup exceeded the shutdown deadline")
+                for task in pending:
+                    task.cancel()
+                await asyncio.wait(pending, timeout=FORCED_SHUTDOWN_TASK_GRACE_SECONDS)
+
+    inference_client = getattr(app.state, "external_inference_client", None)
+    aclose = getattr(inference_client, "aclose", None)
+    if aclose is not None:
+        close_client = asyncio.create_task(aclose())
+        done, _ = await asyncio.wait((close_client,), timeout=remaining(EXTERNAL_INFERENCE_CLOSE_TIMEOUT_SECONDS))
+        if close_client not in done:
+            logger.error("Forced shutdown of external inference HTTP client")
+            close_client.cancel()
+            await asyncio.wait((close_client,), timeout=FORCED_SHUTDOWN_TASK_GRACE_SECONDS)
+            shutdown_error = shutdown_error or RuntimeError("External inference client close timed out")
+        elif close_client.cancelled():
+            shutdown_error = shutdown_error or RuntimeError("External inference client close was cancelled")
+        elif error := close_client.exception():
+            logger.error("External inference HTTP client close failed error_type=%s", type(error).__name__)
+            shutdown_error = shutdown_error or error
+
+    if app.state.external_future_store is not None:
+        close_store = asyncio.create_task(app.state.external_future_store.close())
+        done, _ = await asyncio.wait((close_store,), timeout=remaining(EXTERNAL_INFERENCE_CLOSE_TIMEOUT_SECONDS))
+        if close_store not in done:
+            logger.error("Forced shutdown of external future persistence")
+            close_store.cancel()
+            await asyncio.wait((close_store,), timeout=FORCED_SHUTDOWN_TASK_GRACE_SECONDS)
+            shutdown_error = shutdown_error or RuntimeError("External future persistence close timed out")
+        elif close_store.cancelled():
+            shutdown_error = shutdown_error or RuntimeError("External future persistence close was cancelled")
+        elif error := close_store.exception():
+            raise error
+
+    if shutdown_error is not None:
+        raise shutdown_error
+
+
+async def _close_runtime(app: FastAPI, background_engine: asyncio.subprocess.Process) -> None:
+    try:
+        await _close_external_inference(app)
+    finally:
+        logger.info(f"Stopping background engine (PID {background_engine.pid})")
+        with suppress(ProcessLookupError):
+            background_engine.terminate()
+            try:
+                await asyncio.wait_for(background_engine.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
+                background_engine.kill()
+                await background_engine.wait()
+        logger.info("Background engine stopped")
+
+
+def _get_db_write_context(db_engine):
+    if db_engine.dialect.name == "sqlite":
+        return asyncio.Lock()
+    return nullcontext()
 
 
 def _get_parent_uv_run_args(parent_cmd: list[str]) -> list[str]:
@@ -235,12 +468,23 @@ async def lifespan(app: FastAPI):
     db_url = get_async_database_url(app.state.engine_config.database_url)
     app.state.db_engine = create_async_engine(db_url, echo=False)
     enable_sqlite_wal(app.state.db_engine.sync_engine)
+    enable_database_observability(app.state.db_engine)
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
+    app.state.forwarding_tasks = set()
+    app.state.forwarding_tasks_by_model = {}
+    app.state.draining_forwarding_models = set()
+    app.state.forwarding_model_locks = {}
+    app.state.external_future_store = None
+    app.state.db_write_lock = _get_db_write_context(app.state.db_engine)
+    app.state.sampling_model_cache = {}
+    app.state.sampling_model_cache_lock = asyncio.Lock()
+    app.state.validated_sampler_checkpoints = set()
+    app.state.sampler_checkpoint_validation_lock = asyncio.Lock()
 
     # Setup external inference client if configured.
     #
@@ -256,21 +500,18 @@ async def lifespan(app: FastAPI):
     # The colocated path stays on the engine because vLLM is asleep during
     # training and only the engine's synchronous sample path knows how to
     # wake it (save_weights_for_sampler → broadcast → sample).
-    backend_name = app.state.engine_config.backend
-    backend_cfg = app.state.engine_config.backend_config or {}
-    # SkyRL-Train default is colocate_all=True; only opt into forwarding
-    # when the operator explicitly sets it to False.
-    is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
     if app.state.engine_config.external_inference_url:
         app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
-    elif backend_name in ("megatron", "fsdp") and not is_colocated:
+    elif uses_managed_inference_forwarding(app.state.engine_config):
+        app.state.external_future_store = ExternalFutureStore(app.state.db_engine, app.state.db_write_lock)
+        await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
-            app.state.engine_config, app.state.db_engine
+            app.state.engine_config, app.state.db_engine, app.state.external_future_store
         )
         logger.info(
             "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
-            backend_name,
+            app.state.engine_config.backend,
         )
     else:
         app.state.external_inference_client = None
@@ -319,28 +560,32 @@ async def lifespan(app: FastAPI):
     with suppress(asyncio.CancelledError):
         await app.state.future_poller
 
-    # Close the forwarding client's persistent httpx connection pool if we
-    # installed one. Cheap no-op when external_inference_client doesn't own
-    # an httpx client (ExternalInferenceClient creates one per call).
-    inference_client = getattr(app.state, "external_inference_client", None)
-    aclose = getattr(inference_client, "aclose", None)
-    if aclose is not None:
-        with suppress(Exception):
-            await aclose()
-
-    logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
-    with suppress(ProcessLookupError):
-        background_engine.terminate()
-        try:
-            await asyncio.wait_for(background_engine.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
-            background_engine.kill()
-            await background_engine.wait()
-    logger.info("Background engine stopped")
+    await _close_runtime(app, background_engine)
 
 
 app = FastAPI(title="Tinker API Mock", version="0.0.1", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def log_database_request_failure(request: Request, call_next):
+    """Add endpoint and pool context to database failures."""
+    started = monotonic()
+    try:
+        if _uses_sqlite_api_write_lock(request):
+            async with request.app.state.db_write_lock:
+                return await call_next(request)
+        return await call_next(request)
+    except SQLAlchemyError as error:
+        logger.error(
+            "API database failure failure_stage=api_database method=%s path=%s "
+            "elapsed_seconds=%.3f pool=%s error_type=%s",
+            request.method,
+            request.url.path,
+            monotonic() - started,
+            database_pool_status(request.app.state.db_engine),
+            type(error).__name__,
+        )
+        raise
 
 
 async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
@@ -894,6 +1139,7 @@ class WeightsInfoResponse(BaseModel):
 
 class ClientConfigResponse(BaseModel):
     pjwt_auth_enabled: bool = False
+    proto_compress_fwdbwd: bool = True
 
 
 @app.post("/api/v1/client/config", response_model=ClientConfigResponse)
@@ -925,14 +1171,19 @@ async def create_session(request: CreateSessionRequest, session: AsyncSession = 
 
 
 @app.post("/api/v1/session_heartbeat", response_model=SessionHeartbeatResponse)
-async def session_heartbeat(request: SessionHeartbeatRequest, session: AsyncSession = Depends(get_session)):
+async def session_heartbeat(
+    request: SessionHeartbeatRequest,
+    raw_request: Request,
+    session: AsyncSession = Depends(get_session),
+):
     """Heartbeat for an active session to keep it alive."""
-    session_db = await session.get(SessionDB, request.session_id)
-    if session_db is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session_db.last_heartbeat_at = datetime.now(timezone.utc)
-    session_db.heartbeat_count += 1
-    await session.commit()
+    async with raw_request.app.state.db_write_lock:
+        session_db = await session.get(SessionDB, request.session_id)
+        if session_db is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        session_db.last_heartbeat_at = datetime.now(timezone.utc)
+        session_db.heartbeat_count += 1
+        await session.commit()
     return SessionHeartbeatResponse()
 
 
@@ -1023,25 +1274,43 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
 
 
 @app.post("/api/v1/unload_model", response_model=UnloadModelResponse)
-async def unload_model(request: UnloadModelRequest, session: AsyncSession = Depends(get_session)):
+async def unload_model(
+    request: UnloadModelRequest,
+    raw_request: Request,
+    session: AsyncSession = Depends(get_session),
+):
     """Unload a model and free all associated resources."""
-    # Validate model exists
-    model_db = await session.get(ModelDB, request.model_id)
-    if model_db is None:
-        raise HTTPException(status_code=404, detail="Model not found")
+    # Scope the existence read separately so no database connection or
+    # transaction remains checked out while inference drains.
+    async with raw_request.app.state.db_write_lock:
+        async with AsyncSession(raw_request.app.state.db_engine) as validation_session:
+            if await validation_session.get(ModelDB, request.model_id) is None:
+                raise HTTPException(status_code=404, detail="Model not found")
 
-    # Update model status
-    model_db.status = "unloading"
+    if raw_request.app.state.external_future_store is not None:
+        try:
+            await _drain_model_forwarding(raw_request.app, request.model_id)
+        except ModelForwardingDrainError as error:
+            raise HTTPException(
+                status_code=503,
+                detail="Model unload could not safely drain forwarded inference",
+            ) from error
 
-    # Create future request
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.UNLOAD_MODEL,
-        model_id=request.model_id,
-        request_data=types.UnloadModelInput(),
-    )
+    # Keep the database lock out of the inference drain: terminal external
+    # futures use the same lock while becoming durable.
+    async with raw_request.app.state.db_write_lock:
+        model_db = await session.get(ModelDB, request.model_id)
+        if model_db is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+        model_db.status = "unloading"
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.UNLOAD_MODEL,
+            model_id=request.model_id,
+            request_data=types.UnloadModelInput(),
+        )
 
-    await session.commit()
+        await session.commit()
 
     return UnloadModelResponse(request_id=str(request_id), model_id=request.model_id)
 
@@ -1128,35 +1397,37 @@ async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackw
 async def forward_backward(request: Request, session: AsyncSession = Depends(get_session)):
     """Compute and accumulate gradients (or run forward-only when the proto body asks for it)."""
     req, forward_only = await _read_forward_backward_request(request)
-    await get_model(session, req.model_id)
-
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
-        model_id=req.model_id,
-        request_data=req.forward_backward_input.to_types(),
-        seq_id=req.seq_id,
-    )
-
-    await session.commit()
+    async with request.app.state.db_write_lock:
+        await get_model(session, req.model_id)
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
+            model_id=req.model_id,
+            request_data=req.forward_backward_input.to_types(),
+            seq_id=req.seq_id,
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
 @app.post("/api/v1/forward", response_model=FutureResponse)
-async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_session)):
+async def forward(
+    request: ForwardRequest,
+    raw_request: Request,
+    session: AsyncSession = Depends(get_session),
+):
     """Forward pass to obtain logprobs without accumulating gradients"""
-    await get_model(session, request.model_id)
-
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.FORWARD,
-        model_id=request.model_id,
-        request_data=request.forward_input.to_types(),
-        seq_id=request.seq_id,
-    )
-
-    await session.commit()
+    async with raw_request.app.state.db_write_lock:
+        await get_model(session, request.model_id)
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.FORWARD,
+            model_id=request.model_id,
+            request_data=request.forward_input.to_types(),
+            seq_id=request.seq_id,
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -1298,15 +1569,60 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
-async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (str | None, str | None):
+async def get_sampling_model(
+    request: SampleRequest,
+    req: Request,
+    session: AsyncSession,
+) -> tuple[str | None, str | None]:
     """Return (base_model, model_path) for a sampling request."""
-    # Resolve model/base from sampling_session_id if provided
-    if request.sampling_session_id is not None:
-        sampling_session = await session.get(SamplingSessionDB, request.sampling_session_id)
+    sampling_session_id = request.sampling_session_id
+    if sampling_session_id is None:
+        return (request.base_model, request.model_path)
+
+    cache = req.app.state.sampling_model_cache
+    cached = cache.get(sampling_session_id)
+    if cached is not None:
+        return cached
+
+    async with req.app.state.sampling_model_cache_lock:
+        cached = cache.get(sampling_session_id)
+        if cached is not None:
+            return cached
+        sampling_session = await session.get(SamplingSessionDB, sampling_session_id)
         if sampling_session is None:
             raise HTTPException(status_code=404, detail="Sampling session not found")
-        return (sampling_session.base_model, sampling_session.model_path)
-    return (request.base_model, request.model_path)
+        sampling_model = (
+            sampling_session.base_model,
+            sampling_session.model_path,
+        )
+        cache[sampling_session_id] = sampling_model
+        return sampling_model
+
+
+async def validate_sampler_checkpoint_once(
+    request: Request,
+    model_id: str,
+    checkpoint_id: str,
+    session: AsyncSession,
+) -> None:
+    """Validate an immutable sampler checkpoint once before serving it."""
+    key = (model_id, checkpoint_id)
+    validated = request.app.state.validated_sampler_checkpoints
+    if key in validated:
+        return
+
+    async with request.app.state.sampler_checkpoint_validation_lock:
+        if key in validated:
+            return
+        await get_model(session, model_id)
+        await validate_checkpoint(
+            request,
+            model_id,
+            checkpoint_id,
+            types.CheckpointType.SAMPLER,
+            session,
+        )
+        validated.add(key)
 
 
 @app.post("/api/v1/asample", response_model=FutureResponse)
@@ -1318,7 +1634,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             detail="sampling_session_id must not contain ':' (the routing-key delimiter)",
         )
 
-    base_model, model_path = await get_sampling_model(request, session)
+    base_model, model_path = await get_sampling_model(request, req, session)
 
     if base_model:
         model_id = checkpoint_id = ""
@@ -1336,39 +1652,50 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
                 status_code=400,
                 detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
             )
-        await get_model(session, model_id)
-        # Validate that the checkpoint exists and is ready
-        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
+        await validate_sampler_checkpoint_once(req, model_id, checkpoint_id, session)
 
-    request_id = await create_future(
-        session=session,
-        request_type=(
-            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-        ),
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
-            # A positive topk implies prompt logprobs: both are read off the same
-            # prompt forward pass, so asking for one asks for the other.
-            prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
-            topk_prompt_logprobs=request.topk_prompt_logprobs,
-            seq_id=request.seq_id,
-            sampling_session_id=request.sampling_session_id,
-        ),
+    sample_input = types.SampleInput(
+        base_model=base_model,
+        prompt=request.prompt.to_types(),
+        sampling_params=request.sampling_params.to_types(),
+        num_samples=request.num_samples,
+        checkpoint_id=checkpoint_id,
+        # A positive topk implies prompt logprobs: both are read off the same
+        # prompt forward pass, so asking for one asks for the other.
+        prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+        topk_prompt_logprobs=request.topk_prompt_logprobs,
+        seq_id=request.seq_id,
+        sampling_session_id=request.sampling_session_id,
     )
-
-    await session.commit()
-
     if req.app.state.external_inference_client:
-        asyncio.create_task(
-            req.app.state.external_inference_client.call_and_store_result(
-                request_id, request, model_id, checkpoint_id, base_model=base_model
+        async with _get_model_forwarding_lock(req.app, model_id):
+            if model_id in req.app.state.draining_forwarding_models:
+                raise HTTPException(status_code=409, detail="Model is unloading")
+            if req.app.state.external_future_store is not None:
+                request_id = await req.app.state.external_future_store.create(model_id, sample_input)
+            else:
+                request_id = await create_future(
+                    session=session,
+                    request_type=types.RequestType.EXTERNAL,
+                    model_id=model_id,
+                    request_data=sample_input,
+                )
+                await session.commit()
+            await _start_forwarding_task(
+                req.app,
+                model_id,
+                req.app.state.external_inference_client.call_and_store_result(
+                    request_id, request, model_id, checkpoint_id, base_model=base_model
+                ),
             )
+    else:
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.SAMPLE,
+            model_id=model_id,
+            request_data=sample_input,
         )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -1391,10 +1718,19 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     request_id = int(request.request_id)
 
-    try:
-        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Future not found")
+    found_in_memory = False
+    external_future_store = req.app.state.external_future_store
+    if external_future_store is not None:
+        try:
+            row = await external_future_store.wait(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+            found_in_memory = True
+        except KeyError:
+            pass
+    if not found_in_memory:
+        try:
+            row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Future not found")
 
     if row is None:
         raise HTTPException(status_code=408, detail="Timeout waiting for result")
@@ -1604,19 +1940,24 @@ async def delete_checkpoint(
             ),
         )
 
-    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
-    if not checkpoint_db:
-        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
+    sampler_checkpoint = resolved_checkpoint_type == types.CheckpointType.SAMPLER
+    validation_context = request.app.state.sampler_checkpoint_validation_lock if sampler_checkpoint else nullcontext()
+    async with validation_context:
+        checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
+        if not checkpoint_db:
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
-    if checkpoint_db.status == CheckpointStatus.PENDING:
-        raise HTTPException(status_code=425, detail="Checkpoint is still being created")
+        if checkpoint_db.status == CheckpointStatus.PENDING:
+            raise HTTPException(status_code=425, detail="Checkpoint is still being created")
 
-    # Commit the row deletion before unlinking the artifact. If the commit fails we
-    # leave an orphaned file (GC-able) rather than a row that lists a checkpoint whose
-    # archive is gone, which would make every subsequent download 500.
-    path = checkpoint_file_path(request, unique_id, checkpoint_id, resolved_checkpoint_type)
-    await session.delete(checkpoint_db)
-    await session.commit()
+        # Commit the row deletion before unlinking the artifact. If the commit fails we
+        # leave an orphaned file (GC-able) rather than a row that lists a checkpoint whose
+        # archive is gone, which would make every subsequent download 500.
+        path = checkpoint_file_path(request, unique_id, checkpoint_id, resolved_checkpoint_type)
+        await session.delete(checkpoint_db)
+        await session.commit()
+        if sampler_checkpoint:
+            request.app.state.validated_sampler_checkpoints.discard((unique_id, checkpoint_id))
     await asyncio.to_thread(delete_checkpoint_file, path)
 
 

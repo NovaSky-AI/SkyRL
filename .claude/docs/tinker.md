@@ -49,6 +49,7 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 - `sample` requests are batched ensuring one checkpoint_id per model_id per batch.
 - `optim_step`, `create_model`, `save_weights`, `load_weights` are processed individually and act as barriers.
 - DB uses SQLite WAL mode with 30s busy timeout by default.
+- Non-colocated Megatron/FSDP managed forwarding disables engine-side stale-session cleanup; clients must unload explicitly, or operators must restart the service to reclaim an abandoned adapter.
 
 ## Weight Sync Modes
 
@@ -66,10 +67,10 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 
 ```bash
 # Unit tests (CPU, no GPU needed, requires jax extra)
-uv run --extra dev --extra jax pytest tests/tinker/ -v
+uv run --extra dev --extra tinker --extra jax pytest tests/tinker/ -v
 
 # Integration tests (test_api.py) spin up a real server subprocess -- slow, need port 8000/8001 free
-uv run --extra dev --extra jax pytest tests/tinker/test_api.py -v
+uv run --extra dev --extra tinker --extra jax pytest tests/tinker/test_api.py -v
 ```
 
 - `tests/tinker/conftest.py` -- `wait_for_condition` helper for polling.

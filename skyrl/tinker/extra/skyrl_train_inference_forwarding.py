@@ -5,25 +5,57 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
-from datetime import datetime, timezone
+from time import monotonic
 
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.backends.renderer import render_model_input
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
+from skyrl.tinker.db_models import EngineStateDB, RequestStatus
+from skyrl.tinker.db_observability import database_pool_status
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.utils.log import logger
+
+
+class InferenceForwardingError(RuntimeError):
+    def __init__(self, status_code: int, response_text: str):
+        self.status_code = status_code
+        self.response_text = response_text
+        super().__init__(f"vLLM /v1/completions returned {status_code}: {response_text}")
+
+
+class InferenceForwardingTimeoutError(TimeoutError):
+    """The absolute inference-forwarding operation deadline expired."""
+
+
+def _safe_failure_message(error: Exception) -> str:
+    """Describe a forwarding failure without persisting request or response data."""
+    if isinstance(error, InferenceForwardingError):
+        return f"{type(error).__name__}: HTTP {error.status_code}"
+    return f"{type(error).__name__}: inference forwarding failed"
 
 
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    _PROXY_URL_POLL_INTERVAL_SEC = 0.25
+    _TRANSIENT_503_MAX_ATTEMPTS = 12
+    _TRANSIENT_RETRY_INITIAL_DELAY_SEC = 1.0
+    _TRANSIENT_RETRY_MAX_DELAY_SEC = 10.0
+
+    def __init__(
+        self,
+        engine_config: EngineConfig,
+        db_engine,
+        external_future_store: ExternalFutureStore,
+    ):
         self.engine_config = engine_config
         self.db_engine = db_engine
+        self.external_future_store = external_future_store
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
@@ -32,7 +64,7 @@ class SkyRLTrainInferenceForwardingClient:
         max_conn = engine_config.forwarding_inference_max_connections
         max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(engine_config.forwarding_inference_timeout_sec, connect=10.0),
             limits=httpx.Limits(
                 max_connections=max_conn,
                 max_keepalive_connections=max_keepalive,
@@ -50,16 +82,27 @@ class SkyRLTrainInferenceForwardingClient:
                 return None
             return row.inference_proxy_url
 
-    async def _resolve_proxy_url(self, *, force_refresh: bool = False) -> str:
+    async def _resolve_proxy_url(self, *, force_refresh: bool = False, deadline: float | None = None) -> str:
         # Skip the lock when the cache is warm so concurrent samples don't serialize.
         if not force_refresh and self._cached_proxy_url is not None:
             return self._cached_proxy_url
         async with self._cache_lock:
             if force_refresh or self._cached_proxy_url is None:
-                url = await self._read_proxy_url_from_db()
-                if url is None:
-                    raise RuntimeError("inference engine not ready: no proxy URL published to EngineStateDB")
-                self._cached_proxy_url = url
+                if force_refresh:
+                    self._cached_proxy_url = None
+                loop = asyncio.get_running_loop()
+                if deadline is None:
+                    deadline = loop.time() + self.engine_config.forwarding_inference_timeout_sec
+                while self._cached_proxy_url is None:
+                    self._cached_proxy_url = await self._read_proxy_url_from_db()
+                    if self._cached_proxy_url is not None:
+                        break
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise RuntimeError(
+                            "inference engine not ready: timed out waiting for a proxy URL in EngineStateDB"
+                        )
+                    await asyncio.sleep(min(self._PROXY_URL_POLL_INTERVAL_SEC, remaining))
             return self._cached_proxy_url
 
     async def call_and_store_result(
@@ -71,43 +114,110 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and write the result to FutureDB."""
+        """Forward a sample request to vLLM and complete its external future."""
+        forward_started = monotonic()
+        prompt_tokens = sum(len(chunk.tokens) for chunk in sample_req.prompt.chunks if hasattr(chunk, "tokens"))
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
+        except asyncio.CancelledError:
+            await self.external_future_store.complete(
+                request_id,
+                types.ErrorResponse(
+                    error="Forwarded inference cancelled during model drain or shutdown", status="failed"
+                ),
+                RequestStatus.FAILED,
+                cancellation_safe=False,
+            )
+            raise
+        except SQLAlchemyError as e:
+            logger.error(
+                "Backend-forwarded sample failed failure_stage=proxy_database request_id=%s "
+                "model_id=%s sampling_session_id=%s seq_id=%s prompt_tokens=%s max_tokens=%s "
+                "elapsed_seconds=%.3f pool=%s error_type=%s",
+                request_id,
+                model_id,
+                sample_req.sampling_session_id,
+                sample_req.seq_id,
+                prompt_tokens,
+                sample_req.sampling_params.max_tokens,
+                monotonic() - forward_started,
+                database_pool_status(self.db_engine),
+                type(e).__name__,
+            )
+            result = types.ErrorResponse(error=_safe_failure_message(e), status="failed")
+            status = RequestStatus.FAILED
         except Exception as e:
-            logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
-            result = types.ErrorResponse(error=str(e), status="failed")
+            logger.error(
+                "Backend-forwarded sample failed failure_stage=forward request_id=%s model_id=%s "
+                "sampling_session_id=%s seq_id=%s prompt_tokens=%s max_tokens=%s "
+                "elapsed_seconds=%.3f error_type=%s",
+                request_id,
+                model_id,
+                sample_req.sampling_session_id,
+                sample_req.seq_id,
+                prompt_tokens,
+                sample_req.sampling_params.max_tokens,
+                monotonic() - forward_started,
+                type(e).__name__,
+            )
+            result = types.ErrorResponse(error=_safe_failure_message(e), status="failed")
             status = RequestStatus.FAILED
 
-        async with AsyncSession(self.db_engine) as session:
-            future = await session.get(FutureDB, request_id)
-            if future is None:
-                # Row was deleted between scheduling and completion (cancelled
-                # request, stale-session GC). Nothing to write back.
-                logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
-                return
-            # `result_data` is a text column holding pre-serialized JSON.
-            future.result_data = result.model_dump_json()
-            future.status = status
-            future.completed_at = datetime.now(timezone.utc)
-            await session.commit()
+        await self.external_future_store.complete(request_id, result, status)
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.
-        # HTTP 4xx/5xx surfaces as RuntimeError below and is NOT retried.
+        loop = asyncio.get_running_loop()
+        timeout_sec = self.engine_config.forwarding_inference_timeout_sec
+        deadline = loop.time() + timeout_sec
+        connect_attempt = 0
+        no_worker_attempt = 0
+        force_refresh = False
+
         try:
-            proxy_url = await self._resolve_proxy_url()
-            return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-        except httpx.RequestError as e:
-            logger.warning(
-                "Network error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
-                self._cached_proxy_url,
-                type(e).__name__,
-                e,
-            )
-            proxy_url = await self._resolve_proxy_url(force_refresh=True)
-            return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+            async with asyncio.timeout_at(deadline):
+                while True:
+                    caught_error: Exception
+                    try:
+                        proxy_url = await self._resolve_proxy_url(force_refresh=force_refresh, deadline=deadline)
+                        return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+                    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as error:
+                        connect_attempt += 1
+                        caught_error = error
+                        max_attempts = 2
+                        retry = connect_attempt < max_attempts
+                        retry_attempt = connect_attempt
+                    except InferenceForwardingError as error:
+                        caught_error = error
+                        retry = error.status_code == 503 and "No available workers" in error.response_text
+                        if not retry:
+                            raise
+                        no_worker_attempt += 1
+                        max_attempts = self._TRANSIENT_503_MAX_ATTEMPTS
+                        retry = no_worker_attempt < max_attempts
+                        retry_attempt = no_worker_attempt
+
+                    if not retry:
+                        raise caught_error
+                    delay = min(
+                        self._TRANSIENT_RETRY_INITIAL_DELAY_SEC * 2 ** (retry_attempt - 1),
+                        self._TRANSIENT_RETRY_MAX_DELAY_SEC,
+                        max(0.0, deadline - loop.time()),
+                    )
+                    logger.warning(
+                        "Transient inference forwarding failure; refreshing proxy URL and retrying "
+                        "attempt=%s max_attempts=%s retry_delay_seconds=%.1f error_type=%s",
+                        retry_attempt,
+                        max_attempts,
+                        delay,
+                        type(caught_error).__name__,
+                    )
+                    force_refresh = True
+                    await asyncio.sleep(delay)
+        except TimeoutError as error:
+            raise InferenceForwardingTimeoutError(
+                f"inference forwarding exceeded its {timeout_sec:g}-second operation timeout"
+            ) from error
 
     async def _forward(
         self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None
@@ -157,7 +267,7 @@ class SkyRLTrainInferenceForwardingClient:
         url = f"{proxy_url}/v1/completions"
         response = await self._http_client.post(url, json=payload, headers=headers)
         if response.status_code >= 400:
-            raise RuntimeError(f"vLLM /v1/completions returned {response.status_code}: {response.text}")
+            raise InferenceForwardingError(response.status_code, response.text)
         try:
             result = response.json()
         except ValueError as e:

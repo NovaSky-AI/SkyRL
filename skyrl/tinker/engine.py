@@ -14,7 +14,11 @@ from sqlmodel import Session, create_engine, func, select, update
 
 from skyrl.backends.utils import log_timing
 from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig, add_model
+from skyrl.tinker.config import (
+    EngineConfig,
+    add_model,
+    uses_managed_inference_forwarding,
+)
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
@@ -261,6 +265,12 @@ class TinkerEngine:
         self.config = config
         self.db_engine = create_engine(config.database_url, echo=False)
         enable_sqlite_wal(self.db_engine)
+
+        if uses_managed_inference_forwarding(config):
+            logger.warning(
+                "Stale-session cleanup disabled for managed inference forwarding; "
+                "models require explicit unload or service shutdown"
+            )
 
         # Initialize the backend (handles model state, computation, and adapter management)
         use_ray = config.backend_config.get("use_ray", False)
@@ -545,6 +555,13 @@ class TinkerEngine:
         Returns:
             Number of models unloaded
         """
+        if uses_managed_inference_forwarding(self.config):
+            logger.warning(
+                "Skipped stale-session cleanup for managed inference forwarding; "
+                "models require explicit unload or service shutdown"
+            )
+            return 0
+
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.config.session_timeout_sec)
         unloaded_count = 0
 
@@ -828,7 +845,11 @@ class TinkerEngine:
             self.process_single_requests(other_requests)
 
             # Periodically cleanup stale sessions (disabled if either config is negative)
-            cleanup_enabled = self.config.session_cleanup_interval_sec >= 0 and self.config.session_timeout_sec >= 0
+            cleanup_enabled = (
+                not uses_managed_inference_forwarding(self.config)
+                and self.config.session_cleanup_interval_sec >= 0
+                and self.config.session_timeout_sec >= 0
+            )
             if cleanup_enabled and time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec:
                 _ = self.cleanup_stale_sessions()
                 self._last_cleanup_time = time.time()

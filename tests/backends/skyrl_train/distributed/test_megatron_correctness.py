@@ -10,6 +10,46 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from skyrl.backends.skyrl_train.distributed.megatron.lora_utils import (
+    remap_qwen_megatron_lora_state_for_vllm,
+)
+
+
+def test_remap_megatron_qwen_lora_state_for_vllm() -> None:
+    adapter_state = {
+        "base_model.model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight": "decoder",
+        "base_model.model.model.visual.blocks.0.lora_A.weight": "visual",
+        "base_model.model.model.mtp.layers.0.lora_A.weight": "mtp",
+        "base_model.model.model.multi_token_prediction.layers.0.lora_A.weight": "multi-token",
+    }
+
+    assert remap_qwen_megatron_lora_state_for_vllm(adapter_state, include_mtp=False) == {
+        "base_model.model.language_model.model.layers.0.self_attn.q_proj.lora_A.weight": "decoder"
+    }
+
+
+def test_remap_megatron_qwen_lora_state_keeps_mtp_when_enabled() -> None:
+    adapter_state = {
+        "base_model.model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight": "decoder",
+        "base_model.model.model.mtp.layers.0.lora_A.weight": "mtp",
+        "base_model.model.model.multi_token_prediction.layers.0.lora_A.weight": "multi-token",
+    }
+
+    assert remap_qwen_megatron_lora_state_for_vllm(adapter_state, include_mtp=True) == {
+        "base_model.model.language_model.model.layers.0.self_attn.q_proj.lora_A.weight": "decoder",
+        "base_model.model.model.mtp.layers.0.lora_A.weight": "mtp",
+        "base_model.model.model.multi_token_prediction.layers.0.lora_A.weight": "multi-token",
+    }
+
+
+def test_remap_qwen_lora_state_leaves_other_model_layouts_unchanged() -> None:
+    adapter_state = {
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": "decoder",
+        "base_model.model.model.visual.blocks.0.lora_A.weight": "visual",
+    }
+
+    assert remap_qwen_megatron_lora_state_for_vllm(adapter_state, include_mtp=False) == adapter_state
+
 
 def _fft_dispatch_cfg(weight_sync_backend: str = "nccl") -> SimpleNamespace:
     """Build the minimal ``self.cfg`` view that ``save_weights_for_sampler``

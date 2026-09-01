@@ -58,6 +58,16 @@ class EngineConfig(BaseModel):
         ),
         json_schema_extra={"argparse_type": lambda v: None if v == "None" else int(v)},
     )
+    forwarding_inference_timeout_sec: float = Field(
+        default=1800.0,
+        gt=0,
+        description=(
+            "Absolute timeout in seconds for a sample request forwarded to the "
+            "engine-managed vLLM, including proxy resolution, retry backoff, and HTTP. "
+            "Long-context generations can take longer than the previous hard-coded "
+            "300-second timeout."
+        ),
+    )
     session_cleanup_interval_sec: int = Field(
         default=60,
         description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",
@@ -67,6 +77,15 @@ class EngineConfig(BaseModel):
     session_timeout_sec: int = Field(
         default=300,
         description="Seconds without heartbeat before session is considered stale. Set to -1 to disable cleanup.",
+    )
+
+
+def uses_managed_inference_forwarding(config: EngineConfig) -> bool:
+    """Return whether the API forwards samples to SkyRL-Train-managed inference."""
+    return (
+        config.external_inference_url is None
+        and config.backend in ("megatron", "fsdp")
+        and config.backend_config.get("trainer.placement.colocate_all") is False
     )
 
 

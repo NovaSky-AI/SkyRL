@@ -103,7 +103,7 @@ def start_api_server(
 
 
 @pytest.fixture(scope="function")
-def api_server():
+def api_server(tmp_path):
     """Start a fresh FastAPI server for each test.
 
     Function-scoped rather than module-scoped: the backend only reclaims a
@@ -116,7 +116,11 @@ def api_server():
     the longer teardown timeout lets the lifespan shutdown reap the engine
     subprocess so it isn't orphaned across restarts.
     """
-    with start_api_server(wait_for_up=True, teardown_timeout=20.0) as server:
+    with start_api_server(
+        overrides={"checkpoints-base": str(tmp_path / "checkpoints")},
+        wait_for_up=True,
+        teardown_timeout=20.0,
+    ) as server:
         yield server
 
 
