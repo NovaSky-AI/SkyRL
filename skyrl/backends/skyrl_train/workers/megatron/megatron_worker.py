@@ -510,7 +510,11 @@ class MegatronWorker:
         # `num_layers` override still builds. Only shrink: a pattern shorter than
         # `num_layers` is a genuine misconfiguration, so let the upstream assert report it.
         linear_attention_freq = getattr(provider, "linear_attention_freq", None)
-        if isinstance(linear_attention_freq, (list, tuple)) and provider.num_layers is not None and len(linear_attention_freq) > provider.num_layers:
+        if (
+            isinstance(linear_attention_freq, (list, tuple))
+            and provider.num_layers is not None
+            and len(linear_attention_freq) > provider.num_layers
+        ):
             logger.info(
                 f"Truncating linear_attention_freq from {len(linear_attention_freq)} to "
                 f"{provider.num_layers} entries to match the configured num_layers"
