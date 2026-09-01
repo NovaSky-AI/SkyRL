@@ -23,7 +23,7 @@ Prefill-Decode disaggregation:
 - **P2P transfer connectors** (`get_pd_p2p_connector_name` in `inference_servers/utils.py`): two flavors are
   supported, either bare or wrapped in a vLLM `MultiConnector` (alongside store connectors such as
   `MooncakeStoreConnector` for KV offloading):
-    - `NixlConnector` — pull-based default (NIXL side channel; the actor reserves `nixl_side_channel_base + server_idx`).
+    - `NixlConnector` — pull-based default (NIXL side channel).
     - `MooncakeConnector` — push-based (bootstrap-server handshake). The router runs in `kv_connector=mooncake` mode and
       is given each prefill server's mooncake bootstrap server port. The `MultiKVConnectorPromMetrics.observe` monkeypatch
       (`patches/vllm/patch_multi_connector_stats.py`) is applied to avoid an assert-crash when a child connector
