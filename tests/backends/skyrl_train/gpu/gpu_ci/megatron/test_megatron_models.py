@@ -77,7 +77,6 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # weight-sync, so skip optimizer construction entirely.
     is_large_moe = (
         ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower())
-        or ("nemotron-3-nano" in model_name.lower())
         or ("nemotron-3.5-lightning" in model_name.lower())
         or ("glm-4.7-flash" in model_name.lower())
     )
@@ -98,7 +97,7 @@ def _extra_env_vars_for_model(model_name: str) -> dict[str, str] | None:
 def _engine_overrides_for_model(model_name: str) -> dict:
     """Per-model overrides for vLLM engine init."""
     overrides = {"engine_init_kwargs": {}, "gpu_memory_utilization": 0.9}
-    if "Nemotron-3-Nano" in model_name or "Nemotron-3.5-Lightning" in model_name:
+    if "Nemotron-3.5-Lightning" in model_name:
         # Both default to a 262k context, which would size the KV pool far past
         # what is left next to the colocated Megatron policy shard. Megatron
         # policy init also needs room alongside vLLM on the same GPU, so lower
@@ -249,16 +248,9 @@ async def construct_training_input_from_generator_output(generator_output, token
         ),
         # Nemotron-3.5-Lightning (30B MoE, bf16) on 4xH100-80G. Same
         # NemotronH hybrid Mamba/attention/MoE backbone and layer pattern as
-        # Nemotron-3-Nano above, so it reuses that mesh (TP=4 EP=4 ETP=1 ->
-        # DP=1, vLLM TP=4 colocated) and the same forward-only treatment.
-        # Two config-level differences: the HF config declares the layer
-        # pattern as `layers_block_type`/`mtp_layers_block_type` lists rather
-        # than `hybrid_override_pattern` strings (transformers' NemotronHConfig
-        # exposes the string form as a derived property, which is what both
-        # megatron-bridge and vLLM read), and it ships one MTP head
-        # (`num_nextn_predict_layers=1`). MegatronWorker drops the MTP head
-        # (enable_mtp=False -> provider.mtp_num_layers=None) and vLLM skips the
-        # `mtp.*` weights, so neither side carries it through weight sync.
+        # Nemotron-3-Nano but with one MTP head (`num_nextn_predict_layers=1`).
+        # MegatronWorker drops the MTP head (enable_mtp=False -> provider.mtp_num_layers=None)
+        # and vLLM skips the `mtp.*` weights, so neither side carries it through weight sync.
         pytest.param(
             4,
             1,
