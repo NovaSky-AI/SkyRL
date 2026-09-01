@@ -130,7 +130,6 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
                 db_engine=engine,
                 external_future_store=store,
                 external_inference_client=forwarder,
-                forwarding_tasks=set(),
                 future_waiters={},
                 engine_config=EngineConfig(base_model="model_a"),
                 db_write_lock=db_write_lock,
@@ -250,7 +249,7 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
     assert session_db is not None
     assert session_db.heartbeat_count == 128
     assert sample_request.app.state.validated_sampler_checkpoints == {("model_a", "weights_a")}
-    assert not sample_request.app.state.forwarding_tasks
+    assert not store._forwarding_tasks
 
 
 @pytest.mark.asyncio
@@ -308,7 +307,7 @@ async def test_retrieve_future_bounds_protobuf_serialization_off_event_loop(monk
 
 
 @pytest.mark.asyncio
-async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
+async def test_shutdown_waits_for_forwarding_tasks_before_closing_client():
     release_forwarding = asyncio.Event()
     events = []
 
@@ -316,15 +315,12 @@ async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
         async def aclose(self) -> None:
             events.append("client_closed")
 
-    class ClosingStore:
-        async def close(self) -> None:
-            events.append("store_closed")
-
+    store = ExternalFutureStore()
+    await store.start()
     app = SimpleNamespace(
         state=SimpleNamespace(
             external_inference_client=ClosingClient(),
-            external_future_store=ClosingStore(),
-            forwarding_tasks=set(),
+            external_future_store=store,
         )
     )
 
@@ -332,7 +328,7 @@ async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
         await release_forwarding.wait()
         events.append("future_completed")
 
-    api._start_forwarding_task(app, finish_forwarding())
+    store.spawn_forwarding_task(finish_forwarding())
     shutdown = asyncio.create_task(api._close_external_inference(app))
     await asyncio.sleep(0)
     assert not shutdown.done()
@@ -340,24 +336,21 @@ async def test_shutdown_waits_for_forwarding_tasks_before_closing_store():
     release_forwarding.set()
     await shutdown
 
-    assert events == ["future_completed", "client_closed", "store_closed"]
-    assert not app.state.forwarding_tasks
+    assert events == ["future_completed", "client_closed"]
+    assert not store._forwarding_tasks
 
 
 @pytest.mark.asyncio
 async def test_shutdown_cancels_hung_forwarding_tasks(monkeypatch):
-    monkeypatch.setattr(api, "FORWARDING_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(ExternalFutureStore, "_FORWARDING_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
     events = []
 
-    class ClosingStore:
-        async def close(self) -> None:
-            events.append("store_closed")
-
+    store = ExternalFutureStore()
+    await store.start()
     app = SimpleNamespace(
         state=SimpleNamespace(
             external_inference_client=None,
-            external_future_store=ClosingStore(),
-            forwarding_tasks=set(),
+            external_future_store=store,
         )
     )
 
@@ -368,11 +361,11 @@ async def test_shutdown_cancels_hung_forwarding_tasks(monkeypatch):
             events.append("forwarding_cancelled")
             raise
 
-    api._start_forwarding_task(app, hang_forever())
+    store.spawn_forwarding_task(hang_forever())
     await asyncio.wait_for(api._close_external_inference(app), timeout=5)
 
-    assert events == ["forwarding_cancelled", "store_closed"]
-    assert not app.state.forwarding_tasks
+    assert events == ["forwarding_cancelled"]
+    assert not store._forwarding_tasks
 
 
 @pytest.mark.asyncio

@@ -41,12 +41,13 @@ def _extract_checkpoint_sync(checkpoint_path: AnyPath, target_dir: Path) -> None
 class ExternalInferenceClient:
     """Client for calling external inference engines (e.g., vLLM)."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    def __init__(self, engine_config: EngineConfig, db_engine, external_future_store=None):
         self.base_url = f"{engine_config.external_inference_url}/v1"
         self.api_key = engine_config.external_inference_api_key
         self.checkpoints_base = engine_config.checkpoints_base
         self.lora_base_dir = engine_config.external_inference_lora_base
         self.db_engine = db_engine
+        self.external_future_store = external_future_store
 
     async def call_and_store_result(
         self,
@@ -72,6 +73,10 @@ class ExternalInferenceClient:
             logger.exception("External engine error")
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
+
+        if self.external_future_store is not None:
+            await self.external_future_store.complete(request_id, result, status)
+            return
 
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)

@@ -8,7 +8,7 @@ import signal
 import threading
 from contextlib import asynccontextmanager, nullcontext, suppress
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, AsyncGenerator, Awaitable, ClassVar, Literal
+from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
 from uuid import uuid4
 
 import fastapi
@@ -70,9 +70,6 @@ SHUTDOWN_TIMEOUT_SECONDS = 10
 
 # How long retrieve_future waits for a result before returning 408
 RETRIEVE_FUTURE_TIMEOUT_SECONDS = 300
-
-# How long shutdown waits for in-flight forwarding tasks before cancelling them
-FORWARDING_SHUTDOWN_TIMEOUT_SECONDS = 10
 
 # How often poll_futures looks for newly finished requests. A single query
 # covers every waiter, so this can stay tight without the load scaling up with
@@ -186,43 +183,21 @@ async def poll_futures(
         await asyncio.sleep(poll_interval_sec)
 
 
-def _finish_forwarding_task(tasks: set[asyncio.Task], task: asyncio.Task) -> None:
-    tasks.discard(task)
-    if task.cancelled():
-        return
-    if error := task.exception():
-        logger.error("Forwarding task failed: %r", error)
-
-
 def _serialize_proto_result(request_type: types.RequestType, result_data: str) -> bytes:
     return serialize_result(request_type, json.loads(result_data))
 
 
-def _start_forwarding_task(app: FastAPI, operation: Awaitable[None]) -> None:
-    task = asyncio.create_task(operation)
-    app.state.forwarding_tasks.add(task)
-    task.add_done_callback(lambda done: _finish_forwarding_task(app.state.forwarding_tasks, done))
-
-
 async def _close_external_inference(app: FastAPI) -> None:
-    if app.state.forwarding_tasks:
-        # Bounded wait: a hung inference backend must not stall shutdown for the
-        # full httpx timeout (with retries, ~10 minutes per task).
-        _, pending = await asyncio.wait(tuple(app.state.forwarding_tasks), timeout=FORWARDING_SHUTDOWN_TIMEOUT_SECONDS)
-        if pending:
-            logger.warning(f"Cancelling {len(pending)} forwarding tasks still in flight at shutdown")
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+    # The store drains its forwarding tasks before anything else so no task is
+    # still using the inference client's connections when it closes.
+    if app.state.external_future_store is not None:
+        await app.state.external_future_store.close()
 
     inference_client = getattr(app.state, "external_inference_client", None)
     aclose = getattr(inference_client, "aclose", None)
     if aclose is not None:
         with suppress(Exception):
             await aclose()
-
-    if app.state.external_future_store is not None:
-        await app.state.external_future_store.close()
 
 
 async def _close_runtime(app: FastAPI, background_engine: asyncio.subprocess.Process) -> None:
@@ -306,7 +281,6 @@ async def lifespan(app: FastAPI):
 
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
-    app.state.forwarding_tasks = set()
     app.state.external_future_store = None
     app.state.db_write_lock = _get_db_write_context(app.state.db_engine)
     app.state.sampling_model_cache = {}
@@ -335,7 +309,11 @@ async def lifespan(app: FastAPI):
     # when the operator explicitly sets it to False.
     is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
     if app.state.engine_config.external_inference_url:
-        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
+        app.state.external_future_store = ExternalFutureStore()
+        await app.state.external_future_store.start()
+        app.state.external_inference_client = ExternalInferenceClient(
+            app.state.engine_config, app.state.db_engine, app.state.external_future_store
+        )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
         app.state.external_future_store = ExternalFutureStore()
@@ -1461,26 +1439,24 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         seq_id=request.seq_id,
         sampling_session_id=request.sampling_session_id,
     )
-    if req.app.state.external_future_store is not None:
-        request_id = req.app.state.external_future_store.create(model_id, sample_input)
+    external_future_store = req.app.state.external_future_store
+    if external_future_store is not None:
+        # Every external inference mode has a store, so this branch covers all
+        # forwarded samples; the DB path below is only for the internal engine.
+        request_id = external_future_store.create(model_id, sample_input)
+        external_future_store.spawn_forwarding_task(
+            req.app.state.external_inference_client.call_and_store_result(
+                request_id, request, model_id, checkpoint_id, base_model=base_model
+            )
+        )
     else:
         request_id = await create_future(
             session=session,
-            request_type=(
-                types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-            ),
+            request_type=types.RequestType.SAMPLE,
             model_id=model_id,
             request_data=sample_input,
         )
         await session.commit()
-
-    if req.app.state.external_inference_client:
-        _start_forwarding_task(
-            req.app,
-            req.app.state.external_inference_client.call_and_store_result(
-                request_id, request, model_id, checkpoint_id, base_model=base_model
-            ),
-        )
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 

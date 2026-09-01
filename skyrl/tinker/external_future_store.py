@@ -1,7 +1,9 @@
 import asyncio
 import time
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -33,6 +35,10 @@ class ExternalFutureStore:
     persistence hand-off.
     """
 
+    # How long close() waits for in-flight forwarding tasks before cancelling
+    # them: a hung inference backend must not stall shutdown for the full
+    # httpx timeout (with retries, potentially many minutes per task).
+    _FORWARDING_SHUTDOWN_TIMEOUT_SECONDS = 10.0
     _SWEEP_INTERVAL_SECONDS = 30.0
     # Retrieved entries linger briefly so an SDK retry after a lost HTTP
     # response still finds its result.
@@ -50,6 +56,7 @@ class ExternalFutureStore:
         # honest 404 instead of another request's result.
         self._next_request_id = -(int(time.time() * 1000) << 20) - 1
         self._sweeper: asyncio.Task | None = None
+        self._forwarding_tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         self._sweeper = asyncio.create_task(self._sweep_loop())
@@ -86,7 +93,29 @@ class ExternalFutureStore:
         entry.completed_at = datetime.now(timezone.utc)
         entry.event.set()
 
+    def spawn_forwarding_task(self, operation: Coroutine[Any, Any, None]) -> None:
+        """Run a forwarding operation in the background, tracked for shutdown."""
+        task = asyncio.create_task(operation)
+        self._forwarding_tasks.add(task)
+        task.add_done_callback(self._finish_forwarding_task)
+
+    def _finish_forwarding_task(self, task: asyncio.Task) -> None:
+        self._forwarding_tasks.discard(task)
+        if task.cancelled():
+            return
+        if error := task.exception():
+            logger.error("Forwarding task failed: %r", error)
+
     async def close(self) -> None:
+        if self._forwarding_tasks:
+            _, pending = await asyncio.wait(
+                tuple(self._forwarding_tasks), timeout=self._FORWARDING_SHUTDOWN_TIMEOUT_SECONDS
+            )
+            if pending:
+                logger.warning(f"Cancelling {len(pending)} forwarding tasks still in flight at shutdown")
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         if self._sweeper is not None:
             self._sweeper.cancel()
             await asyncio.gather(self._sweeper, return_exceptions=True)
