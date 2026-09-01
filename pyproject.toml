@@ -182,7 +182,7 @@ harbor = [
 # KV-cache offloading) and P2P PD transfer (MooncakeConnector). Provides the python
 # bindings and the `mooncake_master` binary. Off-the-shelf PyPI wheel; Linux-only.
 mooncake = [
-    "mooncake-transfer-engine; sys_platform == 'linux'",
+    "mooncake-transfer-engine-cuda13; sys_platform == 'linux'",
 ]
 
 dev = [
