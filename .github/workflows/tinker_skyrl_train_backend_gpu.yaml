@@ -28,6 +28,15 @@ permissions:
 jobs:
 
   tinker_skyrl_train_backend_gpu_tests:
+    # A `labeled` event starts a run of every label-gated workflow, so runs fired by
+    # another label skip this job. GitHub keeps only the newest check of a given name,
+    # so a skip published under the real name masks a run that is still going. The
+    # running branch has to stay equal to the job id -- that is the existing check
+    # context, and renaming it would break branch protection pointing at it.
+    name: >-
+      ${{ (github.event_name != 'pull_request_target'
+           || github.event.label.name == 'run_tinker_skyrl_train_backend_gpu_ci')
+           && 'tinker_skyrl_train_backend_gpu_tests' || 'skipped (unrelated label)' }}
     # Gate on the label that fired this event. `types: [labeled]` delivers one event
     # per label added, and `contains(...labels.*.name, ...)` tests the whole label
     # set, so labelling in bulk launched one identical GPU run per label.
