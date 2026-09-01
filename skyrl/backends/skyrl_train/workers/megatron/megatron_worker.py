@@ -178,8 +178,8 @@ class MegatronWeightExtractor(WeightExtractor):
         regular_task_indices: list[int] = []
 
         for idx, task in enumerate(weight_conversion_tasks):
-            # Skip tasks that own no parameter on any PP rank. megatron-bridge 0.7.0
-            # registers mappings for BOTH MoE expert layouts -- grouped-GEMM
+            # Skip tasks that own no parameter on any PP rank. megatron-bridge can
+            # register mappings for BOTH MoE expert layouts -- grouped-GEMM
             # (`mlp.experts.linear_fc1`) and SequentialMLP
             # (`mlp.experts.local_experts.*.linear_fc1`) -- so a model built with one
             # layout still gets conversion tasks for the other. Those have no weights
