@@ -207,8 +207,8 @@ class ServerGroup:
                 dp_master_address=dp_address,
                 dp_rpc_port=dp_rpc_port,
                 enable_pd=self._enable_pd,
-                nixl_side_channel_base=self._nixl_side_channel_base + server_idx,
-                mooncake_bootstrap_base_port=self._mooncake_bootstrap_base_port + server_idx,
+                nixl_side_channel_base=self._nixl_side_channel_base + server_idx * SERVER_PORT_STRIDE,
+                mooncake_bootstrap_base_port=self._mooncake_bootstrap_base_port + server_idx * SERVER_PORT_STRIDE,
                 colocated_training=self._external_pg is not None,
                 **server_kwargs,
             )

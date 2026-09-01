@@ -30,9 +30,10 @@ from .utils import (
 )
 from .vllm_router import VLLMRouter
 
-NIXL_SIDE_CHANNEL_BASE_PORT = 5600
 VLLM_START_PORT = 8000
-MOONCAKE_BOOTSTRAP_BASE_PORT = 20_000
+# NOTE: We use the same base port for NIXL and Mooncake since they will not be
+# used together
+MOONCAKE_BOOTSTRAP_BASE_PORT = NIXL_SIDE_CHANNEL_BASE_PORT = 20_000
 
 
 @dataclass
@@ -123,8 +124,8 @@ def create_inference_servers(
                 placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
-                nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + i * servers_per_group,
-                mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT + i * servers_per_group,
+                nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
+                mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
                 use_expandable_segments=ie_cfg.use_expandable_segments,
@@ -144,8 +145,10 @@ def create_inference_servers(
                 placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
-                nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + (num_prefill + i) * servers_per_group,
-                mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT + (num_prefill + i) * servers_per_group,
+                nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT
+                + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
+                mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT
+                + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
                 use_expandable_segments=ie_cfg.use_expandable_segments,
