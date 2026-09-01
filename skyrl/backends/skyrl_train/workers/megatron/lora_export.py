@@ -9,6 +9,7 @@ def build_lora_adapter_state(
     """Clone exported Megatron adapter weights into PEFT's key layout."""
     adapter_state = {}
     for name, tensor in adapter_weights:
-        exported_tensor = tensor.clone() if preserve_dtype else tensor.float()
+        export_dtype = tensor.dtype if preserve_dtype else torch.float32
+        exported_tensor = tensor.to(dtype=export_dtype, copy=True)
         adapter_state[f"base_model.model.{name}"] = exported_tensor
     return adapter_state
