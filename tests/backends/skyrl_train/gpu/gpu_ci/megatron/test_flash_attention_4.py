@@ -34,7 +34,16 @@ def test_transformer_engine_detects_working_flash_attention_4(query_heads, kv_he
         for _ in range(2)
     ]
     cu_seqlens = torch.tensor([0, 128, 384], device="cuda", dtype=torch.int32)
-    output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, 256, 256, causal=True)
+    output, _ = flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=256,
+        max_seqlen_k=256,
+        causal=True,
+    )
     output.float().square().mean().backward()
 
     for tensor in (q, k, v):
