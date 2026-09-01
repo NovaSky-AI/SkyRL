@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 
-from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import _remove_lora_adapter
+from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
+    _remove_lora_adapter,
+)
 
 
 @pytest.mark.asyncio
