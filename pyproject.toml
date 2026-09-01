@@ -242,14 +242,6 @@ no-build-isolation-package = [
 # unpinned dependencies.
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
-    # megatron-bridge hard dependency that publishes no wheels, so it
-    # would compile CUDA on every install and on every Ray runtime-env sync.
-    # megatron-core only uses it for the experimental DSA (DeepSeek Sparse
-    # Attention) variant, behind a `try: from fast_hadamard_transform import ...
-    # except ImportError` guard, so dropping it keeps the pre-bump behavior
-    # exactly. Remove this override (and add a git source + build config -- the
-    # PyPI sdist is documented upstream as incomplete) if DSA is ever needed.
-    "fast-hadamard-transform; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.16.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.8.0; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux' and python_version >= '3.12'",
