@@ -22,6 +22,9 @@ from skyrl.utils.log import logger
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
+    # TODO: make `external_future_store` required and remove the FutureDB
+    # write-back path in `call_and_store_result` — every production
+    # construction (api.py lifespan) already passes a store.
     def __init__(
         self,
         engine_config: EngineConfig,
@@ -95,6 +98,8 @@ class SkyRLTrainInferenceForwardingClient:
             await self.external_future_store.complete(request_id, result, status)
             return
 
+        # TODO: remove this FutureDB write-back once `external_future_store`
+        # is required (see __init__).
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
             if future is None:
