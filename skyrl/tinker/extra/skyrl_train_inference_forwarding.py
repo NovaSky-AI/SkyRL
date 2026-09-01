@@ -94,20 +94,30 @@ class SkyRLTrainInferenceForwardingClient:
             await session.commit()
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.
-        # HTTP 4xx/5xx surfaces as RuntimeError below and is NOT retried.
-        try:
-            proxy_url = await self._resolve_proxy_url()
-            return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-        except httpx.RequestError as e:
-            logger.warning(
-                "Network error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
-                self._cached_proxy_url,
-                type(e).__name__,
-                e,
-            )
-            proxy_url = await self._resolve_proxy_url(force_refresh=True)
-            return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+        max_attempts = 12
+        delay = 1.0
+        proxy_url = await self._resolve_proxy_url()
+        for attempt in range(max_attempts):
+            try:
+                return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+            except (httpx.ConnectError, httpx.ConnectTimeout, RuntimeError) as error:
+                unavailable = isinstance(error, RuntimeError) and "returned 503: No available workers" in str(error)
+                if isinstance(error, RuntimeError) and not unavailable:
+                    raise
+                if attempt + 1 == max_attempts:
+                    raise
+                logger.warning(
+                    "Transient inference forwarding failure (%s: %s); retrying in %.1fs (%d/%d)",
+                    type(error).__name__,
+                    error,
+                    delay,
+                    attempt + 1,
+                    max_attempts,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 10.0)
+                proxy_url = await self._resolve_proxy_url(force_refresh=True)
+        raise AssertionError("unreachable")
 
     async def _forward(
         self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None
