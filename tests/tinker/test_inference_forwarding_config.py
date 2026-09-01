@@ -30,7 +30,11 @@ def test_forwarding_client_uses_configured_timeout() -> None:
     with patch("skyrl.tinker.extra.skyrl_train_inference_forwarding.httpx.AsyncClient") as async_client:
         SkyRLTrainInferenceForwardingClient(config, db_engine=None)
 
-    assert async_client.call_args.kwargs["timeout"].read == 1800.0
+    timeout = async_client.call_args.kwargs["timeout"]
+    assert timeout.connect == 10.0
+    assert timeout.read == 1800.0
+    assert timeout.write == 300.0
+    assert timeout.pool == 300.0
 
 
 @pytest.mark.asyncio
