@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 
-from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
+pytest.importorskip("vllm", reason="vllm_server_actor imports vllm at module scope")
+pytestmark = pytest.mark.vllm
+
+from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (  # noqa: E402
     _remove_lora_adapter,
 )
 
