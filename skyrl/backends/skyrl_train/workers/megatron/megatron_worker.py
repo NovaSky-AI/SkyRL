@@ -1416,6 +1416,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         handled internally by the bridge).  Only rank 0 writes to disk and
         sends the ``LoraLoadRequest``.
         """
+        import gc
         import json
 
         from megatron.bridge.models.conversion.peft_bridge import (
@@ -1428,7 +1429,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
             adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
 
-        if torch.distributed.get_rank() == 0:
+        rank = torch.distributed.get_rank()
+        remote_client = False
+        lora_request = None
+        if rank == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
             # Rewrite fused-MoE expert LoRA into vLLM's flat PEFT layout so
@@ -1460,13 +1464,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 RemoteInferenceClient,
             )
 
-            if isinstance(inference_engine_client, RemoteInferenceClient):
+            remote_client = isinstance(inference_engine_client, RemoteInferenceClient)
+            lora_request = LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)
+
+        adapter_state.clear()
+        # Inference loading materializes another host copy; release the exported tensors first.
+        del adapter_state
+        gc.collect()
+        torch._C._host_emptyCache()
+        torch.distributed.barrier()
+
+        if rank == 0:
+            if remote_client:
                 await inference_engine_client.load_lora_adapter(lora_name, lora_sync_path)
             else:
-                lora_request = LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)
+                assert lora_request is not None
                 await inference_engine_client.update_named_weights(lora_request)
-
-        torch.distributed.barrier()
 
     async def broadcast_to_inference_engines(
         self,
@@ -1522,7 +1535,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # wanted by an inference engine, so empty regardless.
         if self._weight_transfer_sender.empty_cache_after_send or self.cfg.placement.colocate_all:
             torch.cuda.empty_cache()
-        torch.distributed.barrier()
+        if not (self._is_lora and not self.cfg.policy.megatron_config.lora_config.merge_lora):
+            torch.distributed.barrier()
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method
