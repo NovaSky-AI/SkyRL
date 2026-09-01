@@ -11,6 +11,7 @@ skyrl/backends/skyrl_train/weight_sync/
 ├── base.py                 # WeightUpdateRequest, LoraLoadRequest, WeightChunk
 ├── transfer_strategy.py    # WeightSyncInitInfo / Sender / Strategy ABCs (sender-side only; receive is vLLM-native)
 ├── broadcast_strategy.py   # NCCL broadcast (non-colocated)
+├── nccl_trainer_send.py    # vendored: vLLM 0.26's NCCL trainer-send statics
 ├── cuda_ipc_strategy.py    # CUDA IPC (colocated)
 ├── delta_strategy.py       # Checkpoint-delta sender + strategy (disk / gs:// / s3://)
 ├── delta_checkpoint.py     # DeltaCheckpointPublisher, LocalCheckpointStore, manifest + XOR payloads
@@ -269,11 +270,46 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 
 ## vLLM version coupling
 
-`vllm` is pinned in `pyproject.toml`. Weight-sync code paths are tightly coupled to vLLM internals (`model_runner.load_weights`, `initialize_layerwise_reload`, `SKIP_TENSORS`). When bumping the pin, re-verify the GPU weight-sync tests.
+`vllm` is pinned in `pyproject.toml` (currently `0.28.0`, in both the `fsdp` and `megatron` extras). Weight-sync code paths are tightly coupled to vLLM internals (`model_runner.load_weights`, `initialize_layerwise_reload`, `SKIP_LOAD_TENSORS`). When bumping the pin, re-verify the GPU weight-sync tests.
+
+### `packed` is an init-time wire param (0.28.0+)
+
+Through 0.26.0 the NCCL sender put `packed` on the **per-round** update info. 0.28.0 moved it
+to the **init** info: `NCCLWeightTransferInitInfo.packed` is recorded once during
+`/init_weight_transfer_engine`, `receive_weights` reads `self.packed`, and
+`NCCLWeightTransferUpdateInfo` now rejects the key outright.
+
+So `BroadcastInitInfo.packed` must be sent by `to_api_payload()` and must agree with the
+`packed` handed to `nccl_trainer_send_weights`. Its default is `False` on the vLLM side, so
+forgetting it does not raise — the trainer packs while the worker unpacks one-by-one, and the
+transfer hangs inside NCCL. Only the GPU weight-sync test catches this.
+
+### Vendored trainer-send (`weight_sync/nccl_trainer_send.py`)
+
+0.28.0 deleted `NCCLWeightTransferEngine.trainer_send_weights` and the engine's `trainer_init`
+staticmethod, replacing them with a trainer-side engine abstraction
+(`NCCLTrainerWeightTransferEngine`, via `WeightTransferTrainerFactory`). SkyRL still drives the
+send itself, so `nccl_trainer_send.py` keeps the 0.26.0 behaviour: it wraps
+`packed_nccl_broadcast_producer` and re-exports `nccl_common.trainer_init`, both of which
+survive in 0.28.0 unchanged. Delete that module when SkyRL's sender layer migrates onto vLLM's
+trainer-send engines.
+
+The `sharded_rdt` backend is unaffected: it vendors its own trainer-side ABCs in
+`sharded_rdt_base.py`, which already match 0.28.0's `Generic[TTrainerInitInfo]` shape.
+
+### DeepGEMM is unavailable under the torch override
+
+vLLM 0.28.0's metadata pins `torch==2.13.0`; we override torch to `2.11.0` because the CUDA
+extension wheels we build against (flash-attn, causal-conv1d, mamba-ssm, transformer-engine)
+have no 2.13 builds. vLLM's main extensions are stable-libtorch-ABI and load fine, but
+`vllm/third_party/deep_gemm/_C` is a version-specific `cpython-312` build linked against torch
+2.13's `c10` and fails with an undefined-symbol `ImportError`. vLLM catches this and logs
+`Module vllm.third_party.deep_gemm was found but failed to import`, then falls back, so the
+engine runs — but the DeepGEMM fused-MoE and sparse-attention-indexer paths are gone. Revisit
+when those wheels publish torch 2.13 builds.
 
 ## Gotchas
 
-- NemotronH / Mamba: vLLM's layerwise reload corrupts `conv1d.weight` via shared-storage view buffers. Workaround at the top of `new_inference_worker_wrap.py` adds `"conv_weights"` to `SKIP_TENSORS` at import time. Remove pending vLLM PR #42481 (vLLM 0.21.0).
 - After `update_weights_chunk` runs, call `torch.accelerator.synchronize()` before returning so the sender doesn't drop its packed buffer mid-copy on the next barrier.
 - Delta: `DeltaWeightTransferEngine` is registered as an **import side effect** of `new_inference_worker_wrap.py`, which is the module vLLM loads via `--worker-extension-cls`. Registering anywhere else (e.g. while building CLI args in the driver) is a no-op — it has to happen in the process that owns the engine.
 - Delta: the receive-side `delta checkpoint fetch:` / `receive reload-only:` log lines are emitted inside the nested vLLM worker process and do **not** reach the driver log, even with `SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`. Find them with `grep -rhE "delta checkpoint (fetch|receive)" /tmp/ray/session_latest/logs/`. Filter by mtime — that directory accumulates lines from earlier runs.

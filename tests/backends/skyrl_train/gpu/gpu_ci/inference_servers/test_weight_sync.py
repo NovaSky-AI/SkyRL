@@ -69,11 +69,11 @@ class Trainer:
 
     def init_weight_sync(self, master_address: str, master_port: int, world_size: int, group_name: str):
         """Initialize the weight sync process group as rank 0 (trainer)."""
-        from vllm.distributed.weight_transfer.nccl_engine import (
-            NCCLWeightTransferEngine,
+        from skyrl.backends.skyrl_train.weight_sync.nccl_trainer_send import (
+            nccl_trainer_init,
         )
 
-        self.pg = NCCLWeightTransferEngine.trainer_init(
+        self.pg = nccl_trainer_init(
             dict(
                 master_address=master_address,
                 master_port=master_port,
@@ -106,8 +106,8 @@ class Trainer:
 
         This is a blocking operation - server must call receive concurrently.
         """
-        from vllm.distributed.weight_transfer.nccl_engine import (
-            NCCLWeightTransferEngine,
+        from skyrl.backends.skyrl_train.weight_sync.nccl_trainer_send import (
+            nccl_trainer_send_weights,
         )
 
         params = list(self.model.named_parameters())
@@ -115,10 +115,7 @@ class Trainer:
             f"[Trainer.broadcast_weights] Starting send of {len(params)} params, pg={self.pg}, pg.rank={self.pg.rank}, pg.world_size={self.pg.world_size}"
         )
         try:
-            NCCLWeightTransferEngine.trainer_send_weights(
-                iterator=iter(params),
-                trainer_args={"group": self.pg, "packed": True},
-            )
+            nccl_trainer_send_weights(iter(params), self.pg, packed=True)
             torch.cuda.synchronize()
             print("[Trainer.broadcast_weights] Send complete")
         except Exception as e:
@@ -277,14 +274,17 @@ class TestWeightUpdateFlow:
 
             # Await server receive via client (fans out to all backends)
             dtype_names = [(d.split(".")[-1] if "." in d else d) for d in weight_info["dtypes"]]
+            # No "packed" here: since vLLM 0.28.0 it is an init-time wire param
+            # (BroadcastInitInfo.packed -> NCCLWeightTransferInitInfo.packed), and
+            # NCCLWeightTransferUpdateInfo rejects it.
             update_info = {
                 "names": weight_info["names"],
                 "dtype_names": dtype_names,
                 "shapes": weight_info["shapes"],
-                "packed": True,
             }
             print(
-                f"[Step 3] Calling update_weights_nccl with {len(update_info['names'])} names, packed={update_info['packed']}"
+                f"[Step 3] Calling update_weights_nccl with {len(update_info['names'])} names, "
+                f"packed={init_info.packed} (from init)"
             )
             # Use SkyRL's chunked weight-sync API (skyrl_start_weight_update ->
             # update_weights_nccl -> skyrl_finish_weight_update) rather than vLLM's

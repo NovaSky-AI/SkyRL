@@ -113,7 +113,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.26.0; sys_platform == 'linux'",
+    "vllm==0.28.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -125,9 +125,8 @@ fsdp = [
     "causal-conv1d==1.6.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
     "flash-attn==2.8.3+cu.13.0.torch.2.11; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -149,7 +148,7 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
-    "vllm==0.26.0; sys_platform == 'linux'",
+    "vllm==0.28.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -158,14 +157,13 @@ megatron = [
     # into the image for a module the shim would never load).
     "nixl; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     # megatron-bridge requires Python 3.12+; pin megatron-core to the same
     # constraint so both packages are consistently available (or absent).
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
-    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
@@ -243,31 +241,45 @@ override-dependencies = [
     # so it doesn't pull a second, unused CUDA runtime in alongside the cu13 one.
     "nixl-cu12; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our pin. vLLM 0.26.0's metadata asks for 0.6.14, but flashinfer-cubin was
-    # never released at 0.6.14 and flashinfer hard-errors when cubin's version
-    # differs from its own, so all three are held at 0.6.13 -- the version vLLM
-    # 0.26.0 was developed against. It must be >=0.6.13: older flashinfer rejects
-    # the `layout_code` vLLM's allreduce+RMS fusion pass hands the MNNVL backend
-    # ("MNNVL AllReduce does not support quantization fusion").
-    "flashinfer-python==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.13; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # our pin. vLLM 0.28.0 needs >=0.6.16: it imports
+    # `flashinfer.autotuner.set_autotune_process_group`, which 0.6.13 does not
+    # have, and the engine fails to start without it.
+    # flashinfer-cubin was never released past 0.6.13, and flashinfer hard-errors
+    # when an installed cubin's version differs from its own -- so cubin is
+    # dropped rather than pinned. It is optional: `flashinfer.jit.env._get_cubin_dir`
+    # only consults the package when installed, else falling back to
+    # FLASHINFER_CUBIN_DIR or the ~/.cache/flashinfer cubin cache.
+    "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin; sys_platform == 'never'",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
-    # vLLM 0.26.0 pins tilelang==0.1.9 and apache-tvm-ffi==0.1.10. Both overrides
+    # vLLM 0.28.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both overrides
     # hold these at the versions the lock already resolved to before mamba-ssm moved
     # to the Astral wheel, so they only relax mamba-ssm's pins — no other package's
-    # resolved version changes.
+    # resolved version changes. If a vLLM kernel ever fails on the older tilelang,
+    # raise these to vLLM's pins and re-check mamba-ssm.
     "tilelang==0.1.9; sys_platform == 'linux'",
     "apache-tvm-ffi==0.1.10; sys_platform == 'linux'",
     # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
     # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
     # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
     "xgrammar==0.2.3",
-    # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 while vLLM pins ==0.1.9.
-    "tilelang==0.1.9; sys_platform == 'linux'",
-    # mamba-ssm 2.3.2.post1 caps apache-tvm-ffi at <=0.1.9 while vLLM 0.26.0 pins ==0.1.10. 
-    # Without this, resolution fails outright (the py>=3.14 split has no preferences to fall back on)
-    "apache-tvm-ffi==0.1.10; sys_platform == 'linux'",
+    # vLLM 0.28.0's metadata pins torch==2.13.0, but the astral-cu130 extension
+    # wheels we build against top out earlier: flash-attn, causal-conv1d and
+    # transformer-engine-torch at torch 2.12, mamba-ssm at torch 2.11. vLLM ships
+    # stable-libtorch-ABI extensions (`_C_stable_libtorch.abi3.so`,
+    # `_moe_C_stable_libtorch.abi3.so`), so its main binaries load against 2.11 and
+    # we hold torch there rather than churn every CUDA extension pin. The one
+    # exception is `vllm/third_party/deep_gemm/_C`, a version-specific cpython-312
+    # build linked against torch 2.13's c10: it fails to import and vLLM falls back,
+    # so the DeepGEMM fused-MoE / sparse-attn-indexer paths are unavailable. See
+    # `.claude/docs/weight_sync.md`. Revisit once those wheels publish 2.13 builds.
+    "torch==2.11.0; sys_platform == 'linux'",
+    # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
+    # torch: 0.28.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.28.0 pulls
+    # torchvision==0.28.0, so without this the torch override above would resolve
+    # a torchvision that cannot import against the torch we actually install.
+    "torchvision==0.26.0; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
