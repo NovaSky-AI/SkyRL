@@ -52,15 +52,44 @@ async def test_forwarding_retries_connection_failure() -> None:
     assert client._forward.await_count == 2
 
 
+def _assert_read_timeout_hint(exc: RuntimeError, timeout_sec: float) -> None:
+    message = str(exc)
+    assert isinstance(exc.__cause__, httpx.ReadTimeout)
+    assert f"timed out after {timeout_sec:g}s" in message
+    assert "--forwarding-inference-timeout-sec" in message
+    assert "SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC" in message
+
+
 @pytest.mark.asyncio
 async def test_forwarding_does_not_retry_read_timeout() -> None:
     client = object.__new__(SkyRLTrainInferenceForwardingClient)
+    client.engine_config = EngineConfig(base_model="test-model", forwarding_inference_timeout_sec=123.0)
     client._cached_proxy_url = "http://inference"
     client._resolve_proxy_url = AsyncMock(return_value="http://inference")
     client._forward = AsyncMock(side_effect=httpx.ReadTimeout("slow response"))
 
-    with pytest.raises(httpx.ReadTimeout):
+    with pytest.raises(RuntimeError) as exc_info:
         await client._forward_with_retry(object(), "model", base_model=None)
 
+    _assert_read_timeout_hint(exc_info.value, 123.0)
+    assert "http://inference" in str(exc_info.value)
     client._resolve_proxy_url.assert_awaited_once_with()
     client._forward.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_forwarding_read_timeout_on_retry_surfaces_hint() -> None:
+    # A read timeout raised by the *second* attempt (after a connection retry)
+    # must get the same actionable message as one raised by the first attempt.
+    client = object.__new__(SkyRLTrainInferenceForwardingClient)
+    client.engine_config = EngineConfig(base_model="test-model", forwarding_inference_timeout_sec=45.0)
+    client._cached_proxy_url = "http://old"
+    client._resolve_proxy_url = AsyncMock(side_effect=["http://old", "http://new"])
+    client._forward = AsyncMock(side_effect=[httpx.ConnectError("unreachable"), httpx.ReadTimeout("slow response")])
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client._forward_with_retry(object(), "model", base_model=None)
+
+    _assert_read_timeout_hint(exc_info.value, 45.0)
+    client._resolve_proxy_url.assert_has_awaits([call(), call(force_refresh=True)])
+    assert client._forward.await_count == 2
