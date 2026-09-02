@@ -338,8 +338,20 @@ class TITOHarborGenerator(HarborGenerator):
                 matched_segment.append(match)
             segment_transition_ids.append(matched_segment)
 
+        unexpected = [
+            transition_id
+            for transition_id in sorted(unmatched)
+            if transitions[transition_id].stop_reason not in ("length", "max_tokens")
+        ]
+        if unexpected:
+            raise ValueError(
+                f"Non-truncated TITO transitions missing from Harbor rollout details: {unexpected}"
+            )
         if unmatched:
-            raise ValueError(f"TITO transitions missing from Harbor rollout details: {sorted(unmatched)}")
+            logger.info(
+                "Allowing truncated TITO transitions omitted from Harbor rollout details: {}",
+                sorted(unmatched),
+            )
         return segment_transition_ids
 
     def _write_trace_log(

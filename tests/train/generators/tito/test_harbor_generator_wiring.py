@@ -190,3 +190,70 @@ def test_parity_matches_multiple_harbor_segments_to_transitions():
         [0, 2],
         [1],
     ]
+
+
+def test_parity_allows_tito_only_truncated_transition():
+    from examples.train_integrations.harbor_tito.harbor_generator import (
+        TITOHarborGenerator,
+    )
+
+    trace = Trace()
+    for index, stop_reason in enumerate(("length", "stop")):
+        pending = trace.prepare_turn([{"role": "user", "content": f"call-{index}"}])
+        trace.commit(
+            pending,
+            ModelTurnResult(
+                prompt_token_ids=(index + 1, 9),
+                prompt_message_indices=(0, -1),
+                reused_prefix_length=0,
+                completion_ids=(index + 10,),
+                completion_logprobs=(-0.1,),
+                assistant_message={"role": "assistant", "content": f"answer-{index}"},
+                stop_reason=stop_reason,
+            ),
+        )
+
+    successful = trace.transition(1)
+    rollout_details = [
+        {
+            "prompt_token_ids": [list(successful.prompt_token_ids)],
+            "completion_token_ids": [list(successful.completion_ids)],
+            "logprobs": [list(successful.completion_logprobs)],
+        }
+    ]
+
+    assert TITOHarborGenerator._validate_trace_parity(trace, rollout_details) == [[1]]
+
+
+def test_parity_rejects_tito_only_non_truncated_transition():
+    from examples.train_integrations.harbor_tito.harbor_generator import (
+        TITOHarborGenerator,
+    )
+
+    trace = Trace()
+    for index in range(2):
+        pending = trace.prepare_turn([{"role": "user", "content": f"call-{index}"}])
+        trace.commit(
+            pending,
+            ModelTurnResult(
+                prompt_token_ids=(index + 1, 9),
+                prompt_message_indices=(0, -1),
+                reused_prefix_length=0,
+                completion_ids=(index + 10,),
+                completion_logprobs=(-0.1,),
+                assistant_message={"role": "assistant", "content": f"answer-{index}"},
+                stop_reason="stop",
+            ),
+        )
+
+    successful = trace.transition(1)
+    rollout_details = [
+        {
+            "prompt_token_ids": [list(successful.prompt_token_ids)],
+            "completion_token_ids": [list(successful.completion_ids)],
+            "logprobs": [list(successful.completion_logprobs)],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="Non-truncated TITO transitions"):
+        TITOHarborGenerator._validate_trace_parity(trace, rollout_details)

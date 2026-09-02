@@ -6,7 +6,18 @@ from skyrl.train.generators.tito.trace import Trace
 from skyrl.train.generators.tito.types import ModelTurnResult, TraceOutcome
 
 
-def _commit(trace, _label, messages, prompt, indices, completion, content, reused=0, routed_experts=None):
+def _commit(
+    trace,
+    _label,
+    messages,
+    prompt,
+    indices,
+    completion,
+    content,
+    reused=0,
+    routed_experts=None,
+    stop_reason="stop",
+):
     pending = trace.prepare_turn(messages)
     trace.commit(
         pending,
@@ -17,7 +28,7 @@ def _commit(trace, _label, messages, prompt, indices, completion, content, reuse
             completion_ids=tuple(completion),
             completion_logprobs=tuple(-0.1 for _ in completion),
             assistant_message={"role": "assistant", "content": content},
-            stop_reason="stop",
+            stop_reason=stop_reason,
             routed_experts=routed_experts,
         ),
     )
@@ -59,6 +70,39 @@ def test_linear_turns_become_one_training_row():
     assert output["response_ids"] == [[3, 4, 5, 6]]
     assert output["loss_masks"] == [[1, 0, 0, 1]]
     assert output["rewards"] == [1.0]
+
+
+def test_truncated_retry_and_success_are_both_trainable():
+    trace = Trace()
+    user = {"role": "user", "content": "q"}
+    truncated = {"role": "assistant", "content": "partial"}
+    retry = {"role": "user", "content": "continue"}
+
+    _commit(trace, "truncated", [user], [1, 9], [0, -1], [2], "partial", stop_reason="length")
+    _commit(
+        trace,
+        "success",
+        [user, truncated, retry],
+        [1, 9, 2, 3, 9],
+        [-1, -1, -1, 2, -1],
+        [4],
+        "done",
+        reused=3,
+    )
+    outcome = TraceOutcome(
+        trace=trace,
+        trajectory_id=TrajectoryID("instance", 0),
+        reward=1.0,
+        stop_reason="complete",
+        generation_time=2.0,
+        num_turns=1,
+    )
+
+    output = build_trace_generator_output([outcome], overlong_filtering=False, step_wise=False)
+
+    assert output["prompt_token_ids"] == [[1, 9]]
+    assert output["response_ids"] == [[2, 3, 9, 4]]
+    assert output["loss_masks"] == [[1, 0, 0, 1]]
 
 
 def test_discontinuity_uses_step_wise_rows_and_final_reward():
