@@ -146,6 +146,7 @@ megatron = [
     # metadata requires there, so the two agree without an override.
     "transformer-engine-cu13==2.16.0+cu.13.0; sys_platform == 'linux'",
     "flash-attn==2.8.3+cu.13.0.torch.2.11; sys_platform == 'linux'",
+    "flash-attn-4[cu13]==4.0.0b28; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
@@ -277,8 +278,11 @@ override-dependencies = [
     # to the Astral wheel, so they only relax mamba-ssm's pins — no other package's
     # resolved version changes. If a vLLM kernel ever fails on the older tilelang,
     # raise these to vLLM's pins and re-check mamba-ssm.
+    # FA4 requires a newer TVM FFI than the stale vLLM and mamba-ssm metadata allows.
     "tilelang==0.1.9; sys_platform == 'linux'",
-    "apache-tvm-ffi==0.1.10; sys_platform == 'linux'",
+    "apache-tvm-ffi==0.1.12; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl[cu13]==4.6.2; sys_platform == 'linux'",
+    "quack-kernels[cu13]==0.6.4; sys_platform == 'linux'",
     # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
     # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
     # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
