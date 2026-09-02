@@ -43,18 +43,7 @@ alone would silently do nothing. It finds them by scanning ``sys.modules`` for
 the old function object rather than by hardcoding names, so a new importer in a
 future megatron-core is picked up too.
 
-The diff is applied by GNU ``patch`` itself, to a throwaway copy of
-``recompute.py`` under a temp directory -- so hunk context *and* line numbers are
-validated by a battle-tested implementation rather than by hand-rolled parsing.
-``--forward`` means an already-applied or mismatched patch is refused outright
-instead of producing a mangled file. Only the patched ``checkpointed_forward``
-is then compiled into the live module.
-
 DELETE THIS PATCH once the megatron-core pin includes NVIDIA/Megatron-LM#6793.
-It is a temporary backport of an upstream fix, not a SkyRL behavior change. It
-fails safe in the meantime: if the patch does not apply cleanly this logs and
-no-ops rather than misfiring, and it detects the real fix and steps aside. Check
-this file when bumping the pin.
 """
 
 import ast
