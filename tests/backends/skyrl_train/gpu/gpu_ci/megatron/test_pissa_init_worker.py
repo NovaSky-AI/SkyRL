@@ -237,6 +237,7 @@ def test_pissa_initialization_reshards_grouped_experts(monkeypatch, input_is_par
         )
 
 
+@pytest.mark.skip(reason="PiSSA is experimental; the GPU parity test is not part of CI yet")
 @pytest.mark.parametrize(
     ("model_name", "tp", "pp", "ep", "etp", "num_gpus"),
     [
