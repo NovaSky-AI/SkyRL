@@ -60,7 +60,7 @@ class TestSaveWeights:
     async def test_non_colocated_delta_does_not_pause(self):
         """Delta sync owns pause/resume itself.
 
-        ``DeltaWeightTransferSender._apply_receiver_update`` fetches before pausing and
+        ``DeltaTrainerWeightTransferEngine._apply_receiver_update`` fetches before pausing and
         pauses only around the final reload, so the dispatcher must not pause as well --
         doing so would hold generation down across the whole publish+upload+fetch window
         instead of just the reload.

@@ -1,17 +1,11 @@
 import io
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import ray
 import torch
 import torch.distributed
 from transformers import AutoConfig
-
-try:
-    # for torch 2.5+
-    from torch.distributed.tensor import DTensor
-except ImportError:
-    from torch.distributed._tensor import DTensor
 
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
@@ -25,14 +19,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
-from skyrl.backends.skyrl_train.weight_sync import (
-    LoraLoadRequest,
-    WeightChunk,
-    WeightExtractor,
-)
-from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import (
-    yield_module_grouped_chunks,
-)
+from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
     HFModelWrapper,
     get_llm_for_sequence_regression,
@@ -42,96 +29,6 @@ from skyrl.backends.skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
 )
-from skyrl.train.utils.utils import str_to_torch_dtype
-
-if TYPE_CHECKING:
-    from skyrl.train.config.config import InferenceEngineConfig
-
-
-class FSDPWeightExtractor(WeightExtractor):
-    """Extracts weights from FSDP-sharded models.
-
-    Args:
-        model: FSDP model to extract weights from
-        enable_bucketing: If True, group parameters by module (e.g., for fused QKV loaders)
-        batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
-        weight_prefix: Prefix to prepend to all weight names (e.g., ``"language_model."``
-            when syncing a CausalLM backbone to a vLLM instance which always uses the namespace of the
-            multimodal model, even if vision encoder weights are not initialized).
-    """
-
-    def __init__(
-        self,
-        model: torch.nn.Module,
-        enable_bucketing: bool = False,
-        batch_size_threshold_gb: float = 0.0,
-        weight_prefix: str = "",
-    ):
-        self.model = model
-        self.enable_bucketing = enable_bucketing
-        self.batch_size_threshold_gb = batch_size_threshold_gb
-        self.weight_prefix = weight_prefix
-
-    def extract_weights(self, dtype: torch.dtype):
-        """Extract weights from FSDP model.
-
-        Args:
-            dtype: Target dtype for inference
-
-        Yields:
-            WeightChunk objects (one per parameter, or grouped by module)
-        """
-        # FSDP2 state_dict returns DTensors directly; no state_dict_type configuration needed.
-        params = self.model.state_dict()
-
-        if self.weight_prefix:
-            params = {f"{self.weight_prefix}{k}": v for k, v in params.items()}
-
-        if not self.enable_bucketing:
-            # Simple path: yield one chunk per parameter
-            for name, param in params.items():
-                tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
-                yield WeightChunk(
-                    names=[name],
-                    dtypes=[str(dtype)],
-                    shapes=[list(tensor.shape)],
-                    tensors=[tensor],
-                )
-        else:
-            # NOTE (sumanthrh): By default, when we bucket parameters with FSDP, we group by module
-            # This was done to support the older FlashRL integration where vLLM required
-            # Q,K, V tensors for the same layer to be sent at the same time
-            # Grouping by module is also beneficial because of layerwise reloading in vLLM
-            # We will be able to complete the reload for a full layer in one /update_weights
-            # call and clear the layerwise buffer held for that layer.
-            for chunk in yield_module_grouped_chunks(
-                params=params,
-                dtype=dtype,
-                gather_tensor_fn=self._gather_tensor,
-                get_shape_fn=lambda name, param, tensor: list(tensor.shape),
-                batch_size_threshold_gb=self.batch_size_threshold_gb,
-            ):
-                yield chunk
-
-    def get_weight_metadata(self, dtype: torch.dtype) -> dict:
-        """Return weight metadata without materializing full tensors.
-
-        Reads state_dict() shapes; sharded DTensors are not gathered.
-        """
-        names = []
-        dtype_names = []
-        shapes = []
-        dtype_name = str(dtype).split(".")[-1]
-        for name, param in self.model.state_dict().items():
-            names.append(f"{self.weight_prefix}{name}" if self.weight_prefix else name)
-            dtype_names.append(dtype_name)
-            shapes.append(list(param.shape))
-        return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
-
-    def _gather_tensor(self, param: torch.Tensor) -> torch.Tensor:
-        """Gather sharded tensor into full tensor."""
-        device = torch.cuda.current_device()
-        return param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
@@ -205,42 +102,27 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # Created only on profiled ranks.
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
 
-    async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
-        # Initialize the weight extractor BEFORE super(): a strategy that
-        # rendezvouses at init (sharded_rdt) is handed this extractor by
-        # create_sender. It only depends on
-        # the already-built model, not on super().
-        # TODO(haochen): Module grouping for fused-weight loaders is only enabled for CUDA IPC.
-        # transfer strategy, we can enable it for other strategies as well.
-        from skyrl.backends.skyrl_train.weight_sync import (
-            CudaIpcTransferStrategy,
-            get_transfer_strategy_cls,
-        )
+    def _build_weight_source(self, dtype: "torch.dtype", backend: str):
+        """``WeightSource`` over the FSDP-sharded policy model.
 
-        # TODO (sumanthrh): bucketing can be enabled for other strategies as well
-        # Historically, this was only enabled for CUDA IPC in order to support
-        # Flash-RL
-        enable_bucketing = (
-            get_transfer_strategy_cls(
-                weight_sync_backend=inference_engine_cfg.weight_sync_backend,
-                colocate_all=self.cfg.placement.colocate_all,
-            )
-            is CudaIpcTransferStrategy
-        )
+        ``self.model.model`` is the inner HF module, whose ``state_dict()`` keys
+        are the names vLLM expects; the outer wrapper's are prefixed differently.
+        ``weight_prefix`` covers the one case where they still differ: syncing a
+        CausalLM backbone into a vLLM multimodal namespace.
+        """
         weight_prefix = "language_model." if self._is_multimodal_lm_only else ""
-        self.weight_extractor = FSDPWeightExtractor(
-            self.model.model,
-            enable_bucketing=enable_bucketing,
-            batch_size_threshold_gb=(
-                inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if enable_bucketing else 0.0
-            ),
-            weight_prefix=weight_prefix,
-        )
+        if backend == "sharded_rdt":
+            # RDT pulls, so it needs the ownership + group channels its own
+            # source subclass adds (see sharded_rdt/sharded_rdt_base.py).
+            from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+                make_fsdp_weight_source,
+            )
 
-        # super picks the strategy and creates the sender (for sharded_rdt that
-        # includes the eager rendezvous + bake, which is why the extractor is
-        # built first).
-        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
+            return make_fsdp_weight_source(self.model.model, dtype, weight_prefix)
+
+        from skyrl.backends.skyrl_train.weight_sync.sources import FsdpWeightSource
+
+        return FsdpWeightSource(self.model.model, dtype, weight_prefix)
 
     async def _save_lora_adapters_and_sync(
         self,
@@ -295,21 +177,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     ):
         if inference_engine_client is None:
             inference_engine_client = self._weight_sync_inference_client
-        use_prefix_cache = inference_engine_cfg.enable_prefix_caching
-        generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
-        cache_reset_task = None
-        sender_handles_prefix_cache_reset = self._weight_transfer_sender.handles_prefix_cache_reset
-        # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
-        reset_prefix_cache: bool = use_prefix_cache and (
-            not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync
-        )
-        send_chunks_kwargs = {"reset_prefix_cache": reset_prefix_cache}
-
-        if reset_prefix_cache and torch.distributed.get_rank() == 0 and not sender_handles_prefix_cache_reset:
-            # clear prefix cache
-            cache_reset_task = inference_engine_client.reset_prefix_cache(reset_running_requests=True)
-
-        torch.cuda.empty_cache()
 
         # Check if this is a LoRA model
         peft_model = getattr(self.model.model, "_fsdp_wrapped_module", self.model.model)
@@ -322,30 +189,20 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # name. _resolve_lora_sync_target (shared with Megatron, defined on
             # PolicyWorkerBase) basename-guards against a malformed model_id
             # escaping lora_sync_path even though api.py already validates IDs.
+            cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
+            torch.cuda.empty_cache()
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(
                 peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
             )
-        else:
-            # Send with the sender created at init time. Disable expandable_segments
-            # around it: under colocate_all the CUDA-IPC path calls
-            # cudaIpcGetMemHandle, which is incompatible with the VMM addresses
-            # expandable segments uses, and some senders (sharded_rdt) share GPU
-            # memory on every run and ask for the toggle unconditionally.
-            with self._expandable_segments_disabled_for_sync(
-                force=self._weight_transfer_sender.force_disable_expandable_segments
-            ):
-                await self._weight_transfer_sender.send(
-                    self.weight_extractor,
-                    generator_dtype,
-                    **send_chunks_kwargs,
-                )
+            if cache_reset_task is not None:
+                await cache_reset_task
+            if self.cfg.placement.colocate_all:
+                torch.cuda.empty_cache()
+            torch.distributed.barrier()
+            return
 
-        if cache_reset_task is not None:
-            await cache_reset_task
-        if self._weight_transfer_sender.empty_cache_after_send or self.cfg.placement.colocate_all:
-            torch.cuda.empty_cache()
-        torch.distributed.barrier()
+        await self._sync_weights_to_inference_engines(inference_engine_client, inference_engine_cfg)
 
     def _set_pad_token_id(self, pad_token_id):
         # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model.model -> AutoModelForCausalLM

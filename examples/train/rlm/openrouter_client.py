@@ -182,9 +182,6 @@ class OpenRouterInferenceClient(RemoteInferenceClient):
     async def wake_up(self, *args: Any, **kwargs: Any) -> None:
         pass
 
-    async def init_weight_update_communicator(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
     async def update_named_weights(self, *args: Any, **kwargs: Any) -> None:
         pass
 

@@ -6,7 +6,7 @@ Default backend (`trainer.strategy=fsdp`). Uses PyTorch FSDP2 for distributed tr
 
 - **FSDPConfig** in `skyrl/train/config.py`.
 - **FSDPStrategy** in `skyrl/backends/skyrl_train/distributed/fsdp_strategy.py`.
-- **FSDPWeightExtractor** for extracting weights from sharded parameters (in `skyrl/backends/skyrl_train/workers/fsdp/fsdp_worker.py`).
+- **FsdpWeightSource** (`skyrl/backends/skyrl_train/weight_sync/sources.py`) presents the sharded model to weight sync as vLLM's `WeightSource`; the worker builds it in `FSDPPolicyWorkerBase._build_weight_source`.
 
 ## CPU Offload
 

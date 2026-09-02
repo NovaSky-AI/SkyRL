@@ -102,28 +102,30 @@ SkyRL uses the native weight syncing APIs in vLLM, with the following four-stage
 - `POST /update_weights` — Updates all or a subset of the weights. SkyRL uses chunked weight transfer for efficiency.
 - `POST /finish_weight_update` — Finishes the current weight update.
 
+The trainer side runs on vLLM's *trainer-send* abstraction: each training worker builds a `WeightSource` over its live model and hands it to a `TrainerWeightTransferEngine`, whose `send_weights()` drives the whole four-stage round trip above. See `skyrl/backends/skyrl_train/weight_sync/trainer_engines.py`.
+
+Four backends, selected by `generator.inference_engine.weight_sync_backend` plus `trainer.placement.colocate_all`:
+
+- **`nccl`** — non-colocated. Tensor data is broadcast over NCCL from trainer rank 0 to all inference workers, concurrently with the `/update_weights` HTTP call that ships the metadata (both sides rendezvous inside the same NCCL calls). Combined with `/pause?mode=keep` and `/resume` so in-flight rollouts pause correctly during the sync.
+- **`ipc`** — colocated, where the trainer and inference engines share GPUs. Weights are packed into one reusable buffer and exchanged via CUDA IPC handles. Combined with `/sleep` and `/wake_up` for memory management — the inference engine sleeps to free VRAM during training, then wakes for rollouts.
+- **`delta`** — weights travel as compressed deltas against the base checkpoint through a shared filesystem or object store, for setups where the two sides are not NCCL-reachable.
+- **`sharded_rdt`** — the inference workers *pull* the slices they consume from the trainer ranks over NIXL/RDMA.
+
 <Callout type="info">
-For colocated training, SkyRL currently uses chunked transfers with CUDA IPC handles and currently implements a [custom `Worker` extension](https://github.com/NovaSky-AI/SkyRL/blob/fb87f35dfe9f74f71445da60c79549773b15ba5e/skyrl/backends/skyrl_train/inference_servers/new_inference_worker_wrap.py) as a transitional implementation, pending [vllm-project/vllm#39212](https://github.com/vllm-project/vllm/issues/39212). We plan to migrate to the native APIs in the next vLLM release.
+The receive side is a vLLM `WeightTransferEngine` in each inference worker. SkyRL registers its own under `skyrl_nccl` / `skyrl_ipc`, subclassing vLLM's to also reload the speculative-decoding drafter (a separate module the main model's `load_weights` never touches). A small [`Worker` extension](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/backends/skyrl_train/inference_servers/new_inference_worker_wrap.py) remains for the two things an engine cannot reach: the checkpoint-delta `fetch_weights` call, and driving the allocator directly for KV offload.
 </Callout>
-
-SkyRL implements two transfer strategies in `skyrl/backends/skyrl_train/weight_sync/`:
-
-- **`BroadcastTransferStrategy`** (`broadcast_strategy.py`) — used for non-colocated training. Tensor data is broadcast over NCCL from trainer rank 0 to all inference workers, concurrently with `/update_weights` HTTP calls that ship the metadata. This is used in combination with `/pause?mode=keep` and `/resume` so that in-flight rollouts are paused correctly during the sync.
-- **`CudaIpcTransferStrategy`** (`cuda_ipc_strategy.py`) — used for colocated training where the trainer and inference engines share GPUs. Weights are exchanged via CUDA IPC handles. Combined with `/sleep` and `/wake_up` for memory management — the inference engine sleeps to free VRAM during training, then wakes for rollouts.
 
 Endpoint summary:
 
 | Endpoint | Plane | Purpose |
 |----------|-------|---------|
 | `/init_weight_transfer_engine` | fan-out | One-time communicator setup |
-| `/start_weight_update` * | fan-out | Begin a chunked update |
-| `/update_weights` * | fan-out | Send a tensor chunk |
-| `/finish_weight_update` * | fan-out | Commit the update |
+| `/start_weight_update` | fan-out | Begin a chunked update |
+| `/update_weights` | fan-out | Send a tensor chunk |
+| `/finish_weight_update` | fan-out | Commit the update |
 | `/pause`, `/resume` | fan-out | Generation control |
 | `/sleep`, `/wake_up` | fan-out | Colocated memory management |
 | `/v1/completions`, `/v1/chat/completions`, generate | routed | Generation |
-
-\* Currently we use custom `/collective_rpc` + worker methods that mimick the native APIs because SkyRL makes some vLLM fixes for Qwen 3.6 model loading. We will migrate to the native `/start_weight_update` and `/finish_weight_update` soon.
 
 ## End-to-end Weight Sync Flow
 

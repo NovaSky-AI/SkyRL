@@ -4,10 +4,7 @@ from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, Tuple, Ty
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync import WeightUpdateRequest
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
-        WeightSyncInitInfo,
-    )
+    from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
@@ -125,17 +122,14 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
-        """Initialize weight update communicator from init info.
+    async def update_named_weights(self, request: "LoraLoadRequest | Dict[str, Any]"):
+        """Load weights the engine can reach itself, rather than transferring them.
 
-        Args:
-            init_info: WeightSyncInitInfo from the sender containing all info needed
-                to create the appropriate receiver.
+        The only caller is the LoRA path, which passes a
+        :class:`LoraLoadRequest` naming an adapter directory on disk. Tensor
+        transfer goes through the trainer-side engines (see
+        ``weight_sync/trainer_engines.py``).
         """
-        raise NotImplementedError()
-
-    @abstractmethod
-    async def update_named_weights(self, request: "WeightUpdateRequest"):
         raise NotImplementedError()
 
     @abstractmethod
