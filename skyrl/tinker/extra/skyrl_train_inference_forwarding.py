@@ -15,15 +15,22 @@ from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.utils.log import logger
 
 
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    def __init__(
+        self,
+        engine_config: EngineConfig,
+        db_engine,
+        external_future_store: ExternalFutureStore | None = None,
+    ):
         self.engine_config = engine_config
         self.db_engine = db_engine
+        self.external_future_store = external_future_store
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
@@ -84,6 +91,10 @@ class SkyRLTrainInferenceForwardingClient:
             logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
+
+        if self.external_future_store is not None:
+            await self.external_future_store.complete(request_id, result, status)
+            return
 
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)

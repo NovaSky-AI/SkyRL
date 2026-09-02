@@ -169,17 +169,18 @@ def _read_engine_state(db_path: str):
         engine.dispose()
 
 
-def _read_future_request_type(db_path: str, request_id: int) -> str:
-    """Read the request_type of a single future from the test server's DB."""
-    from sqlmodel import Session, create_engine
+def _read_external_future_ids(db_path: str) -> set[int]:
+    """Read the IDs of terminal EXTERNAL futures from the test server's DB."""
+    from sqlmodel import Session, create_engine, select
 
+    from skyrl.tinker import types as skyrl_types
     from skyrl.tinker.db_models import FutureDB
 
     engine = create_engine(f"sqlite:///{db_path}", echo=False)
     try:
         with Session(engine) as session:
-            row = session.get(FutureDB, request_id)
-            return None if row is None else str(row.request_type)
+            statement = select(FutureDB.request_id).where(FutureDB.request_type == skyrl_types.RequestType.EXTERNAL)
+            return set(session.exec(statement).all())
     finally:
         engine.dispose()
 
@@ -216,11 +217,6 @@ def test_sample_uses_external_path(server_db_path):
     This is the "test" half of the design: the API hoists the sample off
     the engine's serial loop and into the API process's asyncio loop.
     """
-    from sqlmodel import Session, create_engine, func, select
-
-    from skyrl.tinker import types as skyrl_types
-    from skyrl.tinker.db_models import FutureDB
-
     proc, db_path, _ = server_db_path
     sc = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_PORT}/", api_key=TINKER_API_KEY)
     tc = sc.create_lora_training_client(base_model=BASE_MODEL, rank=8)
@@ -229,14 +225,7 @@ def test_sample_uses_external_path(server_db_path):
     _train_one_step(tc, tok)
     sampler = tc.save_weights_and_get_sampling_client(name="external_path_a")
 
-    # Snapshot the max future_id before submitting our sample so we can
-    # filter out any EXTERNAL futures from earlier tests.
-    eng = create_engine(f"sqlite:///{db_path}", echo=False)
-    try:
-        with Session(eng) as s:
-            max_before = s.exec(select(func.max(FutureDB.request_id))).one() or 0
-    finally:
-        eng.dispose()
+    future_ids_before = _read_external_future_ids(db_path)
 
     out = sampler.sample(
         prompt=tinker_types.ModelInput.from_ints(tok.encode("Hi", add_special_tokens=True)),
@@ -245,24 +234,16 @@ def test_sample_uses_external_path(server_db_path):
     ).result()
     assert len(out.sequences) == 1
 
-    # Look for an EXTERNAL future with id > max_before. If async routing
-    # is on, every sample creates exactly one such row.
-    eng = create_engine(f"sqlite:///{db_path}", echo=False)
-    try:
-        with Session(eng) as s:
-            stmt = (
-                select(FutureDB.request_id, FutureDB.request_type)
-                .where(FutureDB.request_id > max_before)
-                .where(FutureDB.request_type == skyrl_types.RequestType.EXTERNAL)
-            )
-            rows = s.exec(stmt).all()
-    finally:
-        eng.dispose()
-
-    assert len(rows) >= 1, (
-        f"expected at least one EXTERNAL future to be created by the sample call, "
-        f"found {len(rows)}; async sample routing may not be active"
+    # Terminal rows flush asynchronously, and in-memory futures use negative IDs
+    # so they cannot collide with the database's positive autoincrement sequence.
+    found_new_future = wait_for_condition(
+        lambda: bool(_read_external_future_ids(db_path) - future_ids_before),
+        timeout_sec=10,
+        poll_interval_sec=0.1,
     )
+    assert (
+        found_new_future
+    ), "expected a new EXTERNAL future after the sample call; async sample routing may not be active"
 
 
 def test_sample_concurrent_with_training_is_fast(server_db_path):
