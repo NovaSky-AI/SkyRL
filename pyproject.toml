@@ -165,6 +165,7 @@ megatron = [
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
     "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
+    "fast-hadamard-transform; sys_platform == 'linux'",
 ]
 
 miniswe = [
@@ -175,6 +176,12 @@ miniswe = [
 ]
 harbor = [
     "harbor[daytona,modal]; python_version >= '3.12'",
+]
+# Mooncake distributed KV for vLLM: the store connector (MooncakeStoreConnector,
+# KV-cache offloading) and P2P PD transfer (MooncakeConnector). Provides the python
+# bindings and the `mooncake_master` binary. Off-the-shelf PyPI wheel; Linux-only.
+mooncake = [
+    "mooncake-transfer-engine-cuda13; sys_platform == 'linux'",
 ]
 
 dev = [
@@ -284,9 +291,11 @@ override-dependencies = [
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
+fast-hadamard-transform = ["torch==2.11.0", "ninja"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+fast-hadamard-transform = { FAST_HADAMARD_TRANSFORM_FORCE_BUILD = "TRUE"}
 
 
 [[tool.uv.index]]
@@ -359,16 +368,41 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "91a15142a4b4442a8d46ab539d1b923bd08570d0", marker = "sys_platform == 'linux'"}
-# megatron-core main branch: https://github.com/NVIDIA/Megatron-LM/tree/main latest as of 6/8/26
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "71e418ea7d7b3a6c9a53238c543c3e0b43e11026", marker = "sys_platform == 'linux'"}
+# megatron-bridge main branch: latest as of 8/13/26
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "2b8cb21d90548a5796c748f1986c77fc1cfe2417", marker = "sys_platform == 'linux'"}
+# megatron-core must match the `3rdparty/Megatron-LM` submodule pin of the
+# megatron-bridge rev above -- that is the only megatron-core commit Bridge's
+# own CI validates against. Bump the two together, reading the submodule rev with
+# `git ls-tree <bridge-rev> 3rdparty/Megatron-LM`. This one is on the Megatron-LM
+# main branch (https://github.com/NVIDIA/Megatron-LM/tree/main), dated 8/12/26.
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "14346b65a2d0790e451919858f7771078105c5f0", marker = "sys_platform == 'linux'"}
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14
 # TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
 vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
 ]
+# NOTE (etang): upstream publishes wheels only up to cu13torch2.10, so torch 2.11 + CUDA 13 falls back
+# to a source build, which needs a local CUDA 13 toolkit. These are built from the pinned rev below with
+# nvcc 13.0.88 and torch 2.11.0+cu130 (sm_75-sm_121, glibc >= 2.35): rebuild if the torch pin moves, and
+# drop them once upstream ships cu13torch2.11. Other platforms/python versions still build from source.
+fast-hadamard-transform = [
+    { url = "https://github.com/erictang000/fast-hadamard-transform/releases/download/v1.1.0.post2-cu13torch2.11/fast_hadamard_transform-1.1.0%2Bcu13torch2.11cxx11abitrue-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/erictang000/fast-hadamard-transform/releases/download/v1.1.0.post2-cu13torch2.11/fast_hadamard_transform-1.1.0%2Bcu13torch2.11cxx11abitrue-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and (platform_machine != 'x86_64' or python_full_version < '3.12' or python_full_version >= '3.14')" },
+]
 
+
+[tool.pytest.ini_options]
+# Registering markers silences PytestUnknownMarkWarning and makes `-m` selection
+# in ci/gpu_ci_run_*.sh explicit rather than relying on free-form names.
+markers = [
+    "vllm: requires the vllm package (present under the fsdp/megatron extras)",
+    "megatron: requires the megatron extra",
+    "megatron_models: long-running Megatron model-parity tests",
+    "integrations: third-party integration tests with extra install steps",
+    "mooncake: requires the mooncake extra (mooncake-transfer-engine)",
+]
 
 [tool.black]
 line-length = 120

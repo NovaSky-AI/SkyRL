@@ -340,6 +340,59 @@ def test_run_engines_locally_false_requires_external_endpoint():
         validate_inference_engine_cfg(cfg)
 
 
+def _pd_cfg_with_role_kwargs(prefill_kwargs=None, decode_kwargs=None) -> SkyRLTrainConfig:
+    """Build a minimally-valid P/D config, optionally with role-specific engine kwargs."""
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.enable_pd = True
+    ie_cfg.num_engines = 2
+    ie_cfg.num_prefill = 1
+    if prefill_kwargs is not None:
+        ie_cfg.prefill_init_kwargs = prefill_kwargs
+    if decode_kwargs is not None:
+        ie_cfg.decode_init_kwargs = decode_kwargs
+    return cfg
+
+
+def test_role_init_kwargs_conflict_with_engine_init_kwargs_rejected():
+    cfg = _pd_cfg_with_role_kwargs(
+        prefill_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+        decode_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+    )
+    cfg.generator.inference_engine.engine_init_kwargs = {"gpu_memory_utilization": 0.8}
+
+    with pytest.raises(ValueError, match="engine_init_kwargs cannot be combined with"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_role_init_kwargs_require_enable_pd():
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.prefill_init_kwargs = {"kv_transfer_config": {"kv_connector": "NixlConnector"}}
+
+    with pytest.raises(ValueError, match="only valid with enable_pd"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_partial_role_init_kwargs_rejected():
+    # Only prefill_init_kwargs set -> decode_init_kwargs is missing kv_transfer_config.
+    cfg = _pd_cfg_with_role_kwargs(
+        prefill_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+    )
+
+    with pytest.raises(ValueError, match="decode_init_kwargs must set kv_transfer_config"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_valid_pd_role_init_kwargs_passes():
+    cfg = _pd_cfg_with_role_kwargs(
+        prefill_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+        decode_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+    )
+
+    # Should not raise.
+    validate_inference_engine_cfg(cfg)
+
+
 def test_offload_kv_for_weight_sync_rejects_colocated():
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = True

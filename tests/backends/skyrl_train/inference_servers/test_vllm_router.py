@@ -141,3 +141,47 @@ class TestBuildRouterArgs:
             args = build_router_args(ie_cfg, server_urls=urls)
         assert args.policy == "round_robin"
         assert args.request_timeout_secs == 60
+
+    def test_pd_mode_mooncake(self):
+        cfg = SkyRLTrainConfig()
+        ie_cfg = cfg.generator.inference_engine
+        prefill = ["http://p1:8000", "http://p2:8000"]
+        decode = ["http://d1:8001"]
+        bootstrap_ports = [40001, 40002]
+        with patch("skyrl.backends.skyrl_train.inference_servers.common.get_open_port", return_value=30000):
+            args = build_router_args(
+                ie_cfg,
+                prefill_urls=prefill,
+                decode_urls=decode,
+                prefill_bootstrap_ports=bootstrap_ports,
+                pd_kv_connector="mooncake",
+            )
+        assert args.vllm_pd_disaggregation is True
+        assert args.prefill_urls == [("http://p1:8000", 40001), ("http://p2:8000", 40002)]
+        assert args.kv_connector == "mooncake"
+
+    def test_pd_mode_bootstrap_ports_length_mismatch_raises(self):
+        cfg = SkyRLTrainConfig()
+        ie_cfg = cfg.generator.inference_engine
+        prefill = ["http://p1:8000", "http://p2:8000"]
+        decode = ["http://d1:8001"]
+        with patch("skyrl.backends.skyrl_train.inference_servers.common.get_open_port", return_value=30000):
+            with pytest.raises(AssertionError, match="must parallel"):
+                build_router_args(
+                    ie_cfg,
+                    prefill_urls=prefill,
+                    decode_urls=decode,
+                    prefill_bootstrap_ports=[40001],
+                    pd_kv_connector="mooncake",
+                )
+
+    def test_pd_mode_nixl_default_has_none_bootstrap_port(self):
+        cfg = SkyRLTrainConfig()
+        ie_cfg = cfg.generator.inference_engine
+        prefill = ["http://p1:8000"]
+        decode = ["http://d1:8001"]
+        with patch("skyrl.backends.skyrl_train.inference_servers.common.get_open_port", return_value=30000):
+            args = build_router_args(ie_cfg, prefill_urls=prefill, decode_urls=decode)
+        assert args.prefill_urls == [("http://p1:8000", None)]
+        # NIXL/default branch does not set kv_connector.
+        assert getattr(args, "kv_connector", None) != "mooncake"

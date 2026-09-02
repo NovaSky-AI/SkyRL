@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    _clear_mtp_hybrid_pattern,
     _convert_moe_experts_lora_to_vllm,
     broadcast_object_across_pp_ranks,
     freeze_moe_router,
@@ -156,7 +157,9 @@ class MegatronWeightExtractor(WeightExtractor):
                 }
                 scale = prec_to_bytes[self.training_dtype] / prec_to_bytes[param.dtype]
                 size_in_bytes = param.element_size() * param.numel() * tp_size * ep_size * scale
-            return broadcast_object_across_pp_ranks(size_in_bytes)
+            # allow_missing: a task may correspond to no parameter on any PP rank
+            # (see the layout note below), in which case there is no size to agree on.
+            return broadcast_object_across_pp_ranks(size_in_bytes, allow_missing=True)
 
         sizes = [
             calculate_size_in_bytes(
@@ -176,6 +179,14 @@ class MegatronWeightExtractor(WeightExtractor):
         regular_task_indices: list[int] = []
 
         for idx, task in enumerate(weight_conversion_tasks):
+            # Skip tasks that own no parameter on any PP rank. megatron-bridge can
+            # register mappings for BOTH MoE expert layouts -- grouped-GEMM
+            # (`mlp.experts.linear_fc1`) and SequentialMLP
+            # (`mlp.experts.local_experts.*.linear_fc1`) -- so a model built with one
+            # layout still gets conversion tasks for the other. Those have no weights
+            # to export, and including them would break bucket-size accounting.
+            if sizes[idx] is None:
+                continue
             if getattr(task.mapping, "is_grouped_export", False):
                 gk = getattr(task.mapping, "group_key", None)
                 grouped_task_indices.setdefault(gk, []).append(idx)
@@ -449,6 +460,7 @@ class MegatronWorker:
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
             provider.mtp_num_layers = None
+            _clear_mtp_hybrid_pattern(provider)
 
         # Workaround for megatron-bridge CONFIG_MAPPING dropping None values:
         # MLA models like Moonlight-16B have q_lora_rank=None (no Q compression),
@@ -494,9 +506,27 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
+        # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
+        # sized for the full model, and megatron-core asserts
+        # `len(pattern) == num_layers` in `get_linear_attention_pattern`. Truncate so a
+        # `num_layers` override still builds. Only shrink: a pattern shorter than
+        # `num_layers` is a genuine misconfiguration, so let the upstream assert report it.
+        linear_attention_freq = getattr(provider, "linear_attention_freq", None)
+        if (
+            isinstance(linear_attention_freq, (list, tuple))
+            and provider.num_layers is not None
+            and len(linear_attention_freq) > provider.num_layers
+        ):
+            logger.info(
+                f"Truncating linear_attention_freq from {len(linear_attention_freq)} to "
+                f"{provider.num_layers} entries to match the configured num_layers"
+            )
+            provider.linear_attention_freq = linear_attention_freq[: provider.num_layers]
+
         # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
         if not enable_mtp:
             provider.mtp_num_layers = None
+            _clear_mtp_hybrid_pattern(provider)
         elif megatron_config.mtp_num_layers is not None:
             provider.mtp_num_layers = megatron_config.mtp_num_layers or None
         # MTP training requires the model to resolve to >= 1 head
@@ -1259,11 +1289,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             torch.cuda.empty_cache()
 
         # Aggregate metrics across micro-batches
-        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        loss_fn_output_batches = []
         for m_batch, metrics in zip(micro_buffer, metrics_list):
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            if metrics is None:
+                loss_fn_output_batches.append([])
+                continue
+            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
             # Skip fully-padding microbatches: their metrics (clip_ratio=0, policy_entropy=0,
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
             # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
@@ -1307,6 +1339,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if moe_metrics:
                 for k, v in moe_metrics.items():
                     status[k] = v
+
+        if not any(loss_fn_output_batches):
+            all_loss_fn_outputs = []
+        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
+            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
+        else:
+            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
@@ -1597,6 +1636,27 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.adapter_store is None:
             return  # FFT path: no-op
         self.adapter_store.swap_to(model_id, self.actor_module, self.optimizer)
+
+    def offload_to_cpu(self, offload_optimizer: bool = True, offload_model: bool = True):
+        """Park the live adapter's grads before offloading.
+
+        The optimizer half of the offload frees the DDP grad buffers, dropping
+        any grads still waiting on an optim_step. Parked grads survive the
+        offload and any swap that happens while offloaded.
+        """
+        if offload_optimizer and self.adapter_store is not None and self.actor_module is not None:
+            self.adapter_store.park_grads(self.actor_module)
+        super().offload_to_cpu(offload_optimizer=offload_optimizer, offload_model=offload_model)
+
+    def backload_to_gpu(self, backload_optimizer: bool = True, backload_model: bool = True):
+        """Unpark the live adapter's grads after backloading.
+
+        The live adapter may differ from the parked one if a swap happened in
+        between.
+        """
+        super().backload_to_gpu(backload_optimizer=backload_optimizer, backload_model=backload_model)
+        if backload_optimizer and self.adapter_store is not None and self.actor_module is not None:
+            self.adapter_store.unpark_grads(self.actor_module)
 
     def adapter_store_state(self) -> dict:
         """Diagnostic: return current_id + registered model_ids. Cheap; useful

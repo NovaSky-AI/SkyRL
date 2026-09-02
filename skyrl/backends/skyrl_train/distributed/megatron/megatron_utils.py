@@ -657,7 +657,7 @@ def get_model_config(model):
     return get_attr_wrapped_model(model, "config", allow_none=False)
 
 
-def broadcast_object_across_pp_ranks(obj):
+def broadcast_object_across_pp_ranks(obj, allow_missing: bool = False):
     """Broadcast an object across pipeline parallel ranks.
 
     From Nemo-RL: https://github.com/NVIDIA-NeMo/RL/blob/0a769cc3553a265dd1ca4648de0a7d0b1ad5ece6/nemo_rl/models/policy/megatron_policy_worker.py#L136
@@ -668,12 +668,18 @@ def broadcast_object_across_pp_ranks(obj):
 
     Args:
         obj: The object to broadcast. Can be None on ranks that don't own it.
+        allow_missing: If True, return None when *no* rank owns the object instead
+            of raising. Callers enumerating conversion tasks need this: since
+            megatron-bridge 0.7.0 a mapping registry can describe parameters that
+            the built model does not contain (see ``_init_param_buckets``).
 
     Returns:
-        The object on all ranks (either the original or the broadcast copy).
+        The object on all ranks (either the original or the broadcast copy), or
+        None if no rank owns it and ``allow_missing`` is set.
 
     Raises:
-        ValueError: If the object doesn't exist on any pipeline parallel rank.
+        ValueError: If the object doesn't exist on any pipeline parallel rank and
+            ``allow_missing`` is False.
     """
     pp_size = mpu.get_pipeline_model_parallel_world_size()
     pp_group = mpu.get_pipeline_model_parallel_group()
@@ -698,6 +704,8 @@ def broadcast_object_across_pp_ranks(obj):
             break
 
     if src_rank is None:
+        if allow_missing:
+            return None
         raise ValueError("Object must exist on at least one PP rank")
 
     # ------------------------------------------------------------------
@@ -725,3 +733,19 @@ def to_te_attention_mask(attention_mask: Optional[torch.Tensor]) -> Optional[tor
     if attention_mask is None or attention_mask.dim() != 2:
         return attention_mask
     return (~attention_mask.bool())[:, None, None, :]
+
+
+def _clear_mtp_hybrid_pattern(provider) -> None:
+    """Drop the MTP block from a hybrid provider's layer pattern.
+
+    Setting ``mtp_num_layers = None`` is not enough for hybrid (Mamba/attention/MoE)
+    models such as NemotronH.  ``HybridModelProvider.finalize()`` appends
+    ``mtp_hybrid_override_pattern`` to ``hybrid_layer_pattern`` whenever that field is
+    set -- and because ``mtp_use_repeated_layer`` defaults to True it appends one copy
+    even for ``mtp_num_layers=None`` -- then re-infers the depth back out of the
+    combined pattern, undoing the disable.  Clearing the pattern too keeps the guard in
+    ``finalize()`` false so the head is never built.  No-op on providers without the
+    field (GPTModel-based MTP models like DeepSeek/GLM honor ``mtp_num_layers``).
+    """
+    if hasattr(provider, "mtp_hybrid_override_pattern"):
+        provider.mtp_hybrid_override_pattern = None
