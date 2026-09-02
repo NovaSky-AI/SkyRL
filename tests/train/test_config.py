@@ -418,6 +418,8 @@ def test_serialized_fp8_fp32_scales_reject_vllm_e8m0(monkeypatch):
 
     with pytest.raises(ValueError, match="VLLM_USE_DEEP_GEMM_E8M0=0"):
         prepare_runtime_environment(cfg)
+
+
 def test_cli_overrides_plus_prefix_rejected():
     with pytest.raises(ValueError, match="The '\\+' prefix"):
         SkyRLTrainConfig.from_cli_overrides(["+new_field=value"])
