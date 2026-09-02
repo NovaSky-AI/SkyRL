@@ -36,7 +36,7 @@ class SkyRLTrainInferenceForwardingClient:
                 connect=10.0,
                 read=engine_config.forwarding_inference_timeout_sec,
                 write=300.0,
-                pool=300.0,
+                pool=engine_config.forwarding_inference_timeout_sec,
             ),
             limits=httpx.Limits(
                 max_connections=max_conn,
