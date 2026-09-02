@@ -287,7 +287,6 @@ async def lifespan(app: FastAPI):
     app.state.sampling_model_cache_lock = asyncio.Lock()
     app.state.validated_sampler_checkpoints = set()
     app.state.sampler_checkpoint_validation_lock = asyncio.Lock()
-    app.state.proto_serialization_lock = asyncio.Lock()
 
     # Setup external inference client if configured.
     #
@@ -1505,14 +1504,19 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
             types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
             and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
         ):
-            async with req.app.state.proto_serialization_lock:
-                content = await asyncio.to_thread(
-                    _serialize_proto_result,
-                    types.RequestType(request_type),
-                    result_data,
-                )
-            return Response(content=content, media_type=PROTO_CONTENT_TYPE)
-        return raw_json_response(result_data)
+            content = await asyncio.to_thread(
+                _serialize_proto_result,
+                types.RequestType(request_type),
+                result_data,
+            )
+            response: Response = Response(content=content, media_type=PROTO_CONTENT_TYPE)
+        else:
+            response = raw_json_response(result_data)
+        # Start the retry-grace clock now that the response is built and about to
+        # be sent, so a large result is never evicted mid-delivery.
+        if found_in_memory:
+            external_future_store.mark_retrieved(request_id)
+        return response
 
     # Return 400 for handled errors (validation, etc.), 500 for unexpected failures.
     # Every writer of a FAILED row stores a types.ErrorResponse, so decode it as

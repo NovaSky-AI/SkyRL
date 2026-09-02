@@ -268,6 +268,9 @@ async def test_retrieve_future_bounds_protobuf_serialization_off_event_loop(monk
                 types.SampleOutput(sequences=[]).model_dump_json(),
             )
 
+        def mark_retrieved(self, request_id):
+            pass
+
     def serialize_result_in_thread(request_type, result_data):
         nonlocal active_serializations, max_active_serializations
         serialization_thread_ids.append(threading.get_ident())
@@ -547,6 +550,7 @@ async def test_sweep_evicts_entries_by_ttl(future_store):
     retrieved_id = store.create("model_a", _sample_input(1))
     await store.complete(retrieved_id, result, RequestStatus.COMPLETED)
     await store.wait(retrieved_id, timeout=1)
+    store.mark_retrieved(retrieved_id)
     completed_id = store.create("model_a", _sample_input(2))
     await store.complete(completed_id, result, RequestStatus.COMPLETED)
     pending_id = store.create("model_a", _sample_input(3))
@@ -555,6 +559,9 @@ async def test_sweep_evicts_entries_by_ttl(future_store):
     store._sweep(now)
     assert set(store._entries) == {retrieved_id, completed_id, pending_id}
 
+    # A completed-but-undelivered entry (read via wait() but never marked
+    # delivered) must NOT be governed by the short retrieved-TTL: a slow
+    # in-flight delivery would otherwise be evicted out from under the client.
     store._sweep(now + timedelta(seconds=ExternalFutureStore._RETRIEVED_TTL_SECONDS + 1))
     assert set(store._entries) == {completed_id, pending_id}
 

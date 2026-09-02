@@ -40,10 +40,14 @@ class ExternalFutureStore:
     # httpx timeout (with retries, potentially many minutes per task).
     _FORWARDING_SHUTDOWN_TIMEOUT_SECONDS = 10.0
     _SWEEP_INTERVAL_SECONDS = 30.0
-    # Retrieved entries linger briefly so an SDK retry after a lost HTTP
-    # response still finds its result.
-    _RETRIEVED_TTL_SECONDS = 60.0
-    # Completed entries whose client never came back for them.
+    # Grace kept after a result has been *delivered* to the client, so an SDK
+    # retry following a lost HTTP response still finds it. Measured from
+    # delivery (mark_retrieved), never from the in-store read: a large result
+    # can spend minutes being serialized and sent, and starting the clock at
+    # read would evict it mid-delivery.
+    _RETRIEVED_TTL_SECONDS = 120.0
+    # Completed but not yet delivered — governs the read/serialize/send window
+    # and clients that never come back.
     _COMPLETED_TTL_SECONDS = 600.0
     # Pending entries whose forwarding task died without completing them.
     _PENDING_TTL_SECONDS = 3600.0
@@ -79,8 +83,19 @@ class ExternalFutureStore:
             await asyncio.wait_for(entry.event.wait(), timeout)
         except asyncio.TimeoutError:
             return None
-        entry.retrieved_at = datetime.now(timezone.utc)
         return entry.status, types.RequestType.EXTERNAL, entry.result_data
+
+    def mark_retrieved(self, request_id: int) -> None:
+        """Record that a result was delivered, starting its retry-grace clock.
+
+        Called by the endpoint after the response is serialized and handed to
+        the transport — not by wait() — so the short retrieved-TTL measures time
+        since delivery, and a slow in-flight delivery is never swept out from
+        under a retrying client.
+        """
+        entry = self._entries.get(request_id)
+        if entry is not None:
+            entry.retrieved_at = datetime.now(timezone.utc)
 
     async def complete(self, request_id: int, result_data: BaseModel, status: RequestStatus) -> None:
         entry = self._entries.get(request_id)
