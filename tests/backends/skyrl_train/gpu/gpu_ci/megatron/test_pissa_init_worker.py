@@ -6,13 +6,11 @@ import pytest
 import ray
 import torch
 
+from examples.train.pissa import pissa_init_worker
+from examples.train.pissa.pissa_init_worker import PiSSAInitWorker
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
-)
-from skyrl.backends.skyrl_train.workers.megatron import pissa_init_worker
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init_worker import (
-    PiSSAInitWorker,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_worker import (

@@ -3,6 +3,10 @@
 import contextlib
 import math
 
+# Import skyrl before megatron: skyrl/__init__.py installs import-time compat shims
+# (see skyrl/_compat.py) that megatron-core imports depend on.
+import skyrl  # noqa: F401
+
 import megatron.core.parallel_state as mpu
 import ray
 import torch

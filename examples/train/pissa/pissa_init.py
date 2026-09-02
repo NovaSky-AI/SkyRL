@@ -7,9 +7,7 @@ from pathlib import Path
 import ray
 import torch
 
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init_worker import (
-    PiSSAInitWorker,
-)
+from examples.train.pissa.pissa_init_worker import PiSSAInitWorker
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 from skyrl.train.utils.utils import initialize_ray
