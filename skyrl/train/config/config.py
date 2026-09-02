@@ -117,7 +117,7 @@ class SkyRLLoraConfig(BaseConfig):
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
 
-    share_expert_adapters: bool = False
+    share_expert_adapters: bool = True
     """Share one LoRA adapter across local grouped experts."""
 
     max_loras: int = 1
