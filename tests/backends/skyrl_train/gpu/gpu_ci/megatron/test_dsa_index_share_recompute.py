@@ -33,6 +33,14 @@ pytestmark = pytest.mark.megatron
 @pytest.fixture(scope="module")
 def patched_megatron():
     """Apply the backport, skipping if this megatron-core does not need it."""
+    # Import the modules that do `from megatron.core.recompute import
+    # checkpointed_forward` *before* patching. Without this the patch runs before
+    # they exist, they later bind the already-patched function on first import,
+    # and the sys.modules rebind loop -- the load-bearing path in a real worker,
+    # where megatron is long since imported -- is never exercised.
+    import megatron.core.models.hybrid.hybrid_block  # noqa: F401
+    import megatron.core.transformer.transformer_block  # noqa: F401
+
     if not patch_dsa_index_share():
         pytest.skip(
             "DSA index-share patch did not apply -- megatron-core either already "
@@ -156,8 +164,15 @@ def test_patch_is_idempotent(patched_megatron):
 
 
 def test_importers_see_the_patched_function(patched_megatron):
-    """TransformerBlock bound the function by name, so it must be rebound too."""
+    """Modules that bound the function by name must be rebound too.
+
+    Both were imported before the patch applied (see the fixture), so this
+    exercises the ``sys.modules`` rebind rather than a fresh import picking up
+    the already-patched value.
+    """
     from megatron.core import recompute
+    from megatron.core.models.hybrid import hybrid_block
     from megatron.core.transformer import transformer_block
 
     assert transformer_block.checkpointed_forward is recompute.checkpointed_forward
+    assert hybrid_block.checkpointed_forward is recompute.checkpointed_forward

@@ -43,20 +43,30 @@ alone would silently do nothing. It finds them by scanning ``sys.modules`` for
 the old function object rather than by hardcoding names, so a new importer in a
 future megatron-core is picked up too.
 
+The diff is applied by GNU ``patch`` itself, to a throwaway copy of
+``recompute.py`` under a temp directory -- so hunk context *and* line numbers are
+validated by a battle-tested implementation rather than by hand-rolled parsing.
+``--forward`` means an already-applied or mismatched patch is refused outright
+instead of producing a mangled file. Only the patched ``checkpointed_forward``
+is then compiled into the live module.
+
 DELETE THIS PATCH once the megatron-core pin includes NVIDIA/Megatron-LM#6793.
 It is a temporary backport of an upstream fix, not a SkyRL behavior change. It
-fails safe in the meantime: every hunk's context must match the installed source
-exactly and uniquely, so on a restructured megatron-core this logs and no-ops
-rather than misfiring, and it detects the real fix and steps aside. Check this
-file when bumping the pin.
+fails safe in the meantime: if the patch does not apply cleanly this logs and
+no-ops rather than misfiring, and it detects the real fix and steps aside. Check
+this file when bumping the pin.
 """
 
+import ast
 import inspect
+import shutil
+import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator, Optional
 
 from loguru import logger
 
@@ -69,71 +79,61 @@ _UPSTREAM_SENTINEL = "_dsa_index_share_carrier_scope"
 _PATCH_FILE = Path(__file__).with_name("dsa_index_share_recompute.patch")
 
 
-def _parse_unified_diff(text: str) -> List[Tuple[str, str]]:
-    """Turn a unified diff into ``(before, after)`` literal blocks, one per hunk.
+# Path the patch's headers are relative to, recreated under a temp directory so
+# `patch -p1` resolves `a/megatron/core/recompute.py` without touching the real
+# install.
+_PATCH_TARGET = Path("megatron") / "core" / "recompute.py"
 
-    Line numbers are deliberately ignored: each hunk is applied by matching its
-    context text, so the patch keeps working if the surrounding file shifts. The
-    caller enforces that every ``before`` block occurs exactly once.
+_FUNCTION_NAME = "checkpointed_forward"
+
+
+def _extract_function(module_source: str, name: str) -> Optional[str]:
+    """Return the source of the top-level function ``name``, or None if absent."""
+    try:
+        tree = ast.parse(module_source)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return ast.get_source_segment(module_source, node)
+    return None
+
+
+def _apply_patch_file(module_source: str) -> Optional[str]:
+    """Apply the shipped .patch to ``module_source`` with GNU patch, in a temp dir.
+
+    Returns the patched module source, or None if the patch does not apply
+    cleanly -- which is the fail-safe path: `patch --forward` refuses an
+    already-applied or mismatched patch rather than producing a mangled file.
     """
-    hunks: List[Tuple[str, str]] = []
-    before: List[str] = []
-    after: List[str] = []
-    in_hunk = False
+    executable = shutil.which("patch")
+    if executable is None:
+        logger.warning("`patch` is not on PATH; skipping DSA index-share patch")
+        return None
 
-    def flush() -> None:
-        if in_hunk and before and after:
-            hunks.append(("".join(before), "".join(after)))
-
-    for raw in text.splitlines(keepends=True):
-        if raw.startswith("@@"):
-            flush()
-            before, after, in_hunk = [], [], True
-            continue
-        if not in_hunk:
-            continue
-        if raw.startswith(("diff ", "--- ", "+++ ")):
-            flush()
-            before, after, in_hunk = [], [], False
-            continue
-        if raw.startswith("\\"):
-            # "\ No newline at end of file" -- metadata, not content.
-            continue
-        if raw.startswith("+"):
-            after.append(raw[1:])
-        elif raw.startswith("-"):
-            before.append(raw[1:])
-        elif raw.startswith(" "):
-            before.append(raw[1:])
-            after.append(raw[1:])
-        elif raw.strip() == "":
-            # A blank context line whose single leading space was stripped.
-            before.append(raw)
-            after.append(raw)
-        else:
-            # Anything else ends the hunk (e.g. trailing prose in a `git show`).
-            flush()
-            before, after, in_hunk = [], [], False
-    flush()
-    return hunks
-
-
-def _apply_hunks(source: str, hunks: List[Tuple[str, str]]) -> Optional[str]:
-    """Apply ``hunks`` to ``source``, or return None if any context is not unique."""
-    patched = source
-    for index, (before, after) in enumerate(hunks, start=1):
-        occurrences = patched.count(before)
-        if occurrences != 1:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / _PATCH_TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(module_source)
+        result = subprocess.run(
+            # --forward: refuse a reversed/already-applied patch instead of
+            # "un-applying" it. -r -: never leave .rej files behind.
+            [executable, "-p1", "--batch", "--forward", "--silent", "-r", "-", "-i", str(_PATCH_FILE)],
+            cwd=tmpdir,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
             logger.info(
-                "megatron-core checkpointed_forward does not match the patch context "
-                "(hunk {} matched {} times, expected exactly 1); skipping DSA index-share patch. "
-                "If megatron-core now includes NVIDIA/Megatron-LM#6793, delete this patch module.",
-                index,
-                occurrences,
+                "{} does not apply to the installed megatron-core (patch exit {}: {}); "
+                "skipping DSA index-share patch. If megatron-core now includes "
+                "NVIDIA/Megatron-LM#6793, delete this patch module.",
+                _PATCH_FILE.name,
+                result.returncode,
+                (result.stderr or result.stdout or "").strip().replace("\n", "; ") or "no output",
             )
             return None
-        patched = patched.replace(before, after)
-    return patched
+        return target.read_text()
 
 
 class _DSAIndexShareCarrier:
@@ -224,25 +224,26 @@ def patch_dsa_index_share(force: bool = False) -> bool:
         logger.warning("DSAttention._get_index_share_carrier is missing; skipping DSA index-share patch")
         return False
 
-    try:
-        hunks = _parse_unified_diff(_PATCH_FILE.read_text())
-    except OSError:
-        logger.warning("Cannot read {}; skipping DSA index-share patch", _PATCH_FILE)
-        return False
-    if not hunks:
-        logger.warning("{} contains no hunks; skipping DSA index-share patch", _PATCH_FILE)
+    if not _PATCH_FILE.is_file():
+        logger.warning("{} is missing; skipping DSA index-share patch", _PATCH_FILE)
         return False
 
     try:
-        source = inspect.getsource(target)
+        module_source = inspect.getsource(recompute)
     except (OSError, TypeError):
-        logger.warning("Cannot read megatron-core checkpointed_forward source; skipping DSA index-share patch")
+        logger.warning("Cannot read megatron-core recompute.py source; skipping DSA index-share patch")
         return False
 
     # Resolve the whole edit before mutating anything, so a source drift cannot
-    # leave the DSA module half-patched.
-    patched_source = _apply_hunks(source, hunks)
+    # leave the DSA module half-patched. The patch is applied to the whole file so
+    # GNU patch validates hunk line numbers as well as context.
+    patched_module = _apply_patch_file(module_source)
+    if patched_module is None:
+        return False
+
+    patched_source = _extract_function(patched_module, _FUNCTION_NAME)
     if patched_source is None:
+        logger.warning("Patched recompute.py has no {}; skipping DSA index-share patch", _FUNCTION_NAME)
         return False
 
     # Publish the carrier machinery on megatron-core's own DSA module: the
@@ -256,7 +257,11 @@ def patch_dsa_index_share(force: bool = False) -> bool:
     # keeps the live module globals it depends on (tensor_parallel, te_checkpoint,
     # get_fp8_context, ...), and so the rebind lands on the module.
     filename = getattr(recompute, "__file__", None) or "<string>"
-    exec(compile(patched_source, filename, "exec"), recompute.__dict__)  # noqa: S102
+    # Pad so the compiled function keeps its real first line, otherwise every
+    # traceback frame inside it points at line 1 of recompute.py. Lines after the
+    # patch's own insertion are still shifted by the inserted count.
+    padding = "\n" * max(getattr(target, "__code__", None).co_firstlineno - 1, 0)
+    exec(compile(padding + patched_source, filename, "exec"), recompute.__dict__)  # noqa: S102
 
     patched = recompute.checkpointed_forward
     if patched is target:
