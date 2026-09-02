@@ -127,6 +127,7 @@ fsdp = [
     "torch==2.11.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -164,6 +165,7 @@ megatron = [
     "megatron-bridge; sys_platform == 'linux' and python_version >= '3.12'",
     "megatron-core; sys_platform == 'linux' and python_version >= '3.12'",
     "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
     "fast-hadamard-transform; sys_platform == 'linux'",
 ]
@@ -248,17 +250,21 @@ override-dependencies = [
     # so it doesn't pull a second, unused CUDA runtime in alongside the cu13 one.
     "nixl-cu12; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our pin. vLLM 0.28.0 needs >=0.6.16: it imports
-    # `flashinfer.autotuner.set_autotune_process_group`, which 0.6.13 does not
-    # have, and the engine fails to start without it.
-    # flashinfer-cubin was never released past 0.6.13, and flashinfer hard-errors
-    # when an installed cubin's version differs from its own -- so cubin is
-    # dropped rather than pinned. It is optional: `flashinfer.jit.env._get_cubin_dir`
-    # only consults the package when installed, else falling back to
-    # FLASHINFER_CUBIN_DIR or the ~/.cache/flashinfer cubin cache.
+    # our pin, so all three flashinfer packages are held here. vLLM 0.28.0 needs
+    # >=0.6.16: it imports `flashinfer.autotuner.set_autotune_process_group`,
+    # which 0.6.14 does not have, and the engine fails to start without it.
+    # flashinfer hard-errors when an installed cubin's version differs from its
+    # own, so the three must move together.
+    # They must also be >=0.6.13: older flashinfer rejects the `layout_code` vLLM's
+    # allreduce+RMS fusion pass hands the MNNVL backend ("MNNVL AllReduce does
+    # not support quantization fusion").
+    #
+    # flashinfer-cubin is not published to PyPI past 0.6.13, so it (like
+    # flashinfer-jit-cache) comes from flashinfer's own index -- see the
+    # `flashinfer` index and [tool.uv.sources] below.
     "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin; sys_platform == 'never'",
+    "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
     # vLLM 0.28.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both overrides
     # hold these at the versions the lock already resolved to before mamba-ssm moved
@@ -317,6 +323,14 @@ name = "flashinfer-cu130"
 url = "https://flashinfer.ai/whl/cu130"
 explicit = true
 
+# flashinfer's CUDA-agnostic index. flashinfer-cubin is a pure-python wheel
+# (py3-none-any) that stopped being published to PyPI after 0.6.13, so it is
+# sourced here instead; the cu130 index above only carries flashinfer-jit-cache.
+[[tool.uv.index]]
+name = "flashinfer"
+url = "https://flashinfer.ai/whl/"
+explicit = true
+
 # Astral's prebuilt GPU wheels (https://wheels.astral.sh). cu130 to match torch's
 # CUDA variant. Wheels are published per (CUDA, torch) pair and carry that pair in
 # a local version segment (e.g. `+cu.13.0.torch.2.11`), so the exact build must be
@@ -330,6 +344,7 @@ explicit = true
 skyrl-gym = { path = "./skyrl-gym", editable = true }
 # Match torch's CUDA variant (cu130).
 flashinfer-jit-cache = { index = "flashinfer-cu130", marker = "sys_platform == 'linux'" }
+flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 
 # torch-2.11 builds of these aren't published on PyPI, so they come from Astral's
 # prebuilt GPU index instead of wheels built by hand on personal forks. Astral

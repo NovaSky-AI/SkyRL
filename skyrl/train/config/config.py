@@ -119,6 +119,9 @@ class SkyRLLoraConfig(BaseConfig):
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
 
+    share_expert_adapters: bool = True
+    """Share one LoRA adapter across local grouped experts."""
+
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
     single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable

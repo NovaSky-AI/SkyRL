@@ -606,6 +606,7 @@ class MegatronWorker:
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
                 lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
+                share_expert_adapters=lora_config.share_expert_adapters,
             )
         elif lora_type == "canonical_lora":
             self.lora_cls = CanonicalLoRA(
