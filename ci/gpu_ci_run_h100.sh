@@ -12,5 +12,6 @@ uv run --directory . --isolated --extra dev --extra fsdp pytest -s -vvv -m h100 
 
 # Run Megatron h100 tests.
 uv run --directory . --isolated --extra dev --extra megatron pytest -s -vvv -m h100 \
+    tests/backends/skyrl_train/gpu/gpu_ci/test_deep_gemm.py \
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py \
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_router_replay.py
