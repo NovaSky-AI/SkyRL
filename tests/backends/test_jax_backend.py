@@ -371,7 +371,7 @@ def test_process_optim_step_hyperparams_behavior():
 
 
 def test_optim_step_returns_metrics():
-    """optim_step should return learning rate and grad norm metrics."""
+    """optim_step should return metrics and invalidate loaded sampler weights."""
     config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, mhc_expansion_rate=4)
     backend = JaxBackend(BASE_MODEL, config)
 
@@ -381,6 +381,7 @@ def test_optim_step_returns_metrics():
     tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
     reqs = {"1001": (model_id, make_fwd_bwd_input(tokens))}
     backend.forward_backward(prepare_model_pass_batch(reqs))
+    backend.models[model_id].loaded_checkpoint_id = "sampler_before_step"
 
     learning_rate = 1e-4
     step_output = backend.optim_step(
@@ -391,6 +392,7 @@ def test_optim_step_returns_metrics():
     assert step_output.metrics["skyrl.ai/learning_rate"] == pytest.approx(learning_rate, rel=2e-3)
     assert step_output.metrics["skyrl.ai/grad_norm"] > 0
     assert step_output.metrics["skyrl.ai/mhc_gradient_norm"] >= 0
+    assert backend.models[model_id].loaded_checkpoint_id is None
 
     no_grad_output = backend.optim_step(
         model_id,
