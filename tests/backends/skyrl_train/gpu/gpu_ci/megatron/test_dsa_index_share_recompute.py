@@ -181,45 +181,12 @@ def test_refuses_a_target_it_does_not_recognise(patched_megatron):
     assert mod._is_expected_target(_impostor, _Foreign) is False
 
 
-def test_rebind_is_confined_to_megatron(patched_megatron):
-    """A non-megatron holder is reported, not silently rebound."""
-    import sys
-    import types
-
-    from megatron.core import recompute
-
-    from skyrl.backends.skyrl_train.patches.megatron import patch_dsa_index_share as mod
-
-    target = recompute.checkpointed_forward
-
-    def _replacement():
-        pass
-
-    sentinel = types.ModuleType("not_megatron_holder")
-    sentinel.checkpointed_forward = target
-    sys.modules["not_megatron_holder"] = sentinel
-    rebound = []
-    try:
-        rebound = mod._rebind_importers(target, _replacement)
-        assert "not_megatron_holder" not in rebound
-        assert sentinel.checkpointed_forward is target  # untouched
-        assert all(name.startswith("megatron.") for name in rebound)
-    finally:
-        # This test really did rebind the live megatron modules; put them back.
-        for name in rebound:
-            setattr(sys.modules[name], "checkpointed_forward", target)
-        sys.modules.pop("not_megatron_holder", None)
-
-    for name in rebound:
-        assert getattr(sys.modules[name], "checkpointed_forward") is target
-
-
 def test_importers_see_the_patched_function(patched_megatron):
     """Modules that bound the function by name must be rebound too.
 
     Both were imported before the patch applied (see the fixture), so this
-    exercises the ``sys.modules`` rebind rather than a fresh import picking up
-    the already-patched value.
+    exercises the rebind rather than a fresh import picking up the already-patched
+    value.
     """
     from megatron.core import recompute
     from megatron.core.models.hybrid import hybrid_block

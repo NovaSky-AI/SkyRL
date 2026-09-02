@@ -37,16 +37,14 @@ leave ``transformer_block``/``hybrid_block`` holding the old function. Applying
 in memory avoids both, plus the file locking that concurrent Ray actors sharing
 one environment would otherwise need.
 
-``checkpointed_forward`` is imported *by name* into those two modules, so the
-rebind below must cover them as well -- rebinding ``megatron.core.recompute``
-alone would silently do nothing. It finds them by identity among megatron's own
-modules rather than by hardcoding names, so a new importer in a future
-megatron-core is picked up too.
+``checkpointed_forward`` is imported *by name* into ``transformer_block`` and
+``hybrid_block``, so the rebind below must cover them as well -- rebinding
+``megatron.core.recompute`` alone would silently do nothing. That pair is fixed
+for the megatron-core rev pinned in pyproject.toml; re-check it when bumping.
 
 DELETE THIS PATCH once the megatron-core pin includes NVIDIA/Megatron-LM#6793.
 """
 
-import ast
 import inspect
 import os
 import shutil
@@ -69,37 +67,28 @@ _UPSTREAM_SENTINEL = "_dsa_index_share_carrier_scope"
 _PATCH_FILE = Path(__file__).with_name("dsa_index_share_recompute.patch")
 
 
-# Path the patch's headers are relative to, recreated under a temp directory so
-# `patch -p1` resolves `a/megatron/core/recompute.py` without touching the real
-# install.
-_PATCH_TARGET = Path("megatron") / "core" / "recompute.py"
-
 _FUNCTION_NAME = "checkpointed_forward"
 
-# The module the patched function must come from, and the package whose modules
-# may hold a by-name import of it.
+# The module the patched function must come from.
 _TARGET_MODULE = "megatron.core.recompute"
-_TARGET_PACKAGE = "megatron."
+
+# Modules that do `from megatron.core.recompute import checkpointed_forward` and
+# therefore hold their own reference. Fixed for the megatron-core rev this patch
+# is written against -- see the pin in pyproject.toml.
+_IMPORTERS = (
+    "megatron.core.transformer.transformer_block",
+    "megatron.core.models.hybrid.hybrid_block",
+)
 
 
-def _extract_function(module_source: str, name: str) -> Optional[str]:
-    """Return the source of the top-level function ``name``, or None if absent."""
-    try:
-        tree = ast.parse(module_source)
-    except SyntaxError:
-        return None
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return ast.get_source_segment(module_source, node)
-    return None
+def _apply_patch(source: str) -> Optional[str]:
+    """Return ``source`` with the shipped .patch applied, or None if it does not.
 
-
-def _apply_patch_file(module_source: str) -> Optional[str]:
-    """Apply the shipped .patch to ``module_source`` with GNU patch, in a temp dir.
-
-    Returns the patched module source, or None if the patch does not apply
-    cleanly -- which is the fail-safe path: `patch --forward` refuses an
-    already-applied or mismatched patch rather than producing a mangled file.
+    GNU patch does the work, on a throwaway copy -- the real install is never
+    touched. Naming the file explicitly means the diff's ``a/megatron/core/...``
+    headers are ignored, so the function's own source can be patched directly.
+    ``--forward`` refuses an already-applied or reversed patch and ``-F 0`` allows
+    no context fuzz, so anything but an exact context match is a clean no-op.
     """
     executable = shutil.which("patch")
     if executable is None:
@@ -107,14 +96,22 @@ def _apply_patch_file(module_source: str) -> Optional[str]:
         return None
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        target = Path(tmpdir) / _PATCH_TARGET
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(module_source)
+        scratch = Path(tmpdir) / "checkpointed_forward.py"
+        scratch.write_text(source)
         result = subprocess.run(
-            # --forward: refuse a reversed/already-applied patch instead of
-            # "un-applying" it. -r -: never leave .rej files behind.
-            [executable, "-p1", "--batch", "--forward", "--silent", "-r", "-", "-i", str(_PATCH_FILE)],
-            cwd=tmpdir,
+            [
+                executable,
+                str(scratch),
+                "-i",
+                str(_PATCH_FILE),
+                "--batch",
+                "--forward",
+                "--silent",
+                "-F",
+                "0",
+                "-r",
+                "-",
+            ],
             capture_output=True,
             text=True,
         )
@@ -128,7 +125,7 @@ def _apply_patch_file(module_source: str) -> Optional[str]:
                 (result.stderr or result.stdout or "").strip().replace("\n", "; ") or "no output",
             )
             return None
-        return target.read_text()
+        return scratch.read_text()
 
 
 def _is_expected_target(function, recompute) -> bool:
@@ -145,30 +142,6 @@ def _is_expected_target(function, recompute) -> bool:
     if declared and compiled:
         return os.path.realpath(declared) == os.path.realpath(compiled)
     return True
-
-
-def _rebind_importers(target, patched) -> list:
-    """Point modules that imported ``checkpointed_forward`` by name at ``patched``.
-
-    The search is confined to megatron's own packages, and within those matches by
-    object identity -- so only names actually bound to the function being replaced
-    are touched. Today the importers are transformer_block and hybrid_block;
-    matching by identity rather than a hardcoded list also covers a new importer
-    in a future megatron-core. Returns the module names that were rebound.
-    """
-    rebound = []
-    for name, module in list(sys.modules.items()):
-        # Filter on the module name *before* touching attributes. Some modules
-        # (torch.ops, torch.classes, tensorboard's TF stub) implement a dynamic
-        # __getattr__ that manufactures an object for any name -- or triggers an
-        # import -- so probing all ~5k loaded modules for `checkpointed_forward`
-        # has side effects well outside megatron.
-        if name != _TARGET_MODULE and not name.startswith(_TARGET_PACKAGE):
-            continue
-        if getattr(module, _FUNCTION_NAME, None) is target:
-            setattr(module, _FUNCTION_NAME, patched)
-            rebound.append(name)
-    return rebound
 
 
 class _DSAIndexShareCarrier:
@@ -272,21 +245,15 @@ def patch_dsa_index_share(force: bool = False) -> bool:
         return False
 
     try:
-        module_source = inspect.getsource(recompute)
+        source = inspect.getsource(target)
     except (OSError, TypeError):
-        logger.warning("Cannot read megatron-core recompute.py source; skipping DSA index-share patch")
+        logger.warning("Cannot read megatron-core {} source; skipping DSA index-share patch", _FUNCTION_NAME)
         return False
 
-    # Resolve the whole edit before mutating anything, so a source drift cannot
-    # leave the DSA module half-patched. The patch is applied to the whole file so
-    # GNU patch validates hunk line numbers as well as context.
-    patched_module = _apply_patch_file(module_source)
-    if patched_module is None:
-        return False
-
-    patched_source = _extract_function(patched_module, _FUNCTION_NAME)
+    # Resolve the edit before mutating anything, so a source drift cannot leave
+    # the DSA module half-patched.
+    patched_source = _apply_patch(source)
     if patched_source is None:
-        logger.warning("Patched recompute.py has no {}; skipping DSA index-share patch", _FUNCTION_NAME)
         return False
 
     # Publish the carrier machinery on megatron-core's own DSA module: the
@@ -312,11 +279,15 @@ def patch_dsa_index_share(force: bool = False) -> bool:
         return False
     setattr(patched, _PATCHED_FLAG, True)
 
-    # Modules that did `from megatron.core.recompute import checkpointed_forward`
-    # hold their own reference, so rebinding `recompute` alone would leave them on
-    # the unpatched function. Anything not yet imported picks up the patched
-    # function through `recompute` when it is.
-    rebound = _rebind_importers(target, patched)
+    # Modules that imported the function by name hold their own reference, so
+    # rebinding `recompute` alone would leave them on the unpatched function. Ones
+    # not yet imported pick it up through `recompute` when they are.
+    rebound = []
+    for name in _IMPORTERS:
+        module = sys.modules.get(name)
+        if getattr(module, _FUNCTION_NAME, None) is target:
+            setattr(module, _FUNCTION_NAME, patched)
+            rebound.append(name)
 
     logger.info(
         "Applied megatron-core DSA index-share patch (NVIDIA/Megatron-LM#6793 backport); rebound {}",
