@@ -281,6 +281,7 @@ async def lifespan(app: FastAPI):
 
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
+    app.state.proto_serialization_lock = asyncio.Lock()
     app.state.external_future_store = None
     app.state.db_write_lock = _get_db_write_context(app.state.db_engine)
     app.state.sampling_model_cache = {}
@@ -1504,11 +1505,12 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
             types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
             and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
         ):
-            content = await asyncio.to_thread(
-                _serialize_proto_result,
-                types.RequestType(request_type),
-                result_data,
-            )
+            async with req.app.state.proto_serialization_lock:
+                content = await asyncio.to_thread(
+                    _serialize_proto_result,
+                    types.RequestType(request_type),
+                    result_data,
+                )
             response: Response = Response(content=content, media_type=PROTO_CONTENT_TYPE)
         else:
             response = raw_json_response(result_data)
