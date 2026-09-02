@@ -528,7 +528,6 @@ def test_sample_support_capture_leaves_greedy_eval_sampling_params_alone():
     assert cfg.generator.eval_sampling_params.top_k == -1
 
 
-
 def test_cli_overrides_plus_prefix_rejected():
     with pytest.raises(ValueError, match="The '\\+' prefix"):
         SkyRLTrainConfig.from_cli_overrides(["+new_field=value"])
