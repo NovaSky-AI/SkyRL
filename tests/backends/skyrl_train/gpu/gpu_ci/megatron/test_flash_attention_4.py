@@ -3,7 +3,7 @@ from importlib.metadata import version
 import pytest
 import torch
 
-pytestmark = [pytest.mark.megatron, pytest.mark.h100]
+pytestmark = pytest.mark.megatron
 
 
 @pytest.mark.parametrize(("query_heads", "kv_heads", "head_dim"), [(24, 4, 256), (32, 2, 128)])
