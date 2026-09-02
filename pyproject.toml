@@ -208,8 +208,7 @@ include-package-data = true
 
 # Runtime patch payloads (skyrl/backends/skyrl_train/patches/**/*.patch) are read
 # from disk at runtime, so they must ship inside the package. `include-package-data`
-# alone does not cover them: there is no MANIFEST.in and no VCS plugin, so without
-# this a built wheel contains only .py files and the patches silently no-op.
+# alone does not cover them
 [tool.setuptools.package-data]
 "*" = ["*.patch"]
 
