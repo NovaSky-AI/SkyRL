@@ -39,15 +39,16 @@ one environment would otherwise need.
 
 ``checkpointed_forward`` is imported *by name* into those two modules, so the
 rebind below must cover them as well -- rebinding ``megatron.core.recompute``
-alone would silently do nothing. It finds them by scanning ``sys.modules`` for
-the old function object rather than by hardcoding names, so a new importer in a
-future megatron-core is picked up too.
+alone would silently do nothing. It finds them by identity among megatron's own
+modules rather than by hardcoding names, so a new importer in a future
+megatron-core is picked up too.
 
 DELETE THIS PATCH once the megatron-core pin includes NVIDIA/Megatron-LM#6793.
 """
 
 import ast
 import inspect
+import os
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,11 @@ _PATCH_FILE = Path(__file__).with_name("dsa_index_share_recompute.patch")
 _PATCH_TARGET = Path("megatron") / "core" / "recompute.py"
 
 _FUNCTION_NAME = "checkpointed_forward"
+
+# The module the patched function must come from, and the package whose modules
+# may hold a by-name import of it.
+_TARGET_MODULE = "megatron.core.recompute"
+_TARGET_PACKAGE = "megatron."
 
 
 def _extract_function(module_source: str, name: str) -> Optional[str]:
@@ -123,6 +129,46 @@ def _apply_patch_file(module_source: str) -> Optional[str]:
             )
             return None
         return target.read_text()
+
+
+def _is_expected_target(function, recompute) -> bool:
+    """Whether ``function`` really is megatron-core's own ``checkpointed_forward``.
+
+    Guards against replacing something another patch already swapped in: the name
+    alone proves nothing, so this also checks the code object was compiled from
+    the recompute module's own file.
+    """
+    if getattr(function, "__module__", None) != _TARGET_MODULE:
+        return False
+    declared = getattr(recompute, "__file__", None)
+    compiled = getattr(getattr(function, "__code__", None), "co_filename", None)
+    if declared and compiled:
+        return os.path.realpath(declared) == os.path.realpath(compiled)
+    return True
+
+
+def _rebind_importers(target, patched) -> list:
+    """Point modules that imported ``checkpointed_forward`` by name at ``patched``.
+
+    The search is confined to megatron's own packages, and within those matches by
+    object identity -- so only names actually bound to the function being replaced
+    are touched. Today the importers are transformer_block and hybrid_block;
+    matching by identity rather than a hardcoded list also covers a new importer
+    in a future megatron-core. Returns the module names that were rebound.
+    """
+    rebound = []
+    for name, module in list(sys.modules.items()):
+        # Filter on the module name *before* touching attributes. Some modules
+        # (torch.ops, torch.classes, tensorboard's TF stub) implement a dynamic
+        # __getattr__ that manufactures an object for any name -- or triggers an
+        # import -- so probing all ~5k loaded modules for `checkpointed_forward`
+        # has side effects well outside megatron.
+        if name != _TARGET_MODULE and not name.startswith(_TARGET_PACKAGE):
+            continue
+        if getattr(module, _FUNCTION_NAME, None) is target:
+            setattr(module, _FUNCTION_NAME, patched)
+            rebound.append(name)
+    return rebound
 
 
 class _DSAIndexShareCarrier:
@@ -190,6 +236,14 @@ def patch_dsa_index_share(force: bool = False) -> bool:
 
     if getattr(target, _PATCHED_FLAG, False):
         return True
+
+    if not _is_expected_target(target, recompute):
+        logger.warning(
+            "megatron.core.recompute.{} is not megatron-core's own function "
+            "(already replaced by something else?); skipping DSA index-share patch",
+            _FUNCTION_NAME,
+        )
+        return False
 
     try:
         from megatron.core.transformer.experimental_attention_variant import (
@@ -260,13 +314,12 @@ def patch_dsa_index_share(force: bool = False) -> bool:
 
     # Modules that did `from megatron.core.recompute import checkpointed_forward`
     # hold their own reference, so rebinding `recompute` alone would leave them on
-    # the unpatched function. Today that is transformer_block and hybrid_block, but
-    # this scans by identity rather than by name so a new importer in a future
-    # megatron-core is covered too. Anything not yet imported picks up the patched
+    # the unpatched function. Anything not yet imported picks up the patched
     # function through `recompute` when it is.
-    for module in list(sys.modules.values()):
-        if getattr(module, "checkpointed_forward", None) is target:
-            module.checkpointed_forward = patched
+    rebound = _rebind_importers(target, patched)
 
-    logger.info("Applied megatron-core DSA index-share patch (NVIDIA/Megatron-LM#6793 backport)")
+    logger.info(
+        "Applied megatron-core DSA index-share patch (NVIDIA/Megatron-LM#6793 backport); rebound {}",
+        ", ".join(sorted(rebound)),
+    )
     return True

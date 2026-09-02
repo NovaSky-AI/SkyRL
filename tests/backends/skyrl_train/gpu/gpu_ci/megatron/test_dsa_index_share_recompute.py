@@ -163,6 +163,57 @@ def test_patch_is_idempotent(patched_megatron):
     assert recompute.checkpointed_forward is before
 
 
+def test_refuses_a_target_it_does_not_recognise(patched_megatron):
+    """A checkpointed_forward swapped in by something else is left alone."""
+    from skyrl.backends.skyrl_train.patches.megatron import patch_dsa_index_share as mod
+
+    class _Foreign:
+        __file__ = "/nowhere/recompute.py"
+
+    def _impostor():
+        pass
+
+    # Wrong __module__ -> rejected outright.
+    assert mod._is_expected_target(_impostor, _Foreign) is False
+
+    # Right __module__ but compiled from a different file -> still rejected.
+    _impostor.__module__ = "megatron.core.recompute"
+    assert mod._is_expected_target(_impostor, _Foreign) is False
+
+
+def test_rebind_is_confined_to_megatron(patched_megatron):
+    """A non-megatron holder is reported, not silently rebound."""
+    import sys
+    import types
+
+    from megatron.core import recompute
+
+    from skyrl.backends.skyrl_train.patches.megatron import patch_dsa_index_share as mod
+
+    target = recompute.checkpointed_forward
+
+    def _replacement():
+        pass
+
+    sentinel = types.ModuleType("not_megatron_holder")
+    sentinel.checkpointed_forward = target
+    sys.modules["not_megatron_holder"] = sentinel
+    rebound = []
+    try:
+        rebound = mod._rebind_importers(target, _replacement)
+        assert "not_megatron_holder" not in rebound
+        assert sentinel.checkpointed_forward is target  # untouched
+        assert all(name.startswith("megatron.") for name in rebound)
+    finally:
+        # This test really did rebind the live megatron modules; put them back.
+        for name in rebound:
+            setattr(sys.modules[name], "checkpointed_forward", target)
+        sys.modules.pop("not_megatron_holder", None)
+
+    for name in rebound:
+        assert getattr(sys.modules[name], "checkpointed_forward") is target
+
+
 def test_importers_see_the_patched_function(patched_megatron):
     """Modules that bound the function by name must be rebound too.
 
