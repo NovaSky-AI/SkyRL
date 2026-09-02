@@ -5,6 +5,8 @@ from argparse import Namespace
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
+pytest.importorskip("vllm", reason="vllm_server_actor imports vllm at module scope")
+
 from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
     VLLMServerActor,
 )
