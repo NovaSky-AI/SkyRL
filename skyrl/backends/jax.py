@@ -827,6 +827,10 @@ class JaxBackendImpl(AbstractBackend):
                 jnp.int32(adapter_index),
             )
 
+        # Training mutates the same LoRA weights used for sampling. Force a
+        # saved sampler snapshot to be reloaded before it is sampled again.
+        self.models[model_id].loaded_checkpoint_id = None
+
         output_metrics = jax.device_get(optim_metrics).to_output_metrics()
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), metrics={output_metrics}")
         return types.OptimStepOutput(metrics=output_metrics)
