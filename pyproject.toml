@@ -152,6 +152,7 @@ megatron = [
     "causal-conv1d==1.6.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
     "vllm==0.28.0; sys_platform == 'linux'",
+    "deep-gemm; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -292,9 +293,9 @@ override-dependencies = [
     # `_moe_C_stable_libtorch.abi3.so`), so its main binaries load against 2.11 and
     # we hold torch there rather than churn every CUDA extension pin. The one
     # exception is `vllm/third_party/deep_gemm/_C`, a version-specific cpython-312
-    # build linked against torch 2.13's c10: it fails to import and vLLM falls back,
-    # so the DeepGEMM fused-MoE / sparse-attn-indexer paths are unavailable. See
-    # `.claude/docs/weight_sync.md`. Revisit once those wheels publish 2.13 builds.
+    # build linked against torch 2.13's c10. The external DeepGEMM source below is
+    # rebuilt against this selected torch runtime, and vLLM prefers it over the
+    # incompatible vendored extension.
     "torch==2.11.0; sys_platform == 'linux'",
     # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
     # torch: 0.28.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.28.0 pulls
@@ -304,10 +305,12 @@ override-dependencies = [
 ]
 
 [tool.uv.extra-build-dependencies]
+deep-gemm = ["torch==2.11.0", "ninja"]
 flash-attn = [{requirement = "torch", match-runtime = true}]
 fast-hadamard-transform = ["torch==2.11.0", "ninja"]
 
 [tool.uv.extra-build-variables]
+deep-gemm = { DG_FORCE_BUILD = "1" }
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 fast-hadamard-transform = { FAST_HADAMARD_TRANSFORM_FORCE_BUILD = "TRUE"}
 
@@ -350,6 +353,7 @@ explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
+deep-gemm = { git = "https://github.com/deepseek-ai/DeepGEMM", rev = "8b1392b978f5a03c828dd1711090d7fb50958b8a" }
 # Match torch's CUDA variant (cu130).
 flashinfer-jit-cache = { index = "flashinfer-cu130", marker = "sys_platform == 'linux'" }
 flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
