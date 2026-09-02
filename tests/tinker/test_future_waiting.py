@@ -187,11 +187,17 @@ async def test_query_count_does_not_scale_with_waiters(waiters, sync_engine, asy
     assert 0 < len(statements) < 50
 
 
-def _stub_request(async_engine, waiters, headers: dict | None = None):
+def _stub_request(async_engine, waiters, external_future_store=None, headers: dict | None = None):
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(db_engine=async_engine, future_waiters=waiters)),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                db_engine=async_engine,
+                external_future_store=external_future_store,
+                future_waiters=waiters,
+            )
+        ),
         headers=headers or {},
     )
 
@@ -215,6 +221,25 @@ async def test_retrieve_future_returns_completed_result(waiters, async_engine, s
     )
 
     # The stored JSON text is returned as-is rather than re-encoded by FastAPI.
+    assert response.media_type == "application/json"
+    assert response.body == SAMPLE_RESULT.model_dump_json().encode()
+
+
+@pytest.mark.asyncio
+async def test_retrieve_future_returns_in_memory_external_result(waiters, async_engine):
+    from skyrl.tinker import api
+    from skyrl.tinker.extra import InMemoryFutureStore
+
+    store = InMemoryFutureStore()
+    request_id = store.create_future()
+    store.complete_future(request_id, RequestStatus.COMPLETED, SAMPLE_RESULT.model_dump_json())
+
+    response = await api.retrieve_future(
+        api.RetrieveFutureRequest(request_id=str(request_id)),
+        _stub_request(async_engine, waiters, store, headers={"accept": api.PROTO_CONTENT_TYPE}),
+    )
+
+    # Forwarded samples use the Tinker JSON response even when the client also accepts proto.
     assert response.media_type == "application/json"
     assert response.body == SAMPLE_RESULT.model_dump_json().encode()
 

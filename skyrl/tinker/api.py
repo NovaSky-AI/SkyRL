@@ -47,6 +47,7 @@ from skyrl.tinker.db_models import (
 )
 from skyrl.tinker.extra import (
     ExternalInferenceClient,
+    InMemoryFutureStore,
     SkyRLTrainInferenceForwardingClient,
 )
 from skyrl.tinker.proto_serialization import (
@@ -261,12 +262,17 @@ async def lifespan(app: FastAPI):
     # SkyRL-Train default is colocate_all=True; only opt into forwarding
     # when the operator explicitly sets it to False.
     is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
+    app.state.external_future_store = InMemoryFutureStore()
     if app.state.engine_config.external_inference_url:
-        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
+        app.state.external_inference_client = ExternalInferenceClient(
+            app.state.engine_config, app.state.external_future_store
+        )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
-            app.state.engine_config, app.state.db_engine
+            app.state.engine_config,
+            app.state.db_engine,
+            app.state.external_future_store,
         )
         logger.info(
             "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
@@ -1340,35 +1346,33 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
-    request_id = await create_future(
-        session=session,
-        request_type=(
-            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-        ),
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
-            # A positive topk implies prompt logprobs: both are read off the same
-            # prompt forward pass, so asking for one asks for the other.
-            prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
-            topk_prompt_logprobs=request.topk_prompt_logprobs,
-            seq_id=request.seq_id,
-            sampling_session_id=request.sampling_session_id,
-        ),
-    )
-
-    await session.commit()
-
     if req.app.state.external_inference_client:
+        request_id = req.app.state.external_future_store.create_future()
         asyncio.create_task(
             req.app.state.external_inference_client.call_and_store_result(
                 request_id, request, model_id, checkpoint_id, base_model=base_model
             )
         )
+    else:
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.SAMPLE,
+            model_id=model_id,
+            request_data=types.SampleInput(
+                base_model=base_model,
+                prompt=request.prompt.to_types(),
+                sampling_params=request.sampling_params.to_types(),
+                num_samples=request.num_samples,
+                checkpoint_id=checkpoint_id,
+                # A positive topk implies prompt logprobs: both are read off the same
+                # prompt forward pass, so asking for one asks for the other.
+                prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+                topk_prompt_logprobs=request.topk_prompt_logprobs,
+                seq_id=request.seq_id,
+                sampling_session_id=request.sampling_session_id,
+            ),
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -1390,22 +1394,31 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     request_id = int(request.request_id)
+    is_external_future = request_id < 0
 
     try:
-        row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        if is_external_future:
+            row = await req.app.state.external_future_store.wait_for_future(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        else:
+            row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
     except KeyError:
         raise HTTPException(status_code=404, detail="Future not found")
 
     if row is None:
         raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
-    status, request_type, result_data = row
+    if is_external_future:
+        status, result_data = row
+        request_type = None
+    else:
+        status, request_type, result_data = row
     if status == RequestStatus.COMPLETED:
         # The SDK retrieves sample/forward/forward_backward results in proto
         # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
         # for these types. Errors and other result types stay JSON.
         if (
-            types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
+            request_type is not None
+            and types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
             and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
         ):
             return Response(
