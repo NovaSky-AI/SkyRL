@@ -176,6 +176,52 @@ def test_validate_mtp_prefix_caching_allows_effective_non_mtp_override():
     _validate_mtp_prefix_caching(cfg)
 
 
+def test_validate_mtp_prefix_caching_rejects_implicit_native_mtp(tmp_path):
+    from transformers import Qwen3_5Config, Qwen3_5TextConfig
+
+    model_path = tmp_path / "model"
+    Qwen3_5Config(
+        architectures=["Qwen3_5ForConditionalGeneration"],
+        text_config=Qwen3_5TextConfig(
+            num_hidden_layers=2,
+            layer_types=["linear_attention", "full_attention"],
+            mtp_num_hidden_layers=1,
+        ),
+    ).save_pretrained(model_path)
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = str(model_path)
+    cfg.generator.inference_engine.speculative_config = {
+        "model": str(model_path),
+        "num_speculative_tokens": 1,
+    }
+
+    with pytest.raises(ValueError, match="MTP speculative decoding with prefix caching"):
+        _validate_mtp_prefix_caching(cfg)
+
+
+@pytest.mark.parametrize("model", ["draft", "ngram", "package.CustomProposer"])
+def test_validate_mtp_prefix_caching_allows_implicit_non_mtp_model(tmp_path, model):
+    from transformers import GPT2Config, Qwen3_5TextConfig
+
+    target_path = tmp_path / "target"
+    draft_path = tmp_path / "draft"
+    Qwen3_5TextConfig(
+        num_hidden_layers=2,
+        layer_types=["linear_attention", "full_attention"],
+    ).save_pretrained(target_path)
+    GPT2Config().save_pretrained(draft_path)
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = str(target_path)
+    cfg.generator.inference_engine.speculative_config = {
+        "model": str(draft_path) if model == "draft" else model,
+        "num_speculative_tokens": 1,
+    }
+
+    _validate_mtp_prefix_caching(cfg)
+
+
 def test_validate_cfg_rejects_mtp_prefix_caching_after_mtp_propagation(tmp_path):
     from transformers import Qwen3_5TextConfig
 
