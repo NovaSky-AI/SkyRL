@@ -22,26 +22,41 @@ defaults to ``trainer.remove_microbatch_padding=True``, which packs), the model
 is DSA, and ``dsa_indexer_topk_freq > 1``. It is a no-op everywhere else, which
 is why it is safe to apply unconditionally from the Megatron worker.
 
-Applied as a source-level rebind rather than an edit to the installed package:
-megatron-core is installed from a pinned git rev and ``uv run --isolated``
-builds a throwaway environment per invocation, so a site-packages edit would not
-survive a run (nor reach other Ray nodes). ``checkpointed_forward`` is a ~170
-line function and both edits land on inner closures, so there is no sub-function
-seam to override -- we recompile that one function with upstream's two edits
-applied and rebind it on every module that imported it by name.
+The edit itself lives in ``dsa_index_share_recompute.patch`` next to this file,
+byte-identical to the upstream commit so it can be refreshed and diffed
+mechanically::
+
+    git show <rev> -- megatron/core/recompute.py \\
+        > skyrl/backends/skyrl_train/patches/megatron/dsa_index_share_recompute.patch
+
+That diff is applied **in memory** to the function's source, not to the file on
+disk. Under ``uv run --isolated`` megatron-core's files are hardlinked into the
+shared uv cache, and the module is already imported by the time the Megatron
+worker builds a model -- so an on-disk edit would need a reload, and would still
+leave ``transformer_block``/``hybrid_block`` holding the old function. Applying
+in memory avoids both, plus the file locking that concurrent Ray actors sharing
+one environment would otherwise need.
+
+``checkpointed_forward`` is imported *by name* into those two modules, so the
+rebind below must cover them as well -- rebinding ``megatron.core.recompute``
+alone would silently do nothing. It finds them by scanning ``sys.modules`` for
+the old function object rather than by hardcoding names, so a new importer in a
+future megatron-core is picked up too.
 
 DELETE THIS PATCH once the megatron-core pin includes NVIDIA/Megatron-LM#6793.
 It is a temporary backport of an upstream fix, not a SkyRL behavior change. It
-fails safe in the meantime: the anchors below are literal 0.20.0 source text, so
-on a restructured megatron-core this logs and no-ops rather than misfiring, and
-it detects the real fix and steps aside. Check this file when bumping the pin.
+fails safe in the meantime: every hunk's context must match the installed source
+exactly and uniquely, so on a restructured megatron-core this logs and no-ops
+rather than misfiring, and it detects the real fix and steps aside. Check this
+file when bumping the pin.
 """
 
 import inspect
 import sys
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Iterator, Optional
+from pathlib import Path
+from typing import Iterator, List, Optional, Tuple
 
 from loguru import logger
 
@@ -51,56 +66,74 @@ _PATCHED_FLAG = "_skyrl_dsa_index_share_patched"
 # installed megatron-core already has the fix and this module should be deleted.
 _UPSTREAM_SENTINEL = "_dsa_index_share_carrier_scope"
 
-# Modules that do `from megatron.core.recompute import checkpointed_forward`,
-# and so hold their own reference that a rebind on `recompute` alone would miss.
-_IMPORTERS = (
-    "megatron.core.transformer.transformer_block",
-    "megatron.core.models.hybrid.hybrid_block",
-)
+_PATCH_FILE = Path(__file__).with_name("dsa_index_share_recompute.patch")
 
-# --- anchors, verbatim from megatron-core 0.20.0 recompute.py -----------------
 
-_ANCHOR_CARRIER_SETUP = """    if extract_layer_indices is None:
-        extract_layer_indices = set()
-    intermediate_hidden_states: List[Tensor] = []
-"""
+def _parse_unified_diff(text: str) -> List[Tuple[str, str]]:
+    """Turn a unified diff into ``(before, after)`` literal blocks, one per hunk.
 
-_REPLACEMENT_CARRIER_SETUP = """    if extract_layer_indices is None:
-        extract_layer_indices = set()
-    intermediate_hidden_states: List[Tensor] = []
+    Line numbers are deliberately ignored: each hunk is applied by matching its
+    context text, so the patch keeps working if the surrounding file shifts. The
+    caller enforces that every ``before`` block occurs exactly once.
+    """
+    hunks: List[Tuple[str, str]] = []
+    before: List[str] = []
+    after: List[str] = []
+    in_hunk = False
 
-    dsa_index_share_carrier = None
-    dsa_index_share_carrier_scope = None
-    if (
-        packed_seq_params is None
-        and getattr(self.config, "experimental_attention_variant", None) == "dsa"
-        and (getattr(self.config, "dsa_indexer_topk_freq", 1) or 1) > 1
-    ):
-        from megatron.core.transformer.experimental_attention_variant.dsa import (
-            _dsa_index_share_carrier_scope,
-            _DSAIndexShareCarrier,
-        )
+    def flush() -> None:
+        if in_hunk and before and after:
+            hunks.append(("".join(before), "".join(after)))
 
-        dsa_index_share_carrier = _DSAIndexShareCarrier()
-        dsa_index_share_carrier_scope = _dsa_index_share_carrier_scope
-"""
+    for raw in text.splitlines(keepends=True):
+        if raw.startswith("@@"):
+            flush()
+            before, after, in_hunk = [], [], True
+            continue
+        if not in_hunk:
+            continue
+        if raw.startswith(("diff ", "--- ", "+++ ")):
+            flush()
+            before, after, in_hunk = [], [], False
+            continue
+        if raw.startswith("\\"):
+            # "\ No newline at end of file" -- metadata, not content.
+            continue
+        if raw.startswith("+"):
+            after.append(raw[1:])
+        elif raw.startswith("-"):
+            before.append(raw[1:])
+        elif raw.startswith(" "):
+            before.append(raw[1:])
+            after.append(raw[1:])
+        elif raw.strip() == "":
+            # A blank context line whose single leading space was stripped.
+            before.append(raw)
+            after.append(raw)
+        else:
+            # Anything else ends the hunk (e.g. trailing prose in a `git show`).
+            flush()
+            before, after, in_hunk = [], [], False
+    flush()
+    return hunks
 
-_ANCHOR_RETURN_CLOSURE = """        return custom_forward
 
-    def chunk_runner(start: int, end: int, use_checkpoint: bool):
-"""
-
-_REPLACEMENT_RETURN_CLOSURE = """        if dsa_index_share_carrier_scope is None:
-            return custom_forward
-
-        def carrier_scoped_forward(*args):
-            with dsa_index_share_carrier_scope(dsa_index_share_carrier):
-                return custom_forward(*args)
-
-        return carrier_scoped_forward
-
-    def chunk_runner(start: int, end: int, use_checkpoint: bool):
-"""
+def _apply_hunks(source: str, hunks: List[Tuple[str, str]]) -> Optional[str]:
+    """Apply ``hunks`` to ``source``, or return None if any context is not unique."""
+    patched = source
+    for index, (before, after) in enumerate(hunks, start=1):
+        occurrences = patched.count(before)
+        if occurrences != 1:
+            logger.info(
+                "megatron-core checkpointed_forward does not match the patch context "
+                "(hunk {} matched {} times, expected exactly 1); skipping DSA index-share patch. "
+                "If megatron-core now includes NVIDIA/Megatron-LM#6793, delete this patch module.",
+                index,
+                occurrences,
+            )
+            return None
+        patched = patched.replace(before, after)
+    return patched
 
 
 class _DSAIndexShareCarrier:
@@ -148,7 +181,7 @@ def patch_dsa_index_share(force: bool = False) -> bool:
 
     No-ops (returning False) when megatron-core is not importable, when it has no
     DSA attention variant, when it already contains NVIDIA/Megatron-LM#6793, or
-    when ``checkpointed_forward`` no longer matches the 0.20.0 source form.
+    when ``checkpointed_forward`` no longer matches the shipped patch's context.
 
     Pass ``force=True`` to patch even when the upstream fix is detected; this
     exists for tests and has no reason to be used in production.
@@ -192,29 +225,24 @@ def patch_dsa_index_share(force: bool = False) -> bool:
         return False
 
     try:
+        hunks = _parse_unified_diff(_PATCH_FILE.read_text())
+    except OSError:
+        logger.warning("Cannot read {}; skipping DSA index-share patch", _PATCH_FILE)
+        return False
+    if not hunks:
+        logger.warning("{} contains no hunks; skipping DSA index-share patch", _PATCH_FILE)
+        return False
+
+    try:
         source = inspect.getsource(target)
     except (OSError, TypeError):
         logger.warning("Cannot read megatron-core checkpointed_forward source; skipping DSA index-share patch")
         return False
 
-    # Verify both anchors before mutating anything, so a source drift cannot
+    # Resolve the whole edit before mutating anything, so a source drift cannot
     # leave the DSA module half-patched.
-    missing = [
-        name
-        for name, anchor in (
-            ("carrier setup", _ANCHOR_CARRIER_SETUP),
-            ("closure return", _ANCHOR_RETURN_CLOSURE),
-        )
-        if anchor not in source
-    ]
-    if missing:
-        logger.info(
-            "megatron-core checkpointed_forward does not match the 0.20.0 form "
-            "({} anchor(s) not found: {}); skipping DSA index-share patch. "
-            "If megatron-core now includes NVIDIA/Megatron-LM#6793, delete this patch module.",
-            len(missing),
-            ", ".join(missing),
-        )
+    patched_source = _apply_hunks(source, hunks)
+    if patched_source is None:
         return False
 
     # Publish the carrier machinery on megatron-core's own DSA module: the
@@ -224,9 +252,6 @@ def patch_dsa_index_share(force: bool = False) -> bool:
     dsa_module._dsa_index_share_carrier_scope = _dsa_index_share_carrier_scope
     attention_cls._get_index_share_carrier = _make_index_share_carrier_getter(attention_cls._get_index_share_carrier)
 
-    patched_source = source.replace(_ANCHOR_CARRIER_SETUP, _REPLACEMENT_CARRIER_SETUP).replace(
-        _ANCHOR_RETURN_CLOSURE, _REPLACEMENT_RETURN_CLOSURE
-    )
     # Execute in megatron-core's own module namespace so the recompiled function
     # keeps the live module globals it depends on (tensor_parallel, te_checkpoint,
     # get_fp8_context, ...), and so the rebind lands on the module.
@@ -239,15 +264,13 @@ def patch_dsa_index_share(force: bool = False) -> bool:
         return False
     setattr(patched, _PATCHED_FLAG, True)
 
-    # TransformerBlock and HybridStack bound `checkpointed_forward` by name at
-    # import time, so rebinding `recompute` alone would leave them on the
-    # unpatched function.
-    for module_name in _IMPORTERS:
-        module = sys.modules.get(module_name)
-        if module is None:
-            # Not imported yet; its own `from ... import` will pick up the patched
-            # function when it is.
-            continue
+    # Modules that did `from megatron.core.recompute import checkpointed_forward`
+    # hold their own reference, so rebinding `recompute` alone would leave them on
+    # the unpatched function. Today that is transformer_block and hybrid_block, but
+    # this scans by identity rather than by name so a new importer in a future
+    # megatron-core is covered too. Anything not yet imported picks up the patched
+    # function through `recompute` when it is.
+    for module in list(sys.modules.values()):
         if getattr(module, "checkpointed_forward", None) is target:
             module.checkpointed_forward = patched
 
