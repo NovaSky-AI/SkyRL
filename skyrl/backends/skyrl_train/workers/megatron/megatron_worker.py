@@ -44,8 +44,8 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
-from skyrl.backends.skyrl_train.patches.megatron_mla_thd_v_pad import (
-    apply_megatron_mla_thd_v_pad_patch,
+from skyrl.backends.skyrl_train.patches.megatron.patch_mla_thd_v_pad import (
+    patch_mla_thd_v_pad,
 )
 from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
@@ -87,7 +87,7 @@ from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
 
-apply_megatron_mla_thd_v_pad_patch()
+patch_mla_thd_v_pad()
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.base import (

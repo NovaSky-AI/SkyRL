@@ -27,7 +27,7 @@ from loguru import logger
 _APPLIED = False
 
 
-def apply_megatron_mla_thd_v_pad_patch() -> None:
+def patch_mla_thd_v_pad() -> None:
     """Patch ``_prepare_mla_core_attention_value`` to skip the V pad on sm100+."""
     global _APPLIED
     if _APPLIED:
