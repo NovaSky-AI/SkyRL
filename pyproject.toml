@@ -91,7 +91,7 @@ skyrl-train = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11; sys_platform == 'linux'",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
     "polars",
     "s3fs",
     "s5cmd>=0.3.3; sys_platform == 'linux'",
@@ -122,9 +122,9 @@ fsdp = [
     # into the image for a module the shim would never load).
     "nixl; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
-    "causal-conv1d==1.6.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11; sys_platform == 'linux'",
-    "torch==2.11.0; sys_platform == 'linux'",
+    "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "torch==2.13.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -137,7 +137,7 @@ megatron = [
     # Declared directly (not just via transformer-engine[pytorch]) so the
     # [tool.uv.sources] index below is honored — uv ignores sources for
     # transitive-only packages, which would otherwise fall back to the PyPI sdist.
-    "transformer-engine-torch==2.16.0+cu.13.0.torch.2.11; sys_platform == 'linux'",
+    "transformer-engine-torch==2.16.0; sys_platform == 'linux'",
     # TE core CUDA lib (libtransformer_engine.so). Declared directly because the
     # meta package only pulls a core via its `core*` extras, which we don't request
     # — without it the meta package's sanity check fails with "Found empty
@@ -145,10 +145,10 @@ megatron = [
     # publishes on the cu130 index, and it is what `transformer-engine-torch`'s
     # metadata requires there, so the two agree without an override.
     "transformer-engine-cu13==2.16.0+cu.13.0; sys_platform == 'linux'",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11; sys_platform == 'linux'",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
-    "causal-conv1d==1.6.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
-    "mamba-ssm==2.3.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
+    "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
+    "mamba-ssm==2.3.2.post1; sys_platform == 'linux'",
     "vllm==0.28.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
@@ -157,7 +157,7 @@ megatron = [
     # too; that variant is overridden out below (it would drag the CUDA-12 runtime
     # into the image for a module the shim would never load).
     "nixl; sys_platform == 'linux'",
-    "torch==2.11.0; sys_platform == 'linux'",
+    "torch==2.13.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     # megatron-bridge requires Python 3.12+; pin megatron-core to the same
@@ -283,27 +283,25 @@ override-dependencies = [
     # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
     # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
     "xgrammar==0.2.3",
-    # vLLM 0.28.0's metadata pins torch==2.13.0, but the astral-cu130 extension
-    # wheels we build against top out earlier: flash-attn, causal-conv1d and
-    # transformer-engine-torch at torch 2.12, mamba-ssm at torch 2.11. vLLM ships
-    # stable-libtorch-ABI extensions (`_C_stable_libtorch.abi3.so`,
-    # `_moe_C_stable_libtorch.abi3.so`), so its main binaries load against 2.11 and
-    # we hold torch there rather than churn every CUDA extension pin. The one
-    # exception is `vllm/third_party/deep_gemm/_C`, a version-specific cpython-312
-    # build linked against torch 2.13's c10: it fails to import and vLLM falls back,
-    # so the DeepGEMM fused-MoE / sparse-attn-indexer paths are unavailable. See
-    # `.claude/docs/weight_sync.md`. Revisit once those wheels publish 2.13 builds.
-    "torch==2.11.0; sys_platform == 'linux'",
+    # Matches vLLM 0.28.0's own metadata pin. We previously held torch at 2.11
+    # because the astral-cu130 extension wheels topped out earlier, at the cost of
+    # `vllm/third_party/deep_gemm/_C` -- a version-specific cpython-312 build linked
+    # against torch 2.13's c10, which failed to import with
+    # `undefined symbol: c10::ValueError(c10::SourceLocation, std::string)` and took
+    # the DeepGEMM fused-MoE / sparse-attn-indexer paths down with it. Astral still
+    # has no torch.2.13 builds, so the four affected extensions now come from wheels
+    # we built ourselves -- see [tool.uv.sources].
+    "torch==2.13.0; sys_platform == 'linux'",
     # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
     # torch: 0.28.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.28.0 pulls
     # torchvision==0.28.0, so without this the torch override above would resolve
     # a torchvision that cannot import against the torch we actually install.
-    "torchvision==0.26.0; sys_platform == 'linux'",
+    "torchvision==0.28.0; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
-fast-hadamard-transform = ["torch==2.11.0", "ninja"]
+fast-hadamard-transform = ["torch==2.13.0", "ninja"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -352,34 +350,44 @@ skyrl-gym = { path = "./skyrl-gym", editable = true }
 flashinfer-jit-cache = { index = "flashinfer-cu130", marker = "sys_platform == 'linux'" }
 flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 
-# torch-2.11 builds of these aren't published on PyPI, so they come from Astral's
-# prebuilt GPU index instead of wheels built by hand on personal forks. Astral
-# publishes cp310-cp314 for both x86_64 and aarch64, so no python/arch marker is
-# needed beyond the platform — this covers aarch64/GB200 with the same official
-# wheels, retiring the separate hand-built aarch64 artifacts these replace.
+# TEMPORARY: torch-2.13 builds of these four are not published anywhere yet --
+# Astral's cu130 index stops at `torch.2.12` (mamba-ssm at `torch.2.11`), so the
+# usual `+cu.13.0.torch.<ver>` pins cannot resolve. These are wheels we built
+# ourselves against torch 2.13.0 + CUDA 13.0.88 and host on a GitHub release.
 #
-# Astral versions each wheel with the (CUDA, torch) pair it was built against, in a
-# PEP 440 local segment (`+cu.13.0.torch.2.11`), so the exact build is pinned in the
-# requirement rather than here — see the `fsdp` / `megatron` extras.
+#   https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/cu13torch2.13
+#
+# They are cp312/x86_64 only and built for `TORCH_CUDA_ARCH_LIST=9.0;10.0`, i.e.
+# H100 and B200 only -- narrower than Astral's coverage. Other Python versions and
+# architectures fall through to the PyPI sdist and build from source.
+#
+# DELETE THIS and go back to `{ index = "astral-cu130" }` with
+# `+cu.13.0.torch.2.13` pins as soon as Astral publishes those builds. Check with:
+#   curl -sL https://wheels.astral.sh/simple/cu130/mamba-ssm/ | grep -o 'torch\.2\.[0-9]*'
 #
 # flash-attn must stay at exactly 2.8.3, NOT 2.8.3.post1: TE gates flash-attn on
 # `max_version = 2.8.3` and 2.8.3.post1 > 2.8.3. TE >= 2.16 strips the local segment
-# before comparing (`PkgVersion(...).public`); TE 2.11 did not, which is why this
-# previously had to be a fork wheel with the local version stripped from METADATA —
-# otherwise TE rejected it and silently fell back to broken unfused attention.
-flash-attn = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
-causal-conv1d = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
-mamba-ssm = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
-# The TE trio must come from Astral as a set. Astral versions the core and torch
-# wheels with local segments (2.16.0+cu.13.0 / +cu.13.0.torch.2.11) while the meta
-# package stays plain 2.16.0, and upstream TE asserts raw string equality across the
-# three at import. Astral's meta wheel carries a patch comparing base versions
-# instead, so mixing their core/torch wheels with the PyPI meta package fails.
+# before comparing (`PkgVersion(...).public`).
+flash-attn = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+]
+causal-conv1d = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+]
+mamba-ssm = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+]
+# The TE meta and core packages carry no torch coupling in their versions
+# (2.16.0 / 2.16.0+cu.13.0), so they stay on Astral; only the torch bindings are
+# rebuilt. Upstream TE asserts version equality across the trio at import; Astral's
+# meta wheel compares base versions, and ours is plain 2.16.0, so they agree.
 transformer-engine = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 transformer-engine-cu13 = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
-transformer-engine-torch = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
+transformer-engine-torch = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+]
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
-# Linux uses the cu130 index (torch 2.11 wheels are published there).
+# Linux uses the cu130 index (torch 2.13 wheels are published there).
 torch = [
     { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
@@ -403,14 +411,13 @@ vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
 ]
-# NOTE (etang): upstream publishes wheels only up to cu13torch2.10, so torch 2.11 + CUDA 13 falls back
-# to a source build, which needs a local CUDA 13 toolkit. These are built from the pinned rev below with
-# nvcc 13.0.88 and torch 2.11.0+cu130 (sm_75-sm_121, glibc >= 2.35): rebuild if the torch pin moves, and
-# drop them once upstream ships cu13torch2.11. Other platforms/python versions still build from source.
+# Built against torch 2.13 + CUDA 13.0.88 alongside the other CUDA extensions above
+# and hosted on the same GitHub release; the previous wheels were cu13torch2.11 and
+# are ABI-incompatible with torch 2.13. Other python/arch combinations build from
+# source at the pinned rev.
 fast-hadamard-transform = [
-    { url = "https://github.com/erictang000/fast-hadamard-transform/releases/download/v1.1.0.post2-cu13torch2.11/fast_hadamard_transform-1.1.0%2Bcu13torch2.11cxx11abitrue-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
-    { url = "https://github.com/erictang000/fast-hadamard-transform/releases/download/v1.1.0.post2-cu13torch2.11/fast_hadamard_transform-1.1.0%2Bcu13torch2.11cxx11abitrue-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
-    { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and (platform_machine != 'x86_64' or python_full_version < '3.12' or python_full_version >= '3.14')" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and (platform_machine != 'x86_64' or python_full_version < '3.12' or python_full_version >= '3.13')" },
 ]
 
 
