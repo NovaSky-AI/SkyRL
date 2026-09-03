@@ -28,6 +28,7 @@ import tempfile
 from dataclasses import asdict
 from typing import Any, Optional
 
+import numpy as np
 import ray
 import torch
 from datasets import Dataset, load_dataset
@@ -53,6 +54,7 @@ from skyrl.train.config.sft_config import (
     build_skyrl_config_for_sft,
 )
 from skyrl.train.dataset.pretokenized import load_from_pretokenized
+from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, SFTDataset, TextDataset
 from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
@@ -706,10 +708,12 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     """
     max_len = max(len(ex["input_ids"]) for ex in examples)
     max_num_actions = max(ex["num_actions"] for ex in examples)
+    num_examples = len(examples)
 
-    sequences = []
-    attention_masks = []
-    loss_masks = []
+    # Fill NumPy buffers by slice, then convert once.
+    sequences_np = np.full((num_examples, max_len), tokenizer.pad_token_id, dtype=np.int64)
+    attention_mask_np = np.zeros((num_examples, max_len), dtype=np.int64)
+    loss_mask_np = np.zeros((num_examples, max_num_actions), dtype=np.int64)
 
     # VLM image tensors travel as a TensorList (one variable-shape tensor per
     # sample). Mixed text+image batches are not supported; every sample in a VLM
@@ -725,14 +729,14 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     pixel_values = []
     image_grid_thw = []
 
-    for ex in examples:
+    for i, ex in enumerate(examples):
+        # Left-pad sequences; right-align response loss masks.
         pad_len = max_len - len(ex["input_ids"])
-        # Left-pad sequences (SkyRL convention)
-        sequences.append([tokenizer.pad_token_id] * pad_len + ex["input_ids"])
-        attention_masks.append([0] * pad_len + ex["attention_mask"])
+        sequences_np[i, pad_len:] = ex["input_ids"]
+        attention_mask_np[i, pad_len:] = ex["attention_mask"]
 
         action_pad = max_num_actions - ex["num_actions"]
-        loss_masks.append([0] * action_pad + ex["loss_mask"])
+        loss_mask_np[i, action_pad:] = ex["loss_mask"]
 
         if batch_has_images:
             pixel_values.append(torch.as_tensor(ex["pixel_values"]))
@@ -740,9 +744,9 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
 
     batch = TrainingInputBatch(
         {
-            "sequences": torch.tensor(sequences, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
-            "loss_mask": torch.tensor(loss_masks, dtype=torch.long),
+            "sequences": torch.from_numpy(sequences_np),
+            "attention_mask": torch.from_numpy(attention_mask_np),
+            "loss_mask": torch.from_numpy(loss_mask_np),
             "pixel_values": TensorList(pixel_values) if batch_has_images else None,
             "image_grid_thw": TensorList(image_grid_thw) if batch_has_images else None,
         }
@@ -1229,49 +1233,41 @@ class SFTTrainer:
 
             shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
 
-    def load_dataset(self) -> tuple[list, list[int]]:
+    def load_dataset(self) -> SFTDataset:
         """Load the training dataset(s): pretokenized stores or tokenize-on-load.
 
         When ``pretokenized_dataset_paths`` is set, each store is loaded through
-        :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized` (same
-        ``list[dict]`` shape as :meth:`_load_and_tokenize`, no online
-        tokenization) and concatenated in config order. Otherwise each
-        ``(name, split)`` pair from ``train_datasets``/``train_dataset_splits``
-        is tokenized independently through :meth:`_load_and_tokenize`
-        (preserving per-dataset cache keys), then concatenated in config order.
-        Either way, multiple sources are mixed per ``train_dataset_weights``.
+        :func:`~skyrl.train.dataset.pretokenized.load_from_pretokenized` (a
+        map-style, memory-mapped dataset yielding the same normalized row
+        dicts as :meth:`_load_and_tokenize`, no online tokenization).
+        Otherwise each ``(name, split)`` pair from
+        ``train_datasets``/``train_dataset_splits`` is tokenized independently
+        through :meth:`_load_and_tokenize` (preserving per-dataset cache keys)
+        and wrapped in a :class:`TextDataset`.
 
         Returns:
-            ``(tokenized, dataset_lengths)`` where ``dataset_lengths`` holds the
-            tokenized size of each source, used to configure weighted mixing in
-            :meth:`build_train_sampler`.
+            A single :class:`SFTDataset`. Multiple sources are concatenated in
+            config order as a :class:`ConcatSFTDataset` (a map-style view, no
+            row materialization), whose ``dataset_lengths`` configures weighted
+            mixing in :meth:`build_train_sampler`.
         """
-        tokenized: list = []
-        dataset_lengths: list[int] = []
+        sources: list[SFTDataset] = []
         if self.sft_cfg.pretokenized_dataset_paths:
-            for path in self.sft_cfg.pretokenized_dataset_paths:
-                # The loader raises on 0 usable rows, so no empty-source check.
-                source = load_from_pretokenized(path, max_length=self.sft_cfg.max_length)
-                tokenized.extend(source)
-                dataset_lengths.append(len(source))
-            if len(dataset_lengths) > 1:
-                per_dataset = ", ".join(
-                    f"{path}={length}" for path, length in zip(self.sft_cfg.pretokenized_dataset_paths, dataset_lengths)
-                )
-                logger.info(f"Concatenated {len(dataset_lengths)} pretokenized datasets: {per_dataset}")
-            return tokenized, dataset_lengths
-        for name, split in zip(self.sft_cfg.train_datasets, self.sft_cfg.train_dataset_splits):
-            source = self._load_and_tokenize(name, split)
-            if len(source) == 0:
-                raise ValueError(f"Training dataset '{name}' (split '{split}') tokenized to 0 examples.")
-            tokenized.extend(source)
-            dataset_lengths.append(len(source))
-        if len(dataset_lengths) > 1:
-            per_dataset = ", ".join(
-                f"{name}={length}" for name, length in zip(self.sft_cfg.train_datasets, dataset_lengths)
-            )
-            logger.info(f"Concatenated {len(dataset_lengths)} training datasets: {per_dataset}")
-        return tokenized, dataset_lengths
+            # The loader raises on 0 usable rows, so no empty-source check.
+            source_names = self.sft_cfg.pretokenized_dataset_paths
+            sources = [load_from_pretokenized(path, max_length=self.sft_cfg.max_length) for path in source_names]
+        else:
+            source_names = self.sft_cfg.train_datasets
+            for name, split in zip(self.sft_cfg.train_datasets, self.sft_cfg.train_dataset_splits):
+                source = self._load_and_tokenize(name, split)
+                if len(source) == 0:
+                    raise ValueError(f"Training dataset '{name}' (split '{split}') tokenized to 0 examples.")
+                sources.append(TextDataset(source))
+        if len(sources) == 1:
+            return sources[0]
+        per_dataset = ", ".join(f"{name}={len(source)}" for name, source in zip(source_names, sources))
+        logger.info(f"Concatenated {len(sources)} training datasets: {per_dataset}")
+        return ConcatSFTDataset(sources)
 
     def load_eval_datasets(self) -> Optional[list[tuple[str, list]]]:
         """Load and tokenize the eval dataset(s), or return ``None`` if not configured.
@@ -1306,17 +1302,19 @@ class SFTTrainer:
             eval_sets.append((name, eval_tokenized))
         return eval_sets
 
-    def _log_dataset_stats(self, tokenized: list) -> None:
+    def _log_dataset_stats(self, tokenized: SFTDataset) -> None:
         """Log tokenized sequence length statistics over the training set.
 
         Reports count, mean, median (q50), q25, q75, min, max of the tokenized
         ``input_ids`` lengths. Logs once via ``logger.info``.
         """
-        if not tokenized:
+        if len(tokenized) == 0:
             logger.warning("No tokenized examples to compute stats over")
             return
 
-        lengths = [len(ex["input_ids"]) for ex in tokenized]
+        # Every SFTDataset provides lengths without materializing rows
+        # (pretokenized stores derive them from arrow offsets at load time).
+        lengths = [int(v) for v in tokenized.sequence_lengths]
         n = len(lengths)
         sorted_lengths = sorted(lengths)
 
@@ -1355,19 +1353,17 @@ class SFTTrainer:
     # Dataloaders & samplers
     # ------------------------------------------------------------------ #
 
-    def build_train_sampler(
-        self, tokenized: list, dataset_lengths: Optional[list[int]] = None
-    ) -> Optional[torch.utils.data.Sampler]:
+    def build_train_sampler(self, tokenized) -> Optional[torch.utils.data.Sampler]:
         """Build the training sampler from ``sft_cfg.sampler``.
 
         Returns ``None`` for the default ``"random"`` strategy over a single
         dataset, signalling :meth:`build_train_dataloader` to use the
         dataloader's built-in ``shuffle=True`` path (which is statefully
-        checkpointed by ``StatefulDataLoader``). With multiple training
-        datasets, ``"random"`` instead returns a :class:`DataMixingSampler`
-        configured with the per-dataset lengths and ``train_dataset_weights``.
-        For ``"sequential"`` and ``"custom"`` it returns an explicit stateful
-        sampler.
+        checkpointed by ``StatefulDataLoader``). Over a
+        :class:`ConcatSFTDataset` (multiple training datasets), ``"random"``
+        instead returns a :class:`DataMixingSampler` configured with its
+        ``dataset_lengths`` and ``train_dataset_weights``. For ``"sequential"``
+        and ``"custom"`` it returns an explicit stateful sampler.
 
         Custom samplers are imported from ``sft_cfg.sampler_class_path`` and
         instantiated as ``ClassName(tokenized, **sft_cfg.sampler_kwargs)``. With
@@ -1376,9 +1372,8 @@ class SFTTrainer:
         constructor must accept them.
 
         Args:
-            tokenized: The (concatenated) tokenized training dataset.
-            dataset_lengths: Tokenized size of each source dataset, in order.
-                ``None`` is treated as a single source spanning ``tokenized``.
+            tokenized: The training dataset (an :class:`SFTDataset`;
+                multi-source runs pass a :class:`ConcatSFTDataset`).
         """
         from skyrl.train.dataset.samplers import (
             DataMixingSampler,
@@ -1386,7 +1381,8 @@ class SFTTrainer:
             import_sampler_class,
         )
 
-        multi_dataset = dataset_lengths is not None and len(dataset_lengths) > 1
+        multi_dataset = isinstance(tokenized, ConcatSFTDataset) and len(tokenized.dataset_lengths) > 1
+        dataset_lengths = tokenized.dataset_lengths if multi_dataset else None
         sampler_type = self.sft_cfg.sampler
         if sampler_type == "random":
             if not multi_dataset:
@@ -1412,9 +1408,7 @@ class SFTTrainer:
             return sampler_cls(tokenized, **sampler_kwargs)
         raise ValueError(f"Unknown sampler '{sampler_type}'. Must be one of 'random', 'sequential', 'custom'.")
 
-    def build_train_dataloader(
-        self, tokenized: list, dataset_lengths: Optional[list[int]] = None
-    ) -> StatefulDataLoader:
+    def build_train_dataloader(self, tokenized) -> StatefulDataLoader:
         """Build the training ``StatefulDataLoader``.
 
         Sampling order is seeded for reproducibility and captured in the dataloader's
@@ -1446,7 +1440,7 @@ class SFTTrainer:
         seeded_generator = torch.Generator()
         seeded_generator.manual_seed(self.sft_cfg.seed)
 
-        sampler = self.build_train_sampler(tokenized, dataset_lengths)
+        sampler = self.build_train_sampler(tokenized)
         num_workers = self.sft_cfg.dataloader_num_workers
 
         return StatefulDataLoader(
@@ -1671,11 +1665,12 @@ class SFTTrainer:
             # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
             # Padded rows have loss_mask=0 so they are excluded here.
             nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
+            # Eval consumes metrics only; skip per-token loss_fn_outputs.
             output = self.dispatch.forward(
                 "policy",
                 batch,
                 loss_fn="cross_entropy",
-                loss_fn_config=None,
+                return_per_token_outputs=False,
             )
             batch_loss = float(output.metrics.get("loss", float("nan")))
             total_loss_weighted += batch_loss * nonpad_tokens
@@ -1696,7 +1691,13 @@ class SFTTrainer:
         """
         timings: dict[str, float] = {}
         with Timer("forward_backward", timings):
-            output = self.dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+            # SFT consumes metrics only; skip per-token loss_fn_outputs.
+            output = self.dispatch.forward_backward(
+                "policy",
+                batch,
+                loss_fn="cross_entropy",
+                return_per_token_outputs=False,
+            )
         with Timer("optim_step", timings):
             grad_norm = self.dispatch.optim_step("policy")
 
@@ -1855,7 +1856,7 @@ class SFTTrainer:
                 logger.warning("resume_from is ignored in dummy run mode")
             return self._train_dummy()
 
-        tokenized, dataset_lengths = self.load_dataset()
+        tokenized = self.load_dataset()
 
         # Log tokenized sequence length statistics (once, before training loop)
         self._log_dataset_stats(tokenized)
@@ -1874,7 +1875,7 @@ class SFTTrainer:
         # Build stateful dataloaders (replaces manual list shuffling/slicing).
         # The training sampler is selected by ``sft_cfg.sampler`` and its
         # position is captured in the checkpoint for resume.
-        self.train_dataloader = self.build_train_dataloader(tokenized, dataset_lengths)
+        self.train_dataloader = self.build_train_dataloader(tokenized)
         if eval_datasets is not None:
             self.eval_dataloaders = [
                 (eval_name, self.build_eval_dataloader(eval_tokenized)) for eval_name, eval_tokenized in eval_datasets
@@ -2143,6 +2144,10 @@ class SFTTrainer:
                 self.global_step = final_step
                 logger.info(f"Saving final HF model at step {final_step}")
                 self.save_hf_model()
+
+        # Drain any in-flight async checkpoint write before teardown. Unconditional:
+        # a save may have happened outside the periodic path. No-op when nothing is pending.
+        self.dispatch.finalize_pending_saves("policy")
 
         # Final eval pass (skip if the last step already ran eval).
         # NOTE: The last in-loop tracker.log(..., commit=True) at step=num_steps

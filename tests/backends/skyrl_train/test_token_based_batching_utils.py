@@ -160,6 +160,19 @@ class TestTokenBasedBatchIterator:
         for i in range(batch.batch_size):
             assert torch.equal(reordered["sequences"][i], batch["sequences"][i])
 
+    def test_reorder_and_combine_items_drops_padding(self):
+        batch = self._make_batch([10, 3, 8, 5])
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=12)
+        output_batches = [
+            [{"sample": index} for index in indices] + [{"sample": "padding"}] for indices in iterator._microbatches
+        ]
+        iterator._num_padding_microbatches = 1
+        output_batches.append([{"sample": "padding-microbatch"}])
+
+        reordered = iterator.reorder_and_combine_items(output_batches)
+
+        assert [output["sample"] for output in reordered] == list(range(batch.batch_size))
+
     def test_get_microbatch_iterator_factory(self):
         batch = self._make_batch([10, 10, 5, 5])
 
@@ -198,6 +211,18 @@ class TestTokenBasedBatchIterator:
         assert padding["attention_mask"][:, 0].sum().item() == padding["attention_mask"].shape[0]
         # Padding rows must not contribute to the loss.
         assert padding["loss_mask"].sum().item() == 0
+
+    def test_padding_microbatch_uses_unique_dummy_routes(self):
+        batch = self._make_batch([4, 4], num_actions=2)
+        batch["rollout_expert_indices"] = torch.full((2, 4, 2, 3), 7, dtype=torch.int16)
+        batch["router_padding_mask"] = torch.zeros((2, 4), dtype=torch.bool)
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)
+
+        padding = iterator._create_padding_microbatch()
+
+        expected = torch.tensor([0, 1, 2], dtype=torch.int16).expand_as(padding["rollout_expert_indices"])
+        assert torch.equal(padding["rollout_expert_indices"], expected)
+        assert torch.all(padding["router_padding_mask"])
 
     def test_multimodal_tensorlist_microbatching(self):
         """Token-based microbatching must gather TensorList fields (multi-modal pixel_values /

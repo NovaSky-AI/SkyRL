@@ -34,14 +34,6 @@ N_SAMPLES_PER_PROMPT = 8
 MAX_GENERATE_LENGTH = 128
 
 
-# vLLM's Triton MLA decode kernel (the only MLA backend on sm < 9.0) fails
-# to compile for glm-4's MLA shape; FLASH_ATTN_MLA / FLASHMLA need Hopper.
-_skip_mla_on_pre_hopper = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 9,
-    reason="no working MLA backend for glm-4 on pre-Hopper GPUs",
-)
-
-
 def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model_name
@@ -83,8 +75,10 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
     # weight-sync, so skip optimizer construction entirely.
-    is_large_moe = ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()) or (
-        "nemotron-3-nano" in model_name.lower()
+    is_large_moe = (
+        ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower())
+        or ("nemotron-3.5-lightning" in model_name.lower())
+        or ("glm-4.7-flash" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -103,14 +97,21 @@ def _extra_env_vars_for_model(model_name: str) -> dict[str, str] | None:
 def _engine_overrides_for_model(model_name: str) -> dict:
     """Per-model overrides for vLLM engine init."""
     overrides = {"engine_init_kwargs": {}, "gpu_memory_utilization": 0.9}
-    if "Nemotron-3-Nano" in model_name:
+    if "Nemotron-3.5-Lightning" in model_name:
+        # Both default to a 262k context, which would size the KV pool far past
+        # what is left next to the colocated Megatron policy shard. Megatron
+        # policy init also needs room alongside vLLM on the same GPU, so lower
+        # vLLM's pool footprint too.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
-        # Megatron policy init also needs room alongside vLLM on the same
-        # GPU, so lower vLLM's pool footprint.
         overrides["gpu_memory_utilization"] = 0.5
     # Large MoE: Megatron policy init also needs room alongside vLLM on the
     # same GPU, so lower vLLM's pool footprint.
     if "qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower():
+        overrides["gpu_memory_utilization"] = 0.5
+    if "glm-4.7-flash" in model_name.lower():
+        # GLM-4.7-Flash's 202k default context would size the KV pool far past
+        # what is left next to the colocated Megatron policy shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
     return overrides
 
@@ -146,7 +147,7 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
 
     sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _ = (
         convert_prompts_responses_to_batch_tensors(
-            tokenizer=tokenizer,
+            pad_token_id=tokenizer.pad_token_id,
             prompts=generator_output["prompt_token_ids"],
             responses=responses,
             rewards=rewards,
@@ -173,7 +174,6 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "action_mask": response_mask.to(dtype=torch.int64),
             }
         )
         training_input.metadata = {"response_length": num_actions}
@@ -184,7 +184,7 @@ async def generate_with_vllm(generator, client, model_name, tokenizer, return_tr
 
 async def construct_training_input_from_generator_output(generator_output, tokenizer):
     return convert_prompts_responses_to_batch_tensors(
-        tokenizer=tokenizer,
+        pad_token_id=tokenizer.pad_token_id,
         prompts=generator_output["prompt_token_ids"],
         responses=generator_output["response_ids"],
         rewards=generator_output["rewards"],
@@ -199,19 +199,22 @@ async def construct_training_input_from_generator_output(generator_output, token
     [
         pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_tp2_ep2"),
         pytest.param(1, 2, 2, 1, None, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, id="qwen3-moe_pp2_cp2"),
+        # GLM-4.7-Flash (~31B MoE, MLA) on 4xH100-80G. Mesh: TP=4 EP=4 ETP=1
+        # -> DP=1, vLLM TP=4 colocated on the same GPUs, same layout as the
+        # other large-MoE entries below.
         pytest.param(
-            2,
-            1,
-            1,
-            2,
-            1,
-            2,
             4,
-            "eatang/glm-4.7-flash-tiny-random",
-            1e-1,
-            2e-2,
-            id="glm-4.7-flash_tp2_ep2",
-            marks=_skip_mla_on_pre_hopper,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            "zai-org/GLM-4.7-Flash",
+            3e-1,
+            5e-2,
+            id="glm-4.7-flash_h100_tp4_ep4",
+            marks=pytest.mark.h100,
         ),
         pytest.param(
             2,
@@ -243,13 +246,11 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             id="qwen3.5-0.8b-dense_tp2",
         ),
-        # Nemotron-3-Nano (30B MoE, bf16) on 4xH100-80G. Mesh: TP=4 EP=4
-        # ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs (colocated).
-        # TP=1 OOMed in the EP alltoall because dense layers were replicated
-        # on every GPU; TP=4 shards them 4-way and matches the qwen3.5-35b
-        # layout below. AdamW optimizer is skipped entirely via is_large_moe
-        # in get_test_actor_config (forward-only test), and vLLM gmu is
-        # lowered to 0.5 so the policy shard + vLLM pool fit on each H100.
+        # Nemotron-3.5-Lightning (30B MoE, bf16) on 4xH100-80G. Same
+        # NemotronH hybrid Mamba/attention/MoE backbone and layer pattern as
+        # Nemotron-3-Nano but with one MTP head (`num_nextn_predict_layers=1`).
+        # MegatronWorker drops the MTP head (enable_mtp=False -> provider.mtp_num_layers=None)
+        # and vLLM skips the `mtp.*` weights, so neither side carries it through weight sync.
         pytest.param(
             4,
             1,
@@ -258,10 +259,10 @@ async def construct_training_input_from_generator_output(generator_output, token
             1,
             4,
             4,
-            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
             5e-1,
             5e-2,
-            id="nemotron3-nano_tp4_ep4_h100",
+            id="nemotron3.5-lightning_tp4_ep4_h100",
             marks=pytest.mark.h100,
         ),
         # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. Mesh:

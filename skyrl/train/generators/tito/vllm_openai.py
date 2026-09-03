@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.exceptions import VLLMValidationError
 
 from .types import Message, ToolSpec
 
@@ -122,7 +123,7 @@ def parse_chat_request(body: Mapping[str, Any], *, registered_model: str) -> Par
     """Validate through vLLM, then enforce only TITO-specific restrictions."""
     try:
         request = ChatCompletionRequest.model_validate(body)
-    except ValidationError as exc:
+    except (ValidationError, VLLMValidationError) as exc:
         raise OpenAIProtocolError(str(exc)) from exc
 
     if request.model is None:

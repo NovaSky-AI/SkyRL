@@ -9,7 +9,7 @@ This page covers the `megatron` backend.
 SkyRL supports NVIDIA's [Megatron-Core](https://developer.nvidia.com/megatron-core) library as an RL training backend, inheriting support for 5D parallelism (tensor+sequence, pipeline, context, expert, and data parallelism), and optimized performance for large scale models.
 
 We provide example scripts for running efficient large scale MoE training with models like `Qwen3-30B-A3B` using Megatron in the [examples/megatron](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/megatron) directory.
-For details on configuring the Megatron backend, and enabling checkpointing, see the [Megatron configuration guide](../configuration/config#megatron-configuration) and the [Megatron checkpointing guide](../checkpointing-logging/checkpointing#megatron-checkpointing).
+For details on configuring the Megatron backend, and enabling checkpointing, see the [configuration API reference](/docs/api-ref/skyrl/config) and the [Megatron checkpointing guide](../checkpointing-logging/checkpointing#megatron-checkpointing).
 
 ## When to use the Megatron backend
 
@@ -38,13 +38,13 @@ A script for running the Qwen3-30B-A3B experiment can be found [here](https://gi
 Additionally, we provide a script for running basic GSM8K training on Qwen3-235B-A22B with Megatron [here](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_qwen3-235b-a22b.sh). 
 Note that although training at 100B+ scale using Megatron is currently possible, we are in the process of further optimizing peformance.
 
-For more details on configuring the Megatron backend, and enabling checkpointing, see [Megatron configuration guide](../configuration/config#megatron-configuration), and [Megatron checkpointing guide](../checkpointing-logging/checkpointing#megatron-checkpointing).
+For more details on configuring the Megatron backend, and enabling checkpointing, see the [configuration API reference](/docs/api-ref/skyrl/config), and the [Megatron checkpointing guide](../checkpointing-logging/checkpointing#megatron-checkpointing).
 
 ## Installation
 
 ### Setting up the Docker image
 
-To get started, you can follow the instructions for installing via Docker in the [Installation Guide](../getting-started/installation) page, but using the `novaskyai/skyrl-train-ray-2.56.0-py3.12-cu12.8-megatron` image instead of the default image.
+To get started, you can follow the instructions for installing via Docker in the [Installation Guide](../getting-started/installation) page, but using the `novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron` image instead of the default image.
 
 This ensures that the necessary dependencies needed for Megatron are installed and don't need to be built on each node for each run, which can be time consuming. Previously, we recommended setting PYTHONPATH to the location of TransformerEngine installation, but this is no longer necessary.
 
@@ -55,7 +55,7 @@ This is handled in the `pyproject.toml` file for the `mcore` extra.
 ## Configuration
 
 We provide the following options for fully configuring the Megatron backend, exposing the underlying Megatron optimizer, DDP, and model config objects
-for advanced users to fully take advantage of all of Megatron-Core's feature flags. For more details, see the [Megatron configuration guide](../configuration/config#megatron-configuration) section.
+for advanced users to fully take advantage of all of Megatron-Core's feature flags. For the full field list, defaults, and per-field documentation, see [`MegatronConfig`](/docs/api-ref/skyrl/config) in the configuration API reference.
 
 ```yaml title="trainer.policy.megatron_config (available fields)"
 tensor_model_parallel_size: 1
@@ -85,6 +85,26 @@ empty_cuda_cache: true
 
 These default values can be overridden by passing in the corresponding arguments to `trainer.policy.megatron_config` in the launch script.
 
+### Sizing the parallelism dimensions
+
+The parallel sizes must satisfy the following rules:
+
+- `model_size = pp_size * tp_size * cp_size`
+- `dp_size = world_size / model_size`
+- `world_size % (pp_size * ep_size * etp_size) == 0`
+
+The last rule means that `ep_size * etp_size` can scale independently of `tp_size * cp_size`, and
+can go across data parallel ranks.
+
+Two things worth noting when picking these values:
+
+- Megatron sequence parallelism (unrelated to Ulysses `sequence_parallel_size`) is enabled
+  automatically whenever `tensor_model_parallel_size > 1`.
+- `expert_tensor_parallel_size` resolves to `tensor_model_parallel_size` when left as `null`.
+  Setting it to `1` is recommended for best performance when `expert_model_parallel_size > 1`.
+
+### Optimizer-state dtypes
+
 `optimizer_config_kwargs` can set optimizer-state dtypes from YAML:
 
 ```yaml
@@ -95,7 +115,19 @@ optimizer_config_kwargs:
   main_params_dtype: fp32
 ```
 
-See the [Megatron configuration guide](../configuration/config#megatron-configuration) for accepted aliases and per-field checks.
+Accepted dtype names are case-insensitive: `fp32` (`float32`, `float`), `fp16` (`float16`, `half`),
+`bf16` (`bfloat16`), and `fp8` (`float8`, `uint8`). `fp8` maps to `torch.uint8`, matching
+TransformerEngine optimizer state storage.
+
+Field-specific checks:
+
+- `main_params_dtype` (master weights): `fp32`, `fp16`
+- `exp_avg_dtype` / `exp_avg_sq_dtype`: `fp32`, `fp16`, `bf16`, `fp8`
+
+<Callout type="warn">
+`optimizer_config_kwargs.use_precision_aware_optimizer=true` can cause checkpointing to fail. See:
+https://github.com/nvidia/megatron-lm/issues/1820. We recommend leaving this setting to `false`.
+</Callout>
 
 ## Parallelism Resources
 

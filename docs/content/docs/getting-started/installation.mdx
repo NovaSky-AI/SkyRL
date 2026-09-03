@@ -5,12 +5,12 @@ title: "Installation"
 
 ## Requirements
 
-- CUDA version 12.8
+- CUDA version 13.0, which needs an NVIDIA driver of r580 or newer
 - [uv](https://docs.astral.sh/uv/)
 
 We use [uv](https://docs.astral.sh/uv/) to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers.
 
-If you're running on an existing Ray cluster (see [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster) section), we suggest using Ray 2.56.0 and Python 3.12. However, we support Ray versions >= 2.44.0.
+If you're running on an existing Ray cluster (see [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster) section), we suggest using Ray 2.57.0 and Python 3.12. However, we support Ray versions >= 2.44.0.
 
 <Callout type="warn">
 We do not recommend using Ray 2.47.0 and 2.47.1 for SkyRL due to known issues in the uv+ray integration.
@@ -31,7 +31,7 @@ We provide docker images with the base dependencies for the FSDP and Megatron ba
 2. You can launch the container using the following command:
 
 ```bash
-docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl novaskyai/skyrl-train-ray-2.56.0-py3.12-cu12.8 /bin/bash
+docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0 /bin/bash
 ```
 
 3. Inside the launched container, setup the latest version of the project:
@@ -46,7 +46,7 @@ cd SkyRL
 2. You can launch the container using the following command:
 
 ```bash
-docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl novaskyai/skyrl-train-ray-2.56.0-py3.12-cu12.8-megatron /bin/bash
+docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron /bin/bash
 ```
 
 3. Inside the launched container, setup the latest version of the project:
@@ -61,18 +61,18 @@ That is it! After initializing the ray cluster as described below, you should no
 <Callout type="warn">
 The older docker image `novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8` is compatible with SkyRL only till commit https://github.com/NovaSky-AI/SkyRL/commit/0ee61a70a71344fbf15e0c6a603cdcc8b4d0cad5
 
-We recommend upgrading to the new docker image `novaskyai/skyrl-train-ray-2.56.0-py3.12-cu12.8`.
+We recommend upgrading to the new docker image `novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0`.
 
-If you wish to use SkyRL with ray != 2.56.0, see the guide for [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster).
+If you wish to use SkyRL with ray != 2.57.0, see the guide for [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster).
 </Callout>
 
 ## Install without Dockerfile
 
 For installation without the Dockerfile, make sure you meet the pre-requisities:
 
-- CUDA 12.8
+- CUDA 13.0 (NVIDIA driver r580 or newer)
 - [uv](https://docs.astral.sh/uv/)
-- [ray](https://docs.ray.io/en/latest/) 2.56.0
+- [ray](https://docs.ray.io/en/latest/) 2.57.0
 
 ### System Dependencies
 

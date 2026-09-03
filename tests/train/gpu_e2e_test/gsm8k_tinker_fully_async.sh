@@ -11,9 +11,12 @@ SKYRL_REPO_ROOT=$(realpath "$SCRIPT_DIR/../../..")
 LOG_DIR="$HOME/tinker_fully_async_logs/$RUN_NAME"
 mkdir -p "$LOG_DIR"
 
-# TODO: tighten thresholds after 3-5 nightly runs (5% allowance from min observed),
-# matching the convention in gsm8k_colocate.sh.
-REWARD_MIN_VALUE=0.0
+# Thresholds: 5% allowance from min/max of the 26 finished nightly runs since 20th Jul 2026
+# (as of 31st Aug 2026), matching the convention in gsm8k_colocate.sh (#1664). Observed:
+# reward in [0.223, 0.295]; kl_sample_train_v2 in [4.1e-3, 7.5e-3] (an order of magnitude
+# above the colocated run's: max_steps_off_policy=4 trains on stale samples).
+REWARD_MIN_VALUE=0.21
+KL_MAX_VALUE=0.0079
 
 # Non-colocated layout: 2 GPUs for the trainer (FSDP policy) and 2 GPUs for the
 # inference engines (vLLM). colocate_all=false keeps training and inference on
@@ -25,7 +28,27 @@ setsid uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
   --base-model "Qwen/Qwen3-0.6B" --backend fsdp --port 8000 \
   --backend-config "$BACKEND_CONFIG" >"$LOG_DIR/server.log" 2>&1 &
 SERVER_PID=$!
-trap 'kill -TERM -- -$SERVER_PID 2>/dev/null || true; sleep 5; kill -KILL -- -$SERVER_PID 2>/dev/null || true' EXIT
+
+# On failure, dump the server log plus the newest SkyRL infra log: Ray actor output
+# (including the vLLM engine's real error, e.g. an OOM during engine startup) is
+# redirected there and never reaches server.log, so without this the job log only
+# shows the opaque re-raised RayTaskError.
+cleanup() {
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "=== tinker server log tail (exit $status) ===" >&2
+    tail -n 200 "$LOG_DIR/server.log" >&2 || true
+    infra_log=$(ls -t /tmp/skyrl-logs/infra-*.log 2>/dev/null | head -1 || true)
+    if [ -n "${infra_log:-}" ]; then
+      echo "=== skyrl infra log tail ($infra_log) ===" >&2
+      tail -n 200 "$infra_log" >&2 || true
+    fi
+  fi
+  kill -TERM -- -$SERVER_PID 2>/dev/null || true
+  sleep 5
+  kill -KILL -- -$SERVER_PID 2>/dev/null || true
+}
+trap cleanup EXIT
 
 deadline=$(( $(date +%s) + 1800 ))
 until curl -sSf http://localhost:8000/docs >/dev/null 2>&1; do
@@ -55,7 +78,9 @@ COOKBOOK_COMMIT="016468b0f214f30492f9f8eb001f9094970b3ad5"
 cd "$COOKBOOK_DIR"
 git fetch --depth 1 origin "$COOKBOOK_COMMIT"
 git checkout --detach "$COOKBOOK_COMMIT"
-TINKER_API_KEY=tml-dummy uv run --extra math-rl --extra wandb --with tinker --with datasets --with torch \
+# Run the client from SkyRL's project so the tinker SDK resolves from SkyRL's uv.lock.
+cd "$SKYRL_REPO_ROOT"
+TINKER_API_KEY=tml-dummy uv run --extra tinker --with-editable "$COOKBOOK_DIR[math-rl,wandb]" --with datasets --with torch \
   python -m tinker_cookbook.recipes.math_rl.train \
   base_url=http://localhost:8000 \
   model_name="Qwen/Qwen3-0.6B" \
@@ -75,4 +100,4 @@ TINKER_API_KEY=tml-dummy uv run --extra math-rl --extra wandb --with tinker --wi
 cd "$SKYRL_REPO_ROOT"
 uv run --isolated --extra fsdp "$SCRIPT_DIR/get_summary.py" \
   --run_name "$RUN_NAME" --project_name "$PROJECT_NAME" \
-  --asserts "env/all/reward/total >= $REWARD_MIN_VALUE"
+  --asserts "env/all/reward/total >= $REWARD_MIN_VALUE" "optim/kl_sample_train_v2 <= $KL_MAX_VALUE"

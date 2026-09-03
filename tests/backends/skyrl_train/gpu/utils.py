@@ -129,7 +129,7 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
         advantages=0.6 * torch.ones((B, num_actions), device="cpu"),
         attention_mask=torch.ones((B, T), dtype=int, device="cpu"),
         loss_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
-        action_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
+        response_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
         num_actions=num_actions,
         info={},
     )
@@ -391,7 +391,8 @@ def ray_init_for_tests():
         env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
-    env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH")
+    if "LD_LIBRARY_PATH" in os.environ:
+        env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
     ray.init(runtime_env={"env_vars": env_vars})
 
 

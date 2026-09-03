@@ -40,6 +40,9 @@ examples/train/         # Example training scripts per model/backend
 Training weights are synced to inference engines via:
 - **Broadcast strategy**: NCCL-based, for non-colocated setups.
 - **CUDA IPC strategy**: For colocated setups (`colocate_all=true`).
+- **Delta strategy**: Checkpoint deltas through a shared directory or object store, for
+  non-colocated setups where the two sides are not NCCL-reachable. See
+  `.claude/docs/weight_sync.md`.
 
 ## Environments
 

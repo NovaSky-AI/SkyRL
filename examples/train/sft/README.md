@@ -41,6 +41,13 @@ Each row must contain:
 
 Rows are normalized to the trainer's internal format; `max_length` truncation still applies (rows whose loss
 window is fully truncated are dropped, and over-length VLM rows are always dropped rather than truncated).
+
+Pretokenized stores are **memory-mapped, not loaded into RAM**: schema validation runs eagerly at load time
+(vectorized, so malformed stores still fail fast), while row normalization happens lazily at access time.
+Controller memory stays bounded by the OS page cache regardless of dataset size, and the store files must stay
+on disk for the duration of the run. Set `dataloader_num_workers>=2` so the per-batch normalization is
+prefetched off the training critical path (measured: ~11 ms/step exposed at `dataloader_num_workers=0` vs
+~1 ms hidden with 2 workers, against multi-second train steps).
 `pretokenized_dataset_paths` cannot be combined with `train_datasets` (nor `eval_pretokenized_dataset_paths`
 with `eval_datasets`) — a run either tokenizes online or ingests pretokenized stores. See
 [`skyrl/train/dataset/pretokenized.py`](../../../skyrl/train/dataset/pretokenized.py) for details.

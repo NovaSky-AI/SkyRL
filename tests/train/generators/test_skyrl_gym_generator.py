@@ -5,6 +5,7 @@ uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_gener
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 from skyrl.train.config import ChatTemplateConfig, GeneratorConfig
@@ -14,12 +15,29 @@ from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
 )
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator, TurnOutput
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
 # Mock constants, where 4 is the eos token id
 MOCK_LLM_OUTPUT_IDS = [1, 10, 12, 4]
 MOCK_TOKENIZER_ENCODED_IDS = [1, 2, 3, 4]
+
+
+def test_turn_output_keeps_uncaptured_suffix_out_of_routes():
+    routes = np.asarray([[[2, 3]], [[4, 5]]], dtype=np.uint8)
+    output = TurnOutput(
+        output="answer",
+        output_ids=[10, 11, 4],
+        output_logprobs=None,
+        new_obs=[],
+        obs_ids=[20, 21],
+        rollout_expert_indices=routes,
+        reward=1.0,
+        added_eos=True,
+    )
+
+    assert output.get_turn_rollout_expert_indices() is routes
+    assert output.get_turn_loss_mask() == [1, 1, 0, 0, 0]
 
 
 # TODO (erictang000): clean up the mocking for tests in this file
@@ -376,7 +394,7 @@ async def test_agent_loop_single_turn(
             # No EOS: just add it
             expected_response_ids = mock_llm_output_ids + [mock_tokenizer.eos_token_id]
 
-        expected_loss_mask = [1] * (len(expected_response_ids))
+        expected_loss_mask = [1] * len(expected_response_ids)
 
     if logprobs_setting is not None:
         assert output.rollout_logprobs is not None
