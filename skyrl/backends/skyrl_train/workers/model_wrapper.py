@@ -6,7 +6,7 @@
 import inspect
 from dataclasses import dataclass
 from numbers import Integral
-from typing import Optional, Union
+from typing import Optional, Union, get_args
 
 import numpy as np
 import torch
@@ -58,14 +58,21 @@ def _scalar_num_actions(num_actions: Union[int, list[int]]) -> Optional[int]:
     return value if value > 0 else None
 
 
-def _model_supports_logits_to_keep(model: nn.Module) -> bool:
-    """Check the actual causal LM signature, unwrapping PEFT when necessary."""
+def _annotation_supports_tensor(annotation) -> bool:
+    """Return whether a forward annotation explicitly includes ``torch.Tensor``."""
+    return annotation is torch.Tensor or any(_annotation_supports_tensor(arg) for arg in get_args(annotation))
+
+
+def _model_supports_logits_to_keep(model: nn.Module, *, require_tensor: bool = False) -> bool:
+    """Check the concrete causal LM signature, unwrapping PEFT when necessary."""
     candidate = model.get_base_model() if isinstance(model, PeftModel) else model
     try:
-        parameters = inspect.signature(candidate.forward).parameters
+        parameter = inspect.signature(candidate.forward).parameters.get("logits_to_keep")
     except (TypeError, ValueError):
         return False
-    return "logits_to_keep" in parameters
+    if parameter is None:
+        return False
+    return not require_tensor or _annotation_supports_tensor(parameter.annotation)
 
 
 def _can_use_action_logits_selection(
@@ -321,6 +328,10 @@ class HFModelWrapper(nn.Module):
             self.model = pretrain_or_model
 
         self._model_supports_logits_to_keep = _model_supports_logits_to_keep(self.model)
+        self._model_supports_tensor_logits_to_keep = _model_supports_logits_to_keep(
+            self.model,
+            require_tensor=True,
+        )
         self.logprobs_chunk_size = logprobs_chunk_size
 
         # TODO (sumanthrh): do the same for `logprobs_from_logits` and test.
@@ -407,6 +418,14 @@ class HFModelWrapper(nn.Module):
                 padded_sequence_length=sequences.shape[1],
                 nnz_indices=nnz_indices if self.remove_microbatch_padding else None,
             )
+            if (
+                logits_selection is not None
+                and isinstance(logits_selection.logits_to_keep, torch.Tensor)
+                and not self._model_supports_tensor_logits_to_keep
+            ):
+                # A named parameter is sufficient for the integer suffix path, but
+                # packed selectors require an explicit tensor-valued contract.
+                logits_selection = None
         model_forward_kwargs = (
             {"logits_to_keep": logits_selection.logits_to_keep} if logits_selection is not None else {}
         )

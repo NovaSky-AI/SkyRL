@@ -52,7 +52,7 @@ class TinyCausalLM(nn.Module):
         input_ids,
         attention_mask=None,
         position_ids=None,
-        logits_to_keep=0,
+        logits_to_keep: int | torch.Tensor = 0,
         **kwargs,
     ):
         del attention_mask, position_ids, kwargs
