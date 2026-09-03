@@ -420,6 +420,28 @@ def test_ephemeral_sampler_checkpoint_stays_in_memory(monkeypatch, tmp_path):
     assert not output_path.exists()
 
 
+@pytest.mark.parametrize("load_optimizer", [False, True])
+def test_training_checkpoint_restore_reloads_saved_sampler(tmp_path, load_optimizer):
+    backend = create_backend(max_lora_adapters=2)
+    model_id = "restored_sampler"
+    adapter_index = create_model(backend, model_id)
+    training_path = tmp_path / "training"
+    backend.save_checkpoint(training_path, model_id)
+
+    lora_layer = backend.model.model.layers[0].self_attn.qkv_proj
+    lora_layer.lora_B[...] = lora_layer.lora_B[...].at[adapter_index, :LORA_RANK].set(1)
+    sampler_path = tmp_path / model_id / "sampler_weights" / "snapshot.tar.gz"
+    backend.save_sampler_checkpoint(sampler_path, model_id)
+
+    backend.load_checkpoint(training_path, model_id, load_optimizer=load_optimizer)
+    assert jnp.all(lora_layer.lora_B[adapter_index] == 0)
+
+    sample_input = make_sample_input([1, 2, 3]).model_copy(update={"checkpoint_id": "snapshot"})
+    prepared = prepare_sample_batch({"sample": (model_id, sample_input)}, tmp_path)
+    assert backend.load_sampler_weights(prepared) == [adapter_index]
+    assert jnp.all(lora_layer.lora_B[adapter_index, :LORA_RANK] == 1)
+
+
 def test_gradient_checkpointing():
     """
     Verify gradient checkpointing doesn't affect loss values.

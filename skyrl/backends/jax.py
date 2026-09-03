@@ -971,6 +971,7 @@ class JaxBackendImpl(AbstractBackend):
             )
 
         insert_adapter_state(adapter_index, self.lora_params, checkpoint_data["lora_weights"], rank)
+        self.models[model_id].loaded_checkpoint_id = None
         if load_optimizer:
             insert_adapter_state(
                 adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
