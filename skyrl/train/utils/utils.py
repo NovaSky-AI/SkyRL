@@ -323,7 +323,7 @@ def _validate_mtp_prefix_caching(cfg: SkyRLTrainConfig) -> None:
         return
 
     model_config = AutoConfig.from_pretrained(
-        cfg.trainer.policy.model.path,
+        engine_kwargs.get("model", cfg.trainer.policy.model.path),
         trust_remote_code=engine_kwargs.get("trust_remote_code", True),
         revision=engine_kwargs.get("revision"),
     )
@@ -355,14 +355,13 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         if cfg.trainer.max_training_steps <= 0:
             raise ValueError(f"max_training_steps must be > 0, got {cfg.trainer.max_training_steps}")
 
-    # Validate generation config separately
-    validate_generator_cfg(cfg)
-
     # Multi-Token Prediction (MTP): the high-level `trainer.mtp` knob is the single source of truth.
     # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
-    # side (vLLM MTP speculative decoding) so both stay consistent.
+    # side (vLLM MTP speculative decoding) before validating the effective inference config.
     _apply_mtp_config(cfg)
-    _validate_mtp_prefix_caching(cfg)
+
+    # Validate generation config separately, including the shared inference-engine checks.
+    validate_generator_cfg(cfg)
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
@@ -612,6 +611,8 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         ValueError / NotImplementedError / AssertionError: on invalid combinations.
     """
     ie_cfg = cfg.generator.inference_engine
+
+    _validate_mtp_prefix_caching(cfg)
 
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"

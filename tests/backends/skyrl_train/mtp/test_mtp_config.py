@@ -16,6 +16,7 @@ from skyrl.train.utils.utils import (
     _apply_mtp_config,
     _validate_mtp_prefix_caching,
     validate_cfg,
+    validate_inference_engine_cfg,
 )
 
 
@@ -242,3 +243,53 @@ def test_validate_cfg_rejects_mtp_prefix_caching_after_mtp_propagation(tmp_path)
         "method": "mtp",
         "num_speculative_tokens": 1,
     }
+
+
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+def test_inference_only_validation_checks_mtp_prefix_caching(tmp_path, enable_prefix_caching):
+    from transformers import Qwen3_5TextConfig
+
+    Qwen3_5TextConfig(
+        num_hidden_layers=2,
+        layer_types=["linear_attention", "full_attention"],
+    ).save_pretrained(tmp_path)
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = str(tmp_path)
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.enable_prefix_caching = enable_prefix_caching
+    cfg.generator.inference_engine.speculative_config = {"method": "mtp", "num_speculative_tokens": 1}
+
+    # The serve entrypoint calls this shared validator without training's MTP propagation.
+    if enable_prefix_caching:
+        with pytest.raises(ValueError, match="MTP speculative decoding with prefix caching"):
+            validate_inference_engine_cfg(cfg)
+    else:
+        validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("hybrid_override", [False, True])
+def test_validate_mtp_prefix_caching_uses_effective_engine_model(tmp_path, hybrid_override):
+    from transformers import Qwen3_5TextConfig
+
+    full_attention_path = tmp_path / "full_attention"
+    hybrid_path = tmp_path / "hybrid"
+    Qwen3_5TextConfig(num_hidden_layers=2, layer_types=["full_attention", "full_attention"]).save_pretrained(
+        full_attention_path
+    )
+    Qwen3_5TextConfig(num_hidden_layers=2, layer_types=["linear_attention", "full_attention"]).save_pretrained(
+        hybrid_path
+    )
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = str(full_attention_path if hybrid_override else hybrid_path)
+    cfg.generator.inference_engine.engine_init_kwargs = {
+        "model": str(hybrid_path if hybrid_override else full_attention_path),
+    }
+    cfg.generator.inference_engine.speculative_config = {"method": "mtp", "num_speculative_tokens": 1}
+
+    if hybrid_override:
+        with pytest.raises(ValueError, match="MTP speculative decoding with prefix caching"):
+            validate_inference_engine_cfg(cfg)
+    else:
+        validate_inference_engine_cfg(cfg)
