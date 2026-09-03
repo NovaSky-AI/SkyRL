@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock
 
+import jax
 import jax.numpy as jnp
 from flax import nnx
 
@@ -75,6 +76,22 @@ def make_inputs(batch_size: int, prompt_length: int):
     input_ids = jnp.tile(jnp.arange(prompt_length, dtype=jnp.int32)[None, :], (batch_size, 1))
     attention_mask = jnp.ones((batch_size, prompt_length), dtype=jnp.int32)
     return input_ids, attention_mask
+
+
+def test_mps_kv_cache_update_layer(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "mps")
+    k_cache = jnp.zeros((3, 5, 1, 2), dtype=jnp.float32)
+    v_cache = jnp.zeros_like(k_cache)
+    k = jnp.arange(1, 13, dtype=jnp.float32).reshape(3, 2, 1, 2)
+    v = k + 10
+    positions = jnp.array([[-7, -6], [-4, -3], [4, 5]], dtype=jnp.int32)
+
+    updated_k, updated_v = KVCache.update_layer((k_cache, v_cache), k, v, positions)
+
+    expected_k = k_cache.at[0, 0:2].set(k[0]).at[1, 1:3].set(k[1]).at[2, 3:5].set(k[2])
+    expected_v = v_cache.at[0, 0:2].set(v[0]).at[1, 1:3].set(v[1]).at[2, 3:5].set(v[2])
+    assert jnp.array_equal(updated_k, expected_k)
+    assert jnp.array_equal(updated_v, expected_v)
 
 
 def generator_outputs_equal(output1: GenerateOutput, index1: int, output2: GenerateOutput, index2: int) -> bool:

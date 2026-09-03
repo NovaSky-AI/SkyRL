@@ -371,7 +371,7 @@ def test_process_optim_step_hyperparams_behavior():
 
 
 def test_optim_step_returns_metrics():
-    """optim_step should return learning rate and grad norm metrics."""
+    """optim_step should return metrics and invalidate loaded sampler weights."""
     config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, mhc_expansion_rate=4)
     backend = JaxBackend(BASE_MODEL, config)
 
@@ -381,6 +381,7 @@ def test_optim_step_returns_metrics():
     tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
     reqs = {"1001": (model_id, make_fwd_bwd_input(tokens))}
     backend.forward_backward(prepare_model_pass_batch(reqs))
+    backend.models[model_id].loaded_checkpoint_id = "sampler_before_step"
 
     learning_rate = 1e-4
     step_output = backend.optim_step(
@@ -391,6 +392,7 @@ def test_optim_step_returns_metrics():
     assert step_output.metrics["skyrl.ai/learning_rate"] == pytest.approx(learning_rate, rel=2e-3)
     assert step_output.metrics["skyrl.ai/grad_norm"] > 0
     assert step_output.metrics["skyrl.ai/mhc_gradient_norm"] >= 0
+    assert backend.models[model_id].loaded_checkpoint_id is None
 
     no_grad_output = backend.optim_step(
         model_id,
@@ -399,6 +401,45 @@ def test_optim_step_returns_metrics():
     assert no_grad_output.metrics["skyrl.ai/learning_rate"] == pytest.approx(2e-4, rel=2e-3)
     assert no_grad_output.metrics["skyrl.ai/grad_norm"] == pytest.approx(0.0)
     assert no_grad_output.metrics["skyrl.ai/mhc_gradient_norm"] == pytest.approx(0.0)
+
+
+def test_ephemeral_sampler_checkpoint_stays_in_memory(monkeypatch, tmp_path):
+    backend = create_backend(max_lora_adapters=2)
+    model_id = "ephemeral_sampler"
+    create_model(backend, model_id)
+    output_path = tmp_path / "ss0_seq1.tar.gz"
+
+    def fail_if_saved(*args, **kwargs):
+        pytest.fail("ephemeral sampler weights should not be written to disk")
+
+    monkeypatch.setattr("skyrl.backends.jax.save_lora_checkpoint", fail_if_saved)
+
+    backend.save_sampler_checkpoint(output_path, model_id, persist=False)
+
+    assert backend.models[model_id].loaded_checkpoint_id == "ss0_seq1"
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize("load_optimizer", [False, True])
+def test_training_checkpoint_restore_reloads_saved_sampler(tmp_path, load_optimizer):
+    backend = create_backend(max_lora_adapters=2)
+    model_id = "restored_sampler"
+    adapter_index = create_model(backend, model_id)
+    training_path = tmp_path / "training"
+    backend.save_checkpoint(training_path, model_id)
+
+    lora_layer = backend.model.model.layers[0].self_attn.qkv_proj
+    lora_layer.lora_B[...] = lora_layer.lora_B[...].at[adapter_index, :LORA_RANK].set(1)
+    sampler_path = tmp_path / model_id / "sampler_weights" / "snapshot.tar.gz"
+    backend.save_sampler_checkpoint(sampler_path, model_id)
+
+    backend.load_checkpoint(training_path, model_id, load_optimizer=load_optimizer)
+    assert jnp.all(lora_layer.lora_B[adapter_index] == 0)
+
+    sample_input = make_sample_input([1, 2, 3]).model_copy(update={"checkpoint_id": "snapshot"})
+    prepared = prepare_sample_batch({"sample": (model_id, sample_input)}, tmp_path)
+    assert backend.load_sampler_weights(prepared) == [adapter_index]
+    assert jnp.all(lora_layer.lora_B[adapter_index, :LORA_RANK] == 1)
 
 
 def test_gradient_checkpointing():
