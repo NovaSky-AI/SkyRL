@@ -538,8 +538,11 @@ class MegatronConfig(BaseConfig):
     without fragmentation. Reconciled across the TP group, so it scales to any parallel size.
     ``None`` uses the exact full-vocab loss. Typical: 64-128."""
     async_dist_ckpt_save: bool = False
-    """Write the torch_dist checkpoint from a background process so training resumes
-    immediately; the pending write is finalized at the next checkpoint and at shutdown.
+    """Write the torch_dist checkpoint from a background process.
+
+    Trainer checkpoint saves wait for completion before updating the latest checkpoint and pruning older
+    checkpoints, so disk writes do not overlap subsequent training steps. Direct worker
+    saves leave the write pending until explicit finalization, the next save, or load.
     The on-disk format is identical to a synchronous save. Only the sharded
     model/optimizer state is async -- the rank-0 HF config/tokenizer write stays inline.
     Falls back to synchronous for cloud paths."""
