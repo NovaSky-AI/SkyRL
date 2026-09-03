@@ -334,16 +334,34 @@ class Worker(DistributedTorchRayActor):
             logger.warning(f"Failed to set {setting!r}: {e}")
 
     @contextmanager
-    def _expandable_segments_disabled_for_sync(self):
+    def _expandable_segments_disabled_for_sync(self, force: bool = False):
         """Disable expandable_segments for the duration of CUDA-IPC weight sync.
 
-        Only toggles under ``colocate_all`` (the IPC path); under non-colocated runs
-        weight sync uses NCCL broadcast, which has its own buffers and is unaffected.
-        :meth:`_set_expandable_segments` itself no-ops when the feature is disabled.
+        By default only toggles under ``colocate_all`` (the colocated IPC path, which
+        only shares CUDA memory when trainer and inference share GPUs); under
+        non-colocated runs the push backends use NCCL broadcast, which has its own
+        buffers and is unaffected. ``force`` comes from the sender's
+        ``force_disable_expandable_segments``, for backends that CUDA-IPC share
+        regardless of colocation: sharded_rdt shares every gathered group with its
+        sidecar producer over ``reduce_tensor``/CUDA IPC, and expandable-segment
+        (VMM) memory makes that export/rebuild ~5-10x slower per storage
+        (measured: publish rebuild 7.2s/rank/sync at 30B, the dominant
+        weight-sync cost). :meth:`_set_expandable_segments` itself no-ops when
+        the feature is disabled.
         """
-        toggle = self.cfg.placement.colocate_all and self.cfg.use_expandable_segments
+        toggle = (force or self.cfg.placement.colocate_all) and self.cfg.use_expandable_segments
         if toggle:
             self._set_expandable_segments(False)
+            # The setting only affects NEW segment creation; freed blocks inside
+            # existing expandable segments are still eligible for reuse. Release
+            # cached segments so the gather buffers allocated during the sync
+            # land in fresh, IPC-fast classic segments. Once per process: later
+            # syncs re-use the classic blocks the first sync created (identical
+            # allocation sizes), and a per-sync empty_cache costs ~0.5-1s at
+            # 235B allocator scale.
+            if not getattr(self, "_ipc_segment_cache_flushed", False):
+                self._ipc_segment_cache_flushed = True
+                torch.cuda.empty_cache()
         try:
             yield
         finally:
@@ -472,15 +490,21 @@ class Worker(DistributedTorchRayActor):
         from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy_cls
 
         assert inference_engine_client is not None
+        # Cache the client so per-sync broadcast_to_inference_engines calls can
+        # pass None instead of re-shipping it: the client carries the HF
+        # tokenizer (~10MB, 0.13s pickle + 0.34s unpickle), which otherwise
+        # rides every sync's RPC fan-out. Workers only use its static parts
+        # (server URLs, cfg flags); the driver's live copy owns weight_version.
+        self._weight_sync_inference_client = inference_engine_client
+
+        # Fetch the total inference world size from the servers.
+        inference_world_size, _ = await inference_engine_client.get_world_size()
 
         # Determine transfer strategy based on inference engine config and placement
         self._transfer_strategy_cls = get_transfer_strategy_cls(
             weight_sync_backend=inference_engine_cfg.weight_sync_backend,
             colocate_all=self.cfg.placement.colocate_all,
         )
-
-        # Fetch the total inference world size from the servers.
-        inference_world_size, _ = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(
@@ -491,18 +515,27 @@ class Worker(DistributedTorchRayActor):
 
         # Create sender on all ranks
         # Strategy implementations may have different logic for different ranks
+        # The extractor is passed to every strategy; only those that rendezvous at
+        # init rather than on the first send use it (sharded_rdt). Both workers build
+        # it before calling super(), so it is available here.
         tasks = [
             asyncio.to_thread(
                 self._transfer_strategy_cls.create_sender,
                 init_info=init_info,
                 inference_client=inference_engine_client,
+                weight_extractor=getattr(self, "weight_extractor", None),
             ),
         ]
 
         # Only rank 0 initializes receivers on inference engines
         # NOTE: For broadcast strategy, sender and receiver init must run concurrently
         # because both need to join the same process group to avoid deadlock
-        if torch.distributed.get_rank() == 0:
+        # NOTE: strategies whose sender drives the inference-side handshake itself
+        # (sharded_rdt) must NOT be initialized from here as well.
+        # TODO (sumanthrh): `sender_initializes_receivers` is currently used as a workaround for
+        # supporting RDT. We can probably move the inference-side init
+        # as a sender method in all the classes to unify this. RDT doesn't call `init_weight_update_communicator` itself
+        if torch.distributed.get_rank() == 0 and not self._transfer_strategy_cls.sender_initializes_receivers:
             tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
 
         results = await asyncio.gather(*tasks)

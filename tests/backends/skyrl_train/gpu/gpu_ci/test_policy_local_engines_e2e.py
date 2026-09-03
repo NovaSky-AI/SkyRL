@@ -61,6 +61,17 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
         # moe model, dp > 1
         pytest.param(True, "nccl", "fsdp", 2, 1, "ray", MOE_MODEL, 2),
         pytest.param(False, "nccl", "fsdp", 1, 1, "ray", MOE_MODEL, 2),
+        # sharded_rdt (NIXL pull): non-colocated TP=1 — 1 GPU for the FSDP policy
+        # + 1 GPU for vLLM. The trainer engine spawns its own per-rank producer
+        # server (sidecar) sharing the policy GPU; the worker extension bakes the
+        # consumer plan.
+        pytest.param(False, "sharded_rdt", "fsdp", 1, 1, "ray", MODEL, 1),
+        # sharded_rdt with 2 FSDP ranks + 2 vLLM engines — closer to the production
+        # training run (4 ranks / 4 engines). With num_engines=2 the policy world
+        # size becomes 2, so the WeightSource full_tensor() triggers a real FSDP2
+        # all-gather collective rather than the trivial no-op that fires on a
+        # single rank, and each rank spawns its own producer server.
+        pytest.param(False, "sharded_rdt", "fsdp", 2, 1, "ray", MODEL, 1),
         # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. "fsdp"
         # is fsdp2 in the current backend (FSDP1 was removed). Colocated
         # uses tp=4 across all 4 GPUs; non-colocated splits 2 GPUs for
@@ -75,6 +86,8 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
         "non_colocated_nccl_fsdp_vllm_mp",
         "colocate_nccl_fsdp_vllm_dp",
         "non_colocated_nccl_fsdp_vllm_dp",
+        "no_colocate_sharded_rdt_fsdp_vllm",
+        "no_colocate_sharded_rdt_fsdp_vllm_2fsdp_2vllm",
         "colocate_nccl_fsdp_vllm_qwen3_5_35b_a3b_h100",
         "no_colocate_nccl_fsdp_vllm_qwen3_5_35b_a3b_h100",
     ],

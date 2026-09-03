@@ -49,10 +49,21 @@ from skyrl.utils.tok import get_tokenizer
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Configuration overrides for the SkyRL-Train backend.
 
-    All keys are applied as overrides to the default SkyRL-Train config.
+    Declared fields configure the backend itself; all extra keys are applied
+    as overrides to the default SkyRL-Train config.
     """
 
-    pass
+    keep_runtime_warm_on_last_unload: bool = True
+    """Keep the shared runtime (Ray, training workers, inference engines, base
+    model) alive when the last LoRA model is unloaded, so the next compatible
+    ``create_model`` registers a fresh adapter against it instead of
+    rebuilding. Only applies to Megatron LoRA policies (the warm path needs
+    the per-tenant adapter machinery, which FSDP does not implement);
+    full-parameter fine-tuning and FSDP always tear down on unload. Set to
+    ``False`` to release all GPUs on the last unload (scale-to-zero) — also
+    the escape hatch for changing the LoRA ``(rank, alpha)`` signature, which
+    is otherwise pinned by the first ``create_model`` for the warm runtime's
+    lifetime."""
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
@@ -134,6 +145,10 @@ class SkyRLTrainBackend(AbstractBackend):
         self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        # Tenants whose LoRA adapters are currently registered on the
+        # inference engines (populated by save_sampler_checkpoint, drained by
+        # delete_model so vLLM stops serving deleted tenants).
+        self._inference_adapter_ids: set[str] = set()
         self._renderer = None
         # CPU-only render server for multi-modal preprocessing; started
         # lazily on the first image-bearing training batch.
@@ -445,12 +460,13 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{model_id}' already exists")
 
         is_lora = lora_config is not None and lora_config.rank > 0
-        is_first_policy = "policy" not in self._model_ids_to_role.values()
 
-        # Multi-LoRA path: allow additional policy adapters when LoRA is active
-        # and the first model has already been built. FFT (rank=0) keeps the
-        # original single-tenant gate.
-        if model_role == "policy" and not is_first_policy:
+        # Multi-LoRA path: register additional policy adapters against the
+        # already-built shared runtime. Gate on the runtime being alive rather
+        # than on a policy model being registered: with
+        # keep_runtime_warm_on_last_unload the runtime outlives the last
+        # registered model. FFT (rank=0) keeps the original single-tenant gate.
+        if model_role == "policy" and self._dispatch is not None:
             if not is_lora:
                 raise ValueError(
                     "SkyRLTrainBackend already has a 'policy' model; multi-tenant "
@@ -538,19 +554,41 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return ResolvedPlacementGroup(pg)
 
+    def _unload_inference_adapter(self, model_id: str) -> None:
+        """Drop a deleted tenant's LoRA adapter from the inference engines.
+
+        Only adapters actually registered on vLLM (via save_sampler_checkpoint)
+        are unloaded. Best-effort: vLLM may have LRU-evicted the adapter
+        already, and an inference-side failure must not block the tenant's
+        removal from the training runtime.
+        """
+        if model_id not in self._inference_adapter_ids:
+            return
+        try:
+            asyncio.run(self._inference_engine_client.unload_lora_adapter(model_id))
+        except Exception as e:
+            logger.warning(f"Failed to unload LoRA adapter '{model_id}' from inference engines: {e}")
+        self._inference_adapter_ids.discard(model_id)
+
     def delete_model(self, model_id: str) -> None:
         role = self._get_role(model_id)
 
-        # Multi-LoRA: if more than one model is currently registered, drop just
-        # this adapter slot rather than tearing down the shared Ray runtime.
-        # The live GPU state may still mirror this adapter; it'll be
+        # Multi-LoRA: if more than one model is currently registered — or the
+        # last one is unloading with keep_runtime_warm_on_last_unload set —
+        # drop just this adapter slot rather than tearing down the shared Ray
+        # runtime. The live GPU state may still mirror this adapter; it'll be
         # overwritten on the next swap_to (no eager swap-away here).
-        if len(self._model_ids_to_role) > 1:
+        # The warm path requires the per-tenant adapter machinery
+        # (delete_adapter on the workers), which only the Megatron backend
+        # implements — FSDP falls through to the teardown below.
+        supports_warm_unload = self._cfg is not None and self._cfg.trainer.strategy == "megatron"
+        if len(self._model_ids_to_role) > 1 or (self.config.keep_runtime_warm_on_last_unload and supports_warm_unload):
             if role == "policy" and self._base_lora_signature is not None:
+                self._unload_inference_adapter(model_id)
                 self._dispatch.delete_adapter("policy", model_id)
                 del self._model_ids_to_role[model_id]
                 self._model_metadata.pop(model_id, None)
-                logger.info(f"Removed LoRA adapter '{model_id}'")
+                logger.info(f"Removed LoRA adapter '{model_id}'; shared runtime stays up")
                 return
             # Fall through to teardown for non-LoRA roles or unexpected mixes.
 
@@ -573,6 +611,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch = None
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._inference_adapter_ids = set()
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
@@ -1235,8 +1274,8 @@ class SkyRLTrainBackend(AbstractBackend):
 
         logger.info(f"Saved checkpoint for {model_id} to {output_path}")
 
-    def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
-        """Load full training checkpoint (model + optimizer + scheduler) from tar."""
+    def load_checkpoint(self, checkpoint_path, model_id: str, load_optimizer: bool) -> None:
+        """Load model state and optionally optimizer state from a training checkpoint."""
         self._validate_model_state(model_id)
         role = self._get_role(model_id)
 
@@ -1247,12 +1286,11 @@ class SkyRLTrainBackend(AbstractBackend):
             with tarfile.open(checkpoint_path, "r") as tar:
                 tar.extractall(temp_dir, filter="data")
 
-            # Load checkpoint (includes optimizer and scheduler states)
             self._dispatch.load_checkpoint(
                 model=role,
                 ckpt_dir=temp_dir,
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
+                load_optimizer_states=load_optimizer,
+                load_lr_scheduler_states=load_optimizer,
                 model_id=model_id,
             )
 
@@ -1277,6 +1315,10 @@ class SkyRLTrainBackend(AbstractBackend):
         # name. None for the FFT / single-tenant path uses legacy behavior.
         sync_id = model_id if self._base_lora_signature is not None else None
         asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
+        if sync_id is not None:
+            # The sync registered this tenant's adapter on vLLM; remember it
+            # so delete_model can unload it.
+            self._inference_adapter_ids.add(model_id)
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:
