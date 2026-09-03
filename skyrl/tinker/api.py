@@ -315,15 +315,19 @@ async def lifespan(app: FastAPI):
     # SkyRL-Train default is colocate_all=True; only opt into forwarding
     # when the operator explicitly sets it to False.
     is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
+    store_ttls = dict(
+        retrieved_ttl_sec=app.state.engine_config.external_future_retrieved_ttl_sec,
+        completed_ttl_sec=app.state.engine_config.external_future_completed_ttl_sec,
+    )
     if app.state.engine_config.external_inference_url:
-        app.state.external_future_store = ExternalFutureStore()
+        app.state.external_future_store = ExternalFutureStore(**store_ttls)
         await app.state.external_future_store.start()
         app.state.external_inference_client = ExternalInferenceClient(
             app.state.engine_config, app.state.db_engine, app.state.external_future_store
         )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
-        app.state.external_future_store = ExternalFutureStore()
+        app.state.external_future_store = ExternalFutureStore(**store_ttls)
         await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
             app.state.engine_config, app.state.db_engine, app.state.external_future_store
@@ -1512,14 +1516,23 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
             types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
             and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
         ):
-            async with req.app.state.proto_serialization_lock:
-                content = await asyncio.to_thread(
-                    _serialize_proto_result,
-                    types.RequestType(request_type),
-                    result_data,
-                )
+            # Forwarded samples are stored as proto already and go out as-is;
+            # anything stored as JSON is encoded once here and cached.
+            content = external_future_store.proto_result(request_id) if found_in_memory else None
+            if content is None:
+                async with req.app.state.proto_serialization_lock:
+                    content = await asyncio.to_thread(
+                        _serialize_proto_result,
+                        types.RequestType(request_type),
+                        result_data,
+                    )
+                if found_in_memory:
+                    external_future_store.cache_proto(request_id, content)
             response: Response = Response(content=content, media_type=PROTO_CONTENT_TYPE)
         else:
+            if result_data is None and found_in_memory:
+                # Stored as proto only; a pre-proto client wants JSON.
+                result_data = external_future_store.json_result(request_id)
             response = raw_json_response(result_data)
         # Start the retry-grace clock now that the response is built and about to
         # be sent, so a large result is never evicted mid-delivery -- but only if
