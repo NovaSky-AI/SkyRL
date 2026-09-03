@@ -73,6 +73,21 @@ class EngineConfig(BaseModel):
             "env_var": "SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC",
         },
     )
+    external_future_retrieved_ttl_sec: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "How long a forwarded sample result stays in memory after it was delivered, so an "
+            "SDK retry after a lost HTTP response still finds it. Must outlast the SDK's worst-case "
+            "re-poll gap (45s poll timeout + up to 30s backoff, twice). Memory for long-output "
+            "rollouts is roughly completion rate x result size x this window."
+        ),
+    )
+    external_future_completed_ttl_sec: float = Field(
+        default=600.0,
+        gt=0,
+        description="How long a completed but never-delivered forwarded sample result stays in memory.",
+    )
     session_cleanup_interval_sec: int = Field(
         default=60,
         description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",
