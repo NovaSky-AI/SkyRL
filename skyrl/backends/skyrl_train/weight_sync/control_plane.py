@@ -107,11 +107,19 @@ class SkyrlWeightSyncClient:
         body = {"weight_version": weight_version} if weight_version is not None else None
         self._fanout_uniform(FINISH_UPDATE_ENDPOINT, body)
 
-    # ---- extras used by the delta engine's round trip ----
+    # ---- extras: the checkpoint-delta lifecycle ----
     #
-    # Not part of the four-method protocol: they are one backend's lifecycle
-    # (download the payload while generation is still live, then pause around the
-    # reload), not the transport contract.
+    # Not the transport contract, and here anyway, because they have to be driven
+    # from inside `send_weights`: `fetch_weights` needs the `target_version` the
+    # publish produces mid-send, and must run before the pause. `send_weights` is
+    # sync and runs off the event loop, so `RemoteInferenceClient` -- where these
+    # routes otherwise live -- is reachable only via `run_coroutine_threadsafe`,
+    # the loop coupling this client exists to avoid (see module docstring).
+    # Splitting them into a second sync object would duplicate the session and
+    # pool to narrow one type.
+    #
+    # The cost: an engine calling these needs a SkyRL client, not any object
+    # satisfying VLLMWeightSyncClient. Only the delta engine does.
 
     def fetch_weights(self, target_version: int, sync_dir: Optional[str] = None, uri: Optional[str] = None) -> None:
         body: Dict[str, Any] = {"target_version": int(target_version)}

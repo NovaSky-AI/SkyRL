@@ -6,13 +6,12 @@ network fabric, but the shape is vLLM's trainer-send: a ``WeightSource`` in, a
 four-method ``VLLMWeightSyncClient`` out, ``send_weights()`` owning the round
 trip.
 
-Two parts of that round trip ride the engine rather than the client protocol:
-
-* ``fetch_weights`` runs **before** the pause so the download overlaps live
-  generation.
-* the pause / resume bracket and the prefix-cache reset. This is the only backend
-  that reloads a whole checkpoint in place, so the only one that needs generation
-  stopped.
+Two parts of that round trip ride the engine rather than the client protocol, and
+cannot be hoisted to the worker: ``fetch_weights`` needs the ``target_version``
+the publish produces mid-send, and must run **before** the pause so the download
+overlaps live generation. The pause / resume bracket and the prefix-cache reset
+then wrap the reload -- this is the only backend that reloads a whole checkpoint
+in place, so the only one that needs generation stopped.
 """
 
 from __future__ import annotations
