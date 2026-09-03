@@ -420,13 +420,14 @@ def test_offload_kv_for_weight_sync_sync_trainer_ok():
 
 
 @pytest.mark.parametrize("clear_kv_cache", [False, True])
-def test_offload_kv_for_weight_sync_async_ok(clear_kv_cache):
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+def test_offload_kv_for_weight_sync_async_ok(clear_kv_cache, enable_prefix_caching):
     cfg = SkyRLTrainConfig()
     cfg.trainer.placement.colocate_all = False
     cfg.generator.inference_engine.offload_kv_for_weight_sync = True
     cfg.trainer.fully_async.enabled = True
     cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = clear_kv_cache
-    # Both clear_kv_cache settings are supported now.
+    cfg.generator.inference_engine.enable_prefix_caching = enable_prefix_caching
     validate_inference_engine_cfg(cfg)
 
 

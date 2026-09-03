@@ -967,6 +967,8 @@ class FullyAsyncConfig(BaseConfig):
     the epoch ends."""
     clear_kv_cache_on_weight_sync: bool = False
     """Whether or not to clear the KV cache on weight sync. Defaults to False.
+    If True, running requests recompute their KV after the sync, including when
+    inference prefix caching is disabled.
     If False, we reuse KV cache from stale policies during generation
     (avoids recomputation at the cost of using slightly stale KV cache).
     """
