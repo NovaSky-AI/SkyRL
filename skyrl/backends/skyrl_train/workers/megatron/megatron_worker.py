@@ -19,6 +19,7 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from omegaconf import OmegaConf
 from transformers import AutoConfig
 
+import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
 from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
@@ -69,6 +70,9 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
+from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
+    maybe_force_qwen35_text_bridge,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -94,11 +98,6 @@ if TYPE_CHECKING:
         InferenceEngineInterface,
     )
     from skyrl.train.config.config import InferenceEngineConfig
-
-import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
-from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
-    maybe_force_qwen35_text_bridge,
-)
 
 
 class MegatronWeightExtractor(WeightExtractor):
