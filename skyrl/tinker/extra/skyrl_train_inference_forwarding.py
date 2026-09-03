@@ -8,7 +8,6 @@ import asyncio
 from datetime import datetime, timezone
 
 import aiohttp
-import orjson
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.backends.renderer import render_model_input
@@ -17,6 +16,7 @@ from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
 from skyrl.tinker.external_future_store import ExternalFutureStore, PreparedResult
+from skyrl.tinker.extra.completion_decode import CompletionDecoder
 from skyrl.tinker.proto_serialization import (
     sample_output_json_from_proto,
     serialize_sample_output,
@@ -50,6 +50,7 @@ class SkyRLTrainInferenceForwardingClient:
         self._cache_lock = asyncio.Lock()
         # Created on first use so it binds to the serving event loop.
         self._session: aiohttp.ClientSession | None = None
+        self._decoder = CompletionDecoder()
 
     def _get_session(self) -> aiohttp.ClientSession:
         """Return the shared aiohttp session, creating it on first use.
@@ -239,8 +240,10 @@ class SkyRLTrainInferenceForwardingClient:
             if response.status >= 400:
                 raise RuntimeError(f"vLLM /v1/completions returned {response.status}: {body.decode(errors='replace')}")
             try:
-                result = orjson.loads(body)
-            except orjson.JSONDecodeError as e:
+                # Token ids and logprobs land directly in int32/float32 arrays;
+                # no per-token Python objects are built (see completion_decode).
+                choices = self._decoder.decode(body, want_prompt_logprobs=want_prompt_logprobs)
+            except ValueError as e:
                 # vllm-router can return HTML on transient errors even with 2xx status.
                 raise RuntimeError(
                     f"vLLM /v1/completions returned non-JSON ({response.status}, "
@@ -252,26 +255,16 @@ class SkyRLTrainInferenceForwardingClient:
         if want_prompt_logprobs:
             # All `n` choices share one prompt, so vLLM repeats the same prompt
             # logprobs on each choice; read them off the first.
-            choices = result.get("choices") or []
-            raw = choices[0].get("prompt_logprobs") if choices else None
+            raw = choices[0].prompt_logprobs if choices else None
             if raw is None:
                 logger.warning("Requested prompt logprobs but vLLM /v1/completions returned none")
             prompt_logprobs, topk = convert_vllm_prompt_logprobs(prompt_tokens, raw, topk=topk_prompt_logprobs)
 
-        sequences = []
-        for choice in result.get("choices", []):
-            tokens = choice.get("token_ids", [])
-            lp = choice.get("logprobs") or {}
-            logprobs = lp.get("token_logprobs") or []
-            # vLLM occasionally returns None for logprobs under load; zero-fill so
-            # RL advantage computation doesn't see a ragged shape.
-            if not logprobs and tokens:
-                logger.warning("No logprobs returned from vLLM — filling with zeros")
-                logprobs = [0.0] * len(tokens)
-            # Tinker's stop_reason is Literal["stop", "length"]; vLLM emits a wider set.
-            finish_reason = choice.get("finish_reason")
-            stop_reason = "stop" if finish_reason in ("stop", "stop_token") else "length"
-            sequences.append((stop_reason, tokens, logprobs))
+        # Tinker's stop_reason is Literal["stop", "length"]; vLLM emits a wider set.
+        sequences = [
+            ("stop" if choice.finish_reason in ("stop", "stop_token") else "length", choice.tokens, choice.logprobs)
+            for choice in choices
+        ]
 
         # Encode straight to the proto wire form the SDK retrieves; no pydantic
         # model or JSON text is built for the result (see PreparedResult).
