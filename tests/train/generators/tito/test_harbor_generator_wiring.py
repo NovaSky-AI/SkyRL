@@ -56,7 +56,8 @@ class _RateLimiter:
 
 
 @pytest.mark.asyncio
-async def test_harbor_attempt_uses_registered_proxy_endpoint(monkeypatch):
+@pytest.mark.parametrize("llm_kwargs", [{}, None, {"extra_body": None}])
+async def test_harbor_attempt_uses_registered_proxy_endpoint(monkeypatch, llm_kwargs):
     pytest.importorskip("harbor")
     from examples.train_integrations.harbor_tito import (
         harbor_generator as harbor_module,
@@ -114,7 +115,7 @@ async def test_harbor_attempt_uses_registered_proxy_endpoint(monkeypatch):
     generator._harbor_trial_config_template = {
         "agent": {
             "kwargs": {
-                "llm_kwargs": {},
+                "llm_kwargs": llm_kwargs,
             }
         }
     }
@@ -131,6 +132,7 @@ async def test_harbor_attempt_uses_registered_proxy_endpoint(monkeypatch):
         )
 
     assert captured_config["agent"]["kwargs"]["api_base"].startswith("http://127.0.0.1:")
+    assert captured_config["agent"]["kwargs"]["llm_kwargs"]["extra_body"]["cache_salt"] == "salt"
     assert output.reward == 1.0
     assert output.trace is not None
     assert len(output.trace.committed_turns()) == 1

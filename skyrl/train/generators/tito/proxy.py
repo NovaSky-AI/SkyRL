@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import socket
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, Optional, Set
@@ -92,46 +93,81 @@ class TITOProxy:
         if self._server_task is not None:
             raise RuntimeError("TITO proxy is already serving")
 
-        # Reserve the ephemeral port while uvicorn starts.
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self._config.host, self._config.port))
-        sock.listen(2048)
-        sock.setblocking(False)
-        port = sock.getsockname()[1]
-        server = uvicorn.Server(
-            uvicorn.Config(
-                self._app,
-                host=self._config.host,
-                port=port,
-                log_level="warning",
-                lifespan="off",
-            )
-        )
-        self._socket = sock
-        self._server = server
-        self._base_url = f"http://{self._config.host}:{port}"
-        self._server_task = asyncio.create_task(server.serve(sockets=[sock]))
-
-        while not server.started:
-            if self._server_task.done():
-                await self._server_task
-                raise RuntimeError("TITO proxy failed to start")
-            await asyncio.sleep(0.01)
-
+        sock: Optional[socket.socket] = None
+        server: Optional[uvicorn.Server] = None
+        server_task: Optional[asyncio.Task] = None
         try:
+            # Reserve the ephemeral port while uvicorn starts.
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self._config.host, self._config.port))
+            sock.listen(2048)
+            sock.setblocking(False)
+            port = sock.getsockname()[1]
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    self._app,
+                    host=self._config.host,
+                    port=port,
+                    log_level="warning",
+                    lifespan="off",
+                )
+            )
+            server_task = asyncio.create_task(server.serve(sockets=[sock]))
+            self._socket = sock
+            self._server = server
+            self._base_url = f"http://{self._config.host}:{port}"
+            self._server_task = server_task
+
+            while not server.started:
+                if server_task.done():
+                    await server_task
+                    raise RuntimeError("TITO proxy exited before completing startup")
+                await asyncio.sleep(0.01)
+
             yield
         finally:
+            context_error = sys.exc_info()[1]
             async with self._registrations_lock:
-                if self._registrations:
-                    raise RuntimeError("Cannot stop TITO proxy while registrations are active")
-            server.should_exit = True
-            await self._server_task
-            sock.close()
-            self._server_task = None
-            self._server = None
-            self._socket = None
-            self._base_url = None
+                active_registration_count = len(self._registrations)
+
+            shutdown_error: Optional[BaseException] = None
+
+            async def _shutdown() -> None:
+                if server is not None:
+                    server.should_exit = True
+                if server_task is not None:
+                    await server_task
+
+            try:
+                shutdown_task = asyncio.create_task(_shutdown())
+                try:
+                    await asyncio.shield(shutdown_task)
+                except asyncio.CancelledError:
+                    # Do not leave uvicorn running if the owner is cancelled.
+                    await shutdown_task
+                    raise
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                shutdown_error = exc
+            finally:
+                if sock is not None:
+                    sock.close()
+                self._server_task = None
+                self._server = None
+                self._socket = None
+                self._base_url = None
+
+            if shutdown_error is not None:
+                if context_error is None:
+                    raise shutdown_error
+                logger.error("TITO proxy shutdown failed while propagating another error: %r", shutdown_error)
+            if active_registration_count:
+                message = f"Cannot stop TITO proxy while {active_registration_count} registration(s) are active"
+                if context_error is None:
+                    raise RuntimeError(message)
+                logger.error("%s", message)
 
     @asynccontextmanager
     async def register(
@@ -207,8 +243,15 @@ class TITOProxy:
         registration = await self._begin_request(registration_token)
         try:
             content_length = request.headers.get("content-length")
-            if content_length is not None and int(content_length) > self._config.max_request_bytes:
-                raise HTTPException(status_code=413, detail="Request body is too large")
+            if content_length is not None:
+                try:
+                    declared_length = int(content_length)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="Invalid Content-Length header") from exc
+                if declared_length < 0:
+                    raise HTTPException(status_code=400, detail="Invalid Content-Length header")
+                if declared_length > self._config.max_request_bytes:
+                    raise HTTPException(status_code=413, detail="Request body is too large")
             raw_body = await request.body()
             if len(raw_body) > self._config.max_request_bytes:
                 raise HTTPException(status_code=413, detail="Request body is too large")

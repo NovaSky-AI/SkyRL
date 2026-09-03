@@ -68,6 +68,76 @@ class FakeInferenceEngine:
         self.finished_sessions.append(session_id)
 
 
+def _assert_proxy_stopped(proxy):
+    assert proxy._server_task is None
+    assert proxy._server is None
+    assert proxy._socket is None
+    assert proxy._base_url is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_cleans_up_when_startup_fails(monkeypatch):
+    async def fail_startup(self, sockets=None):
+        raise RuntimeError("startup failed")
+
+    monkeypatch.setattr("skyrl.train.generators.tito.proxy.uvicorn.Server.serve", fail_startup)
+    proxy = TITOProxy(FakeInferenceEngine(), FakeRenderer())
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        async with proxy.serving():
+            pass
+
+    _assert_proxy_stopped(proxy)
+
+
+@pytest.mark.asyncio
+async def test_proxy_cleans_up_when_serving_body_fails():
+    proxy = TITOProxy(FakeInferenceEngine(), FakeRenderer())
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        async with proxy.serving():
+            raise RuntimeError("body failed")
+
+    _assert_proxy_stopped(proxy)
+
+
+@pytest.mark.asyncio
+async def test_proxy_cleans_up_when_owner_is_cancelled():
+    proxy = TITOProxy(FakeInferenceEngine(), FakeRenderer())
+    entered = asyncio.Event()
+
+    async def serve_until_cancelled():
+        async with proxy.serving():
+            entered.set()
+            await asyncio.Future()
+
+    owner = asyncio.create_task(serve_until_cancelled())
+    await entered.wait()
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    _assert_proxy_stopped(proxy)
+
+
+@pytest.mark.asyncio
+async def test_proxy_stops_before_reporting_active_registration():
+    engine = FakeInferenceEngine()
+    proxy = TITOProxy(engine, FakeRenderer())
+    trace = Trace()
+    serving = proxy.serving()
+    await serving.__aenter__()
+    registration = proxy.register(trace, router_session_id="session-1", cache_salt=None, model="model")
+    await registration.__aenter__()
+
+    with pytest.raises(RuntimeError, match=r"1 registration\(s\) are active"):
+        await serving.__aexit__(None, None, None)
+
+    _assert_proxy_stopped(proxy)
+    await registration.__aexit__(None, None, None)
+    assert engine.finished_sessions == ["session-1"]
+
+
 @pytest.mark.asyncio
 async def test_proxy_runs_token_inference_and_commits_trace():
     engine = FakeInferenceEngine()
@@ -97,6 +167,35 @@ async def test_proxy_runs_token_inference_and_commits_trace():
     assert engine.generate_calls[0][0]["cache_salt"] == "salt"
     assert engine.finished_sessions == ["session-1"]
     assert trace.is_sealed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content_length", "expected_status"),
+    [
+        ("invalid", 400),
+        ("-1", 400),
+        ("9", 413),
+    ],
+)
+async def test_proxy_validates_content_length(content_length, expected_status):
+    engine = FakeInferenceEngine()
+    proxy = TITOProxy(engine, FakeRenderer(), config=TITOProxyConfig(max_request_bytes=8))
+    trace = Trace()
+
+    async with proxy.serving():
+        async with proxy.register(trace, router_session_id="session-1", cache_salt=None, model="model") as handle:
+            registration_token = handle.base_url.rsplit("/", 1)[-1]
+            transport = httpx.ASGITransport(app=proxy._app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    f"/sessions/{registration_token}/v1/chat/completions",
+                    content=b"{}",
+                    headers={"content-length": content_length},
+                )
+
+    assert response.status_code == expected_status
+    assert not engine.generate_calls
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from collections.abc import MutableMapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -198,9 +199,19 @@ class TITOHarborGenerator(HarborGenerator):
                 config["task"] = {"path": prompt}
                 config["agent"]["kwargs"]["session_id"] = session_id
                 if cache_salt is not None:
-                    llm_kwargs = config["agent"]["kwargs"].setdefault("llm_kwargs", {})
-                    extra_body = llm_kwargs.setdefault("extra_body", {})
-                    if not isinstance(extra_body, dict):
+                    agent_kwargs = config["agent"]["kwargs"]
+                    llm_kwargs = agent_kwargs.get("llm_kwargs")
+                    if llm_kwargs is None:
+                        llm_kwargs = {}
+                        agent_kwargs["llm_kwargs"] = llm_kwargs
+                    elif not isinstance(llm_kwargs, MutableMapping):
+                        raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs must be a mapping")
+
+                    extra_body = llm_kwargs.get("extra_body")
+                    if extra_body is None:
+                        extra_body = {}
+                        llm_kwargs["extra_body"] = extra_body
+                    elif not isinstance(extra_body, MutableMapping):
                         raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs.extra_body must be a mapping")
                     extra_body["cache_salt"] = cache_salt
 
