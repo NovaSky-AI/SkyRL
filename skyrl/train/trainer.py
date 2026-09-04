@@ -630,6 +630,11 @@ class RayPPOTrainer:
         Each prompt produces `n_samples_per_prompt` samples. For data-parallel
         training we care that the total number of samples is nicely splittable
         across the (combined) data-parallel size of all enabled models.
+
+        Raises:
+            ValueError: If the batch has fewer prompts than the shard stride, so
+                truncation would leave zero prompts and the training step would
+                fail much later in rollout-metrics aggregation.
         """
         lcm_dp_size = self.dispatch.get_lcm_dp_size()
 
@@ -646,6 +651,17 @@ class RayPPOTrainer:
             return entries
 
         kept_prompts = (len(entries) // stride) * stride
+        # An already-empty batch is passed through unchanged: zero prompts shard
+        # evenly, and it is not the truncation failure this error is about.
+        if entries and kept_prompts == 0:
+            raise ValueError(
+                f"Batch of {len(entries)} prompts cannot be sharded evenly: with the combined "
+                f"data-parallel size of the enabled models (lcm_dp_size={lcm_dp_size}) and "
+                f"generator.n_samples_per_prompt={n_samples_per_prompt}, the number of prompts "
+                f"per batch must be a multiple of {stride}. Increase trainer.train_batch_size "
+                f"to at least {stride}, or adjust the placement or n_samples_per_prompt so that "
+                f"fewer prompts are required per batch."
+            )
         return entries[:kept_prompts]
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker):
