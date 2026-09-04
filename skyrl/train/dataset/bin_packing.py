@@ -47,15 +47,23 @@ class SeqPacker(ABC):
         bin_capacity: int,
         min_bin_count: Optional[int] = None,
         bin_count_multiple: Optional[int] = None,
+        sequence_length_multiple: int = 1,
+        packed_length_multiple: int = 1,
     ):
         if min_bin_count is not None and min_bin_count < 0:
             raise ValueError("min_bin_count must be nonnegative")
         if bin_count_multiple is not None and bin_count_multiple < 1:
             raise ValueError("bin_count_multiple must be positive")
+        if sequence_length_multiple < 1:
+            raise ValueError("sequence_length_multiple must be positive")
+        if packed_length_multiple < 1:
+            raise ValueError("packed_length_multiple must be positive")
 
         self.bin_capacity = bin_capacity
         self.min_bin_count = min_bin_count
         self.bin_count_multiple = bin_count_multiple
+        self.sequence_length_multiple = sequence_length_multiple
+        self.packed_length_multiple = packed_length_multiple
 
     @abstractmethod
     def _pack_implementation(self, sequence_lengths: List[int]) -> List[List[int]]:
@@ -63,8 +71,13 @@ class SeqPacker(ABC):
 
     def _validate_sequence_lengths(self, sequence_lengths: List[int]) -> None:
         for length in sequence_lengths:
-            if length > self.bin_capacity:
+            if self._packed_length(length) > self.bin_capacity:
                 raise ValueError(f"Sequence length {length} exceeds bin capacity {self.bin_capacity}")
+
+    def _packed_length(self, sequence_length_sum: int) -> int:
+        """Return the physical footprint after aggregate tail padding."""
+        multiple = self.packed_length_multiple
+        return sequence_length_sum + (-sequence_length_sum % multiple)
 
     def _adjust_bin_count(self, bins: List[List[int]]) -> List[List[int]]:
         """Pad the bin list to a multiple of ``bin_count_multiple``.
@@ -123,8 +136,10 @@ class SeqPacker(ABC):
         return adjusted_bins
 
     def pack(self, sequence_lengths: List[int]) -> List[List[int]]:
-        """Pack ``sequence_lengths`` into bins and apply DP-symmetry adjustment."""
-        bins = self._pack_implementation(sequence_lengths)
+        """Pack layout-aligned sequences and apply aggregate tail padding."""
+        multiple = self.sequence_length_multiple
+        packing_lengths = [length + (-length % multiple) for length in sequence_lengths]
+        bins = self._pack_implementation(packing_lengths)
         bins = self._adjust_bin_count(bins)
         return bins
 
@@ -144,19 +159,20 @@ class FirstFitDecreasing(SeqPacker):
         indexed.sort(reverse=True)
 
         bins: List[List[int]] = []
-        bin_remaining: List[int] = []
+        bin_lengths: List[int] = []
 
         for length, idx in indexed:
             placed = False
-            for i, remaining in enumerate(bin_remaining):
-                if remaining >= length:
+            for i, bin_length in enumerate(bin_lengths):
+                new_length = bin_length + length
+                if self._packed_length(new_length) <= self.bin_capacity:
                     bins[i].append(idx)
-                    bin_remaining[i] -= length
+                    bin_lengths[i] = new_length
                     placed = True
                     break
             if not placed:
                 bins.append([idx])
-                bin_remaining.append(self.bin_capacity - length)
+                bin_lengths.append(length)
 
         return bins
 
@@ -199,7 +215,7 @@ class Balanced(SeqPacker):
             if bin_tokens_heap:
                 bin_tokens, bin_idx = bin_tokens_heap[0]
                 new_bin_tokens = bin_tokens + length
-                if new_bin_tokens <= self.bin_capacity:
+                if self._packed_length(new_bin_tokens) <= self.bin_capacity:
                     bins[bin_idx].append(idx)
                     heapq.heapreplace(bin_tokens_heap, (new_bin_tokens, bin_idx))
                     placed = True
@@ -222,6 +238,8 @@ def make_seq_packer(
     bin_capacity: int,
     min_bin_count: Optional[int] = None,
     bin_count_multiple: Optional[int] = None,
+    sequence_length_multiple: int = 1,
+    packed_length_multiple: int = 1,
 ) -> SeqPacker:
     """Factory returning a configured :class:`SeqPacker` instance.
 
@@ -234,6 +252,10 @@ def make_seq_packer(
             ``dp_size``).
         bin_count_multiple: Force the total bin count to be a multiple of
             this value (typically ``dp_size``).
+        sequence_length_multiple: Round each sequence's packing footprint up
+            to this multiple before placement.
+        packed_length_multiple: Round each bin's aggregate footprint up to
+            this multiple when checking capacity.
     """
     if isinstance(algorithm, str):
         try:
@@ -250,4 +272,6 @@ def make_seq_packer(
         bin_capacity=bin_capacity,
         min_bin_count=min_bin_count,
         bin_count_multiple=bin_count_multiple,
+        sequence_length_multiple=sequence_length_multiple,
+        packed_length_multiple=packed_length_multiple,
     )

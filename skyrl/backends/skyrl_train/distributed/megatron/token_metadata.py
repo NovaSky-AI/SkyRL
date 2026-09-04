@@ -5,7 +5,8 @@ from dataclasses import dataclass
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packed_seq_align_size,
+    get_packing_align_size_sequence,
+    get_packing_align_size_total,
     get_unpacked_seq_align_size,
 )
 
@@ -63,8 +64,11 @@ def build_token_metadata_layout(
         )
 
     cp_size = mpu.get_context_parallel_world_size()
-    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
-    padded_sequence_lengths_tensor = sequence_lengths_tensor + (-sequence_lengths_tensor % align_size)
+    packing_align_size_sequence = get_packing_align_size_sequence(tp_size, cp_size)
+    packing_align_size_total = get_packing_align_size_total(tp_size, cp_size, fp8_enabled=fp8_enabled)
+    padded_sequence_lengths_tensor = sequence_lengths_tensor + (-sequence_lengths_tensor % packing_align_size_sequence)
+    aggregate_pad_size = (-padded_sequence_lengths_tensor.sum()) % packing_align_size_total
+    padded_sequence_lengths_tensor[-1] += aggregate_pad_size
     padded_sequence_lengths = padded_sequence_lengths_tensor.tolist()
     cu_seqlens_padded = torch.cat(
         (
