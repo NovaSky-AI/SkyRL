@@ -21,7 +21,7 @@ def test_forwarding_timeout_reads_environment(monkeypatch) -> None:
     assert config.forwarding_inference_timeout_sec == 1800.0
 
 
-def test_forwarding_client_uses_configured_timeout() -> None:
+def test_forwarding_client_uses_configured_read_and_pool_timeout() -> None:
     config = EngineConfig(
         base_model="test-model",
         forwarding_inference_timeout_sec=1800.0,
@@ -34,7 +34,7 @@ def test_forwarding_client_uses_configured_timeout() -> None:
     assert timeout.connect == 10.0
     assert timeout.read == 1800.0
     assert timeout.write == 300.0
-    assert timeout.pool == 300.0
+    assert timeout.pool == 1800.0
 
 
 @pytest.mark.asyncio
