@@ -67,6 +67,9 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     LoraSignature,
     iter_opts,
 )
+from skyrl.backends.skyrl_train.workers.megatron.lora_export import (
+    build_lora_adapter_state,
+)
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
@@ -1477,9 +1480,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         from safetensors.torch import save_file
 
-        adapter_state = {}
-        for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
-            adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
+        adapter_state = build_lora_adapter_state(
+            self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False),
+            preserve_dtype=self.cfg.policy.model.lora.preserve_export_dtype,
+        )
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
