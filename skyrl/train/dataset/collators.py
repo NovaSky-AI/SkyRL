@@ -4,7 +4,7 @@ Two callables cover the two SFT data paths:
 
 - :class:`DefaultCollator` left-pads sequences to the batch maximum and applies
   the per-non-pad-token loss normalization.
-- :class:`PackedDataCollator` performs controller-level FFD bin-packing
+- :class:`PackedDataCollator` performs controller-level MFFD bin-packing
   (Megatron-only): once per training step it packs sequences into bins of
   capacity ``max_tokens_per_microbatch``, rounds the bin count up to a multiple
   of ``dp_size`` (so every DP rank gets the same number of micro-batches), and
@@ -29,7 +29,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 
-from .bin_packing import make_seq_packer
+from .bin_packing import PackingStrategy, make_seq_packer
 
 
 class DefaultCollator:
@@ -66,13 +66,13 @@ class DefaultCollator:
 
 
 class PackedDataCollator:
-    """Pack examples into bin rows via FFD and return a :class:`TrainingInputBatch`.
+    """Pack examples into bin rows via MFFD and return a :class:`TrainingInputBatch`.
 
     Activates on the training-step batch (``batch_size == self.batch_size``).
     Flow:
 
     1. Compute per-example sequence lengths.
-    2. FFD-pack with ``bin_capacity = max_tokens_per_microbatch``,
+    2. MFFD-pack with ``bin_capacity = max_tokens_per_microbatch``,
        ``min_bin_count = dp_size``, ``bin_count_multiple = dp_size``.
     3. Round-robin assign bins to DP shards (this happens implicitly inside
        ``MeshDispatch.dispatch`` because the rows are laid out in shard-major
@@ -171,7 +171,7 @@ class PackedDataCollator:
             full_input_ids.append(np.asarray(ex["input_ids"], dtype=np.int64))
 
         # ------------------------------------------------------------------
-        # 2. FFD pack with DP-symmetry constraints
+        # 2. MFFD pack with DP-symmetry constraints
         # ------------------------------------------------------------------
         # Each bin row is one worker micro-batch. Megatron's
         # ``forward_backward_func`` runs one micro-batch per bin on each DP
@@ -181,7 +181,7 @@ class PackedDataCollator:
         # ``num_microbatches``) identical across ranks.
         bin_count_multiple = dp_size
         packer = make_seq_packer(
-            "first_fit_decreasing",
+            PackingStrategy.MODIFIED_FIRST_FIT_DECREASING,
             bin_capacity=bin_capacity,
             min_bin_count=bin_count_multiple,
             bin_count_multiple=bin_count_multiple,
@@ -233,7 +233,7 @@ class PackedDataCollator:
         # because the redistribution moves one sub-seq into every empty
         # bin. If we ever see one, we widen this assertion.
         for bin_indices in flat_bins:
-            assert bin_indices, "FFD produced an empty bin; _adjust_bin_count should prevent this"
+            assert bin_indices, "MFFD produced an empty bin; _adjust_bin_count should prevent this"
 
         # ------------------------------------------------------------------
         # 4. Build per-row tensors: sequences, attention_mask, loss_mask
@@ -293,7 +293,7 @@ class PackedDataCollator:
         # ------------------------------------------------------------------
         # 6. Pack into TrainingInputBatch with sub_seq_lengths data field
         # ------------------------------------------------------------------
-        # ``sub_seq_lengths`` is genuinely per-sample data: after FFD the
+        # ``sub_seq_lengths`` is genuinely per-sample data: after MFFD the
         # batch's "sample" *is* a bin, so ``len(bin_subseq_lengths) == num_bins
         # == batch_size``, co-indexed with ``sequences[r]``. We store it as a
         # ``TensorList`` (one 1-D int tensor per bin, ragged across bins — same

@@ -771,7 +771,7 @@ def collate_sft_examples(
     rows so they contribute no gradient. This lets every example in an epoch be
     trained on (instead of dropping the tail) while still dispatching a full,
     evenly-shardable ``batch_size`` batch. Packed batches are never row-padded
-    (their rows are FFD bins, already rounded to a multiple of ``dp_size``).
+    (their rows are MFFD bins, already rounded to a multiple of ``dp_size``).
     """
     batch = collator(examples, batch_size=batch_size)
     if pad_to_batch_size:
@@ -852,7 +852,7 @@ class SFTTrainer:
     def _build_collator(self, tokenizer):
         """Select the batch collator from the configured packing mode.
 
-        ``PackedDataCollator`` performs controller-level FFD bin-packing
+        ``PackedDataCollator`` performs controller-level MFFD bin-packing
         (Megatron-only, ``use_sequence_packing=True``); ``DefaultCollator``
         left-pads each example. The choice is fixed by static config; the
         ``tokenizer`` is passed in by :meth:`setup` once it is available. The
@@ -1416,7 +1416,7 @@ class SFTTrainer:
         example in an epoch is trained on: a final short batch is padded up to
         ``batch_size`` in :func:`collate_sft_examples` (padded rows are masked
         out of the loss), instead of being dropped. (Packed batches are not
-        row-padded; the FFD packer already handles a short example list.)
+        row-padded; the MFFD packer already handles a short example list.)
 
         Resume note: ``StatefulDataLoader`` restores the *in-progress* epoch
         bit-exactly (the common case). For the built-in ``"random"`` sampler,
@@ -1432,7 +1432,7 @@ class SFTTrainer:
             collate_sft_examples,
             collator=self.collator,
             batch_size=self.sft_cfg.batch_size,
-            # Packed batches dispatch FFD-bin rows (already a multiple of
+            # Packed batches dispatch MFFD-bin rows (already a multiple of
             # dp_size), so only the un-packed path pads to batch_size.
             pad_to_batch_size=not self.sft_cfg.use_sequence_packing,
         )
@@ -1726,7 +1726,7 @@ class SFTTrainer:
             # batch_size >= dp_size (every DP rank needs >= 1 bin) and do NOT
             # require batch_size % micro_train_batch_size_per_gpu == 0, because
             # micro_train_batch_size_per_gpu refers to bins-per-MB, not
-            # examples-per-MB; FFD rounds the bin count up to a multiple of
+            # examples-per-MB; MFFD rounds the bin count up to a multiple of
             # dp_size, and bins/MB is a separate knob.
             dp_size = self._dp_size()
             if batch_size < dp_size:

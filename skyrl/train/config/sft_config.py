@@ -284,14 +284,14 @@ class SFTConfig(BaseConfig):
     # ---- Packing ----
     remove_microbatch_padding: bool = True  # Pack multiple sequences per microbatch (requires flash_attn)
     use_sequence_packing: bool = False
-    """Enable controller-level FFD bin-packing across the global mini-batch.
+    """Enable controller-level MFFD bin-packing across the global mini-batch.
     Requires ``remove_microbatch_padding=True`` and the Megatron backend. When
     enabled, ``SFTTrainer`` uses ``PackedDataCollator`` instead of
     ``DefaultCollator``. Each bin row becomes one row in the dispatched batch
     and one worker micro-batch.
     """
     max_tokens_per_microbatch: Optional[int] = None
-    """FFD bin capacity (max tokens per bin) when ``use_sequence_packing=True``.
+    """MFFD bin capacity (max tokens per bin) when ``use_sequence_packing=True``.
     Each bin row becomes one worker micro-batch, so this is the token budget for
     one micro-batch. Must be ``>= max_length`` so any single sequence fits in a
     bin. ``None`` (default) resolves to ``max_length`` (each bin holds one
@@ -307,7 +307,7 @@ class SFTConfig(BaseConfig):
     Useful for CI smoke tests and quick validation runs."""
 
     def resolved_bin_capacity(self) -> int:
-        """FFD bin capacity (max tokens per bin) when sequence packing is enabled.
+        """MFFD bin capacity (max tokens per bin) when sequence packing is enabled.
 
         Resolves ``max_tokens_per_microbatch`` against ``max_length``: when the
         token budget is ``None`` it falls back to ``max_length`` (each bin holds
@@ -619,7 +619,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             cfg.remove_microbatch_padding = True
         if cfg.max_length is None:
             raise ValueError("use_sequence_packing=True requires max_length to be set (it is the bin capacity).")
-        # Resolve and validate the FFD bin capacity (asserts it is >= max_length
+        # Resolve and validate the MFFD bin capacity (asserts it is >= max_length
         # so any single sequence fits in a bin).
         cfg.resolved_bin_capacity()
 
