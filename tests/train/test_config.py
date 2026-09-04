@@ -20,7 +20,11 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
     overrides_dict_to_dotlist,
 )
-from skyrl.train.utils.utils import validate_cfg, validate_inference_engine_cfg
+from skyrl.train.utils.utils import (
+    validate_cfg,
+    validate_generator_cfg,
+    validate_inference_engine_cfg,
+)
 from tests.train.util import example_dummy_config
 
 
@@ -38,6 +42,14 @@ def _make_validated_test_config():
     cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
     cfg.trainer.critic_mini_batch_size = cfg.trainer.train_batch_size
     return cfg
+
+
+def test_validate_generator_cfg_defers_wandb_authentication(monkeypatch):
+    cfg = _make_validated_test_config()
+    cfg.trainer.logger = "wandb"
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+    validate_generator_cfg(cfg)
 
 
 # Helper dataclasses for testing

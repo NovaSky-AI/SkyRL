@@ -497,10 +497,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "for multi-turn generation"
         )
 
-    # TODO(tgriggs): use a more modular config validation
-    if cfg.trainer.logger == "wandb":
-        assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
-
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
         if cfg.generator.sampling_params.logprobs > 1:
