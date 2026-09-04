@@ -271,6 +271,76 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
         }
 
 
+def _has_native_mtp_capability(model_config) -> bool:
+    fields = ("mtp_num_hidden_layers", "num_nextn_predict_layers", "num_mtp_modules", "n_predict")
+    text_config = model_config.get_text_config(decoder=True)
+    for candidate in (model_config, text_config):
+        for field in fields:
+            value = getattr(candidate, field, None)
+            if isinstance(value, int) and value > 0:
+                return True
+        mtp_config = getattr(candidate, "mtp_config", None)
+        if isinstance(mtp_config, dict):
+            for field in fields:
+                value = mtp_config.get(field)
+                if isinstance(value, int) and value > 0:
+                    return True
+    return False
+
+
+def _is_custom_proposer_path(model: str) -> bool:
+    if model.startswith(("http://", "https://", "file://")) or "/" in model:
+        return False
+    parts = model.split(".")
+    return len(parts) >= 2 and all(part.isidentifier() for part in parts)
+
+
+def _validate_mtp_prefix_caching(cfg: SkyRLTrainConfig) -> None:
+    """Reject vLLM MTP with prefix caching on recurrent linear-attention models."""
+    ie_cfg = cfg.generator.inference_engine
+    engine_kwargs = ie_cfg.engine_init_kwargs or {}
+    enable_prefix_caching = engine_kwargs.get("enable_prefix_caching", ie_cfg.enable_prefix_caching)
+    speculative_config = engine_kwargs.get("speculative_config", ie_cfg.speculative_config)
+
+    if not enable_prefix_caching or not speculative_config:
+        return
+
+    from transformers import AutoConfig
+
+    method = speculative_config.get("method")
+    uses_mtp = method == "mtp" or (isinstance(method, str) and method.endswith("_mtp"))
+    if method is None and speculative_config.get("model"):
+        draft_model = speculative_config["model"]
+        if draft_model in ("ngram", "[ngram]") or _is_custom_proposer_path(draft_model):
+            return
+        draft_config = AutoConfig.from_pretrained(
+            draft_model,
+            trust_remote_code=engine_kwargs.get("trust_remote_code", True),
+            revision=speculative_config.get("revision"),
+            code_revision=speculative_config.get("code_revision"),
+        )
+        uses_mtp = _has_native_mtp_capability(draft_config)
+    if not uses_mtp:
+        return
+
+    model_config = AutoConfig.from_pretrained(
+        engine_kwargs.get("model", cfg.trainer.policy.model.path),
+        trust_remote_code=engine_kwargs.get("trust_remote_code", True),
+        revision=engine_kwargs.get("revision"),
+    )
+    text_config = model_config.get_text_config(decoder=True)
+    if "linear_attention" not in (getattr(text_config, "layer_types", None) or []):
+        return
+
+    raise ValueError(
+        "MTP speculative decoding with prefix caching is unsafe for models with recurrent "
+        "linear-attention layers. Set generator.inference_engine.enable_prefix_caching=false "
+        "and remove any engine_init_kwargs.enable_prefix_caching override, or disable MTP "
+        "speculative decoding (SKYRL_DISABLE_SPEC=1 for trainer.mtp, or remove speculative_config). See "
+        "vllm-project/vllm#43559 and vllm-project/vllm#50021."
+    )
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -286,13 +356,13 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         if cfg.trainer.max_training_steps <= 0:
             raise ValueError(f"max_training_steps must be > 0, got {cfg.trainer.max_training_steps}")
 
-    # Validate generation config separately
-    validate_generator_cfg(cfg)
-
     # Multi-Token Prediction (MTP): the high-level `trainer.mtp` knob is the single source of truth.
     # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
-    # side (vLLM MTP speculative decoding) so both stay consistent.
+    # side (vLLM MTP speculative decoding) before validating the effective inference config.
     _apply_mtp_config(cfg)
+
+    # Validate generation config separately, including the shared inference-engine checks.
+    validate_generator_cfg(cfg)
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
@@ -542,6 +612,8 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         ValueError / NotImplementedError / AssertionError: on invalid combinations.
     """
     ie_cfg = cfg.generator.inference_engine
+
+    _validate_mtp_prefix_caching(cfg)
 
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
