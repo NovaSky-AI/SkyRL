@@ -10,6 +10,7 @@ Counters are summed across replicas; gauges are averaged.  Rates and average
 latencies are derived from deltas vs. the previous sample.
 """
 
+from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
 import asyncio
 import re
 import time
@@ -163,7 +164,7 @@ def discover_ray_metrics_urls() -> List[str]:
         port = node.get("MetricsExportPort")
         if not ip or not port:
             continue
-        urls.append(f"http://{ip}:{port}/metrics")
+        urls.append(format_http_url(ip, port, "/metrics"))
     return urls
 
 
