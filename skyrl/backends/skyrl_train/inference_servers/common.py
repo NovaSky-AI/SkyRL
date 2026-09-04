@@ -4,8 +4,8 @@ Common utilities for inference servers.
 Uses Ray's public network utilities for consistency with Ray's cluster management.
 """
 
-import logging
 import ipaddress
+import logging
 import socket
 from dataclasses import dataclass
 from typing import Optional, Tuple

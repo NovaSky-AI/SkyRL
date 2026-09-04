@@ -10,7 +10,6 @@ Counters are summed across replicas; gauges are averaged.  Rates and average
 latencies are derived from deltas vs. the previous sample.
 """
 
-from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
 import asyncio
 import re
 import time
@@ -19,6 +18,8 @@ from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 import httpx
 import ray
 from loguru import logger
+
+from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
 
 # vLLM metric base names after RayPrometheusStatLogger sanitization (`:` -> `_`)
 # AND the `ray_` prefix that Ray's metrics agent adds to every custom metric.

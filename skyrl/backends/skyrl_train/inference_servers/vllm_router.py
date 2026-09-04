@@ -19,8 +19,8 @@ from vllm_router.launch_router import launch_router
 from vllm_router.router_args import RouterArgs
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
-    format_http_url,
     find_and_reserve_port,
+    format_http_url,
     get_node_ip,
 )
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
