@@ -357,9 +357,17 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 #
 #   https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/cu13torch2.13
 #
-# They are cp312/x86_64 only and built for `TORCH_CUDA_ARCH_LIST=9.0;10.0`, i.e.
-# H100 and B200 only -- narrower than Astral's coverage. Other Python versions and
+# They are cp312 only, built for both x86_64 and aarch64. Other Python versions and
 # architectures fall through to the PyPI sdist and build from source.
+#
+# NOTE: `TORCH_CUDA_ARCH_LIST` does NOT control what these wheels contain -- four of
+# the five packages ignore it and hardcode their own gencode lists (mamba-ssm's
+# setup.py explicitly clears the variable; flash-attn reads `FLASH_ATTN_CUDA_ARCHS`,
+# default `80;90;100;120`). Actual embedded cubins, per `cuobjdump --list-elf`:
+#   flash-attn                                sm_80 90 100 120
+#   mamba-ssm / causal-conv1d / fast-hadamard sm_75 80 87 90 100 103 110 120 121
+#   transformer-engine-torch                  none (kernels live in -cu13)
+# So H100/GH200 (sm_90) and B200/GB200 (sm_100) are covered on both arches.
 #
 # TODO: DELETE THIS and go back to `{ index = "astral-cu130" }` with
 # `+cu.13.0.torch.2.13` pins as soon as Astral publishes those builds. Check with:
@@ -370,12 +378,15 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 # before comparing (`PkgVersion(...).public`).
 flash-attn = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
 ]
 causal-conv1d = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
 ]
 mamba-ssm = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
 ]
 # The TE meta and core packages carry no torch coupling in their versions
 # (2.16.0 / 2.16.0+cu.13.0), so they stay on Astral; only the torch bindings are
@@ -384,6 +395,7 @@ transformer-engine = { index = "astral-cu130", marker = "sys_platform == 'linux'
 transformer-engine-cu13 = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 transformer-engine-torch = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
 ]
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
 # Linux uses the cu130 index (torch 2.13 wheels are published there).
@@ -413,7 +425,8 @@ vllm-router = [
 # TODO (sumanthrh): Move towards official torch 13 + CUDA 13 wheels when available
 fast-hadamard-transform = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
-    { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and (platform_machine != 'x86_64' or python_full_version < '3.12' or python_full_version >= '3.13')" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and ((platform_machine != 'x86_64' and platform_machine != 'aarch64') or python_full_version < '3.12' or python_full_version >= '3.13')" },
 ]
 
 
