@@ -241,6 +241,12 @@ def _frozen_offload_enabled() -> bool:
     return bool(_FROZEN_OFFLOAD_DIR) and _FROZEN_OFFLOAD_DIR != "0"
 
 
+# Set after the first file-offload failure: later params skip straight to the
+# pinned-RAM fallback instead of retrying the filesystem and re-logging the
+# same warning for every frozen param.
+_frozen_offload_failed = False
+
+
 def _frozen_offload_file(name: str) -> str:
     import hashlib
 
@@ -264,13 +270,19 @@ def _offload_frozen_param_to_file(name: str, param) -> bool:
 
     Returns True on success; False to let the caller fall back to pinned RAM.
     """
+    global _frozen_offload_failed
+    if _frozen_offload_failed:
+        return False
     path = None
     try:
         data = param.data.detach()
         nbytes = data.numel() * data.element_size()
         path = _frozen_offload_file(name)
         with open(path, "wb") as f:
-            f.write(data.contiguous().view(torch.uint8).flatten().cpu().numpy().tobytes())
+            # The numpy array shares the CPU tensor's memory and write() takes
+            # any buffer-protocol object, so no second full-size copy is made
+            # (unlike .tobytes()).
+            f.write(data.contiguous().view(torch.uint8).flatten().cpu().numpy())
         try:
             mapped = (
                 torch.from_file(path, shared=False, size=nbytes, dtype=torch.uint8).view(data.dtype).view(data.shape)
@@ -286,8 +298,11 @@ def _offload_frozen_param_to_file(name: str, param) -> bool:
                 os.unlink(path)
             except OSError:
                 pass
+        _frozen_offload_failed = True
         logging.getLogger(__name__).warning(
-            "file-backed frozen offload failed for %s (%s); falling back to pinned RAM", name, exc
+            "file-backed frozen offload failed for %s (%s); falling back to pinned RAM for all frozen params",
+            name,
+            exc,
         )
         return False
 
