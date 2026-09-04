@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 
 import torch
 
 from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
     LocalCheckpointStore,
 )
+from skyrl.backends.skyrl_train.weight_sync.skyrl_engines import empty_cuda_cache_rocm
 
 try:
     from vllm.logger import init_logger
@@ -36,10 +37,6 @@ class DeltaTransferUpdateInfo:
     sync_dir: str | None = None
     uri: str | None = None
     version: int | None = None
-    # vLLM 0.23's native /update_weights path checks this attribute before it
-    # dispatches into the custom transfer engine. Delta checkpoint sync always
-    # reloads dense prepared checkpoint tensors.
-    update_kind: str = "dense"
 
     @property
     def resolved_target_version(self) -> int:
@@ -65,7 +62,11 @@ def register_delta_weight_transfer_engine() -> None:
 
 
 class DeltaWeightTransferEngine:
-    """Receive compressed checkpoint deltas and load updated weights into vLLM."""
+    """Receive compressed checkpoint deltas and load updated weights into vLLM.
+
+    Duck-typed against vLLM's ``WeightTransferEngine`` rather than subclassing
+    it, so this module stays importable without vLLM installed.
+    """
 
     init_info_cls = DeltaTransferInitInfo
     update_info_cls = DeltaTransferUpdateInfo
@@ -75,10 +76,8 @@ class DeltaWeightTransferEngine:
     supports_draft_weight_update = False
 
     def __init__(self, config: Any, vllm_config: Any, device: Any, model: torch.nn.Module) -> None:
-        # Signature mirrors vLLM's WeightTransferEngine base (0.26+):
-        # WeightTransferEngineFactory.create_engine calls
-        # engine_cls(config, vllm_config, device, model). Duck-typed rather than
-        # subclassed so this module stays importable without vLLM installed.
+        # Signature fixed by WeightTransferEngineFactory.create_engine, which
+        # calls engine_cls(config, vllm_config, device, model).
         self.config = config
         self.vllm_config = vllm_config
         self.parallel_config = getattr(vllm_config, "parallel_config", None)
@@ -103,20 +102,19 @@ class DeltaWeightTransferEngine:
         self.model_config = self._default_model_config
 
     def start_weight_update(self) -> None:
-        """No-op: SkyRL drives the layerwise-reload lifecycle from the worker.
+        """Initialize layerwise reloading for the incoming checkpoint weights."""
+        from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
 
-        vLLM's ``Worker.start_weight_update`` delegates here, but SkyRL's delta
-        flow calls ``NewInferenceWorkerWrap.skyrl_start_weight_update`` instead
-        (see DeltaWeightTransferSender._apply_receiver_update), which is what
-        initializes layerwise reload. Doing it again here would double-initialize.
-        """
+        with torch.device(self.device):
+            initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
-        """No-op counterpart to :meth:`start_weight_update`.
+        """Finalize layerwise reloading after the checkpoint has been loaded."""
+        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 
-        SkyRL finalizes layerwise reload via
-        ``NewInferenceWorkerWrap.skyrl_finish_weight_update``.
-        """
+        with torch.device(self.device):
+            finalize_layerwise_reload(self.model, self.model_config)
+        empty_cuda_cache_rocm()
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """Load one update, as vLLM's native ``/update_weights`` endpoint expects."""
@@ -176,12 +174,27 @@ class DeltaWeightTransferEngine:
         prepare_s = time.perf_counter() - t0
         load_s = 0.0
         t1 = time.perf_counter()
-        self.model.load_weights(
-            self._store.iter_tensors(
+
+        def tensors():
+            return self._store.iter_tensors(
                 load_format=self._checkpoint_load_format,
                 multi_thread_safetensors_max_workers=self._multi_thread_safetensors_max_workers,
             )
+
+        # MTP architectures raise on incomplete layer coverage.
+        from vllm.model_executor.model_loader.mtp_validation import (
+            disable_mtp_completeness_check,
         )
+
+        with torch.device(self.device), disable_mtp_completeness_check():
+            self.model.load_weights(tensors())
+            # The spec-decode drafter is a separate module the main load never
+            # touches. Unlike the push backends this does NOT go through
+            # skyrl_drafter_reload's proxy: that materializes the weight list so
+            # the drafter can re-read it, which for a whole checkpoint would be
+            # the entire model resident at once. The store re-streams instead.
+            self._reload_drafter(tensors)
+
         load_s = time.perf_counter() - t1
         total_s = time.perf_counter() - t0
         message = (
@@ -197,11 +210,25 @@ class DeltaWeightTransferEngine:
         logger.info(message)
         print(message, flush=True)
 
+    def _reload_drafter(self, tensors) -> None:
+        """Reload the spec-decode drafter from a fresh pass over the checkpoint.
+
+        No-op, and no second pass, when this process has no loadable proposer.
+        """
+        from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
+            current_model_runner,
+        )
+
+        model_runner = current_model_runner()
+        drafter = getattr(model_runner, "drafter", None) if model_runner is not None else None
+        if drafter is None or getattr(drafter, "model", None) is None:
+            return
+
+        from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+            _reload_spec_decode_drafter,
+        )
+
+        _reload_spec_decode_drafter(model_runner, tensors())
+
     def shutdown(self):
         self._store = None
-
-    @staticmethod
-    def trainer_send_weights(
-        _iterator: Iterator[tuple[str, torch.Tensor]], _trainer_args: dict[str, Any] | Any
-    ) -> None:
-        raise NotImplementedError("Delta weight sync publishes through SkyRL's DeltaWeightTransferSender")

@@ -4,63 +4,155 @@ Training-to-inference weight transfer. Runs after every training step (or on the
 
 ## Architecture
 
-Two-sided protocol with sender (training) / receiver (inference):
+Weight sync runs on vLLM's **trainer-send** abstraction. Each training worker builds
+a `WeightSource` over its live model and hands it to a `TrainerWeightTransferEngine`,
+whose `send_weights()` owns the whole round trip (`start_weight_update` →
+`update_weights` → `finish_weight_update`, plus barriers and the non-sender collective
+replay). SkyRL owns three things and nothing else: the source, the control-plane
+client, and choosing an init info.
+
+**Chunking is vLLM's responsibility.** SkyRL passes a source and stops — it does not
+decide, express, or bound how the stream is cut on the wire. The packed NCCL and IPC
+producers already chunk out of a fixed reusable buffer and consume the source lazily,
+so a source's only obligation is to be a lazy generator that does not retain.
 
 ```
 skyrl/backends/skyrl_train/weight_sync/
-├── base.py                 # WeightUpdateRequest, LoraLoadRequest, WeightChunk
-├── transfer_strategy.py    # WeightSyncInitInfo / Sender / Strategy ABCs (sender-side only; receive is vLLM-native)
-├── broadcast_strategy.py   # NCCL broadcast (non-colocated)
-├── nccl_trainer_send.py    # vendored: vLLM 0.26's NCCL trainer-send statics
-├── cuda_ipc_strategy.py    # CUDA IPC (colocated)
-├── delta_strategy.py       # Checkpoint-delta sender + strategy (disk / gs:// / s3://)
+├── __init__.py             # backend selection: get_transfer_strategy / get_vllm_receive_backend
+├── base.py                 # LoraLoadRequest (not a weight transfer -- an adapter path)
+├── sources.py              # FsdpWeightSource / MegatronWeightSource (vLLM's metadata()+__iter__)
+├── trainer_engines.py      # build_trainer_engine: init info + client -> trainer_init
+├── control_plane.py        # SkyrlWeightSyncClient (blocking HTTP) + per-server init rewrites
+├── skyrl_engines.py        # receive side: skyrl_nccl / skyrl_ipc (+ the drafter-reload proxy)
+├── delta_trainer.py        # DeltaTrainerWeightTransferEngine (send side)
+├── delta_engine.py         # DeltaWeightTransferEngine (receive side, in the vLLM worker)
 ├── delta_checkpoint.py     # DeltaCheckpointPublisher, LocalCheckpointStore, manifest + XOR payloads
-├── delta_engine.py         # DeltaWeightTransferEngine (receive side, runs in the vLLM worker)
 ├── delta_payload.py        # zstd compress/decompress + uint8 tensor <-> bytes helpers
-├── weight_extractor.py     # Sharded-param -> dense tensor extraction
-├── weight_extractor_utils.py
 └── sharded_rdt/            # the sharded_rdt (NIXL pull) backend; __init__ is import-free
-    ├── sharded_rdt_strategy.py # sharded_rdt as a WeightTransferStrategy (thin adapter)
-    ├── rdt_send.py             # trainer-side driver: WeightSource impls + RdtWeightSyncSender
-    ├── rdt_control_plane.py    # SyncRdtControlPlaneClient (blocking HTTP to /collective_rpc)
+    ├── rdt_send.py             # its WeightSources + build_rdt_trainer_init_info
+    ├── sharded_rdt_base.py     # GroupedWeightSource + layerwise_groups (the two RDT-only channels)
     ├── rdt_vllm_register.py    # registers the sharded_rdt engine into vLLM's factory
     ├── rdt_libfabric_shim.py   # LIBFABRIC provider shim for NIXL
-    ├── sharded_rdt_base.py     # vendored: trainer-side ABCs (WeightSource, layerwise_groups)
     ├── sharded_rdt_trainer.py  # vendored: trainer engine + the _RDTProducerServer sidecar
     ├── sharded_rdt_engine.py   # vendored: consumer engine (runs in the vLLM worker)
     ├── sharded_rdt_common.py   # vendored: RdtRouter, op-chain allowlist, buffer sizing
     └── sharded_rdt_fake.py     # vendored: FakeRDTTensor placeholders for the bake
 ```
 
-The subpackage's `__init__.py` deliberately imports nothing: `sharded_rdt_engine` and
-`sharded_rdt_trainer` import `vllm` at module scope, so re-exporting from it would pull
-vllm into every `weight_sync` import and break the CPU CI job that runs without the wheel.
-Public names (`ShardedRdtTransferStrategy` and friends) are re-exported from
-`weight_sync/__init__.py`, which only reaches the vllm-free `sharded_rdt_strategy`.
+Neither `__init__.py` imports anything: `sources`, `trainer_engines`, `delta_trainer`,
+`sharded_rdt_engine` and `sharded_rdt_trainer` import `vllm` at module scope, so a
+re-export would pull vllm into every `weight_sync` import and break the CPU CI job that
+runs without the wheel. Import those modules at their call sites.
 
 vLLM worker-extension class (loaded via `--worker-extension-cls`):
 
-- `skyrl/backends/skyrl_train/inference_servers/new_inference_worker_wrap.py` — `NewInferenceWorkerWrap`. Three-phase chunked lifecycle.
+- `inference_servers/new_inference_worker_wrap.py` — `NewInferenceWorkerWrap`. Holds
+  exactly **two** weight-sync things, both limits of *dispatch* rather than of the
+  engine abstraction: `fetch_weights` (`/collective_rpc` reaches worker methods by name
+  only, and no native route can invoke an engine method) and the sleep/wake pair
+  (`EngineCore.sleep` hardcodes the prefix-cache clear). It is also where the
+  receive-side factory registrations and the model-runner recorder patch are installed,
+  because vLLM imports it in every worker process before model init.
 
-The weight sync implementation relies on the native vLLM weight sync APIs - `WeightTransferEngine` abstractions as well as native RPC endpoints for weight updates.
+### Trainer side, per backend
 
-## Transfer Strategies
+| logical backend | trainer engine | receive engine (`WeightTransferConfig.backend`) |
+|---|---|---|
+| `nccl` | vLLM's `NCCLTrainerWeightTransferEngine` | `skyrl_nccl` |
+| `ipc` | vLLM's `IPCTrainerWeightTransferEngine` | `skyrl_ipc` |
+| `delta` | `DeltaTrainerWeightTransferEngine` | `delta` |
+| `sharded_rdt` | `ShardedRDTTrainerWeightTransferEngine` | `sharded_rdt` |
 
-- **Broadcast** (`BroadcastTransferStrategy`): NCCL collective. Used for **non-colocated** setups. Training and inference are on different GPUs; weights cross the wire over a dedicated process group.
-- **CUDA IPC** (`CudaIpcTransferStrategy`): Per-chunk packed buffer + one IPC handle per rank. Used for **colocated** setups (`colocate_all=true`). Both sides live on the same GPU; the receiver maps the sender's CUDA allocation directly.
-- **Delta** (`DeltaTransferStrategy`): Weights travel as compressed XOR deltas against the base checkpoint, through a shared filesystem or object store instead of the network fabric. Selected with `generator.inference_engine.weight_sync_backend=delta`; intended for **non-colocated** setups where the two sides are not NCCL-reachable (separate clusters, PD-disaggregated serving). Not supported with LoRA (`validate_cfg` rejects it).
+The receive side takes new names for NCCL and IPC because SkyRL subclasses vLLM's
+engines (to reload the spec-decode drafter) and `register_engine` raises on an
+already-registered name. The trainer-side factory has its own registry, so the send side
+keeps vLLM's names.
+
+## Transfer backends
+
+- **Broadcast** (`nccl`): NCCL collective, packed. Used for **non-colocated** setups. Training and inference are on different GPUs; weights cross the wire over a dedicated process group.
+- **CUDA IPC** (`ipc`): packed IPC handles out of one reusable buffer. Used for **colocated** setups (`colocate_all=true`). Both sides live on the same GPU; the receiver maps the sender's CUDA allocation directly and clones out of it.
+- **Delta** (`delta`): Weights travel as compressed XOR deltas against the base checkpoint, through a shared filesystem or object store instead of the network fabric. Selected with `generator.inference_engine.weight_sync_backend=delta`; intended for **non-colocated** setups where the two sides are not NCCL-reachable (separate clusters, PD-disaggregated serving). Not supported with LoRA (`validate_cfg` rejects it).
 - **Sharded RDT** (`sharded_rdt`): the inference workers **pull** the slices they consume from
   the trainer ranks over NIXL/RDMA, instead of the trainer pushing every tensor to every
   worker. Selected with `generator.inference_engine.weight_sync_backend=sharded_rdt`;
   non-colocated only (`placement.colocate_all=false`), Megatron or FSDP, and it forces
   `distributed_executor_backend=ray` because the workers dial named trainer actors. See
-  the dedicated section below for the capabilities it declares.
+  the dedicated section below.
 
-Strategy choice is decided by the sender (`get_transfer_strategy_cls`). The init info is expanded per server via `for_servers()` / `to_api_payload()` and pushed to the servers through the HTTP control plane (`init_weight_update_communicator` → vLLM's native `/init_weight_transfer_engine`); the receive side is vLLM's native weight-transfer engine, driven by `NewInferenceWorkerWrap`.
+Selection is `get_transfer_strategy(weight_sync_backend, colocate_all)`, called from two
+places that must agree: `inference_servers/utils.build_vllm_cli_args` on the driver (via
+`get_vllm_receive_backend`, to build the servers' `WeightTransferConfig`, and to force
+`distributed_executor_backend=ray` for `sharded_rdt`), and `build_trainer_engine` on each
+worker. Both read the same two config values, so the trainer and receive engines cannot
+disagree.
+
+### Weight sources
+
+`sources.py` implements exactly vLLM's two-channel contract, and the two channels must
+agree element for element — `metadata()` declares what iteration will yield, and the
+engine sizes the worker's receive buffers and cuts its packed chunk boundaries from it.
+`NCCLTrainerWeightTransferEngine._checked_iter` enforces that at runtime and names the
+first divergent parameter; the Megatron GPU test
+(`gpu_ci/megatron/test_megatron_weight_source.py`) is the regression check that gets
+there first.
+
+- `FsdpWeightSource` — `state_dict()` for metadata (FSDP2 `DTensor.shape` is already the
+  global shape, so declaring costs no collective); iteration all-gathers via
+  `materialize_full_tensor`. `weight_prefix` handles syncing a CausalLM backbone into a
+  vLLM multimodal namespace.
+- `MegatronWeightSource` — `bridge.export_hf_weights(conversion_tasks=None)`, a lazy
+  generator in HF-canonical order that gathers TP/PP/EP internally. `metadata()` must
+  materialize once to learn shapes, so it runs a dry export and caches.
+
+**There is no bucketing, and that is deliberate.** Bucketing does not bound memory — it
+*accumulates* a whole bucket before handing it on, where the unbucketed export yields one
+parameter at a time. What it was for, IPC handle count and Flash-RL fused-loader grouping,
+`packed_ipc_producer`'s single reusable buffer subsumes. And one whole-model
+`export_hf_weights` call satisfies `_accumulate_grouped_export`'s "every task of a
+`group_key` in one call" requirement by construction, where bucketing has to special-case
+it (splitting them means expert weights are silently never yielded).
+
+### Control plane
+
+`control_plane.SkyrlWeightSyncClient` is a **blocking** HTTP client over vLLM's native
+RLHF routes, because `VLLMWeightSyncClient` is a synchronous protocol and the engine runs
+off the event loop (`asyncio.to_thread(engine.send_weights)`). Four properties are
+load-bearing: `Connection: close` (a full training step elapses between syncs, so any
+keep-alive is stale), concurrent fan-out (required for *correctness* on the RDT path — a
+serial `update_weights` deadlocks the producer's ref-counted group free), body-aware error
+messages, and no timeout / no retry.
+
+Two per-server init rewrites live there, because each engine builds only **one**
+worker-side init dict:
+
+- `nccl_init_payloads` — cumulative `rank_offset`, advancing one deployment's worth per
+  deployment and staying put across the DP servers *within* one (vLLM's
+  `data_parallel_index` already separates those). This is the highest-risk arithmetic in
+  weight sync: a wrong offset mis-maps ranks and **hangs in the NCCL rendezvous** rather
+  than erroring, so it cross-checks `world_size` against what the offsets imply.
+- `rdt_init_payloads` — the deployment ordinal as `replica_rank` plus `num_replicas`, so
+  the engine can offset its consumer ids into globally distinct ranges.
+
+### Capability probes
+
+Three things the trainer engine cannot do for itself are decided by `getattr` probes on
+the engine in `Worker._sync_weights_to_inference_engines`:
+
+| probe | default | who sets it |
+|---|---|---|
+| `skyrl_handles_prefix_cache_reset` | False | delta (it resets inside its own pause bracket) |
+| `skyrl_force_disable_expandable_segments` | False | sharded_rdt (CUDA-IPC shares on every run, not only under colocation) |
+| `skyrl_empty_cache_after_send` | True | sharded_rdt sets False (buffers are reused next step) |
+
+They are probes and not declared attributes because two of the four engines are vLLM's
+own classes and cannot carry SkyRL attributes at all — so the *absence* of a flag is the
+common case and must mean the default. `skyrl_set_reset_prefix_cache(bool)` is the same
+idea for a per-round value, since `send_weights()` takes no arguments.
 
 ## Delta backend
 
-Unlike the other two strategies, delta sync does not push tensors to the receiver at all — it
+Unlike the push backends, delta sync does not send tensors to the receiver at all — it
 publishes bytes to `sync_dir` and the receiver pulls them.
 
 **Publish (trainer, rank 0).** `DeltaCheckpointPublisher` keeps a CPU `uint8` snapshot of the
@@ -69,48 +161,75 @@ patch, and writes them as safetensors payload files plus a `manifest.json` under
 `<sync_dir>/delta-<version:08d>/`. Unchanged tensors are omitted. Payload files roll over at
 `max_file_size_in_gb`.
 
-**Fetch (receiver, before pause).** A control-plane operation the other strategies do not have:
-`RemoteInferenceClient.fetch_weights` → `/fetch_weights` on every server, driven by
-`DeltaWeightTransferSender._apply_receiver_update` *before* generation is paused, so the
-download and patch-apply happen off the critical path. `LocalCheckpointStore` maintains a
+**Fetch (receiver, before pause).** A control-plane operation the other backends do not have:
+`SkyrlWeightSyncClient.fetch_weights` → `/fetch_weights` on every server, driven by
+`DeltaTrainerWeightTransferEngine._apply_receiver_update` *before* generation is paused, so
+the download and patch-apply happen off the critical path. It is also why the worker
+extension still exists (see Architecture): `/collective_rpc` reaches worker methods only.
+
+`LocalCheckpointStore` maintains a
 mutable copy of the checkpoint under `local_checkpoint_dir/weights`, replaying every delta from
 its current version up to the target (so a late-joining engine catches up), and applies each
 patch by XOR-ing directly into the mmap'd safetensors files.
 
 **Reload.** Only then is generation paused and the local checkpoint reloaded into vLLM via
 `iter_tensors`. Note the delta shrinks the *transfer*, not the reload — the whole checkpoint is
-re-read even for an empty delta.
+re-read even for an empty delta. The pause/resume bracket and the prefix-cache reset ride the
+engine, not the four-method client protocol: this is the only backend that reloads a whole
+checkpoint in place, so it is the only one that needs generation stopped.
+
+The engine owns its layerwise-reload lifecycle like every other one
+(`start_weight_update` → `initialize_layerwise_reload`, `finish_weight_update` →
+`finalize_layerwise_reload`), which is what runs `process_weights_after_loading`. Its
+drafter reload takes a **second** `iter_tensors` pass rather than the push backends'
+proxy: materializing a whole checkpoint into a list so the drafter can re-read it would
+put the entire model in memory at once.
 
 `DeltaWeightSyncConfig.__post_init__` derives `local_checkpoint_dir` and `publish_staging_dir`
 from `sync_dir` when unset, so consuming classes never invent their own defaults.
 
 ## Sharded RDT (`sharded_rdt`)
 
-`sharded_rdt` is selected through `get_transfer_strategy_cls` like every other backend
-(`ShardedRdtTransferStrategy`, in `weight_sync/sharded_rdt/sharded_rdt_strategy.py`), but underneath it
-is vLLM's *trainer-send* model — a `WeightSource`, a `TrainerWeightTransferEngine` and a
-`VLLMWeightSyncClient` — where the engine owns the whole round trip and the workers pull.
-The strategy is a thin adapter over `RdtWeightSyncSender` (`weight_sync/sharded_rdt/rdt_send.py`),
-which is where the real work lives.
+`sharded_rdt` is selected through `get_transfer_strategy` and built by the same
+`build_trainer_engine` call as every other backend; nothing about its trainer side is
+special. What *is* special is that it **pulls**, and pulling needs two
+channels vLLM's `WeightSource` has no concept of. Those live on
+`sharded_rdt_base.GroupedWeightSource` and stay inside this package
+(`weight_sync/sources.py` is vLLM's contract verbatim, so a future upstream chunking
+change arrives for free):
 
-Where the pull model does not fit the push backends' shape, declared as capabilities
-so the workers hold no backend conditional:
-
-| flag | why |
+| channel | what it really is |
 |---|---|
-| `sender_initializes_receivers = True` | `trainer_init` opens the inference side itself (the bake needs the source metadata and must run under `set_current_vllm_config`), so worker rank 0 must **not** also call `init_weight_update_communicator`. |
-| `force_disable_expandable_segments = True` | The sidecar shares gathered tensors over CUDA IPC on every run, not only under colocation. |
-| `empty_cache_after_send = False` | Publish buffers are reused by the next training step; scrubbing them back to CUDA costs 0.25-0.53s/rank at 235B. The worker still empties under `colocate_all`. |
+| `held_names()` | **ownership** under PP / EP. Feeds `_resolve_ownership` → `_spawn_server(held)`, and consumers route pulls to producers by name. Not a chunking concern, and not optional: the default (hold everything) is correct at pp=1/ep=1 and wrong above it. |
+| `groups()` | the coordination index the producer's free barrier counts (`_inflight` is keyed by group). |
+| `iter_groups()` | batching — driving the gather per group instead of per tensor turns ~37k generator resumes into ~95 on a per-expert MoE model (~0.9s/sync at 235B). |
 
-The sender overrides `WeightTransferSender.send` rather than implementing `send_chunks`:
-there is no chunk stream to push, and the base `send()` would call
-`get_weight_metadata`, which on the Megatron extractor is a whole-model
-`export_hf_weights` pass — the exact gather the RDT weight source exists to avoid.
-`send_chunks` raises here.
+Three source flavors, chosen by `make_megatron_weight_source` / `make_fsdp_weight_source`:
 
-This is still intermediate: when the pinned vLLM ships trainer-send for NCCL/IPC too,
-those backends collapse into this shape and the strategy layer goes away — the adapter is
-what disappears, not `rdt_send.py`.
+- `RdtFsdpWeightSource` — the shared FSDP source re-ordered **group-major**, so
+  `layerwise_groups` partitions `metadata()` exactly. The push backends do not care about
+  order (any permutation transfers identically as long as the two channels agree), which
+  is why only RDT pays for the reorder.
+- `MegatronStackedWeightSource` — PP-local and EP-local, gathering experts at stack
+  granularity. `_pp_local_export_ctx` patches the bridge's PP broadcast so the owning
+  stage gets its tensor and every other stage gets `None` (which `megatron_to_hf` already
+  skips). Without it every rank materializes the whole model under PP; this is the actual
+  OOM fix, measured on Qwen3-32B at tp4/pp2 (70.56 GiB) and tp8/pp2 (73.06 GiB) of 79.18.
+- `RdtMegatronWeightSource` — the whole-model fallback, taken on four conditions
+  (`_demoted`: a gather group spans PP stages, i.e. tied embeddings or MTP; grouped-export
+  archs; `etp != 1`; dense at `pp == 1`).
+
+**PP/EP locality cannot be shared with the push backends.** It needs per-rank ownership,
+so only a pull backend can consume a PP-local source: NCCL broadcasts from rank 0, IPC
+shares whole-tensor handles, and delta publishes a whole checkpoint — all three require
+the cross-stage export. Conversely, RDT's whole-model residency is *the point* for a pull
+backend (each producer must be able to serve its bound consumer the complete model), which
+is why the Qwen3-32B OOM does not transfer to the push backends: they stream and drop.
+
+Two capability probes (see Architecture): `skyrl_force_disable_expandable_segments = True`
+(the sidecar shares gathered tensors over CUDA IPC on every run, and VMM memory makes
+export/rebuild 5-10x slower per storage) and `skyrl_empty_cache_after_send = False`
+(publish buffers are reused by the next training step).
 
 Three kinds of process: the **trainer ranks** (each builds a `WeightSource` and a
 `ShardedRDTTrainerWeightTransferEngine`), one **producer sidecar** Ray actor per trainer
@@ -212,10 +331,45 @@ waits on the same channel, so a sharer that never arrives fails the same way.
 
 The `sharded_rdt_*.py` files are vendored from the vLLM PR: github.com/vllm-project/vllm/pull/43375; see each file's header for the removal plan once the pinned vLLM ships the trainer-side ABCs natively.
 
-## Lifecycle (`NewInferenceWorkerWrap`)
-1. `start_weight_update(is_checkpoint_format=True)` — initializes layerwise reload (moves layers to meta device, wraps loaders).
-2. `update_weights_chunk(update_info)` — called repeatedly. Unpacks the SkyRL packed CUDA-IPC payload, slices the contiguous buffer per param, calls `model.load_weights(weights=...)` under `set_current_vllm_config`.
-3. `finish_weight_update()` — runs `finalize_layerwise_reload` (quantization repacking, attention weight postprocessing).
+## Receive-side lifecycle
+
+vLLM's native routes, driven by the trainer engine through `SkyrlWeightSyncClient`:
+
+1. `/init_weight_transfer_engine` → `engine.init_transfer_engine(...)`. The **one**
+   lifecycle method `GPUWorker` does not wrap in `set_current_vllm_config`, which is why
+   the RDT engine opens that context itself (its bake drives `model.load_weights` against
+   meta params, and `process_weights_after_loading` on MoE models reads
+   `get_current_vllm_config()` to build kernels).
+2. `/start_weight_update` → `engine.start_weight_update()` → `initialize_layerwise_reload`
+   (moves layers to meta device, wraps loaders).
+3. `/update_weights` → `engine.update_weights(...)`, once or many times. The actual
+   receive; wrapped in `disable_mtp_completeness_check()` because MTP architectures raise
+   on incomplete layer coverage.
+4. `/finish_weight_update` → `engine.finish_weight_update()` → `finalize_layerwise_reload`
+   (quantization repacking, attention weight postprocessing), then
+   `model_runner.reset_lora_state()` on the worker.
+
+`GPUWorker` opens `set_current_vllm_config` around steps 2-4 itself, which is why the
+receive path needs no SkyRL wrapper.
+
+### Spec-decode drafter reload
+
+vLLM's engines call `self.model.load_weights(...)` directly and there is still no
+`load_weights` callback, so `skyrl_engines.SkyrlDrafterReloadMixin` swaps `self.model` for
+a `_LoadWeightsProxy` for the duration of `receive_weights` — the drafter
+(`model_runner.drafter.model`, a separate module the main load never touches) is then
+reloaded from exactly the weights the main model just received. The proxy is only
+installed when this process actually *has* a drafter, so a non-MTP deployment runs vLLM's
+path verbatim.
+
+Delta is the exception: it re-streams `iter_tensors` a second time instead, because the
+proxy has to materialize the weight list so the drafter can re-read it, and for a whole
+checkpoint that is the entire model resident at once.
+
+An engine has no route to its worker — it is constructed inside `Worker.load_model`, and
+the worker-extension class is appended to `Worker.__bases__` *after* `Worker` — so
+`patches/vllm/patch_model_runner_registry.py` wraps `GPUModelRunner.load_model` to record
+the runner in a process-global weakref.
 
 ## KV offload during non-colocated weight sync
 
@@ -233,18 +387,36 @@ Validated in `validate_inference_engine_cfg`. vLLM-version coupled (mirrors `GPU
 
 ## Convention: vLLM imports
 
-`vllm` is a Linux-only optional dep. Import it **lazily inside methods**, not at module top. Match the existing pattern in `new_inference_worker_wrap.py`.
+`vllm` is a Linux-only optional dep, and half the CPU suite runs without the wheel. Two
+rules, not one:
+
+- A module that **anything** vllm-free imports must import `vllm` **lazily inside
+  methods**: `weight_sync/__init__.py`, `base.py`, `delta_checkpoint.py`,
+  `delta_engine.py`, `control_plane.py` and `new_inference_worker_wrap.py` all follow this.
+- A module that is *itself* vllm-only may import at module top — `sources.py`,
+  `trainer_engines.py`, `delta_trainer.py`, `sharded_rdt_base.py`,
+  `sharded_rdt_{engine,trainer}.py`. The rule then moves up: **nothing vllm-free may
+  import them at module scope.** The workers import `sources` / `trainer_engines` inside
+  `_build_weight_source` / `init_weight_sync_state` for exactly this reason, and
+  `weight_sync/__init__.py` re-exports neither.
+
+Tests for the second group carry `pytest.importorskip("vllm")` plus
+`pytestmark = pytest.mark.vllm`, which is what puts them in the `-m "vllm"` CPU half.
 
 ## Tests
 
 ```bash
-# CPU — chunk packing, transfer strategies, and the sharded_rdt pull plan /
-# producer sidecar / weight source / control plane
+# CPU — the control plane's per-server init rewrites, the delta publisher, and the
+# sharded_rdt pull plan / producer sidecar / grouped source contract
 uv run --extra dev --extra fsdp pytest tests/backends/skyrl_train/weight_sync/ -v
 
-# GPU — end-to-end weight sync (NCCL + CUDA IPC paths, TP=1 and TP=2)
+# GPU — end-to-end weight sync: all four backends through build_trainer_engine
 uv run --isolated --extra dev --extra fsdp \
   pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_weight_sync.py -v
+
+# GPU — the Megatron source's two channels must agree (what _checked_iter enforces at runtime)
+uv run --isolated --extra dev --extra megatron \
+  pytest tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_weight_source.py -v
 
 # GPU — end-to-end delta sync (sparse perturbation, fsdp and megatron)
 uv run --isolated --extra dev --extra fsdp \
@@ -259,43 +431,54 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 
 | Change | Run |
 |--------|-----|
-| `WeightChunk` packing / size accounting | `tests/backends/skyrl_train/weight_sync/test_weight_chunk.py` |
-| Broadcast or CUDA IPC sender | `test_transfer_strategies.py` (CPU) **and** GPU `test_weight_sync.py` |
+| A `WeightSource` (`sources.py` or `rdt_send.py`) | `test_sources.py` + `test_sharded_rdt_source.py` (CPU), GPU `test_weight_sync.py`, and — for Megatron — GPU `test_megatron_weight_source.py` |
+| `control_plane.py`, especially the init rewrites | `test_control_plane.py` (CPU) **and** GPU `test_weight_sync.py` |
+| `trainer_engines.py` / a trainer engine | `test_trainer_engines.py` (CPU) **and** GPU `test_weight_sync.py` |
+| `skyrl_engines.py` (receive side) | GPU `test_weight_sync.py` only — it runs inside the vLLM worker |
 | `NewInferenceWorkerWrap` | GPU `test_weight_sync.py` (CPU tests will not catch regressions) |
 | Delta publish / manifest / payload format | `test_delta_checkpoint.py` **and** GPU `test_delta_weight_sync_e2e.py` |
 | `LocalCheckpointStore` (fetch, replay, apply, cache keys) | `test_delta_checkpoint.py` |
-| `DeltaWeightTransferEngine` | GPU `test_delta_weight_sync_e2e.py` only — it runs inside the vLLM worker |
+| `DeltaWeightTransferEngine` (receive side) | GPU `test_delta_weight_sync_e2e.py` only — it runs inside the vLLM worker |
 | Who pauses / resets the prefix cache | `test_prefix_cache_reset.py` **and** `distributed/test_worker_dispatch.py` |
 | `DeltaWeightSyncConfig` defaults or validation | `tests/train/test_config.py` |
 
 ## vLLM version coupling
 
-`vllm` is pinned in `pyproject.toml` (currently `0.28.0`, in both the `fsdp` and `megatron` extras). Weight-sync code paths are tightly coupled to vLLM internals (`model_runner.load_weights`, `initialize_layerwise_reload`, `SKIP_LOAD_TENSORS`). When bumping the pin, re-verify the GPU weight-sync tests.
+`vllm` is pinned in `pyproject.toml` (currently `0.28.0`, in both the `fsdp` and `megatron` extras). Weight-sync code paths are tightly coupled to vLLM internals. When bumping the pin, re-verify the GPU weight-sync tests and the extension points listed below.
 
-### `packed` is an init-time wire param (0.28.0+)
+### `packed` is chosen by SkyRL, agreed by vLLM
 
-Through 0.26.0 the NCCL sender put `packed` on the **per-round** update info. 0.28.0 moved it
-to the **init** info: `NCCLWeightTransferInitInfo.packed` is recorded once during
-`/init_weight_transfer_engine`, `receive_weights` reads `self.packed`, and
-`NCCLWeightTransferUpdateInfo` now rejects the key outright.
+`packed` rides the **init** info, and the trainer engine propagates it to the worker at
+`trainer_init`, so the two sides structurally cannot disagree. What SkyRL chooses is
+`packed=True` on both push backends:
 
-So `BroadcastInitInfo.packed` must be sent by `to_api_payload()` and must agree with the
-`packed` handed to `nccl_trainer_send_weights`. Its default is `False` on the vLLM side, so
-forgetting it does not raise — the trainer packs while the worker unpacks one-by-one, and the
-transfer hangs inside NCCL. Only the GPU weight-sync test catches this.
+- NCCL: packed broadcasts out of a fixed reusable buffer instead of one NCCL call per
+  parameter. vLLM's unpacked path is only reached by its own tests.
+- IPC: `packed=True` is **not** vLLM's default but is required here. The unpacked path
+  holds a strong ref to a contiguous copy of *every* parameter until past
+  `finish_weight_update` (so the consumer's IPC views stay valid) — i.e. the whole model
+  resident on the trainer. Packed streams through one reusable buffer, and the consumer
+  clones out of it.
 
-### Vendored trainer-send (`weight_sync/nccl_trainer_send.py`)
+### Extension points relied on
 
-0.28.0 deleted `NCCLWeightTransferEngine.trainer_send_weights` and the engine's `trainer_init`
-staticmethod, replacing them with a trainer-side engine abstraction
-(`NCCLTrainerWeightTransferEngine`, via `WeightTransferTrainerFactory`). SkyRL still drives the
-send itself, so `nccl_trainer_send.py` keeps the 0.26.0 behaviour: it wraps
-`packed_nccl_broadcast_producer` and re-exports `nccl_common.trainer_init`, both of which
-survive in 0.28.0 unchanged. Delete that module when SkyRL's sender layer migrates onto vLLM's
-trainer-send engines.
-
-The `sharded_rdt` backend is unaffected: it vendors its own trainer-side ABCs in
-`sharded_rdt_base.py`, which already match 0.28.0's `Generic[TTrainerInitInfo]` shape.
+- `WeightTransferEngineFactory` / `WeightTransferTrainerFactory` — `register_engine`
+  raises `ValueError` on a duplicate name, and `WeightTransferConfig.backend` is typed
+  `Literal[...] | str` and validated against the registry at engine creation.
+- `TrainerInitInfo` — `backend` is a `ClassVar` the factory dispatches on; `rank` is
+  keyword-only.
+- `VLLMWeightSyncClient` — a **structural** (PEP 544) four-method protocol, so
+  `SkyrlWeightSyncClient` needs no import or subclassing. Note 0.28 declares
+  `finish_weight_update(weight_version: str | None = None)`.
+- `set_weight_update_target` / `reset_weight_update_target` on `WeightTransferEngine` —
+  the draft-session hook. SkyRL's proxy swap composes with it by restoring the exact
+  object it found.
+- `GPUModelRunner.load_model` — wrapped by `patch_model_runner_registry`.
+- `CuMemAllocator` via `vllm.device_allocator.get_mem_allocator_instance` — the KV-offload
+  path drives it directly because `EngineCore.sleep` hardcodes
+  `clear_prefix_cache = level >= 1` and `CuMemBackend.suspend` cannot express "discard
+  weights, offload kv_cache". Registering a custom `SleepModeBackend` does not help: the
+  problem is on the dispatch path, not in the suspend mechanism.
 
 ### DeepGEMM is unavailable under the torch override
 
@@ -310,8 +493,8 @@ when those wheels publish torch 2.13 builds.
 
 ## Gotchas
 
-- After `update_weights_chunk` runs, call `torch.accelerator.synchronize()` before returning so the sender doesn't drop its packed buffer mid-copy on the next barrier.
-- Delta: `DeltaWeightTransferEngine` is registered as an **import side effect** of `new_inference_worker_wrap.py`, which is the module vLLM loads via `--worker-extension-cls`. Registering anywhere else (e.g. while building CLI args in the driver) is a no-op — it has to happen in the process that owns the engine.
+- Every receive-side engine is registered as an **import side effect** of `new_inference_worker_wrap.py`, the module vLLM loads via `--worker-extension-cls`. Registering anywhere else (e.g. while building CLI args in the driver) is a no-op for the workers — it has to happen in the process that owns the engine. The driver registers too, separately, because it validates `WeightTransferConfig.backend` against the registry.
+- `send_weights()` must be called on **every** trainer rank, and every rank must drain the source: iterating it is what drives the gather collectives, so a rank that skipped it deadlocks its peers. Only rank 0 touches the wire (the engines resolve `is_sender` from `init_info.rank`, never from a global process group, which is ambiguous once FSDP/TP/PP/EP groups exist).
 - Delta: the receive-side `delta checkpoint fetch:` / `receive reload-only:` log lines are emitted inside the nested vLLM worker process and do **not** reach the driver log, even with `SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`. Find them with `grep -rhE "delta checkpoint (fetch|receive)" /tmp/ray/session_latest/logs/`. Filter by mtime — that directory accumulates lines from earlier runs.
 - Delta: `_safe_path_name` appends a digest of the full value because sibling delta URIs differ only in their trailing `delta-<version>`; a plain length cap collapses every version onto one cache directory. Don't "simplify" it back to truncation.
 - Delta: `s3://` needs the `s5cmd` CLI, which the `aws` extra installs into the run's venv (`--extra aws`). `gs://` needs the `gcloud` CLI as a *system* binary — the `gcp` extra only provides a Python library and will not satisfy it.

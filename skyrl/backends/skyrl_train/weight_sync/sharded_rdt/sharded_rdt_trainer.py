@@ -24,10 +24,12 @@ consumer set and its engine exposes ``get_worker_init_payload`` for a restarted
 consumer to rejoin, both of which are deliberately omitted here. The consumer set
 is the provisioned fleet, fixed at ``trainer_init``. Do not "restore" them when
 syncing; the producer-side stall watchdog IS kept, because the slot-sharing
-rendezvous relies on it as its failure mode.
+rendezvous relies on it as its failure mode. This copy also carries the
+``skyrl_*`` capability flags the workers probe; they are additive, so the fork can
+be re-synced over them.
 
 REMOVAL: delete this module once SkyRL's pinned vLLM ships the trainer-side
-engine, and repoint ``weight_sync/sharded_rdt/rdt_send.py`` at
+engine, and repoint ``weight_sync/trainer_engines.py``'s registration at
 ``vllm.distributed.weight_transfer.sharded_rdt_trainer``.
 """
 
@@ -798,6 +800,18 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
     """
 
     init_info_cls = ShardedRDTTrainerInitInfo
+
+    # Worker capability probes (see workers/worker.py).
+    #
+    # The producer sidecar shares every gathered group with this rank over CUDA
+    # IPC on every run, not only under colocation, and expandable-segment (VMM)
+    # memory makes that export/rebuild 5-10x slower per storage (measured:
+    # publish rebuild 7.2s/rank/sync at 30B, the dominant weight-sync cost).
+    skyrl_force_disable_expandable_segments = True
+    # Publish buffers stay in this process's allocator cache and are reused by
+    # the next training step; returning them to CUDA costs 0.25-0.53s per rank at
+    # 235B and buys nothing.
+    skyrl_empty_cache_after_send = False
 
     def __init__(
         self,

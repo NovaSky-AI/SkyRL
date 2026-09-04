@@ -650,24 +650,10 @@ class TestControlPlane:
 class TestWeightSync:
     """Test weight sync methods."""
 
-    @pytest.mark.asyncio
-    async def test_init_weight_update_communicator(self, client):
-        """Test init_weight_update_communicator expands init_info via to_api_payload and fans out."""
-        api_payload = {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5}
-
-        class MockInitInfo:
-            """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
-
-            def for_servers(self, world_size_per_server, num_servers, dp_size=1):
-                return [self] * num_servers
-
-            def to_api_payload(self):
-                return dict(api_payload)
-
-        result = await client.init_weight_update_communicator(MockInitInfo())
-        assert set(result) == set(client.server_urls)
-        for response in result.values():
-            assert response["body"]["body"] == {"init_info": api_payload}
+    # The init handshake and the start/update/finish lifecycle moved off this
+    # async client onto the trainer-side engines' blocking SkyrlWeightSyncClient
+    # (weight_sync/control_plane.py, covered by test_control_plane.py). What is
+    # left here is what the driver still drives.
 
     @pytest.mark.asyncio
     async def test_update_named_weights(self, client):

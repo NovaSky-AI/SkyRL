@@ -51,7 +51,6 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
-    TYPE_CHECKING,
     Any,
     Dict,
     List,
@@ -96,12 +95,6 @@ _TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
     "stop_strings": "stop",
     "stop_tokens": "stop_token_ids",
 }
-
-if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
-        WeightSyncInitInfo,
-    )
-
 
 logger = logging.getLogger(__name__)
 
@@ -1102,35 +1095,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
     # Weight Sync (control plane - fan-out)
     # ---------------------------
 
-    async def init_weight_update_communicator(
-        self,
-        init_info: "WeightSyncInitInfo",
-    ) -> Dict[str, Any]:
-        """
-        Initialize weight sync via vLLM native /init_weight_transfer_engine.
-
-        Fetches per-server world sizes, expands init_info into per-server
-        payloads (with correct NCCL rank offsets), and fans out to all servers.
-
-        Args:
-            init_info: A WeightSyncInitInfo (e.g. BroadcastInitInfo) that supports
-                for_servers() and to_api_payload().
-
-        Returns:
-            Dict mapping server_url to response.
-        """
-        _, world_size_per_server = await self.get_world_size()
-        num_servers = len(self.server_urls)
-        server_infos = init_info.for_servers(world_size_per_server, num_servers, dp_size=self.data_parallel_size)
-        payloads = [{"init_info": x.to_api_payload()} for x in server_infos]
-        results = await asyncio.gather(
-            *[
-                self._call_server(url, "/init_weight_transfer_engine", payload)
-                for url, payload in zip(self.server_urls, payloads)
-            ]
-        )
-        return {url: resp for url, resp in results}
-
     async def update_named_weights(
         self,
         update_info: Dict[str, Any],
@@ -1168,106 +1132,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
             kwargs["uri"] = uri
         return await self._call_all_servers("/fetch_weights", kwargs)
 
-    # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
-    # these three methods from /collective_rpc to the native vLLM endpoints
-    # (/start_weight_update, /update_weights, /finish_weight_update) and remove
-    # the NewInferenceWorkerWrap worker extension.
-
-    async def start_weight_update(
-        self,
-        is_checkpoint_format: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        Start a new chunked weight update via /collective_rpc.
-
-        Calls the NewInferenceWorkerWrap.skyrl_start_weight_update method on all
-        workers. For checkpoint-format weights this initializes layerwise
-        reload. Must be called before any update_weights_ipc calls.
-
-        Args:
-            is_checkpoint_format: True if weights are in checkpoint format
-                (need layerwise processing), False for kernel format.
-
-        Returns:
-            Dict mapping server_url to response.
-        """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {
-                "method": "skyrl_start_weight_update",
-                "kwargs": {"is_checkpoint_format": is_checkpoint_format},
-            },
-        )
-
-    async def update_weights_ipc(
-        self,
-        update_info: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Send a single weight chunk via /collective_rpc.
-
-        Calls NewInferenceWorkerWrap.update_weights_ipc on all workers.
-        Can be called multiple times between skyrl_start_weight_update and
-        skyrl_finish_weight_update.
-
-        Args:
-            update_info: Dict with backend-specific update info (names,
-                dtype_names, shapes, ipc_handles_pickled or packed flag).
-
-        Returns:
-            Dict mapping server_url to response.
-        """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {
-                "method": "update_weights_ipc",
-                "kwargs": {"update_info": update_info},
-            },
-        )
-
-    async def update_weights_nccl(
-        self,
-        update_info: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Send batched weight update via /collective_rpc to the broadcast receiver.
-
-        Calls NewInferenceWorkerWrap.update_weights_nccl on all workers,
-        which routes weight_transfer_engine.receive_weights through the
-        set_current_vllm_config wrap. Used by the broadcast (NCCL) sender as
-        a temporary substitute for vLLM's native /update_weights endpoint
-        until the upstream patch (vllm-project/vllm weight-sync-fix) lands.
-
-        Args:
-            update_info: Dict with backend-specific update info (names,
-                dtype_names, shapes, packed flag, etc.) — same shape vLLM's
-                native /update_weights expects.
-
-        Returns:
-            Dict mapping server_url to response.
-        """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {
-                "method": "update_weights_nccl",
-                "kwargs": {"update_info": update_info},
-            },
-        )
-
-    async def finish_weight_update(self) -> Dict[str, Any]:
-        """
-        Finish the current chunked weight update via /collective_rpc.
-
-        Calls NewInferenceWorkerWrap.skyrl_finish_weight_update on all workers.
-        For checkpoint-format weights, runs layerwise postprocessing.
-
-        Returns:
-            Dict mapping server_url to response.
-        """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {"method": "skyrl_finish_weight_update"},
-        )
+    # The weight-sync lifecycle (/start_weight_update, /update_weights,
+    # /finish_weight_update) is driven by the trainer-side engines through the
+    # blocking SkyrlWeightSyncClient (weight_sync/control_plane.py), which they
+    # need because the protocol is synchronous and they run off the event loop.
+    # What is left here is what the driver drives: pause/resume, prefix-cache
+    # reset, /fetch_weights, LoRA, and /get_world_size at init.
 
     async def load_lora_adapter(
         self,

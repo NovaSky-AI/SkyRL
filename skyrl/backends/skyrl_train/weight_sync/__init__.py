@@ -1,66 +1,45 @@
-"""Weight synchronization abstractions for distributed RL training."""
+"""Weight synchronization for distributed RL training.
 
-from typing import Type
+SkyRL drives weight sync through vLLM's trainer-send abstraction: each training
+worker builds a ``WeightSource`` over its live model (``sources.py``) and hands
+it to a ``TrainerWeightTransferEngine`` (``trainer_engines.py``) whose
+``send_weights()`` owns the whole round trip. Four backends:
 
-from .base import LoraLoadRequest, WeightChunk, WeightUpdateRequest
-from .broadcast_strategy import (
-    BroadcastInitInfo,
-    BroadcastTransferStrategy,
-    BroadcastWeightTransferSender,
-    BroadcastWeightUpdateRequest,
-)
-from .cuda_ipc_strategy import (
-    CudaIpcInitInfo,
-    CudaIpcTransferStrategy,
-    CudaIpcWeightTransferSender,
-    CudaIpcWeightUpdateRequest,
-)
-from .delta_strategy import (
-    DeltaInitInfo,
-    DeltaTransferStrategy,
-    DeltaWeightTransferSender,
-)
-from .sharded_rdt.sharded_rdt_strategy import (
-    ShardedRdtInitInfo,
-    ShardedRdtTransferStrategy,
-    ShardedRdtWeightTransferSender,
-)
-from .transfer_strategy import (
-    WeightSyncInitInfo,
-    WeightTransferSender,
-    WeightTransferStrategy,
-)
-from .weight_extractor import WeightExtractor
+===============  ==========================================================
+``nccl``         broadcast from trainer rank 0; non-colocated
+``ipc``          CUDA IPC handles; colocated (``placement.colocate_all``)
+``delta``        compressed checkpoint deltas via disk / ``gs://`` / ``s3://``
+``sharded_rdt``  the inference workers pull slices over NIXL
+===============  ==========================================================
 
+This package imports no vLLM at module scope: half the CPU suite runs without the
+(Linux-only, optional) wheel. The vLLM-facing modules -- ``sources``,
+``trainer_engines``, ``skyrl_engines``, ``delta_trainer`` -- are imported at their
+call sites instead.
+"""
 
-def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> Type[WeightTransferStrategy]:
-    """Get the appropriate transfer strategy class based on config.
+from .base import LoraLoadRequest
 
-    Uses CUDA IPC when:
-    - weight_sync_backend is "nccl"
-    - colocate_all is True (training and inference on same nodes)
-
-    Otherwise uses broadcast.
-
-    Args:
-        weight_sync_backend: The weight sync backend ("nccl" or other).
-        colocate_all: Whether training and inference are colocated on same nodes.
-
-    Returns:
-        The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
-    """
-    strategy = get_transfer_strategy(weight_sync_backend, colocate_all)
-    if strategy == "sharded_rdt":
-        return ShardedRdtTransferStrategy
-    if strategy == "delta":
-        return DeltaTransferStrategy
-    if strategy == "ipc":
-        return CudaIpcTransferStrategy
-    return BroadcastTransferStrategy
+#: Logical backend name -> the name its *receive*-side engine is registered
+#: under in vLLM's ``WeightTransferEngineFactory``.
+#:
+#: NCCL and IPC take new names because SkyRL subclasses vLLM's engines and
+#: ``register_engine`` refuses an already-registered name. The trainer-side
+#: factory has a separate registry, so the send side keeps vLLM's own names.
+_VLLM_RECEIVE_BACKENDS = {
+    "nccl": "skyrl_nccl",
+    "ipc": "skyrl_ipc",
+    "delta": "delta",
+    "sharded_rdt": "sharded_rdt",
+}
 
 
 def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
-    """Get the appropriate transfer strategy string based on config."""
+    """Resolve the logical weight-sync backend from config + placement.
+
+    A configured ``nccl`` means CUDA IPC when training and inference share GPUs,
+    and broadcast otherwise.
+    """
     if weight_sync_backend in ("sharded_rdt", "rdt"):
         return "sharded_rdt"
     if weight_sync_backend == "delta":
@@ -70,27 +49,13 @@ def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
     return "nccl"
 
 
+def get_vllm_receive_backend(weight_sync_backend: str, colocate_all: bool) -> str:
+    """The ``WeightTransferConfig.backend`` the inference servers must be built with."""
+    return _VLLM_RECEIVE_BACKENDS[get_transfer_strategy(weight_sync_backend, colocate_all)]
+
+
 __all__ = [
-    "WeightChunk",
-    "WeightExtractor",
-    "WeightUpdateRequest",
     "LoraLoadRequest",
-    "BroadcastWeightUpdateRequest",
-    "CudaIpcWeightUpdateRequest",
-    "WeightTransferStrategy",
-    "WeightTransferSender",
-    "WeightSyncInitInfo",
-    "BroadcastInitInfo",
-    "CudaIpcInitInfo",
-    "BroadcastTransferStrategy",
-    "BroadcastWeightTransferSender",
-    "CudaIpcTransferStrategy",
-    "CudaIpcWeightTransferSender",
-    "DeltaInitInfo",
-    "DeltaTransferStrategy",
-    "DeltaWeightTransferSender",
-    "ShardedRdtInitInfo",
-    "ShardedRdtTransferStrategy",
-    "ShardedRdtWeightTransferSender",
-    "get_transfer_strategy_cls",
+    "get_transfer_strategy",
+    "get_vllm_receive_backend",
 ]

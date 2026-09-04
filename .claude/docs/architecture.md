@@ -11,7 +11,7 @@ skyrl/                  # Core library
 │   └── skyrl_train/    # FSDP/Megatron training backend
 │       ├── distributed/        # Dispatch, FSDP/Megatron strategies
 │       ├── inference_servers/  # HTTP inference path (RemoteInferenceClient, vLLM servers, router)
-│       ├── weight_sync/        # Weight extraction and transfer
+│       ├── weight_sync/        # WeightSources + trainer-side transfer engines
 │       └── workers/            # FSDP/Megatron workers
 ├── train/              # Training entrypoints, config, dataset, generators, trainer
 │   ├── config/         # Hydra YAML configs (ppo_base, megatron, skyrl_gym)
