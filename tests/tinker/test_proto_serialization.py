@@ -11,12 +11,15 @@ import math
 import numpy as np
 import pytest
 import tinker.types as sdk_types
+import zstandard
+from fastapi import HTTPException
 from tinker import ForwardBackwardOutput, SampleResponse
 from tinker.proto.request_conv import forward_backward_request_to_proto
 from tinker.proto.response_conv import deserialize_proto_response
 
 from skyrl.tinker import api, types
 from skyrl.tinker.proto_serialization import (
+    PROTO_CONTENT_TYPE,
     parse_forward_backward_request,
     serialize_result,
 )
@@ -212,3 +215,65 @@ def test_parse_forward_backward_request_forward_only_and_config():
 def test_parse_forward_backward_request_garbage_raises():
     with pytest.raises(Exception):
         parse_forward_backward_request(b"\xff\xfe not a proto")
+
+
+class _StubRequest:
+    """Just enough of fastapi.Request for _read_forward_backward_request:
+    the function only touches ``await request.body()`` and ``request.headers``."""
+
+    def __init__(self, body: bytes, headers: dict[str, str]):
+        self._body = body
+        self.headers = headers
+
+    async def body(self) -> bytes:
+        return self._body
+
+
+@pytest.mark.asyncio
+async def test_read_forward_backward_request_zstd_proto_body():
+    """SDK >= 0.25 may send the proto body zstd-compressed (Content-Encoding: zstd)."""
+    raw = encode_sdk_fwd_bwd_request(forward_only=True)
+    compressed = zstandard.ZstdCompressor().compress(raw)
+    request = _StubRequest(
+        compressed,
+        {"content-type": PROTO_CONTENT_TYPE, "content-encoding": "zstd"},
+    )
+    parsed, forward_only = await api._read_forward_backward_request(request)
+    assert forward_only
+    assert parsed.model_id == "model_abc"
+    (datum,) = parsed.forward_backward_input.data
+    assert datum.model_input.chunks[0].tokens == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_read_forward_backward_request_zstd_json_body():
+    """Content-Encoding applies to the raw body regardless of wire format."""
+    req = api.ForwardBackwardRequest(
+        model_id="model_json",
+        forward_backward_input=api.ForwardBackwardInput(
+            data=[
+                api.Datum(
+                    model_input=api.ModelInput(chunks=[api.EncodedTextChunk(tokens=[1, 2, 3])]),
+                    loss_fn_inputs={
+                        "target_tokens": api.TensorData(data=[2, 3, 4]),
+                        "weights": api.TensorData(data=[1.0, 1.0, 1.0]),
+                    },
+                )
+            ],
+            loss_fn="cross_entropy",
+        ),
+    )
+    compressed = zstandard.ZstdCompressor().compress(req.model_dump_json().encode())
+    parsed, forward_only = await api._read_forward_backward_request(
+        _StubRequest(compressed, {"content-encoding": "zstd"})
+    )
+    assert not forward_only
+    assert parsed.model_id == "model_json"
+
+
+@pytest.mark.asyncio
+async def test_read_forward_backward_request_bad_zstd_raises_422():
+    request = _StubRequest(b"\x00\x01 not zstd", {"content-encoding": "zstd"})
+    with pytest.raises(HTTPException) as exc_info:
+        await api._read_forward_backward_request(request)
+    assert exc_info.value.status_code == 422

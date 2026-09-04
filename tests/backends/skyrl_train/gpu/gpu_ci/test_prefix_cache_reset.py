@@ -1,6 +1,9 @@
 """Tests for prefix cache reset behaviour in `PolicyWorker.broadcast_to_inference_engines`
 
-When ``WeightTransferSender.handles_prefix_cache_reset`` is ``True``,
+The worker's send path goes through ``WeightTransferSender.send``, whose default
+implementation materializes the chunk stream and calls ``send_chunks``; senders that
+pull instead (sharded_rdt) override ``send``. When
+``WeightTransferSender.handles_prefix_cache_reset`` is ``True``,
 the sender will resets the cache itself as part of its own pause/update sequence
 (``DeltaWeightTransferSender`` does this inside ``_apply_receiver_update``), and the worker must skip
 this.
@@ -33,6 +36,10 @@ def _make_worker(worker_cls, handles_prefix_cache_reset: bool):
     # AsyncMock would make this attribute a coroutine; the production code reads it as a
     # plain bool, so set it explicitly.
     worker._weight_transfer_sender.handles_prefix_cache_reset = handles_prefix_cache_reset
+    # Same reason: the worker reads these as plain bools to decide the
+    # expandable-segments toggle and the post-send empty_cache.
+    worker._weight_transfer_sender.force_disable_expandable_segments = False
+    worker._weight_transfer_sender.empty_cache_after_send = True
     worker._weight_transfer_sender._inference_client = None
     worker.weight_extractor = MagicMock()
     # FSDP dereferences self.model.model before the LoRA branch, so it must exist even
@@ -40,7 +47,8 @@ def _make_worker(worker_cls, handles_prefix_cache_reset: bool):
     worker.model = SimpleNamespace(model=SimpleNamespace())
 
     @contextmanager
-    def _noop_ctx():
+    def _noop_ctx(*args, **kwargs):
+        # The worker calls this with force=<sender flag>.
         yield
 
     worker._expandable_segments_disabled_for_sync = _noop_ctx
@@ -88,8 +96,8 @@ async def test_worker_skips_prefix_cache_reset_when_sender_handles_it(strategy, 
     client.reset_prefix_cache.assert_not_awaited()
     # The sync still happens, and the sender is still told the cache needs resetting so
     # it can do it at the right point in its own sequence.
-    worker._weight_transfer_sender.send_chunks.assert_awaited_once()
-    assert worker._weight_transfer_sender.send_chunks.await_args.kwargs["reset_prefix_cache"] is True
+    worker._weight_transfer_sender.send.assert_awaited_once()
+    assert worker._weight_transfer_sender.send.await_args.kwargs["reset_prefix_cache"] is True
 
 
 @pytest.mark.asyncio
@@ -104,7 +112,7 @@ async def test_worker_resets_prefix_cache_when_sender_does_not(strategy, monkeyp
     await worker.broadcast_to_inference_engines(client, _ie_cfg())
 
     client.reset_prefix_cache.assert_awaited_once_with(reset_running_requests=True)
-    worker._weight_transfer_sender.send_chunks.assert_awaited_once()
+    worker._weight_transfer_sender.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -120,4 +128,4 @@ async def test_no_reset_when_prefix_caching_disabled(strategy, monkeypatch):
     await worker.broadcast_to_inference_engines(client, ie_cfg)
 
     client.reset_prefix_cache.assert_not_awaited()
-    assert worker._weight_transfer_sender.send_chunks.await_args.kwargs["reset_prefix_cache"] is False
+    assert worker._weight_transfer_sender.send.await_args.kwargs["reset_prefix_cache"] is False

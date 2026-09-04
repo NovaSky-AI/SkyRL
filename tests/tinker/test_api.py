@@ -222,8 +222,16 @@ def test_training_workflow(service_client):
     # The third example omits weights (auto-filled with 1s), so all losses should be non-zero
     assert all(v != 0.0 for v in fwdbwd_result.loss_fn_outputs[2]["elementwise_loss"].data)
 
-    # Load the optimizer state and verify another forward_backward pass has the same loss
-    training_client.load_state(resume_path)
+    # Matching the Tinker service, LoadWeights is only permitted as a model's first
+    # request; this client has already saved and trained, so both load flavors are rejected.
+    with pytest.raises(Exception, match="LoadWeights is not permitted"):
+        training_client.load_state(resume_path).result()
+    with pytest.raises(Exception, match="LoadWeights is not permitted"):
+        training_client.load_state_with_optimizer(resume_path).result()
+
+    # Restore the run on a fresh client instead (weights-only load as its first request)
+    # and verify a forward_backward pass reproduces the pre-optim-step losses.
+    training_client = service_client.create_training_client_from_state(resume_path)
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert_loss_fn_outputs_equal(fwdbwd_result2.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
     # Also check that custom loss function produces the same loss
@@ -232,10 +240,9 @@ def test_training_workflow(service_client):
     ).result()
     assert_loss_fn_outputs_equal(fwdbwd_result_custom.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
 
-    # Test that we can restore the training run
-    training_client = service_client.create_training_client_from_state(resume_path)
-    # Verify the restored client has the same state by running forward_backward again
-    fwdbwd_result3 = training_client.forward_backward(processed_examples, "cross_entropy").result()
+    # Restoring with optimizer state also loads as a fresh client's first request
+    training_client_opt = service_client.create_training_client_from_state_with_optimizer(resume_path)
+    fwdbwd_result3 = training_client_opt.forward_backward(processed_examples, "cross_entropy").result()
     assert_loss_fn_outputs_equal(fwdbwd_result3.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
 
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
