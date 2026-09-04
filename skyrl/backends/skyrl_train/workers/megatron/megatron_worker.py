@@ -62,6 +62,7 @@ from skyrl.backends.skyrl_train.weight_sync import (
     WeightChunk,
     WeightExtractor,
 )
+from skyrl.backends.skyrl_train.weight_sync.cache import should_reset_kv_cache
 from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     AdapterStore,
     LoraSignature,
@@ -1529,13 +1530,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     ):
         if inference_engine_client is None:
             inference_engine_client = self._weight_sync_inference_client
-        use_prefix_cache = inference_engine_cfg.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
         sender_handles_prefix_cache_reset = self._weight_transfer_sender.handles_prefix_cache_reset
-        # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
-        reset_prefix_cache: bool = use_prefix_cache and (
-            not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync
+        reset_prefix_cache = should_reset_kv_cache(
+            enable_prefix_caching=inference_engine_cfg.enable_prefix_caching,
+            fully_async=self.cfg.fully_async.enabled,
+            clear_kv_cache_on_weight_sync=self.cfg.fully_async.clear_kv_cache_on_weight_sync,
         )
         send_chunks_kwargs = {"reset_prefix_cache": reset_prefix_cache}
 

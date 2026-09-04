@@ -30,6 +30,7 @@ def _make_worker(worker_cls, handles_prefix_cache_reset: bool):
     worker._is_lora = False
     worker.cfg = SimpleNamespace(
         fully_async=SimpleNamespace(enabled=False, clear_kv_cache_on_weight_sync=False),
+        placement=SimpleNamespace(colocate_all=False),
         policy=SimpleNamespace(megatron_config=SimpleNamespace(lora_config=SimpleNamespace(merge_lora=False))),
     )
     worker._weight_transfer_sender = AsyncMock()
@@ -129,3 +130,27 @@ async def test_no_reset_when_prefix_caching_disabled(strategy, monkeypatch):
 
     client.reset_prefix_cache.assert_not_awaited()
     assert worker._weight_transfer_sender.send.await_args.kwargs["reset_prefix_cache"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)])
+@pytest.mark.parametrize("handles_reset", [False, True])
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+@pytest.mark.parametrize("clear_kv_cache", [False, True])
+async def test_async_running_request_reset(strategy, handles_reset, enable_prefix_caching, clear_kv_cache, monkeypatch):
+    _patch_collectives(monkeypatch)
+    worker = _make_worker(get_worker_cls(strategy), handles_prefix_cache_reset=handles_reset)
+    worker.cfg.fully_async.enabled = True
+    worker.cfg.fully_async.clear_kv_cache_on_weight_sync = clear_kv_cache
+    client = AsyncMock()
+    ie_cfg = SimpleNamespace(enable_prefix_caching=enable_prefix_caching, model_dtype="bfloat16")
+
+    await worker.broadcast_to_inference_engines(client, ie_cfg)
+
+    # The sender gets the same policy regardless of who owns the reset, and
+    # running requests require invalidation even without reusable prefix blocks.
+    assert worker._weight_transfer_sender.send.await_args.kwargs["reset_prefix_cache"] is clear_kv_cache
+    if clear_kv_cache and not handles_reset:
+        client.reset_prefix_cache.assert_awaited_once_with(reset_running_requests=True)
+    else:
+        client.reset_prefix_cache.assert_not_awaited()
