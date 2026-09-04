@@ -361,7 +361,7 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 # H100 and B200 only -- narrower than Astral's coverage. Other Python versions and
 # architectures fall through to the PyPI sdist and build from source.
 #
-# DELETE THIS and go back to `{ index = "astral-cu130" }` with
+# TODO: DELETE THIS and go back to `{ index = "astral-cu130" }` with
 # `+cu.13.0.torch.2.13` pins as soon as Astral publishes those builds. Check with:
 #   curl -sL https://wheels.astral.sh/simple/cu130/mamba-ssm/ | grep -o 'torch\.2\.[0-9]*'
 #
@@ -379,8 +379,7 @@ mamba-ssm = [
 ]
 # The TE meta and core packages carry no torch coupling in their versions
 # (2.16.0 / 2.16.0+cu.13.0), so they stay on Astral; only the torch bindings are
-# rebuilt. Upstream TE asserts version equality across the trio at import; Astral's
-# meta wheel compares base versions, and ours is plain 2.16.0, so they agree.
+# rebuilt.
 transformer-engine = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 transformer-engine-cu13 = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 transformer-engine-torch = [
@@ -405,16 +404,13 @@ megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev =
 # `git ls-tree <bridge-rev> 3rdparty/Megatron-LM`. This one is on the Megatron-LM
 # main branch (https://github.com/NVIDIA/Megatron-LM/tree/main), dated 8/12/26.
 megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "14346b65a2d0790e451919858f7771078105c5f0", marker = "sys_platform == 'linux'"}
-# NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14
-# TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
+# NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14 as well as a new `sticky_least_loaded` policy: https://github.com/SumanthRH/router/tree/session-aware-lb
 vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
 ]
 # Built against torch 2.13 + CUDA 13.0.88 alongside the other CUDA extensions above
-# and hosted on the same GitHub release; the previous wheels were cu13torch2.11 and
-# are ABI-incompatible with torch 2.13. Other python/arch combinations build from
-# source at the pinned rev.
+# TODO (sumanthrh): Move towards official torch 13 + CUDA 13 wheels when available
 fast-hadamard-transform = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
     { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and (platform_machine != 'x86_64' or python_full_version < '3.12' or python_full_version >= '3.13')" },
