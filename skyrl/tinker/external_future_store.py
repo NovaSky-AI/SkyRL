@@ -30,8 +30,6 @@ class ExternalFuture:
     request_id: int
     model_id: str | None
     status: RequestStatus = RequestStatus.PENDING
-    # At most one of these is populated at completion; the other is derived
-    # lazily on the first request for it and then cached for retries.
     result_data: str | None = None
     result_proto: bytes | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -70,8 +68,6 @@ class ExternalFutureStore:
     _PENDING_TTL_SECONDS = 3600.0
 
     def __init__(self, *, retrieved_ttl_sec: float | None = None, completed_ttl_sec: float | None = None):
-        # Retention after delivery is the dominant memory term for long-output
-        # rollouts (results x retrieved TTL), so operators can tune it.
         if retrieved_ttl_sec is not None:
             self._RETRIEVED_TTL_SECONDS = retrieved_ttl_sec
         if completed_ttl_sec is not None:
@@ -89,8 +85,6 @@ class ExternalFutureStore:
         self._sweeper = asyncio.create_task(self._sweep_loop())
 
     def create(self, model_id: str | None, request_data: BaseModel) -> int:
-        # The request body is not retained: nothing reads it back on this
-        # path, and a long prompt would cost ~100KB per pending entry.
         request_id = self._next_request_id
         self._next_request_id -= 1
         self._entries[request_id] = ExternalFuture(request_id=request_id, model_id=model_id)
