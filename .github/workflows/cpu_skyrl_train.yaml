@@ -42,7 +42,6 @@ jobs:
         with:
           # Semantic version range syntax or exact version of a Python version
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -64,7 +63,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -88,7 +86,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:
