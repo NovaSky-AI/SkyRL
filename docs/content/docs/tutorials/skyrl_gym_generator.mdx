@@ -207,6 +207,31 @@ very first `\n` that makes up the former assistant's `\n`). The `\n` at the **fi
 turn will still be missing, but this is fine.
 You can see `tests/cpu/generators/test_skyrl_gym_generator_chat_templating.py` for more details.
 
+## Tolerating failed rollouts
+
+Rollouts are fanned out with `asyncio.gather`, so by default the first exception raised by any
+trajectory aborts the entire training step and discards the trajectories that already finished. For
+flaky environments (network blips in a multi-turn coding agent, for instance) that can waste a lot of
+compute.
+
+Setting `generator.skip_failed_rollouts=true` contains each rollout's exceptions instead. A failed
+rollout is replaced by a single-token placeholder trajectory with zero reward, a zeroed loss mask,
+and `stop_reason="rollout_error"`, so it contributes neither reward nor gradients while keeping the
+batch size that the trainer's data-parallel sharding expects:
+
+```yaml
+generator:
+  skip_failed_rollouts: true
+```
+
+If *every* rollout in a batch fails, the first exception is re-raised rather than producing a step
+with no usable data. The flag is not supported with `generator.batched=true` or
+`generator.inference_engine.enable_return_routed_experts=true`.
+
+Because `rollout_error` is not `"stop"`, the existing
+[`zero_reward_on_non_stop`](/docs/api-ref/skyrl/config) and `apply_overlong_filtering` knobs already
+treat these placeholders as trajectories that should not contribute.
+
 ## References
 
 - https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
