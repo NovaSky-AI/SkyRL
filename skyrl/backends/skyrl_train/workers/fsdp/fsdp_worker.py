@@ -153,18 +153,24 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.strategy = strategy
 
         self._is_lora = self.cfg.policy.model.lora.rank > 0
+        quantization = self.cfg.policy.model.bitsandbytes_4bit
+        if quantization.enabled and not self._is_lora:
+            raise ValueError("4-bit policy training requires LoRA (policy.model.lora.rank > 0).")
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         is_multimodal = hasattr(model_config, "vision_config") and model_config.vision_config is not None
         self._is_multimodal_lm_only = self.cfg.policy.language_model_only and is_multimodal
-        use_meta = should_use_meta_init(
+        use_meta = not quantization.enabled and should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
 
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.flash_attn,
-            bf16=self.cfg.policy.inference_only_init,
+            bf16=self.cfg.policy.inference_only_init or quantization.enabled,
+            load_in_4bit=quantization.enabled,
+            bnb_4bit_quant_type=quantization.quant_type,
+            bnb_4bit_use_double_quant=quantization.use_double_quant,
             lora_rank=self.cfg.policy.model.lora.rank,
             lora_alpha=self.cfg.policy.model.lora.alpha,
             lora_dropout=self.cfg.policy.model.lora.dropout,
@@ -444,6 +450,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
         assert self.cfg.strategy == "fsdp"
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.ref.fsdp_config,
+            model_config=self.cfg.ref.model,
             fsdp_strategy=self.cfg.strategy,
             seed=self.cfg.seed,
             micro_train_batch_size_per_gpu=self.cfg.micro_train_batch_size_per_gpu,
@@ -451,15 +458,20 @@ class FSDPRefWorkerBase(RefWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
+        quantization = self.cfg.ref.model.bitsandbytes_4bit
+
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        use_meta = should_use_meta_init(
+        use_meta = not quantization.enabled and should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
 
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.flash_attn,
-            bf16=self.cfg.bf16,
+            bf16=self.cfg.bf16 or quantization.enabled,
+            load_in_4bit=quantization.enabled,
+            bnb_4bit_quant_type=quantization.quant_type,
+            bnb_4bit_use_double_quant=quantization.use_double_quant,
             sequence_parallel_size=self.cfg.ref.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             model_config_kwargs=self.cfg.ref.model_config_kwargs,
