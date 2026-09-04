@@ -230,7 +230,9 @@ def load_megatron_grads_to_gpu(models):
 # and re-read freely, instead of ~1.3TB/node of anonymous/pinned memory that
 # competes with the vLLM engines for physical RAM (the source of repeated
 # NUMA OOM kills and compress-swap stalls on TB-scale colocated models).
-# Files are written once per rank on first offload and reused afterwards.
+# Each param's file is written on first offload, mapped, and immediately
+# unlinked; the mapping keeps the inode alive until the process exits, and
+# sleep/wake cycles reuse the live mapping via ``param._offload_cpu_data``.
 # Set SKYRL_FROZEN_OFFLOAD_DIR=0 (or empty) to restore pinned-RAM offload.
 _FROZEN_OFFLOAD_DIR = os.environ.get("SKYRL_FROZEN_OFFLOAD_DIR", "/data/skyrl/frozen-offload")
 
@@ -239,34 +241,51 @@ def _frozen_offload_enabled() -> bool:
     return bool(_FROZEN_OFFLOAD_DIR) and _FROZEN_OFFLOAD_DIR != "0"
 
 
-def _frozen_offload_file(name: str, tensor) -> str:
+def _frozen_offload_file(name: str) -> str:
     import hashlib
 
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-    key = hashlib.sha1(f"{name}|{tuple(tensor.shape)}|{tensor.dtype}".encode()).hexdigest()[:20]
+    # The name hash is cosmetic (the file lives only until it is mapped); the
+    # pid suffix keeps concurrent processes on one node from sharing a path.
+    key = hashlib.sha1(name.encode()).hexdigest()[:20]
     rank_dir = os.path.join(_FROZEN_OFFLOAD_DIR, f"rank{rank}")
     os.makedirs(rank_dir, exist_ok=True)
-    return os.path.join(rank_dir, f"{key}.bin")
+    return os.path.join(rank_dir, f"{key}-{os.getpid()}.bin")
 
 
 def _offload_frozen_param_to_file(name: str, param) -> bool:
     """Move a frozen param's data to a file-backed mmap CPU tensor.
 
+    The backing file is unlinked as soon as it is mapped: the mapping pins the
+    inode (whose pages stay clean, evictable page cache) until the process
+    exits, at which point the kernel reclaims the space. No other chunk,
+    process, or run can ever open the file, and no cleanup is needed — even on
+    SIGKILL. The space shows up in ``df`` but not in directory listings.
+
     Returns True on success; False to let the caller fall back to pinned RAM.
     """
+    path = None
     try:
         data = param.data.detach()
         nbytes = data.numel() * data.element_size()
-        path = _frozen_offload_file(name, data)
-        if not (os.path.exists(path) and os.path.getsize(path) == nbytes):
-            tmp = f"{path}.tmp{os.getpid()}"
-            with open(tmp, "wb") as f:
-                f.write(data.contiguous().view(torch.uint8).flatten().cpu().numpy().tobytes())
-            os.replace(tmp, path)
-        mapped = torch.from_file(path, shared=False, size=nbytes, dtype=torch.uint8).view(data.dtype).view(data.shape)
+        path = _frozen_offload_file(name)
+        with open(path, "wb") as f:
+            f.write(data.contiguous().view(torch.uint8).flatten().cpu().numpy().tobytes())
+        try:
+            mapped = (
+                torch.from_file(path, shared=False, size=nbytes, dtype=torch.uint8).view(data.dtype).view(data.shape)
+            )
+        finally:
+            os.unlink(path)
+            path = None
         param._offload_cpu_data = mapped
         return True
     except (OSError, RuntimeError) as exc:
+        if path is not None:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
         logging.getLogger(__name__).warning(
             "file-backed frozen offload failed for %s (%s); falling back to pinned RAM", name, exc
         )
