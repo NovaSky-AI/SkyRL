@@ -639,8 +639,9 @@ class PolicyConfig(BaseConfig):
     Backend-specific behavior:
     - FSDP: initialize weights in bf16 instead of fp32 (skipping the fp32 master weights
       that mixed-precision training requires) and skip optimizer/LR-scheduler construction.
-    - Megatron: skip optimizer/LR-scheduler construction (DistributedOptimizer eagerly
-      materializes fp32 master + AdamW state on GPU)."""
+    - Megatron: skip the DDP wrap, whose ``_ParamAndGradBuffer`` holds a param and a
+      grad copy of the model, and skip optimizer/LR-scheduler construction
+      (DistributedOptimizer eagerly materializes fp32 master + AdamW state on GPU)."""
 
 
 @dataclass

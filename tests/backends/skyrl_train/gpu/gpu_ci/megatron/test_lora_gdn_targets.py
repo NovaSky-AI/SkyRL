@@ -57,7 +57,13 @@ QWEN35_NAMES = [
 
 
 def _bridge_with_registry(registry: MegatronMappingRegistry):
-    return SimpleNamespace(_model_bridge=SimpleNamespace(mapping_registry=lambda: registry))
+    # `gdn_in_proj_lora_is_safe` installs the bridge's `hf_pretrained` onto the
+    # model bridge before the lookup, for the bridges whose `mapping_registry`
+    # probes the checkpoint. These registries are built directly and never read it.
+    return SimpleNamespace(
+        hf_pretrained=None,
+        _model_bridge=SimpleNamespace(mapping_registry=lambda: registry),
+    )
 
 
 def _fused_in_proj_adapter() -> AdapterWeight:
