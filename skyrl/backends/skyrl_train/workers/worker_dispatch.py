@@ -610,12 +610,29 @@ class WorkerDispatch:
             )
         )
 
+    def _weight_sync_needs_model_on_gpu(self) -> bool:
+        """Whether weight sync must backload an offloaded policy model.
+
+        Adapter-only LoRA sync (megatron, ``merge_lora=False``) exports straight
+        from the fused adapter buffers, which stay GPU-resident while the model
+        is offloaded — so the frozen base weights are not needed on GPU. Every
+        other sync path extracts full weights and needs the whole model.
+        """
+        return not (
+            self.cfg.trainer.strategy == "megatron"
+            and self.cfg.trainer.policy.model.lora.rank > 0
+            and not self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
+        )
+
     def _prepare_for_weight_sync(self) -> None:
         """Prepare for weight sync: ensure policy model is on GPU, offload optimizer. Helper for save_weights_for_sampler."""
         if not self.colocate_all:
             return
-        # Ensure policy model is on GPU (will offload others in colocation group)
-        self._ensure_on_gpu("policy", need_optimizer=False, need_model=True)
+        # Ensure policy model is on GPU (will offload others in colocation group).
+        # Adapter-only LoRA sync keeps need_model=False: the offload-others side
+        # effect still runs, but the offloaded frozen base weights are not
+        # round-tripped to GPU just to broadcast the resident adapters.
+        self._ensure_on_gpu("policy", need_optimizer=False, need_model=self._weight_sync_needs_model_on_gpu())
         # Offload optimizer if it's on GPU
         if self._gpu_state["policy"].optimizer_on_gpu:
             self._offload("policy", offload_optimizer=True, offload_model=False)

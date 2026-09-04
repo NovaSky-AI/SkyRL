@@ -202,3 +202,53 @@ class TestSaveWeights:
 
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
+
+
+class TestPrepareForWeightSync:
+    """Tests for `WorkerDispatch._prepare_for_weight_sync` model-backload gating."""
+
+    def _make_dispatch(self, strategy: str, lora_rank: int, merge_lora: bool):
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        cfg = _fft_dispatch_cfg()
+        cfg.trainer.strategy = strategy
+        cfg.trainer.policy.model.lora.rank = lora_rank
+        cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
+
+        dispatch = WorkerDispatch.__new__(WorkerDispatch)
+        dispatch.colocate_all = True
+        dispatch.cfg = cfg
+        dispatch._ensure_on_gpu = MagicMock()
+        dispatch._offload = MagicMock()
+        dispatch._gpu_state = {"policy": SimpleNamespace(optimizer_on_gpu=False)}
+        return dispatch
+
+    def test_megatron_adapter_only_lora_skips_model_backload(self):
+        """merge_lora=False syncs from the resident adapter buffers, so the
+        offloaded frozen base weights must not round-trip to GPU."""
+        dispatch = self._make_dispatch("megatron", lora_rank=32, merge_lora=False)
+        dispatch._prepare_for_weight_sync()
+        dispatch._ensure_on_gpu.assert_called_once_with("policy", need_optimizer=False, need_model=False)
+
+    def test_megatron_merge_lora_backloads_model(self):
+        """merge_lora=True extracts full merged weights, which needs the base on GPU."""
+        dispatch = self._make_dispatch("megatron", lora_rank=32, merge_lora=True)
+        dispatch._prepare_for_weight_sync()
+        dispatch._ensure_on_gpu.assert_called_once_with("policy", need_optimizer=False, need_model=True)
+
+    def test_megatron_fft_backloads_model(self):
+        dispatch = self._make_dispatch("megatron", lora_rank=0, merge_lora=False)
+        dispatch._prepare_for_weight_sync()
+        dispatch._ensure_on_gpu.assert_called_once_with("policy", need_optimizer=False, need_model=True)
+
+    def test_fsdp_lora_backloads_model(self):
+        """FSDP LoRA offload has no resident-adapter guarantee; stay conservative."""
+        dispatch = self._make_dispatch("fsdp", lora_rank=32, merge_lora=False)
+        dispatch._prepare_for_weight_sync()
+        dispatch._ensure_on_gpu.assert_called_once_with("policy", need_optimizer=False, need_model=True)
+
+    def test_non_colocated_is_untouched(self):
+        dispatch = self._make_dispatch("megatron", lora_rank=32, merge_lora=False)
+        dispatch.colocate_all = False
+        dispatch._prepare_for_weight_sync()
+        dispatch._ensure_on_gpu.assert_not_called()
