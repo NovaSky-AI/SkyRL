@@ -749,22 +749,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-        # vLLM's torch.compile cache is left enabled. It was force-disabled here in #95
-        # (vLLM 0.9.0, July 2025) after multi-node runs failed at compile time with
-        # "corrupted compilation artifact"; single-node was fine, which points at
-        # concurrent engines writing one cache directory on a shared filesystem.
-        #
-        # Since then torch>=2.10 writes inductor artifacts atomically
-        # (pytorch/pytorch#162432), which is the failure mode that produced corrupt
-        # artifacts. We pin torch 2.11, so that fix is in.
-        #
-        # Caveat for multi-node: engines with identical config still resolve to the
-        # same cache directory (VLLM_CACHE_ROOT/torch_compile_cache/<hash>/rank_i_j),
-        # and vLLM's own index file (vllm_compile_cache.py) is still written
-        # non-atomically with no lock -- an upstream write lock was proposed and
-        # rejected in vllm-project/vllm#26521 in favour of atomic writes. If
-        # VLLM_CACHE_ROOT is on a filesystem shared between nodes, point it at
-        # node-local storage, or set VLLM_DISABLE_COMPILE_CACHE=1 to opt back out.
+        # vLLM torch compile is default enabled, we leave it as-is and propagate any user-supplied
+        # overrides for `VLLM_DISABLE_COMPILE_CACHE`
+        # TODO (sumanthrh): Test with shared storage in a multi-node env where we can persist cache
         if os.environ.get("VLLM_DISABLE_COMPILE_CACHE"):
             logger.info(
                 "Exporting `VLLM_DISABLE_COMPILE_CACHE` to ray runtime env: "
