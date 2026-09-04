@@ -1097,6 +1097,18 @@ class DeltaWeightSyncConfig(BaseConfig):
             self.publish_staging_dir = str(_default_publish_staging_dir(self.sync_dir))
 
 
+#: vLLM speculative-decoding methods SkyRL supports, validated in
+#: ``validate_inference_engine_cfg``.
+#:
+#: Only ``mtp``: its drafter weights live in the policy checkpoint, so the weight sync
+#: that reloads the main model also reloads the drafter
+#: (``inference_servers/spec_decode_utils.py``). Every other vLLM method (``eagle``,
+#: ``eagle3``, ``draft_model``, ``medusa``, ...) loads its drafter from a separate
+#: checkpoint whose parameter names the trainer never publishes, so the drafter would
+#: keep drafting with stale weights after the first sync.
+SUPPORTED_SPECULATIVE_DECODING_METHODS = ("mtp",)
+
+
 @dataclass
 class InferenceEngineConfig(BaseConfig):
     """Configuration for inference engine instantiation and management."""
@@ -1197,8 +1209,9 @@ class InferenceEngineConfig(BaseConfig):
     ``trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters`` (Megatron). The two
     must agree, and are validated against each other."""
     speculative_config: Optional[Dict[str, Any]] = None
-    """Speculative-decoding config passed through to vLLM for MTP drafter decoding. 
-    (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train mtp). ``None`` disables it."""
+    """Speculative-decoding config passed through to vLLM for MTP drafter decoding.
+    (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train mtp). ``None`` disables it.
+    ``method`` must be one of :data:`SUPPORTED_SPECULATIVE_DECODING_METHODS`."""
     external_proxy_url: Optional[str] = None
     """Data-plane URL (load-balanced router) for the new inference layer.
     Generation requests are sent here."""

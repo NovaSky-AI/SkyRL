@@ -12,6 +12,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl.train.config.config import (
+    SUPPORTED_SPECULATIVE_DECODING_METHODS,
     BaseConfig,
     DeltaWeightSyncConfig,
     SkyRLTrainConfig,
@@ -391,6 +392,42 @@ def test_valid_pd_role_init_kwargs_passes():
 
     # Should not raise.
     validate_inference_engine_cfg(cfg)
+
+
+def test_speculative_config_none_passes():
+    cfg = SkyRLTrainConfig()
+    assert cfg.generator.inference_engine.speculative_config is None
+    # Speculative decoding off: nothing to validate.
+    validate_inference_engine_cfg(cfg)
+
+
+def test_speculative_config_mtp_passes():
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.speculative_config = {"method": "mtp", "num_speculative_tokens": 1}
+    validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "draft_model", "medusa", "ngram"])
+def test_speculative_config_rejects_unsupported_method(method):
+    """Only MTP keeps its drafter weights in the policy checkpoint, so only MTP survives
+    a weight sync; the rest would draft with stale weights."""
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.speculative_config = {"method": method, "num_speculative_tokens": 1}
+    with pytest.raises(ValueError, match="speculative_config.method"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_speculative_config_requires_an_explicit_method():
+    """vLLM would otherwise infer the method from the draft model config, letting an
+    unsupported drafter through without ever naming itself."""
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.speculative_config = {"model": "some/eagle-head", "num_speculative_tokens": 1}
+    with pytest.raises(ValueError, match="speculative_config.method"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_supported_speculative_decoding_methods_is_mtp_only():
+    assert SUPPORTED_SPECULATIVE_DECODING_METHODS == ("mtp",)
 
 
 def test_offload_kv_for_weight_sync_rejects_colocated():

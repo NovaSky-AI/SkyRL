@@ -26,7 +26,11 @@ from skyrl.env_vars import (
     SKYRL_PYTHONPATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
 )
-from skyrl.train.config.config import SkyRLTrainConfig
+from skyrl.train.config.config import (
+    SUPPORTED_SPECULATIVE_DECODING_METHODS,
+    SkyRLTrainConfig,
+    get_config_as_dict,
+)
 
 
 class Timer:
@@ -625,6 +629,17 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         assert (
             ie_cfg.weight_sync_backend != "delta"
         ), "Offloading KV cache during weight sync is not supported for delta weight sync"
+
+    # Validate speculative decoding. `method` is required rather than left to vLLM's
+    # inference from the draft model config, so an unsupported drafter cannot reach the
+    # engine implicitly.
+    if ie_cfg.speculative_config is not None:
+        method = get_config_as_dict(ie_cfg.speculative_config).get("method")
+        if method not in SUPPORTED_SPECULATIVE_DECODING_METHODS:
+            raise ValueError(
+                f"invalid `generator.inference_engine.speculative_config.method`: {method!r}. "
+                f"Must be one of {list(SUPPORTED_SPECULATIVE_DECODING_METHODS)}."
+            )
 
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
