@@ -20,6 +20,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -247,24 +249,119 @@ def load_megatron_grads_to_gpu(models):
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
 
 
+# Frozen (requires_grad=False, non-adapter) weights are immutable for the
+# whole run, so their CPU offload copies can live in file-backed mmap storage
+# instead of RAM: the pages are then *clean page cache* the kernel can evict
+# and re-read freely, instead of ~1.3TB/node of anonymous/pinned memory that
+# competes with the vLLM engines for physical RAM (the source of repeated
+# NUMA OOM kills and compress-swap stalls on TB-scale colocated models).
+# Each param's file is written on first offload, mapped, and immediately
+# unlinked; the mapping keeps the inode alive until the process exits, and
+# sleep/wake cycles reuse the live mapping via ``param._offload_cpu_data``.
+# Set SKYRL_FROZEN_OFFLOAD_DIR=0 (or empty) to restore pinned-RAM offload.
+_FROZEN_OFFLOAD_DIR = os.environ.get("SKYRL_FROZEN_OFFLOAD_DIR", "/data/skyrl/frozen-offload")
+
+
+def _frozen_offload_enabled() -> bool:
+    return bool(_FROZEN_OFFLOAD_DIR) and _FROZEN_OFFLOAD_DIR != "0"
+
+
+# Set after the first file-offload failure: later params skip straight to the
+# pinned-RAM fallback instead of retrying the filesystem and re-logging the
+# same warning for every frozen param.
+_frozen_offload_failed = False
+
+
+def _frozen_offload_file(name: str) -> str:
+    import hashlib
+
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    # The name hash is cosmetic (the file lives only until it is mapped); the
+    # pid suffix keeps concurrent processes on one node from sharing a path.
+    key = hashlib.sha1(name.encode()).hexdigest()[:20]
+    rank_dir = os.path.join(_FROZEN_OFFLOAD_DIR, f"rank{rank}")
+    os.makedirs(rank_dir, exist_ok=True)
+    return os.path.join(rank_dir, f"{key}-{os.getpid()}.bin")
+
+
+def _offload_frozen_param_to_file(name: str, param) -> bool:
+    """Move a frozen param's data to a file-backed mmap CPU tensor.
+
+    The backing file is unlinked as soon as it is mapped: the mapping pins the
+    inode (whose pages stay clean, evictable page cache) until the process
+    exits, at which point the kernel reclaims the space. No other chunk,
+    process, or run can ever open the file, and no cleanup is needed — even on
+    SIGKILL. The space shows up in ``df`` but not in directory listings.
+
+    Returns True on success; False to let the caller fall back to pinned RAM.
+    """
+    global _frozen_offload_failed
+    if _frozen_offload_failed:
+        return False
+    path = None
+    try:
+        data = param.data.detach()
+        nbytes = data.numel() * data.element_size()
+        path = _frozen_offload_file(name)
+        with open(path, "wb") as f:
+            # The numpy array shares the CPU tensor's memory and write() takes
+            # any buffer-protocol object, so no second full-size copy is made
+            # (unlike .tobytes()).
+            f.write(data.contiguous().view(torch.uint8).flatten().cpu().numpy())
+        try:
+            mapped = (
+                torch.from_file(path, shared=False, size=nbytes, dtype=torch.uint8).view(data.dtype).view(data.shape)
+            )
+        finally:
+            os.unlink(path)
+            path = None
+        param._offload_cpu_data = mapped
+        return True
+    except (OSError, RuntimeError) as exc:
+        if path is not None:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        _frozen_offload_failed = True
+        logging.getLogger(__name__).warning(
+            "file-backed frozen offload failed for %s (%s); falling back to pinned RAM for all frozen params",
+            name,
+            exc,
+        )
+        return False
+
+
 @torch.no_grad()
-def offload_megatron_model_to_cpu(models):
+def offload_megatron_model_to_cpu(models, is_lora: bool = False):
     """
     In megatron, the model and optimizer storage are:
     - bf16 parameter data chunked in model parallel group
     - fp32 grad chunked in model parallel group
     - fp32 main_parameter chunked in model and dp group
     - fp32 optimizer state chunked in model and dp group
+
+    ``is_lora``: the run trains LoRA adapters only (base weights frozen).
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
-                # use megatron buffer built in function to offload to cpu
-                # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.16.0/megatron/core/distributed/param_and_grad_buffer.py#L964
-                buffer.offload_to_cpu(move_params=True, move_grads=False)
+            # LoRA: Megatron's fused param/grad buffers only hold grad-requiring
+            # params, so here they contain nothing but the adapters (a few GB) —
+            # keep them resident. The adapter-only weight sync exports straight
+            # from these GPU tensors, so the TB-scale frozen masters never need
+            # to round-trip through the GPU just to sync a rank-32 adapter.
+            if not is_lora:
+                for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                    # use megatron buffer built in function to offload to cpu
+                    # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.16.0/megatron/core/distributed/param_and_grad_buffer.py#L964
+                    buffer.offload_to_cpu(move_params=True, move_grads=False)
 
             # LoRA-aware offloading: offload non-lora base weights that live
             # outside the fused Megatron buffers (e.g. HF/bridge "to_wrap" weights).
+            # Frozen weights are immutable, so prefer file-backed mmap copies
+            # (clean, evictable page cache) over pinned RAM; see
+            # _offload_frozen_param_to_file.
+            use_file_offload = _frozen_offload_enabled()
             for name, param in model_chunk.named_parameters():
                 if (
                     param.is_cuda
@@ -272,8 +369,14 @@ def offload_megatron_model_to_cpu(models):
                     and "adapter" not in name
                     and param.data.storage().size() > 0
                 ):
-                    cpu_tensor = param.data.detach().cpu().pin_memory()
-                    param._offload_cpu_data = cpu_tensor
+                    if hasattr(param, "_offload_cpu_data") and param._offload_cpu_data is not None:
+                        # Frozen data never changes: the existing CPU copy
+                        # (file-backed or pinned) is still valid; just free
+                        # the GPU side again.
+                        pass
+                    elif not (use_file_offload and _offload_frozen_param_to_file(name, param)):
+                        cpu_tensor = param.data.detach().cpu().pin_memory()
+                        param._offload_cpu_data = cpu_tensor
                     param._offload_cuda_numel = param.data.numel()
                     param.data = torch.empty(0, dtype=param.data.dtype, device=param.data.device)
         else:
@@ -282,11 +385,13 @@ def offload_megatron_model_to_cpu(models):
 
 
 @torch.no_grad()
-def load_megatron_model_to_gpu(models):
+def load_megatron_model_to_gpu(models, is_lora: bool = False):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
-                buffer.reload_from_cpu(move_params=True, move_grads=False)
+            # LoRA buffers never offload (see offload_megatron_model_to_cpu).
+            if not is_lora:
+                for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                    buffer.reload_from_cpu(move_params=True, move_grads=False)
 
             # Restore any LoRA-frozen base weights that were offloaded above.
             device_id = torch.cuda.current_device()
