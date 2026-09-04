@@ -220,6 +220,10 @@ def nccl_init_payloads(
     """
     dp = max(1, int(data_parallel_size))
     num_servers = len(server_urls)
+    if num_servers % dp != 0:
+        raise ValueError(
+            f"Number of servers ({num_servers}) must be divisible by data_parallel_size ({dp})."
+        )
     base_offset = int(init_info.get("rank_offset", 1))
     world_size = int(init_info["world_size"])
     num_deployments = max(1, num_servers // dp)
