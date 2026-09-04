@@ -223,7 +223,7 @@ class MegatronStrategy(DistributedStrategy):
         ``optimizer is None`` (e.g. ``policy.inference_only_init=True`` flows).
         """
         if offload_model:
-            offload_megatron_model_to_cpu(model)
+            offload_megatron_model_to_cpu(model, is_lora=self.is_lora)
         if offload_optimizer:
             offload_megatron_grads_to_cpu(model)
             if optimizer is not None:
@@ -238,7 +238,7 @@ class MegatronStrategy(DistributedStrategy):
         from optimizer existence.
         """
         if backload_model:
-            load_megatron_model_to_gpu(model)
+            load_megatron_model_to_gpu(model, is_lora=self.is_lora)
         if backload_optimizer:
             load_megatron_grads_to_gpu(model)
             if optimizer is not None:
