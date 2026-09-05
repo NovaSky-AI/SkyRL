@@ -42,6 +42,7 @@
 #   ANYSCALE_API_ATTEMPTS    tries per control-plane call (default 6)
 #   ANYSCALE_JOBS_FILE       where submitted job names are recorded, for
 #                            ci/terminate_anyscale_jobs.sh to clean up after a cancel
+#   ANYSCALE_LOG_TAIL_LINES  remote log lines to print on real failure (default 100)
 
 set -euo pipefail
 
@@ -68,6 +69,11 @@ API_ATTEMPTS="${ANYSCALE_API_ATTEMPTS:-6}"
 TERMINATE_ATTEMPTS="${ANYSCALE_TERMINATE_ATTEMPTS:-5}"
 # Consecutive unreadable status polls before we stop waiting on a job.
 UNKNOWN_POLL_LIMIT="${ANYSCALE_UNKNOWN_POLL_LIMIT:-10}"
+LOG_TAIL_LINES="${ANYSCALE_LOG_TAIL_LINES:-100}"
+if [[ ! "$LOG_TAIL_LINES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ANYSCALE_LOG_TAIL_LINES must be a positive integer; using 100." >&2
+    LOG_TAIL_LINES=100
+fi
 
 API_ERR_LOG="$(mktemp)"
 
@@ -231,6 +237,26 @@ ensure_terminal() {
     is_terminal "$state"
 }
 
+# Best-effort diagnostics for failures after the entrypoint started. Keep this
+# bounded because the CI log should show the failure context without replacing
+# the job's own output. Do not let a log-fetch failure change the job result.
+print_remote_log_tail() {
+    local job_name="$1"
+    local logs
+
+    echo "--- Anyscale log tail for ${job_name} (last ${LOG_TAIL_LINES} lines) ---" >&2
+    if ! logs="$(anyscale job logs --cloud "$CLOUD" --name "$job_name" --tail --max-lines "$LOG_TAIL_LINES" 2>/dev/null)"; then
+        echo "Unable to fetch Anyscale logs for ${job_name}." >&2
+        return 0
+    fi
+
+    if [[ -n "${logs//[[:space:]]/}" ]]; then
+        printf '%s\n' "$logs" >&2
+    else
+        echo "(no remote logs available)" >&2
+    fi
+}
+
 for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     run_name="$JOB_NAME"
     if [[ "$attempt" -gt 1 ]]; then
@@ -262,6 +288,7 @@ for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
 
     if entrypoint_ran "$runs" "$run_name"; then
         echo "Job ${run_name} failed (state: ${state}) but the entrypoint ran -- real failure, not retrying." >&2
+        print_remote_log_tail "$run_name" || true
         exit 1
     fi
 
