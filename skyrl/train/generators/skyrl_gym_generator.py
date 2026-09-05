@@ -32,6 +32,7 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.generators.utils import (
+    apply_chat_template,
     apply_overlong_filtering,
     get_custom_chat_template,
     get_generation_prompt_ids,
@@ -185,12 +186,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "I am a user."},
         ]
-        self.base_conversation_token_ids = tokenizer.apply_chat_template(
+        self.base_conversation_token_ids = apply_chat_template(
+            tokenizer,
             self.base_conversation,
+            chat_template_kwargs=self.generator_cfg.chat_template_kwargs,
             add_generation_prompt=False,
             tokenize=True,
             return_dict=False,
-            **self.generator_cfg.chat_template_kwargs,
         )
         # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
         # For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator#multi-turn-tokenization-and-ti-to
@@ -343,15 +345,16 @@ class SkyRLGymGenerator(GeneratorInterface):
             # init() returns the first prompt to be given to the model, and optional metadata dict
             chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
             initial_chat_history_length = len(chat_history)
-            initial_input_ids = self.tokenizer.apply_chat_template(
+            initial_input_ids = apply_chat_template(
+                self.tokenizer,
                 chat_history,
+                chat_template_kwargs=self.generator_cfg.chat_template_kwargs,
                 # If retokenize_chat_history==True, avoid including the generation prompt in both the
                 # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
                 add_generation_prompt=not retokenize_chat_history,
                 chat_template=self.custom_chat_template if retokenize_chat_history else None,
                 tokenize=True,
                 return_dict=False,
-                **self.generator_cfg.chat_template_kwargs,
             )
 
             initial_prompt_length = len(initial_input_ids)
@@ -390,13 +393,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 # 1. Generate output
                 if is_step_wise or retokenize_chat_history:
                     # re-apply whole chat template so length check is correct
-                    agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
+                    agent_loop_state.input_ids = apply_chat_template(
+                        self.tokenizer,
                         chat_history,
+                        chat_template_kwargs=self.generator_cfg.chat_template_kwargs,
                         chat_template=self.custom_chat_template if retokenize_chat_history else None,
                         add_generation_prompt=True,
                         tokenize=True,
                         return_dict=False,
-                        **self.generator_cfg.chat_template_kwargs,
                     )
                     agent_loop_state.loss_mask = []
                     agent_loop_state.rollout_logprobs = None
@@ -530,16 +534,17 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Note that during the agent loop, we still add the final observation messages/ tokens because we terminate the agent loop if the input length
             # exceeds the maximum
             if retokenize_chat_history:
-                response_encodings = self.tokenizer.apply_chat_template(
+                response_encodings = apply_chat_template(
+                    self.tokenizer,
                     agent_loop_state.chat_history[
                         initial_chat_history_length : len(agent_loop_state.chat_history) - len(new_obs)
                     ],
+                    chat_template_kwargs=self.generator_cfg.chat_template_kwargs,
                     chat_template=self.custom_chat_template,
                     add_generation_prompt=False,
                     return_dict=True,
                     return_assistant_tokens_mask=True,
                     tokenize=True,
-                    **self.generator_cfg.chat_template_kwargs,
                 )
                 loss_mask = response_encodings["assistant_masks"]
                 response_ids = response_encodings["input_ids"]
@@ -661,12 +666,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             if len(new_obs) > 0:
                 # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
                 # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
-                obs_ids_to_add = self.tokenizer.apply_chat_template(
+                obs_ids_to_add = apply_chat_template(
+                    self.tokenizer,
                     [*self.base_conversation, *new_obs],
+                    chat_template_kwargs=self.generator_cfg.chat_template_kwargs,
                     add_generation_prompt=not is_done,
                     tokenize=True,
                     return_dict=False,
-                    **self.generator_cfg.chat_template_kwargs,
                 )[len(self.base_conversation_token_ids) :]
             elif not is_done:
                 obs_ids_to_add = self.generation_prompt_ids
