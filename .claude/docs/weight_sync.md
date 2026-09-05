@@ -297,16 +297,16 @@ trainer-send engines.
 The `sharded_rdt` backend is unaffected: it vendors its own trainer-side ABCs in
 `sharded_rdt_base.py`, which already match 0.28.0's `Generic[TTrainerInitInfo]` shape.
 
-### DeepGEMM is unavailable under the torch override
+### DeepGEMM follows the selected torch runtime
 
 vLLM 0.28.0's metadata pins `torch==2.13.0`; we override torch to `2.11.0` because the CUDA
 extension wheels we build against (flash-attn, causal-conv1d, mamba-ssm, transformer-engine)
 have no 2.13 builds. vLLM's main extensions are stable-libtorch-ABI and load fine, but
 `vllm/third_party/deep_gemm/_C` is a version-specific `cpython-312` build linked against torch
-2.13's `c10` and fails with an undefined-symbol `ImportError`. vLLM catches this and logs
-`Module vllm.third_party.deep_gemm was found but failed to import`, then falls back, so the
-engine runs — but the DeepGEMM fused-MoE and sparse-attention-indexer paths are gone. Revisit
-when those wheels publish torch 2.13 builds.
+2.13's `c10` and fails with an undefined-symbol `ImportError`. SkyRL therefore pins the matching
+DeepGEMM source revision as an external package and builds it against the selected torch runtime.
+vLLM prefers that package over its incompatible vendored extension, keeping the DeepGEMM
+fused-MoE and sparse-attention-indexer paths available.
 
 ## Gotchas
 
