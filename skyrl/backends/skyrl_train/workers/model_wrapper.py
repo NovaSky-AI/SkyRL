@@ -3,7 +3,10 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
-from typing import Optional, Union
+import inspect
+from dataclasses import dataclass
+from numbers import Integral
+from typing import Optional, Union, get_args
 
 import numpy as np
 import torch
@@ -12,7 +15,7 @@ import transformers
 from flash_attn.bert_padding import pad_input, unpad_input
 from loguru import logger
 from packaging.version import Version
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
 from transformers import (
     AutoConfig,
@@ -31,6 +34,102 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
 )
+
+
+@dataclass(frozen=True)
+class _ActionLogitsSelection:
+    """Positions needed to score the right-aligned action window."""
+
+    logits_to_keep: Union[int, torch.Tensor]
+    target_indices: Union[slice, torch.Tensor]
+    restore_indices: Optional[torch.Tensor]
+    output_sequence_length: int
+
+
+def _scalar_num_actions(num_actions: Union[int, list[int]]) -> Optional[int]:
+    """Return a supported scalar action count without guessing ragged layouts."""
+    if isinstance(num_actions, list):
+        if len(num_actions) != 1:
+            return None
+        num_actions = num_actions[0]
+    if isinstance(num_actions, bool) or not isinstance(num_actions, Integral):
+        return None
+    value = int(num_actions)
+    return value if value > 0 else None
+
+
+def _annotation_supports_tensor(annotation) -> bool:
+    """Return whether a forward annotation explicitly includes ``torch.Tensor``."""
+    return annotation is torch.Tensor or any(_annotation_supports_tensor(arg) for arg in get_args(annotation))
+
+
+def _model_supports_logits_to_keep(model: nn.Module, *, require_tensor: bool = False) -> bool:
+    """Check the concrete causal LM signature, unwrapping PEFT when necessary."""
+    candidate = model.get_base_model() if isinstance(model, PeftModel) else model
+    try:
+        parameter = inspect.signature(candidate.forward).parameters.get("logits_to_keep")
+    except (TypeError, ValueError):
+        return False
+    if parameter is None:
+        return False
+    return not require_tensor or _annotation_supports_tensor(parameter.annotation)
+
+
+def _can_use_action_logits_selection(
+    *,
+    model_supports_logits_to_keep: bool,
+    is_vlm: bool,
+    has_image_inputs: bool,
+    sequence_parallel_size: int,
+) -> bool:
+    """Keep unsupported model, multimodal, and sequence-parallel paths unchanged."""
+    return model_supports_logits_to_keep and not is_vlm and not has_image_inputs and sequence_parallel_size == 1
+
+
+def _build_action_logits_selection(
+    num_actions: Union[int, list[int]],
+    padded_sequence_length: int,
+    nnz_indices: Optional[torch.Tensor] = None,
+) -> Optional[_ActionLogitsSelection]:
+    """Build an integer suffix or packed tensor selector for action logits.
+
+    The selected window has ``num_actions + 1`` positions: the logit immediately
+    before the first action predicts that action, while the final selected logit
+    is discarded by the existing causal shift.  For packed inputs, only valid
+    positions whose original padded columns intersect that suffix are selected.
+    ``restore_indices`` is therefore the matching subset of ``nnz_indices``.
+    """
+    action_count = _scalar_num_actions(num_actions)
+    if action_count is None:
+        return None
+
+    output_sequence_length = action_count + 1
+    if output_sequence_length > padded_sequence_length:
+        return None
+
+    if nnz_indices is None:
+        return _ActionLogitsSelection(
+            logits_to_keep=output_sequence_length,
+            target_indices=slice(-output_sequence_length, None),
+            restore_indices=None,
+            output_sequence_length=output_sequence_length,
+        )
+
+    if nnz_indices.ndim != 1 or nnz_indices.dtype != torch.long:
+        return None
+    first_selected_column = padded_sequence_length - output_sequence_length
+    packed_selector = torch.nonzero(
+        nnz_indices.remainder(padded_sequence_length) >= first_selected_column,
+        as_tuple=False,
+    ).flatten()
+    if packed_selector.numel() == 0:
+        return None
+    return _ActionLogitsSelection(
+        logits_to_keep=packed_selector,
+        target_indices=packed_selector,
+        restore_indices=nnz_indices.index_select(0, packed_selector),
+        output_sequence_length=output_sequence_length,
+    )
 
 
 class HFModelWrapper(nn.Module):
@@ -228,6 +327,11 @@ class HFModelWrapper(nn.Module):
         else:
             self.model = pretrain_or_model
 
+        self._model_supports_logits_to_keep = _model_supports_logits_to_keep(self.model)
+        self._model_supports_tensor_logits_to_keep = _model_supports_logits_to_keep(
+            self.model,
+            require_tensor=True,
+        )
         self.logprobs_chunk_size = logprobs_chunk_size
 
         # TODO (sumanthrh): do the same for `logprobs_from_logits` and test.
@@ -302,6 +406,30 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
+        logits_selection = None
+        if _can_use_action_logits_selection(
+            model_supports_logits_to_keep=self._model_supports_logits_to_keep,
+            is_vlm=self.is_vlm,
+            has_image_inputs=has_image_inputs,
+            sequence_parallel_size=self.sequence_parallel_size,
+        ):
+            logits_selection = _build_action_logits_selection(
+                num_actions,
+                padded_sequence_length=sequences.shape[1],
+                nnz_indices=nnz_indices if self.remove_microbatch_padding else None,
+            )
+            if (
+                logits_selection is not None
+                and isinstance(logits_selection.logits_to_keep, torch.Tensor)
+                and not self._model_supports_tensor_logits_to_keep
+            ):
+                # A named parameter is sufficient for the integer suffix path, but
+                # packed selectors require an explicit tensor-valued contract.
+                logits_selection = None
+        model_forward_kwargs = (
+            {"logits_to_keep": logits_selection.logits_to_keep} if logits_selection is not None else {}
+        )
+
         if self.is_vlm:
             # NOTE: transformers v5 introduced `mm_token_type_ids` to distinguish text
             # vs. multimodal tokens, and expects it to be populated at tokenization.
@@ -321,22 +449,37 @@ class HFModelWrapper(nn.Module):
                 attention_mask=attention_mask_fwd,
                 position_ids=None,
                 **vlm_kwargs,
+                **model_forward_kwargs,
             )
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
         elif self.remove_microbatch_padding and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
-            output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+            output = self.model(
+                sequences_fwd,
+                attention_mask=None,
+                position_ids=position_ids_fwd,
+                **model_forward_kwargs,
+            )
         else:
-            output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+            output = self.model(
+                sequences_fwd,
+                attention_mask=attention_mask_fwd,
+                position_ids=position_ids_fwd,
+                **model_forward_kwargs,
+            )
 
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
 
+        target_tokens = (
+            sequences_rolled[:, logits_selection.target_indices] if logits_selection is not None else sequences_rolled
+        )
         # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
+        # The final selected position for each row is discarded from action_log_probs below.
         log_probs = logprobs_from_logits(
             logits_BSV,
-            sequences_rolled,
+            target_tokens,
             inplace_backward=True,
         )
 
@@ -350,10 +493,13 @@ class HFModelWrapper(nn.Module):
         if self.remove_microbatch_padding:
             # add padding back - postprocess logprobs to be compatible with original tensor
             batch_size, seqlen = attention_mask.shape
-            # (1, nnz-1) -> (batch_size, seqlen). Pad token ID used by flash attention is 0.
+            restore_indices = logits_selection.restore_indices if logits_selection is not None else nnz_indices
+            # (1, selected_nnz) -> (batch_size, seqlen). Pad token ID used by flash attention is 0.
             log_probs = pad_input(
-                log_probs.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                log_probs.transpose(0, 1), indices=restore_indices, batch=batch_size, seqlen=seqlen
             ).squeeze(-1)
+            if logits_selection is not None:
+                log_probs = log_probs[:, -logits_selection.output_sequence_length :]
 
         if compute_entropy:
             # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
@@ -363,6 +509,8 @@ class HFModelWrapper(nn.Module):
                 # Non-sample packing: pass attention mask to handle padding
                 # Use attention_mask_fwd which may be sliced (if sequence_parallel_size > 1) or full
                 entropy_mask = attention_mask_fwd
+                if logits_selection is not None:
+                    entropy_mask = entropy_mask[:, logits_selection.target_indices]
 
             entropy_BS = self.chunked_entropy_from_logits_fn(
                 logits_BSV,
@@ -377,15 +525,21 @@ class HFModelWrapper(nn.Module):
                     entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
                 )  # shape can be (1, nnz) - with packing or (B,S) - without packing
             if self.remove_microbatch_padding:
+                restore_indices = logits_selection.restore_indices if logits_selection is not None else nnz_indices
                 entropy_BS = pad_input(
-                    entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                    entropy_BS.transpose(0, 1), indices=restore_indices, batch=batch_size, seqlen=seqlen
                 ).squeeze(
                     -1
-                )  # (1, nnz) -> (B, S)
+                )  # (1, selected_nnz) -> (B, S)
+                if logits_selection is not None:
+                    entropy_BS = entropy_BS[:, -logits_selection.output_sequence_length :]
 
             output["entropy"] = entropy_BS
 
-        if isinstance(num_actions, list):
+        scalar_num_actions = _scalar_num_actions(num_actions)
+        if scalar_num_actions is not None:
+            num_actions = scalar_num_actions
+        elif isinstance(num_actions, list):
             if len(num_actions) == 1:
                 num_actions = num_actions[0]
             else:
