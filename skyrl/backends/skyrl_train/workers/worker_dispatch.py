@@ -201,6 +201,20 @@ class WorkerDispatch:
         if offload_optimizer:
             self._gpu_state[model].optimizer_on_gpu = False
 
+    def offload_for_sampling(self) -> None:
+        """Fully offload every colocated trainer model so inference engines can reclaim VRAM.
+
+        Used by cold sample paths (no preceding weight sync): the engines are
+        woken directly, so any model left GPU-resident by a forward/optim op
+        (policy, critic, ...) must first move to CPU. No-op when nothing is on
+        the GPU.
+        """
+        if not self.colocate_all:
+            return
+        for model, state in self._gpu_state.items():
+            if state.model_on_gpu or state.optimizer_on_gpu:
+                self._offload(model, offload_optimizer=True, offload_model=True)
+
     def mark_all_offloaded(self) -> None:
         """Mark all models as offloaded (call after build_models when colocate_all)."""
         for model in self._actor_groups:

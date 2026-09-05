@@ -160,6 +160,10 @@ class SkyRLTrainBackend(AbstractBackend):
         # New inference infrastructure
         self._server_groups: list = []
         self._inference_router = None
+        # Colocated engines are slept after init and around training ops;
+        # sample paths must wake them (tracked here so wakes are not issued
+        # against already-awake engines).
+        self._engines_asleep = False
 
         # Optional hook invoked on inference-engine state changes (after
         # _create_new_inference_client, on delete_model teardown). The host
@@ -396,6 +400,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # LoRA weight sync is in use, since level 2 would discard the base model).
         if is_colocated:
             asyncio.run(client.sleep())
+            self._engines_asleep = True
 
     def _create_render_client(self) -> RendererClientProtocol:
         """Return a client for vLLM's ``/v1/chat/completions/render``.
@@ -431,6 +436,14 @@ class SkyRLTrainBackend(AbstractBackend):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
         if self._inference_engines_initialized:
             return
+
+        # A preceding training op (another tenant's forward/forward_backward)
+        # may have left the trainer GPU-resident; under colocate_all the
+        # engines' startup allocation (gpu_memory_utilization of each GPU)
+        # then OOMs. Offload the trainer before bringing the engines up --
+        # the same order the build path uses (build -> offload -> engines).
+        if self._dispatch is not None:
+            self._dispatch.offload_for_sampling()
 
         self._create_new_inference_client()
 
@@ -825,11 +838,35 @@ class SkyRLTrainBackend(AbstractBackend):
     def _sleep_inference_engines(self):
         """Sleep inference engines to free GPU memory for training."""
         if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
+            if self._engines_asleep:
+                return
             lora_cfg = self._cfg.trainer.policy.model.lora
             # TODO(team): remove once vllm fixes this
             # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
             sleep_level = 1 if lora_cfg and lora_cfg.rank > 0 else 2
             asyncio.run(self._inference_engine_client.sleep(level=sleep_level))
+            self._engines_asleep = True
+
+    def _wake_inference_engines_for_sampling(self):
+        """Wake colocated engines before serving sample requests.
+
+        Inverse of :meth:`_sleep_inference_engines`. A cold sample -- a
+        request against an already-synced adapter with no
+        ``save_weights_for_sampler`` of its own in between (a training op,
+        this tenant's or another's, slept the engines since the last sync)
+        -- must not rely on the sync having woken the engines: without this,
+        requests queue against sleeping engines and hang. The trainer may be
+        GPU-resident from a preceding forward / optim op, so it is offloaded
+        first to give the engines their VRAM back.
+        """
+        if not (self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all):
+            return
+        if not self._engines_asleep:
+            return
+        self._dispatch.offload_for_sampling()
+        asyncio.run(self._inference_engine_client.wake_up(tags=["weights"]))
+        asyncio.run(self._inference_engine_client.wake_up(tags=["kv_cache"]))
+        self._engines_asleep = False
 
     def _validate_batch_role_and_loss(self, role: str, loss_fn: str):
         if role == "critic" and loss_fn not in {"ppo", "ppo_critic"}:
@@ -1051,8 +1088,9 @@ class SkyRLTrainBackend(AbstractBackend):
         save_weights_for_sampler() explicitly before calling sample() if weights
         have been updated.
         """
-        # 1. Ensure inference engines are initialized
+        # 1. Ensure inference engines are initialized and awake
         self._ensure_inference_engines()
+        self._wake_inference_engines_for_sampling()
 
         # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
         # mixes adapters in one batched sample call (the engine batches across
@@ -1310,11 +1348,17 @@ class SkyRLTrainBackend(AbstractBackend):
         # Lazily create inference engines on first sampling-related call
         self._ensure_inference_engines()
 
+        # The colocated sync dance (wake weights -> broadcast -> wake KV cache)
+        # assumes engines start asleep; a preceding sample leaves them awake.
+        self._sleep_inference_engines()
+
         # Multi-LoRA: pass model_id so the dispatch swaps the right adapter in
         # before broadcasting and the worker registers it on vLLM under that
         # name. None for the FFT / single-tenant path uses legacy behavior.
         sync_id = model_id if self._base_lora_signature is not None else None
         asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
+        # The colocated sync path leaves the engines awake (weights + KV cache).
+        self._engines_asleep = False
         if sync_id is not None:
             # The sync registered this tenant's adapter on vLLM; remember it
             # so delete_model can unload it.
