@@ -16,7 +16,11 @@ from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
-from skyrl.tinker.external_future_store import ExternalFutureStore
+from skyrl.tinker.external_future_store import ExternalFutureStore, PreparedResult
+from skyrl.tinker.proto_serialization import (
+    sample_output_json_from_proto,
+    serialize_sample_output,
+)
 from skyrl.utils.log import logger
 
 
@@ -142,12 +146,15 @@ class SkyRLTrainInferenceForwardingClient:
                 logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
                 return
             # `result_data` is a text column holding pre-serialized JSON.
-            future.result_data = result.model_dump_json()
+            if isinstance(result, PreparedResult):
+                future.result_data = result.json or sample_output_json_from_proto(result.proto)
+            else:
+                future.result_data = result.model_dump_json()
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
 
-    async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
+    async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> PreparedResult:
         # Retry only failures where the request demonstrably did not execute:
         # connect-phase errors and 5xx rejections from the router. Read and
         # write failures are ambiguous: vLLM may still be executing the
@@ -179,9 +186,7 @@ class SkyRLTrainInferenceForwardingClient:
                 "the SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC environment variable."
             ) from e
 
-    async def _forward(
-        self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None
-    ) -> types.SampleOutput:
+    async def _forward(self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None) -> PreparedResult:
         # model_id matches the LoRA name registered with vLLM during
         # save_weights_for_sampler; base_model is used for non-LoRA sampling.
         model_name = base_model if base_model else model_id
@@ -266,16 +271,8 @@ class SkyRLTrainInferenceForwardingClient:
             # Tinker's stop_reason is Literal["stop", "length"]; vLLM emits a wider set.
             finish_reason = choice.get("finish_reason")
             stop_reason = "stop" if finish_reason in ("stop", "stop_token") else "length"
-            sequences.append(
-                types.GeneratedSequence(
-                    tokens=tokens,
-                    logprobs=logprobs,
-                    stop_reason=stop_reason,
-                )
-            )
+            sequences.append((stop_reason, tokens, logprobs))
 
-        return types.SampleOutput(
-            sequences=sequences,
-            prompt_logprobs=prompt_logprobs,
-            topk_prompt_logprobs=topk,
-        )
+        # Encode straight to the proto wire form the SDK retrieves; no pydantic
+        # model or JSON text is built for the result (see PreparedResult).
+        return PreparedResult(proto=serialize_sample_output(sequences, prompt_logprobs, topk))
