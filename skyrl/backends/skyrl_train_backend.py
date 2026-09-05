@@ -855,13 +855,14 @@ class SkyRLTrainBackend(AbstractBackend):
     def _wake_inference_engines_for_sampling(self) -> str | None:
         """Wake colocated engines before serving sample requests.
 
-        Inverse of :meth:`_sleep_inference_engines`. A cold sample -- base
-        model, or an already-synced adapter, with no interleaved training op
-        -- must not rely on ``save_weights_for_sampler`` having woken the
-        engines: without this, requests queue against sleeping engines and
-        hang. The trainer may be GPU-resident from a preceding forward /
-        optim op, so it is offloaded first to give the engines their VRAM
-        back.
+        Inverse of :meth:`_sleep_inference_engines`. A cold sample -- a
+        request against an already-synced adapter with no
+        ``save_weights_for_sampler`` of its own in between (a training op,
+        this tenant's or another's, slept the engines since the last sync)
+        -- must not rely on the sync having woken the engines: without this,
+        requests queue against sleeping engines and hang. The trainer may be
+        GPU-resident from a preceding forward / optim op, so it is offloaded
+        first to give the engines their VRAM back.
 
         Returns an error message (and does not wake) when the engines were
         slept at level 2: that discards the weights, so a plain wake would
@@ -1120,18 +1121,15 @@ class SkyRLTrainBackend(AbstractBackend):
         # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
         # mixes adapters in one batched sample call (the engine batches across
         # model_ids in find_batchable_sample); we route each request via the
-        # `model` field in _sample_with_remote_client below. An empty model_id
-        # is base-model sampling (create_sampling_client(base_model=...): the
-        # API maps it to model_id "") and must not be treated as unknown --
-        # _sample_with_remote_client routes it to the served base model name.
+        # `model` field in _sample_with_remote_client below.
         unique_models = set(prepared_batch.all_model_ids)
-        unknown = [mid for mid in unique_models if mid and mid not in self._model_ids_to_role]
+        unknown = [mid for mid in unique_models if mid not in self._model_ids_to_role]
         if unknown:
             error = types.ErrorResponse(
                 error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}", status="error"
             )
             return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
-        non_policy = [mid for mid in unique_models if mid and self._model_ids_to_role.get(mid) != "policy"]
+        non_policy = [mid for mid in unique_models if self._model_ids_to_role.get(mid) != "policy"]
         if non_policy:
             error = types.ErrorResponse(
                 error=f"Sampling is only supported for policy models, got non-policy: {sorted(non_policy)}",
@@ -1151,22 +1149,12 @@ class SkyRLTrainBackend(AbstractBackend):
         # Resolve the inference-engine model name per request. With multi-LoRA
         # the adapter name on vLLM IS the Tinker model_id (registered by
         # save_sampler_checkpoint via load_lora_adapter). Single-tenant /
-        # FFT path falls back to resolve_policy_model_name(cfg). An empty
-        # model_id is base-model sampling and must target the served base
-        # model directly: resolve_policy_model_name would return the LoRA
-        # adapter alias under LoRA weight sync, which (a) does not exist on
-        # the engines until the first sampler-weight save and (b) would wrongly
-        # apply adapter deltas to a base-model request.
+        # FFT path falls back to resolve_policy_model_name(cfg).
         fallback_model_name = resolve_policy_model_name(self._cfg)
-        base_model_name = self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
-        per_request_models = []
-        for mid in prepared_batch.all_model_ids:
-            if not mid:
-                per_request_models.append(base_model_name)
-            elif self._base_lora_signature is not None and mid in self._model_ids_to_role:
-                per_request_models.append(mid)
-            else:
-                per_request_models.append(fallback_model_name)
+        per_request_models = [
+            mid if (self._base_lora_signature is not None and mid in self._model_ids_to_role) else fallback_model_name
+            for mid in prepared_batch.all_model_ids
+        ]
 
         # Prompt logprobs are a property of the prompt, and all `num_samples`
         # samples of a request share one prompt, so only ask for them on the
