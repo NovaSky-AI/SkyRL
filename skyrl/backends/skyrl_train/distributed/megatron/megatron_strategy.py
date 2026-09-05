@@ -25,6 +25,7 @@ from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from torch import distributed as dist
 from torch import optim
+from torch.distributed.checkpoint import FileSystemReader
 from transformers import PreTrainedTokenizer
 
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
@@ -520,12 +521,12 @@ class MegatronStrategy(DistributedStrategy):
     def _load_dist_checkpoint_from_cloud(self, ckpt_dir: str, sharded_state_dict: dict) -> dict:
         """Download checkpoint shards from cloud storage with per-rank parallelism.
 
-        All ranks on the same node share a single local directory. Each rank
-        downloads only its own shard file(s) into the shared dir, so the total
-        download per node equals one full copy of the checkpoint (instead of one
-        copy per rank).
+        All ranks on the same node share a single node-local directory.
+        Each node downloads its ranks' assigned shards plus files backing the
+        common state, rather than downloading the full checkpoint on every rank.
 
-        Local rank 0 creates the directory and downloads common metadata files.
+        Local rank 0 creates the directory and downloads common metadata files
+        and any shard containing the common state read independently by every rank.
         After a barrier, all shard files are present and every rank can load.
 
         Does not currently support flexible trainer resharding.
@@ -556,6 +557,22 @@ class MegatronStrategy(DistributedStrategy):
                         continue
                     io.download_file(cloud_entry, os.path.join(local_dir, name))
 
+                if not os.path.isfile(os.path.join(local_dir, "common.pt")):
+                    # Current Megatron checkpoints embed common state in a DCP
+                    # shard. Every rank reads it before distributed shard loading.
+                    common_key = dist_checkpointing.ShardedObject("common_state", None, (1,), (0,)).unique_key
+                    metadata = FileSystemReader(local_dir).read_metadata()
+                    common_shards = {
+                        storage.relative_path
+                        for index, storage in metadata.storage_data.items()
+                        if index.fqn == common_key
+                    }
+                    for relative_path in sorted(common_shards):
+                        local_path = os.path.join(local_dir, relative_path)
+                        if not os.path.isfile(local_path):
+                            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                            io.download_file(f"{ckpt_dir.rstrip('/')}/{relative_path}", local_path)
+
             # Wait for the directory and common files to be ready.
             dist.barrier()
 
@@ -568,7 +585,8 @@ class MegatronStrategy(DistributedStrategy):
                 if match and int(match.group(1)) == global_rank:
                     cloud_path = ckpt_dir.rstrip("/") + "/" + name
                     local_path = os.path.join(local_dir, name)
-                    io.download_file(cloud_path, local_path)
+                    if not os.path.isfile(local_path):
+                        io.download_file(cloud_path, local_path)
 
             # Wait for all ranks to finish downloading their shards.
             dist.barrier()
