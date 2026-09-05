@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from skyrl.env_vars import SKYRL_HTTP_CONNECTION_LIMIT
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig, add_model, config_to_argv
 from skyrl.tinker.db_models import (
@@ -70,6 +71,12 @@ SHUTDOWN_TIMEOUT_SECONDS = 10
 
 # How long retrieve_future waits for a result before returning 408
 RETRIEVE_FUTURE_TIMEOUT_SECONDS = 300
+
+# Idle keep-alive for client connections. Under a burst of completions the
+# event loop can be busy for many seconds; with uvicorn's 5s default every
+# idle SDK connection is closed during such a burst and all clients reconnect
+# at once, overflowing the accept backlog. Hold connections across bursts.
+HTTP_KEEP_ALIVE_TIMEOUT_SECONDS = 75
 
 # How often poll_futures looks for newly finished requests. A single query
 # covers every waiter, so this can stay tight without the load scaling up with
@@ -1854,4 +1861,13 @@ if __name__ == "__main__":
     # Store config in app.state so lifespan can access it
     app.state.engine_config = engine_config
 
-    uvicorn.run(app, host=args.host, port=args.port, log_config=get_uvicorn_log_config())
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_config=get_uvicorn_log_config(),
+        # Pending connections queue in the kernel while the loop is busy instead
+        # of being refused (effective value is capped by net.core.somaxconn).
+        backlog=SKYRL_HTTP_CONNECTION_LIMIT,
+        timeout_keep_alive=HTTP_KEEP_ALIVE_TIMEOUT_SECONDS,
+    )
