@@ -5,6 +5,7 @@ UID tracking, and the consumer's exhaustion-aware buffer drain.
 """
 
 import asyncio
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,96 @@ def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncData
     # batch_size=1 (one prompt per draw) and identity collate so each batch is a list with one dict.
     loader = StatefulDataLoader(dataset, batch_size=1, collate_fn=lambda batch: batch[0])
     return _AsyncDataloader(loader, mini_batch_size)
+
+
+@pytest.mark.asyncio
+async def test_partial_resume_generation_budget_bounds_and_replaces_filtered_groups(monkeypatch):
+    class Generator:
+        async def generate(self, generator_input):
+            uid = generator_input["uid"]
+            await asyncio.sleep(int(uid) * 0.01)
+            rewards = [1.0, 1.0] if uid == "0" else [0.0, 1.0]
+            return {"rewards": rewards, "loss_masks": [[1], [1]]}
+
+    def prepare_generator_input(rand_prompts, *_args, **_kwargs):
+        uid = rand_prompts[0]["uid"]
+        return {"uid": uid, "prompts": []}, [uid]
+
+    monkeypatch.setattr(
+        "skyrl.train.fully_async_trainer.prepare_generator_input",
+        prepare_generator_input,
+    )
+    monkeypatch.setattr(
+        "skyrl.train.fully_async_trainer.get_sampling_params_for_backend",
+        lambda *_args, **_kwargs: {},
+    )
+
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.async_train_dataloader = _make_async_dataloader(num_prompts=8, mini_batch_size=2)
+    trainer._staleness_manager = _AsyncStalenessManager(
+        max_concurrent_generation_groups=4,
+        mini_batch_size=2,
+        max_staleness_steps=1,
+    )
+    trainer.generator = Generator()
+    trainer.global_step = 8
+    trainer.mini_batch_size = 2
+    trainer.num_parallel_generation_workers = 4
+    trainer.sample_full_batch = True
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._phase_gauge = SimpleNamespace(timed_phase=lambda *_args: nullcontext())
+    trainer.cfg = SimpleNamespace(
+        generator=SimpleNamespace(
+            n_samples_per_prompt=2,
+            inference_engine=SimpleNamespace(backend="test"),
+            sampling_params={},
+        ),
+        environment=SimpleNamespace(env_class="test"),
+        trainer=SimpleNamespace(algorithm=SimpleNamespace(zero_variance_filter_tol=0.0)),
+    )
+
+    buffer = asyncio.Queue(maxsize=4)
+    generation_budget = asyncio.Semaphore(2)
+    tasks = [asyncio.create_task(trainer._run_generate_for_a_group_loop(buffer, generation_budget)) for _ in range(4)]
+    try:
+        kept, dropped, exhausted = await asyncio.wait_for(
+            trainer._collect_generation_mini_batch(buffer, asyncio.Event(), generation_budget),
+            timeout=1,
+        )
+        while trainer._staleness_manager._stat.running:
+            await asyncio.sleep(0)
+
+        assert [group.uid for group in dropped] == ["0"]
+        assert [group.uid for group in kept] == ["1", "2"]
+        assert exhausted is False
+        assert buffer.empty()
+        assert trainer._staleness_manager._stat.accepted == 2
+        assert trainer._staleness_manager._stat.filtered == 1
+        assert all(not task.done() for task in tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Exhaustion must also wake peers blocked on permits so sample_full_batch can terminate.
+    trainer.async_train_dataloader = _make_async_dataloader(num_prompts=2, mini_batch_size=2)
+    trainer._staleness_manager = _AsyncStalenessManager(
+        max_concurrent_generation_groups=4,
+        mini_batch_size=2,
+        max_staleness_steps=1,
+    )
+    buffer = asyncio.Queue(maxsize=4)
+    generation_budget = asyncio.Semaphore(4)
+    tasks = [asyncio.create_task(trainer._run_generate_for_a_group_loop(buffer, generation_budget)) for _ in range(4)]
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+        assert buffer.qsize() == 2
+        assert trainer._staleness_manager._stat.running == 0
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # --------------------------------------------------------------------------------------
