@@ -38,6 +38,9 @@ tpu = [
 tinker = [
     "tinker>=0.3.0,<=0.24.1",
     "fastapi[standard]",
+    # Decodes vLLM completion bodies into numeric buffers without per-token
+    # Python objects (skyrl/tinker/extra/completion_decode.py).
+    "pysimdjson",
     "sqlmodel",
     "sqlalchemy[asyncio]",
     "aiosqlite",

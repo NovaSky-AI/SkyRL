@@ -7500,6 +7500,50 @@ wheels = [
 ]
 
 [[package]]
+name = "pysimdjson"
+version = "7.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9c/24/65e3cad88e74ef8ca59fefded953eb78ebface8a3199c3a97fe318a7387b/pysimdjson-7.0.2.tar.gz", hash = "sha256:44cf276e48912a3b9c7ca362c14da8420a7ac15a9f1a16ec95becff86db3904a", size = 1397812, upload-time = "2025-06-28T20:37:24.071Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e6/53/6c08667ec90830f42b257a460fe04c0316e6aeb6e5567b20813caddcdbae/pysimdjson-7.0.2-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:9ef56dff19b004dd52bbaf31bd6b26486d20a07de50bf3fd0e2d655cebadc135", size = 1857080, upload-time = "2025-06-28T20:36:23.401Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/5f/81f0bc351e6970dcd7448580779791c42706614627807b3aec8cb8095be0/pysimdjson-7.0.2-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:b7db0a4abf3740a33204283c15ae1bc4fd2dd17be7c259d10551a8d32f72fab9", size = 1646685, upload-time = "2025-06-28T20:36:24.79Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/bd/8249fd295a1113b3a66eccd68752bd52d4f32df4d1a740f9f0d3db91b517/pysimdjson-7.0.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:0b751b44323c763ae51303aba5834bd193eea4d121987230a977ccfbe258e479", size = 2798435, upload-time = "2025-06-28T20:36:25.946Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/58/504b6bdfd97c26094bcc50fbc283c806d3b36477c077267d76d07ab96caa/pysimdjson-7.0.2-cp311-cp311-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:fe3712de488044408ff4a8e59c0745ba74f063ad019a3d0e662c9df9bb96e985", size = 2859387, upload-time = "2025-06-28T20:36:27.078Z" },
+    { url = "https://files.pythonhosted.org/packages/47/2f/ca46b61203ab06d9bb45d216a5a635ec92250fe531bf990191c07403096d/pysimdjson-7.0.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0caeb9edaeae4bbbce9fdc0c2e81d303c29628ef637c11b248942c591eb59b24", size = 3265436, upload-time = "2025-06-28T20:36:28.164Z" },
+    { url = "https://files.pythonhosted.org/packages/14/ce/cce78f90c9fb51df6fdb71e8262206887a72a3851734b3a07528f9fd1eec/pysimdjson-7.0.2-cp311-cp311-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:cc0e934a4bb9b1465628eae80d6f386d0cfd5c6b9e8bc822a9326e30c2b7fb66", size = 2547752, upload-time = "2025-06-28T20:36:29.295Z" },
+    { url = "https://files.pythonhosted.org/packages/45/b2/c841750e7cc118bcfaf3f47f904eb405f632f2a5fe24d8c35bb5657933a9/pysimdjson-7.0.2-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:39c05ca2d26de21373045557fc1f1a84c70cea35e89f4746e537fbe2948f9c38", size = 3688684, upload-time = "2025-06-28T20:36:30.431Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/48/aad6bbd435f47385487b7397a7bb645ee53195bf4637f467d616382c1bf8/pysimdjson-7.0.2-cp311-cp311-musllinux_1_2_i686.whl", hash = "sha256:98018ad3e96dc9a5ffcce5100bc1cc0ef20185ff1ab097bb21a2dd1090e644e6", size = 3595563, upload-time = "2025-06-28T20:36:31.857Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/9d/dcdafeb3ee0c689b4dbef7d859919760fe89357551a8ddbacfb65244a689/pysimdjson-7.0.2-cp311-cp311-musllinux_1_2_ppc64le.whl", hash = "sha256:3a05fbc43f22b131246c58d25f332e6e7929826bd4ee88fab2ffb5f3a29305bf", size = 3850967, upload-time = "2025-06-28T20:36:32.95Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/db/3aee16daf44b31399dc5d3318978782a96138f0ea32f09bedf172a4473f1/pysimdjson-7.0.2-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:755774195a3c7714ec88d08da2f03ed9097d72bcc35ae31b4887b524ae37d435", size = 4214235, upload-time = "2025-06-28T20:36:34.451Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/3a/79876cd35668e2dfd4aa66091ecda130117940fe706d754c39aaa4609b3a/pysimdjson-7.0.2-cp311-cp311-win32.whl", hash = "sha256:1c7f85f5b0280e57de1cbfb624b3b2535cc590d4490a6955ff65e5a358b09285", size = 1529278, upload-time = "2025-06-28T20:36:35.993Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/89/bda298ab3b3407f38b70994efc7e4f0938d9ff34e0e5b180f9d5066cccf7/pysimdjson-7.0.2-cp311-cp311-win_amd64.whl", hash = "sha256:d3ff730a48e666a2f663a43663fd71c10ba5d0393cfce500c4f535f09fae39e7", size = 1573100, upload-time = "2025-06-28T20:36:37.079Z" },
+    { url = "https://files.pythonhosted.org/packages/61/81/2a7bee8961e9519084ee290bb7135844f1f786ec8a26f62d48e7fd23a08b/pysimdjson-7.0.2-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:8ea5ffbdfde6a26b05bec12263ffacf8435d2e51c3793b44aa090fb38e709434", size = 1877768, upload-time = "2025-06-28T20:36:38.463Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/55/dfa21b647ff1a54e5925664ebfe3f1f800375546f0665347f3041a52bf5a/pysimdjson-7.0.2-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:4fbe295c84bd9406ac8fc38ab76a6ff1187df11be9348e5937f9dcc42f41c8f8", size = 1656024, upload-time = "2025-06-28T20:36:39.847Z" },
+    { url = "https://files.pythonhosted.org/packages/64/bd/06b744b0b33f4932ad4ed51fdb8ec5eeca6f7980ad502839dbfbe5ac60c9/pysimdjson-7.0.2-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:abbbd51ef301083c9ee885d1ba8d3c2081c462d56c2d0e2f603cc917a44f7ed5", size = 2771741, upload-time = "2025-06-28T20:36:41.249Z" },
+    { url = "https://files.pythonhosted.org/packages/90/a4/c13afff7d4cd2fd001508f0d411063a8a9c451d694178b5230d50c8caf98/pysimdjson-7.0.2-cp312-cp312-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:14ca76010e5d82f4c0de90586a940e57c28beee937b4a53ef239b88ebee7190e", size = 2823997, upload-time = "2025-06-28T20:36:42.704Z" },
+    { url = "https://files.pythonhosted.org/packages/58/da/459c89f3dbb8344f6b2a374850d13522cc9a89726faea4319568034f1f1f/pysimdjson-7.0.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a1de838fc7aa473db24ddacc0b285928bd74d5830755f8471b17c34e78e94840", size = 3248858, upload-time = "2025-06-28T20:36:43.969Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/90/c9274cb68412b2b119a0d72c71d57b01f05397b59afc7cec9ff0b28a88d5/pysimdjson-7.0.2-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:061259784a9a4746d40a3a3f20542a19bd0e403e49af4aa3bd9a1626429ce704", size = 2529651, upload-time = "2025-06-28T20:36:45.266Z" },
+    { url = "https://files.pythonhosted.org/packages/95/3b/8f3a3866daa6776ea3d3986b0c21cc678bd0bb5872a19a18170fae396e90/pysimdjson-7.0.2-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:27c2e4cde872b8d3a05dc855341508d11d056bb3b25eddbc17e533417a848a52", size = 3664874, upload-time = "2025-06-28T20:36:46.541Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/21/376e54868918d8b4831fb8653c1976615f99a11d95e0502ecaaa7a306d32/pysimdjson-7.0.2-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:41a18886861d47b63ef6231796a30ccc547bf3772a06fa60b681ee8f00a614ce", size = 3579057, upload-time = "2025-06-28T20:36:47.843Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/92/29bf4549ec6d692aca1cc11b1ff8a8bf8f742dd09e834f649e2567eb1438/pysimdjson-7.0.2-cp312-cp312-musllinux_1_2_ppc64le.whl", hash = "sha256:fdbd392590613ddbc4922ab5374282dddefa94471fc7a97bc2c1df6a450dd671", size = 3818097, upload-time = "2025-06-28T20:36:49.319Z" },
+    { url = "https://files.pythonhosted.org/packages/9a/f8/ff0a6e3ee124eef780f164c95ea95ccca1ac04e4cff483e728aa029e7b36/pysimdjson-7.0.2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:cb217ddaedd5f28ca7db16e4ea972f02c6db380827ec312c7e6a9371ca5e4d7c", size = 4201879, upload-time = "2025-06-28T20:36:50.801Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/b0/7f60a32fef8b97407f07c80d367fb161c9245bd3c1de1597c9f4cb1c6536/pysimdjson-7.0.2-cp312-cp312-win32.whl", hash = "sha256:bf5af81e19b0cef57679523759f9219e2641e5156a4ee5b854e49e3e6b1690ab", size = 1529773, upload-time = "2025-06-28T20:36:51.97Z" },
+    { url = "https://files.pythonhosted.org/packages/28/e7/b127c677f6aa8991ba6f9ea99a08aa167ab93a1844f6da35c65fa4b98179/pysimdjson-7.0.2-cp312-cp312-win_amd64.whl", hash = "sha256:782ee03679eaea5b28d9bc9279bc0f0f03d251c17571396f3ed50ba86023d88f", size = 1574523, upload-time = "2025-06-28T20:36:53.103Z" },
+    { url = "https://files.pythonhosted.org/packages/65/65/bf171e0dde8a40a56c6fde4e700daa3b172f1781b26478e92c34317f1225/pysimdjson-7.0.2-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:a721cc23cd6240430b2c862caff79a411abc987290859cd0f9c5a3e29efa1d2c", size = 1877151, upload-time = "2025-06-28T20:36:54.199Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/2d/242c1bebadb960b704066288ae28660da3de7fb5d8f52f655e080e7ffbbf/pysimdjson-7.0.2-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:fdbbf4246cac27dac38043da8f4d82a46d434b5bc3a4e54c0a55de1dd92631ae", size = 1655651, upload-time = "2025-06-28T20:36:55.336Z" },
+    { url = "https://files.pythonhosted.org/packages/49/86/3b25e77ae2998342d2bd376eb58baf17b35e6c2fdb9184e8bc8c31ebfafe/pysimdjson-7.0.2-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:77bbf9afdea8a9aa220cbf29115cc32e81207f9e8e07963ea145ba8d2e8f4053", size = 2771613, upload-time = "2025-06-28T20:36:56.732Z" },
+    { url = "https://files.pythonhosted.org/packages/49/d9/3db962802aa5c95a8f89023dcf00eefa30817e9b9862668d5efb91c44d81/pysimdjson-7.0.2-cp313-cp313-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:43d42ef0660181b67bd833c13bdcbb2743abd40bc348db8f9e788b5d88717459", size = 2819981, upload-time = "2025-06-28T20:36:57.923Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/a0/bfbc3c9a1b216cacad74863229c06c576f108e4f67cb6daa3c4d6071a9ff/pysimdjson-7.0.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:13f2820c95d9c74139407921aeec8099e67546ccfcb309561881e877e4a3aa97", size = 3246918, upload-time = "2025-06-28T20:36:59.458Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/fc/1d21538d1fd3e4f2f7a96de605fbcdb1f150ff0eb49ac08f005da83e17c7/pysimdjson-7.0.2-cp313-cp313-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:f81638ce66a7393ad1b4f5fae6666c417cc01e5ecb81c86ff727349599bbc83f", size = 2524078, upload-time = "2025-06-28T20:37:00.659Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/d3/76c05b4d116adcb947955c68700c9e67ee7f748a38d37ba72e5b1109ef1d/pysimdjson-7.0.2-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:5ffe83c4dbfdabea5f2231cc64ff1a62b7ecd18f64cb04a61439a5c24d08a0cd", size = 3662263, upload-time = "2025-06-28T20:37:01.835Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/4c/7f4c326f4022babab518e1295446c58c7f72b7bfb242b47e9fae421c3783/pysimdjson-7.0.2-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:08b576531375fa6b9479b43b5358e5e172490bef8969b0f53d6b6be7c5d7b88a", size = 3576295, upload-time = "2025-06-28T20:37:02.989Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/9a/c4df622caf46284dd1a4d6e403dccea2a874623563c63d6e1cec4f54259a/pysimdjson-7.0.2-cp313-cp313-musllinux_1_2_ppc64le.whl", hash = "sha256:1b7e26580d0030b6f7bb6fddc12e7756f4ffae3a9e4f7a8c3522d783173ac459", size = 3813976, upload-time = "2025-06-28T20:37:04.186Z" },
+    { url = "https://files.pythonhosted.org/packages/75/b9/e21a5d1f4060ffeca6026a94599f6b68bf62221dd02a7af5962c73040edc/pysimdjson-7.0.2-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:4a8fb78454cd2936f8e27e8948b56b6e44a766eaa162fef02a1436c2d4570053", size = 4197725, upload-time = "2025-06-28T20:37:05.591Z" },
+    { url = "https://files.pythonhosted.org/packages/d8/ed/7e4511cabdcb2931cce174ce0ecf17cf4de6039b4d908daca4d313875f1e/pysimdjson-7.0.2-cp313-cp313-win32.whl", hash = "sha256:ef56eacf050e194d4058d6ed818dbbe40d9ec5dcb182ba93a451cad2467aad27", size = 1529585, upload-time = "2025-06-28T20:37:07.016Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/fa/3642b49521007362c9eb228ed472927e020b84d6413efa8fd69fd9f7c6b9/pysimdjson-7.0.2-cp313-cp313-win_amd64.whl", hash = "sha256:4ae000c2d45a1af0303fe151e5204188fcbb23acc6cbdf04ac1062ab80538a1b", size = 1574251, upload-time = "2025-06-28T20:37:08.327Z" },
+]
+
+[[package]]
 name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -9151,6 +9195,7 @@ tinker = [
     { name = "asyncpg" },
     { name = "fastapi", extra = ["standard"] },
     { name = "psycopg2-binary" },
+    { name = "pysimdjson" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sqlmodel" },
     { name = "tinker" },
@@ -9232,6 +9277,7 @@ requires-dist = [
     { name = "pybase64", marker = "extra == 'skyrl-train'", specifier = ">=1.4.2" },
     { name = "pybind11", marker = "extra == 'skyrl-train'" },
     { name = "pymdown-extensions", marker = "extra == 'dev'", specifier = ">=10.7" },
+    { name = "pysimdjson", marker = "extra == 'tinker'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-forked", marker = "extra == 'dev'" },
