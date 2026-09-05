@@ -135,16 +135,20 @@ class AsyncRateLimiter(RateLimiterInterface):
     async def acquire(self) -> None:
         """Acquire permission to proceed, waiting if necessary.
 
-        First applies rate limiting (controls how fast operations start),
-        then acquires concurrency slot (controls how many run simultaneously).
+        Reserves a concurrency slot before applying the rate limit, so queued
+        operations cannot accumulate rate tokens and start in a burst later.
+        The slot is released if waiting for a rate token fails or is cancelled.
         """
-        # Rate limit first (controls start rate)
-        if self._rate is not None:
-            await self._acquire_rate_token()
-
-        # Then concurrency limit (controls concurrent execution)
         if self._max_concurrency is not None:
             await self._semaphore.acquire()
+
+        try:
+            if self._rate is not None:
+                await self._acquire_rate_token()
+        except BaseException:
+            # __aexit__ is not called when acquisition in __aenter__ fails.
+            self.release()
+            raise
 
     def release(self) -> None:
         """Release a concurrency slot.

@@ -3,7 +3,9 @@ uv run --isolated --extra dev pytest tests/train/utils/test_rate_limiter.py -v
 """
 
 import asyncio
+import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
@@ -268,7 +270,7 @@ class TestAsyncRateLimiterCombined:
         assert max_running <= max_conc
 
     @pytest.mark.asyncio
-    async def test_rate_limit_applies_before_concurrency(self):
+    async def test_rate_limit_applies_with_available_concurrency(self):
         """Rate limiting should control start rate, concurrency limits running."""
         rate = 5.0
         max_conc = 10  # High concurrency, rate should be the bottleneck
@@ -287,6 +289,87 @@ class TestAsyncRateLimiterCombined:
 
         expected_wait = 1.0 / rate
         assert elapsed >= expected_wait * 0.8
+
+    @pytest.mark.asyncio
+    async def test_queued_trials_cannot_bank_rate_tokens(self, monkeypatch):
+        """Time spent waiting for a slot must not turn into a later start burst."""
+        clock = SimpleNamespace(now=0.0)
+        monkeypatch.setattr(
+            sys.modules[AsyncRateLimiter.__module__], "time", SimpleNamespace(monotonic=lambda: clock.now)
+        )
+        limiter = AsyncRateLimiter(rate=1.0, max_concurrency=1)
+        starts = []
+
+        async def trial():
+            async with limiter:
+                starts.append(clock.now)
+
+        await limiter.acquire()
+        tasks = []
+        try:
+            # A long-running trial occupies the only slot while more trials queue.
+            for timestamp in (1.0, 2.0):
+                clock.now = timestamp
+                tasks.append(asyncio.create_task(trial()))
+                await asyncio.sleep(0)
+
+            limiter.release()
+            await tasks[0]
+            await asyncio.sleep(0)
+
+            # The bucket holds one token at t=2. The next trial must wait for refill.
+            assert starts == [2.0]
+            assert not tasks[1].done()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_while_rate_limited_releases_concurrency(self, monkeypatch):
+        limiter = AsyncRateLimiter(rate=1.0, max_concurrency=1)
+        waiting_for_rate = asyncio.Event()
+        acquire_rate_token = limiter._acquire_rate_token
+
+        async def wait_for_rate():
+            waiting_for_rate.set()
+            await asyncio.Future()
+
+        async def trial():
+            async with limiter:
+                pytest.fail("The trial should be cancelled before it starts")
+
+        monkeypatch.setattr(limiter, "_acquire_rate_token", wait_for_rate)
+        task = asyncio.create_task(trial())
+        await waiting_for_rate.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        monkeypatch.setattr(limiter, "_acquire_rate_token", acquire_rate_token)
+        await asyncio.wait_for(limiter.acquire(), timeout=1.0)
+        limiter.release()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_while_concurrency_limited_does_not_release_slot(self):
+        limiter = AsyncRateLimiter(rate=3.0, max_concurrency=1)
+        await limiter.acquire()
+        cancelled = asyncio.create_task(limiter.acquire())
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        waiting = asyncio.create_task(limiter.acquire())
+        try:
+            await asyncio.sleep(0)
+            assert not waiting.done()
+            limiter.release()
+            await asyncio.wait_for(waiting, timeout=1.0)
+            limiter.release()
+        finally:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
 
 
 class TestRateLimiterConfig:
