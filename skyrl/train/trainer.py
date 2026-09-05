@@ -91,6 +91,7 @@ from skyrl.train.utils.trainer_utils import (
     extract_step_from_path,
     finalize_minibatch_rollout_logprob_diff_std,
     run_on_each_node,
+    shutdown_dataloader,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
     zero_variance_filter,
@@ -623,6 +624,17 @@ class RayPPOTrainer:
             logger.warning(f"Failed to flush pending metrics at step {self.global_step}: {e}")
         self.all_metrics = {}
         self.all_timings = {}
+
+    def shutdown(self) -> None:
+        """Stop train and evaluation DataLoader workers."""
+        for name, dataloader in (
+            ("train", self.train_dataloader),
+            ("eval", self.eval_dataloader),
+        ):
+            try:
+                shutdown_dataloader(dataloader)
+            except Exception:
+                logger.exception(f"Failed to shut down {name} DataLoader workers")
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
         """Remove tail data to have even shards in terms of *effective* samples.
