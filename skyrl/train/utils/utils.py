@@ -706,6 +706,21 @@ def get_physical_gpu_id():
     return str(props.uuid)
 
 
+def _default_fla_tilelang() -> str | None:
+    """Pick fla's GatedDeltaNet backend for the visible GPU architecture.
+
+    fla's TileLang kernels are the working GDN backward on Hopper, where its Triton
+    backward is broken (fla-org/flash-linear-attention#640); on Blackwell (SM100+) the
+    TileLang packed backward aborts and the Triton kernels are the working ones. Returns
+    ``"1"`` (TileLang) for pre-Blackwell GPUs, ``"0"`` (Triton) for SM100+, and ``None``
+    when no CUDA device is visible so fla applies its own default in the worker.
+    """
+    if not torch.cuda.is_available():
+        return None
+    major, _minor = torch.cuda.get_device_capability()
+    return "0" if major >= 10 else "1"
+
+
 def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     Prepare environment variables for Ray runtime environment.
@@ -731,10 +746,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-        # Propagate fla's GDN backend choice to Ray workers. Default 1 keeps fla's
-        # TileLang default (works on Hopper); export FLA_TILELANG=0 on Blackwell (B200),
-        # where the TileLang packed backward aborts, to fall back to the Triton kernels.
-        env_vars["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "1")
+        fla_tilelang = os.environ.get("FLA_TILELANG") or _default_fla_tilelang()
+        if fla_tilelang is not None:
+            env_vars["FLA_TILELANG"] = fla_tilelang
         if cfg.trainer.flash_attn:
             # disable fused attention for megatron with flash_attn
             # (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)

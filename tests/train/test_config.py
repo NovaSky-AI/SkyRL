@@ -20,7 +20,12 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
     overrides_dict_to_dotlist,
 )
-from skyrl.train.utils.utils import validate_cfg, validate_inference_engine_cfg
+from skyrl.train.utils import utils as train_utils
+from skyrl.train.utils.utils import (
+    prepare_runtime_environment,
+    validate_cfg,
+    validate_inference_engine_cfg,
+)
 from tests.train.util import example_dummy_config
 
 
@@ -903,3 +908,51 @@ class TestDeltaWeightSyncConfig:
         # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
         assert "my_sync_dir" in cfg.publish_staging_dir
         assert "my_sync_dir" in cfg.local_checkpoint_dir
+
+
+def _megatron_runtime_cfg():
+    cfg = example_dummy_config()
+    cfg.trainer.strategy = "megatron"
+    return cfg
+
+
+def _patch_runtime_probes(monkeypatch, cuda_available: bool, sm_major: int = 9):
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setattr(train_utils.torch.cuda, "is_available", lambda: cuda_available)
+    monkeypatch.setattr(train_utils.torch.cuda, "get_device_capability", lambda *_args: (sm_major, 0))
+
+
+def test_runtime_env_fla_tilelang_explicit_setting_wins(monkeypatch):
+    monkeypatch.setenv("FLA_TILELANG", "0")
+    _patch_runtime_probes(monkeypatch, cuda_available=True, sm_major=9)
+
+    env_vars = prepare_runtime_environment(_megatron_runtime_cfg())
+
+    assert env_vars["FLA_TILELANG"] == "0"
+
+
+def test_runtime_env_fla_tilelang_defaults_to_tilelang_on_hopper(monkeypatch):
+    monkeypatch.delenv("FLA_TILELANG", raising=False)
+    _patch_runtime_probes(monkeypatch, cuda_available=True, sm_major=9)
+
+    env_vars = prepare_runtime_environment(_megatron_runtime_cfg())
+
+    assert env_vars["FLA_TILELANG"] == "1"
+
+
+def test_runtime_env_fla_tilelang_defaults_to_triton_on_blackwell(monkeypatch):
+    monkeypatch.delenv("FLA_TILELANG", raising=False)
+    _patch_runtime_probes(monkeypatch, cuda_available=True, sm_major=10)
+
+    env_vars = prepare_runtime_environment(_megatron_runtime_cfg())
+
+    assert env_vars["FLA_TILELANG"] == "0"
+
+
+def test_runtime_env_fla_tilelang_unset_without_visible_gpu(monkeypatch):
+    monkeypatch.delenv("FLA_TILELANG", raising=False)
+    _patch_runtime_probes(monkeypatch, cuda_available=False)
+
+    env_vars = prepare_runtime_environment(_megatron_runtime_cfg())
+
+    assert "FLA_TILELANG" not in env_vars

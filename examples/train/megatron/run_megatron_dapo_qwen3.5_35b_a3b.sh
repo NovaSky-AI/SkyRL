@@ -68,7 +68,8 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 
 # On Blackwell, use the following env vars:
 # export VLLM_USE_FLASHINFER_MOE_FP16=0   # force triton moe backend since flashinfer trtllm bf16 MoE kernel requires expert intermediate_size to be a multiple of 128
-# export FLA_TILELANG=0   # force triton gdn backend since fla's default TileLang GDN backend aborts in the packed backward. leave unset on hopper, since Triton GDN backward is broken there: https://github.com/fla-org/flash-linear-attention/issues/640#issuecomment-4236520788
+# FLA_TILELANG (fla's GDN backend) is picked per GPU architecture by prepare_runtime_environment:
+# TileLang on Hopper, Triton on Blackwell. Export it only to override that choice.
 
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
