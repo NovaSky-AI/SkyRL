@@ -193,6 +193,7 @@ def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
 def test_serialized_fp8_runtime_defaults_to_fp32_scales(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
+    monkeypatch.setattr(train_utils, "has_visible_cuda_device", lambda: True)
     monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: False)
     cfg = example_dummy_config()
@@ -207,6 +208,7 @@ def test_serialized_fp8_runtime_defaults_to_fp32_scales(monkeypatch):
 def test_serialized_fp8_runtime_defaults_to_pow2_scales_on_blackwell(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
+    monkeypatch.setattr(train_utils, "has_visible_cuda_device", lambda: True)
     monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: True)
     cfg = example_dummy_config()
@@ -221,6 +223,7 @@ def test_serialized_fp8_runtime_defaults_to_pow2_scales_on_blackwell(monkeypatch
 def test_serialized_fp8_pow2_scales_reject_disabled_e8m0_on_blackwell(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+    monkeypatch.setattr(train_utils, "has_visible_cuda_device", lambda: True)
     monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: True)
     cfg = example_dummy_config()
@@ -228,6 +231,51 @@ def test_serialized_fp8_pow2_scales_reject_disabled_e8m0_on_blackwell(monkeypatc
 
     with pytest.raises(ValueError, match="VLLM_USE_DEEP_GEMM_E8M0=1"):
         prepare_runtime_environment(cfg)
+
+
+def test_serialized_fp8_requires_an_explicit_scale_mode_without_a_driver_gpu(monkeypatch):
+    """The contract is baked into the runtime env before ray.init, so a GPU-less
+    head cannot infer it from the workers; guessing Hopper would hand FP32 block
+    scales to Blackwell workers."""
+    monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
+    monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setattr(train_utils, "has_visible_cuda_device", lambda: False)
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
+
+    with pytest.raises(ValueError, match="NVTE_FP8_BLOCK_SCALING_FP32_SCALES"):
+        prepare_runtime_environment(cfg)
+
+
+def test_serialized_fp8_pow2_scales_set_e8m0_without_a_driver_gpu(monkeypatch):
+    """E8M0 follows the wire scale format, not the driver's device: vLLM picks the
+    per-device form itself, so the default must survive a GPU-less head."""
+    monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0")
+    monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setattr(train_utils, "has_visible_cuda_device", lambda: False)
+    monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: False)
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "0"
+    assert env_vars["VLLM_USE_DEEP_GEMM_E8M0"] == "1"
+
+
+@pytest.mark.parametrize("backend", ["sharded_rdt", "delta"])
+def test_serialized_fp8_weight_sync_rejects_backends_without_a_chunk_channel(backend):
+    """Neither backend carries payload + scale pairs, and both would otherwise
+    fail only at the first sync -- after vLLM has loaded as FP8."""
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
+    cfg.generator.inference_engine.weight_sync_backend = backend
+
+    with pytest.raises(ValueError, match=backend):
+        validate_inference_engine_cfg(cfg)
 
 
 def test_serialized_fp8_weight_sync_requires_megatron():
@@ -252,6 +300,7 @@ def test_serialized_fp8_weight_sync_rejects_adapter_only_megatron_lora():
 
 def test_megatron_fp8_compute_defaults_to_fp32_scales_without_serialized_sync(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
+    monkeypatch.setattr(train_utils, "has_visible_cuda_device", lambda: True)
     monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: False)
     cfg = example_dummy_config()
@@ -314,6 +363,7 @@ def test_megatron_validation_allows_inference_only_fp8_param_without_gather():
 
 @pytest.mark.parametrize(("blackwell", "expected_recipe"), [(True, "mxfp8"), (False, "blockwise")])
 def test_megatron_validation_resolves_auto_fp8_recipe(monkeypatch, blackwell, expected_recipe):
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: True)
     monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: blackwell)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: blackwell)
     cfg = _make_validated_test_config()
@@ -327,8 +377,9 @@ def test_megatron_validation_resolves_auto_fp8_recipe(monkeypatch, blackwell, ex
 
 
 def test_megatron_validation_rejects_mxfp8_before_blackwell(monkeypatch):
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: True)
+    monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: False)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: False)
-    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
     cfg.trainer.policy.megatron_config.transformer_config_kwargs["fp8"] = "e4m3"
@@ -546,6 +597,59 @@ def test_run_engines_locally_false_requires_external_endpoint():
 
     with pytest.raises(ValueError, match="run_engines_locally=false requires"):
         validate_inference_engine_cfg(cfg)
+
+
+def _pd_cfg_with_role_kwargs(prefill_kwargs=None, decode_kwargs=None) -> SkyRLTrainConfig:
+    """Build a minimally-valid P/D config, optionally with role-specific engine kwargs."""
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.enable_pd = True
+    ie_cfg.num_engines = 2
+    ie_cfg.num_prefill = 1
+    if prefill_kwargs is not None:
+        ie_cfg.prefill_init_kwargs = prefill_kwargs
+    if decode_kwargs is not None:
+        ie_cfg.decode_init_kwargs = decode_kwargs
+    return cfg
+
+
+def test_role_init_kwargs_conflict_with_engine_init_kwargs_rejected():
+    cfg = _pd_cfg_with_role_kwargs(
+        prefill_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+        decode_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+    )
+    cfg.generator.inference_engine.engine_init_kwargs = {"gpu_memory_utilization": 0.8}
+
+    with pytest.raises(ValueError, match="engine_init_kwargs cannot be combined with"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_role_init_kwargs_require_enable_pd():
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.prefill_init_kwargs = {"kv_transfer_config": {"kv_connector": "NixlConnector"}}
+
+    with pytest.raises(ValueError, match="only valid with enable_pd"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_partial_role_init_kwargs_rejected():
+    # Only prefill_init_kwargs set -> decode_init_kwargs is missing kv_transfer_config.
+    cfg = _pd_cfg_with_role_kwargs(
+        prefill_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+    )
+
+    with pytest.raises(ValueError, match="decode_init_kwargs must set kv_transfer_config"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_valid_pd_role_init_kwargs_passes():
+    cfg = _pd_cfg_with_role_kwargs(
+        prefill_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+        decode_kwargs={"kv_transfer_config": {"kv_connector": "NixlConnector"}},
+    )
+
+    # Should not raise.
+    validate_inference_engine_cfg(cfg)
 
 
 def test_offload_kv_for_weight_sync_rejects_colocated():

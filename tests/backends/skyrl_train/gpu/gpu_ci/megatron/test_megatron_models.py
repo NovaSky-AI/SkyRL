@@ -10,6 +10,8 @@ block scales (NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1, set by
 _extra_env_vars_for_model). Select them with: -k "full_fp8 or fp8_param".
 """
 
+import os
+
 import pytest
 import ray
 import torch
@@ -18,6 +20,9 @@ from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    is_blackwell_or_newer,
 )
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
@@ -39,14 +44,6 @@ from tests.backends.skyrl_train.gpu.utils import (
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
 MAX_GENERATE_LENGTH = 128
-
-
-# vLLM's Triton MLA decode kernel (the only MLA backend on sm < 9.0) fails
-# to compile for glm-4's MLA shape; FLASH_ATTN_MLA / FLASHMLA need Hopper.
-_skip_mla_on_pre_hopper = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 9,
-    reason="no working MLA backend for glm-4 on pre-Hopper GPUs",
-)
 
 
 def get_test_actor_config(model_name) -> SkyRLTrainConfig:
@@ -90,8 +87,10 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
     # weight-sync, so skip optimizer construction entirely.
-    is_large_moe = ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower()) or (
-        "nemotron-3-nano" in model_name.lower()
+    is_large_moe = (
+        ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower())
+        or ("nemotron-3.5-lightning" in model_name.lower())
+        or ("glm-4.7-flash" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -106,22 +105,35 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
     if "moonlight" in model_name.lower() or "glm-4" in model_name.lower():
         env["NVTE_FUSED_ATTN"] = "1"
     if fp8_mode:
-        # Hopper serialized-FP8 contract: FP32 block scales end-to-end, and
-        # vLLM must not requantize wire scales to E8M0 (train/utils/utils.py
-        # pins both in production; the test sets them explicitly because the
-        # fp8 fields are applied after get_test_actor_config's validate_cfg).
-        env["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = "1"
-        env["VLLM_USE_DEEP_GEMM_E8M0"] = "0"
+        # Serialized-FP8 block-scale contract, mirroring what
+        # train/utils/utils.py pins in production (the test sets them
+        # explicitly because the fp8 fields are applied after
+        # get_test_actor_config's validate_cfg). Hopper: FP32 block scales
+        # end-to-end, and vLLM must not requantize wire scales to E8M0.
+        # Blackwell (SM100+): TE only supports power-of-2 block scales for
+        # blockwise quantization, and SM100 DeepGEMM only accepts E8M0 scale
+        # factors -- power-of-2 wire scales requantize to E8M0 losslessly.
+        if is_blackwell_or_newer():
+            scale_mode, e8m0_mode = "0", "1"
+        else:
+            scale_mode, e8m0_mode = "1", "0"
+        env["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", scale_mode)
+        env["VLLM_USE_DEEP_GEMM_E8M0"] = os.environ.get("VLLM_USE_DEEP_GEMM_E8M0", e8m0_mode)
+    # fla's TileLang GDN backend aborts on Blackwell; fall back to Triton.
+    if "qwen3.5" in model_name.lower():
+        env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0" if is_blackwell_or_newer() else "1")
     return env or None
 
 
 def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) -> dict:
     """Per-model overrides for vLLM engine init."""
     overrides = {"engine_init_kwargs": {}, "gpu_memory_utilization": 0.9}
-    if "Nemotron-3-Nano" in model_name:
+    if "Nemotron-3.5-Lightning" in model_name:
+        # Both default to a 262k context, which would size the KV pool far past
+        # what is left next to the colocated Megatron policy shard. Megatron
+        # policy init also needs room alongside vLLM on the same GPU, so lower
+        # vLLM's pool footprint too.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
-        # Megatron policy init also needs room alongside vLLM on the same
-        # GPU, so lower vLLM's pool footprint.
         overrides["gpu_memory_utilization"] = 0.5
     # Large MoE: Megatron policy init also needs room alongside vLLM on the
     # same GPU, so lower vLLM's pool footprint.
@@ -137,6 +149,11 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
             # pool fits ~163 blocks, and the vLLM default max_num_seqs=1024
             # fails CUDA-graph capture. The test runs <= 80 concurrent seqs.
             overrides["max_num_seqs"] = 128
+    if "glm-4.7-flash" in model_name.lower():
+        # GLM-4.7-Flash's 202k default context would size the KV pool far past
+        # what is left next to the colocated Megatron policy shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
     return overrides
 
 
@@ -223,20 +240,23 @@ async def construct_training_input_from_generator_output(generator_output, token
     [
         pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, None, id="qwen3-moe_tp2_ep2"),
         pytest.param(1, 2, 2, 1, None, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, None, id="qwen3-moe_pp2_cp2"),
+        # GLM-4.7-Flash (~31B MoE, MLA) on 4xH100-80G. Mesh: TP=4 EP=4 ETP=1
+        # -> DP=1, vLLM TP=4 colocated on the same GPUs, same layout as the
+        # other large-MoE entries below.
         pytest.param(
-            2,
-            1,
-            1,
-            2,
-            1,
-            2,
             4,
-            "eatang/glm-4.7-flash-tiny-random",
-            1e-1,
-            2e-2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            "zai-org/GLM-4.7-Flash",
+            3e-1,
+            5e-2,
             None,
-            id="glm-4.7-flash_tp2_ep2",
-            marks=_skip_mla_on_pre_hopper,
+            id="glm-4.7-flash_h100_tp4_ep4",
+            marks=pytest.mark.h100,
         ),
         pytest.param(
             2,
@@ -270,13 +290,11 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             id="qwen3.5-0.8b-dense_tp2",
         ),
-        # Nemotron-3-Nano (30B MoE, bf16) on 4xH100-80G. Mesh: TP=4 EP=4
-        # ETP=1 -> DP=1. vLLM TP=4 across the same 4 GPUs (colocated).
-        # TP=1 OOMed in the EP alltoall because dense layers were replicated
-        # on every GPU; TP=4 shards them 4-way and matches the qwen3.5-35b
-        # layout below. AdamW optimizer is skipped entirely via is_large_moe
-        # in get_test_actor_config (forward-only test), and vLLM gmu is
-        # lowered to 0.5 so the policy shard + vLLM pool fit on each H100.
+        # Nemotron-3.5-Lightning (30B MoE, bf16) on 4xH100-80G. Same
+        # NemotronH hybrid Mamba/attention/MoE backbone and layer pattern as
+        # Nemotron-3-Nano but with one MTP head (`num_nextn_predict_layers=1`).
+        # MegatronWorker drops the MTP head (enable_mtp=False -> provider.mtp_num_layers=None)
+        # and vLLM skips the `mtp.*` weights, so neither side carries it through weight sync.
         pytest.param(
             4,
             1,
@@ -285,11 +303,11 @@ async def construct_training_input_from_generator_output(generator_output, token
             1,
             4,
             4,
-            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
             5e-1,
             5e-2,
             None,
-            id="nemotron3-nano_tp4_ep4_h100",
+            id="nemotron3.5-lightning_tp4_ep4_h100",
             marks=pytest.mark.h100,
         ),
         # Qwen3.5-35B-A3B (~35B MoE, ~3B activated) on 4xH100-80G. Mesh:

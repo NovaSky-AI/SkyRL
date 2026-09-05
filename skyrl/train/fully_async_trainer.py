@@ -596,6 +596,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         # 4. After training: pause generation, sync weights, resume.
                         with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
+                        # `sync_weights` above is the full bracket: it also pauses and
+                        # resumes generation, which under vLLM DP costs seconds of
+                        # coordinator quiesce that is not weight-sync work. The
+                        # dispatch reports the transfer on its own alongside it.
+                        self.all_timings.update(self.dispatch.get_timing_metrics())
 
                     # A training step completed: count it for this epoch's bookkeeping.
                     trained_steps_this_epoch += 1

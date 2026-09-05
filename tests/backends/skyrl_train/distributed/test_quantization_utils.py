@@ -5,6 +5,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_fp8_enabled,
     is_mxfp8_recipe,
     resolve_auto_fp8_recipe,
+    validate_concrete_fp8_recipe,
 )
 
 
@@ -41,6 +42,7 @@ def test_is_mxfp8_recipe(recipe, expected):
 
 
 def test_resolve_auto_fp8_recipe_picks_mxfp8_on_blackwell(monkeypatch):
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: True)
     monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: True)
     kwargs = {"fp8": "e4m3", "fp8_recipe": "auto"}
     assert resolve_auto_fp8_recipe(kwargs) == "mxfp8"
@@ -48,10 +50,40 @@ def test_resolve_auto_fp8_recipe_picks_mxfp8_on_blackwell(monkeypatch):
 
 
 def test_resolve_auto_fp8_recipe_picks_blockwise_on_hopper(monkeypatch):
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: True)
     monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: False)
     kwargs = {"fp8": "e4m3", "fp8_recipe": "AUTO"}
     assert resolve_auto_fp8_recipe(kwargs) == "blockwise"
     assert kwargs["fp8_recipe"] == "blockwise"
+
+
+def test_resolve_auto_fp8_recipe_defers_without_cuda(monkeypatch):
+    """A GPU-less driver must not guess the workers' architecture."""
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: False)
+    kwargs = {"fp8": "e4m3", "fp8_recipe": "auto"}
+    assert resolve_auto_fp8_recipe(kwargs) == "auto"
+    assert kwargs["fp8_recipe"] == "auto"
+
+
+def test_validate_concrete_fp8_recipe_ignores_non_mxfp8():
+    validate_concrete_fp8_recipe({"fp8_recipe": "blockwise", "fp8_param": True})
+    validate_concrete_fp8_recipe({"fp8_recipe": "auto"})
+    validate_concrete_fp8_recipe({})
+    validate_concrete_fp8_recipe(None)
+
+
+def test_validate_concrete_fp8_recipe_rejects_mxfp8_before_blackwell(monkeypatch):
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: True)
+    monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: False)
+    with pytest.raises(ValueError, match="requires SM100"):
+        validate_concrete_fp8_recipe({"fp8_recipe": "mxfp8"})
+
+
+def test_validate_concrete_fp8_recipe_rejects_mxfp8_with_fp8_param(monkeypatch):
+    # Device-independent: must fire even on a GPU-less process.
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: False)
+    with pytest.raises(ValueError, match="fp8_param"):
+        validate_concrete_fp8_recipe({"fp8_recipe": "mxfp8", "fp8_param": True})
 
 
 def test_resolve_auto_fp8_recipe_passes_explicit_values_through(monkeypatch):

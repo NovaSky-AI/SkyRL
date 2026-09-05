@@ -90,8 +90,17 @@ class DeltaWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        derive_metadata_from_chunks: bool = False,
         reset_prefix_cache: bool = False,
+        **kwargs,
     ) -> None:
+        if derive_metadata_from_chunks:
+            # Serialized-FP8 wire chunks carry marker names and scale tensors
+            # that the delta-checkpoint format cannot represent.
+            raise ValueError(
+                "Delta weight sync does not support serialized FP8 chunks; "
+                "disable fp8_weight_sync_mode or use a broadcast/CUDA-IPC strategy"
+            )
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             rank = torch.distributed.get_rank()
         else:
@@ -177,6 +186,7 @@ class DeltaTransferStrategy(WeightTransferStrategy):
     def create_sender(
         init_info: DeltaInitInfo,
         inference_client: "RemoteInferenceClient",
+        weight_extractor: Optional[Any] = None,
     ) -> DeltaWeightTransferSender:
         return DeltaWeightTransferSender(init_info=init_info, inference_client=inference_client)
 

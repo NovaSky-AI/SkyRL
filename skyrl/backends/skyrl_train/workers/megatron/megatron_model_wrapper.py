@@ -9,6 +9,10 @@ from megatron.core.distributed import finalize_model_grads
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 
+from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
+    call_model_with_fused_lm_head,
+    fused_lm_head_output_processor,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
@@ -149,35 +153,6 @@ def _copy_tensor_dict_to_device(batch: Dict[str, Any], device: int) -> Dict[str,
     return {key: _copy_tensor_tree_to_device(value, device) for key, value in batch.items()}
 
 
-def _fused_lm_head_output_processor(**kwargs):
-    """GPTModel ``output_processor`` hook for the fused LM-head log-prob path.
-
-    Skips the output-layer matmul (so the [S, B, vocab//TP] logits are never
-    built), returns the decoder hidden states in [b, s, h] layout (the same
-    layout the default logits path returns), and stashes the resolved
-    output-layer weight into the caller-provided ``context`` dict so the fused
-    log-prob / entropy can run downstream with it.
-    """
-    hidden_states = kwargs["hidden_states"]
-    output_layer = kwargs["output_layer"]
-    ctx = kwargs.get("context")
-    if ctx is not None:
-        output_weight = kwargs.get("output_weight")
-        ctx["lm_head_weight"] = output_weight if output_weight is not None else output_layer.weight
-    # With sequence parallelism the decoder hidden states are sharded along the
-    # sequence dim; the ColumnParallelLinear output layer all-gathers them before
-    # projecting (megatron tensor_parallel/layers.py). We skip that layer, so
-    # replicate the gather here. tensor_parallel_output_grad=True makes the
-    # backward reduce-scatter the hidden grad across TP ranks — exactly the sum
-    # of each rank's vocab-slice grad_hidden that the fused op produces.
-    if getattr(output_layer, "sequence_parallel", False):
-        from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
-
-        hidden_states = gather_from_sequence_parallel_region(hidden_states, tensor_parallel_output_grad=True)
-    # [s, b, h] -> [b, s, h], matching `logits.transpose(0, 1)` in the default path.
-    return hidden_states.transpose(0, 1).contiguous()
-
-
 class MegatronModelWrapper:
     def __init__(
         self,
@@ -211,15 +186,57 @@ class MegatronModelWrapper:
                 "packing path, or set trainer.remove_microbatch_padding=False."
             )
 
+        # Pending grad-sync request recorded by `_defer_finalize_model_grads`, replayed
+        # by `run_pending_grad_sync`. See those methods for why the sync is deferred.
+        self._pending_grad_sync: Optional[dict] = None
+
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
-        # use the build in finalize_model_grads function to all reduce gradients across parallelism dimensions
-        config.finalize_model_grads_func = finalize_model_grads
+        # use the built-in finalize_model_grads function to all reduce gradients across
+        # parallelism dimensions -- but deferred to optim_step rather than run per
+        # forward_backward. See `_defer_finalize_model_grads`.
+        config.finalize_model_grads_func = self._defer_finalize_model_grads
         # Wire up the optimizer's loss scaler so Megatron's pipeline schedule can scale
         # the loss before backward (critical for fp16 dynamic loss scaling, MoE aux loss
         # scaling, and any explicit loss_scale configuration).
         if actor_optimizer is not None:
             config.grad_scale_func = actor_optimizer.scale_loss
+
+    def _defer_finalize_model_grads(self, model, num_tokens=None, **kwargs) -> None:
+        """Record Megatron's end-of-schedule grad sync instead of running it.
+
+        Megatron's pipeline schedules call ``finalize_model_grads_func`` at the end of
+        every ``forward_backward_func``, which is correct when one call == one optimizer
+        step. SkyRL lets a logical batch span several ``forward_backward`` calls (Tinker
+        splits large batches into multiple requests; callers may accumulate), and the
+        sync is *not* idempotent: the DP reduce-scatter writes the reduced result into
+        this rank's own shard of ``grad_data`` while leaving peer regions holding
+        un-reduced local values, so reducing a second time folds already-reduced
+        gradients back in. The layernorm/embedding all-reduces double-count the same way.
+
+        So we record the request here and replay it exactly once from
+        :meth:`run_pending_grad_sync`, called by the worker's ``optim_step``.
+
+        ``num_tokens`` is only non-None under ``calculate_per_token_loss`` (never set by
+        SkyRL, whose loss scaling assumes the per-microbatch path); accumulate it across
+        calls so the deferred sync divides by the whole window's token count if it ever is.
+        """
+        del model, kwargs  # replayed against self.actor_module with default process groups
+        pending = self._pending_grad_sync
+        if pending is not None and pending["num_tokens"] is not None and num_tokens is not None:
+            num_tokens = pending["num_tokens"] + num_tokens
+        self._pending_grad_sync = {"num_tokens": num_tokens}
+
+    def run_pending_grad_sync(self) -> None:
+        """Reduce gradients across DP/TP/PP exactly once for the accumulated window.
+
+        Always runs the collective, even when this rank recorded nothing: a DP rank
+        whose ``forward_backward`` got no microbatches never reaches the schedule's
+        finalize hook, and skipping the reduce here would hang the ranks that do run it.
+        """
+        pending = self._pending_grad_sync
+        self._pending_grad_sync = None
+        finalize_model_grads(self.actor_module, pending["num_tokens"] if pending else None)
 
     def train(self):
         [module.train() for module in self.actor_module]
@@ -432,12 +449,13 @@ class MegatronModelWrapper:
                 # (e.g. PPO reference logprobs) at long context would still
                 # materialize the full [B, S, vocab//TP] logits and OOM.
                 _op_ctx: dict = {}
-                outputs = model(
+                outputs = call_model_with_fused_lm_head(
+                    model,
                     new_sequences,
                     new_position_ids,
                     to_te_attention_mask(new_attention_mask),
                     packed_seq_params=packed_seq_params,
-                    output_processor=_fused_lm_head_output_processor,
+                    output_processor=fused_lm_head_output_processor,
                     output_processor_context=_op_ctx,
                     **model_replay_kwargs,
                     **vlm_inputs,
@@ -1095,12 +1113,13 @@ class MegatronModelWrapper:
                     # output_processor returns decoder hidden states (not logits) and
                     # stashes the LM-head weight; loss_func then fuses the projection.
                     _op_ctx: dict = {}
-                    outputs = model(
+                    outputs = call_model_with_fused_lm_head(
+                        model,
                         new_sequences,
                         new_position_ids,
                         to_te_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
-                        output_processor=_fused_lm_head_output_processor,
+                        output_processor=fused_lm_head_output_processor,
                         output_processor_context=_op_ctx,
                         **model_replay_kwargs,
                         **vlm_inputs,
