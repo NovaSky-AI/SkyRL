@@ -581,7 +581,9 @@ class Worker(DistributedTorchRayActor):
     def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
         _, states = self.strategy.load_checkpoint(
             model=self.model,
-            optimizer=self.optimizer if load_optimizer_states else None,
+            # Strategies may need the live optimizer to refresh master weights
+            # even when its training state must not be restored.
+            optimizer=self.optimizer,
             scheduler=self.scheduler if load_lr_scheduler_states else None,
             ckpt_dir=ckpt_dir,
             load_optimizer_states=load_optimizer_states,
