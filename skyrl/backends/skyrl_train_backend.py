@@ -30,9 +30,10 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY,
-    MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY,
-    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY,
 )
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
@@ -797,18 +798,20 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Train-vs-rollout logprob gap, computed by the policy workers per
         # micro-batch (masked |logp_train - logp_rollout| over action tokens)
-        # and reduced across micro-batches / DP ranks.  Reconstruct the std
-        # from the reduced first/second moments (std itself cannot be
-        # mean-reduced; same as finalize_minibatch_rollout_logprob_diff_std)
-        # and surface the family under skyrl-train's familiar
+        # and summed across micro-batches / DP ranks (`_sum` / `_nnz` keys,
+        # same as finalize_minibatch_rollout_logprob_diff_std) so the mean /
+        # std can be derived exactly even for imbalanced shards, then surface
+        # the family under skyrl-train's familiar
         # `policy/rollout_train_logprobs_abs_diff_*` names.  The `:mean` /
         # `:max` / `:min` suffixes drive the Tinker SDK's cross-chunk
         # reduction when a request is split into multiple chunks.
-        if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY in data:
-            mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY])
+        if MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY in data:
+            total = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY])
+            count = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY])
+            mean = total / count if count > 0 else 0.0
             metrics["policy/rollout_train_logprobs_abs_diff_mean:mean"] = mean
-            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY in data:
-                sq_mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY])
+            if MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY in data:
+                sq_mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY]) / count if count > 0 else 0.0
                 # max(0, ...) guards tiny negatives from float round-off.
                 metrics["policy/rollout_train_logprobs_abs_diff_std:mean"] = math.sqrt(max(0.0, sq_mean - mean**2))
             if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY in data:

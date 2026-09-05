@@ -19,16 +19,23 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
+    LOSS_MASK_NNZ_KEY,
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY,
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY,
-    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY,
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY,
+    MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY,
+    POLICY_ENTROPY_SUM_KEY,
     compute_minibatch_rollout_logprob_diff_metrics,
     reduce_metrics,
 )
 from skyrl.train.config import AlgorithmConfig, OffPolicyCorrectionConfig
-from skyrl.train.utils.trainer_utils import finalize_minibatch_rollout_logprob_diff_std
+from skyrl.train.utils.trainer_utils import (
+    finalize_minibatch_rollout_logprob_diff_std,
+    finalize_policy_entropy,
+)
 
 
 def test_losses_without_old_logprobs():
@@ -110,8 +117,8 @@ def test_off_policy_correction_enabled():
 
 
 def test_minibatch_metric_values_match_manual():
-    """The worker metric reports the masked abs diff moments/extremes via the same masked_mean /
-    `* loss_mask` pattern as the off-policy `is_ratio_*` metrics."""
+    """The worker metric reports the masked abs diff sums/count via the same `* loss_mask`
+    pattern as the off-policy `is_ratio_*` metrics; sum/count reproduces the masked mean."""
     action_log_probs = torch.tensor([[-1.0, -2.0, -3.0], [-0.5, -1.5, -2.5]])
     rollout_logprobs = torch.tensor([[-1.5, -1.0, -3.0], [-0.5, -2.0, -1.0]])
     loss_mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
@@ -120,8 +127,13 @@ def test_minibatch_metric_values_match_manual():
 
     abs_diff = (action_log_probs - rollout_logprobs).abs()
     masked = abs_diff * loss_mask
-    assert metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY] == masked_mean(abs_diff, loss_mask).item()
-    assert metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY] == masked_mean(abs_diff.square(), loss_mask).item()
+    assert metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY] == masked.sum().item()
+    assert metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY] == masked.square().sum().item()
+    assert metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY] == loss_mask.sum().item()
+    # sum/count reproduces masked_mean for a single micro-batch.
+    assert metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY] / metrics[
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY
+    ] == pytest.approx(masked_mean(abs_diff, loss_mask).item())
     assert metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY] == masked.max().item()
     assert metrics[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY] == masked.min().item()
 
@@ -137,8 +149,9 @@ def test_minibatch_metric_emitted_unconditionally_when_rollout_present():
     fully_masked = torch.zeros_like(alp)
     masked_metrics = compute_minibatch_rollout_logprob_diff_metrics(alp, rlp, fully_masked)
     assert set(masked_metrics) == {
-        MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
-        MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY,
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY,
+        MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY,
         MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY,
         MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY,
     }
@@ -153,35 +166,55 @@ def test_finalize_std_noop_without_moments():
 
 
 def test_std_aggregates_correctly_across_microbatches_and_minibatches():
-    """Reduce per-micro-batch moments over micro-batches then mini-batches, derive the std, and
-    check it equals the exact pooled population std (exact because all sizes are equal)."""
-    # Four equal-size micro-batches grouped into two mini-batches of two micro-batches each.
+    """Reduce per-micro-batch sums/counts over micro-batches then mini-batches, derive the std, and
+    check it equals the exact pooled population std even with unequal micro-batch sizes."""
+    # Four unequal-size micro-batches grouped into two mini-batches of two micro-batches each.
     diffs = [
         torch.tensor([0.1, 0.3, 0.5, 0.2]),
-        torch.tensor([1.0, 0.8, 0.6, 0.4]),
-        torch.tensor([0.2, 0.2, 0.9, 0.7]),
-        torch.tensor([0.3, 0.5, 0.1, 0.6]),
+        torch.tensor([1.0, 0.8, 0.6, 0.4, 0.9, 0.1]),
+        torch.tensor([0.2, 0.2, 0.9]),
+        torch.tensor([0.3, 0.5, 0.1, 0.6, 0.7]),
     ]
 
-    def moments(d):
+    def sums(d):
         return {
-            MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY: d.mean().item(),
-            MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY: d.square().mean().item(),
+            MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY: d.sum().item(),
+            MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY: d.square().sum().item(),
+            MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY: float(d.numel()),
         }
 
-    keys = list(moments(diffs[0]).keys())
+    keys = list(sums(diffs[0]).keys())
     # Worker-level reduction over micro-batches within each mini-batch.
-    mb1 = reduce_metrics({k: [moments(diffs[0])[k], moments(diffs[1])[k]] for k in keys})
-    mb2 = reduce_metrics({k: [moments(diffs[2])[k], moments(diffs[3])[k]] for k in keys})
+    mb1 = reduce_metrics({k: [sums(diffs[0])[k], sums(diffs[1])[k]] for k in keys})
+    mb2 = reduce_metrics({k: [sums(diffs[2])[k], sums(diffs[3])[k]] for k in keys})
 
     # Trainer-level reduction across mini-batches.
     all_metrics = {k: [mb1[k], mb2[k]] for k in keys}
     reduced = reduce_metrics(all_metrics)
     finalize_minibatch_rollout_logprob_diff_std(reduced)
 
-    # All micro-batches are equal size, so the pooled mean/std are exact.
+    # The pooled mean/std are exact even though the micro-batch sizes differ.
     pooled = torch.cat(diffs)
-    assert MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY not in reduced
-    assert abs(reduced[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY] - pooled.mean().item()) < 1e-6
-    expected_std = pooled.std(unbiased=False).item()
-    assert abs(reduced[MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY] - expected_std) < 1e-6
+    assert MINIBATCH_ROLLOUT_LOGPROB_DIFF_SUM_KEY not in reduced
+    assert MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_SUM_KEY not in reduced
+    assert MINIBATCH_ROLLOUT_LOGPROB_DIFF_NNZ_KEY not in reduced
+    assert reduced[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY] == pytest.approx(pooled.mean().item())
+    assert reduced[MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY] == pytest.approx(pooled.std(unbiased=False).item())
+
+
+def test_finalize_policy_entropy_exact_across_unequal_shards():
+    """Entropy finalizes as sum/count, so an imbalanced set of shards gives the exact global mean
+    rather than a mean-of-means."""
+    metrics = {
+        POLICY_ENTROPY_SUM_KEY: 0.4 + 3.0,
+        LOSS_MASK_NNZ_KEY: 2.0 + 5.0,
+    }
+    finalize_policy_entropy(metrics)
+    assert metrics == {"policy_entropy": (0.4 + 3.0) / (2.0 + 5.0)}
+
+
+def test_finalize_policy_entropy_noop_without_keys():
+    """The entropy derivation is a no-op when the keys are absent."""
+    metrics = {"foo": 1.0}
+    finalize_policy_entropy(metrics)
+    assert metrics == {"foo": 1.0}
