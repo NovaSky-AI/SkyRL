@@ -283,14 +283,6 @@ override-dependencies = [
     # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
     # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
     "xgrammar==0.2.3",
-    # Matches vLLM 0.28.0's own metadata pin. We previously held torch at 2.11
-    # because the astral-cu130 extension wheels topped out earlier, at the cost of
-    # `vllm/third_party/deep_gemm/_C` -- a version-specific cpython-312 build linked
-    # against torch 2.13's c10, which failed to import with
-    # `undefined symbol: c10::ValueError(c10::SourceLocation, std::string)` and took
-    # the DeepGEMM fused-MoE / sparse-attn-indexer paths down with it. Astral still
-    # has no torch.2.13 builds, so the four affected extensions now come from wheels
-    # we built ourselves -- see [tool.uv.sources].
     "torch==2.13.0; sys_platform == 'linux'",
     # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
     # torch: 0.28.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.28.0 pulls
@@ -357,8 +349,9 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 #
 #   https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/cu13torch2.13
 #
-# They are cp312 only, built for both x86_64 and aarch64. Other Python versions and
-# architectures fall through to the PyPI sdist and build from source.
+# They cover cp311/cp312/cp313/cp314 on both x86_64 and aarch64 -- the whole of this
+# project's `requires-python = ">=3.11"` range, matching the coverage Astral gave us.
+# Anything outside that matrix falls through to the PyPI sdist and builds from source.
 #
 # NOTE: `TORCH_CUDA_ARCH_LIST` does NOT control what these wheels contain -- four of
 # the five packages ignore it and hardcode their own gencode lists (mamba-ssm's
@@ -377,16 +370,34 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 # `max_version = 2.8.3` and 2.8.3.post1 > 2.8.3. TE >= 2.16 strips the local segment
 # before comparing (`PkgVersion(...).public`).
 flash-attn = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp311-cp311-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
 ]
 causal-conv1d = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp311-cp311-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
 ]
 mamba-ssm = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp311-cp311-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
 ]
 # The TE meta and core packages carry no torch coupling in their versions
 # (2.16.0 / 2.16.0+cu.13.0), so they stay on Astral; only the torch bindings are
@@ -394,8 +405,14 @@ mamba-ssm = [
 transformer-engine = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 transformer-engine-cu13 = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 transformer-engine-torch = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp311-cp311-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/transformer_engine_torch-2.16.0-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
 ]
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
 # Linux uses the cu130 index (torch 2.13 wheels are published there).
@@ -424,9 +441,15 @@ vllm-router = [
 # Built against torch 2.13 + CUDA 13.0.88 alongside the other CUDA extensions above
 # TODO (sumanthrh): Move towards official torch 13 + CUDA 13 wheels when available
 fast-hadamard-transform = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp311-cp311-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.11' and python_full_version < '3.12'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
-    { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and ((platform_machine != 'x86_64' and platform_machine != 'aarch64') or python_full_version < '3.12' or python_full_version >= '3.13')" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_full_version >= '3.14' and python_full_version < '3.15'" },
+    { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and (platform_machine != 'x86_64' and platform_machine != 'aarch64' or python_full_version < '3.11' or python_full_version >= '3.15')" },
 ]
 
 
