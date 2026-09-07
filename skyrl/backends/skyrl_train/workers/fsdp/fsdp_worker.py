@@ -48,6 +48,16 @@ if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
 
 
+def _get_inference_weight_prefix(is_multimodal_lm_only: bool) -> str:
+    """Return the enclosing inference-model prefix omitted by language-only loading.
+
+    Shared by full-weight and LoRA exports. This preserves the existing assumption
+    that the inference VLM exposes its text model under ``language_model``; it is
+    not a universal naming convention for all VLM architectures.
+    """
+    return "language_model." if is_multimodal_lm_only else ""
+
+
 class FSDPWeightExtractor(WeightExtractor):
     """Extracts weights from FSDP-sharded models.
 
@@ -227,7 +237,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             )
             is CudaIpcTransferStrategy
         )
-        weight_prefix = "language_model." if self._is_multimodal_lm_only else ""
+        weight_prefix = _get_inference_weight_prefix(self._is_multimodal_lm_only)
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
             enable_bucketing=enable_bucketing,
@@ -260,6 +270,19 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
 
         lora_params = collect_lora_params(module=self.model.model)
+        weight_prefix = _get_inference_weight_prefix(self._is_multimodal_lm_only)
+        if weight_prefix:
+            # Keep PEFT's wrapper outermost; the inference namespace belongs inside it.
+            peft_wrapper_prefix = "base_model.model."
+            # Preserve unfamiliar naming formats rather than inventing a wrapper for them.
+            lora_params = {
+                (
+                    f"{peft_wrapper_prefix}{weight_prefix}{name.removeprefix(peft_wrapper_prefix)}"
+                    if name.startswith(peft_wrapper_prefix)
+                    else name
+                ): tensor
+                for name, tensor in lora_params.items()
+            }
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
