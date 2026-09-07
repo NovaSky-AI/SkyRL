@@ -41,6 +41,40 @@ def _new_pinned_like(t: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(t, device="cpu").pin_memory()
 
 
+def _iter_optimizer_state_groups(opt) -> Iterable[List[Tuple[torch.Tensor, dict]]]:
+    """Yield the live FP32 parameter and state for each optimizer shard."""
+    main_groups = getattr(opt, "shard_fp32_from_float16_groups", None) or []
+    shard_groups = getattr(opt, "shard_float16_groups", None) or []
+    optimizer = opt.optimizer
+    if len(main_groups) != len(shard_groups):
+        raise RuntimeError(
+            "AdapterStore: FP32-main and model-shard group counts differ: " f"{len(main_groups)} != {len(shard_groups)}"
+        )
+
+    for group_idx, (main_group, shard_group) in enumerate(zip(main_groups, shard_groups)):
+        if len(main_group) != len(shard_group):
+            raise RuntimeError(
+                f"AdapterStore: optimizer group {group_idx} main and shard counts differ: "
+                f"{len(main_group)} != {len(shard_group)}"
+            )
+
+        state_group = []
+        for param_idx, (main_param, shard_param) in enumerate(zip(main_group, shard_group)):
+            state_key = main_param if main_param is not None else shard_param
+            state = optimizer.state.get(state_key, {})
+            if main_param is None:
+                main_param = getattr(optimizer, "param_to_inner_param", {}).get(shard_param)
+                if main_param is None:
+                    main_param = state.get("master_param")
+                if not isinstance(main_param, torch.Tensor):
+                    raise RuntimeError(
+                        "AdapterStore: precision-aware optimizer has no FP32 master tensor "
+                        f"for group {group_idx} parameter {param_idx}"
+                    )
+            state_group.append((main_param, state))
+        yield state_group
+
+
 def _is_resident(t: Optional[torch.Tensor]) -> bool:
     """True when `t` still owns storage we can copy to/from.
 
@@ -124,10 +158,11 @@ class AdapterSlot:
           forward_backward aren't lost when another tenant runs before
           this adapter's optim_step.
       cpu_main_param[opt_idx][g] -> list[Tensor], shapes matching
-          opt.shard_fp32_from_float16_groups[g].
+          the optimizer's live FP32 master tensors.
       cpu_opt_state[opt_idx][g][i] -> dict[str, Tensor], mirroring
           opt.optimizer.state[main_param] for every tensor-valued entry
-          (exp_avg, exp_avg_sq, step, ...).
+          (exp_avg, exp_avg_sq, step, ...). Precision-aware optimizers expose
+          the master parameter in state; it is stored only in cpu_main_param.
     """
 
     cpu_param_data: List[List[torch.Tensor]] = field(default_factory=list)
@@ -209,20 +244,22 @@ class AdapterStore:
         for _opt in iter_opts(optimizer):
             opt_main: List[List[torch.Tensor]] = []
             opt_state: List[List[dict]] = []
-            groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
-            for g, group in enumerate(groups):
+            for group in _iter_optimizer_state_groups(_opt):
                 main_g: List[torch.Tensor] = []
                 state_g: List[dict] = []
-                for main_param in group:
+                for main_param, state in group:
                     main_g.append(_new_pinned_like(main_param))
-                    state = _opt.optimizer.state.get(main_param, {})
                     # Tensor entries get pinned-CPU mirrors; non-tensor scalar
                     # entries (e.g. PyTorch Adam's `state['step']` Python int)
                     # are stored by value and re-applied on restore. Without
                     # this, the global Adam step counter would leak across
                     # adapters and break bias correction.
                     state_g.append(
-                        {k: _new_pinned_like(v) if isinstance(v, torch.Tensor) else v for k, v in state.items()}
+                        {
+                            k: _new_pinned_like(v) if isinstance(v, torch.Tensor) else v
+                            for k, v in state.items()
+                            if k != "master_param"
+                        }
                     )
                 opt_main.append(main_g)
                 opt_state.append(state_g)
@@ -263,13 +300,13 @@ class AdapterStore:
             if _is_resident(buf.grad_data):
                 slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
-            groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
-            for g, group in enumerate(groups):
-                for i, main_param in enumerate(group):
+            for g, group in enumerate(_iter_optimizer_state_groups(_opt)):
+                for i, (main_param, state) in enumerate(group):
                     slot.cpu_main_param[opt_idx][g][i].copy_(main_param, non_blocking=True)
-                    state = _opt.optimizer.state.get(main_param, {})
                     cpu_state = slot.cpu_opt_state[opt_idx][g][i]
                     for k, v in state.items():
+                        if k == "master_param":
+                            continue
                         if isinstance(v, torch.Tensor):
                             if k in cpu_state and isinstance(cpu_state[k], torch.Tensor):
                                 cpu_state[k].copy_(v, non_blocking=True)
@@ -294,11 +331,9 @@ class AdapterStore:
             if _is_resident(buf.grad_data):
                 buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
-            groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
-            for g, group in enumerate(groups):
-                for i, main_param in enumerate(group):
+            for g, group in enumerate(_iter_optimizer_state_groups(_opt)):
+                for i, (main_param, state) in enumerate(group):
                     main_param.copy_(slot.cpu_main_param[opt_idx][g][i], non_blocking=True)
-                    state = _opt.optimizer.state.get(main_param, {})
                     cpu_state = slot.cpu_opt_state[opt_idx][g][i]
                     # Restore both tensor and non-tensor entries: tensors get
                     # copy_() into existing GPU storage; Python scalars (e.g.
