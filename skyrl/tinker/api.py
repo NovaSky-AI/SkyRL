@@ -718,6 +718,8 @@ class OptimStepRequest(BaseModel):
     adam_params: AdamParams
     seq_id: int | None = None
 
+    gradient_scale: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+
 
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
@@ -897,6 +899,8 @@ class SupportedModel(BaseModel):
 
 class GetServerCapabilitiesResponse(BaseModel):
     supported_models: list[SupportedModel]
+
+    streaming_accumulation_v1: bool = False
 
 
 class ListCheckpointsResponse(BaseModel):
@@ -1205,15 +1209,20 @@ async def forward(request: ForwardRequest, raw_request: Request, session: AsyncS
 
 
 @app.post("/api/v1/optim_step", response_model=FutureResponse)
-async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(get_session)):
+async def optim_step(request: OptimStepRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Update model using accumulated gradients."""
     await get_model(session, request.model_id)
+
+    if request.gradient_scale != 1.0 and not supports_streaming_accumulation(req.app.state.engine_config):
+        raise HTTPException(status_code=400, detail="Gradient scaling requires non-colocated Megatron training")
 
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.OPTIM_STEP,
         model_id=request.model_id,
-        request_data=types.OptimStepInput(adam_params=request.adam_params.to_types()),
+        request_data=types.OptimStepInput(
+            adam_params=request.adam_params.to_types(), gradient_scale=request.gradient_scale
+        ),
         seq_id=request.seq_id,
     )
 
@@ -1461,13 +1470,23 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
+def supports_streaming_accumulation(config: EngineConfig) -> bool:
+    return (
+        config.backend == "megatron"
+        and (config.backend_config or {}).get("trainer.placement.colocate_all", True) is False
+    )
+
+
 @app.get("/api/v1/get_server_capabilities", response_model=GetServerCapabilitiesResponse)
 async def get_server_capabilities(request: Request):
     """Retrieve information about supported models and server capabilities."""
     supported_models = [
         SupportedModel(model_name=request.app.state.engine_config.base_model),
     ]
-    return GetServerCapabilitiesResponse(supported_models=supported_models)
+    return GetServerCapabilitiesResponse(
+        supported_models=supported_models,
+        streaming_accumulation_v1=supports_streaming_accumulation(request.app.state.engine_config),
+    )
 
 
 class RetrieveFutureRequest(BaseModel):
