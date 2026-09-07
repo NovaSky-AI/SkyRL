@@ -82,10 +82,13 @@ def _rows_for_output(
     columns are the rows. Step-wise, each trajectory expands to one row per step, so rows are
     resolved through ``generator_output["trajectory_ids"]``.
     """
+    env_extras = generator_input["env_extras"]
+    if env_extras is None:
+        env_extras = [{} for _ in range(len(generator_input["prompts"]))]
     if not step_wise:
         return _EvalRows(
             env_classes=list(generator_input["env_classes"]),
-            env_extras=list(generator_input["env_extras"]),
+            env_extras=list(env_extras),
             uids=list(uids),
             prompts=list(generator_input["prompts"]),
         )
@@ -94,7 +97,7 @@ def _rows_for_output(
         for traj_id, env_class, env_extra, prompt in zip(
             generator_input["trajectory_ids"],
             generator_input["env_classes"],
-            generator_input["env_extras"],
+            env_extras,
             generator_input["prompts"],
         )
     }
