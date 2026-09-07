@@ -33,9 +33,9 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.num_prefill=$NUM_PREFILL \
   generator.inference_engine.engine_init_kwargs.kv_transfer_config.kv_connector=NixlConnector \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=1024 \
   trainer.policy_mini_batch_size=256 \

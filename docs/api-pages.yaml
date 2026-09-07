@@ -139,6 +139,7 @@
           description: ""
           objects:
             - skyrl.train.config.config.TrainerConfig
+            - skyrl.train.config.config.EvalConfig
             - skyrl.train.config.config.OptimizerConfig
             - skyrl.train.config.config.MixedPrecisionConfig
             - skyrl.train.config.config.FakeInt4QatConfig

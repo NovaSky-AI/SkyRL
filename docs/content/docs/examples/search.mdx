@@ -109,12 +109,12 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
     environment.skyrl_gym.search.topk=3 \
 
     # - Evaluation: batch size, intervals, sampling params
-    trainer.eval_batch_size=256 \
-    trainer.eval_before_train=false \
+    trainer.eval.batch_size=256 \
+    trainer.eval.before_train=false \
     generator.eval_sampling_params.temperature=0 \
     generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
     generator.eval_sampling_params.max_generate_length=500 \
-    trainer.eval_interval=50 \
+    trainer.eval.interval=50 \
     ... # logging + checkpointing configuration (see `examples/train/search/run_search.sh` for the full script)
 
 ```

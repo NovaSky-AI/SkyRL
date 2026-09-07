@@ -89,9 +89,9 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   generator.inference_engine.engine_init_kwargs.max_model_len=$MAX_MODEL_LEN \
   generator.inference_engine.engine_init_kwargs.enable_log_requests=false \
   trainer.epochs=3 \
-  trainer.eval_batch_size=128 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=100 \
+  trainer.eval.batch_size=128 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=100 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$MINI_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \

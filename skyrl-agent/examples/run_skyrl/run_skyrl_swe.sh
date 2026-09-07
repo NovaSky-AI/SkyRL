@@ -42,9 +42,9 @@ uv run --isolated --env-file .env --extra skyrl-train \
   generator.task="./examples/run_skyrl/skyrl_swe.yaml" \
   trainer.epochs=10 \
   trainer.seed=$seed \
-  trainer.eval_batch_size=128 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=10 \
+  trainer.eval.batch_size=128 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=10 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$BATCH_SIZE \
   trainer.policy_mini_batch_size=$BATCH_SIZE \

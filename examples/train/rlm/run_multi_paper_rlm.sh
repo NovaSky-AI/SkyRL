@@ -35,10 +35,10 @@ uv run --with "transformers==5.4.0" --extra fsdp --python 3.12 -m examples.train
   trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
   trainer.ref.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
   trainer.epochs=1 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=10 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=10 \
   trainer.update_epochs_per_batch=1 \
-  trainer.eval_batch_size=16 \
+  trainer.eval.batch_size=16 \
   trainer.train_batch_size=4 \
   trainer.policy_mini_batch_size=4 \
   trainer.micro_forward_batch_size_per_gpu=1 \
@@ -68,7 +68,7 @@ uv run --with "transformers==5.4.0" --extra fsdp --python 3.12 -m examples.train
   trainer.log_path="$(pwd)/.neer/artifacts/skyrl-logs" \
   trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
   trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \
-  trainer.dump_eval_results=true \
+  trainer.eval.dump_results=true \
   trainer.policy.language_model_only=true \
   trainer.ref.language_model_only=true \
   generator.inference_engine.language_model_only=true \

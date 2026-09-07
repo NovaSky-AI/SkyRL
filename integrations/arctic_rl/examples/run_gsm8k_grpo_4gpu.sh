@@ -64,9 +64,9 @@ uv run --isolated --extra skyrl-train \
   trainer.placement.colocate_all=false \
   trainer.placement.policy_num_gpus_per_node=2 \
   trainer.epochs=1 \
-  trainer.eval_batch_size=256 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=10 \
+  trainer.eval.batch_size=256 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=10 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=256 \
   trainer.policy_mini_batch_size=4 \

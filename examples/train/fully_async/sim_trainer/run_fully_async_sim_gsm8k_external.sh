@@ -53,8 +53,8 @@ uv run --isolated --extra fsdp \
   trainer.policy_mini_batch_size=${MINI_BATCH_SIZE} \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=0 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=0 \
   trainer.ckpt_interval=-1 \
   trainer.hf_save_interval=-1 \
   trainer.resume_mode=none \

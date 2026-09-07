@@ -119,9 +119,9 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.eval_n_samples_per_prompt=16 \
   trainer.epochs=20 \
   trainer.max_training_steps=400 \
-  trainer.eval_batch_size=512 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=-1 \
+  trainer.eval.batch_size=512 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=-1 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=32 \
   trainer.policy_mini_batch_size=32 \

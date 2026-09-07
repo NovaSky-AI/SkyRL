@@ -128,9 +128,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.max_ckpts_to_keep=3 \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
-  trainer.eval_batch_size=256 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=50 \
+  trainer.eval.batch_size=256 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=50 \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
   generator.eval_sampling_params.max_generate_length=500 \

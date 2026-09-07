@@ -37,10 +37,10 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=false \
   trainer.remove_microbatch_padding=$REMOVE_MICROBATCH_PADDING \
-  trainer.eval_interval=5 \
+  trainer.eval.interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=1024 \
   trainer.policy_mini_batch_size=256 \

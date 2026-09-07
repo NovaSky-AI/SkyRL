@@ -89,7 +89,7 @@ class HarborExp(BasePPOExp):
         return HarborTaskDataset(data_files=self.cfg.data.train_data)
 
     def get_eval_dataset(self):
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+        if self.cfg.trainer.eval.interval > 0 and self.cfg.data.val_data:
             return HarborTaskDataset(data_files=self.cfg.data.val_data)
         return None
 ```

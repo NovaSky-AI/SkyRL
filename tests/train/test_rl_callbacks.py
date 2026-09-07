@@ -5,7 +5,7 @@ with three callbacks registered:
   * RecorderCallback — snapshots every event for sequence + payload assertions.
   * ForceEvaluateAtStep — sets ``control.should_evaluate = True`` on the
     on_step_end of step 1, exercising the callback-driven eval path. With
-    ``eval_interval=2`` step 1 would not normally eval, so any eval event
+    ``eval.interval=2`` step 1 would not normally eval, so any eval event
     seen at step 1 comes from this callback.
   * ForceSaveAtStep — sets ``control.should_save = True`` on the on_step_end
     of step 2, exercising the callback-driven save path.
@@ -157,10 +157,10 @@ def _build_test_cfg():
     cfg = example_dummy_config()
     # 1 epoch over a 2-batch dataloader -> 2 steps total.
     cfg.trainer.epochs = 1
-    # eval_interval=2 means step 1 has no interval-driven eval; only the force-evaluate
+    # eval.interval=2 means step 1 has no interval-driven eval; only the force-evaluate
     # callback can trigger eval at step 1. Step 2 still gets an interval-driven eval.
-    cfg.trainer.eval_interval = 2
-    cfg.trainer.eval_before_train = False
+    cfg.trainer.eval.interval = 2
+    cfg.trainer.eval.before_train = False
     # ckpt_interval=0 means the callback-driven force-save is the only save path tested.
     cfg.trainer.ckpt_interval = 0
     cfg.trainer.hf_save_interval = 0
@@ -261,7 +261,7 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
 
     event_names = [name for name, _ in recorder.events]
 
-    # eval_interval=2 -> step 1 has no interval-driven eval, so on_eval_start/end
+    # eval.interval=2 -> step 1 has no interval-driven eval, so on_eval_start/end
     # at step 1 only appear because ForceEvaluateAtStep set should_evaluate.
     # on_save at step 2 only appears because ForceSaveAtStep set should_save.
     # Step 2's eval is interval-driven (last_step == total_training_steps).

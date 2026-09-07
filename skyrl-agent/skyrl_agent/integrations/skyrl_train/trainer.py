@@ -158,7 +158,7 @@ def build_dataloader(
             mainly makes the batch size 1.
     """
     # prepare dataloader
-    batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval_batch_size
+    batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval.batch_size
 
     # Seed the dataloader for reproducibility.
     seeded_generator = torch.Generator()
@@ -295,7 +295,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
             await self.dispatch.save_weights_for_sampler()
 
         # Eval before training
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
+        if self.cfg.trainer.eval.interval > 0 and self.cfg.trainer.eval.before_train:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
                 self.tracker.log(eval_metrics, step=self.global_step, commit=True)
@@ -409,8 +409,8 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                 logger.info(status)
                 # log epoch info
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                if self.cfg.trainer.eval_interval > 0 and (
-                    self.global_step % self.cfg.trainer.eval_interval == 0
+                if self.cfg.trainer.eval.interval > 0 and (
+                    self.global_step % self.cfg.trainer.eval.interval == 0
                     or self.global_step == self.total_training_steps
                 ):
                     with Timer("eval", self.all_timings):
@@ -512,7 +512,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
         # 4. Prepare dumping data
         # TODO[Ben] update this to be cloud-compatible
-        if cfg.trainer.dump_eval_results:
+        if cfg.trainer.eval.dump_results:
             with Timer("dump_eval_results"):
                 data_save_dir = (
                     Path(cfg.trainer.export_path)

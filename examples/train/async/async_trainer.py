@@ -41,7 +41,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             await self.dispatch.save_weights_for_sampler()
 
         # Eval before training
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
+        if self.cfg.trainer.eval.interval > 0 and self.cfg.trainer.eval.before_train:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
                 self.tracker.log(eval_metrics, step=self.global_step)
@@ -90,8 +90,8 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                     self.all_metrics = {}
                     pbar.update(1)
 
-                    if self.cfg.trainer.eval_interval > 0 and (
-                        self.global_step % self.cfg.trainer.eval_interval == 0
+                    if self.cfg.trainer.eval.interval > 0 and (
+                        self.global_step % self.cfg.trainer.eval.interval == 0
                         or self.global_step == self.total_training_steps
                     ):
                         with Timer("eval", self.all_timings):

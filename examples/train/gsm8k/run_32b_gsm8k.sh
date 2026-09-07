@@ -45,7 +45,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.run_name="gsm8k_test_32b" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_32B_ckpt" \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=5 \
   $@

@@ -70,9 +70,9 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   trainer.epochs=20 \
   trainer.algorithm.sapo.tau_pos=$TAU_POS \
   trainer.algorithm.sapo.tau_neg=$TAU_NEG \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=10 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=10 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \

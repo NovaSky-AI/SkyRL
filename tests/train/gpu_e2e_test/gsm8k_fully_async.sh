@@ -20,7 +20,7 @@ LOGPROBS_DIFF_MAX_VALUE=0.0193
 # The anyscale job's working_dir is the repo root, so we can use relative paths.
 bash examples/train/fully_async/fully_async_run_gsm8k.sh \
   trainer.epochs=1 \
-  trainer.eval_before_train=true \
+  trainer.eval.before_train=true \
   trainer.micro_forward_batch_size_per_gpu=8 \
   trainer.micro_train_batch_size_per_gpu=8 \
   trainer.run_name=\"$RUN_NAME\" trainer.project_name=\"gsm8k_fully_async_ci\"

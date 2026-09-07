@@ -10,6 +10,7 @@ import dataclasses
 import json
 import os
 import typing
+import warnings
 from abc import ABC
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -80,7 +81,7 @@ class DataConfig(BaseConfig):
     """Files for the evaluation dataset, in the same formats accepted by ``train_data``.
     When more than one is given, evaluation runs over all of them: both per-dataset metrics
     (keyed by each sample's ``data_source``) and aggregated ``eval/all/*`` metrics are logged,
-    and ``trainer.dump_eval_results`` dumps the per-dataset and aggregated results."""
+    and ``trainer.eval.dump_results`` dumps the per-dataset and aggregated results."""
     dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
 
 
@@ -1020,7 +1021,7 @@ class FullyAsyncConfig(BaseConfig):
     ``broadcast_to_inference_engines``. The generation-side dynamics (staleness control, rate
     limiting, pause/resume) remain faithful.
 
-    Because no models are built, this requires ``trainer.eval_interval``, ``trainer.ckpt_interval``,
+    Because no models are built, this requires ``trainer.eval.interval``, ``trainer.ckpt_interval``,
     and ``trainer.hf_save_interval`` to all be ``<= 0``, ``trainer.update_ref_every_epoch=False``,
     and resumption to be disabled. See
     https://docs.skyrl.ai/docs/tutorials/fully_async for usage."""
@@ -1382,6 +1383,36 @@ class MTPConfig(BaseConfig):
 
 
 # ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EvalConfig(BaseConfig):
+    """When evaluation runs and how it is batched, dumped and logged.
+
+    Sampling behaviour during eval (``eval_sampling_params``, ``eval_n_samples_per_prompt``) lives on
+    ``GeneratorConfig``; this class only orchestrates."""
+
+    interval: int = 5
+    """Evaluate against the validation dataset every N steps. ``-1`` to disable evaluation."""
+    before_train: bool = True
+    """Evaluate the model once before training starts."""
+    batch_size: int = 1024
+    """Batch size for evaluation."""
+    dump_results: bool = True
+    """Dump full evaluation results to a file.
+    Results at global step N are written to ``{export_path}/dumped_evals/global_step_{N}_evals``, with both per-dataset
+    and aggregated results when multiple validation datasets are configured."""
+    num_logger_samples: int = -1
+    """Number of evaluation trajectory (prompt, response, score) tuples to upload to a wandb
+    table on each eval. ``-1`` (default) or ``0`` disables. When positive,
+    up to this many samples are taken from the start of each eval pass and
+    logged via :class:`TrajectoryLogger`. Column count is fixed
+    by the first call, so keep the eval set size and this value stable."""
+
+
+# ---------------------------------------------------------------------------
 # Trainer (top-level)
 # ---------------------------------------------------------------------------
 
@@ -1491,12 +1522,8 @@ class TrainerConfig(BaseConfig):
     remove_microbatch_padding: bool = True
     """Pack samples into the THD layout and strip intra-microbatch padding (requires flash attention).
     Common to all models."""
-    eval_batch_size: int = 1024
-    """Batch size for evaluation."""
-    eval_before_train: bool = True
-    """Evaluate the model once before training starts."""
-    eval_interval: int = 5
-    """Evaluate against the validation dataset every N steps. ``-1`` to disable evaluation."""
+    eval: EvalConfig = field(default_factory=EvalConfig)
+    """Evaluation orchestration: when eval runs, how it is batched, dumped and logged. See ``EvalConfig``."""
     max_prompt_length: int = 512
     """Maximum prompt length during training.
     Prompts longer than this are filtered out of the train/eval datasets at load time, not
@@ -1518,19 +1545,9 @@ class TrainerConfig(BaseConfig):
     """Dump each training data batch to a file for debugging.
     The batch at global step N is written to
     ``{export_path}/dumped_data/global_step_{N}_training_input.pkl``."""
-    dump_eval_results: bool = True
-    """Dump full evaluation results to a file.
-    Results at global step N are written to ``{export_path}/dumped_evals/global_step_{N}_evals``, with both per-dataset
-    and aggregated results when multiple validation datasets are configured."""
     print_example_interval: int = 1
     """Pretty-print an example prompt/response/reward to stdout every N
     training steps; ``0``/``-1`` disables. Renamed from ``log_example_interval``."""
-    num_logger_eval_samples: int = -1
-    """Number of evaluation trajectory (prompt, response, score) tuples to upload to a wandb
-    table on each eval. ``-1`` (default) or ``0`` disables. When positive,
-    up to this many samples are taken from the start of each eval pass and
-    logged via :class:`TrajectoryLogger`. Column count is fixed
-    by the first call, so keep the eval set size and this value stable."""
     num_logger_train_samples: int = -1
     """Number of training trajectory (prompt, response, score) tuples to upload to a wandb
     table on each training step. ``-1`` (default) or ``0`` disables. When positive,
@@ -1620,6 +1637,65 @@ class TrainerConfig(BaseConfig):
                 f"got {self.vocab_entropy_chunk_memory_mb!r}."
             )
 
+    # Deprecated flat eval keys, moved under ``eval``. CLI/dict overrides are remapped in
+    # ``SkyRLTrainConfig.from_cli_overrides``; these properties keep attribute reads and writes
+    # working for out-of-tree code (skyrl-agent, custom trainer loops). Remove after one release.
+
+    @property
+    def eval_interval(self) -> int:
+        """Deprecated alias for ``eval.interval``."""
+        _warn_flat_eval_key("eval_interval", "eval.interval")
+        return self.eval.interval
+
+    @eval_interval.setter
+    def eval_interval(self, value: int) -> None:
+        _warn_flat_eval_key("eval_interval", "eval.interval")
+        self.eval.interval = value
+
+    @property
+    def eval_before_train(self) -> bool:
+        """Deprecated alias for ``eval.before_train``."""
+        _warn_flat_eval_key("eval_before_train", "eval.before_train")
+        return self.eval.before_train
+
+    @eval_before_train.setter
+    def eval_before_train(self, value: bool) -> None:
+        _warn_flat_eval_key("eval_before_train", "eval.before_train")
+        self.eval.before_train = value
+
+    @property
+    def eval_batch_size(self) -> int:
+        """Deprecated alias for ``eval.batch_size``."""
+        _warn_flat_eval_key("eval_batch_size", "eval.batch_size")
+        return self.eval.batch_size
+
+    @eval_batch_size.setter
+    def eval_batch_size(self, value: int) -> None:
+        _warn_flat_eval_key("eval_batch_size", "eval.batch_size")
+        self.eval.batch_size = value
+
+    @property
+    def dump_eval_results(self) -> bool:
+        """Deprecated alias for ``eval.dump_results``."""
+        _warn_flat_eval_key("dump_eval_results", "eval.dump_results")
+        return self.eval.dump_results
+
+    @dump_eval_results.setter
+    def dump_eval_results(self, value: bool) -> None:
+        _warn_flat_eval_key("dump_eval_results", "eval.dump_results")
+        self.eval.dump_results = value
+
+    @property
+    def num_logger_eval_samples(self) -> int:
+        """Deprecated alias for ``eval.num_logger_samples``."""
+        _warn_flat_eval_key("num_logger_eval_samples", "eval.num_logger_samples")
+        return self.eval.num_logger_samples
+
+    @num_logger_eval_samples.setter
+    def num_logger_eval_samples(self, value: int) -> None:
+        _warn_flat_eval_key("num_logger_eval_samples", "eval.num_logger_samples")
+        self.eval.num_logger_samples = value
+
 
 def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
     """
@@ -1664,6 +1740,20 @@ def overrides_dict_to_dotlist(args: Dict[str, Any]) -> List[str]:
             serialized = str(value)
         dotlist.append(f"{key}={serialized}")
     return dotlist
+
+
+_FLAT_EVAL_KEY_MIGRATIONS = {
+    "trainer.eval_interval": "trainer.eval.interval",
+    "trainer.eval_before_train": "trainer.eval.before_train",
+    "trainer.eval_batch_size": "trainer.eval.batch_size",
+    "trainer.dump_eval_results": "trainer.eval.dump_results",
+    "trainer.num_logger_eval_samples": "trainer.eval.num_logger_samples",
+}
+"""Deprecated flat ``trainer.*`` eval keys and the ``trainer.eval.*`` keys that replaced them."""
+
+
+def _warn_flat_eval_key(old: str, new: str) -> None:
+    warnings.warn(f"trainer.{old} is deprecated; use trainer.{new} instead.", DeprecationWarning, stacklevel=3)
 
 
 def _has_nested_key(cfg: Any, path: str) -> bool:
@@ -1812,8 +1902,6 @@ class SkyRLTrainConfig(BaseConfig):
 
         ie_cfg = self.generator.inference_engine
         if _uses_lora_weight_sync(self) and ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
-            import warnings
-
             warnings.warn(
                 "LoRA is enabled but inference_engine.enforce_eager=true. "
                 "This combination causes significant performance degradation (2-3x slower generation). "
@@ -1937,8 +2025,6 @@ class SkyRLTrainConfig(BaseConfig):
                     "Specify only one of trainer.use_sample_packing (deprecated) and "
                     "trainer.remove_microbatch_padding, not both."
                 )
-            import warnings
-
             warnings.warn(
                 "trainer.use_sample_packing has been renamed to "
                 "trainer.remove_microbatch_padding; use "
@@ -1948,6 +2034,19 @@ class SkyRLTrainConfig(BaseConfig):
             )
             overrides.trainer["remove_microbatch_padding"] = overrides.trainer["use_sample_packing"]
             del overrides.trainer["use_sample_packing"]
+        # Same treatment for the flat eval keys that moved under ``trainer.eval``.
+        for old_path, new_path in _FLAT_EVAL_KEY_MIGRATIONS.items():
+            if not _has_nested_key(overrides, old_path):
+                continue
+            if _has_nested_key(overrides, new_path):
+                raise ValueError(f"Specify only one of {old_path} (deprecated) and {new_path}, not both.")
+            warnings.warn(
+                f"{old_path} has been renamed to {new_path}; use {new_path} instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            OmegaConf.update(overrides, new_path, _get_nested_value(overrides, old_path))
+            _delete_nested_key(overrides, old_path)
         return cls.from_dict_config(overrides)
 
 

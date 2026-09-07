@@ -58,7 +58,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     )
     cfg.generator.eval_n_samples_per_prompt = 1
     cfg.environment = EnvironmentConfig(env_class="gsm8k")
-    cfg.trainer.dump_eval_results = False
+    cfg.trainer.eval.dump_results = False
     cfg.trainer.export_path = str(tmp_path)
 
     prompts_batch = [
@@ -138,7 +138,7 @@ def _configure_eval(cfg, tmp_path, *, step_wise: bool, dump_results: bool = Fals
     cfg.generator.eval_n_samples_per_prompt = 1
     cfg.generator.step_wise_trajectories = step_wise
     cfg.environment = EnvironmentConfig(env_class="gsm8k")
-    cfg.trainer.dump_eval_results = dump_results
+    cfg.trainer.eval.dump_results = dump_results
     cfg.trainer.export_path = str(tmp_path)
     return cfg
 

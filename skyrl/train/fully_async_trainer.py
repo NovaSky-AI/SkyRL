@@ -483,7 +483,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self._ray_gpu_monitor.start()
 
         # Eval before training
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
+        if self.cfg.trainer.eval.interval > 0 and self.cfg.trainer.eval.before_train:
             with self._phase_gauge.timed_phase("eval", self.all_timings):
                 eval_metrics = await self.eval()
                 self.tracker.log(eval_metrics, step=self.global_step, commit=True)
@@ -615,8 +615,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                     # 6. Eval. At interval and at the last step.
                     # NOTE(Charlie): eval does not overlap with training, but overlaps with generation.
-                    if self.cfg.trainer.eval_interval > 0 and (
-                        self.global_step % self.cfg.trainer.eval_interval == 0
+                    if self.cfg.trainer.eval.interval > 0 and (
+                        self.global_step % self.cfg.trainer.eval.interval == 0
                         or self.global_step == self.total_training_steps
                     ):
                         with self._phase_gauge.timed_phase("eval", self.all_timings):

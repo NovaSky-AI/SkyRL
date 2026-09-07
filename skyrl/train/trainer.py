@@ -285,7 +285,7 @@ class RayPPOTrainer:
 
         # Eval before training. Wrapped in eval callbacks + on_log so that e.g.
         # a best-checkpoint callback sees the baseline reading.
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
+        if self.cfg.trainer.eval.interval > 0 and self.cfg.trainer.eval.before_train:
             self._fire("on_eval_start")
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
@@ -496,8 +496,8 @@ class RayPPOTrainer:
                         )
                     # log epoch info
                     self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                    interval_eval = self.cfg.trainer.eval_interval > 0 and (
-                        self.global_step % self.cfg.trainer.eval_interval == 0
+                    interval_eval = self.cfg.trainer.eval.interval > 0 and (
+                        self.global_step % self.cfg.trainer.eval.interval == 0
                         or self.global_step == self.total_training_steps
                     )
                     if force_eval or interval_eval:

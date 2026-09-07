@@ -58,9 +58,9 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=1024 \
   trainer.policy_mini_batch_size=256 \

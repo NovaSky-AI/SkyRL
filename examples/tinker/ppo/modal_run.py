@@ -31,7 +31,7 @@ Usage (from the repo root):
     # pass extra Hydra overrides to the standard PPO launcher
     modal run examples/tinker/ppo/modal_run.py \
         --experiment standard \
-        --standard-extra-args "trainer.epochs=1 trainer.eval_interval=1"
+        --standard-extra-args "trainer.epochs=1 trainer.eval.interval=1"
 
 The Tinker client uses TINKER_API_KEY=tml-dummy, matching the bundled SkyRL
 Tinker server's default (see the NovaSky blog post and run_tinker_server.sh).

@@ -77,9 +77,9 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=10 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=10 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \

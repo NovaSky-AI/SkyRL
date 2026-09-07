@@ -106,11 +106,11 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.max_ckpts_to_keep=5 \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/${RUN_NAME}" \
-  trainer.eval_batch_size=256 \
-  trainer.eval_before_train=false \
+  trainer.eval.batch_size=256 \
+  trainer.eval.before_train=false \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
   generator.eval_sampling_params.max_generate_length=500 \
   trainer.export_path="$HOME/${RUN_NAME}/exports" \
-  trainer.eval_interval=800 \
+  trainer.eval.interval=800 \
   $@

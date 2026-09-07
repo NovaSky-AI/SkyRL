@@ -59,9 +59,9 @@ uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_asyn
   trainer.policy.model.lora.alpha=$LORA_ALPHA \
   trainer.policy.megatron_config.lora_config.merge_lora=$MERGE_LORA \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=4 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=4 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=${MINI_BATCH_SIZE} \
   trainer.policy_mini_batch_size=${MINI_BATCH_SIZE} \

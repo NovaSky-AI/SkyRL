@@ -54,9 +54,9 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   generator.inference_engine.num_engines=$NUM_INFERENCE_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=4 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=4 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=${MINI_BATCH_SIZE} \
   trainer.policy_mini_batch_size=${MINI_BATCH_SIZE} \

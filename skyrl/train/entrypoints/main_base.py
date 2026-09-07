@@ -93,7 +93,7 @@ class BasePPOExp:
         Returns:
             The evaluation dataset, or None if evaluation is disabled.
         """
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+        if self.cfg.trainer.eval.interval > 0 and self.cfg.data.val_data:
             prompts_dataset = PromptDataset(
                 datasets=self.cfg.data.val_data,
                 tokenizer=self.tokenizer,

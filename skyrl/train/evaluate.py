@@ -221,12 +221,12 @@ async def evaluate(
     # trajectory when step-wise.
     scored_outputs, scored_rows, num_turns_list = _scored_view(concat_generator_outputs, rows, step_wise)
 
-    # Optionally upload up to `num_logger_eval_samples` samples to tracker (wandb)
+    # Optionally upload up to `eval.num_logger_samples` samples to tracker (wandb)
     if trajectory_logger is not None:
         with Timer("log_eval_results"):
             trajectory_logger.log(
                 tracker=tracker,
-                num_samples=cfg.trainer.num_logger_eval_samples,
+                num_samples=cfg.trainer.eval.num_logger_samples,
                 prompts=scored_rows.prompts,
                 generator_output=scored_outputs,
                 tokenizer=tokenizer,
@@ -255,7 +255,7 @@ async def evaluate(
 
     # 4. Prepare dumping data. The dump keeps every row (every step when step-wise).
     # TODO[Ben] update this to be cloud-compatible
-    if cfg.trainer.dump_eval_results:
+    if cfg.trainer.eval.dump_results:
         with Timer("dump_eval_results"):
             data_save_dir = (
                 Path(cfg.trainer.export_path)

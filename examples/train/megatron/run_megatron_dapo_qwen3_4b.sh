@@ -86,9 +86,9 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.epochs=20 \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \

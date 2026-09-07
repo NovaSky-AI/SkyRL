@@ -62,7 +62,7 @@ uv run --isolated --extra megatron -m examples.train_scripts.full_context.main_f
   trainer.logger="wandb" \
   trainer.project_name="gsm8k_full_ctx" \
   trainer.run_name="gsm8k_full_ctx_test_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=5 \
   trainer.num_dummy_steps=5

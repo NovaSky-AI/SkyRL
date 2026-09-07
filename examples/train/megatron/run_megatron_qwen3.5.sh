@@ -49,9 +49,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.ref.language_model_only=$LANGUAGE_MODEL_ONLY \
   generator.inference_engine.language_model_only=$LANGUAGE_MODEL_ONLY \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=1024 \
   trainer.policy_mini_batch_size=256 \

@@ -60,9 +60,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.remove_microbatch_padding=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=128 \
   trainer.policy_mini_batch_size=64 \

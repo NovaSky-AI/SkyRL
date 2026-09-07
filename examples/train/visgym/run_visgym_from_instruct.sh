@@ -85,10 +85,10 @@ uv run --isolated --extra fsdp \
   trainer.resume_mode=null \
   trainer.log_path="/tmp/skyrl-logs" \
   trainer.export_path="$EXPORT_PATH" \
-  trainer.dump_eval_results=true \
+  trainer.eval.dump_results=true \
   trainer.ckpt_path="$HOME/ckpts/visgym_maze_2d_easy_from_instruct" \
   trainer.remove_microbatch_padding=false \
-  trainer.eval_interval=10 \
+  trainer.eval.interval=10 \
   trainer.ckpt_interval=10 \
   trainer.algorithm.loss_reduction=token_mean_legacy \
   "$@"

@@ -82,8 +82,8 @@ class FullyAsyncTrainerSim(FullyAsyncRayPPOTrainer):
         # so assert those are off — no models are built in sim mode, so they would otherwise crash.
         t = self.cfg.trainer
         assert (
-            t.eval_interval <= 0
-        ), "FullyAsyncTrainerSim: set trainer.eval_interval<=0 to disable (no models to eval)."
+            t.eval.interval <= 0
+        ), "FullyAsyncTrainerSim: set trainer.eval.interval<=0 to disable (no models to eval)."
         assert (
             t.ckpt_interval <= 0
         ), "FullyAsyncTrainerSim: set trainer.ckpt_interval<=0 to disable (no models to checkpoint)."

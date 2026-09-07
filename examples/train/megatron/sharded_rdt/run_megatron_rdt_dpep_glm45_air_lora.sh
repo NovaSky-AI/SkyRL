@@ -150,8 +150,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.remove_microbatch_padding=true \
   trainer.epochs=1 \
   trainer.max_training_steps=$NUM_STEPS \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=1000 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=1000 \
   trainer.ckpt_interval=1000 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=16 \

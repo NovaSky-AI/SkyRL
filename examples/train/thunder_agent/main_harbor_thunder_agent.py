@@ -93,7 +93,7 @@ class HarborThunderAgentFullyAsyncExp(FullyAsyncThunderAgentExp):
         return prompts_dataset
 
     def get_eval_dataset(self):
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+        if self.cfg.trainer.eval.interval > 0 and self.cfg.data.val_data:
             return self._build_harbor_task_dataset(
                 data_files=self.cfg.data.val_data,
                 max_tasks=self.cfg.max_eval_tasks,

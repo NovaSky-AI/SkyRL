@@ -37,7 +37,7 @@ async def test_main_generate(ray_init_fixture, tmp_path):
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.export_path = str(tmp_path)
     cfg.trainer.ckpt_path = str(tmp_path)
-    cfg.trainer.dump_eval_results = False
+    cfg.trainer.eval.dump_results = False
 
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.tensor_parallel_size = 1
@@ -51,8 +51,8 @@ async def test_main_generate(ray_init_fixture, tmp_path):
         data_path = create_dataset(tmp_path, cfg.trainer.policy.model.path)
         cfg.data.val_data = [data_path]
         cfg.trainer.train_batch_size = 1
-        cfg.trainer.eval_batch_size = 1
-        cfg.trainer.eval_interval = 1
+        cfg.trainer.eval.batch_size = 1
+        cfg.trainer.eval.interval = 1
 
         exp = EvalOnlyEntrypoint(cfg)
         inference_engine_client = exp.get_inference_client()

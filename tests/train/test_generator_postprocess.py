@@ -26,7 +26,7 @@ class DummyDataset:
 def create_config(batch_size):
     cfg = SkyRLTrainConfig()
     cfg.trainer.train_batch_size = batch_size
-    cfg.trainer.eval_batch_size = batch_size
+    cfg.trainer.eval.batch_size = batch_size
     cfg.trainer.resume_mode = "none"
     cfg.trainer.seed = 42
     cfg.trainer.epochs = 1

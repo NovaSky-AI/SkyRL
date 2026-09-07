@@ -87,9 +87,9 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   trainer.epochs=1 \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=$EVAL_CKPT_INTERVAL \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=$EVAL_CKPT_INTERVAL \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$MINI_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \

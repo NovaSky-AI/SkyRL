@@ -151,9 +151,9 @@ cd "${SKYRL_DIR}"
     generator.inference_engine.async_engine=true \
     generator.batched=true \
     trainer.epochs=1 \
-    trainer.eval_batch_size=32 \
-    trainer.eval_before_train=false \
-    trainer.eval_interval=100 \
+    trainer.eval.batch_size=32 \
+    trainer.eval.before_train=false \
+    trainer.eval.interval=100 \
     trainer.update_epochs_per_batch=1 \
     trainer.train_batch_size=${TRAIN_BSZ} \
     trainer.policy_mini_batch_size=${MINI_BSZ} \

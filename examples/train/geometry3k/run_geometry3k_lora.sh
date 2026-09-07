@@ -40,9 +40,9 @@ uv run --isolated --extra fsdp --with pylatexenc \
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=6 \
-  trainer.eval_batch_size=256 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=256 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=128 \
   trainer.policy_mini_batch_size=64 \
@@ -69,7 +69,7 @@ uv run --isolated --extra fsdp --with pylatexenc \
   trainer.resume_mode=null \
   trainer.log_path="/tmp/skyrl-logs" \
   trainer.export_path="$EXPORT_PATH" \
-  trainer.dump_eval_results=true \
+  trainer.eval.dump_results=true \
   trainer.ckpt_path="$HOME/ckpts/geometry3k_vlm_lora_ckpt" \
   trainer.algorithm.loss_reduction=token_mean_legacy \
   "$@"

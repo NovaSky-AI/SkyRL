@@ -4,7 +4,7 @@ uv run --isolated --extra dev pytest -s tests/train/test_config.py
 
 import pathlib
 import typing
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Annotated, Optional
 
@@ -15,6 +15,7 @@ from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.train.config.config import (
     BaseConfig,
     DeltaWeightSyncConfig,
+    EvalConfig,
     SkyRLTrainConfig,
     TrainerConfig,
     _resolve_class_type,
@@ -1162,3 +1163,85 @@ class TestDeltaWeightSyncConfig:
         # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
         assert "my_sync_dir" in cfg.publish_staging_dir
         assert "my_sync_dir" in cfg.local_checkpoint_dir
+
+
+# ---------------------------------------------------------------------------
+# EvalConfig: `trainer.eval.*` and the deprecated flat `trainer.eval_*` keys
+# ---------------------------------------------------------------------------
+
+_FLAT_EVAL_KEY_CASES = [
+    ("trainer.eval_interval", "trainer.eval.interval", 7),
+    ("trainer.eval_before_train", "trainer.eval.before_train", False),
+    ("trainer.eval_batch_size", "trainer.eval.batch_size", 16),
+    ("trainer.dump_eval_results", "trainer.eval.dump_results", False),
+    ("trainer.num_logger_eval_samples", "trainer.eval.num_logger_samples", 3),
+]
+
+
+def test_eval_config_new_keys():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.eval.interval=7",
+            "trainer.eval.before_train=false",
+            "trainer.eval.batch_size=16",
+            "trainer.eval.dump_results=false",
+            "trainer.eval.num_logger_samples=3",
+        ]
+    )
+    assert cfg.trainer.eval.interval == 7
+    assert cfg.trainer.eval.before_train is False
+    assert cfg.trainer.eval.batch_size == 16
+    assert cfg.trainer.eval.dump_results is False
+    assert cfg.trainer.eval.num_logger_samples == 3
+
+
+@pytest.mark.parametrize(("old", "new", "value"), _FLAT_EVAL_KEY_CASES)
+def test_eval_config_flat_keys_remap_and_warn(old, new, value):
+    cli_value = str(value).lower() if isinstance(value, bool) else str(value)
+    with pytest.warns(DeprecationWarning, match=old):
+        cfg = SkyRLTrainConfig.from_cli_overrides([f"{old}={cli_value}"])
+    assert _get_nested_attr(cfg, new) == value
+    # The flat key must not survive into the typed config's serialized form.
+    assert old.split(".")[-1] not in asdict(cfg)["trainer"]
+
+
+def test_eval_config_flat_and_nested_together_rejected():
+    with pytest.raises(ValueError, match="only one of"):
+        SkyRLTrainConfig.from_cli_overrides(["trainer.eval_interval=7", "trainer.eval.interval=7"])
+
+
+def test_eval_config_dict_overrides_remap():
+    with pytest.warns(DeprecationWarning, match="trainer.eval_interval"):
+        cfg = SkyRLTrainConfig.from_cli_overrides({"trainer.eval_interval": 3})
+    assert cfg.trainer.eval.interval == 3
+
+
+def test_trainer_config_flat_eval_attributes_alias_nested():
+    cfg = TrainerConfig()
+    with pytest.warns(DeprecationWarning, match="trainer.eval_interval"):
+        cfg.eval_interval = 9
+    assert cfg.eval.interval == 9
+    with pytest.warns(DeprecationWarning, match="trainer.eval_interval"):
+        assert cfg.eval_interval == 9
+    with pytest.warns(DeprecationWarning, match="trainer.num_logger_eval_samples"):
+        cfg.num_logger_eval_samples = 4
+    assert cfg.eval.num_logger_samples == 4
+
+
+def test_eval_config_absent_from_flat_serialization():
+    trainer = asdict(SkyRLTrainConfig())["trainer"]
+    assert trainer["eval"] == {
+        "interval": 5,
+        "before_train": True,
+        "batch_size": 1024,
+        "dump_results": True,
+        "num_logger_samples": -1,
+    }
+    for old, _, _ in _FLAT_EVAL_KEY_CASES:
+        assert old.split(".")[-1] not in trainer
+
+
+def test_trainer_config_accepts_nested_eval_config():
+    cfg = TrainerConfig(eval=EvalConfig(batch_size=2))
+    assert cfg.eval.batch_size == 2
+    assert example_dummy_config().trainer.eval.batch_size == 2

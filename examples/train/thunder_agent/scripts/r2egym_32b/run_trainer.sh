@@ -301,9 +301,9 @@ fi
   trainer.placement.ref_num_gpus_per_node="$TRAIN_GPUS_PER_NODE" \
   trainer.critic.model.path=null \
   trainer.epochs="$EPOCHS" \
-  trainer.eval_batch_size=128 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval="$EVAL_INTERVAL" \
+  trainer.eval.batch_size=128 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval="$EVAL_INTERVAL" \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size="$TRAIN_BATCH_SIZE" \
   trainer.policy_mini_batch_size="$MINI_BATCH_SIZE" \

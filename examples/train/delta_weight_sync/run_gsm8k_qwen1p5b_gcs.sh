@@ -42,9 +42,9 @@ uv run --isolated --extra fsdp --extra "$CLOUD_EXTRA" -m skyrl.train.entrypoints
   generator.inference_engine.tensor_parallel_size=$INFERENCE_TP_SIZE \
   trainer.epochs=20 \
   trainer.max_training_steps=$MAX_TRAINING_STEPS \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=1024 \
   trainer.policy_mini_batch_size=256 \

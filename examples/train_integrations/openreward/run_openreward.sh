@@ -73,11 +73,11 @@ uv run --isolated --extra fsdp --with openreward \
   trainer.max_ckpts_to_keep=5 \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$CKPT_DIR" \
-  trainer.eval_batch_size=64 \
-  trainer.eval_before_train=false \
+  trainer.eval.batch_size=64 \
+  trainer.eval.before_train=false \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</tool_call>"]' \
   generator.eval_sampling_params.max_generate_length=1024 \
   trainer.export_path="$EXPORT_DIR" \
-  trainer.eval_interval=50 \
+  trainer.eval.interval=50 \
   $@

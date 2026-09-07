@@ -142,7 +142,7 @@ See [`examples/train/fully_async/main_fully_async_sim.py`](https://github.com/No
 - `trainer.fully_async.simulate_weight_sync_seconds`: Wall-clock seconds generation stays paused to
   stand in for the (skipped) weight broadcast. `0.0` means pause then immediately resume.
 
-Because no models are built, `simulate_training=true` requires `trainer.eval_interval`,
+Because no models are built, `simulate_training=true` requires `trainer.eval.interval`,
 `trainer.ckpt_interval`, and `trainer.hf_save_interval` to all be `<= 0`,
 `trainer.update_ref_every_epoch=false`, and resumption to be disabled.
 

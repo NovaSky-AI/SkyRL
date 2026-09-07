@@ -2,6 +2,7 @@
 
 from skyrl.train.config import (
     AlgorithmConfig,
+    EvalConfig,
     GeneratorConfig,
     InferenceEngineConfig,
     SamplingParams,
@@ -18,7 +19,7 @@ def example_dummy_config():
         logger="tensorboard",
         micro_train_batch_size_per_gpu=2,
         train_batch_size=2,
-        eval_batch_size=2,
+        eval=EvalConfig(batch_size=2),
         update_epochs_per_batch=1,
         epochs=1,
         max_prompt_length=20,

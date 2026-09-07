@@ -22,8 +22,8 @@ uv run --isolated --with verifiers --extra fsdp -m examples.train_integrations.v
   generator.inference_engine.tensor_parallel_size=1 \
   generator.n_samples_per_prompt=5 \
   trainer.epochs=20 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=5 \
   trainer.train_batch_size=128 \
   trainer.policy_mini_batch_size=128 \
   trainer.micro_forward_batch_size_per_gpu=32 \

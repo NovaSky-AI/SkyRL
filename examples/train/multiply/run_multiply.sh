@@ -26,9 +26,9 @@ uv run --isolated --extra fsdp -m examples.train.multiply.main_multiply \
   trainer.critic_mini_batch_size=256 \
   trainer.micro_forward_batch_size_per_gpu=64 \
   trainer.micro_train_batch_size_per_gpu=64 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=5 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \

@@ -39,7 +39,7 @@ uv run --isolated --extra fsdp -m examples.train_scripts.full_context.main_full_
   trainer.logger="wandb" \
   trainer.project_name="gsm8k_full_ctx" \
   trainer.run_name="gsm8k_full_ctx_test" \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=1024 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=5 \
   trainer.num_dummy_steps=5

@@ -52,9 +52,9 @@ uv run --isolated --env-file .env --extra skyrl-train -m skyrl_agent.integration
   generator.task="./examples/run_skyrl/skyrl_web_research_hle.yaml" \
   trainer.epochs=10 \
   trainer.seed=$seed \
-  trainer.eval_batch_size=128 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=50 \
+  trainer.eval.batch_size=128 \
+  trainer.eval.before_train=true \
+  trainer.eval.interval=50 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=64 \
   trainer.policy_mini_batch_size=64 \

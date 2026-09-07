@@ -840,7 +840,7 @@ def build_dataloader(
             mainly makes the batch size 1.
     """
     # prepare dataloader
-    batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval_batch_size
+    batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval.batch_size
 
     # Seed the dataloader for reproducibility.
     seeded_generator = torch.Generator()

@@ -27,9 +27,9 @@ uv run --isolated --extra fsdp --env-file .env.llm_judge -m examples.train.llm_a
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$TP_SIZE \
   trainer.epochs=20 \
-  trainer.eval_batch_size=32 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
+  trainer.eval.batch_size=32 \
+  trainer.eval.before_train=false \
+  trainer.eval.interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=32 \
   trainer.policy_mini_batch_size=32 \

@@ -81,7 +81,7 @@ class HarborExp(BasePPOExp):
         Returns:
             HarborTaskDataset: The evaluation dataset.
         """
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+        if self.cfg.trainer.eval.interval > 0 and self.cfg.data.val_data:
             prompts_dataset = HarborTaskDataset(
                 data_files=self.cfg.data.val_data,
             )
