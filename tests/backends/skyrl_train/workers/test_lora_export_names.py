@@ -9,15 +9,20 @@ import pytest
 import torch
 from peft import LoraConfig, TaskType
 from safetensors.torch import load_file
-from vllm.lora.utils import parse_fine_tuned_lora_name
-from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
 
-from skyrl.backends.skyrl_train.distributed import fsdp_utils
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+# Collection imports this module before marker selection, including in CPU-only CI.
+pytest.importorskip("vllm", reason="LoRA export tests use vLLM's adapter-name parser and model mapper")
+pytestmark = pytest.mark.vllm
+
+from vllm.lora.utils import parse_fine_tuned_lora_name  # noqa: E402
+from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration  # noqa: E402
+
+from skyrl.backends.skyrl_train.distributed import fsdp_utils  # noqa: E402
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (  # noqa: E402
     RemoteInferenceClient,
 )
-from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
-from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
+from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase  # noqa: E402
+from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
