@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 
-def build_config(profile: str, model_path: Path, state_dir: Path) -> dict:
+def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: Path | None = None) -> dict:
     root = Path(__file__).parent
     config = json.loads((root / "common.json").read_text())
     overrides = json.loads((root / f"{profile}.json").read_text())
@@ -19,6 +19,22 @@ def build_config(profile: str, model_path: Path, state_dir: Path) -> dict:
     config["trainer.policy.model.path"] = str(model_path)
     config["generator.inference_engine.engine_init_kwargs"]["model"] = str(model_path)
     config["trainer.policy.model.lora.lora_sync_path"] = str(state_dir / "lora-sync")
+    if profile_dir is not None:
+        if not profile_dir.is_absolute():
+            raise ValueError("profile-dir must be an absolute path on the policy nodes")
+        config["trainer.policy.torch_profiler_config"] = {
+            "enable": True,
+            "ranks": [0],
+            "save_path": str(profile_dir),
+            "skip_first": 0,
+            "wait": 0,
+            "warmup": 1,
+            "active": 1,
+            "repeat": 1,
+            "record_shapes": True,
+            "profile_memory": True,
+            "with_stack": False,
+        }
     return config
 
 
@@ -29,11 +45,12 @@ def main() -> None:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--database-path", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--profile-dir", type=Path, help="Record one policy GPU trace; omit for timing control")
     parser.add_argument("--print-config", action="store_true")
     args = parser.parse_args()
     if not all(path.is_absolute() for path in (args.model_path, args.state_dir, args.database_path)):
         parser.error("model-path, state-dir and database-path must be absolute")
-    config = build_config(args.profile, args.model_path, args.state_dir)
+    config = build_config(args.profile, args.model_path, args.state_dir, args.profile_dir)
     if args.print_config:
         print(json.dumps(config, indent=2))
         return

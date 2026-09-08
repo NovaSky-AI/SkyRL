@@ -31,7 +31,12 @@ class TestProfiles(unittest.TestCase):
                 self.assertEqual(engine["max_model_len"], context)
                 self.assertEqual(engine["model"], "/models/glm")
                 self.assertEqual(engine["moe_backend"], "triton")
-                self.assertEqual(engine["kv_cache_dtype"], "fp8")
+                self.assertEqual(engine["kv_cache_dtype"], "auto")
+                self.assertEqual(cfg["generator.inference_engine.model_dtype"], "bfloat16")
+                self.assertNotIn("lora_target_modules", engine)
+                self.assertNotIn("generator.inference_engine.max_num_seqs", cfg)
+                self.assertIn("linear_kv_up_proj", cfg["trainer.policy.model.lora.target_modules"])
+                self.assertIn("linear_fc1", cfg["trainer.policy.model.lora.target_modules"])
                 attention = cfg["trainer.policy.megatron_config.transformer_config_kwargs"]
                 self.assertEqual(attention["dsa_kernel_backend"], "tilelang")
                 self.assertEqual(attention["recompute_num_layers"], 1)
@@ -62,9 +67,18 @@ class TestProfiles(unittest.TestCase):
 
     def test_profile_overrides_do_not_leak_between_calls(self):
         first = module.build_config("256k-3n", Path("/m"), Path("/s"))
-        first["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"] = "auto"
+        first["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"] = "fp8"
         second = module.build_config("32k-2n", Path("/m"), Path("/s"))
-        self.assertEqual(second["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"], "fp8")
+        self.assertEqual(second["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"], "auto")
+
+    def test_profile_window_is_opt_in_and_does_not_change_model_recipe(self):
+        control = module.build_config("32k-2n", Path("/m"), Path("/s"))
+        profiled = module.build_config("32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
+        profiler = profiled.pop("trainer.policy.torch_profiler_config")
+        self.assertEqual(profiled, control)
+        self.assertEqual((profiler["warmup"], profiler["active"], profiler["repeat"]), (1, 1, 1))
+        with self.assertRaisesRegex(ValueError, "absolute path"):
+            module.build_config("32k-2n", Path("/m"), Path("/s"), Path("relative/traces"))
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@
     "linear_fc2"
   ],
   "generator.inference_engine.backend": "vllm",
+  "generator.inference_engine.model_dtype": "bfloat16",
   "generator.inference_engine.run_engines_locally": true,
   "generator.inference_engine.language_model_only": true,
   "generator.inference_engine.num_engines": 1,
@@ -63,27 +64,14 @@
   "generator.inference_engine.distributed_executor_backend": "mp",
   "generator.inference_engine.weight_sync_backend": "nccl",
   "generator.inference_engine.enforce_eager": false,
-  "generator.inference_engine.max_num_seqs": 8,
   "generator.inference_engine.max_num_batched_tokens": 32768,
   "generator.inference_engine.enable_prefix_caching": false,
   "generator.inference_engine.enable_chunked_prefill": true,
   "generator.inference_engine.engine_init_kwargs": {
-    "kv_cache_dtype": "fp8",
+    "kv_cache_dtype": "auto",
     "disable_custom_all_reduce": true,
     "linear_backend": "triton",
     "moe_backend": "triton",
-    "lora_target_modules": [
-      "fused_qkv_a_proj",
-      "q_a_proj",
-      "q_b_proj",
-      "q_proj",
-      "kv_a_proj_with_mqa",
-      "kv_b_proj",
-      "o_proj",
-      "gate_up_proj",
-      "down_proj",
-      "experts"
-    ],
     "trust_remote_code": true
   },
   "trainer.policy.model.lora.share_expert_adapters": true
