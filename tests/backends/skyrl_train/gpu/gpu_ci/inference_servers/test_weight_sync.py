@@ -89,7 +89,7 @@ class WeightSyncTrainerBase:
 
     def sync_once(self):
         """Rendezvous on the first call, then run one full weight sync."""
-        from skyrl.backends.skyrl_train.weight_sync.trainer_engines import (
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
             build_trainer_engine,
         )
 
@@ -108,7 +108,7 @@ class WeightSyncTrainerBase:
 
     def shutdown(self):
         if self._engine is not None:
-            from skyrl.backends.skyrl_train.weight_sync.trainer_engines import (
+            from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
                 teardown_engine,
             )
 
@@ -120,7 +120,8 @@ class WeightSyncTrainerBase:
 # the producer sidecar it spawns to this GPU for CUDA IPC.
 NcclTrainer = ray.remote(num_gpus=1)(WeightSyncTrainerBase)
 RdtTrainer = ray.remote(num_gpus=1, max_concurrency=4)(WeightSyncTrainerBase)
-# IPC shares a GPU with the colocated server, so a fraction.
+# IPC shares a GPU with the colocated server; its fraction and placement group
+# are set per call in _make_env.
 IpcTrainer = ray.remote(WeightSyncTrainerBase)
 
 

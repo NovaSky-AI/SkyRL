@@ -291,7 +291,6 @@ class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: TrainerConfig, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
-        self._transfer_strategy_cls = None  # Set in init_weight_transfer_communicator
         # Populated by init_model when torch profiling is enabled.
         self.profiler = None
 
@@ -340,8 +339,8 @@ class Worker(DistributedTorchRayActor):
         By default only toggles under ``colocate_all`` (the colocated IPC path, which
         only shares CUDA memory when trainer and inference share GPUs); under
         non-colocated runs the push backends use NCCL broadcast, which has its own
-        buffers and is unaffected. ``force`` comes from the sender's
-        ``force_disable_expandable_segments``, for backends that CUDA-IPC share
+        buffers and is unaffected. ``force`` comes from the trainer engine's
+        ``skyrl_force_disable_expandable_segments``, for backends that CUDA-IPC share
         regardless of colocation: sharded_rdt shares every gathered group with its
         sidecar producer over ``reduce_tensor``/CUDA IPC, and expandable-segment
         (VMM) memory makes that export/rebuild ~5-10x slower per storage
@@ -491,7 +490,7 @@ class Worker(DistributedTorchRayActor):
             simultaneously: rank 0 blocks driving the inference-side handshake
             while the others reach the collectives it needs.
         """
-        from skyrl.backends.skyrl_train.weight_sync.trainer_engines import (
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
             build_trainer_engine,
         )
 
@@ -599,15 +598,14 @@ class Worker(DistributedTorchRayActor):
         memory bracket around it.
 
         Three things the engine cannot do for itself, each decided by a
-        capability probe on it (see ``trainer_engines.engine_capability``):
+        capability declared on it (see ``weight_senders.SkyrlTrainerCapabilities``):
 
         * the prefix-cache reset, unless the engine handles it internally
           (checkpoint-delta does, inside its own pause bracket);
         * the ``expandable_segments`` toggle, a trainer-process allocator setting;
         * ``empty_cache`` afterwards.
         """
-        from skyrl.backends.skyrl_train.weight_sync.trainer_engines import (
-            engine_capability,
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
             maybe_set_reset_prefix_cache,
         )
 
@@ -615,7 +613,7 @@ class Worker(DistributedTorchRayActor):
         maybe_set_reset_prefix_cache(engine, self._should_reset_prefix_cache(inference_engine_cfg))
 
         cache_reset_task = None
-        if not engine_capability(engine, "handles_prefix_cache_reset", False):
+        if not engine.skyrl_handles_prefix_cache_reset:
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
 
         torch.cuda.empty_cache()
@@ -624,9 +622,7 @@ class Worker(DistributedTorchRayActor):
         # is incompatible with the VMM addresses expandable segments use; some
         # engines (sharded_rdt) share GPU memory on every run and ask for the
         # toggle unconditionally.
-        with self._expandable_segments_disabled_for_sync(
-            force=engine_capability(engine, "force_disable_expandable_segments", False)
-        ):
+        with self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments):
             await self._weight_sync_thread(engine.send_weights)
 
         if cache_reset_task is not None:
@@ -635,7 +631,7 @@ class Worker(DistributedTorchRayActor):
         # empty_cache_after_send=False: scrubbing them back to CUDA costs
         # 0.25-0.53s per rank at 235B and buys nothing. Under colocation an
         # inference engine wants the physical memory, so empty regardless.
-        if engine_capability(engine, "empty_cache_after_send", True) or self.cfg.placement.colocate_all:
+        if engine.skyrl_empty_cache_after_send or self.cfg.placement.colocate_all:
             torch.cuda.empty_cache()
         torch.distributed.barrier()
 

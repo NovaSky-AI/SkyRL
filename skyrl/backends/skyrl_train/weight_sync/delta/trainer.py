@@ -28,9 +28,12 @@ from vllm.distributed.weight_transfer.base import (
     WeightSource,
 )
 
-from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
+from skyrl.backends.skyrl_train.weight_sync.delta.checkpoint import (
     DeltaCheckpointPublisher,
     DeltaPublishResult,
+)
+from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+    SkyrlTrainerCapabilities,
 )
 
 if TYPE_CHECKING:
@@ -63,7 +66,7 @@ class DeltaTrainerInitInfo(TrainerInitInfo):
     multi_thread_safetensors_max_workers: int = 8
 
 
-class DeltaTrainerWeightTransferEngine(TrainerWeightTransferEngine[DeltaTrainerInitInfo]):
+class DeltaTrainerWeightTransferEngine(SkyrlTrainerCapabilities, TrainerWeightTransferEngine[DeltaTrainerInitInfo]):
     """Publish a checkpoint delta and drive the inference-side reload."""
 
     init_info_cls = DeltaTrainerInitInfo
@@ -183,16 +186,3 @@ class DeltaTrainerWeightTransferEngine(TrainerWeightTransferEngine[DeltaTrainerI
 
     def shutdown(self) -> None:
         self._publisher = None
-
-
-def register_delta_trainer_engine() -> None:
-    """Register ``delta`` in ``WeightTransferTrainerFactory`` (idempotent)."""
-    from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-
-    if DELTA_BACKEND in WeightTransferTrainerFactory._registry:
-        return
-    WeightTransferTrainerFactory.register_engine(
-        DELTA_BACKEND,
-        "skyrl.backends.skyrl_train.weight_sync.delta_trainer",
-        "DeltaTrainerWeightTransferEngine",
-    )

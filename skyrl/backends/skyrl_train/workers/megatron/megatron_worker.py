@@ -239,9 +239,8 @@ class MegatronWorker:
         provider.attention_backend = "flash" if flash_attn else "fused"
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
-        # Apply explicit MoE config fields to the provider.
-        # These replace the previously hardcoded values and can be further
-        # overridden by transformer_config_kwargs if needed.
+        # Apply explicit MoE config fields to the provider. Overridable via
+        # transformer_config_kwargs below.
         provider.moe_token_dispatcher_type = megatron_config.moe_token_dispatcher_type
         provider.moe_router_load_balancing_type = megatron_config.moe_router_load_balancing_type
         provider.moe_aux_loss_coeff = megatron_config.moe_aux_loss_coeff

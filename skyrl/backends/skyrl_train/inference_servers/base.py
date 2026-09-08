@@ -123,13 +123,16 @@ class InferenceEngineInterface(ABC):
 
     @abstractmethod
     async def update_named_weights(self, request: "LoraLoadRequest | Dict[str, Any]"):
-        """Load weights the engine can reach itself, rather than transferring them.
+        """Update model weights. Used for full parameter fine-tuning"""
+        raise NotImplementedError()
 
-        The only caller is the LoRA path, which passes a
-        :class:`LoraLoadRequest` naming an adapter directory on disk. Tensor
-        transfer goes through the trainer-side engines (see
-        ``weight_sync/trainer_engines.py``).
-        """
+    @abstractmethod
+    async def load_lora_adapter(
+        self,
+        lora_name: str,
+        lora_path: str,
+    ) -> Dict[str, Any]:
+        """Load LoRA adapter"""
         raise NotImplementedError()
 
     @abstractmethod

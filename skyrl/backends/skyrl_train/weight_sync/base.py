@@ -12,8 +12,8 @@ class LoraLoadRequest:
     from a path rather than moving any tensor.
 
     ``lora_name`` is the name vLLM registers the adapter under, and what callers
-    later pass as ``model=<lora_name>`` when sampling. Empty string preserves the
-    legacy single-tenant behavior where the engine generates a numeric name.
+    later pass as ``model=<lora_name>`` when sampling. Empty string leaves the
+    engine to generate a numeric name (the single-tenant path).
     """
 
     lora_path: str = ""

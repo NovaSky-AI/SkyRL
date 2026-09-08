@@ -2,7 +2,7 @@
 
 SkyRL drives weight sync through vLLM's trainer-send abstraction: each training
 worker builds a ``WeightSource`` over its live model (``sources.py``) and hands
-it to a ``TrainerWeightTransferEngine`` (``trainer_engines.py``) whose
+it to a ``TrainerWeightTransferEngine`` (``weight_senders.py``) whose
 ``send_weights()`` owns the whole round trip. Four backends:
 
 ===============  ==========================================================
@@ -14,7 +14,7 @@ it to a ``TrainerWeightTransferEngine`` (``trainer_engines.py``) whose
 
 This package imports no vLLM at module scope: half the CPU suite runs without the
 (Linux-only, optional) wheel. The vLLM-facing modules -- ``sources``,
-``trainer_engines``, ``skyrl_engines``, ``delta_trainer`` -- are imported at their
+``weight_senders``, ``delta.trainer``, ``delta.engine`` -- are imported at their
 call sites instead.
 """
 

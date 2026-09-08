@@ -1,7 +1,7 @@
 """vLLM worker extension for the two weight-sync things an engine cannot do.
 
 Weight transfer itself does not route through here: the receive path is an engine
-subclass (``weight_sync/skyrl_engines.py``, ``weight_sync/delta_engine.py``,
+subclass (``weight_sync/weight_receivers.py``, ``weight_sync/delta/engine.py``,
 ``weight_sync/sharded_rdt/sharded_rdt_engine.py``) driven over vLLM's native RLHF
 routes, which wrap ``set_current_vllm_config`` themselves and give each engine
 its own layerwise-reload lifecycle.
@@ -30,6 +30,7 @@ Usage:
         skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap
 """
 
+import logging
 from typing import TYPE_CHECKING
 
 import torch
@@ -53,31 +54,18 @@ except ModuleNotFoundError:
     pass
 
 try:
-    from skyrl.backends.skyrl_train.weight_sync.skyrl_engines import (
-        register_skyrl_engines,
+    from skyrl.backends.skyrl_train.weight_sync.register import (
+        register_receive_engines,
     )
 
-    register_skyrl_engines()
+    register_receive_engines()
 except ModuleNotFoundError:
-    pass
-
-try:
-    from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
-        register_delta_weight_transfer_engine,
+    logging.getLogger(__name__).debug(
+        "skyrl.weight_sync.register not importable; receive engines are unregistered "
+        "and any weight sync in this worker will fail at create_engine.",
+        exc_info=True,
     )
 
-    register_delta_weight_transfer_engine()
-except ModuleNotFoundError:
-    pass
-
-try:
-    from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
-        rdt_vllm_register,  # noqa: F401
-    )
-
-    rdt_vllm_register.ensure_registered()
-except ModuleNotFoundError:
-    pass
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
@@ -97,9 +85,7 @@ class NewInferenceWorkerWrap:
     def fetch_weights(self, target_version: int, sync_dir: str | None = None, uri: str | None = None):
         """Fetch/apply a checkpoint delta before the paused reload phase."""
         if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
-            )
+            raise RuntimeError("Weight transfer not configured: set weight_transfer_config on the engine.")
         fetch = getattr(self.weight_transfer_engine, "fetch_weights", None)
         if fetch is None:
             raise RuntimeError(f"{type(self.weight_transfer_engine).__name__} does not support fetch_weights")

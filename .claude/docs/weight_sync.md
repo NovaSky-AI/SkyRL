@@ -20,18 +20,19 @@ so a source's only obligation is to be a lazy generator that does not retain.
 skyrl/backends/skyrl_train/weight_sync/
 ├── __init__.py             # backend selection: get_transfer_strategy / get_vllm_receive_backend
 ├── base.py                 # LoraLoadRequest (not a weight transfer -- an adapter path)
+├── register.py             # the ONE home for both factories' registrations
 ├── sources.py              # FsdpWeightSource / MegatronWeightSource (vLLM's metadata()+__iter__)
-├── trainer_engines.py      # build_trainer_engine: init info + client -> trainer_init
+├── weight_senders.py       # build_trainer_engine: init info + client -> trainer_init
 ├── control_plane.py        # SkyrlWeightSyncClient (blocking HTTP) + per-server init rewrites
-├── skyrl_engines.py        # receive side: skyrl_nccl / skyrl_ipc (+ the drafter-reload proxy)
-├── delta_trainer.py        # DeltaTrainerWeightTransferEngine (send side)
-├── delta_engine.py         # DeltaWeightTransferEngine (receive side, in the vLLM worker)
-├── delta_checkpoint.py     # DeltaCheckpointPublisher, LocalCheckpointStore, manifest + XOR payloads
-├── delta_payload.py        # zstd compress/decompress + uint8 tensor <-> bytes helpers
+├── weight_receivers.py     # receive side: skyrl_nccl / skyrl_ipc (+ the drafter-reload proxy)
+├── delta/                  # the checkpoint-delta backend; __init__ is import-free
+│   ├── trainer.py              # DeltaTrainerWeightTransferEngine (send side)
+│   ├── engine.py               # DeltaWeightTransferEngine (receive side, in the vLLM worker)
+│   ├── checkpoint.py           # DeltaCheckpointPublisher, LocalCheckpointStore, manifest + XOR
+│   └── payload.py              # zstd compress/decompress + uint8 tensor <-> bytes helpers
 └── sharded_rdt/            # the sharded_rdt (NIXL pull) backend; __init__ is import-free
     ├── rdt_send.py             # its WeightSources + build_rdt_trainer_init_info
     ├── sharded_rdt_base.py     # GroupedWeightSource + layerwise_groups (the two RDT-only channels)
-    ├── rdt_vllm_register.py    # registers the sharded_rdt engine into vLLM's factory
     ├── rdt_libfabric_shim.py   # LIBFABRIC provider shim for NIXL
     ├── sharded_rdt_trainer.py  # vendored: trainer engine + the _RDTProducerServer sidecar
     ├── sharded_rdt_engine.py   # vendored: consumer engine (runs in the vLLM worker)
@@ -39,10 +40,17 @@ skyrl/backends/skyrl_train/weight_sync/
     └── sharded_rdt_fake.py     # vendored: FakeRDTTensor placeholders for the bake
 ```
 
-Neither `__init__.py` imports anything: `sources`, `trainer_engines`, `delta_trainer`,
-`sharded_rdt_engine` and `sharded_rdt_trainer` import `vllm` at module scope, so a
-re-export would pull vllm into every `weight_sync` import and break the CPU CI job that
-runs without the wheel. Import those modules at their call sites.
+No `__init__.py` imports anything: `sources`, `weight_senders`, `delta/trainer.py`,
+`delta/engine.py`, `sharded_rdt_engine` and `sharded_rdt_trainer` import `vllm` at module
+scope, so a re-export would pull vllm into every `weight_sync` import and break the CPU CI
+job that runs without the wheel. Import those modules at their call sites.
+
+`register.py` is how they reach vLLM's factories without being imported: it names `delta`
+and `sharded_rdt` by module path and class name as strings, which vLLM resolves only when a
+worker constructs the backend. `register_receive_engines()` runs on the driver and in every
+vLLM worker; `register_trainer_engines()` runs on each trainer rank. `skyrl_nccl` /
+`skyrl_ipc` are the exception — built dynamically as subclasses of vLLM's engines, so the
+class object itself is registered.
 
 vLLM worker-extension class (loaded via `--worker-extension-cls`):
 
@@ -56,17 +64,16 @@ vLLM worker-extension class (loaded via `--worker-extension-cls`):
 
 ### Trainer side, per backend
 
-| logical backend | trainer engine | receive engine (`WeightTransferConfig.backend`) |
+| logical backend | trainer engine (factory key) | receive engine (`WeightTransferConfig.backend`) |
 |---|---|---|
-| `nccl` | vLLM's `NCCLTrainerWeightTransferEngine` | `skyrl_nccl` |
-| `ipc` | vLLM's `IPCTrainerWeightTransferEngine` | `skyrl_ipc` |
-| `delta` | `DeltaTrainerWeightTransferEngine` | `delta` |
-| `sharded_rdt` | `ShardedRDTTrainerWeightTransferEngine` | `sharded_rdt` |
+| `nccl` | `SkyrlNCCLTrainerWeightTransferEngine` (`skyrl_nccl`) | `skyrl_nccl` |
+| `ipc` | `SkyrlIPCTrainerWeightTransferEngine` (`skyrl_ipc`) | `skyrl_ipc` |
+| `delta` | `DeltaTrainerWeightTransferEngine` (`delta`) | `delta` |
+| `sharded_rdt` | `ShardedRDTTrainerWeightTransferEngine` (`sharded_rdt`) | `sharded_rdt` |
 
-The receive side takes new names for NCCL and IPC because SkyRL subclasses vLLM's
-engines (to reload the spec-decode drafter) and `register_engine` raises on an
-already-registered name. The trainer-side factory has its own registry, so the send side
-keeps vLLM's names.
+Both sides take new names for NCCL and IPC because SkyRL subclasses vLLM's engines --
+the receive side to reload the spec-decode drafter, the send side to declare the capability
+attributes above -- and `register_engine` raises on an already-registered name.
 
 ## Transfer backends
 
@@ -105,14 +112,6 @@ there first.
   generator in HF-canonical order that gathers TP/PP/EP internally. `metadata()` must
   materialize once to learn shapes, so it runs a dry export and caches.
 
-**There is no bucketing, and that is deliberate.** Bucketing does not bound memory — it
-*accumulates* a whole bucket before handing it on, where the unbucketed export yields one
-parameter at a time. What it was for, IPC handle count and Flash-RL fused-loader grouping,
-`packed_ipc_producer`'s single reusable buffer subsumes. And one whole-model
-`export_hf_weights` call satisfies `_accumulate_grouped_export`'s "every task of a
-`group_key` in one call" requirement by construction, where bucketing has to special-case
-it (splitting them means expert weights are silently never yielded).
-
 ### Control plane
 
 `control_plane.SkyrlWeightSyncClient` is a **blocking** HTTP client over vLLM's native
@@ -134,21 +133,27 @@ worker-side init dict:
 - `rdt_init_payloads` — the deployment ordinal as `replica_rank` plus `num_replicas`, so
   the engine can offset its consumer ids into globally distinct ranges.
 
-### Capability probes
+### Capability declarations
 
-Three things the trainer engine cannot do for itself are decided by `getattr` probes on
-the engine in `Worker._sync_weights_to_inference_engines`:
+Three things the trainer engine cannot do for itself are read off the engine as plain
+attributes in `Worker._sync_weights_to_inference_engines`. `weight_senders.SkyrlTrainerCapabilities`
+declares them with the common-case defaults, and every trainer engine inherits it:
 
-| probe | default | who sets it |
+| attribute | default | who overrides it |
 |---|---|---|
 | `skyrl_handles_prefix_cache_reset` | False | delta (it resets inside its own pause bracket) |
 | `skyrl_force_disable_expandable_segments` | False | sharded_rdt (CUDA-IPC shares on every run, not only under colocation) |
 | `skyrl_empty_cache_after_send` | True | sharded_rdt sets False (buffers are reused next step) |
 
-They are probes and not declared attributes because two of the four engines are vLLM's
-own classes and cannot carry SkyRL attributes at all — so the *absence* of a flag is the
-common case and must mean the default. `skyrl_set_reset_prefix_cache(bool)` is the same
-idea for a per-round value, since `send_weights()` takes no arguments.
+vLLM's own NCCL and IPC trainer engines cannot carry SkyRL attributes, so SkyRL subclasses
+them — `SkyrlNCCLTrainerWeightTransferEngine` / `SkyrlIPCTrainerWeightTransferEngine`, with
+init infos whose `backend` ClassVar is `skyrl_nccl` / `skyrl_ipc` — exactly as the receive
+side does, and for the same reason: `register_engine` refuses a duplicate name. All four
+trainer engines therefore declare all three attributes, so a misspelled name is an
+`AttributeError` rather than a silently-wrong default.
+
+`skyrl_set_reset_prefix_cache(bool)` stays a `getattr` probe: it is a per-round value and
+only delta implements it, since `send_weights()` takes no arguments.
 
 ## Delta backend
 
@@ -355,7 +360,7 @@ receive path needs no SkyRL wrapper.
 ### Spec-decode drafter reload
 
 vLLM's engines call `self.model.load_weights(...)` directly and there is still no
-`load_weights` callback, so `skyrl_engines.SkyrlDrafterReloadMixin` swaps `self.model` for
+`load_weights` callback, so `weight_receivers.SkyrlDrafterReloadMixin` swaps `self.model` for
 a `_LoadWeightsProxy` for the duration of `receive_weights` — the drafter
 (`model_runner.drafter.model`, a separate module the main load never touches) is then
 reloaded from exactly the weights the main model just received. The proxy is only
@@ -391,12 +396,12 @@ Validated in `validate_inference_engine_cfg`. vLLM-version coupled (mirrors `GPU
 rules, not one:
 
 - A module that **anything** vllm-free imports must import `vllm` **lazily inside
-  methods**: `weight_sync/__init__.py`, `base.py`, `delta_checkpoint.py`,
-  `delta_engine.py`, `control_plane.py` and `new_inference_worker_wrap.py` all follow this.
+  methods**: `weight_sync/__init__.py`, `base.py`, `delta/checkpoint.py`,
+  `delta/engine.py`, `control_plane.py` and `new_inference_worker_wrap.py` all follow this.
 - A module that is *itself* vllm-only may import at module top — `sources.py`,
-  `trainer_engines.py`, `delta_trainer.py`, `sharded_rdt_base.py`,
+  `weight_senders.py`, `delta/trainer.py`, `sharded_rdt_base.py`,
   `sharded_rdt_{engine,trainer}.py`. The rule then moves up: **nothing vllm-free may
-  import them at module scope.** The workers import `sources` / `trainer_engines` inside
+  import them at module scope.** The workers import `sources` / `weight_senders` inside
   `_build_weight_source` / `init_weight_sync_state` for exactly this reason, and
   `weight_sync/__init__.py` re-exports neither.
 
@@ -432,9 +437,11 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | Change | Run |
 |--------|-----|
 | A `WeightSource` (`sources.py` or `rdt_send.py`) | `test_sources.py` + `test_sharded_rdt_source.py` (CPU), GPU `test_weight_sync.py`, and — for Megatron — GPU `test_megatron_weight_source.py` |
+| RDT ownership (`held_names`, PP/EP locality, `_qkv_index_device_ctx`) | `test_sharded_rdt_ownership.py` (CPU) — run under **both** the `fsdp` and `megatron` extras; the QKV cases only execute under `megatron`. It imports `skyrl` at module scope on purpose: `disable_flash_attn_cute()` must run before anything reaches megatron-bridge |
 | `control_plane.py`, especially the init rewrites | `test_control_plane.py` (CPU) **and** GPU `test_weight_sync.py` |
-| `trainer_engines.py` / a trainer engine | `test_trainer_engines.py` (CPU) **and** GPU `test_weight_sync.py` |
-| `skyrl_engines.py` (receive side) | GPU `test_weight_sync.py` only — it runs inside the vLLM worker |
+| `weight_senders.py` / a trainer engine | `test_weight_senders.py` (CPU) **and** GPU `test_weight_sync.py` |
+| `register.py` (either factory) | `test_registration.py` (CPU) — it *resolves* each entry, not just membership |
+| `weight_receivers.py` (receive side) | GPU `test_weight_sync.py` only — it runs inside the vLLM worker |
 | `NewInferenceWorkerWrap` | GPU `test_weight_sync.py` (CPU tests will not catch regressions) |
 | Delta publish / manifest / payload format | `test_delta_checkpoint.py` **and** GPU `test_delta_weight_sync_e2e.py` |
 | `LocalCheckpointStore` (fetch, replay, apply, cache keys) | `test_delta_checkpoint.py` |

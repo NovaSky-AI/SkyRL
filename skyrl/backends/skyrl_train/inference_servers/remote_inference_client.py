@@ -16,7 +16,7 @@ This client is responsible for BOTH data plane and control plane operations:
 
 2. Control Plane (fan-out to all server_urls):
    - pause, resume, sleep, wake_up, reset_prefix_cache
-   - init_weight_transfer, update_weights_skyrl
+   - update_weights, fetch_weights, load/unload_lora_adapter, get_world_size
    - Fans out directly to all backend servers (bypassing router)
    - This allows using external routers that only handle data plane
 
@@ -28,7 +28,7 @@ Key features:
 - Two URL types:
   - proxy_url: Single URL for data plane operations (routed requests)
   - server_urls: List of backend URLs for control plane operations (fan-out)
-- Lazy world_size fetching from /get_server_info
+- Lazy world_size fetching from /get_world_size, cached after the first call
 - Keep-mode pause: in-flight requests are frozen by the vLLM scheduler and
   resume where they left off after /resume. No client-side retry needed.
 

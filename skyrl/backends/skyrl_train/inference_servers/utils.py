@@ -19,10 +19,7 @@ from skyrl.backends.skyrl_train.weight_sync import (
     get_transfer_strategy,
     get_vllm_receive_backend,
 )
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
-    rdt_vllm_register,  # noqa: F401,E402
-)
-from skyrl.backends.skyrl_train.weight_sync.skyrl_engines import register_skyrl_engines
+from skyrl.backends.skyrl_train.weight_sync.register import register_receive_engines
 from skyrl.train.config import (
     InferenceEngineConfig,
     SkyRLTrainConfig,
@@ -76,7 +73,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-    register_skyrl_engines()
+    register_receive_engines()
 
     # This function may run a GPU-less Ray head
     # node, where ``current_platform`` resolves to ``UnspecifiedPlatform`` with
@@ -142,9 +139,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     if get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all) == "sharded_rdt":
         if cfg.trainer.placement.colocate_all:
             raise ValueError(
-                "weight_sync_backend='sharded_rdt' requires non-colocated training/"
-                "inference (placement.colocate_all=false); workers pull from a "
-                "separate named trainer actor over NIXL."
+                "weight_sync_backend='sharded_rdt' requires non-colocated training/inference "
+                "(placement.colocate_all=false)."
             )
         args.distributed_executor_backend = "ray"
 

@@ -1,25 +1,28 @@
-"""vLLM receive-side engine for SkyRL checkpoint-delta weight sync."""
+"""vLLM receive-side engine for SkyRL checkpoint-delta weight sync.
+
+Imports vLLM at module scope, so import it lazily from anything that must work
+without the wheel. Nothing does: ``weight_sync/register.py`` names this module
+by path and vLLM imports it only when a worker builds the ``delta`` backend.
+"""
 
 from __future__ import annotations
 
-import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import torch
+from vllm.distributed.weight_transfer.base import WeightTransferEngine
+from vllm.logger import init_logger
 
-from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
+from skyrl.backends.skyrl_train.weight_sync.delta.checkpoint import (
     LocalCheckpointStore,
 )
-from skyrl.backends.skyrl_train.weight_sync.skyrl_engines import empty_cuda_cache_rocm
+from skyrl.backends.skyrl_train.weight_sync.weight_receivers import (
+    empty_cuda_cache_rocm,
+)
 
-try:
-    from vllm.logger import init_logger
-
-    logger = init_logger(__name__)
-except Exception:
-    logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -46,26 +49,13 @@ class DeltaTransferUpdateInfo:
         return int(version)
 
 
-def register_delta_weight_transfer_engine() -> None:
-    """Register SkyRL's custom vLLM weight-transfer backend under ``delta``."""
-    from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
-
-    try:
-        WeightTransferEngineFactory.register_engine(
-            "delta",
-            "skyrl.backends.skyrl_train.weight_sync.delta_engine",
-            "DeltaWeightTransferEngine",
-        )
-    except ValueError as e:
-        if "already registered" not in str(e):
-            raise
-
-
-class DeltaWeightTransferEngine:
+class DeltaWeightTransferEngine(WeightTransferEngine[DeltaTransferInitInfo, DeltaTransferUpdateInfo]):
     """Receive compressed checkpoint deltas and load updated weights into vLLM.
 
-    Duck-typed against vLLM's ``WeightTransferEngine`` rather than subclassing
-    it, so this module stays importable without vLLM installed.
+    The base supplies ``__init__``, the draft-session retarget hooks
+    (``set_weight_update_target`` / ``reset_weight_update_target``) and the
+    ``_default_model`` bookkeeping they restore from; only the delta-specific
+    lifecycle is implemented here.
     """
 
     init_info_cls = DeltaTransferInitInfo
@@ -76,30 +66,11 @@ class DeltaWeightTransferEngine:
     supports_draft_weight_update = False
 
     def __init__(self, config: Any, vllm_config: Any, device: Any, model: torch.nn.Module) -> None:
-        # Signature fixed by WeightTransferEngineFactory.create_engine, which
-        # calls engine_cls(config, vllm_config, device, model).
-        self.config = config
-        self.vllm_config = vllm_config
-        self.parallel_config = getattr(vllm_config, "parallel_config", None)
-        self.model_config = getattr(vllm_config, "model_config", None)
-        self.device = device
-        self.model = model
-        self._default_model = model
-        self._default_model_config = self.model_config
+        super().__init__(config, vllm_config, device, model)
         self._store: LocalCheckpointStore | None = None
         self._checkpoint_load_format = "vllm_multi_thread_safetensors"
         self._multi_thread_safetensors_max_workers = 8
         self._cloud_download_workers = 4
-
-    def set_weight_update_target(self, model: Any, model_config: Any) -> None:
-        """Retarget the active weight update (see WeightTransferEngine base)."""
-        self.model = model
-        self.model_config = model_config
-
-    def reset_weight_update_target(self) -> None:
-        """Restore weight updates to the default target model."""
-        self.model = self._default_model
-        self.model_config = self._default_model_config
 
     def start_weight_update(self) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
@@ -159,7 +130,10 @@ class DeltaWeightTransferEngine:
         stats = self._store.fetch(target_version=target_version, sync_dir=sync_dir, uri=uri)
         total_s = time.perf_counter() - t0
         fetch_s, apply_s, reset_s = stats.get("fetch_s", 0.0), stats.get("apply_s", 0.0), stats.get("reset_s", 0.0)
-        message = f"delta checkpoint fetch: target_version={target_version} fetch_s={fetch_s:.3f} apply_s={apply_s:.3f}  reset_s={reset_s:.3f} total_s={total_s:.3f}"
+        message = (
+            f"delta checkpoint fetch: target_version={target_version} fetch_s={fetch_s:.3f} "
+            f"apply_s={apply_s:.3f} reset_s={reset_s:.3f} total_s={total_s:.3f}"
+        )
         logger.info(message)
         print(message, flush=True)
         return {"status": "ok", "target_version": target_version, "stats": {**stats, "total_s": total_s}}
@@ -228,6 +202,7 @@ class DeltaWeightTransferEngine:
             _reload_spec_decode_drafter,
         )
 
+        # NOTE: This only works for MTP because we iterate over the target model's tensors
         _reload_spec_decode_drafter(model_runner, tensors())
 
     def shutdown(self):

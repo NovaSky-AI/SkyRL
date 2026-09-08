@@ -1,7 +1,9 @@
-"""Tests for Megatron backend correctness fixes.
+"""Tests for ``WorkerDispatch``'s weight-sync orchestration.
 
-Tests that require megatron-core (GPU dependency) are skipped when it is not
-installed.
+Covers which pause/sleep/wake bracket ``save_weights_for_sampler`` puts around
+the broadcast for each placement, LoRA mode and weight-sync backend, plus the
+optimizer-offload policy applied before and after the sync. CPU-only: the
+dispatch is built via ``__new__`` with mocked actor groups and client.
 """
 
 from types import SimpleNamespace
@@ -18,7 +20,7 @@ def _fft_dispatch_cfg(weight_sync_backend: str = "nccl") -> SimpleNamespace:
     the pause/resume branch is taken.
 
     ``weight_sync_backend`` defaults to ``"nccl"`` so the caller-pauses branch is
-    exercised; pass ``"delta"`` for the branch where the sender pauses internally.
+    exercised; pass ``"delta"`` for the branch where the trainer engine pauses internally.
     """
     return SimpleNamespace(
         trainer=SimpleNamespace(
@@ -60,10 +62,8 @@ class TestSaveWeights:
     async def test_non_colocated_delta_does_not_pause(self):
         """Delta sync owns pause/resume itself.
 
-        ``DeltaTrainerWeightTransferEngine._apply_receiver_update`` fetches before pausing and
-        pauses only around the final reload, so the dispatcher must not pause as well --
-        doing so would hold generation down across the whole publish+upload+fetch window
-        instead of just the reload.
+        ``DeltaTrainerWeightTransferEngine._apply_receiver_update`` fetches before pausing
+        and pauses only around the final reload, so the dispatcher must not pause as well.
         """
         from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 

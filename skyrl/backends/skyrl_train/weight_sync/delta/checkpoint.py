@@ -25,7 +25,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save, save_file
 
-from skyrl.backends.skyrl_train.weight_sync.delta_payload import (
+from skyrl.backends.skyrl_train.weight_sync.delta.payload import (
     bytes_to_uint8_tensor,
     compress_bytes,
     decompress_bytes,
@@ -574,8 +574,8 @@ class LocalCheckpointStore:
             f.flush()
 
     def _reset_from_base(self) -> None:
-        # We only reset the `weights_dir` to reuse previously downloaded deltas for the run if they
-        # exist in the `delta_dir`
+        # Only `weights_dir` is reset, so deltas already downloaded into
+        # `deltas_dir` stay reusable for the rest of the run.
         shutil.rmtree(self.weights_dir, ignore_errors=True)
         self._write_state(
             CheckpointState(
@@ -1107,11 +1107,6 @@ class DeltaCheckpointPublisher:
         source: Iterable[Tuple[str, torch.Tensor]],
     ) -> DeltaPublishResult:
         """Drain a ``WeightSource`` and create this rank's delta files locally.
-
-        Takes the ``(name, tensor)`` stream directly rather than a chunk stream:
-        the chunk boundary was never load-bearing here — no batching, no flush
-        decision, no size accounting (that is ``payload_file_bytes``, tracked per
-        tensor). All it ever did was get flattened.
 
         **Every rank must call this**, source or not: iterating the source is
         what drives its gather collectives (FSDP ``full_tensor()``, a Megatron

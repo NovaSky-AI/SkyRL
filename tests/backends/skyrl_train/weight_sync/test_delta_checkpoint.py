@@ -8,7 +8,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
+from skyrl.backends.skyrl_train.weight_sync.delta.checkpoint import (
     _MANIFEST_NAME,
     _MAX_SAFE_PATH_NAME_LEN,
     CheckpointIndex,
@@ -19,7 +19,7 @@ from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
     _safe_path_name,
     _weights_dir,
 )
-from skyrl.backends.skyrl_train.weight_sync.delta_payload import (
+from skyrl.backends.skyrl_train.weight_sync.delta.payload import (
     decompress_bytes,
     uint8_tensor_to_bytes,
 )
@@ -331,7 +331,7 @@ def test_local_checkpoint_store_fetch_is_single_writer_with_concurrent_ray_actor
             import time
             from pathlib import Path
 
-            import skyrl.backends.skyrl_train.weight_sync.delta_checkpoint as delta_checkpoint
+            import skyrl.backends.skyrl_train.weight_sync.delta.checkpoint as delta_checkpoint
 
             original = delta_checkpoint.fetch_delta_directory
             counter = Path(counter_file)
@@ -421,8 +421,9 @@ def test_delta_checkpoint_unchanged_publish_advances_version(tmp_path):
 
 
 def test_safe_path_name_disambiguates_long_sibling_uris():
-    # Sibling delta URIs differ only in their final component, which is exactly what a
-    # length cap truncates away. Long sync_dirs must not collapse every version onto one cache directory name.
+    # Sibling delta URIs differ only in their final component, which is exactly what
+    # a length cap truncates away. Long sync_dirs must not collapse every version
+    # onto one cache directory name.
     prefix = "s3://bucket-with-a-long-name/" + "org_xc6lv84h3d7m9dljcc17esfw2i/" * 4 + "delta_weight_sync/run-name"
     v1 = _safe_path_name(f"{prefix}/delta-00000001")
     v2 = _safe_path_name(f"{prefix}/delta-00000002")
@@ -454,11 +455,11 @@ def test_delta_checkpoint_gcs_cli_publish_fetch_roundtrip(monkeypatch, tmp_path)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(
-        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.shutil.which",
+        "skyrl.backends.skyrl_train.weight_sync.delta.checkpoint.shutil.which",
         fake_which,
     )
     monkeypatch.setattr(
-        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.subprocess.run",
+        "skyrl.backends.skyrl_train.weight_sync.delta.checkpoint.subprocess.run",
         fake_run,
     )
 
@@ -513,11 +514,11 @@ def test_delta_checkpoint_s3_cli_publish_fetch_roundtrip(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(
-        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.shutil.which",
+        "skyrl.backends.skyrl_train.weight_sync.delta.checkpoint.shutil.which",
         fake_which,
     )
     monkeypatch.setattr(
-        "skyrl.backends.skyrl_train.weight_sync.delta_checkpoint.subprocess.run",
+        "skyrl.backends.skyrl_train.weight_sync.delta.checkpoint.subprocess.run",
         fake_run,
     )
 

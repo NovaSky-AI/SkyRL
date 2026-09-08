@@ -8,22 +8,23 @@ engine whose ``send_weights()`` owns the round trip.
 ===============  ==================================================
 ``nccl``         vLLM's ``NCCLTrainerWeightTransferEngine``
 ``ipc``          vLLM's ``IPCTrainerWeightTransferEngine``
-``delta``        ``weight_sync/delta_trainer.py``
+``delta``        ``weight_sync/delta/trainer.py``
 ``sharded_rdt``  ``weight_sync/sharded_rdt/sharded_rdt_trainer.py``
 ===============  ==================================================
 
 The trainer- and worker-side factories keep separate registries, so the trainer
 engines use vLLM's ``nccl`` / ``ipc`` keys even though the receive side registers
-under ``skyrl_nccl`` / ``skyrl_ipc`` (see ``skyrl_engines.py``).
+under ``skyrl_nccl`` / ``skyrl_ipc`` (see ``weight_receivers.py``).
 """
 
 from __future__ import annotations
 
 import logging
-import math
 import socket
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
+from vllm.distributed.weight_transfer.base import WeightSource
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
 )
@@ -42,13 +43,95 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+SKYRL_NCCL_TRAINER_BACKEND = "skyrl_nccl"
+SKYRL_IPC_TRAINER_BACKEND = "skyrl_ipc"
+
+
+class SkyrlTrainerCapabilities:
+    """The three things the worker's memory bracket needs from a trainer engine.
+
+    Declared, not probed. Every SkyRL trainer engine inherits or overrides these,
+    so ``Worker._sync_weights_to_inference_engines`` reads plain attributes and a
+    typo in a name is an ``AttributeError`` rather than a silent default.
+
+    * ``skyrl_handles_prefix_cache_reset`` -- the engine resets the prefix cache
+      itself, at the right point in its own pause/update sequence, and the worker
+      must not fire a second concurrent reset. Checkpoint-delta sets this.
+    * ``skyrl_force_disable_expandable_segments`` -- the engine shares CUDA
+      memory over IPC on every run, not only under colocation, so expandable
+      (VMM) segments must be off around the send. Sharded RDT sets this.
+    * ``skyrl_empty_cache_after_send`` -- False when the send buffers are reused
+      by the next step, where scrubbing them back to CUDA is pure cost.
+    """
+
+    skyrl_handles_prefix_cache_reset: bool = False
+    skyrl_force_disable_expandable_segments: bool = False
+    skyrl_empty_cache_after_send: bool = True
+
+
+_TRAINER_ENGINE_CACHE: dict[str, tuple[type, type]] = {}
+
+
+def _build_skyrl_nccl_trainer() -> "tuple[type, type]":
+    """vLLM's NCCL trainer engine plus the SkyRL capability declarations.
+
+    A new backend key rather than a shadow of ``nccl``: ``register_engine``
+    refuses a duplicate name, and the factory dispatches on the init info's
+    ``backend`` ClassVar, so the subclassed init info carries the new key.
+    """
+    from vllm.distributed.weight_transfer.nccl_engine import (
+        NCCLTrainerInitInfo,
+        NCCLTrainerWeightTransferEngine,
+    )
+
+    @dataclass
+    class SkyrlNCCLTrainerInitInfo(NCCLTrainerInitInfo):
+        backend: ClassVar[str] = SKYRL_NCCL_TRAINER_BACKEND
+
+    class SkyrlNCCLTrainerWeightTransferEngine(SkyrlTrainerCapabilities, NCCLTrainerWeightTransferEngine):
+        init_info_cls = SkyrlNCCLTrainerInitInfo
+
+    return SkyrlNCCLTrainerInitInfo, SkyrlNCCLTrainerWeightTransferEngine
+
+
+def _build_skyrl_ipc_trainer() -> "tuple[type, type]":
+    """vLLM's IPC trainer engine plus the SkyRL capability declarations."""
+    from vllm.distributed.weight_transfer.ipc_engine import (
+        IPCTrainerInitInfo,
+        IPCTrainerWeightTransferEngine,
+    )
+
+    @dataclass
+    class SkyrlIPCTrainerInitInfo(IPCTrainerInitInfo):
+        backend: ClassVar[str] = SKYRL_IPC_TRAINER_BACKEND
+
+    class SkyrlIPCTrainerWeightTransferEngine(SkyrlTrainerCapabilities, IPCTrainerWeightTransferEngine):
+        init_info_cls = SkyrlIPCTrainerInitInfo
+
+    return SkyrlIPCTrainerInitInfo, SkyrlIPCTrainerWeightTransferEngine
+
+
+def get_skyrl_nccl_trainer() -> "tuple[type, type]":
+    """``(init_info_cls, engine_cls)`` for ``skyrl_nccl``. Built lazily and cached."""
+    if SKYRL_NCCL_TRAINER_BACKEND not in _TRAINER_ENGINE_CACHE:
+        _TRAINER_ENGINE_CACHE[SKYRL_NCCL_TRAINER_BACKEND] = _build_skyrl_nccl_trainer()
+    return _TRAINER_ENGINE_CACHE[SKYRL_NCCL_TRAINER_BACKEND]
+
+
+def get_skyrl_ipc_trainer() -> "tuple[type, type]":
+    """``(init_info_cls, engine_cls)`` for ``skyrl_ipc``. Built lazily and cached."""
+    if SKYRL_IPC_TRAINER_BACKEND not in _TRAINER_ENGINE_CACHE:
+        _TRAINER_ENGINE_CACHE[SKYRL_IPC_TRAINER_BACKEND] = _build_skyrl_ipc_trainer()
+    return _TRAINER_ENGINE_CACHE[SKYRL_IPC_TRAINER_BACKEND]
+
+
 def build_trainer_engine(
     *,
     ie_cfg: "InferenceEngineConfig",
     colocate_all: bool,
     rank: int,
     inference_world_size: int,
-    source_factory: Callable[["torch.dtype", str], Any],
+    source_factory: Callable[["torch.dtype", str], WeightSource],
     server_urls: list,
     data_parallel_size: int,
     base_model_path: Optional[str] = None,
@@ -84,14 +167,15 @@ def build_trainer_engine(
     from skyrl.train.utils.utils import str_to_torch_dtype
 
     backend = get_transfer_strategy(ie_cfg.weight_sync_backend, colocate_all)
-    source = source_factory(str_to_torch_dtype(ie_cfg.model_dtype), backend)
+    dtype = str_to_torch_dtype(ie_cfg.model_dtype)
+    source = source_factory(dtype, backend)
 
-    init_info, init_payload_fn = _build_init_info(
+    init_info, init_payload_fn = _build_sender_init_info(
         backend=backend,
         ie_cfg=ie_cfg,
         rank=rank,
         inference_world_size=inference_world_size,
-        source=source,
+        dtype=dtype,
         server_urls=server_urls,
         data_parallel_size=data_parallel_size,
         base_model_path=base_model_path,
@@ -115,32 +199,37 @@ def build_trainer_engine(
     return engine
 
 
-def _packed_buffer_size_bytes(source: Any) -> int:
-    """Packed-buffer size that fits the model's largest single parameter.
+def _packed_buffer_size_bytes(base_model_path: Optional[str], threshold_in_gb: float, dtype: "torch.dtype") -> int:
+    """Packed-buffer size for both push backends: the configured size, floored to
+    fit the model's largest single parameter.
 
-    The packed producers stream through a fixed reusable buffer, and a parameter
-    too large for one raises on the IPC path and over-allocates on NCCL. vLLM's
-    1 GiB default is smaller than a large-vocab embedding matrix (Qwen3-235B's is
-    151936 x 4096 in bf16 = 1.24 GiB), so size it from the source.
+    ``generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB`` is the
+    configured size. It applies to NCCL as well as IPC.
 
-    ``metadata()`` is a collective on a Megatron source, so this runs on every
-    rank -- it is called before the sender split, which keeps them in lockstep --
-    and the source caches it.
+    The floor is not optional. The packed producers stream through one fixed
+    reusable buffer, and a parameter larger than it raises on the IPC path and
+    over-allocates on NCCL -- so a large-vocab embedding (Qwen3-235B's is
+    151936 x 4096 in bf16 = 1.24 GiB) outgrows the 1 GiB default on its own.
+
+    The floor comes from the checkpoint's safetensors headers rather than the
+    live model, so it costs no GPU memory, no collective, and no residency: the
+    policy may be offloaded when this runs. A checkpoint whose shapes cannot be
+    read contributes no floor and the configured size stands.
     """
-    meta = source.metadata()
-    if not meta:
-        return DEFAULT_PACKED_BUFFER_SIZE_BYTES
-    largest = max(math.prod(m.shape) * m.dtype.itemsize for m in meta)
-    return max(DEFAULT_PACKED_BUFFER_SIZE_BYTES, largest)
+    from skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes import max_param_numel
+
+    configured = int(threshold_in_gb * 1024**3) if threshold_in_gb and threshold_in_gb > 0 else 0
+    largest = max_param_numel(base_model_path) * dtype.itemsize if base_model_path else 0
+    return max(DEFAULT_PACKED_BUFFER_SIZE_BYTES, configured, largest)
 
 
-def _build_init_info(
+def _build_sender_init_info(
     *,
     backend: str,
     ie_cfg: "InferenceEngineConfig",
     rank: int,
     inference_world_size: int,
-    source: Any,
+    dtype: "torch.dtype",
     server_urls: list,
     data_parallel_size: int,
     base_model_path: Optional[str],
@@ -150,11 +239,14 @@ def _build_init_info(
     ``init_payload_fn`` expands the engine's single worker-side init dict to one
     payload per server; only NCCL and sharded RDT need it (see ``control_plane``).
     """
-    _register_skyrl_trainer_engines()
+    from skyrl.backends.skyrl_train.weight_sync.register import register_trainer_engines
+
+    register_trainer_engines()
 
     if backend == "nccl":
         import ray
-        from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
+
+        nccl_init_info_cls, _ = get_skyrl_nccl_trainer()
 
         # Only rank 0 opens the endpoint, so only its address/port reaches a
         # worker; the other ranks build and discard theirs.
@@ -163,7 +255,7 @@ def _build_init_info(
             sock.bind(("", 0))
             master_port = sock.getsockname()[1]
         return (
-            NCCLTrainerInitInfo(
+            nccl_init_info_cls(
                 master_address=master_address,
                 master_port=master_port,
                 # Every inference worker plus the single trainer sender (rank 0).
@@ -172,14 +264,16 @@ def _build_init_info(
                 # call per parameter. The engine propagates this to the worker at
                 # the handshake, so the two sides cannot disagree.
                 packed=True,
-                packed_buffer_size_bytes=_packed_buffer_size_bytes(source),
+                packed_buffer_size_bytes=_packed_buffer_size_bytes(
+                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
+                ),
                 rank=rank,
             ),
             nccl_init_payloads,
         )
 
     if backend == "ipc":
-        from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
+        ipc_init_info_cls, _ = get_skyrl_ipc_trainer()
 
         return (
             # packed=True overrides the vLLM default: the unpacked path holds a
@@ -187,19 +281,21 @@ def _build_init_info(
             # `finish_weight_update` (so the consumer's IPC views stay valid),
             # i.e. the whole model resident on the trainer. Packed streams
             # through one reusable buffer.
-            IPCTrainerInitInfo(
+            ipc_init_info_cls(
                 packed=True,
-                packed_buffer_size_bytes=_packed_buffer_size_bytes(source),
+                packed_buffer_size_bytes=_packed_buffer_size_bytes(
+                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
+                ),
                 rank=rank,
             ),
             None,
         )
 
     if backend == "delta":
-        from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
+        from skyrl.backends.skyrl_train.weight_sync.delta.checkpoint import (
             SUPPORTED_CHECKPOINT_LOAD_FORMATS,
         )
-        from skyrl.backends.skyrl_train.weight_sync.delta_trainer import (
+        from skyrl.backends.skyrl_train.weight_sync.delta.trainer import (
             DeltaTrainerInitInfo,
         )
 
@@ -245,45 +341,6 @@ def _build_init_info(
         )
 
     raise ValueError(f"Unknown weight sync backend {backend!r}.")
-
-
-_TRAINER_ENGINES_REGISTERED = False
-
-
-def _register_skyrl_trainer_engines() -> None:
-    """Register SkyRL's trainer engines (``delta``, ``sharded_rdt``) once."""
-    global _TRAINER_ENGINES_REGISTERED
-    if _TRAINER_ENGINES_REGISTERED:
-        return
-    from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-
-    if "delta" not in WeightTransferTrainerFactory._registry:
-        WeightTransferTrainerFactory.register_engine(
-            "delta",
-            "skyrl.backends.skyrl_train.weight_sync.delta_trainer",
-            "DeltaTrainerWeightTransferEngine",
-        )
-    if "sharded_rdt" not in WeightTransferTrainerFactory._registry:
-        WeightTransferTrainerFactory.register_engine(
-            "sharded_rdt",
-            "skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer",
-            "ShardedRDTTrainerWeightTransferEngine",
-        )
-    _TRAINER_ENGINES_REGISTERED = True
-
-
-def engine_capability(engine: Any, name: str, default: Any) -> Any:
-    """Read a SkyRL capability flag off a trainer engine.
-
-    A ``getattr`` probe rather than a declared attribute: two of the four engines
-    are vLLM's own classes and cannot carry SkyRL attributes, so an engine that
-    declares nothing must get the default.
-
-    Flags: ``skyrl_handles_prefix_cache_reset``,
-    ``skyrl_force_disable_expandable_segments``,
-    ``skyrl_empty_cache_after_send``.
-    """
-    return getattr(engine, f"skyrl_{name}", default)
 
 
 def maybe_set_reset_prefix_cache(engine: Any, reset: bool) -> None:

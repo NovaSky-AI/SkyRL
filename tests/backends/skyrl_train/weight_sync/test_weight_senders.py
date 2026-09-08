@@ -1,4 +1,4 @@
-"""Tests for ``weight_sync/trainer_engines.py``.
+"""Tests for ``weight_sync/weight_senders.py``.
 
 What is worth pinning are the choices it encodes that are silent when wrong:
 
@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("vllm", reason="trainer_engines builds vLLM trainer init infos")
+pytest.importorskip("vllm", reason="weight_senders builds vLLM trainer init infos")
 
 pytestmark = pytest.mark.vllm
 
@@ -26,10 +26,9 @@ from skyrl.backends.skyrl_train.weight_sync.control_plane import (  # noqa: E402
     nccl_init_payloads,
     rdt_init_payloads,
 )
-from skyrl.backends.skyrl_train.weight_sync.trainer_engines import (  # noqa: E402
-    _build_init_info,
+from skyrl.backends.skyrl_train.weight_sync.weight_senders import (  # noqa: E402
+    _build_sender_init_info,
     _packed_buffer_size_bytes,
-    engine_capability,
     maybe_set_reset_prefix_cache,
     teardown_engine,
 )
@@ -53,12 +52,12 @@ class _Source:
 
 
 def _init_info(backend, *, inference_world_size=4, ie_cfg=None, base_model_path=None, rank=0, source=None):
-    return _build_init_info(
+    return _build_sender_init_info(
         backend=backend,
-        ie_cfg=ie_cfg if ie_cfg is not None else SimpleNamespace(),
+        ie_cfg=ie_cfg if ie_cfg is not None else SimpleNamespace(weight_transfer_threshold_cuda_ipc_GB=1.0),
         rank=rank,
         inference_world_size=inference_world_size,
-        source=source if source is not None else _Source(),
+        dtype=torch.bfloat16,
         server_urls=["http://a"],
         data_parallel_size=1,
         base_model_path=base_model_path,
@@ -66,26 +65,60 @@ def _init_info(backend, *, inference_world_size=4, ie_cfg=None, base_model_path=
 
 
 class TestPackedBufferSize:
-    """A parameter too large for the buffer raises on the IPC path, and vLLM's
-    1 GiB default is smaller than a large-vocab embedding matrix."""
+    """The configured size, floored to fit the largest parameter in the checkpoint:
+    a parameter too large for the buffer raises on the IPC path, and vLLM's 1 GiB
+    default is smaller than a large-vocab embedding matrix.
 
-    def test_small_models_keep_vllms_default(self):
-        assert _packed_buffer_size_bytes(_Source(shapes=((4, 4),))) == _1GiB
+    The floor is read from the checkpoint's safetensors headers, so it needs
+    neither the live model nor a resident GPU copy of it.
+    """
 
-    def test_grows_to_fit_the_largest_single_parameter(self):
+    @staticmethod
+    def _with_max_numel(monkeypatch, numel):
+        import skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes as cs
+
+        monkeypatch.setattr(cs, "max_param_numel", lambda _p: numel)
+
+    def test_small_models_keep_vllms_default(self, monkeypatch):
+        self._with_max_numel(monkeypatch, 16)
+        assert _packed_buffer_size_bytes("m", 1.0, torch.bfloat16) == _1GiB
+
+    def test_grows_to_fit_the_largest_single_parameter(self, monkeypatch):
         # 151936 x 4096 bf16 = Qwen3-235B's embedding: 1.24 GiB, over the default.
-        source = _Source(shapes=((151936, 4096), (4096, 4096)))
-        assert _packed_buffer_size_bytes(source) == 151936 * 4096 * 2
+        self._with_max_numel(monkeypatch, 151936 * 4096)
+        assert _packed_buffer_size_bytes("m", 1.0, torch.bfloat16) == 151936 * 4096 * 2
 
-    def test_sizes_from_the_largest_not_the_total(self):
-        # Four 0.5 GiB parameters total 2 GiB but each fits the default; the
-        # buffer bounds one chunk, not the model.
-        half_gib_rows = (1024**3) // 2 // 2 // 1024
-        source = _Source(shapes=((half_gib_rows, 1024),) * 4)
-        assert _packed_buffer_size_bytes(source) == _1GiB
+    def test_the_configured_threshold_raises_the_buffer(self, monkeypatch):
+        self._with_max_numel(monkeypatch, 16)
+        assert _packed_buffer_size_bytes("m", 4.0, torch.bfloat16) == 4 * _1GiB
 
-    def test_an_empty_source_falls_back_to_the_default(self):
-        assert _packed_buffer_size_bytes(_Source(shapes=())) == _1GiB
+    def test_the_parameter_floor_beats_a_smaller_threshold(self, monkeypatch):
+        """A configured size below the largest parameter cannot be honoured --
+        that tensor would not fit in one chunk at all."""
+        self._with_max_numel(monkeypatch, 151936 * 4096)
+        assert _packed_buffer_size_bytes("m", 0.5, torch.bfloat16) == 151936 * 4096 * 2
+
+    def test_an_unreadable_checkpoint_falls_back_to_the_default(self, monkeypatch):
+        """``max_param_numel`` returns 0 when it cannot read shapes."""
+        self._with_max_numel(monkeypatch, 0)
+        assert _packed_buffer_size_bytes("m", 0.0, torch.bfloat16) == _1GiB
+
+    def test_no_model_path_falls_back_to_the_default(self):
+        assert _packed_buffer_size_bytes(None, 0.0, torch.bfloat16) == _1GiB
+
+    def test_the_wire_dtype_sets_the_bytes(self, monkeypatch):
+        """The header gives element counts; the inference dtype turns them into bytes."""
+        self._with_max_numel(monkeypatch, 151936 * 4096)
+        assert _packed_buffer_size_bytes("m", 0.0, torch.float32) == 151936 * 4096 * 4
+
+
+def test_the_threshold_applies_to_nccl_as_well_as_ipc():
+    """``weight_transfer_threshold_cuda_ipc_GB`` sizes the packed buffer on both
+    push backends, despite naming only IPC."""
+    cfg = SimpleNamespace(weight_transfer_threshold_cuda_ipc_GB=3.0)
+    for backend in ("nccl", "ipc"):
+        info, _ = _init_info(backend, ie_cfg=cfg)
+        assert info.packed_buffer_size_bytes == 3 * _1GiB, backend
 
 
 class TestNcclInitInfo:
@@ -97,18 +130,19 @@ class TestNcclInitInfo:
         info, _ = _init_info("nccl")
         assert info.packed is True
 
-    def test_buffer_is_sized_from_the_source(self):
-        source = _Source(shapes=((151936, 4096),))
-        info, _ = _init_info("nccl", source=source)
-        assert info.packed_buffer_size_bytes == 151936 * 4096 * 2
-        # metadata() is a collective on a Megatron source, so a rank that
-        # skipped it would hang its peers.
-        assert source.metadata_calls == 1
+    def test_buffer_is_sized_from_the_checkpoint(self, monkeypatch):
+        import skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes as cs
 
-    def test_backend_is_vllms_own_key(self):
-        """Separate registries, so only the receive side takes a new name."""
+        monkeypatch.setattr(cs, "max_param_numel", lambda _p: 151936 * 4096)
+        info, _ = _init_info("nccl", base_model_path="/models/base")
+        assert info.packed_buffer_size_bytes == 151936 * 4096 * 2
+
+    def test_backend_is_the_skyrl_key(self):
+        """SkyRL subclasses vLLM's trainer engine to declare the capability
+        attributes, and ``register_engine`` refuses a duplicate name -- so the
+        send side takes its own key too, mirroring the receive side."""
         info, _ = _init_info("nccl")
-        assert info.backend == "nccl"
+        assert info.backend == "skyrl_nccl"
 
     def test_rank_decides_the_sender(self):
         assert _init_info("nccl", rank=0)[0].is_sender is True
@@ -130,13 +164,15 @@ class TestIpcInitInfo:
         assert info.packed is True
         assert payload_fn is None
 
-    def test_buffer_is_sized_from_the_source(self):
-        source = _Source(shapes=((151936, 4096),))
-        info, _ = _init_info("ipc", source=source)
+    def test_buffer_is_sized_from_the_checkpoint(self, monkeypatch):
+        import skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes as cs
+
+        monkeypatch.setattr(cs, "max_param_numel", lambda _p: 151936 * 4096)
+        info, _ = _init_info("ipc", base_model_path="/models/base")
         assert info.packed_buffer_size_bytes == 151936 * 4096 * 2
 
-    def test_backend_is_vllms_own_key(self):
-        assert _init_info("ipc")[0].backend == "ipc"
+    def test_backend_is_the_skyrl_key(self):
+        assert _init_info("ipc")[0].backend == "skyrl_ipc"
 
 
 class TestShardedRdtInitInfo:
@@ -169,16 +205,19 @@ def _delta_cfg(**overrides):
     )
     for key, value in overrides.items():
         setattr(delta, key, value)
-    return SimpleNamespace(delta_weight_sync=delta)
+    return SimpleNamespace(delta_weight_sync=delta, weight_transfer_threshold_cuda_ipc_GB=1.0)
 
 
 class TestDeltaInitInfo:
-    def test_does_not_touch_the_source(self):
-        """No wire buffer to size, and a Megatron ``metadata()`` is a whole-model
-        dry export."""
-        source = _Source()
-        _init_info("delta", ie_cfg=_delta_cfg(), base_model_path="/m", source=source)
-        assert source.metadata_calls == 0
+    def test_does_not_size_a_wire_buffer(self, monkeypatch):
+        """Delta publishes to storage, so there is no packed buffer to size and
+        no reason to read the checkpoint."""
+        import skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes as cs
+
+        calls = []
+        monkeypatch.setattr(cs, "max_param_numel", lambda p: calls.append(p) or 0)
+        _init_info("delta", ie_cfg=_delta_cfg(), base_model_path="/m")
+        assert calls == []
 
     def test_carries_the_publisher_and_worker_settings(self):
         info, payload_fn = _init_info("delta", ie_cfg=_delta_cfg(), base_model_path="/models/base")
@@ -226,7 +265,7 @@ class TestBuildTrainerEngineResolvesTheBackend:
             WeightTransferTrainerFactory,
         )
 
-        from skyrl.backends.skyrl_train.weight_sync.trainer_engines import (
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
             build_trainer_engine,
         )
 
@@ -244,7 +283,11 @@ class TestBuildTrainerEngineResolvesTheBackend:
             return _Source()
 
         build_trainer_engine(
-            ie_cfg=SimpleNamespace(weight_sync_backend=weight_sync_backend, model_dtype="bfloat16"),
+            ie_cfg=SimpleNamespace(
+                weight_sync_backend=weight_sync_backend,
+                model_dtype="bfloat16",
+                weight_transfer_threshold_cuda_ipc_GB=1.0,
+            ),
             colocate_all=colocate_all,
             rank=0,
             inference_world_size=4,
@@ -256,23 +299,26 @@ class TestBuildTrainerEngineResolvesTheBackend:
         return seen
 
     @pytest.mark.parametrize(
-        "weight_sync_backend,colocate_all,expected",
+        "weight_sync_backend,colocate_all,logical,dispatch_key",
         [
-            ("nccl", False, "nccl"),
+            ("nccl", False, "nccl", "skyrl_nccl"),
             # The one resolution with no config field of its own.
-            ("nccl", True, "ipc"),
-            ("sharded_rdt", False, "sharded_rdt"),
-            ("rdt", False, "sharded_rdt"),
+            ("nccl", True, "ipc", "skyrl_ipc"),
+            ("sharded_rdt", False, "sharded_rdt", "sharded_rdt"),
+            ("rdt", False, "sharded_rdt", "sharded_rdt"),
         ],
     )
     def test_resolution_reaches_both_the_factory_and_the_source(
-        self, monkeypatch, weight_sync_backend, colocate_all, expected
+        self, monkeypatch, weight_sync_backend, colocate_all, logical, dispatch_key
     ):
         seen = self._build(monkeypatch, weight_sync_backend, colocate_all)
-        assert seen["init_info"].backend == expected
-        # The source factory is told the SAME backend, so sharded RDT gets its
+        # The init info's `backend` is the factory dispatch key. NCCL and IPC take
+        # skyrl_* keys because SkyRL subclasses vLLM's trainer engines to declare
+        # the capability attributes, and register_engine refuses a duplicate name.
+        assert seen["init_info"].backend == dispatch_key
+        # The source factory is told the LOGICAL backend, so sharded RDT gets its
         # ownership-aware subclass and nothing else does.
-        assert seen["factory_args"][1] == expected
+        assert seen["factory_args"][1] == logical
 
     def test_source_factory_gets_the_inference_dtype(self, monkeypatch):
         seen = self._build(monkeypatch, "nccl", False)
@@ -287,46 +333,50 @@ class _Bare:
     """An engine that declares nothing — the shape of vLLM's own engines."""
 
 
-class TestCapabilityProbes:
-    def test_defaults_for_an_engine_that_declares_nothing(self):
-        engine = _Bare()
-        assert engine_capability(engine, "handles_prefix_cache_reset", False) is False
-        assert engine_capability(engine, "force_disable_expandable_segments", False) is False
-        assert engine_capability(engine, "empty_cache_after_send", True) is True
+class TestCapabilityDeclarations:
+    """The worker's memory bracket reads three attributes off the trainer engine.
+    Every engine declares all three, so a typo is an AttributeError rather than a
+    silently-wrong default."""
 
-    def test_reads_a_declared_flag(self):
-        engine = _Bare()
-        engine.skyrl_empty_cache_after_send = False
-        assert engine_capability(engine, "empty_cache_after_send", True) is False
+    def test_the_defaults_are_the_common_case(self):
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+            SkyrlTrainerCapabilities,
+        )
+
+        assert SkyrlTrainerCapabilities.skyrl_handles_prefix_cache_reset is False
+        assert SkyrlTrainerCapabilities.skyrl_force_disable_expandable_segments is False
+        assert SkyrlTrainerCapabilities.skyrl_empty_cache_after_send is True
+
+    def test_nccl_and_ipc_inherit_the_defaults(self):
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+            get_skyrl_ipc_trainer,
+            get_skyrl_nccl_trainer,
+        )
+
+        for _, engine_cls in (get_skyrl_nccl_trainer(), get_skyrl_ipc_trainer()):
+            assert engine_cls.skyrl_handles_prefix_cache_reset is False
+            assert engine_cls.skyrl_force_disable_expandable_segments is False
+            assert engine_cls.skyrl_empty_cache_after_send is True
 
     def test_delta_declares_it_resets_the_prefix_cache(self):
-        from skyrl.backends.skyrl_train.weight_sync.delta_trainer import (
+        from skyrl.backends.skyrl_train.weight_sync.delta.trainer import (
             DeltaTrainerWeightTransferEngine,
         )
 
-        assert engine_capability(DeltaTrainerWeightTransferEngine, "handles_prefix_cache_reset", False) is True
+        assert DeltaTrainerWeightTransferEngine.skyrl_handles_prefix_cache_reset is True
+        assert DeltaTrainerWeightTransferEngine.skyrl_empty_cache_after_send is True
 
     def test_rdt_declares_its_two_memory_flags(self):
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
             ShardedRDTTrainerWeightTransferEngine as E,
         )
 
-        assert engine_capability(E, "force_disable_expandable_segments", False) is True
-        assert engine_capability(E, "empty_cache_after_send", True) is False
+        assert E.skyrl_handles_prefix_cache_reset is False
+        assert E.skyrl_force_disable_expandable_segments is True
+        assert E.skyrl_empty_cache_after_send is False
 
     def test_set_reset_prefix_cache_is_optional(self):
-        # No setter must be a no-op, not an AttributeError.
         maybe_set_reset_prefix_cache(_Bare(), True)
-
-        class _WithSetter:
-            told = None
-
-            def skyrl_set_reset_prefix_cache(self, reset):
-                self.told = reset
-
-        engine = _WithSetter()
-        maybe_set_reset_prefix_cache(engine, True)
-        assert engine.told is True
 
 
 class TestTeardown:

@@ -6,7 +6,8 @@ this backend natively. ``sharded_rdt_base`` is what remains of the vendored
 trainer-side ABCs now that vLLM 0.28 ships them: the two channels a *pull*
 backend needs and vLLM has no concept of (per-rank ownership, and a group index).
 The rest is SkyRL glue: ``rdt_send`` (weight sources + the trainer init info),
-``rdt_vllm_register``, ``rdt_libfabric_shim``.
+``rdt_libfabric_shim``. Factory registration lives in
+``weight_sync/register.py``.
 
 This ``__init__`` imports nothing: ``sharded_rdt_engine`` and ``sharded_rdt_trainer``
 import ``vllm`` at module scope, so a re-export here would pull vllm into every

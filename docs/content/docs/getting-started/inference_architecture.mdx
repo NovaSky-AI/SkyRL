@@ -102,7 +102,7 @@ SkyRL uses the native weight syncing APIs in vLLM, with the following four-stage
 - `POST /update_weights` — Updates all or a subset of the weights. SkyRL uses chunked weight transfer for efficiency.
 - `POST /finish_weight_update` — Finishes the current weight update.
 
-The trainer side runs on vLLM's *trainer-send* abstraction: each training worker builds a `WeightSource` over its live model and hands it to a `TrainerWeightTransferEngine`, whose `send_weights()` drives the whole four-stage round trip above. See `skyrl/backends/skyrl_train/weight_sync/trainer_engines.py`.
+The trainer side runs on vLLM's *trainer-send* abstraction: each training worker builds a `WeightSource` over its live model and hands it to a `TrainerWeightTransferEngine`, whose `send_weights()` drives the whole four-stage round trip above. See `skyrl/backends/skyrl_train/weight_sync/weight_senders.py`.
 
 Four backends, selected by `generator.inference_engine.weight_sync_backend` plus `trainer.placement.colocate_all`:
 

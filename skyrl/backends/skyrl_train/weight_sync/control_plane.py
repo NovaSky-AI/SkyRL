@@ -115,8 +115,6 @@ class SkyrlWeightSyncClient:
     # sync and runs off the event loop, so `RemoteInferenceClient` -- where these
     # routes otherwise live -- is reachable only via `run_coroutine_threadsafe`,
     # the loop coupling this client exists to avoid (see module docstring).
-    # Splitting them into a second sync object would duplicate the session and
-    # pool to narrow one type.
     #
     # The cost: an engine calling these needs a SkyRL client, not any object
     # satisfying VLLMWeightSyncClient. Only the delta engine does.

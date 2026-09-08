@@ -9,8 +9,7 @@ return wrong data, it deadlocks the ranks sharing a gather collective, so the
 contract is pinned here.
 
 Adapted from the vLLM RDT fork (`tests/distributed/test_weight_transfer.py`).
-Marked `vllm` because `sharded_rdt_base` now imports the base ABCs from the
-wheel rather than vendoring them.
+Marked `vllm`: `sharded_rdt_base` imports the base ABCs from the wheel.
 """
 
 import pytest

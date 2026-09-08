@@ -650,10 +650,10 @@ class TestControlPlane:
 class TestWeightSync:
     """Test weight sync methods."""
 
-    # The init handshake and the start/update/finish lifecycle moved off this
-    # async client onto the trainer-side engines' blocking SkyrlWeightSyncClient
-    # (weight_sync/control_plane.py, covered by test_control_plane.py). What is
-    # left here is what the driver still drives.
+    # The init handshake and the start/update/finish lifecycle run on the
+    # trainer-side engines' blocking SkyrlWeightSyncClient
+    # (weight_sync/control_plane.py, covered by test_control_plane.py). Covered
+    # here is what this client drives from the driver.
 
     @pytest.mark.asyncio
     async def test_update_named_weights(self, client):
@@ -671,7 +671,7 @@ class TestWeightSync:
 
     @pytest.mark.asyncio
     async def test_fetch_weights(self, client):
-        """Test fetch_weights uses the first-class /fetch_weights endpoint."""
+        """Test fetch_weights fans out to /fetch_weights on all servers."""
         result = await client.fetch_weights(
             target_version=3,
             sync_dir="gs://bucket/prefix",

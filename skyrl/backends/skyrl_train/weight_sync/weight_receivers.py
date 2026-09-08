@@ -6,7 +6,8 @@ separate module that the main model's ``load_weights`` never touches, and vLLM's
 engines call ``self.model.load_weights(...)`` directly with no callback, so the
 only injection point is the ``self.model`` handle they read.
 
-Registered under ``skyrl_nccl`` / ``skyrl_ipc`` rather than shadowing vLLM's
+Registered (in ``weight_sync/register.py``) under ``skyrl_nccl`` / ``skyrl_ipc``
+rather than shadowing vLLM's
 ``nccl`` / ``ipc``: ``register_engine`` raises on a duplicate name, and
 ``WeightTransferConfig.backend`` is typed ``Literal[...] | str`` and validated
 against the registry, so a new name is all that is needed.
@@ -24,8 +25,6 @@ logger = logging.getLogger(__name__)
 
 SKYRL_NCCL_BACKEND = "skyrl_nccl"
 SKYRL_IPC_BACKEND = "skyrl_ipc"
-
-_REGISTERED = False
 
 
 def empty_cuda_cache_rocm() -> None:
@@ -92,6 +91,8 @@ class SkyrlDrafterReloadMixin:
             _reload_spec_decode_drafter(model_runner, weight_list)
             return loaded
 
+        # The proxy scopes the override to the `WeightTransferEngine` context
+        # instead of mutating `load_weights` on the model object itself.
         self.model = _LoadWeightsProxy(model, load_weights)
         try:
             yield
@@ -102,8 +103,8 @@ class SkyrlDrafterReloadMixin:
 
 
 # Each engine brackets its lifecycle in `torch.device(self.device)`. vLLM's own
-# path does not (it passes `device=` where it matters), but SkyRL's loaders have
-# always run under it, so keep it as the default device weight loading sees.
+# path passes `device=` where it matters instead; SkyRL's loaders rely on it
+# being the default device that weight loading sees.
 
 
 def _build_skyrl_nccl_engine() -> type:
@@ -165,31 +166,3 @@ def get_skyrl_ipc_engine() -> type:
     if SKYRL_IPC_BACKEND not in _ENGINE_CACHE:
         _ENGINE_CACHE[SKYRL_IPC_BACKEND] = _build_skyrl_ipc_engine()
     return _ENGINE_CACHE[SKYRL_IPC_BACKEND]
-
-
-def register_skyrl_engines() -> None:
-    """Register ``skyrl_nccl`` / ``skyrl_ipc`` in vLLM's factory (idempotent).
-
-    Must run in every vLLM worker process (``Worker.load_model`` builds the
-    engine through the factory) and on the driver (which validates
-    ``WeightTransferConfig.backend`` against the registry).
-    """
-    global _REGISTERED
-    if _REGISTERED:
-        return
-    try:
-        from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
-    except ImportError:
-        # vLLM is a Linux-only optional dependency; nothing to register.
-        logger.debug("vLLM not importable; skipping SkyRL weight-transfer engine registration.")
-        return
-
-    for name, loader in (
-        (SKYRL_NCCL_BACKEND, get_skyrl_nccl_engine),
-        (SKYRL_IPC_BACKEND, get_skyrl_ipc_engine),
-    ):
-        if name in WeightTransferEngineFactory._registry:
-            continue
-        # Direct-class registration, so resolve now; vLLM is importable by here.
-        WeightTransferEngineFactory.register_engine(name, loader())
-    _REGISTERED = True

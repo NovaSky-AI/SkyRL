@@ -29,7 +29,7 @@ rendezvous relies on it as its failure mode. This copy also carries the
 be re-synced over them.
 
 REMOVAL: delete this module once SkyRL's pinned vLLM ships the trainer-side
-engine, and repoint ``weight_sync/trainer_engines.py``'s registration at
+engine, and repoint ``weight_sync/weight_senders.py``'s registration at
 ``vllm.distributed.weight_transfer.sharded_rdt_trainer``.
 """
 
@@ -807,6 +807,9 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
     # IPC on every run, not only under colocation, and expandable-segment (VMM)
     # memory makes that export/rebuild 5-10x slower per storage (measured:
     # publish rebuild 7.2s/rank/sync at 30B, the dominant weight-sync cost).
+    # This engine drives its own pause/reset sequence for neither -- the worker
+    # fires the prefix-cache reset as usual.
+    skyrl_handles_prefix_cache_reset = False
     skyrl_force_disable_expandable_segments = True
     # Publish buffers stay in this process's allocator cache and are reused by
     # the next training step; returning them to CUDA costs 0.25-0.53s per rank at

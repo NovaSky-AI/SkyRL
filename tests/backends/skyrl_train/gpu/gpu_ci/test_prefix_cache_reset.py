@@ -1,12 +1,11 @@
 """Tests for prefix cache reset behaviour in ``PolicyWorker.broadcast_to_inference_engines``.
 
 The worker calls the trainer engine's ``send_weights()`` inside a memory bracket
-whose three decisions come from ``getattr`` capability probes on the engine
+whose three decisions come from capability flags on the engine
 (``skyrl_handles_prefix_cache_reset``,
-``skyrl_force_disable_expandable_segments``, ``skyrl_empty_cache_after_send``).
-Two of the four engines are vLLM's own classes and cannot declare SkyRL
-attributes, so the *absence* of a flag is the common case and must mean the
-default.
+``skyrl_force_disable_expandable_segments``, ``skyrl_empty_cache_after_send``;
+see ``weight_senders.SkyrlTrainerCapabilities``). An engine that declares none of
+them must get the defaults.
 
 An engine declaring ``skyrl_handles_prefix_cache_reset`` resets the cache itself,
 at the right point in its own pause/update sequence, and the worker must skip its
@@ -24,14 +23,21 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+    SkyrlTrainerCapabilities,
+)
 from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
 
 
-class _FakeEngine:
+class _FakeEngine(SkyrlTrainerCapabilities):
     """A trainer engine with only what the worker's send bracket touches.
 
+    Inherits ``SkyrlTrainerCapabilities`` for the same reason every real trainer
+    engine does: the worker reads the three flags as plain attributes, so an
+    engine that declared none would raise rather than take the defaults.
+
     A plain class, not a Mock: a Mock answers every attribute, so it could never
-    exercise the probe defaults.
+    exercise the defaults.
     """
 
     def __init__(self, **flags) -> None:
@@ -127,7 +133,7 @@ async def test_worker_skips_prefix_cache_reset_when_engine_handles_it(strategy, 
 @pytest.mark.parametrize("strategy", STRATEGIES)
 async def test_worker_resets_prefix_cache_when_engine_does_not(strategy, monkeypatch):
     _patch_collectives(monkeypatch)
-    # No flags at all -- the shape of vLLM's own NCCL / IPC trainer engines.
+    # No flags at all: the worker must fall back to the defaults.
     engine = _FakeEngine()
     worker = _make_worker(get_worker_cls(strategy), engine)
     client = AsyncMock()
@@ -177,7 +183,7 @@ async def test_expandable_segments_force_comes_from_the_engine(strategy, monkeyp
 @pytest.mark.asyncio
 @pytest.mark.parametrize("strategy", STRATEGIES)
 async def test_empty_cache_after_send_defaults_on_and_can_be_declined(strategy, monkeypatch):
-    """The default must be True -- that is what vLLM's own engines get."""
+    """The default must be True; only an engine that declines it skips the post-send empty_cache."""
     _patch_collectives(monkeypatch)
     for engine, expected in ((_FakeEngine(), 2), (_FakeEngine(empty_cache_after_send=False), 1)):
         calls = []
