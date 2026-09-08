@@ -62,6 +62,19 @@ try:
 except ModuleNotFoundError:
     pass
 
+# vLLM stores its AOT compile artifact under a directory keyed only by rank and
+# DP rank, so every TP=1 engine on a node is `rank_0_0` and they overwrite each
+# other's artifact even when they sit on different GPUs; a reused artifact then
+# dies with "CUDA driver error: invalid argument". Scope that directory to the
+# running device. Installed here for the same reason as the registrations above:
+# this module is loaded in every worker process before model init, and the device
+# is read lazily at compile time, once it is live.
+from skyrl.backends.skyrl_train.patches.vllm.patch_compile_cache_device_path import (  # noqa: E402
+    apply_compile_cache_device_path_patch,
+)
+
+apply_compile_cache_device_path_patch()
+
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
 
