@@ -1100,12 +1100,7 @@ class DeltaWeightSyncConfig(BaseConfig):
 #: vLLM speculative-decoding methods SkyRL supports, validated in
 #: ``validate_inference_engine_cfg``.
 #:
-#: Only ``mtp``: its drafter weights live in the policy checkpoint, so the weight sync
-#: that reloads the main model also reloads the drafter
-#: (``inference_servers/spec_decode_utils.py``). Every other vLLM method (``eagle``,
-#: ``eagle3``, ``draft_model``, ``medusa``, ...) loads its drafter from a separate
-#: checkpoint whose parameter names the trainer never publishes, so the drafter would
-#: keep drafting with stale weights after the first sync.
+#: Only ``mtp`` is supported
 SUPPORTED_SPECULATIVE_DECODING_METHODS = ("mtp",)
 
 
