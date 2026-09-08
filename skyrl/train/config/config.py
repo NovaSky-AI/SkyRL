@@ -1205,8 +1205,7 @@ class InferenceEngineConfig(BaseConfig):
     must agree, and are validated against each other."""
     speculative_config: Optional[Dict[str, Any]] = None
     """Speculative-decoding config passed through to vLLM for MTP drafter decoding.
-    (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train mtp). ``None`` disables it.
-    ``method`` must be one of :data:`SUPPORTED_SPECULATIVE_DECODING_METHODS`."""
+    (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train mtp). ``None`` disables it."""
     external_proxy_url: Optional[str] = None
     """Data-plane URL (load-balanced router) for the new inference layer.
     Generation requests are sent here."""
