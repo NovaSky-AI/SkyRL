@@ -10,6 +10,7 @@ PROFILE = Path(__file__).resolve().parents[2] / "docker/attention/b300-fa4"
 sys.path.insert(0, str(PROFILE))
 import build_wheels  # noqa: E402
 import image_profile  # noqa: E402
+import mamba_compat  # noqa: E402
 import verify_install  # noqa: E402
 
 
@@ -169,3 +170,25 @@ def test_source_drift_is_rejected(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="source manifest changed"):
         image_profile.apply(root)
     assert not (root / "uv.lock").exists()
+
+
+def test_mamba_preparation_keeps_mamba2_importable(tmp_path, monkeypatch):
+    root = tmp_path / "mamba_ssm"
+    root.mkdir()
+    (root / "modules").mkdir()
+    (root / "modules/mamba2.py").write_text("class Mamba2: pass\n")
+    (root / "modules/mamba3.py").write_text("raise RuntimeError('incompatible TileLang TVM')\n")
+    init = root / "__init__.py"
+    init.write_bytes(b"from mamba_ssm.modules.mamba2 import Mamba2\n" + mamba_compat.EAGER_IMPORT)
+    metadata = tmp_path / f"mamba_ssm-{mamba_compat.VERSION}.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text(f"Name: mamba-ssm\nVersion: {mamba_compat.VERSION}\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(RuntimeError, match="incompatible TileLang"):
+        __import__("mamba_ssm")
+    report = mamba_compat.prepare_mamba()
+    assert report["original_sha256"] != report["prepared_sha256"]
+    assert __import__("mamba_ssm").Mamba2.__name__ == "Mamba2"
+    for name in list(sys.modules):
+        if name == "mamba_ssm" or name.startswith("mamba_ssm."):
+            sys.modules.pop(name)

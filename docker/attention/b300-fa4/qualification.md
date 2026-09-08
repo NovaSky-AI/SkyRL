@@ -74,6 +74,13 @@ commit SHA and unique candidate tag, or its existing remote image workflow with
 `attention_profile=b300-fa4`. Candidate builds never move `latest`. Both B300
 workloads run the installed-payload, dependency, CUDA, and SM103 checks at startup.
 
+After frozen installation, the profile's `mamba_compat.py` removes the unused
+Mamba3 eager import from the pinned Mamba package, matching the previously
+qualified Nemotron image in Trajectory PR #4397. Mamba3's TileLang import conflicts
+with FA4's TVM FFI version. This preparation leaves Mamba2 intact, records before
+and after hashes in the image, and is followed by real FA4/Mamba2 import checks.
+It does not change either attention wheel or the default image profile.
+
 Recheck `uv run tcli get --cluster r2z1 nodes --free` and the cluster table, then
 deploy one currently free eight-GPU node with `--reserved --image <digest>
 --shutdown-after-seconds 7200`. Run Qwen and Nemotron sequentially using their
