@@ -86,6 +86,62 @@ FUTURE_POLL_INTERVAL_SECONDS = 0.05
 # Statuses a request never moves out of, i.e. the ones a waiter resolves on.
 TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
 
+# Heartbeats arrive in synchronized waves at high LoRA fanout. Coalesce each
+# wave into one transaction so control-plane liveness does not queue behind
+# hundreds of individual SQLite commits.
+HEARTBEAT_BATCH_WINDOW_SECONDS = 0.05
+
+
+class _SessionHeartbeatBatcher:
+    """Persist concurrent session heartbeats in a small number of transactions."""
+
+    def __init__(self, db_engine):
+        self._db_engine = db_engine
+        self._lock = asyncio.Lock()
+        self._pending: dict[str, list[asyncio.Future[bool]]] = {}
+        self._flush_task: asyncio.Task[None] | None = None
+
+    async def record(self, session_id: str) -> bool:
+        result = asyncio.get_running_loop().create_future()
+        async with self._lock:
+            self._pending.setdefault(session_id, []).append(result)
+            if self._flush_task is None:
+                self._flush_task = asyncio.create_task(self._flush())
+        return await result
+
+    async def _flush(self) -> None:
+        await asyncio.sleep(HEARTBEAT_BATCH_WINDOW_SECONDS)
+        while True:
+            async with self._lock:
+                if not self._pending:
+                    self._flush_task = None
+                    return
+                pending = self._pending
+                self._pending = {}
+
+            try:
+                async with AsyncSession(self._db_engine) as session:
+                    statement = select(SessionDB).where(SessionDB.session_id.in_(pending))
+                    sessions = (await session.exec(statement)).all()
+                    now = datetime.now(timezone.utc)
+                    for session_db in sessions:
+                        session_db.last_heartbeat_at = now
+                        session_db.heartbeat_count += len(pending[session_db.session_id])
+                    found_session_ids = {session_db.session_id for session_db in sessions}
+                    await session.commit()
+                for session_id, waiters in pending.items():
+                    found = session_id in found_session_ids
+                    for waiter in waiters:
+                        waiter.set_result(found)
+            except Exception as exc:
+                for waiters in pending.values():
+                    for waiter in waiters:
+                        waiter.set_exception(exc)
+
+    async def close(self) -> None:
+        if self._flush_task is not None:
+            await self._flush_task
+
 
 def raw_json_response(payload: str | None) -> Response:
     """Return already-serialized JSON without routing it through FastAPI's encoder.
@@ -288,6 +344,7 @@ async def lifespan(app: FastAPI):
 
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
+    app.state.session_heartbeat_batcher = _SessionHeartbeatBatcher(app.state.db_engine)
     app.state.proto_serialization_lock = asyncio.Lock()
     app.state.external_future_store = None
     app.state.db_write_lock = _get_db_write_context(app.state.db_engine)
@@ -378,6 +435,8 @@ async def lifespan(app: FastAPI):
     app.state.future_poller.cancel()
     with suppress(asyncio.CancelledError):
         await app.state.future_poller
+
+    await app.state.session_heartbeat_batcher.close()
 
     await _close_runtime(app, background_engine)
 
@@ -970,16 +1029,17 @@ async def create_session(request: CreateSessionRequest, session: AsyncSession = 
 async def session_heartbeat(
     request: SessionHeartbeatRequest,
     raw_request: Request,
-    session: AsyncSession = Depends(get_session),
+    _session: AsyncSession = Depends(get_session),
 ):
     """Heartbeat for an active session to keep it alive."""
-    async with raw_request.app.state.db_write_lock:
-        session_db = await session.get(SessionDB, request.session_id)
-        if session_db is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        session_db.last_heartbeat_at = datetime.now(timezone.utc)
-        session_db.heartbeat_count += 1
-        await session.commit()
+    batcher = getattr(raw_request.app.state, "session_heartbeat_batcher", None)
+    if batcher is None:
+        # Direct endpoint callers in embedded deployments may not run the FastAPI lifespan.
+        batcher = _SessionHeartbeatBatcher(raw_request.app.state.db_engine)
+        raw_request.app.state.session_heartbeat_batcher = batcher
+    found = await batcher.record(request.session_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="Session not found")
     return SessionHeartbeatResponse()
 
 
