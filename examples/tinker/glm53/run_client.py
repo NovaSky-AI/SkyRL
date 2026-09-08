@@ -1,4 +1,4 @@
-"""Time a fixed-input LoRA training loop against a native SkyRL Tinker server."""
+"""Profile dataset-independent, full-context GSPO through SkyRL's Tinker API."""
 
 import argparse
 from contextlib import contextmanager
@@ -12,6 +12,11 @@ import httpx
 import tinker
 from tinker import types
 
+FIXTURE_TEXTS = (
+    "A river flows past a stone bridge. Trees grow along the bank and birds gather in the branches. ",
+    "Calculate the area of a rectangle: multiply its length by its width. Explain each arithmetic operation. ",
+)
+
 
 def build_datum(tokens: list[int], context: int) -> types.Datum:
     """Repeat a token fixture into exactly `context` input/target positions."""
@@ -21,6 +26,37 @@ def build_datum(tokens: list[int], context: int) -> types.Datum:
     return types.Datum(
         model_input=types.ModelInput.from_ints(sequence[:-1]),
         loss_fn_inputs={"target_tokens": sequence[1:], "weights": [1.0] * context},
+    )
+
+
+def build_gspo_batch(datum: types.Datum, reference, advantage: float) -> list[types.Datum]:
+    """Attach frozen old-policy scores and a sequence-constant synthetic advantage."""
+    return [
+        types.Datum(
+            model_input=datum.model_input,
+            loss_fn_inputs={
+                **datum.loss_fn_inputs,
+                "logprobs": output["logprobs"],
+                "advantages": [advantage] * len(datum.model_input.to_ints()),
+            },
+        )
+        for output in reference.loss_fn_outputs
+    ]
+
+
+def serialize_batch(data: list[types.Datum]) -> str:
+    return json.dumps(
+        [
+            {
+                "model_input": datum.model_input.model_dump(mode="json"),
+                "loss_fn_inputs": {
+                    key: {"data": value.data, "dtype": value.dtype, "shape": value.shape}
+                    for key, value in datum.loss_fn_inputs.items()
+                },
+            }
+            for datum in data
+        ],
+        allow_nan=False,
     )
 
 
@@ -45,11 +81,11 @@ def measure(report, name: str):
 
 def check_training_result(result, context: int, batch_size: int) -> None:
     if len(result.loss_fn_outputs) != batch_size:
-        raise ValueError("forward/backward returned the wrong datum count")
+        raise ValueError("model pass returned the wrong datum count")
     for output in result.loss_fn_outputs:
         values = output["logprobs"].data
         if len(values) != context or not all(math.isfinite(value) for value in values):
-            raise ValueError("forward/backward must return one finite logprob per scored position")
+            raise ValueError("model pass must return one finite logprob per scored position")
     if not all(math.isfinite(value) for value in result.metrics.values()):
         raise ValueError("non-finite training metric")
 
@@ -86,18 +122,13 @@ def run(args) -> None:
             if not info.is_lora or info.lora_rank != 32:
                 raise ValueError("expected a rank-32 LoRA training client")
             tokenizer = trainer.get_tokenizer()
-            tokens = tokenizer.encode(args.text_file.read_text(), add_special_tokens=False)
-            datum = build_datum(tokens, args.context)
-            fixture = json.dumps(
-                {
-                    "model_input": datum.model_input.model_dump(mode="json"),
-                    "loss_fn_inputs": {
-                        key: {"data": value.data, "dtype": value.dtype, "shape": value.shape}
-                        for key, value in datum.loss_fn_inputs.items()
-                    },
-                }
-            )
-            (args.output_dir / "datum.json").write_text(fixture + "\n")
+            datums = [
+                build_datum(tokenizer.encode(text, add_special_tokens=False), args.context) for text in FIXTURE_TEXTS
+            ]
+            if datums[0].model_input.to_ints() == datums[1].model_input.to_ints():
+                raise ValueError("opposite-advantage fixtures must not have identical token inputs")
+            fixture = serialize_batch(datums)
+            (args.output_dir / "datums.json").write_text(fixture + "\n")
             (args.output_dir / "run.json").write_text(
                 json.dumps(
                     {
@@ -108,19 +139,31 @@ def run(args) -> None:
                         "backwards_per_step": 2,
                         "steps": args.steps,
                         "learning_rate": args.learning_rate,
-                        "loss_fn": "cross_entropy",
-                        "datum_sha256": hashlib.sha256(fixture.encode()).hexdigest(),
+                        "loss_fn": "gspo",
+                        "loss_fn_config": None,
+                        "reference_source": "trainer.forward before each optimizer update",
+                        "advantages": [1.0, -1.0],
+                        "datums_sha256": hashlib.sha256(fixture.encode()).hexdigest(),
                     },
                     indent=2,
                 )
                 + "\n"
             )
-            data = [datum] * args.batch_size
-            prompt = types.ModelInput.from_ints(tokens[:128])
+            prompt = types.ModelInput.from_ints(datums[0].model_input.to_ints()[:128])
             for step in range(args.steps):
-                for backward in range(2):
+                batches = []
+                for index, (datum, advantage) in enumerate(zip(datums, [1.0, -1.0], strict=True)):
+                    with measure(report, f"step_{step}/reference_{index}") as record:
+                        # cross_entropy here is a forward-only scoring request, never an update.
+                        reference = trainer.forward([datum] * args.batch_size, "cross_entropy").result()
+                        check_training_result(reference, args.context, args.batch_size)
+                        batches.append(build_gspo_batch(datum, reference, advantage))
+                        record["scored_tokens"] = args.context * args.batch_size
+                    batch_json = serialize_batch(batches[-1])
+                    (args.output_dir / f"step_{step}_batch_{index}.json").write_text(batch_json + "\n")
+                for backward, data in enumerate(batches):
                     with measure(report, f"step_{step}/backward_{backward}") as record:
-                        result = trainer.forward_backward(data, "cross_entropy").result()
+                        result = trainer.forward_backward(data, "gspo").result()
                         check_training_result(result, args.context, args.batch_size)
                         record["scored_tokens"] = args.context * args.batch_size
                         record["metrics"] = result.metrics
@@ -151,9 +194,6 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--model-path", required=True)
     parser.add_argument(
-        "--text-file", type=Path, required=True, help="Fixed text repeated to fill the training context"
-    )
-    parser.add_argument(
         "--output-dir", type=Path, required=True, help="New directory for inputs, phase timings and metrics"
     )
     parser.add_argument("--context", type=int, default=32768)
@@ -165,8 +205,6 @@ def main() -> None:
         parser.error("context >= 2, batch-size >= 1 and steps >= 2 are required")
     if not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
         parser.error("learning-rate must be positive and finite")
-    if not args.text_file.is_file():
-        parser.error("text-file must exist")
     run(args)
 
 

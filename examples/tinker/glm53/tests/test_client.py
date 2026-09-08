@@ -36,6 +36,21 @@ def test_reject_empty_or_invalid_fixture(tokens, context):
         module.build_datum(tokens, context)
 
 
+def test_gspo_keeps_reference_scores_targets_and_full_context_masks():
+    datum = module.build_datum([11, 12, 13], 7)
+    scores = types.TensorData(data=[-0.5] * 7, dtype="float32", shape=[7])
+    reference = SimpleNamespace(loss_fn_outputs=[{"logprobs": scores}])
+    for advantage in [1.0, -1.0]:
+        batch = module.build_gspo_batch(datum, reference, advantage)
+        fields = batch[0].loss_fn_inputs
+        assert fields["logprobs"].data == scores.data
+        assert fields["advantages"].data == [advantage] * 7
+        assert fields["weights"].data == [1.0] * 7
+        assert fields["target_tokens"].data == datum.loss_fn_inputs["target_tokens"].data
+        assert batch[0].model_input.to_ints() == datum.model_input.to_ints()
+    assert "advantages" not in datum.loss_fn_inputs
+
+
 def test_failure_records_elapsed_time_without_claiming_completion():
     report = io.StringIO()
     with pytest.raises(RuntimeError, match="worker failed"):
@@ -77,31 +92,46 @@ def test_unload_waits_for_terminal_completion_and_preserves_model_identity():
     ]
 
 
-@pytest.mark.parametrize("fail_backward", [False, True])
-def test_client_orders_repeated_backwards_and_unloads_after_success_or_failure(tmp_path, fail_backward):
+@pytest.mark.parametrize("failure", [None, "reference", "backward"])
+def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_path, failure):
     from unittest.mock import Mock
 
     events = []
     trainer = Mock(model_id="model-test")
     trainer.get_info.return_value = SimpleNamespace(is_lora=True, lora_rank=32, model_dump=lambda **kw: {"rank": 32})
-    trainer.get_tokenizer.return_value.encode.return_value = [11, 12, 13]
+    trainer.get_tokenizer.return_value.encode.side_effect = [[11, 12, 13], [21, 22, 23]]
 
     def future(name, value):
         def result():
             events.append(name)
-            if fail_backward and name == "backward":
+            if failure == name:
                 raise RuntimeError("worker failed")
             return value
 
         return SimpleNamespace(result=result)
 
-    trainer.forward_backward.side_effect = lambda data, loss: future(
-        "backward",
-        SimpleNamespace(
-            loss_fn_outputs=[{"logprobs": types.TensorData(data=[-1.0] * 7, dtype="float32", shape=[7])}],
-            metrics={"loss": 1.0},
-        ),
-    )
+    def output(logprob):
+        return SimpleNamespace(
+            loss_fn_outputs=[{"logprobs": types.TensorData(data=[logprob] * 7, dtype="float32", shape=[7])}],
+            metrics={"loss": 0.0},
+        )
+
+    def forward(data, loss):
+        assert loss == "cross_entropy"
+        assert "advantages" not in data[0].loss_fn_inputs
+        return future("reference", output(-1.0 - events.count("optimizer")))
+
+    def backward(data, loss):
+        assert loss == "gspo"
+        assert events.count("reference") == 2 * (events.count("optimizer") + 1)
+        fields = data[0].loss_fn_inputs
+        assert fields["logprobs"].data == [-1.0 - events.count("optimizer")] * 7
+        assert fields["advantages"].data == ([1.0] if data[0].model_input.to_ints()[0] == 11 else [-1.0]) * 7
+        assert fields["weights"].data == [1.0] * 7
+        return future("backward", output(-1.0))
+
+    trainer.forward.side_effect = forward
+    trainer.forward_backward.side_effect = backward
     trainer.optim_step.side_effect = lambda params: future(
         "optimizer", SimpleNamespace(metrics={"skyrl.ai/grad_norm": 1.0})
     )
@@ -118,13 +148,10 @@ def test_client_orders_repeated_backwards_and_unloads_after_success_or_failure(t
     trainer.save_state.side_effect = lambda name: future("checkpoint", SimpleNamespace(path="tinker://test/state"))
     service = Mock()
     service.create_lora_training_client.return_value = trainer
-    text_file = tmp_path / "text.txt"
-    text_file.write_text("fixture")
     args = SimpleNamespace(
         output_dir=tmp_path / "result",
         base_url="http://example.com",
         model_path="test-model",
-        text_file=text_file,
         context=7,
         batch_size=1,
         steps=2,
@@ -134,14 +161,28 @@ def test_client_orders_repeated_backwards_and_unloads_after_success_or_failure(t
         patch.object(module.tinker, "ServiceClient", return_value=service),
         patch.object(module, "unload_model", side_effect=lambda url, model: events.append("unload")),
     ):
-        if fail_backward:
+        if failure:
             with pytest.raises(RuntimeError, match="worker failed"):
                 module.run(args)
-            assert events == ["backward", "unload"]
+            assert events == (["reference"] if failure == "reference" else ["reference", "reference", "backward"]) + [
+                "unload"
+            ]
         else:
             module.run(args)
-            assert events == ["backward", "backward", "optimizer", "publication", "sample"] * 2 + [
+            assert events == [
+                "reference",
+                "reference",
+                "backward",
+                "backward",
+                "optimizer",
+                "publication",
+                "sample",
+            ] * 2 + [
                 "checkpoint",
                 "unload",
             ]
             assert json.loads((args.output_dir / "run.json").read_text())["backwards_per_step"] == 2
+            assert json.loads((args.output_dir / "run.json").read_text())["loss_fn"] == "gspo"
+            saved = json.loads((args.output_dir / "step_1_batch_1.json").read_text())[0]
+            assert saved["loss_fn_inputs"]["logprobs"]["data"] == [-2.0] * 7
+            assert saved["loss_fn_inputs"]["advantages"]["data"] == [-1.0] * 7
