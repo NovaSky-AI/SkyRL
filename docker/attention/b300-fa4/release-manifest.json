@@ -4,13 +4,13 @@
       "filename": "flash_attn-2.8.3+cu.13.0.torch.2.11.fa4b28.skyrl1-cp312-cp312-manylinux_2_24_x86_64.whl",
       "sha256": "62192506822d63ffee85ccadc6317be987abd87a3fe7e608c2ed49352bc0792c",
       "size": 237200630,
-      "url": "https://github.com/NovaSky-AI/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.11.fa4b28.skyrl1-cp312-cp312-manylinux_2_24_x86_64.whl"
+      "url": "https://github.com/oran-goodman/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.11.fa4b28.skyrl1-cp312-cp312-manylinux_2_24_x86_64.whl"
     },
     {
       "filename": "flash_attn_4-4.0.0b28+skyrl1-py3-none-any.whl",
       "sha256": "b87de78770f1689e69297aaf5510c6caca34b811cbe35768d3efa35cce865e78",
       "size": 2361,
-      "url": "https://github.com/NovaSky-AI/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn_4-4.0.0b28%2Bskyrl1-py3-none-any.whl"
+      "url": "https://github.com/oran-goodman/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn_4-4.0.0b28%2Bskyrl1-py3-none-any.whl"
     }
   ],
   "build": {

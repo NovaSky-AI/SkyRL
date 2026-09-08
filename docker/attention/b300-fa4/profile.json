@@ -1,7 +1,7 @@
 {
-  "generated_manifest_sha256": "e815b0bd7614b0042ffcb0fbe61825232c358837263423150846928f80146687",
-  "lock_sha256": "4c4901cfa855924c800ce8735ff7bb11bf16c5ae2330031a6a06db89034a1af1",
+  "generated_manifest_sha256": "364e2a9c8758caa466c422aa44ebd98ae304ba975a8ca01aeddf6125975f87d1",
+  "lock_sha256": "23dabe78508cb0a6acff931cc10dd19d685e28a97c0a48c686c658aacce99db0",
   "profile": "b300-fa4",
-  "release_manifest_sha256": "bb77254d5495e147f261216ee11eb7b087c9340c2964031718d00a6d9fea24a6",
+  "release_manifest_sha256": "ad3527c05e7e1a642ff1cc13f5c8b69bb9c13fc5ed621fbf2dbd68e66bf1f821",
   "source_manifest_sha256": "24d122b4ef979a69b3c32ea04dd64e47faaa4adf1ada43d2e24f454998743396"
 }

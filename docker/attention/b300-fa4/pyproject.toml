@@ -362,7 +362,7 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 # before comparing (`PkgVersion(...).public`); TE 2.11 did not, which is why this
 # previously had to be a fork wheel with the local version stripped from METADATA —
 # otherwise TE rejected it and silently fell back to broken unfused attention.
-flash-attn = {url = "https://github.com/NovaSky-AI/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.11.fa4b28.skyrl1-cp312-cp312-manylinux_2_24_x86_64.whl"}
+flash-attn = {url = "https://github.com/oran-goodman/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.11.fa4b28.skyrl1-cp312-cp312-manylinux_2_24_x86_64.whl"}
 causal-conv1d = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 mamba-ssm = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 # The TE trio must come from Astral as a set. Astral versions the core and torch
@@ -390,7 +390,7 @@ megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "14346b65a
 # to a source build, which needs a local CUDA 13 toolkit. These are built from the pinned rev below with
 # nvcc 13.0.88 and torch 2.11.0+cu130 (sm_75-sm_121, glibc >= 2.35): rebuild if the torch pin moves, and
 # drop them once upstream ships cu13torch2.11. Other platforms/python versions still build from source.
-flash-attn-4 = {url = "https://github.com/NovaSky-AI/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn_4-4.0.0b28%2Bskyrl1-py3-none-any.whl"}
+flash-attn-4 = {url = "https://github.com/oran-goodman/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn_4-4.0.0b28%2Bskyrl1-py3-none-any.whl"}
 
 
 [[tool.uv.sources.fast-hadamard-transform]]
