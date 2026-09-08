@@ -1,0 +1,300 @@
+"""CPU tests for the generator-owned TITO proxy."""
+
+import asyncio
+
+import httpx
+import pytest
+
+from skyrl.train.generators.tito.proxy import TITOProxy, TITOProxyConfig
+from skyrl.train.generators.tito.renderer import RenderedPrompt
+from skyrl.train.generators.tito.trace import Trace
+
+
+class FakeRenderer:
+    def render(self, messages, *, tools=None):
+        token_ids = []
+        message_indices = []
+        for index, message in enumerate(messages):
+            token_ids.append(10 + index)
+            message_indices.append(index)
+        token_ids.append(99)
+        message_indices.append(-1)
+        return RenderedPrompt(tuple(token_ids), tuple(message_indices))
+
+    def bridge(self, previous_prompt_ids, previous_completion_ids, new_messages, *, tools=None):
+        token_ids = list(previous_prompt_ids) + list(previous_completion_ids)
+        message_indices = [-1] * len(token_ids)
+        for index, _ in enumerate(new_messages):
+            token_ids.append(30 + index)
+            message_indices.append(index)
+        token_ids.append(99)
+        message_indices.append(-1)
+        return RenderedPrompt(
+            tuple(token_ids),
+            tuple(message_indices),
+            reused_prefix_length=len(previous_prompt_ids) + len(previous_completion_ids),
+        )
+
+    def parse_response(self, token_ids, *, tools=None):
+        return {"role": "assistant", "content": ",".join(str(token_id) for token_id in token_ids)}
+
+    def get_stop_token_ids(self):
+        return [2]
+
+    def decode_token(self, token_id):
+        return str(token_id)
+
+
+class FakeInferenceEngine:
+    def __init__(self):
+        self.generate_calls = []
+        self.finished_sessions = []
+        self.delay = 0.0
+
+    async def generate(self, input_batch, model=None):
+        self.generate_calls.append((input_batch, model))
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        return {
+            "responses": ["response"],
+            "response_ids": [[50, 51]],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[-0.2, -0.3]],
+            "prompt_logprobs": None,
+            "rollout_expert_indices": None,
+        }
+
+    async def finish_session(self, session_id):
+        self.finished_sessions.append(session_id)
+
+
+def _assert_proxy_stopped(proxy):
+    assert proxy._server_task is None
+    assert proxy._server is None
+    assert proxy._socket is None
+    assert proxy._base_url is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_cleans_up_when_startup_fails(monkeypatch):
+    async def fail_startup(self, sockets=None):
+        raise RuntimeError("startup failed")
+
+    monkeypatch.setattr("skyrl.train.generators.tito.proxy.uvicorn.Server.serve", fail_startup)
+    proxy = TITOProxy(FakeInferenceEngine(), FakeRenderer())
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        async with proxy.serving():
+            pass
+
+    _assert_proxy_stopped(proxy)
+
+
+@pytest.mark.asyncio
+async def test_proxy_cleans_up_when_serving_body_fails():
+    proxy = TITOProxy(FakeInferenceEngine(), FakeRenderer())
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        async with proxy.serving():
+            raise RuntimeError("body failed")
+
+    _assert_proxy_stopped(proxy)
+
+
+@pytest.mark.asyncio
+async def test_proxy_cleans_up_when_owner_is_cancelled():
+    proxy = TITOProxy(FakeInferenceEngine(), FakeRenderer())
+    entered = asyncio.Event()
+
+    async def serve_until_cancelled():
+        async with proxy.serving():
+            entered.set()
+            await asyncio.Future()
+
+    owner = asyncio.create_task(serve_until_cancelled())
+    await entered.wait()
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    _assert_proxy_stopped(proxy)
+
+
+@pytest.mark.asyncio
+async def test_proxy_stops_before_reporting_active_registration():
+    engine = FakeInferenceEngine()
+    proxy = TITOProxy(engine, FakeRenderer())
+    trace = Trace()
+    serving = proxy.serving()
+    await serving.__aenter__()
+    registration = proxy.register(trace, router_session_id="session-1", cache_salt=None, model="model")
+    await registration.__aenter__()
+
+    with pytest.raises(RuntimeError, match=r"1 registration\(s\) are active"):
+        await serving.__aexit__(None, None, None)
+
+    _assert_proxy_stopped(proxy)
+    await registration.__aexit__(None, None, None)
+    assert engine.finished_sessions == ["session-1"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_runs_token_inference_and_commits_trace():
+    engine = FakeInferenceEngine()
+    proxy = TITOProxy(engine, FakeRenderer())
+    trace = Trace()
+
+    async with proxy.serving():
+        async with proxy.register(trace, router_session_id="session-1", cache_salt="salt", model="model") as handle:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{handle.base_url}/v1/chat/completions",
+                    json={
+                        "model": "model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "temperature": 0.7,
+                        "max_tokens": 8,
+                    },
+                )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "50,51"
+    assert len(trace.committed_turns()) == 1
+    assert trace.transition(0).model == "model"
+    assert trace.transition(0).sampling_params["temperature"] == 0.7
+    assert trace.transition(0).sampling_params["max_tokens"] == 8
+    assert engine.generate_calls[0][0]["prompt_token_ids"] == [[10, 99]]
+    assert engine.generate_calls[0][0]["cache_salt"] == "salt"
+    assert engine.finished_sessions == ["session-1"]
+    assert trace.is_sealed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content_length", "expected_status"),
+    [
+        ("invalid", 400),
+        ("-1", 400),
+        ("9", 413),
+    ],
+)
+async def test_proxy_validates_content_length(content_length, expected_status):
+    engine = FakeInferenceEngine()
+    proxy = TITOProxy(engine, FakeRenderer(), config=TITOProxyConfig(max_request_bytes=8))
+    trace = Trace()
+
+    async with proxy.serving():
+        async with proxy.register(trace, router_session_id="session-1", cache_salt=None, model="model") as handle:
+            registration_token = handle.base_url.rsplit("/", 1)[-1]
+            transport = httpx.ASGITransport(app=proxy._app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    f"/sessions/{registration_token}/v1/chat/completions",
+                    content=b"{}",
+                    headers={"content-length": content_length},
+                )
+
+    assert response.status_code == expected_status
+    assert not engine.generate_calls
+
+
+@pytest.mark.asyncio
+async def test_identical_concurrent_requests_record_distinct_attempts():
+    engine = FakeInferenceEngine()
+    engine.delay = 0.05
+    proxy = TITOProxy(engine, FakeRenderer())
+    trace = Trace()
+    body = {"model": "model", "messages": [{"role": "user", "content": "hello"}]}
+
+    async with proxy.serving():
+        async with proxy.register(trace, router_session_id="session-1", cache_salt=None, model="model") as handle:
+            async with httpx.AsyncClient() as client:
+                first, second = await asyncio.gather(
+                    client.post(f"{handle.base_url}/v1/chat/completions", json=body),
+                    client.post(f"{handle.base_url}/v1/chat/completions", json=body),
+                )
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["choices"][0]["message"] == second.json()["choices"][0]["message"]
+    assert first.json()["id"] != second.json()["id"]
+    assert len(engine.generate_calls) == 2
+    assert len(trace.committed_turns()) == 2
+    assert len(trace.branches()) == 2
+
+
+@pytest.mark.asyncio
+async def test_proxy_rejects_unsupported_streaming():
+    engine = FakeInferenceEngine()
+    proxy = TITOProxy(engine, FakeRenderer())
+    trace = Trace()
+
+    async with proxy.serving():
+        async with proxy.register(trace, router_session_id="session-1", cache_salt=None, model="model") as handle:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{handle.base_url}/v1/chat/completions",
+                    json={
+                        "model": "model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    },
+                )
+
+    assert response.status_code == 400
+    assert "Streaming" in response.json()["error"]["message"]
+    assert not engine.generate_calls
+
+
+@pytest.mark.asyncio
+async def test_proxy_enforces_configured_model_length():
+    engine = FakeInferenceEngine()
+    proxy = TITOProxy(
+        engine,
+        FakeRenderer(),
+        config=TITOProxyConfig(max_model_len=1),
+    )
+    trace = Trace()
+
+    async with proxy.serving():
+        async with proxy.register(trace, router_session_id="session-1", cache_salt=None, model="model") as handle:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{handle.base_url}/v1/chat/completions",
+                    json={
+                        "model": "model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+
+    assert response.status_code == 400
+    assert "model" in response.json()["error"]["message"]
+    assert not engine.generate_calls
+
+
+@pytest.mark.asyncio
+async def test_registration_cleanup_survives_drain_timeout():
+    engine = FakeInferenceEngine()
+    engine.delay = 0.1
+    proxy = TITOProxy(
+        engine,
+        FakeRenderer(),
+        config=TITOProxyConfig(drain_timeout_seconds=0.01),
+    )
+    trace = Trace()
+    body = {"model": "model", "messages": [{"role": "user", "content": "hello"}]}
+
+    async with proxy.serving():
+        async with proxy.register(trace, router_session_id="session-1", cache_salt=None, model="model") as handle:
+            async with httpx.AsyncClient() as client:
+                request_task = asyncio.create_task(client.post(f"{handle.base_url}/v1/chat/completions", json=body))
+                while not engine.generate_calls:
+                    await asyncio.sleep(0.001)
+        try:
+            response = await request_task
+        except httpx.TransportError:
+            response = None
+
+    if response is not None:
+        assert response.status_code >= 500
+    assert trace.is_sealed
+    assert engine.finished_sessions == ["session-1"]
