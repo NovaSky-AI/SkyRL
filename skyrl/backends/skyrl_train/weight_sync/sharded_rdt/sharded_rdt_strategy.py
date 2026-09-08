@@ -96,6 +96,16 @@ class ShardedRdtWeightTransferSender(WeightTransferSender):
         prefix cache, so the worker resets it (``handles_prefix_cache_reset``
         stays False).
         """
+        if weight_extractor.derives_metadata_from_chunks:
+            # Serialized FP8 splits each tensor into a quantized payload plus
+            # scales; the weight sources here publish whole bridge tensors, so
+            # the consumers would pull dequantized weights into modules vLLM
+            # built for FP8. Config validation rejects the combination too; this
+            # covers senders built outside the training entrypoint.
+            raise ValueError(
+                "sharded_rdt does not support serialized FP8 chunks; "
+                "disable fp8_weight_sync_mode or use the nccl weight sync backend"
+            )
         del dtype, kwargs
         await self._sender.send(weight_extractor)
 

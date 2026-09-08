@@ -18,7 +18,11 @@ if TYPE_CHECKING:
 import ray
 import torch
 
-from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
+from skyrl.backends.skyrl_train.weight_sync.base import (
+    WeightChunk,
+    WeightUpdateRequest,
+    get_weight_chunk_metadata,
+)
 from skyrl.backends.skyrl_train.weight_sync.nccl_trainer_send import (
     nccl_trainer_init,
     nccl_trainer_send_weights,
@@ -130,21 +134,27 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        derive_metadata_from_chunks: bool = False,
         **kwargs,
     ) -> None:
         """Send chunks via broadcast or vLLM native NCCL.
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
-            weight_metadata: Pre-computed metadata dict with "names", "dtype_names",
-                "shapes". Avoids materializing all chunks to collect metadata.
+            weight_metadata: Complete metadata for the batched update path.
+            derive_metadata_from_chunks: Send each chunk with derived metadata.
         """
-        await self._send_chunks_vllm_native(chunks, weight_metadata)
+        if derive_metadata_from_chunks:
+            if weight_metadata is not None:
+                raise ValueError("weight_metadata must be omitted when deriving metadata from chunks")
+            await self._send_serialized_fp8_chunks_vllm_native(chunks)
+        else:
+            await self._send_chunks_vllm_native(chunks, weight_metadata)
 
     async def _send_chunks_vllm_native(
         self,
         chunks: Iterable[WeightChunk],
-        weight_metadata: Optional[Dict[str, list]] = None,
+        weight_metadata: Optional[Dict[str, list]],
     ) -> None:
         """Batched path: one update_weights call + nccl_trainer_send_weights.
 
@@ -153,10 +163,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         tensors to vLLM via the NCCL weight transfer engine.
         """
         if weight_metadata is None:
-            raise ValueError(
-                "weight_metadata is required for vLLM native path. "
-                "Call weight_extractor.get_weight_metadata() and pass it to send_chunks."
-            )
+            raise ValueError("weight_metadata is required unless derive_metadata_from_chunks=true")
 
         def weight_iterator() -> Iterator[Tuple[str, torch.Tensor]]:
             for chunk in chunks:
@@ -178,7 +185,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             update_info = dict(weight_metadata)
             update_task = asyncio.create_task(self._inference_client.update_weights_nccl(update_info))
 
-            # Run in thread so the HTTP update_task can progress concurrently
+            # Run in a thread so the HTTP update task can progress concurrently.
             await asyncio.to_thread(
                 nccl_trainer_send_weights,
                 weight_iterator(),
@@ -189,11 +196,51 @@ class BroadcastWeightTransferSender(WeightTransferSender):
 
             await self._inference_client.finish_weight_update()
         else:
-            # Non-rank-0 still needs to participate in the all-gather
+            # Non-rank-0 still needs to participate in extractor collectives.
             for _ in weight_iterator():
                 pass
 
         torch.distributed.barrier()
+
+    async def _send_serialized_fp8_chunks_vllm_native(
+        self,
+        chunks: Iterable[WeightChunk],
+    ) -> None:
+        """Send lazy mixed-dtype serialized-FP8 chunks through vLLM NCCL."""
+        if torch.distributed.get_rank() == 0:
+            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+
+        for chunk in chunks:
+            if torch.distributed.get_rank() == 0:
+                await self._send_chunk_vllm_native(chunk)
+
+        if torch.distributed.get_rank() == 0:
+            await self._inference_client.finish_weight_update()
+
+        torch.distributed.barrier()
+
+    async def _send_chunk_vllm_native(self, chunk: WeightChunk) -> None:
+        """Send one logical chunk as its own NCCL update round.
+
+        Same wire protocol as the batched path (vendored
+        ``nccl_trainer_send_weights`` + ``BroadcastInitInfo.packed``), just one
+        round per chunk because serialized-FP8 names/shapes are only known once
+        the chunk is built. The update info carries only names/dtype_names/shapes:
+        vLLM 0.28.0 rejects ``packed`` there (it is fixed at init). The packed
+        producer linearizes by bytes, so mixed fp8/fp32/bf16 tensors in one
+        round are fine.
+        """
+        update_info = get_weight_chunk_metadata(chunk)
+        update_task = asyncio.create_task(self._inference_client.update_weights_nccl(update_info))
+
+        # Let the receiver enter its collective while the trainer broadcasts.
+        await asyncio.to_thread(
+            nccl_trainer_send_weights,
+            iter(zip(chunk.names, chunk.tensors)),
+            self._model_update_group,
+            packed=self._init_info.packed,
+        )
+        await update_task
 
     def teardown(self) -> None:
         """Destroy the process group used for weight transfer."""
