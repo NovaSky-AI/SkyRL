@@ -69,14 +69,20 @@ class WeightTransferSender(ABC):
         is what keeps ``get_weight_metadata`` (a whole-model gather on the
         Megatron extractor) off their critical path entirely.
 
+        An extractor whose metadata depends on chunk contents (serialized FP8)
+        reports ``derives_metadata_from_chunks``; for those, precomputing is not
+        just wasteful but unsupported, so the flag is forwarded instead.
+
         Args:
             weight_extractor: The worker's extractor, already built.
             dtype: Inference dtype to convert to.
             **kwargs: Forwarded to :meth:`send_chunks`.
         """
+        derive_metadata_from_chunks = weight_extractor.derives_metadata_from_chunks
         await self.send_chunks(
             weight_extractor.extract_weights(dtype),
-            weight_metadata=weight_extractor.get_weight_metadata(dtype),
+            weight_metadata=(None if derive_metadata_from_chunks else weight_extractor.get_weight_metadata(dtype)),
+            derive_metadata_from_chunks=derive_metadata_from_chunks,
             **kwargs,
         )
 
@@ -85,6 +91,7 @@ class WeightTransferSender(ABC):
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        derive_metadata_from_chunks: bool = False,
         **kwargs,
     ) -> None:
         """Send chunks using this transfer strategy.
@@ -95,8 +102,7 @@ class WeightTransferSender(ABC):
         Args:
             chunks: Iterable of WeightChunk objects to send.
             weight_metadata: Optional pre-computed metadata (names, dtype_names, shapes).
-                When provided, allows the sender to avoid materializing all chunks
-                to collect metadata upfront.
+            derive_metadata_from_chunks: Derive metadata from each transferred chunk.
         """
         ...
 
