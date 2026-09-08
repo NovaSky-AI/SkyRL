@@ -15,13 +15,17 @@ pytest.importorskip("vllm", reason="LoRA export tests use vLLM's adapter-name pa
 pytestmark = pytest.mark.vllm
 
 from vllm.lora.utils import parse_fine_tuned_lora_name  # noqa: E402
-from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration  # noqa: E402
+from vllm.model_executor.models.qwen3_5 import (  # noqa: E402
+    Qwen3_5ForConditionalGeneration,
+)
 
 from skyrl.backends.skyrl_train.distributed import fsdp_utils  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (  # noqa: E402
     RemoteInferenceClient,
 )
-from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase  # noqa: E402
+from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (  # noqa: E402
+    FSDPPolicyWorkerBase,
+)
 from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase  # noqa: E402
 
 
@@ -118,9 +122,7 @@ def test_full_weight_sync_uses_inference_namespace(monkeypatch, is_multimodal_lm
 
 @pytest.mark.parametrize("unrecognized_prefix", ["", "base_model", "base_model.model_extra."])
 @pytest.mark.parametrize("is_multimodal_lm_only", [True, False])
-def test_lora_export_preserves_unrecognized_prefix(
-    tmp_path, monkeypatch, unrecognized_prefix, is_multimodal_lm_only
-):
+def test_lora_export_preserves_unrecognized_prefix(tmp_path, monkeypatch, unrecognized_prefix, is_multimodal_lm_only):
     original_name = f"{unrecognized_prefix}model.layers.0.self_attn.q_proj.lora_B.weight"
     recognized_name = "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
     source_params = {
