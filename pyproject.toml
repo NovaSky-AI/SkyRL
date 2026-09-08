@@ -148,7 +148,11 @@ megatron = [
     # metadata requires there, so the two agree without an override.
     "transformer-engine-cu13==2.16.0+cu.13.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
-    "flash-attn-4[cu13]==4.0.0b28; sys_platform == 'linux'",
+    # FA4 ships only inside the combined x86_64 wheels below, which cover
+    # cp312-cp314 -- hence the `< '3.15'` bound, matching the companion's own
+    # `Requires-Python`. Elsewhere `skyrl._compat` poisons the stale
+    # `flash_attn.cute` tree and megatron-core falls back to HAVE_FA4 = False.
+    "flash-attn-4[cu13]==4.0.0b28; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.15'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1; sys_platform == 'linux'",
@@ -374,12 +378,26 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 # `max_version = 2.8.3` and 2.8.3.post1 > 2.8.3. TE >= 2.16 strips the local segment
 # before comparing (`PkgVersion(...).public`).
 flash-attn = [
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
+    # x86_64 gets the combined FA2+FA4 wheels: the plain cu13torch2.13 FA2
+    # build above ships a stale `flash_attn/cute/` tree (21 files, built against
+    # the nvidia-cutlass-dsl 4.0/4.1 API) that collides with real FA4 (52 files).
+    # This wheel is the same torch-2.13 FA2 extension with that tree replaced by
+    # FA4 4.0.0b28's, so one package owns `flash_attn.cute` outright and FA2 and
+    # FA4 are importable side by side. See `flash-attn-4` below for the companion.
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
+]
+# Metadata-only companion: it carries no runtime files, declares the `cu13`
+# extra, and hard-depends on the exact combined wheel above (which is what
+# actually ships `flash_attn/cute/`). Both must come from the same release --
+# the companion cannot find the combined wheel on PyPI. Its presence is also
+# the signal `skyrl._compat.disable_bundled_flash_attn_cute()` checks.
+flash-attn-4 = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn_4-4.0.0b28%2Bskyrl1-py3-none-any.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.15'" },
 ]
 causal-conv1d = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
