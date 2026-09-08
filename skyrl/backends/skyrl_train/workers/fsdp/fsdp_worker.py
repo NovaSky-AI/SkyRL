@@ -42,20 +42,11 @@ from skyrl.backends.skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
 )
+from skyrl.backends.skyrl_train.workers.worker_utils import get_inference_weight_prefix
 from skyrl.train.utils.utils import str_to_torch_dtype
 
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
-
-
-def _get_inference_weight_prefix(is_multimodal_lm_only: bool) -> str:
-    """Return the enclosing inference-model prefix omitted by language-only loading.
-
-    Shared by full-weight and LoRA exports. This preserves the existing assumption
-    that the inference VLM exposes its text model under ``language_model``; it is
-    not a universal naming convention for all VLM architectures.
-    """
-    return "language_model." if is_multimodal_lm_only else ""
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -237,7 +228,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             )
             is CudaIpcTransferStrategy
         )
-        weight_prefix = _get_inference_weight_prefix(self._is_multimodal_lm_only)
+        weight_prefix = get_inference_weight_prefix(self._is_multimodal_lm_only)
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
             enable_bucketing=enable_bucketing,
@@ -270,7 +261,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
 
         lora_params = collect_lora_params(module=self.model.model)
-        weight_prefix = _get_inference_weight_prefix(self._is_multimodal_lm_only)
+        weight_prefix = get_inference_weight_prefix(self._is_multimodal_lm_only)
         if weight_prefix:
             # Keep PEFT's wrapper outermost; the inference namespace belongs inside it.
             peft_wrapper_prefix = "base_model.model."
