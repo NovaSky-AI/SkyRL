@@ -27,16 +27,16 @@ permissions:
 jobs:
   
   skyrl_train_tests_megatron:
-    # Gate on the label that fired this event. `types: [labeled]` delivers one event
-    # per label added, and `contains(...labels.*.name, ...)` tests the whole label
-    # set, so labelling in bulk launched one identical GPU run per label.
+    # Gate on the PR's whole label set, not just the label that fired this event,
+    # so the run also happens when the gating label is already present and some
+    # other label is added afterwards.
     if: >
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (
         github.event_name == 'pull_request_target' &&
         !github.event.pull_request.draft &&
-        github.event.label.name == 'run_train_megatron_gpu_ci'
+        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci')
       )
     runs-on: ubuntu-latest
     defaults:
