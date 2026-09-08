@@ -10,7 +10,7 @@ name = "skyrl"
 dynamic = ["version"]
 description = "Unified API for training and inference"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "datasets>=4.0.0",
     "pillow>=11.3.0",
@@ -91,7 +91,7 @@ skyrl-train = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11; sys_platform == 'linux'",
+    "flash-attn==2.8.3+cu.13.0.torch.2.11.fa4b28.skyrl1; sys_platform == 'linux'",
     "polars",
     "s3fs",
     "s5cmd>=0.3.3; sys_platform == 'linux'",
@@ -123,7 +123,7 @@ fsdp = [
     "nixl; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11; sys_platform == 'linux'",
+    "flash-attn==2.8.3+cu.13.0.torch.2.11.fa4b28.skyrl1; sys_platform == 'linux'",
     "torch==2.11.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -145,7 +145,7 @@ megatron = [
     # publishes on the cu130 index, and it is what `transformer-engine-torch`'s
     # metadata requires there, so the two agree without an override.
     "transformer-engine-cu13==2.16.0+cu.13.0; sys_platform == 'linux'",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11; sys_platform == 'linux'",
+    "flash-attn==2.8.3+cu.13.0.torch.2.11.fa4b28.skyrl1; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1+cu.13.0.torch.2.11; sys_platform == 'linux'",
@@ -168,6 +168,7 @@ megatron = [
     "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
     "fast-hadamard-transform; sys_platform == 'linux'",
+    "flash-attn-4[cu13]==4.0.0b28+skyrl1; sys_platform == 'linux'",
 ]
 
 miniswe = [
@@ -214,10 +215,7 @@ version = {attr = "skyrl.__version__"}
 
 [tool.uv]
 # Resolve for both Linux (production) and macOS (dev)
-required-environments = [
-    "sys_platform == 'linux'",
-    "sys_platform == 'darwin' and platform_machine == 'arm64'",
-]
+required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras
@@ -272,7 +270,7 @@ override-dependencies = [
     # resolved version changes. If a vLLM kernel ever fails on the older tilelang,
     # raise these to vLLM's pins and re-check mamba-ssm.
     "tilelang==0.1.9; sys_platform == 'linux'",
-    "apache-tvm-ffi==0.1.10; sys_platform == 'linux'",
+    "apache-tvm-ffi==0.1.12; sys_platform == 'linux'",
     # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
     # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
     # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
@@ -293,7 +291,10 @@ override-dependencies = [
     # torchvision==0.28.0, so without this the torch override above would resolve
     # a torchvision that cannot import against the torch we actually install.
     "torchvision==0.26.0; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl[cu13]==4.6.2; sys_platform == 'linux'",
+    "quack-kernels[cu13]==0.6.4; sys_platform == 'linux'",
 ]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
@@ -361,7 +362,7 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 # before comparing (`PkgVersion(...).public`); TE 2.11 did not, which is why this
 # previously had to be a fork wheel with the local version stripped from METADATA —
 # otherwise TE rejected it and silently fell back to broken unfused attention.
-flash-attn = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
+flash-attn = {url = "https://github.com/NovaSky-AI/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.11.fa4b28.skyrl1-cp312-cp312-manylinux_2_24_x86_64.whl"}
 causal-conv1d = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 mamba-ssm = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 # The TE trio must come from Astral as a set. Astral versions the core and torch
@@ -374,14 +375,6 @@ transformer-engine-cu13 = { index = "astral-cu130", marker = "sys_platform == 'l
 transformer-engine-torch = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
 # Linux uses the cu130 index (torch 2.11 wheels are published there).
-torch = [
-    { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
-    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
-]
-torchvision = [
-    { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
-    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
-]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
 # megatron-bridge main branch: latest as of 8/13/26
 megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "2b8cb21d90548a5796c748f1986c77fc1cfe2417", marker = "sys_platform == 'linux'"}
@@ -393,21 +386,25 @@ megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev =
 megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "14346b65a2d0790e451919858f7771078105c5f0", marker = "sys_platform == 'linux'"}
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14
 # TODO (sumanthrh): Remove this after 0.1.15 vllm-router release
-vllm-router = [
-    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
-]
 # NOTE (etang): upstream publishes wheels only up to cu13torch2.10, so torch 2.11 + CUDA 13 falls back
 # to a source build, which needs a local CUDA 13 toolkit. These are built from the pinned rev below with
 # nvcc 13.0.88 and torch 2.11.0+cu130 (sm_75-sm_121, glibc >= 2.35): rebuild if the torch pin moves, and
 # drop them once upstream ships cu13torch2.11. Other platforms/python versions still build from source.
-fast-hadamard-transform = [
-    { url = "https://github.com/erictang000/fast-hadamard-transform/releases/download/v1.1.0.post2-cu13torch2.11/fast_hadamard_transform-1.1.0%2Bcu13torch2.11cxx11abitrue-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'" },
-    { url = "https://github.com/erictang000/fast-hadamard-transform/releases/download/v1.1.0.post2-cu13torch2.11/fast_hadamard_transform-1.1.0%2Bcu13torch2.11cxx11abitrue-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.13' and python_full_version < '3.14'" },
-    { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "e7706faf8d1c3b9f241e36860640ad1dac644ede", marker = "sys_platform == 'linux' and (platform_machine != 'x86_64' or python_full_version < '3.12' or python_full_version >= '3.14')" },
-]
+flash-attn-4 = {url = "https://github.com/NovaSky-AI/SkyRL/releases/download/attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1/flash_attn_4-4.0.0b28%2Bskyrl1-py3-none-any.whl"}
 
 
+[[tool.uv.sources.fast-hadamard-transform]]
+url = "https://github.com/erictang000/fast-hadamard-transform/releases/download/v1.1.0.post2-cu13torch2.11/fast_hadamard_transform-1.1.0%2Bcu13torch2.11cxx11abitrue-cp312-cp312-linux_x86_64.whl"
+marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'"
+[[tool.uv.sources.vllm-router]]
+url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl"
+marker = "sys_platform == 'linux' and platform_machine == 'x86_64'"
+[[tool.uv.sources.torchvision]]
+index = "pytorch-cu130"
+marker = "sys_platform == 'linux'"
+[[tool.uv.sources.torch]]
+index = "pytorch-cu130"
+marker = "sys_platform == 'linux'"
 [tool.pytest.ini_options]
 # Registering markers silences PytestUnknownMarkWarning and makes `-m` selection
 # in ci/gpu_ci_run_*.sh explicit rather than relying on free-form names.

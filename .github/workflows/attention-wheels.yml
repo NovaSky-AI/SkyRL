@@ -1,0 +1,42 @@
+name: Attention wheel packaging
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - docker/attention/b300-fa4/**
+      - tests/packaging/test_b300_fa4.py
+      - tests/test_compat.py
+      - .github/workflows/attention-wheels.yml
+  push:
+    paths:
+      - docker/attention/b300-fa4/**
+      - tests/packaging/test_b300_fa4.py
+      - .github/workflows/attention-wheels.yml
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12.14"
+      - name: Test packaging and detection
+        run: uv run --isolated --no-project --with pytest --with tomlkit==0.13.3 --with packaging==25.0 pytest tests/packaging/test_b300_fa4.py tests/test_compat.py
+      - name: Build wheel pair twice
+        run: |
+          uv run --isolated --no-project docker/attention/b300-fa4/build_wheels.py --download --cache /tmp/attention-inputs --output /tmp/attention-release
+          uv run --isolated --no-project docker/attention/b300-fa4/build_wheels.py --cache /tmp/attention-inputs --output /tmp/attention-rebuild
+          diff /tmp/attention-release/SHA256SUMS /tmp/attention-rebuild/SHA256SUMS
+      - name: Exercise pip and uv on Linux
+        run: uv run --isolated --no-project docker/attention/b300-fa4/install_smoke.py --artifacts /tmp/attention-release --report /tmp/attention-release/linux-installation.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fa2-fa4-skyrl1
+          path: /tmp/attention-release/
+          retention-days: 30

@@ -1,6 +1,7 @@
 # CI
 
 - **Workflows**: `.github/workflows/{cpu,gpu,tinker}_*.yaml`.
+- **Attention packaging**: `.github/workflows/attention-wheels.yml` builds the FA2/FA4 pair twice and tests real pip/uv installs on Linux. B300 kernel and training qualification runs separately through Trajectory TCLI.
 - **Runner glue**: `ci/anyscale_*.yaml` (Anyscale job spec) → `ci/gpu_*_run*.sh` (pytest invocation).
 
 ## CPU vs GPU

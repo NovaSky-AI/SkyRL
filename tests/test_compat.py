@@ -29,3 +29,16 @@ def test_missing_fa4_disables_bundled_cute(monkeypatch):
     importlib.reload(skyrl)
 
     assert sys.modules["flash_attn.cute"] is None
+
+
+def test_metadata_only_companion_enables_cute(tmp_path, monkeypatch):
+    metadata = tmp_path / "flash_attn_4-4.0.0b28+skyrl1.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text("Metadata-Version: 2.4\nName: flash-attn-4\nVersion: 4.0.0b28+skyrl1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "flash_attn.cute", raising=False)
+
+    importlib.reload(skyrl)
+
+    assert importlib.metadata.version("flash-attn-4") == "4.0.0b28+skyrl1"
+    assert "flash_attn.cute" not in sys.modules

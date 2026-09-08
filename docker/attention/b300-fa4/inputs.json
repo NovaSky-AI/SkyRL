@@ -1,0 +1,31 @@
+{
+  "recipe_revision": "skyrl1",
+  "skyrl_base_commit": "b58b96e81992c9cfe9b08b1c5ed6202ce8c6432e",
+  "combined_version": "2.8.3+cu.13.0.torch.2.11.fa4b28.skyrl1",
+  "companion_version": "4.0.0b28+skyrl1",
+  "release_repository": "NovaSky-AI/SkyRL",
+  "release_tag": "attention-fa2-2.8.3-fa4-4.0.0b28-skyrl1",
+  "requires_python": ">=3.12,<3.13",
+  "runtime_pins": {
+    "torch": "torch==2.11.0",
+    "nvidia-cutlass-dsl": "nvidia-cutlass-dsl[cu13]==4.6.2",
+    "quack-kernels": "quack-kernels[cu13]==0.6.4",
+    "apache-tvm-ffi": "apache-tvm-ffi==0.1.12"
+  },
+  "inputs": {
+    "fa2": {
+      "filename": "flash_attn-2.8.3+cu.13.0.torch.2.11-cp312-cp312-manylinux_2_24_x86_64.whl",
+      "url": "https://wheels.astral.sh/artifacts/a7aab3f4de4624f0b83efa050b78aa273c98359d5b98527c2eefc7130d7d028e/flash_attn-2.8.3%2Bcu.13.0.torch.2.11-cp312-cp312-manylinux_2_24_x86_64.whl",
+      "sha256": "a7aab3f4de4624f0b83efa050b78aa273c98359d5b98527c2eefc7130d7d028e",
+      "version": "2.8.3+cu.13.0.torch.2.11",
+      "license": "BSD-3-Clause"
+    },
+    "fa4": {
+      "filename": "flash_attn_4-4.0.0b28-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/bb/aa/3fbbf512a901b8174f840fa35fcc5eaed03dd3dba9879c16c435f6e62092/flash_attn_4-4.0.0b28-py3-none-any.whl",
+      "sha256": "b6fc43864488b97becee5c123536bc7d0de98bfac0754973aa6c00521eced9cf",
+      "version": "4.0.0b28",
+      "license": "BSD-3-Clause"
+    }
+  }
+}
