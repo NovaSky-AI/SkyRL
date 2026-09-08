@@ -22,7 +22,10 @@ the engine via the factory). It is imported from:
 function and ImportError is swallowed on platforms without vLLM.
 
 REMOVAL: delete this module + its imports once SkyRL's pinned vLLM registers the
-``sharded_rdt`` engine in ``WeightTransferEngineFactory`` natively.
+``sharded_rdt`` engine in ``WeightTransferEngineFactory`` natively. vLLM >= 0.28.1
+(the pinned dev wheel) does register ``sharded_rdt`` natively, so on that wheel this
+module is a no-op and vLLM's own engine is used; the vendored engine below stays as the
+fallback for older wheels until the two implementations are reconciled.
 """
 
 import logging

@@ -762,7 +762,17 @@ class TestShardedRdtVllmRegistration:
 
         rdt_vllm_register.ensure_registered()
         loader = WeightTransferEngineFactory._registry["sharded_rdt"]
-        assert loader() is ShardedRDTWeightTransferEngine
+        resolved = loader()
+        # vLLM >= 0.28.1 registers its own `sharded_rdt` engine natively, in which case the
+        # SkyRL shim deliberately leaves that registration alone (see rdt_vllm_register).
+        native_engine = None
+        try:
+            from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+                ShardedRDTWeightTransferEngine as native_engine,
+            )
+        except ImportError:
+            pass
+        assert resolved is ShardedRDTWeightTransferEngine or (native_engine is not None and resolved is native_engine)
 
 
 class TestCreateInitInfo:

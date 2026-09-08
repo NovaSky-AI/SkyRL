@@ -80,7 +80,11 @@ def _run_render_server(model_path: str, port: int, log_file: Optional[str]) -> N
         build_and_serve_renderer,
         setup_server,
     )
-    from vllm.entrypoints.openai.cli_args import make_arg_parser
+
+    try:  # vLLM >= 0.28.1 moved the CLI args to entrypoints.launchers
+        from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    except ImportError:
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     async def _serve() -> None:
