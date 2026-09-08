@@ -306,6 +306,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if colocate_all:
             self._dispatch.mark_as_offloaded("policy")
 
+        if cfg.trainer.policy.torch_profiler_config.enable:
+            self._dispatch.start_profile("policy")
+
         logger.info("init policy model done")
 
     def _build_critic(self, CriticWorker, lora_config: types.LoraConfig) -> None:
@@ -595,6 +598,8 @@ class SkyRLTrainBackend(AbstractBackend):
         # Last model (or non-LoRA path): tear down the shared Ray runtime.
         # The Tinker engine will rebuild on the next create_model().
         logger.info(f"Deleting model {model_id}, shutting down shared SkyRL-Train runtime...")
+        if self._cfg.trainer.policy.torch_profiler_config.enable:
+            self._dispatch.stop_profile("policy")
         for group in self._server_groups:
             group.shutdown()
         self._server_groups = []
@@ -1033,6 +1038,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
         grad_norm = self._dispatch.optim_step(role, model_id=model_id)
+        if role == "policy" and self._cfg.trainer.policy.torch_profiler_config.enable:
+            self._dispatch.profile_step("policy")
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
 
         metrics: dict[str, float] = {}
