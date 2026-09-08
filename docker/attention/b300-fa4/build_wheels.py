@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import urllib.request
 import zipfile
 from email import policy
@@ -186,7 +187,9 @@ def download_inputs(manifest, cache):
         path = cache / spec["filename"]
         if not path.exists():
             temporary = path.with_suffix(".download")
-            urllib.request.urlretrieve(spec["url"], temporary)
+            request = urllib.request.Request(spec["url"], headers={"User-Agent": "SkyRL-wheel-builder/skyrl1"})
+            with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as stream:
+                shutil.copyfileobj(response, stream)
             if sha256(temporary) != spec["sha256"]:
                 temporary.unlink()
                 raise ValueError(f"Input SHA-256 mismatch: {spec['filename']}")
