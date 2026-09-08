@@ -1,0 +1,8 @@
+{
+  "trainer.max_tokens_per_microbatch": 16384,
+  "generator.inference_engine.gpu_memory_utilization": 0.8,
+  "generator.inference_engine.max_num_seqs": 16,
+  "generator.inference_engine.engine_init_kwargs": {
+    "max_model_len": 32768
+  }
+}
