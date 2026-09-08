@@ -30,6 +30,16 @@ MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFI
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_std"
 
 
+def get_inference_weight_prefix(is_multimodal_lm_only: bool) -> str:
+    """Return the enclosing inference-model prefix omitted by language-only loading.
+
+    Shared by full-weight and LoRA exports. This preserves the existing assumption
+    that the inference VLM exposes its text model under ``language_model``; it is
+    not a universal naming convention for all VLM architectures.
+    """
+    return "language_model." if is_multimodal_lm_only else ""
+
+
 @torch.no_grad()
 def compute_minibatch_rollout_logprob_diff_metrics(
     action_log_probs: torch.Tensor,
