@@ -23,6 +23,10 @@ from skyrl.backends.skyrl_train.weight_sync.base import (
     WeightUpdateRequest,
     get_weight_chunk_metadata,
 )
+from skyrl.backends.skyrl_train.weight_sync.nccl_trainer_send import (
+    nccl_trainer_init,
+    nccl_trainer_send_weights,
+)
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferSender,
@@ -38,6 +42,13 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     master_port: int
     rank_offset: int
     world_size: int
+    packed: bool = True
+    """Whether the transfer is packed. As of vLLM 0.28.0 this is an init-time
+    wire param: the worker records it from ``NCCLWeightTransferInitInfo`` during
+    ``/init_weight_transfer_engine`` and ``receive_weights`` reads it from there,
+    so it can no longer ride the per-round update info. It must match the
+    ``packed`` the sender passes to ``nccl_trainer_send_weights``, or the two
+    sides split the stream differently and the broadcast hangs in NCCL."""
 
     def for_servers(self, world_size_per_server: int, num_servers: int, dp_size: int = 1) -> List["BroadcastInitInfo"]:
         """Return one BroadcastInitInfo per server with rank_offset for each.
@@ -76,6 +87,7 @@ class BroadcastInitInfo(WeightSyncInitInfo):
             "master_port": self.master_port,
             "rank_offset": self.rank_offset,
             "world_size": self.world_size,
+            "packed": self.packed,
         }
 
 
@@ -94,8 +106,9 @@ class BroadcastWeightUpdateRequest(WeightUpdateRequest):
 class BroadcastWeightTransferSender(WeightTransferSender):
     """Sends weights via torch.distributed.broadcast or vLLM NCCL (new inference path).
 
-    When using new inference, uses vLLM's trainer_send_weights with batched
-    update_weights. Otherwise uses per-chunk HTTP + torch.distributed.broadcast.
+    When using new inference, uses the vendored ``nccl_trainer_send_weights``
+    (see ``nccl_trainer_send.py``) with batched update_weights. Otherwise uses
+    per-chunk HTTP + torch.distributed.broadcast.
     """
 
     def __init__(
@@ -143,7 +156,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]],
     ) -> None:
-        """Send one metadata-declared update through vLLM's native NCCL path.
+        """Batched path: one update_weights call + nccl_trainer_send_weights.
 
         All ranks must evaluate the chunks iterator (extract_weights uses
         collective all-gather internally). Only rank 0 sends the gathered
@@ -164,20 +177,20 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         # patch lands (vllm-project/vllm weight-sync-fix).
         # https://github.com/vllm-project/vllm/pull/42577
         if torch.distributed.get_rank() == 0:
-            from vllm.distributed.weight_transfer.nccl_engine import (
-                NCCLWeightTransferEngine,
-            )
-
             await self._inference_client.start_weight_update(is_checkpoint_format=True)
 
-            update_info = {**weight_metadata, "packed": True}
+            # vLLM 0.28.0 dropped `packed` (and the buffer geometry) from
+            # NCCLWeightTransferUpdateInfo -- it is agreed once at init instead,
+            # via BroadcastInitInfo.packed. Sending it here is now a TypeError.
+            update_info = dict(weight_metadata)
             update_task = asyncio.create_task(self._inference_client.update_weights_nccl(update_info))
 
             # Run in a thread so the HTTP update task can progress concurrently.
             await asyncio.to_thread(
-                NCCLWeightTransferEngine.trainer_send_weights,
-                iterator=weight_iterator(),
-                trainer_args={"group": self._model_update_group, "packed": True},
+                nccl_trainer_send_weights,
+                weight_iterator(),
+                self._model_update_group,
+                packed=self._init_info.packed,
             )
             await update_task
 
@@ -207,19 +220,25 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         torch.distributed.barrier()
 
     async def _send_chunk_vllm_native(self, chunk: WeightChunk) -> None:
-        """Send one logical chunk through vLLM's byte-packed NCCL path."""
-        from vllm.distributed.weight_transfer.nccl_engine import (
-            NCCLWeightTransferEngine,
-        )
+        """Send one logical chunk as its own NCCL update round.
 
-        update_info = {**get_weight_chunk_metadata(chunk), "packed": True}
+        Same wire protocol as the batched path (vendored
+        ``nccl_trainer_send_weights`` + ``BroadcastInitInfo.packed``), just one
+        round per chunk because serialized-FP8 names/shapes are only known once
+        the chunk is built. The update info carries only names/dtype_names/shapes:
+        vLLM 0.28.0 rejects ``packed`` there (it is fixed at init). The packed
+        producer linearizes by bytes, so mixed fp8/fp32/bf16 tensors in one
+        round are fine.
+        """
+        update_info = get_weight_chunk_metadata(chunk)
         update_task = asyncio.create_task(self._inference_client.update_weights_nccl(update_info))
 
         # Let the receiver enter its collective while the trainer broadcasts.
         await asyncio.to_thread(
-            NCCLWeightTransferEngine.trainer_send_weights,
-            iterator=iter(zip(chunk.names, chunk.tensors)),
-            trainer_args={"group": self._model_update_group, "packed": True},
+            nccl_trainer_send_weights,
+            iter(zip(chunk.names, chunk.tensors)),
+            self._model_update_group,
+            packed=self._init_info.packed,
         )
         await update_task
 
@@ -276,11 +295,12 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     def create_sender(
         init_info: BroadcastInitInfo,
         inference_client: "RemoteInferenceClient",
+        weight_extractor: Optional[Any] = None,
     ) -> BroadcastWeightTransferSender:
         """Create a broadcast sender.
 
-        On rank 0, uses vLLM's NCCLWeightTransferEngine.trainer_init to join the
-        weight-transfer group. Other ranks do not hold a communicator.
+        On rank 0, joins the weight-transfer group via ``nccl_trainer_init``
+        (vLLM's ``nccl_common.trainer_init``). Other ranks hold no communicator.
 
         Args:
             init_info: BroadcastInitInfo from create_init_info.
@@ -290,11 +310,7 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
         model_update_group = None
 
         if rank == 0:
-            from vllm.distributed.weight_transfer.nccl_engine import (
-                NCCLWeightTransferEngine,
-            )
-
-            model_update_group = NCCLWeightTransferEngine.trainer_init(
+            model_update_group = nccl_trainer_init(
                 dict(
                     master_address=init_info.master_addr,
                     master_port=init_info.master_port,

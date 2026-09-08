@@ -3,6 +3,7 @@ vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -101,6 +102,7 @@ class VLLMServerActor(ServerActorProtocol):
         # PD disaggregation settings
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
+        mooncake_bootstrap_base_port: int = 50052,
         colocated_training: bool = False,
         distributed_executor_backend: str = "ray",
         mp_cuda_visible_devices: Optional[str] = None,
@@ -122,6 +124,7 @@ class VLLMServerActor(ServerActorProtocol):
             dp_rpc_port: DP RPC port (for non-rank-0 servers)
             enable_pd: Enable prefill-decode disaggregation
             nixl_side_channel_base: Base port for NIXL side channel to start searching for a free port
+            mooncake_bootstrap_base_port: Base port for Mooncake bootstrap server to start searching for a free port
             colocated_training: Whether the server is colocated with training workers
             distributed_executor_backend: vLLM distributed executor backend.
                 ``"ray"`` spawns TP/PP workers as Ray tasks (default).
@@ -169,15 +172,54 @@ class VLLMServerActor(ServerActorProtocol):
         self._cli_args.host = "0.0.0.0"
         self._cli_args.port = self._port
 
-        # PD disaggregation: setup NIXL side channel for KV transfer
+        # PD disaggregation: setup the KV-transfer side channel for the P2P
+        # connector (NIXL side channel or Mooncake bootstrap server).
         self._nixl_port_reservation = None
         self._nixl_side_channel_base = None
+        # Mooncake bootstrap server base port and reservation
+        self._mooncake_bootstrap_server_port = None
+        self._mooncake_port_reservation = None
         if enable_pd:
-            # use nixl_side_channel_base + server_idx as convention for the start port for this server
-            self._nixl_side_channel_base, self._nixl_port_reservation = find_and_reserve_port(
-                nixl_side_channel_base + server_idx
+            from skyrl.backends.skyrl_train.inference_servers.utils import (
+                get_pd_p2p_connector_name,
             )
-            self._setup_nixl_side_channel(self._nixl_side_channel_base)
+            from skyrl.backends.skyrl_train.patches.vllm.patch_multi_connector_stats import (
+                apply_multi_connector_stats_patch,
+            )
+
+            # MultiConnector stacks (e.g. Mooncake P2P + store) crash the
+            # AsyncLLM output handler when a child has stats but no prom
+            # metrics; patch before the engine is built in this process.
+            apply_multi_connector_stats_patch()
+
+            # Handle both dict and JSON string formats for kv_transfer_config
+            kv_config = getattr(self._cli_args, "kv_transfer_config", None)
+            if kv_config is not None and isinstance(kv_config, str):
+                try:
+                    kv_config = json.loads(kv_config)
+                except (json.JSONDecodeError, TypeError) as e:
+                    raise ValueError(
+                        f"Invalid kv_transfer_config: expected valid JSON string or dict, "
+                        f"got {type(kv_config).__name__}: {e}"
+                    ) from e
+                self._cli_args.kv_transfer_config = kv_config
+            p2p_connector = get_pd_p2p_connector_name(kv_config) if kv_config else "NixlConnector"
+
+            if p2p_connector == "MooncakeConnector":
+                # Each external-LB instance launches its own bootstrap HTTP
+                # server bound at exactly VLLM_MOONCAKE_BOOTSTRAP_PORT
+                # The router is given the same port per prefill server
+                # via server info returned by `.start`
+                self._mooncake_bootstrap_server_port, self._mooncake_port_reservation = find_and_reserve_port(
+                    mooncake_bootstrap_base_port
+                )
+                self._setup_mooncake_port(self._mooncake_bootstrap_server_port)
+            else:
+                # use nixl_side_channel_base to start searching for a free port for this server
+                self._nixl_side_channel_base, self._nixl_port_reservation = find_and_reserve_port(
+                    nixl_side_channel_base
+                )
+                self._setup_nixl_side_channel(self._nixl_side_channel_base)
 
         # Each engine needs to know its dp_rank and dp_size so DP process groups are formed
         if dp_size > 0:
@@ -244,7 +286,6 @@ class VLLMServerActor(ServerActorProtocol):
 
         Each server instance needs a unique side channel port for KV transfer handshake.
         """
-        import json
 
         os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(side_channel_port)
         os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = self._ip
@@ -253,15 +294,6 @@ class VLLMServerActor(ServerActorProtocol):
 
         if hasattr(self._cli_args, "kv_transfer_config") and self._cli_args.kv_transfer_config:
             kv_config = self._cli_args.kv_transfer_config
-            # Handle both dict and JSON string formats
-            if isinstance(kv_config, str):
-                try:
-                    kv_config = json.loads(kv_config)
-                except (json.JSONDecodeError, TypeError) as e:
-                    raise ValueError(
-                        f"Invalid kv_transfer_config: expected valid JSON string or dict, "
-                        f"got {type(self._cli_args.kv_transfer_config).__name__}: {e}"
-                    ) from e
             kv_config["engine_id"] = engine_id
             self._cli_args.kv_transfer_config = kv_config
 
@@ -270,9 +302,28 @@ class VLLMServerActor(ServerActorProtocol):
             f"host={self._ip}, port={side_channel_port}, engine_id={engine_id}"
         )
 
+    def _setup_mooncake_port(self, mooncake_server_port: int) -> None:
+        """Setup Mooncake bootstrap server port for P/D"""
+        os.environ["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(mooncake_server_port)
+        engine_id = f"server-{self._server_idx}-{self._ip}-{mooncake_server_port}"
+
+        if hasattr(self._cli_args, "kv_transfer_config") and self._cli_args.kv_transfer_config:
+            kv_config = self._cli_args.kv_transfer_config
+            kv_config["engine_id"] = engine_id
+            self._cli_args.kv_transfer_config = kv_config
+
+        logger.info(
+            f"Server {self._server_idx}: Mooncake PD bootstrap port configured -"
+            f"host={self._ip}, port={mooncake_server_port}, engine_id={engine_id}"
+        )
+
     def get_server_info(self) -> ServerInfo:
         """Get the server's IP and port info."""
-        return ServerInfo(ip=self._ip, port=self._port)
+        return ServerInfo(
+            ip=self._ip,
+            port=self._port,
+            mooncake_bootstrap_server_port=self._mooncake_bootstrap_server_port,
+        )
 
     def get_dp_info(self) -> Tuple[str, int]:
         """Get the DP master address and RPC port (for server 0 to share with others)."""
@@ -330,6 +381,10 @@ class VLLMServerActor(ServerActorProtocol):
         if self._nixl_port_reservation is not None:
             self._nixl_port_reservation.close()
             self._nixl_port_reservation = None
+
+        if self._mooncake_port_reservation is not None:
+            self._mooncake_port_reservation.close()
+            self._mooncake_port_reservation = None
 
         await _build_and_serve_vllm_server(
             self._cli_args,

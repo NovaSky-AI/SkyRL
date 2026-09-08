@@ -8,6 +8,7 @@ Automatically handles GPU placement:
 The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -61,6 +62,10 @@ class WorkerDispatch:
         # Inference engine client for weight sync (optional)
         self._inference_engine_client = inference_engine_client
 
+        # Seconds the last save_weights_for_sampler spent on the transfer itself,
+        # excluding the pause/resume bracket. None until the first sync.
+        self.last_weight_sync_seconds: Optional[float] = None
+
         # Actor groups by name.
         # TODO: Remove these role-specific identifiers. We will move to using model IDs and add support for generic models beyond these.
         self._actor_groups: Dict[str, PPORayActorGroup] = {"policy": policy_actor_group}
@@ -86,11 +91,14 @@ class WorkerDispatch:
         No-op when ``model_id is None`` (single-tenant / FFT path) or when
         the workers don't have an AdapterStore (non-LoRA strategies).
 
-        Must be called *after* ``_ensure_on_gpu(role, ...)`` so the model
-        and optimizer storages are live before we tensor.copy_() into them.
+        The swap copies the DDP param buffers, so the model has to be resident.
+        Most callers just ran _ensure_on_gpu; repeating it here is a no-op for
+        them and covers the paths that only need the optimizer, like set_lr.
+        Grad buffers and optimizer state may stay offloaded.
         """
         if model_id is None or role not in self._actor_groups:
             return
+        self._ensure_on_gpu(role, need_optimizer=False, need_model=True)
         ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
 
     def register_adapter(self, role: str, model_id: str) -> None:
@@ -417,7 +425,12 @@ class WorkerDispatch:
         """Run optimizer step. For single-tenant training, the model should already be on GPU from forward_backward.
 
         For multi-tenant LoRA training, ``model_id`` is used to ensure the correct adapter is used.
+
+        The residency check is not redundant with forward_backward's: under
+        multi-tenancy another tenant's request can offload the optimizer
+        between the two calls.
         """
+        self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
         refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
         grad_norms = ray.get(refs)
@@ -600,31 +613,54 @@ class WorkerDispatch:
         registered on vLLM under that name. None preserves single-tenant
         behavior (the legacy ``SKYRL_LORA_ADAPTER_NAME`` path).
         """
+        # Pass None for the client: workers cached it at init_weight_sync_state.
+        # It carries the HF tokenizer (~10MB — 0.13s pickle driver-side, 0.34s
+        # unpickle on EVERY worker), so shipping it per sync costs ~0.5s of the
+        # sync wall even via ray.put (deref still deserializes per worker).
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
                 "broadcast_to_inference_engines",
-                inference_engine_client,
+                None,
                 self.cfg.generator.inference_engine,
                 model_id=model_id,
             )
         )
 
+    def get_timing_metrics(self) -> Dict[str, float]:
+        """Timing this dispatch measured itself, to merge into the trainer's metrics.
+
+        ``sync_weights_only_transfer`` is the weight transfer alone, reported apart
+        from the trainer's ``sync_weights``, which also brackets the generation
+        pause/resume (seconds of coordinator quiesce under vLLM DP). Empty until the
+        first sync.
+        """
+        if self.last_weight_sync_seconds is None:
+            return {}
+        return {"sync_weights_only_transfer": self.last_weight_sync_seconds}
+
     def _prepare_for_weight_sync(self) -> None:
-        """Prepare for weight sync: ensure policy model is on GPU, offload optimizer. Helper for save_weights_for_sampler."""
+        """Load policy weights and apply the configured optimizer offload policy."""
         if not self.colocate_all:
             return
-        # Ensure policy model is on GPU (will offload others in colocation group)
-        self._ensure_on_gpu("policy", need_optimizer=False, need_model=True)
-        # Offload optimizer if it's on GPU
-        if self._gpu_state["policy"].optimizer_on_gpu:
+        offload_optimizer = self.cfg.trainer.policy.optimizer_config.offload_after_step
+        self._ensure_on_gpu(
+            "policy",
+            need_optimizer=False,
+            need_model=True,
+        )
+        if offload_optimizer and self._gpu_state["policy"].optimizer_on_gpu:
             self._offload("policy", offload_optimizer=True, offload_model=False)
 
     def _finish_weight_sync(self) -> None:
-        """Finish weight sync: offload model weights and optimizer state. Helper for save_weights_for_sampler."""
+        """Offload policy weights and conditionally offload optimizer state."""
         if not self.colocate_all:
             return
-        self._offload("policy", offload_optimizer=True, offload_model=True)
+        self._offload(
+            "policy",
+            offload_optimizer=self.cfg.trainer.policy.optimizer_config.offload_after_step,
+            offload_model=True,
+        )
 
     async def save_weights_for_sampler(self, model_id: Optional[str] = None) -> None:
         """
@@ -641,6 +677,19 @@ class WorkerDispatch:
                 "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
             )
 
+        def _broadcast_and_finish() -> None:
+            """The weight transfer proper, timed on its own.
+
+            ``last_weight_sync_seconds`` is surfaced as
+            ``timing/sync_weights_only_transfer`` via :meth:`get_timing_metrics`,
+            alongside the trainer's own ``sync_weights`` timer, which wraps the
+            enclosing pause/resume bracket too.
+            """
+            start = time.perf_counter()
+            self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+            self._finish_weight_sync()
+            self.last_weight_sync_seconds = time.perf_counter() - start
+
         # Sync weights to inference engine
         self._prepare_for_weight_sync()
         # Make the requested adapter live on every worker before broadcasting
@@ -648,8 +697,7 @@ class WorkerDispatch:
         self.ensure_active_adapter("policy", model_id)
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
-            self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-            self._finish_weight_sync()
+            _broadcast_and_finish()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
             strategy = self.cfg.trainer.strategy
@@ -658,8 +706,7 @@ class WorkerDispatch:
                 strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
             ):
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
-                self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                self._finish_weight_sync()
+                _broadcast_and_finish()
             elif self.cfg.generator.inference_engine.offload_kv_for_weight_sync:
                 # Sleep the engine to free GPU memory during the sync (wake weights,
                 # broadcast, wake KV cache) so gpu_memory_utilization can run higher.
@@ -674,8 +721,7 @@ class WorkerDispatch:
                     try:
                         await self._inference_engine_client.sleep_for_weight_sync(offload_kv=offload_kv)
                         await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
-                        self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                        self._finish_weight_sync()
+                        _broadcast_and_finish()
                         await self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"])
                     finally:
                         await self._inference_engine_client.resume_generation()
@@ -686,8 +732,7 @@ class WorkerDispatch:
                     await self._inference_engine_client.sleep()
                     try:
                         await self._inference_engine_client.wake_up(tags=["weights"])
-                        self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                        self._finish_weight_sync()
+                        _broadcast_and_finish()
                     finally:
                         await self._inference_engine_client.wake_up(tags=["kv_cache"])
             else:
@@ -696,13 +741,11 @@ class WorkerDispatch:
                 if self.cfg.generator.inference_engine.weight_sync_backend == "delta":
                     # Delta disk sync performs publish/fetch before pausing and
                     # pauses internally only around the final reload.
-                    self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                    self._finish_weight_sync()
+                    _broadcast_and_finish()
                 else:
                     await self._inference_engine_client.pause_generation()
                     try:
-                        self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-                        self._finish_weight_sync()
+                        _broadcast_and_finish()
                     finally:
                         await self._inference_engine_client.resume_generation()
 

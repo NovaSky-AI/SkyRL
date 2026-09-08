@@ -29,6 +29,13 @@ Notes:
   Run with `COLOCATE_ALL=false` and split the GPUs between
   `trainer.placement.policy_num_gpus_per_node` and the inference engines for a
   disaggregated placement.
+- **Qwen3.5 runs text-only.** All scripts set `language_model_only=true` on the policy, ref and
+  inference engine: Qwen3.5 otherwise loads through the VL bridge, which packs sequences inside
+  its own forward and is rejected together with SkyRL sample packing.
+- **GDN kernels on Blackwell.** The Blackwell scripts `export FLA_TILELANG=0` so fla uses its
+  Triton GatedDeltaNet kernels; the TileLang packed backward aborts on B200 (it shows up as a
+  CUDA "misaligned address" in the first backward). Leave it unset on Hopper, where the Triton
+  backward is the broken one.
 - **Recipe selection.** `fp8_recipe=auto` picks the architecture-native
   recipe: `blockwise` (FP32 scales) on Hopper, `mxfp8` on Blackwell/SM100+.
   The Hopper scripts pin `blockwise` explicitly; the Blackwell scripts use

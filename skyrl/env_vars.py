@@ -105,3 +105,13 @@ instead of being redirected to the log file. Useful for debugging startup issues
 Default: False (infrastructure logs go to file only, stdout shows training progress).
 Set ``SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`` to show all logs on stdout.
 """
+
+SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC = float(os.environ.get("SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC", 300))
+"""
+Read timeout in seconds for API-side requests forwarded to the SkyRL-Train-managed
+inference engine. This is applicable for SkyRL's Tinker server in non-colocated setups.
+
+The timeout must cover time spent queued behind other requests as well as generation time.
+Equivalent to the ``--forwarding-inference-timeout-sec`` flag of the Tinker API server
+(``EngineConfig.forwarding_inference_timeout_sec``); the flag takes precedence when both are set.
+"""

@@ -7,7 +7,7 @@ Uses Ray's public network utilities for consistency with Ray's cluster managemen
 import logging
 import socket
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import ray
 
@@ -45,6 +45,8 @@ class ServerInfo:
 
     ip: str
     port: int
+    # optional, in case the mooncake connector is being used
+    mooncake_bootstrap_server_port: Optional[int] = None
 
     @property
     def url(self) -> str:

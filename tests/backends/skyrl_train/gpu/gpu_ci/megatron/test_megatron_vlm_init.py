@@ -185,6 +185,10 @@ async def test_vlm_sft_hf_parity(ray_init_fixture):
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = None
     cfg.trainer.remove_microbatch_padding = False
+    # fp32 on a single GPU: the DDP param/grad buffers and the optimizer's fp32
+    # master + AdamW state add ~15GB on top of the 8GB model, overflowing a 22GB
+    # L4. This test only forwards, so skip that training state.
+    cfg.trainer.policy.inference_only_init = True
     batch = get_test_training_batch(batch_size=4)
 
     actor_group = init_worker_with_type(

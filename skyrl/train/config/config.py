@@ -109,13 +109,18 @@ class SkyRLLoraConfig(BaseConfig):
     Must be accessible to all workers in distributed setups."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
-    ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module list
-    on Megatron. A list of specific module names can be given instead."""
+    ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
+    list on Megatron (attention, MLP, and GatedDeltaNet projections). GatedDeltaNet ``in_proj``
+    is dropped for models like Qwen3-Next whose fused HF checkpoint layout cannot round-trip a
+    LoRA adapter through Megatron-Bridge. A list of specific module names can be given instead."""
     exclude_modules: Optional[str] = None
     """Modules to exclude from LoRA."""
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
+
+    share_expert_adapters: bool = True
+    """Share one LoRA adapter across local grouped experts."""
 
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
@@ -672,8 +677,9 @@ class PolicyConfig(BaseConfig):
     Backend-specific behavior:
     - FSDP: initialize weights in bf16 instead of fp32 (skipping the fp32 master weights
       that mixed-precision training requires) and skip optimizer/LR-scheduler construction.
-    - Megatron: skip optimizer/LR-scheduler construction (DistributedOptimizer eagerly
-      materializes fp32 master + AdamW state on GPU)."""
+    - Megatron: skip the DDP wrap, whose ``_ParamAndGradBuffer`` holds a param and a
+      grad copy of the model, and skip optimizer/LR-scheduler construction
+      (DistributedOptimizer eagerly materializes fp32 master + AdamW state on GPU)."""
 
 
 @dataclass
@@ -1130,6 +1136,13 @@ class DeltaWeightSyncConfig(BaseConfig):
             self.publish_staging_dir = str(_default_publish_staging_dir(self.sync_dir))
 
 
+#: vLLM speculative-decoding methods SkyRL supports, validated in
+#: ``validate_inference_engine_cfg``.
+#:
+#: Only ``mtp`` is supported
+SUPPORTED_SPECULATIVE_DECODING_METHODS = ("mtp",)
+
+
 @dataclass
 class InferenceEngineConfig(BaseConfig):
     """Configuration for inference engine instantiation and management."""
@@ -1247,7 +1260,7 @@ class InferenceEngineConfig(BaseConfig):
     ``trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters`` (Megatron). The two
     must agree, and are validated against each other."""
     speculative_config: Optional[Dict[str, Any]] = None
-    """Speculative-decoding config passed through to vLLM for MTP drafter decoding. 
+    """Speculative-decoding config passed through to vLLM for MTP drafter decoding.
     (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train mtp). ``None`` disables it."""
     external_proxy_url: Optional[str] = None
     """Data-plane URL (load-balanced router) for the new inference layer.
@@ -1262,6 +1275,14 @@ class InferenceEngineConfig(BaseConfig):
     """Number of prefill engines when ``enable_pd=True``. Decode engines = ``num_engines - num_prefill``
 
     NOTE: SkyRL counts data parallel workers separately, so the total number of prefill workers will be ``data_parallel_size * num_prefill``."""
+    prefill_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """Pass-through kwargs for the vLLM engine, applied only to prefill engines when
+    ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs``: provide role-specific
+    kwargs (including shared ones like ``kv_transfer_config``) via ``prefill_init_kwargs`` /
+    ``decode_init_kwargs`` instead."""
+    decode_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """Pass-through kwargs for the vLLM engine, applied only to decode engines when
+    ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs`` (see ``prefill_init_kwargs``)."""
     router_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs applied to ``RouterArgs`` for the vllm-router.
     Names must match ``vllm_router.RouterArgs`` fields (e.g. ``policy``, ``request_timeout_secs``)."""

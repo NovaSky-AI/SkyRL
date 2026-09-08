@@ -11,9 +11,12 @@ SKYRL_REPO_ROOT=$(realpath "$SCRIPT_DIR/../../..")
 LOG_DIR="$HOME/tinker_fully_async_logs/$RUN_NAME"
 mkdir -p "$LOG_DIR"
 
-# TODO: tighten thresholds after 3-5 nightly runs (5% allowance from min observed),
-# matching the convention in gsm8k_colocate.sh.
-REWARD_MIN_VALUE=0.0
+# Thresholds: 5% allowance from min/max of the 26 finished nightly runs since 20th Jul 2026
+# (as of 31st Aug 2026), matching the convention in gsm8k_colocate.sh (#1664). Observed:
+# reward in [0.223, 0.295]; kl_sample_train_v2 in [4.1e-3, 7.5e-3] (an order of magnitude
+# above the colocated run's: max_steps_off_policy=4 trains on stale samples).
+REWARD_MIN_VALUE=0.21
+KL_MAX_VALUE=0.0079
 
 # Non-colocated layout: 2 GPUs for the trainer (FSDP policy) and 2 GPUs for the
 # inference engines (vLLM). colocate_all=false keeps training and inference on
@@ -97,4 +100,4 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --with-editable "$COOKBOOK_DIR[ma
 cd "$SKYRL_REPO_ROOT"
 uv run --isolated --extra fsdp "$SCRIPT_DIR/get_summary.py" \
   --run_name "$RUN_NAME" --project_name "$PROJECT_NAME" \
-  --asserts "env/all/reward/total >= $REWARD_MIN_VALUE"
+  --asserts "env/all/reward/total >= $REWARD_MIN_VALUE" "optim/kl_sample_train_v2 <= $KL_MAX_VALUE"

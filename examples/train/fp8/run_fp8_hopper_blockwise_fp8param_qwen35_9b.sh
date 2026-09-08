@@ -38,6 +38,11 @@ MEGATRON_CP=1
 MEGATRON_EP=1
 MEGATRON_ETP=1
 
+# Qwen3.5 goes through the VL bridge (Qwen3VLModel), which packs sequences in its own
+# forward and conflicts with SkyRL sample packing; language_model_only routes it to the
+# native GPTModel + GDN THD packing path on both the trainer and vLLM.
+LANGUAGE_MODEL_ONLY=true
+
 # ---- FP8: trainer GEMMs + rollout weight sync ----
 # Hopper blockwise FP8 uses exact FP32 block scales end to end. Both exported
 # variables are defaulted and validated by SkyRL at startup; set for clarity.
@@ -72,6 +77,9 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.eval_sampling_params.top_p=1.0 \
   generator.eval_sampling_params.max_generate_length=8192 \
   trainer.policy.model.path="$MODEL_NAME" \
+  trainer.policy.language_model_only=$LANGUAGE_MODEL_ONLY \
+  trainer.ref.language_model_only=$LANGUAGE_MODEL_ONLY \
+  generator.inference_engine.language_model_only=$LANGUAGE_MODEL_ONLY \
   trainer.placement.colocate_all=$COLOCATE_ALL \
   trainer.strategy=megatron \
   trainer.placement.policy_num_nodes=$NUM_NODES \

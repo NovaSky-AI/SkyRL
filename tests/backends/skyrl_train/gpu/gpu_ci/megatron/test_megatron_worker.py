@@ -22,7 +22,10 @@ from skyrl.train.config import (
     SkyRLTrainConfig,
     TorchProfilerConfig,
 )
-from skyrl.train.utils.utils import print_mem, validate_cfg
+from skyrl.train.utils.utils import (
+    print_mem,
+    validate_cfg,
+)
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
@@ -117,17 +120,49 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
+    (
+        "weight_sync_backend",
+        "colocate_all",
+        "inference_tp",
+        "megatron_tp",
+        "megatron_pp",
+        "megatron_ep",
+        "megatron_etp",
+        "lora",
+        "num_engines",
+    ),
     [
-        pytest.param(True, 4, 2, 2, 1, None, False, id="colocate_all"),
-        pytest.param(False, 2, 2, 1, 1, None, False, id="non_colocated"),
-        pytest.param(True, 4, 2, 2, 1, None, True, id="colocate_all_lora"),
+        pytest.param("nccl", True, 4, 2, 2, 1, None, False, 1, id="nccl_colocate_all"),
+        pytest.param("nccl", False, 2, 2, 1, 1, None, False, 1, id="nccl_non_colocated"),
+        pytest.param("nccl", True, 4, 2, 2, 1, None, True, 1, id="nccl_colocate_all_lora"),
+        # sharded_rdt (NIXL pull): non-colocated only. Both variants fit 4 GPUs --
+        # policy world = megatron_tp*megatron_pp, engines = inference_tp*num_engines.
+        #
+        #   TP2/TP2:  2 policy + 1 engine x TP2  = 4. Trainer TP gather feeding an
+        #             inference-TP-sharded consumer plan. The model is dense and
+        #             pp == 1, so this covers the plain whole-model weight source.
+        #   TP1/PP2:  2 policy + 2 engines x TP1 = 4. Covers trainer PP>1, so the
+        #             stacked source's PP-local serving engages (each stage declares
+        #             only its own layers via held_names), AND num_engines>1, so the
+        #             consumer ids are offset per deployment by replica_rank -- the
+        #             M:N path that deadlocked before that fix.
+        pytest.param("sharded_rdt", False, 2, 2, 1, 1, None, False, 1, id="sharded_rdt_infer_tp2_trainer_tp2"),
+        pytest.param("sharded_rdt", False, 1, 1, 2, 1, None, False, 2, id="sharded_rdt_infer_tp1_trainer_pp2_2engines"),
     ],
 )
 @pytest.mark.asyncio
 @pytest.mark.megatron
 async def test_megatron_policy_weight_sync(
-    ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
+    ray_init_fixture,
+    weight_sync_backend,
+    colocate_all,
+    inference_tp,
+    megatron_tp,
+    megatron_pp,
+    megatron_ep,
+    megatron_etp,
+    lora,
+    num_engines,
 ):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
@@ -137,7 +172,7 @@ async def test_megatron_policy_weight_sync(
         if lora:
             cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
         cfg.trainer.placement.colocate_all = colocate_all
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
         cfg.trainer.strategy = "megatron"
         cfg.generator.inference_engine.backend = "vllm"
         cfg.generator.inference_engine.tensor_parallel_size = inference_tp
@@ -154,6 +189,7 @@ async def test_megatron_policy_weight_sync(
             model=MODEL_NAME,
             use_local=True,
             backend="vllm",
+            num_inference_engines=num_engines,
             sleep_level=2,  # since we explicitly sync weights
         ) as engines:
             client, pg = engines.client, engines.pg
@@ -163,7 +199,9 @@ async def test_megatron_policy_weight_sync(
                 "policy",
                 shared_pg=pg,
                 colocate_all=cfg.trainer.placement.colocate_all,
-                num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+                # The policy world is what the megatron geometry needs, which is not
+                # necessarily inference_tp (e.g. inference TP1 + trainer PP2).
+                num_gpus_per_node=megatron_tp * megatron_pp,
                 cfg=cfg,
             )
             ray.get(

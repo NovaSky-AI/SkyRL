@@ -54,6 +54,7 @@ class ServerGroup:
         enable_dp: bool = False,
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
+        mooncake_bootstrap_base_port: int = 50052,
         server_actor_cls: Optional[Type[ServerActorProtocol]] = None,
         use_expandable_segments: bool = False,
         **server_actor_kwargs: Any,
@@ -73,8 +74,11 @@ class ServerGroup:
             enable_dp: Enable data parallelism across servers.
             enable_pd: Enable prefill-decode disaggregation.
             nixl_side_channel_base: Base port for NIXL side channels. Each
-                server will be assigned a port of nixl_side_channel_base +
-                server_idx.
+                server will be assigned a "base port" of nixl_side_channel_base +
+                server_idx to start searching for a free port.
+            mooncake_bootstrap_base_port: Base port for Mooncake bootstrap server. Each
+                server will be assigned a "base port" of mooncake_bootstrap_base_port +
+                server_idx to start searching for a free port.
             server_actor_cls: Server actor class implementing
                 ServerActorProtocol. Defaults to VLLMServerActor.
             **server_actor_kwargs: Additional keyword arguments to pass to the server actor class.
@@ -91,6 +95,7 @@ class ServerGroup:
         self._enable_dp = enable_dp
         self._enable_pd = enable_pd
         self._nixl_side_channel_base = nixl_side_channel_base
+        self._mooncake_bootstrap_base_port = mooncake_bootstrap_base_port
         self._pool: Optional[ServerActorPool] = None
         self._internal_pg: Optional[PlacementGroup] = None
         self._server_actor_kwargs = server_actor_kwargs
@@ -202,7 +207,8 @@ class ServerGroup:
                 dp_master_address=dp_address,
                 dp_rpc_port=dp_rpc_port,
                 enable_pd=self._enable_pd,
-                nixl_side_channel_base=self._nixl_side_channel_base,
+                nixl_side_channel_base=self._nixl_side_channel_base + server_idx * SERVER_PORT_STRIDE,
+                mooncake_bootstrap_base_port=self._mooncake_bootstrap_base_port + server_idx * SERVER_PORT_STRIDE,
                 colocated_training=self._external_pg is not None,
                 **server_kwargs,
             )
