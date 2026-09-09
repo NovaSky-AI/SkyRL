@@ -645,20 +645,17 @@ class TinkerEngine:
 
         return types.LoadWeightsOutput(type="load_weights")
 
-    def process_save_weights(
-        self, model_id: str, request_data: types.SaveWeightsInput
-    ) -> types.SaveWeightsOutput | types.ErrorResponse:
+    def process_save_weights(self, model_id: str, request_data: types.SaveWeightsInput) -> types.SaveWeightsOutput:
         """
         Saves a clean training checkpoint by converting the trimmed NNX graph
         to a pure dictionary before serialization, following official Flax docs.
         """
-        if not self.backend.has_model(model_id):
-            return _model_not_found_error(model_id)
-
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
+            if not self.backend.has_model(model_id):
+                raise ValueError(_model_not_found_error(model_id).error)
             self.backend.save_checkpoint(output_path, model_id)
             logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
 
@@ -669,11 +666,8 @@ class TinkerEngine:
 
     def process_save_weights_for_sampler(
         self, model_id: str, request_data: types.SaveWeightsForSamplerInput
-    ) -> types.SaveWeightsForSamplerOutput | types.ErrorResponse:
+    ) -> types.SaveWeightsForSamplerOutput:
         """Process a save_weights_for_sampler request and save model weights."""
-        if not self.backend.has_model(model_id):
-            return _model_not_found_error(model_id)
-
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
         output_path = self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
@@ -684,6 +678,8 @@ class TinkerEngine:
         persist = request_data.sampling_session_seq_id is None
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
+            if not self.backend.has_model(model_id):
+                raise ValueError(_model_not_found_error(model_id).error)
             self.backend.save_sampler_checkpoint(output_path, model_id, persist=persist)
             logger.info(f"Saved sampler checkpoint for model {model_id} to {output_path}")
 
