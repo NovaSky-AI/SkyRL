@@ -239,6 +239,7 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
+    app.state.sample_request_db_lock = asyncio.Lock()
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
 
@@ -1318,50 +1319,55 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             detail="sampling_session_id must not contain ':' (the routing-key delimiter)",
         )
 
-    base_model, model_path = await get_sampling_model(request, session)
+    # SQLite permits one writer. Serialize only the short request-row transaction so
+    # large sampling bursts wait here instead of exhausting the SQLAlchemy pool.
+    async with req.app.state.sample_request_db_lock:
+        base_model, model_path = await get_sampling_model(request, session)
 
-    if base_model:
-        model_id = checkpoint_id = ""
-    else:
-        assert model_path is not None
-        path = types.TinkerPath.parse(model_path)
-        if (
-            not path
-            # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
-            or path.kind not in ("", "sampler_weights")
-            or not (model_id := path.primary_id)
-            or not (checkpoint_id := path.secondary_id)
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
-            )
-        await get_model(session, model_id)
-        # Validate that the checkpoint exists and is ready
-        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
+        if base_model:
+            model_id = checkpoint_id = ""
+        else:
+            assert model_path is not None
+            path = types.TinkerPath.parse(model_path)
+            if (
+                not path
+                # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
+                or path.kind not in ("", "sampler_weights")
+                or not (model_id := path.primary_id)
+                or not (checkpoint_id := path.secondary_id)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
+                )
+            await get_model(session, model_id)
+            # Validate that the checkpoint exists and is ready
+            await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
-    request_id = await create_future(
-        session=session,
-        request_type=(
-            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-        ),
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
-            # A positive topk implies prompt logprobs: both are read off the same
-            # prompt forward pass, so asking for one asks for the other.
-            prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
-            topk_prompt_logprobs=request.topk_prompt_logprobs,
-            seq_id=request.seq_id,
-            sampling_session_id=request.sampling_session_id,
-        ),
-    )
+        request_id = await create_future(
+            session=session,
+            request_type=(
+                types.RequestType.EXTERNAL
+                if req.app.state.external_inference_client
+                else types.RequestType.SAMPLE
+            ),
+            model_id=model_id,
+            request_data=types.SampleInput(
+                base_model=base_model,
+                prompt=request.prompt.to_types(),
+                sampling_params=request.sampling_params.to_types(),
+                num_samples=request.num_samples,
+                checkpoint_id=checkpoint_id,
+                # A positive topk implies prompt logprobs: both are read off the same
+                # prompt forward pass, so asking for one asks for the other.
+                prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+                topk_prompt_logprobs=request.topk_prompt_logprobs,
+                seq_id=request.seq_id,
+                sampling_session_id=request.sampling_session_id,
+            ),
+        )
 
-    await session.commit()
+        await session.commit()
 
     if req.app.state.external_inference_client:
         asyncio.create_task(
