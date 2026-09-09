@@ -25,6 +25,7 @@ class TestProfiles(unittest.TestCase):
 
     def test_profiles_preserve_nested_common_settings(self):
         for name, nodes, tp, cp, pp, context in (
+            ("glm52-32k-2n", 1, 8, 1, 1, 32768),
             ("32k-2n", 1, 8, 1, 1, 32768),
             ("256k-2n", 1, 4, 2, 1, 262144),
             ("256k-3n", 2, 8, 1, 2, 262144),
@@ -55,6 +56,14 @@ class TestProfiles(unittest.TestCase):
                     self.assertEqual(attention["num_layers_in_first_pipeline_stage"], 38)
                 else:
                     self.assertNotIn("num_layers_in_first_pipeline_stage", attention)
+
+    def test_glm52_and_glm53_32k_profiles_have_identical_runtime_knobs(self):
+        glm52 = module.build_config("glm52-32k-2n", Path("/models/glm52"), Path("/state"), Path("/traces"))
+        glm53 = module.build_config("32k-2n", Path("/models/glm53"), Path("/state"), Path("/traces"))
+        for cfg in (glm52, glm53):
+            cfg.pop("trainer.policy.model.path")
+            cfg["generator.inference_engine.engine_init_kwargs"].pop("model")
+        self.assertEqual(glm52, glm53)
 
     def test_dry_run_needs_no_download_or_gpu_imports(self):
         result = subprocess.run(

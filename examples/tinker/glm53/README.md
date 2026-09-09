@@ -1,4 +1,4 @@
-# GLM 5.3: full-context GSPO profiling
+# GLM 5.2 / 5.3: full-context GSPO profiling
 
 First validate the client/profiler on **Qwen3-0.6B**, then use the GLM **32K, two-node** profile.
 This example uses SkyRL's Tinker API directly;
@@ -36,6 +36,7 @@ Each B300 node has eight GPUs; verify physical trainer/inference separation.
 | Profile | Trainer | Inference | Context |
 | --- | --- | --- | --- |
 | `qwen3-0.6b` | 1 GPU, TP1 | 1 separate GPU, TP1 | 32,768 |
+| `glm52-32k-2n` | 1 node, TP8/CP1/EP8 | 1 node, TP8 | 32,768 |
 | `32k-2n` | 1 node, TP8/CP1/EP8 | 1 node, TP8 | 32,768 |
 | `256k-2n` | 1 node, TP4/CP2/EP8 | 1 node, TP8 | 262,144 |
 | `256k-3n` | 2 nodes, TP8/PP2/EP8 (38/40 layers) | 1 node, TP8 | 262,144 |
@@ -62,6 +63,12 @@ scratch. The API binds localhost; use approved authenticated transport for remot
 Add `--print-config` for a GPU-free config inspection. Record the source SHA, image digest,
 resolved package/config versions and server logs; old deployment receipts do not qualify
 this newer dependency matrix (Torch 2.13 rather than historical 2.11).
+
+For GLM 5.2, use profile `glm52-32k-2n` and the native-BF16 checkpoint
+[`zai-org/GLM-5.2`](https://huggingface.co/zai-org/GLM-5.2/tree/cf457fa734ab149ffef225f80893eb38c6ff5cdc)
+at revision `cf457fa734ab149ffef225f80893eb38c6ff5cdc`. Download it to a separate model
+directory and pass that path to both server and client. Its runtime knobs match `32k-2n`;
+this is a new current-stack candidate, not a reproduction of an older FP8 GLM 5.2 run.
 
 ### Small-model control
 
@@ -102,6 +109,11 @@ as soon as the policy runtime starts, with no skipped or profiler-warmup windows
 client update is still labeled warmup for timing, but its operations are recorded too.
 The existing hooks export a window after each successful optimizer and continue recording.
 Unloading an adapter does not stop profiling on a warm service.
+
+After an OOM, do not reuse this diagnostic runtime: the current failure guard stops and
+disables that worker's profiler. It does not affect other services, but a later client on
+the same warm runtime would lack that rank's trace. Per-job recovery remains an open
+profiling-lifecycle issue; this example is not yet a reusable post-failure benchmark service.
 
 On a PyTorch OOM in Megatron forward, backward or optimizer, the failing worker attempts
 to export its active trace locally before re-raising, including during the first update.
