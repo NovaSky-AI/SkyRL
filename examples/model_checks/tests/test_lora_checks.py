@@ -11,12 +11,16 @@ from examples.model_checks.lora_logprobs import (
 )
 
 
-@pytest.mark.parametrize("fault", [None, "base", "stale", "frozen_sampler", "frozen_trainer", "updated_parity"])
+@pytest.mark.parametrize(
+    "fault",
+    [None, "base", "stale", "frozen_sampler", "frozen_trainer", "updated_parity", "wrong_direction", "wrong_scale"],
+)
 def test_publication_checks_reject_broken_phases(fault):
     report = {
         "base": [-2.0, -3.0],
         "zero": [-2.0, -3.0],
         "trainer_zero": [-2.0, -3.0],
+        "trainer_repeat": [-2.0, -3.0],
         "repeat": [-2.0, -3.0],
         "stale": [-2.0, -3.0],
         "trainer_updated": [-1.98, -2.98],
@@ -32,17 +36,52 @@ def test_publication_checks_reject_broken_phases(fault):
         report["trainer_updated"] = report["trainer_zero"]
     elif fault == "updated_parity":
         report["updated"] = [-1.0, -2.0]
+    elif fault == "wrong_direction":
+        report["updated"] = [-2.02, -3.02]
+    elif fault == "wrong_scale":
+        report["updated"] = [-1.96, -2.96]
 
     def check_all():
         check_initial_adapter(report, 0.05)
         check_withheld_publication(report)
-        check_updated_adapter(report, 0.05)
+        check_updated_adapter(report, 0.05, 0.005)
 
     if fault is None:
         check_all()
     else:
         with pytest.raises(AssertionError):
             check_all()
+
+
+def test_update_comparison_cancels_a_fixed_backend_offset():
+    report = {
+        "base": [-2.0, -3.0],
+        "zero": [-2.0, -3.0],
+        "repeat": [-2.0, -3.0],
+        "trainer_zero": [-1.96, -2.96],
+        "trainer_repeat": [-1.96, -2.96],
+        "trainer_updated": [-1.94, -2.94],
+        "updated": [-1.98, -2.98],
+    }
+    check_initial_adapter(report, 0.05)
+    check_updated_adapter(report, 0.05, 0.005)
+    assert report["updated_parity"]["mean_abs"] == pytest.approx(0.04)
+    assert report["update_delta"]["max_abs"] < 1e-12
+
+
+def test_update_smaller_than_the_budget_cannot_qualify_publication():
+    report = {
+        "base": [-2.0],
+        "zero": [-2.0],
+        "repeat": [-2.0],
+        "trainer_zero": [-2.0],
+        "trainer_repeat": [-2.0],
+        "trainer_updated": [-1.999],
+        "updated": [-1.999],
+    }
+    check_initial_adapter(report, 0.05)
+    with pytest.raises(AssertionError, match="update too small"):
+        check_updated_adapter(report, 0.05, 0.005)
 
 
 def test_logprob_check_preserves_alignment_and_reports_tail_errors():

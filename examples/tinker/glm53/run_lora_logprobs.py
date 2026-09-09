@@ -13,21 +13,21 @@ from examples.model_checks.lora_logprobs import (
     check_updated_adapter,
     check_withheld_publication,
 )
+from examples.model_checks.megatron_lora import (
+    build_batch,
+    open_runtime,
+    perturb_trainer,
+    publish,
+    score_sampler,
+    score_trainer,
+)
+from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.utils.tok import get_tokenizer
 
 
 async def run(args, report):
     cfg = load_config(args.backend_config, args.output_dir)
-    from examples.model_checks.megatron_lora import (  # noqa: PLC0415
-        build_batch,
-        open_runtime,
-        perturb_trainer,
-        publish,
-        score_sampler,
-        score_trainer,
-    )
-    from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name  # noqa: PLC0415
-    from skyrl.utils.tok import get_tokenizer  # noqa: PLC0415
-
     tokenizer = get_tokenizer(cfg.trainer.policy.model.path)
     sequences = build_sequences(tokenizer)
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
@@ -36,28 +36,43 @@ async def run(args, report):
         tokens=sequences,
         scored_positions=[len(tokens) - 1 for tokens in sequences],
         mean_atol=args.mean_atol,
+        delta_mean_atol=args.delta_mean_atol,
         model=cfg.trainer.policy.model.path,
     )
     adapter = resolve_policy_model_name(cfg)
 
     async with open_runtime(cfg, tokenizer) as (policy, client):
-        # Zero-init LoRA must preserve base scores and agree across both engines.
-        report["base"] = await score_sampler(client, sequences, client.model_name)
+        await check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, args.mean_atol)
+        apply_trainer_update(policy, batch, report)
+        await check_unpublished_sampler(client, sequences, adapter, report)
         await publish(policy, client, cfg)
-        report["zero"] = await score_sampler(client, sequences, adapter)
-        report["trainer_zero"] = score_trainer(policy, batch)
-        report["repeat"] = await score_sampler(client, sequences, adapter)
-        check_initial_adapter(report, args.mean_atol)
+        await check_published_update(client, sequences, adapter, report, args.mean_atol, args.delta_mean_atol)
 
-        # The trainer changes; inference must not change until publication.
-        report["perturbation"] = perturb_trainer(policy)
-        report["trainer_updated"] = score_trainer(policy, batch)
-        report["stale"] = await score_sampler(client, sequences, adapter)
-        check_withheld_publication(report)
 
-        await publish(policy, client, cfg)
-        report["updated"] = await score_sampler(client, sequences, adapter)
-        check_updated_adapter(report, args.mean_atol)
+async def check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, atol):
+    report["base"] = await score_sampler(client, sequences, client.model_name)
+    await publish(policy, client, cfg)
+    adapter = resolve_policy_model_name(cfg)
+    report["zero"] = await score_sampler(client, sequences, adapter)
+    report["trainer_zero"] = score_trainer(policy, batch)
+    report["repeat"] = await score_sampler(client, sequences, adapter)
+    report["trainer_repeat"] = score_trainer(policy, batch)
+    check_initial_adapter(report, atol)
+
+
+def apply_trainer_update(policy, batch, report):
+    report["perturbation"] = perturb_trainer(policy)
+    report["trainer_updated"] = score_trainer(policy, batch)
+
+
+async def check_unpublished_sampler(client, sequences, adapter, report):
+    report["stale"] = await score_sampler(client, sequences, adapter)
+    check_withheld_publication(report)
+
+
+async def check_published_update(client, sequences, adapter, report, atol, delta_atol):
+    report["updated"] = await score_sampler(client, sequences, adapter)
+    check_updated_adapter(report, atol, delta_atol)
 
 
 def build_sequences(tokenizer):
@@ -88,8 +103,6 @@ def validate_config(overrides):
 
 
 def load_config(path, output_dir):
-    from skyrl.train.config import SkyRLTrainConfig  # noqa: PLC0415
-
     overrides = json.loads(path.read_text())
     validate_config(overrides)
     overrides["trainer.strategy"] = overrides.pop("strategy")
@@ -107,9 +120,10 @@ def main():
     parser.add_argument("--backend-config", type=Path, required=True, help="Rendered run_server.py backend config")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--mean-atol", type=float, required=True, help="Reviewed mean logprob error budget")
+    parser.add_argument("--delta-mean-atol", type=float, required=True, help="Reviewed mean update-delta error budget")
     args = parser.parse_args()
-    if not math.isfinite(args.mean_atol) or args.mean_atol <= 0:
-        parser.error("mean-atol must be positive and finite")
+    if any(not math.isfinite(value) or value <= 0 for value in (args.mean_atol, args.delta_mean_atol)):
+        parser.error("logprob and update-delta budgets must be positive and finite")
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     report = {"passed": False}

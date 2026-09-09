@@ -2,6 +2,8 @@
 
 import json
 import sys
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,6 +52,8 @@ def test_cli_records_success_only_after_runtime_finishes(tmp_path, monkeypatch, 
             str(output_dir),
             "--mean-atol",
             "0.05",
+            "--delta-mean-atol",
+            "0.005",
         ],
     )
 
@@ -67,3 +71,77 @@ def test_cli_records_success_only_after_runtime_finishes(tmp_path, monkeypatch, 
     report = json.loads((output_dir / "logprobs.json").read_text())
     assert report["passed"] is (not cleanup_fails)
     assert report["updated_parity"]["mean_abs"] == 0.01
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_publication", [False, True])
+async def test_run_checks_the_actual_published_update_and_cleans_up(monkeypatch, tmp_path, wrong_publication):
+    calls = []
+    changed = False
+    publications = 0
+    cfg = SimpleNamespace(trainer=SimpleNamespace(policy=SimpleNamespace(model=SimpleNamespace(path="model"))))
+    client = SimpleNamespace(model_name="base")
+    monkeypatch.setattr(run_lora_logprobs, "load_config", lambda *args: cfg)
+    monkeypatch.setattr(run_lora_logprobs, "get_tokenizer", lambda *args: SimpleNamespace(pad_token_id=0))
+    monkeypatch.setattr(run_lora_logprobs, "build_sequences", lambda *args: [[1, 2, 3]])
+    monkeypatch.setattr(run_lora_logprobs, "build_batch", lambda *args: "batch")
+    monkeypatch.setattr(run_lora_logprobs, "resolve_policy_model_name", lambda *args: "adapter")
+
+    @asynccontextmanager
+    async def open_runtime(*args):
+        try:
+            yield "policy", client
+        finally:
+            calls.append("cleanup")
+
+    async def publish(*args):
+        nonlocal publications
+        publications += 1
+        calls.append("publish")
+
+    def perturb(*args):
+        nonlocal changed
+        changed = True
+        calls.append("update_trainer")
+        return {"seed": 0}
+
+    def score_trainer(*args):
+        calls.append("score_trainer")
+        return [-1.98, -2.98] if changed else [-2.0, -3.0]
+
+    async def score_sampler(client, sequences, model):
+        calls.append(f"score_{model}")
+        if publications < 2:
+            return [-2.0, -3.0]
+        return [-2.02, -3.02] if wrong_publication else [-1.98, -2.98]
+
+    for name, function in [
+        ("open_runtime", open_runtime),
+        ("publish", publish),
+        ("perturb_trainer", perturb),
+        ("score_trainer", score_trainer),
+        ("score_sampler", score_sampler),
+    ]:
+        monkeypatch.setattr(run_lora_logprobs, name, function)
+    args = SimpleNamespace(backend_config="config.json", output_dir=tmp_path, mean_atol=0.05, delta_mean_atol=0.005)
+    report = {}
+    if wrong_publication:
+        with pytest.raises(AssertionError):
+            await run_lora_logprobs.run(args, report)
+    else:
+        await run_lora_logprobs.run(args, report)
+        assert report["update_delta"]["mean_abs"] < 1e-12
+    assert calls == [
+        "score_base",
+        "publish",
+        "score_adapter",
+        "score_trainer",
+        "score_adapter",
+        "score_trainer",
+        "update_trainer",
+        "score_trainer",
+        "score_adapter",
+        "publish",
+        "score_adapter",
+        "cleanup",
+    ]
