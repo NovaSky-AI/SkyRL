@@ -1,73 +1,49 @@
-# GLM runtime checks and profiling
+# GLM training checks and profiling
 
-Shared runtime profiles; each command has a separate, explicit test purpose.
-`run_client.py` measures training mechanics, not learning or sampler parity.
-Start with Qwen3-0.6B (one trainer GPU + one inference GPU); it is **not** offered
-by hosted Tinker. A hosted comparison needs a common model and matched loss/gradients.
+`run_client.run()` shows the benchmark: create → initial publish/sample →
+repeat reference scoring, GSPO forward/backward, optimizer, publish/sample →
+checkpoint/unload. The first update is warmup; subsequent updates are measured.
+Each update uses two fixed full-context sequences with opposite synthetic advantages.
+This checks mechanics and latency, **not learning or LoRA numerical agreement**.
 
-Use an owned Ray cluster, the same pinned checkout/environment on each node, and a
-downloaded model. Adapter/checkpoint paths must be shared; database/traces use local scratch.
+## Run
 
-The completed GLM-5.3 32K profiling receipt used source `97e14ca42d85539958a0c40f72f0f43b4dce42dc`,
-`zai-org/GLM-5.3-BF16` revision `304b8051cfb2b260b61ce0cbe330e02a98e73639`, and image
-`novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron@sha256:d3efc4bc84b9013c61f320a470c04d7cca39ab09176f96c571a40c40b0cf4edd`.
-Use the checkout's frozen lockfile; newer source or model revisions need revalidation.
+Use an owned Ray cluster and the same frozen checkout/environment on every node.
+Download the model first. State/adapter paths must be shared; database and traces use local scratch.
+Start uv-managed Ray with `--block`. For GLM, set
+`SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=1200` and
+`SKYRL_WORKER_NCCL_TIMEOUT_IN_S=1800` before starting Ray on every node.
 
 ```bash
 export RAY_ADDRESS=auto
-uv run --isolated --extra tinker --extra megatron python examples/tinker/glm53/run_server.py qwen3-0.6b \
-  --model-path /shared/models/qwen3-0.6b --state-dir /shared/qwen-control \
-  --database-path /local/qwen.db --profile-dir /local/qwen-traces
+uv run --isolated --extra tinker --extra megatron python examples/tinker/glm53/run_server.py glm53-32k-2n \
+  --model-path /shared/models/glm53 --state-dir /shared/glm-check \
+  --database-path /local/glm.db --profile-dir /local/glm-traces
 
 timeout --signal=TERM --kill-after=30s 2h \
   uv run --isolated --extra tinker examples/tinker/glm53/run_client.py \
-  --model-path /shared/models/qwen3-0.6b --context 32768 --batch-size 2 --steps 3 \
-  --output-dir /local/qwen-results
+  --model-path /shared/models/glm53 --context 32768 --batch-size 2 --steps 3 \
+  --output-dir /local/glm-results
 ```
 
-Create the parent directories; use fresh output/state paths. Keep the explicit
-`python` in the server command for the API's uv-environment discovery.
-Start uv-managed Ray with `--block` so its temporary environment stays alive.
-For GLM, set both deadlines before starting Ray on every node:
+Use fresh state/output paths and create parent directories. Keep the explicit `python` in the server command.
+`run_server.py --help` lists profiles; `--print-config` renders without GPUs.
+The Qwen3-0.6B smoke profile needs two GPUs. Other GLM/context profiles require their own qualification.
 
-```bash
-export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=1200
-export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=1800
-```
+## Results
 
-The worker collective deadline also covers ranks waiting while rank 0 exports
-and loads the adapter. Keep an outer job deadline; these are not speed optimizations.
+The client saves exact inputs, replay batches, model metadata and per-phase JSONL.
+Trainer traces include CUDA/memory events on every rank. Optimizer metrics separate
+dispatch from trace processing; the full optimizer API duration still includes both.
+For vLLM traces, enable its profiler and pass `--inference-profile-url` or
+`--inference-profile-url-file` (read after initial publication). Capture-control/export
+time is outside publication/sample timings. Verify trace files, not just HTTP success.
 
-`run_client.run()` shows the protocol: create → initial publish/sample →
-warmup + two measured updates → checkpoint/unload. Each update is one batched
-reference forward, one batched GSPO forward/backward, optimizer, publication and short sample.
-Two repeated-text fixtures each score exactly 32,768 positions. Raw advantages are
-+1/-1; the API sums them. This is not yet the hosted sequence-mean GSPO workload.
+Short samples do not prove full-context inference. OOM trace export is best-effort;
+cold loading, SIGKILL and failed exports are not covered. Unload does not release the
+deployment: its owner must enforce deadlines and tear it down.
 
-Profiles are in [configs/](configs/); `run_server.py --help` lists GLM variants.
-`--print-config` renders the effective server config without starting GPUs.
-GLM/256K profiles still need their own qualification.
-
-The client saves exact datums, replay batches and phase JSONL. Every trainer rank
-profiles warmup and updates; verify CUDA traces. Optimizer request time includes
-trace export; this example disables eager kernel-summary aggregation. OOM
-export/restart is best-effort; it does not recover model state.
-Cold model loading, vLLM, SIGKILL and failed exports are outside profiler coverage.
-Short samples do not qualify full-context inference. Unload does not release the
-deployment; the owner must enforce deadlines and tear down its resources.
-
-## LoRA scores
-
-On an owned Ray cluster, `run_lora_logprobs.py` checks zero-init agreement,
-a seeded adapter change, withheld publication, weight sync, and updated scores:
-
-```bash
-uv run --isolated --extra tinker --extra megatron python -m examples.tinker.glm53.run_lora_logprobs \
-  --backend-config /local/backend-config.json --output-dir /local/lora-check \
-  --mean-atol "$MEAN_ATOL"
-```
-
-Use the rendered backend config and a reviewed absolute error budget. The actual withheld
-adapter must fail that budget before the published adapter passes it; direct update deltas
-remain diagnostic. These short synthetic inputs do not prove
-full-context capacity, real optimizer behavior, or learning.
+Completed GLM-5.3 32K receipt: source `97e14ca42d85539958a0c40f72f0f43b4dce42dc`,
+model `zai-org/GLM-5.3-BF16` revision `304b8051cfb2b260b61ce0cbe330e02a98e73639`,
+image `novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron@sha256:d3efc4bc84b9013c61f320a470c04d7cca39ab09176f96c571a40c40b0cf4edd`.
+New instrumentation/source needs its own validation; that receipt is not credited to later revisions.

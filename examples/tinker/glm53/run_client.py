@@ -11,6 +11,39 @@ from tinker import types
 from skyrl.tinker import sdk_checks as checks
 
 
+def run(args) -> None:
+    config = checks.TrainingCheckConfig(args.output_dir, args.context, args.batch_size, args.steps, args.learning_rate)
+    config.output_dir.mkdir(parents=True, exist_ok=False)
+    # This example targets the local, unauthenticated SkyRL API only.
+    service = tinker.ServiceClient(base_url=args.base_url, api_key="tml-dummy")
+    with (args.output_dir / "phases.jsonl").open("w") as report:
+        trainer = checks.create_training_client(service, args.model_path, report)
+        try:
+            datums = checks.prepare_full_context_inputs(trainer, config, report)
+            prompt = types.ModelInput.from_ints(datums[0].model_input.to_ints()[:128])
+            checks.publish_and_sample(trainer, prompt, report, "initial")
+            profile_url = resolve_inference_profile_url(args, report)
+            for step in range(config.steps):
+                step_phase = "warmup" if step == 0 else f"step_{step}"
+                with checks.measure_phase(report, step_phase):
+                    batch = checks.score_reference_batch(trainer, datums, config, report, step)
+                    checks.train_batch(trainer, batch, config, report, step_phase)
+                    checks.update_optimizer(trainer, config.learning_rate, report, step_phase)
+                    checks.publish_and_sample(trainer, prompt, report, step_phase, profile_url)
+            with checks.measure_phase(report, "checkpoint") as record:
+                record["path"] = trainer.save_state("full-context-final").result().path
+        finally:
+            with checks.measure_phase(report, "unload"):
+                checks.unload_model(args.base_url, trainer.model_id)
+
+
+def resolve_inference_profile_url(args, report):
+    if args.inference_profile_url_file is None:
+        return args.inference_profile_url
+    with checks.measure_phase(report, "inference_profiler_endpoint"):
+        return wait_for_inference_profile_url(args.inference_profile_url_file)
+
+
 def wait_for_inference_profile_url(path: Path) -> str:
     """Wait at most 30 seconds for the launcher's atomic endpoint-file handoff."""
     deadline = time.monotonic() + 30
@@ -26,34 +59,6 @@ def wait_for_inference_profile_url(path: Path) -> str:
         if not url:
             raise ValueError("inference profiling endpoint file is empty")
         return url
-
-
-def run(args) -> None:
-    args.output_dir.mkdir(parents=True, exist_ok=False)
-    # This example targets the local, unauthenticated SkyRL API only.
-    service = tinker.ServiceClient(base_url=args.base_url, api_key="tml-dummy")
-    with (args.output_dir / "phases.jsonl").open("w") as report:
-        trainer = checks.create_training_client(service, args.model_path, report)
-        try:
-            datums = checks.prepare_full_context_inputs(trainer, args, report)
-            prompt = types.ModelInput.from_ints(datums[0].model_input.to_ints()[:128])
-            checks.publish_and_sample(trainer, prompt, report, "initial")
-            inference_profile_url = args.inference_profile_url
-            if args.inference_profile_url_file is not None:
-                with checks.measure_phase(report, "inference_profiler_endpoint"):
-                    inference_profile_url = wait_for_inference_profile_url(args.inference_profile_url_file)
-            for step in range(args.steps):
-                step_phase = "warmup" if step == 0 else f"step_{step}"
-                with checks.measure_phase(report, step_phase):
-                    batch = checks.score_reference_batch(trainer, datums, args, report, step)
-                    checks.train_batch(trainer, batch, args, report, step_phase)
-                    checks.update_optimizer(trainer, args.learning_rate, report, step_phase)
-                    checks.publish_and_sample(trainer, prompt, report, step_phase, inference_profile_url)
-            with checks.measure_phase(report, "checkpoint") as record:
-                record["path"] = trainer.save_state("full-context-final").result().path
-        finally:
-            with checks.measure_phase(report, "unload"):
-                checks.unload_model(args.base_url, trainer.model_id)
 
 
 def main() -> None:
