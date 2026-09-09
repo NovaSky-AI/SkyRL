@@ -80,6 +80,7 @@ class _ProfCfg:
     with_stack: bool = False
     with_flops: bool = False
     with_modules: bool = False
+    collect_kernel_summary: bool = True
     export_type: str = "chrome_trace"
 
 
@@ -141,6 +142,23 @@ def test_save_path_is_taken_verbatim(tmp_path):
     explicit = str(tmp_path / "explicit")
     prof = Profiler(_ProfCfg(save_path=explicit))
     assert prof.save_path == explicit
+
+
+def test_trace_only_exports_memory_without_aggregating_events(tmp_path):
+    profiler = Profiler(_ProfCfg(save_path=str(tmp_path), profile_memory=True, collect_kernel_summary=False))
+    with patch.object(profiler.prof, "key_averages") as summarize:
+        profiler.start()
+        with torch.profiler.record_function("trace_only_work"):
+            torch.ones(8).add_(1)
+        profiler.step()
+        profiler.stop()
+        summarize.assert_not_called()
+    traces = list(tmp_path.glob("*.pt.trace.json"))
+    assert len(traces) == 1
+    events = json.loads(traces[0].read_text())["traceEvents"]
+    assert any(event["name"] == "trace_only_work" for event in events)
+    assert any(event["name"] == "[memory]" for event in events)
+    assert profiler.get_kernel_summary() is None
 
 
 def test_kernel_summary_none_when_disabled(tmp_path):

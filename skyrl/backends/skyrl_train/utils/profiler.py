@@ -88,7 +88,7 @@ class Profiler:
             self.prof = None
 
     def _on_trace_ready(self, prof) -> None:
-        """Write a trace and cache the last-window kernel self-time summary."""
+        """Write a trace and optionally cache the last-window kernel self-time summary."""
         os.makedirs(self.save_path, exist_ok=True)
         worker_name = f"rank{self.rank}"
         if self.export_type == "stacks":
@@ -99,6 +99,8 @@ class Profiler:
             torch.profiler.tensorboard_trace_handler(self.save_path, worker_name=worker_name)(prof)
             logger.info(f"[Profiler] rank {self.rank}: exported chrome trace under {self.save_path}")
 
+        if not self.config.collect_kernel_summary:
+            return
         try:
             # Microseconds, self time.
             self._last_pairs = [(str(e.key), float(e.self_device_time_total)) for e in prof.key_averages()]
@@ -108,7 +110,7 @@ class Profiler:
 
     def get_kernel_summary(self):
         """Return ``{"window_count": int, "pairs": [(name, self_us), ...]}`` or None."""
-        if not self.enable or self.prof is None:
+        if not self.enable or self.prof is None or not self.config.collect_kernel_summary:
             return None
         return {"window_count": self._window_count, "pairs": list(self._last_pairs)}
 

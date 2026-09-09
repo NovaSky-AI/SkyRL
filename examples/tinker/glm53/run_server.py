@@ -41,6 +41,7 @@ def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: P
         "repeat": 0,
         "record_shapes": True,
         "profile_memory": True,
+        "collect_kernel_summary": False,
         "with_stack": False,
     }
     return config

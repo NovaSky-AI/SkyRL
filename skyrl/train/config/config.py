@@ -321,6 +321,8 @@ class TorchProfilerConfig(BaseConfig):
     """Passed to ``torch.profiler.profile``."""
     with_modules: bool = False
     """Passed to ``torch.profiler.profile``."""
+    collect_kernel_summary: bool = True
+    """Cache kernel times after export; disable for raw traces without eager event aggregation."""
     export_type: str = "chrome_trace"
     """Either ``chrome_trace`` or ``stacks``.
     ``chrome_trace`` writes ``*.pt.trace.json``; ``stacks`` writes self-CUDA-time stacks and

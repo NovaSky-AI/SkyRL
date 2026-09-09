@@ -106,6 +106,8 @@ class TestProfiles(unittest.TestCase):
         profiled = module.build_config("glm53-32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
         profiler = profiled["trainer.policy.torch_profiler_config"]
         self.assertTrue(profiler["enable"])
+        self.assertTrue(profiler["profile_memory"])
+        self.assertFalse(profiler["collect_kernel_summary"])
         self.assertEqual((profiler["skip_first"], profiler["wait"], profiler["warmup"]), (0, 0, 0))
         self.assertEqual((profiler["active"], profiler["repeat"]), (1, 0))
         with self.assertRaisesRegex(ValueError, "absolute path"):
