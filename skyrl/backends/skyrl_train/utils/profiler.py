@@ -1,5 +1,7 @@
 import os
+from contextlib import contextmanager
 from functools import wraps
+from time import perf_counter
 
 import torch
 import torch.distributed
@@ -10,6 +12,31 @@ _ACTIVITY_MAP = {
     "cpu": torch.profiler.ProfilerActivity.CPU,
     "cuda": torch.profiler.ProfilerActivity.CUDA,
 }
+
+
+@contextmanager
+def measure_phase_seconds(metrics, name):
+    start = perf_counter()
+    yield
+    metrics[name] = perf_counter() - start
+
+
+@contextmanager
+def measure_megatron_schedule(model_config, timers):
+    """Measure synchronized schedule phases without replacing existing timers."""
+    if model_config.timers is not None:
+        raise ValueError("Cannot replace existing Megatron timers")
+    phases = {"forward-compute": 2, "backward-compute": 2, "forward-backward": 1}
+    for name, level in phases.items():
+        timers(name, log_level=level).reset()
+    report = {}
+    model_config.timers = timers
+    try:
+        yield report
+        for name in phases:
+            report[name] = timers(name).elapsed(reset=False, barrier=False)
+    finally:
+        model_config.timers = None
 
 
 def build_profiler_from_policy_cfg(trainer_cfg):

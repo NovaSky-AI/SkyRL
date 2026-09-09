@@ -20,13 +20,18 @@ def run(args) -> None:
             datums = checks.prepare_full_context_inputs(trainer, args, report)
             prompt = types.ModelInput.from_ints(datums[0].model_input.to_ints()[:128])
             checks.publish_and_sample(trainer, prompt, report, "initial")
+            inference_profile_url = args.inference_profile_url
+            if args.inference_profile_url_file is not None:
+                inference_profile_url = args.inference_profile_url_file.read_text().strip()
+                if not inference_profile_url:
+                    raise ValueError("inference profiling endpoint file is empty")
             for step in range(args.steps):
                 step_phase = "warmup" if step == 0 else f"step_{step}"
                 with checks.measure_phase(report, step_phase):
                     batch = checks.score_reference_batch(trainer, datums, args, report, step)
                     checks.train_batch(trainer, batch, args, report, step_phase)
                     checks.update_optimizer(trainer, args.learning_rate, report, step_phase)
-                    checks.publish_and_sample(trainer, prompt, report, step_phase)
+                    checks.publish_and_sample(trainer, prompt, report, step_phase, inference_profile_url)
             with checks.measure_phase(report, "checkpoint") as record:
                 record["path"] = trainer.save_state("full-context-final").result().path
         finally:
@@ -38,6 +43,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--model-path", required=True)
+    profiling = parser.add_mutually_exclusive_group()
+    profiling.add_argument("--inference-profile-url", help="Owned vLLM engine URL with profiling enabled")
+    profiling.add_argument(
+        "--inference-profile-url-file",
+        type=Path,
+        help="Owned engine URL, written by the launcher before initial publication completes",
+    )
     parser.add_argument(
         "--output-dir", type=Path, required=True, help="New directory for inputs, phase timings and metrics"
     )

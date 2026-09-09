@@ -192,14 +192,32 @@ def score_reference_batch(trainer, datums, args, report, step: int) -> list[type
     return batch
 
 
-def publish_and_sample(trainer, prompt, report, phase_prefix: str):
-    with measure_phase(report, f"{phase_prefix}/publication"):
-        sampler = trainer.save_weights_and_get_sampling_client()
-    with measure_phase(report, f"{phase_prefix}/sample") as record:
-        result = sampler.sample(
-            prompt, num_samples=1, sampling_params=types.SamplingParams(max_tokens=8, temperature=0)
-        ).result()
-        if len(result.sequences) != 1 or not result.sequences[0].tokens:
-            raise ValueError("sampling returned no sequence")
-        record["output_tokens"] = result.sequences[0].tokens
+@contextmanager
+def profile_inference(base_url, report, phase):
+    """Bracket vLLM capture outside model-stage timers; the engine must enable profiling."""
+    if base_url is None:
+        yield
+        return
+    with httpx.Client(base_url=base_url.rstrip("/") + "/", timeout=300) as client:
+        with measure_phase(report, f"{phase}/profiler_start"):
+            client.post("start_profile").raise_for_status()
+        try:
+            yield
+        finally:
+            with measure_phase(report, f"{phase}/profiler_stop"):
+                client.post("stop_profile").raise_for_status()
+
+
+def publish_and_sample(trainer, prompt, report, phase_prefix: str, inference_profile_url=None):
+    with profile_inference(inference_profile_url, report, f"{phase_prefix}/publication"):
+        with measure_phase(report, f"{phase_prefix}/publication"):
+            sampler = trainer.save_weights_and_get_sampling_client()
+    with profile_inference(inference_profile_url, report, f"{phase_prefix}/sample"):
+        with measure_phase(report, f"{phase_prefix}/sample") as record:
+            result = sampler.sample(
+                prompt, num_samples=1, sampling_params=types.SamplingParams(max_tokens=8, temperature=0)
+            ).result()
+            if len(result.sequences) != 1 or not result.sequences[0].tokens:
+                raise ValueError("sampling returned no sequence")
+            record["output_tokens"] = result.sequences[0].tokens
     return sampler

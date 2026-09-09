@@ -207,6 +207,8 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
         output_dir=tmp_path / "result",
         base_url="http://example.com",
         model_path="test-model",
+        inference_profile_url=None,
+        inference_profile_url_file=None,
         context=7,
         batch_size=2,
         steps=2,

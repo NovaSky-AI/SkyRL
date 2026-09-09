@@ -8,6 +8,11 @@ by hosted Tinker. A hosted comparison needs a common model and matched loss/grad
 Use an owned Ray cluster, the same pinned checkout/environment on each node, and a
 downloaded model. Adapter/checkpoint paths must be shared; database/traces use local scratch.
 
+The completed GLM-5.3 32K profiling receipt used source `97e14ca42d85539958a0c40f72f0f43b4dce42dc`,
+`zai-org/GLM-5.3-BF16` revision `304b8051cfb2b260b61ce0cbe330e02a98e73639`, and image
+`novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron@sha256:d3efc4bc84b9013c61f320a470c04d7cca39ab09176f96c571a40c40b0cf4edd`.
+Use the checkout's frozen lockfile; newer source or model revisions need revalidation.
+
 ```bash
 export RAY_ADDRESS=auto
 uv run --isolated --extra tinker --extra megatron python examples/tinker/glm53/run_server.py qwen3-0.6b \
@@ -35,7 +40,7 @@ and loads the adapter. Keep an outer job deadline; these are not speed optimizat
 
 `run_client.run()` shows the protocol: create → initial publish/sample →
 warmup + two measured updates → checkpoint/unload. Each update is one batched
-reference forward, one batched GSPO backward, optimizer, publication and short sample.
+reference forward, one batched GSPO forward/backward, optimizer, publication and short sample.
 Two repeated-text fixtures each score exactly 32,768 positions. Raw advantages are
 +1/-1; the API sums them. This is not yet the hosted sequence-mean GSPO workload.
 

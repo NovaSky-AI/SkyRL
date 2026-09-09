@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
+from skyrl.backends.skyrl_train.utils.profiler import measure_phase_seconds
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -1037,12 +1038,14 @@ class SkyRLTrainBackend(AbstractBackend):
         adam_params = request_data.adam_params
         self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
-        grad_norm = self._dispatch.optim_step(role, model_id=model_id)
+        metrics: dict[str, float] = {}
+        with measure_phase_seconds(metrics, "skyrl.ai/optimizer_dispatch_seconds"):
+            grad_norm = self._dispatch.optim_step(role, model_id=model_id)
         if role == "policy" and self._cfg.trainer.policy.torch_profiler_config.enable:
-            self._dispatch.profile_step("policy")
+            with measure_phase_seconds(metrics, "skyrl.ai/profile_processing_seconds"):
+                self._dispatch.profile_step("policy")
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
 
-        metrics: dict[str, float] = {}
         if grad_norm is not None:
             metrics["skyrl.ai/grad_norm"] = float(grad_norm)
         metrics["skyrl.ai/learning_rate"] = adam_params.learning_rate
