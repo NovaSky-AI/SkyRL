@@ -50,7 +50,7 @@ hf download zai-org/GLM-5.3-BF16 --revision 304b8051cfb2b260b61ce0cbe330e02a98e7
 export RAY_ADDRESS=auto
 uv run --isolated --extra tinker --extra megatron examples/tinker/glm53/run_server.py 32k-2n \
   --model-path /shared/models/glm53-bf16 --state-dir /shared/glm53-control \
-  --database-path /local/glm53/tinker.db
+  --database-path /local/glm53/tinker.db --profile-dir /local/glm53/traces/run-01
 ```
 
 Start Ray with `ray start --head --port=6379 --num-gpus=8` on the head and
@@ -79,21 +79,18 @@ Placement, precision, memory/packing budgets and worker trace setup belong to th
 
 ## Profiling and artifacts
 
-Measure an **unprofiled control** first. For a separate profiled run, start a fresh dedicated
-service with `--profile-dir /local/glm53/traces/run-01`, then run the identical client.
-Existing Tinker hooks are runtime-scoped: the server profiler warms up through the first
-optimizer and records until the second. This includes warmup publication and the next
-reference/backward passes. It is not a client-session profiling API: unloading an adapter
-from a warm service does not reset the schedule for another job.
+Profiling is required for this diagnostic example. Use a fresh dedicated service and a new
+`--profile-dir` on each policy node. Every trainer rank records CPU/CUDA shapes and memory
+as soon as the policy runtime starts, with no skipped or profiler-warmup windows. The first
+client update is still labeled warmup for timing, but its operations are recorded too.
+The existing hooks export a window after each successful optimizer and continue recording.
+Unloading an adapter does not stop profiling on a warm service.
 
-An OOM before the first optimizer completes can leave no recorded GPU trace: that interval
-is profiler warmup. Phase records and server logs are still needed for failure diagnosis.
-This preset is for steady-state profiling, not warmup-OOM capture; even an active trace
-can be lost if its worker is killed before export.
-
-Traces cover CPU/CUDA shapes and memory on **policy rank 0**, not vLLM workers, all-rank peaks
-or cold model loading. Verify traces were actually exported. Profiling can retain tensors
-and slow execution; use unprofiled repeats to credit speedups.
+Recording is not crash-safe persistence: an OOM or killed worker before export can still
+lose the active window. Cold model loading and vLLM are outside these policy hooks. Retain
+phase records and server logs, and verify traces were exported on every trainer node.
+Profiling can retain tensors, consume substantial disk space and slow execution; these
+diagnostic timings are not unprofiled throughput measurements.
 
 - `phases.jsonl`: initial costs, labeled warmup, measured steps and subphase timing/metrics.
   Parent step times include their subphases; do not add both together.

@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 
-def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: Path | None = None) -> dict:
+def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: Path) -> dict:
     root = Path(__file__).parent
     config = json.loads((root / "common.json").read_text())
     overrides = json.loads((root / f"{profile}.json").read_text())
@@ -19,23 +19,22 @@ def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: P
     config["trainer.policy.model.path"] = str(model_path)
     config["generator.inference_engine.engine_init_kwargs"]["model"] = str(model_path)
     config["trainer.policy.model.lora.lora_sync_path"] = str(state_dir / "lora-sync")
-    if profile_dir is not None:
-        if not profile_dir.is_absolute():
-            raise ValueError("profile-dir must be an absolute path on the policy nodes")
-        # Existing Tinker profiler hooks are runtime-scoped, not client-session scoped.
-        config["trainer.policy.torch_profiler_config"] = {
-            "enable": True,
-            "ranks": [0],
-            "save_path": str(profile_dir),
-            "skip_first": 0,
-            "wait": 0,
-            "warmup": 1,
-            "active": 1,
-            "repeat": 1,
-            "record_shapes": True,
-            "profile_memory": True,
-            "with_stack": False,
-        }
+    if not profile_dir.is_absolute():
+        raise ValueError("profile-dir must be an absolute path on the policy nodes")
+    # Existing Tinker profiler hooks are runtime-scoped, not client-session scoped.
+    config["trainer.policy.torch_profiler_config"] = {
+        "enable": True,
+        "ranks": list(range(config["trainer.placement.policy_num_nodes"] * 8)),
+        "save_path": str(profile_dir),
+        "skip_first": 0,
+        "wait": 0,
+        "warmup": 0,
+        "active": 1,
+        "repeat": 0,
+        "record_shapes": True,
+        "profile_memory": True,
+        "with_stack": False,
+    }
     return config
 
 
@@ -49,7 +48,8 @@ def main() -> None:
     parser.add_argument(
         "--profile-dir",
         type=Path,
-        help="Enable one runtime-scoped policy trace (one warmup + one active update); omit for timing control",
+        required=True,
+        help="Local trace directory on each policy node; record every update from runtime start",
     )
     parser.add_argument("--print-config", action="store_true")
     args = parser.parse_args()

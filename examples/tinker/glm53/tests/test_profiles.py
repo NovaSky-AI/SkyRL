@@ -21,9 +21,10 @@ class TestProfiles(unittest.TestCase):
             ("256k-3n", 2, 8, 1, 2, 262144),
         ):
             with self.subTest(profile=name):
-                cfg = module.build_config(name, Path("/models/glm"), Path("/state/service"))
+                cfg = module.build_config(name, Path("/models/glm"), Path("/state/service"), Path("/scratch/traces"))
                 self.assertEqual(cfg["trainer.placement.policy_num_nodes"], nodes)
                 self.assertEqual(nodes * 8, tp * cp * pp)
+                self.assertEqual(cfg["trainer.policy.torch_profiler_config"]["ranks"], list(range(nodes * 8)))
                 self.assertEqual(cfg["trainer.policy.megatron_config.tensor_model_parallel_size"], tp)
                 self.assertEqual(cfg["trainer.policy.megatron_config.context_parallel_size"], cp)
                 self.assertEqual(cfg["trainer.policy.megatron_config.pipeline_model_parallel_size"], pp)
@@ -58,6 +59,8 @@ class TestProfiles(unittest.TestCase):
                 "/nonexistent/state",
                 "--database-path",
                 "/nonexistent/local/tinker.db",
+                "--profile-dir",
+                "/nonexistent/local/traces",
                 "--print-config",
             ],
             capture_output=True,
@@ -67,17 +70,17 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["trainer.placement.policy_num_nodes"], 2)
 
     def test_profile_overrides_do_not_leak_between_calls(self):
-        first = module.build_config("256k-3n", Path("/m"), Path("/s"))
+        first = module.build_config("256k-3n", Path("/m"), Path("/s"), Path("/scratch/traces"))
         first["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"] = "fp8"
-        second = module.build_config("32k-2n", Path("/m"), Path("/s"))
+        second = module.build_config("32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
         self.assertEqual(second["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"], "auto")
 
-    def test_profile_window_is_opt_in_and_does_not_change_model_recipe(self):
-        control = module.build_config("32k-2n", Path("/m"), Path("/s"))
+    def test_profiling_has_no_warmup_gap_or_one_update_cutoff(self):
         profiled = module.build_config("32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
-        profiler = profiled.pop("trainer.policy.torch_profiler_config")
-        self.assertEqual(profiled, control)
-        self.assertEqual((profiler["warmup"], profiler["active"], profiler["repeat"]), (1, 1, 1))
+        profiler = profiled["trainer.policy.torch_profiler_config"]
+        self.assertTrue(profiler["enable"])
+        self.assertEqual((profiler["skip_first"], profiler["wait"], profiler["warmup"]), (0, 0, 0))
+        self.assertEqual((profiler["active"], profiler["repeat"]), (1, 0))
         with self.assertRaisesRegex(ValueError, "absolute path"):
             module.build_config("32k-2n", Path("/m"), Path("/s"), Path("relative/traces"))
 
