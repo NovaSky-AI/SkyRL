@@ -30,7 +30,7 @@ def apply_sequence_chunked(
             *(input[start:end] for input in aligned_inputs),
         )
         if torch.is_grad_enabled():
-            outputs.append(checkpoint(fn, *chunk_inputs, use_reentrant=False))
+            outputs.append(checkpoint(fn, *chunk_inputs, use_reentrant=True))
         else:
             outputs.append(fn(*chunk_inputs))
     return torch.cat(outputs, dim=0)

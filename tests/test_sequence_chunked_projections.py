@@ -247,7 +247,7 @@ def test_sequence_chunking_composes_with_outer_and_stateful_checkpoints() -> Non
         )
         return apply_sequence_chunked(mlp, recurrent_output, 4)
 
-    output = checkpoint(run_block, hidden_states, use_reentrant=False)
+    output = checkpoint(run_block, hidden_states, use_reentrant=True)
     output.square().mean().backward()
 
     assert hidden_states.grad is not None
