@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from unittest.mock import patch
 
-from skyrl.backends.skyrl_train.utils.profiler import Profiler
+from skyrl.backends.skyrl_train.utils.profiler import Profiler, cuda_peak_probe
 
 
 @dataclass
@@ -43,6 +43,38 @@ def test_disabled_is_noop(tmp_path):
     assert prof.check() is False
     _run_loop(prof, 5)  # must not raise
     assert glob.glob(os.path.join(str(tmp_path), "*")) == []
+
+
+def test_cuda_peak_probe_disabled_does_not_touch_cuda():
+    with (
+        patch("torch.cuda.synchronize") as synchronize,
+        cuda_peak_probe(enabled=False, phase="forward_backward", rank=0, metadata={}) as metrics,
+    ):
+        pass
+
+    assert metrics == {}
+    synchronize.assert_not_called()
+
+
+def test_cuda_peak_probe_reports_allocator_peaks():
+    gib = 1024**3
+    with (
+        patch("torch.cuda.synchronize"),
+        patch("torch.cuda.memory_allocated", return_value=10 * gib),
+        patch("torch.cuda.memory_reserved", return_value=12 * gib),
+        patch("torch.cuda.mem_get_info", side_effect=[(200 * gib, 275 * gib), (180 * gib, 275 * gib)]),
+        patch("torch.cuda.reset_peak_memory_stats"),
+        patch("torch.cuda.max_memory_allocated", return_value=20 * gib),
+        patch("torch.cuda.max_memory_reserved", return_value=24 * gib),
+        cuda_peak_probe(enabled=True, phase="forward_backward", rank=0, metadata={}) as metrics,
+    ):
+        pass
+
+    assert metrics == {
+        "profile/cuda_peak_allocated_gib": 20.0,
+        "profile/cuda_peak_reserved_gib": 24.0,
+        "profile/cuda_peak_growth_gib": 10.0,
+    }
 
 
 def test_rank_not_selected_is_noop(tmp_path):

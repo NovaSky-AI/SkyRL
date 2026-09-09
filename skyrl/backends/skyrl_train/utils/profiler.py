@@ -1,4 +1,6 @@
 import os
+from contextlib import contextmanager
+from time import perf_counter
 
 import torch
 import torch.distributed
@@ -9,6 +11,74 @@ _ACTIVITY_MAP = {
     "cpu": torch.profiler.ProfilerActivity.CPU,
     "cuda": torch.profiler.ProfilerActivity.CUDA,
 }
+_GIB = 1024**3
+
+
+@contextmanager
+def cuda_peak_probe(*, enabled: bool, phase: str, rank: int, metadata: dict):
+    """Measure CUDA allocator peaks around a phase without torch.profiler overhead."""
+    metrics = {}
+    if not enabled:
+        yield metrics
+        return
+
+    torch.cuda.synchronize()
+    baseline_allocated = torch.cuda.memory_allocated()
+    baseline_reserved = torch.cuda.memory_reserved()
+    free_before, total = torch.cuda.mem_get_info()
+    torch.cuda.reset_peak_memory_stats()
+    started = perf_counter()
+    try:
+        yield metrics
+    except torch.OutOfMemoryError:
+        free_after, _ = torch.cuda.mem_get_info()
+        logger.exception(
+            "[cuda-memory] status=oom phase={} rank={} metadata={} "
+            "baseline_allocated_gib={:.3f} baseline_reserved_gib={:.3f} "
+            "peak_allocated_gib={:.3f} peak_reserved_gib={:.3f} "
+            "free_before_gib={:.3f} free_after_gib={:.3f}",
+            phase,
+            rank,
+            metadata,
+            baseline_allocated / _GIB,
+            baseline_reserved / _GIB,
+            torch.cuda.max_memory_allocated() / _GIB,
+            torch.cuda.max_memory_reserved() / _GIB,
+            free_before / _GIB,
+            free_after / _GIB,
+        )
+        raise
+    else:
+        torch.cuda.synchronize()
+        free_after, _ = torch.cuda.mem_get_info()
+        peak_allocated = torch.cuda.max_memory_allocated()
+        peak_reserved = torch.cuda.max_memory_reserved()
+        metrics.update(
+            {
+                "profile/cuda_peak_allocated_gib": peak_allocated / _GIB,
+                "profile/cuda_peak_reserved_gib": peak_reserved / _GIB,
+                "profile/cuda_peak_growth_gib": (peak_allocated - baseline_allocated) / _GIB,
+            }
+        )
+        logger.info(
+            "[cuda-memory] status=ok phase={} rank={} metadata={} "
+            "elapsed_s={:.3f} baseline_allocated_gib={:.3f} "
+            "baseline_reserved_gib={:.3f} peak_allocated_gib={:.3f} "
+            "peak_reserved_gib={:.3f} peak_growth_gib={:.3f} "
+            "free_before_gib={:.3f} free_after_gib={:.3f} total_gib={:.3f}",
+            phase,
+            rank,
+            metadata,
+            perf_counter() - started,
+            baseline_allocated / _GIB,
+            baseline_reserved / _GIB,
+            peak_allocated / _GIB,
+            peak_reserved / _GIB,
+            (peak_allocated - baseline_allocated) / _GIB,
+            free_before / _GIB,
+            free_after / _GIB,
+            total / _GIB,
+        )
 
 
 def build_profiler_from_policy_cfg(trainer_cfg):

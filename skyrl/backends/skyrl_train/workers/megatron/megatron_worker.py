@@ -48,7 +48,10 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
-from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
+from skyrl.backends.skyrl_train.utils.profiler import (
+    build_profiler_from_policy_cfg,
+    cuda_peak_probe,
+)
 from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
@@ -1260,14 +1263,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         else:
             micro_bsz = micro_buffer[0]["sequences"].shape[0]
 
-        # Gate on first PP/TP/CP rank so we emit exactly one line per DP rank
-        # (matches how status all-reduce treats metrics as identical within a DP group).
-        if (
+        probe_enabled = os.environ.get("SKYRL_CUDA_PEAK_PROBE", "0") == "1"
+        log_packing = (
             mpu.get_tensor_model_parallel_rank() == 0
             and mpu.get_pipeline_model_parallel_rank() == 0
             and mpu.get_context_parallel_rank() == 0
-        ):
-            real_tokens = int(sum(int(mb["attention_mask"].sum().item()) for mb in micro_buffer))
+        )
+        real_tokens = (
+            int(sum(int(mb["attention_mask"].sum().item()) for mb in micro_buffer))
+            if log_packing or probe_enabled
+            else None
+        )
+
+        # Gate on first PP/TP/CP rank so we emit exactly one line per DP rank
+        # (matches how status all-reduce treats metrics as identical within a DP group).
+        if log_packing:
             num_microbatches = len(micro_buffer)
             dp_rank = mpu.get_data_parallel_rank()
             logger.info(
@@ -1275,15 +1285,29 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 f"seq_len={seq_len} tokens={real_tokens}"
             )
 
-        metrics_list = self.model.forward_backward_mini_batch(
-            micro_batches=micro_buffer,
-            seq_len=seq_len,
-            micro_batch_size=micro_bsz,
-            temperature=self.cfg.algorithm.temperature,
-            loss_fn=loss_fn,
-            loss_fn_config=loss_fn_config,
-            return_per_token_outputs=return_per_token_outputs,
-        )
+        with cuda_peak_probe(
+            enabled=probe_enabled,
+            phase="forward_backward",
+            rank=torch.distributed.get_rank(),
+            metadata={
+                "sequence_tokens": real_tokens,
+                "max_tokens_per_microbatch": self.cfg.max_tokens_per_microbatch,
+                "recompute_num_layers": self.cfg.policy.megatron_config.transformer_config_kwargs.get(
+                    "recompute_num_layers"
+                ),
+                "tp": mpu.get_tensor_model_parallel_world_size(),
+                "dp": mpu.get_data_parallel_world_size(),
+            },
+        ) as memory_metrics:
+            metrics_list = self.model.forward_backward_mini_batch(
+                micro_batches=micro_buffer,
+                seq_len=seq_len,
+                micro_batch_size=micro_bsz,
+                temperature=self.cfg.algorithm.temperature,
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
+                return_per_token_outputs=return_per_token_outputs,
+            )
 
         if self.empty_cuda_cache:
             torch.cuda.empty_cache()
@@ -1309,6 +1333,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
         # NOTE: Sum loss metrics because scaling is already applied before the worker reduction.
         status = reduce_metrics(all_metrics, sum_loss_metrics=True)
+        status.update(memory_metrics)
         if self.optimizer is not None:
             status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
 
