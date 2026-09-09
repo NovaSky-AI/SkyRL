@@ -34,10 +34,17 @@ if TYPE_CHECKING:
 
 @dataclass
 class GPUState:
-    """Tracks what's on GPU for a model."""
+    """Tracks what's on GPU for a model.
 
-    model_on_gpu: bool = False
-    optimizer_on_gpu: bool = False
+    Has no defaults: every construction site states both fields. Recording
+    "resident" for an offloaded model skips a needed backload and runs the model
+    from CPU; recording "offloaded" for a resident one costs a redundant backload,
+    which also breaks ``torch.profiler`` because the backload swaps parameters the
+    profiler holds references to.
+    """
+
+    model_on_gpu: bool
+    optimizer_on_gpu: bool
 
 
 class WorkerDispatch:
@@ -74,12 +81,19 @@ class WorkerDispatch:
         if ref_actor_group is not None:
             self._actor_groups["ref"] = ref_actor_group
 
-        # GPU state tracking (only matters when colocated)
-        self._gpu_state: Dict[str, GPUState] = {name: GPUState() for name in self._actor_groups.keys()}
+        # GPU state tracking (only matters when colocated). Every caller builds and
+        # initializes its actor groups on GPU before constructing the dispatch;
+        # colocated callers offload first and then immediately mark_all_offloaded(),
+        # so "resident" is the correct starting assumption here.
+        self._gpu_state: Dict[str, GPUState] = {
+            name: GPUState(model_on_gpu=True, optimizer_on_gpu=True) for name in self._actor_groups.keys()
+        }
 
     def register_actor_group(self, model: str, actor_group: PPORayActorGroup) -> None:
         self._actor_groups[model] = actor_group
-        self._gpu_state[model] = GPUState()
+        # Not initialized yet -- callers register, then call init_model(), which
+        # records the model as resident.
+        self._gpu_state[model] = GPUState(model_on_gpu=False, optimizer_on_gpu=False)
 
     # ------------------------------------------------------------------
     # Multi-LoRA: per-model adapter swap orchestration.
@@ -148,7 +162,7 @@ class WorkerDispatch:
     def _offload_inactive_model(self, model: str) -> None:
         """Offload an inactive colocated model to CPU."""
         self._actor_groups[model].offload_to_cpu()
-        self._gpu_state[model] = GPUState()
+        self._gpu_state[model] = GPUState(model_on_gpu=False, optimizer_on_gpu=False)
 
     def _ensure_on_gpu(self, model: str, need_optimizer: bool = True, need_model: bool = True) -> None:
         """Ensure model is on GPU, offloading others in same colocation group if needed."""
@@ -210,7 +224,7 @@ class WorkerDispatch:
         """Mark a specific model as offloaded without changing others."""
         if model not in self._actor_groups:
             return
-        self._gpu_state[model] = GPUState()
+        self._gpu_state[model] = GPUState(model_on_gpu=False, optimizer_on_gpu=False)
 
     def forward(
         self,
