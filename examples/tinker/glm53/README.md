@@ -1,6 +1,7 @@
-# Full-context profiling
+# GLM runtime checks and profiling
 
-Native SkyRL benchmark, not a learning or sampler-parity test.
+Shared runtime profiles; each command has a separate, explicit test purpose.
+`run_client.py` measures training mechanics, not learning or sampler parity.
 Start with Qwen3-0.6B (one trainer GPU + one inference GPU); it is **not** offered
 by hosted Tinker. A hosted comparison needs a common model and matched loss/gradients.
 
