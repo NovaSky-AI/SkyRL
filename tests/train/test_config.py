@@ -25,6 +25,7 @@ from skyrl.train.utils import utils as train_utils
 from skyrl.train.utils.utils import (
     prepare_runtime_environment,
     validate_cfg,
+    validate_generator_cfg,
     validate_inference_engine_cfg,
 )
 from tests.train.util import example_dummy_config
@@ -44,6 +45,14 @@ def _make_validated_test_config():
     cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
     cfg.trainer.critic_mini_batch_size = cfg.trainer.train_batch_size
     return cfg
+
+
+def test_validate_generator_cfg_defers_wandb_authentication(monkeypatch):
+    cfg = _make_validated_test_config()
+    cfg.trainer.logger = "wandb"
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+    validate_generator_cfg(cfg)
 
 
 # Helper dataclasses for testing
