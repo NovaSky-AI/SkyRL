@@ -3,85 +3,11 @@ from types import MethodType
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from skyrl.backends.skyrl_train.patches.megatron.swiglu_triton import (
     install_triton_swiglu,
 )
-
-
-class _SequenceChunkedFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, hidden_states: torch.Tensor, *args) -> torch.Tensor:
-        tensor_inputs = args[:-3]
-        aligned_input_count, chunk_size, fn = args[-3:]
-        aligned_inputs = tensor_inputs[:aligned_input_count]
-        ctx.chunk_size = chunk_size
-        ctx.fn = fn
-        ctx.aligned_input_count = aligned_input_count
-        ctx.save_for_backward(hidden_states, *tensor_inputs)
-
-        output = None
-        for start in range(0, hidden_states.shape[0], chunk_size):
-            end = min(start + chunk_size, hidden_states.shape[0])
-            chunk_output = fn(
-                hidden_states[start:end],
-                *(aligned_input[start:end] for aligned_input in aligned_inputs),
-            )
-            if output is None:
-                output_shape = (*hidden_states.shape[:-1], chunk_output.shape[-1])
-                output = hidden_states.new_empty(output_shape)
-            output[start:end].copy_(chunk_output)
-
-        assert output is not None
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> tuple:
-        saved_inputs = ctx.saved_tensors
-        data_input_count = 1 + ctx.aligned_input_count
-        data_inputs = saved_inputs[:data_input_count]
-        parameters = saved_inputs[data_input_count:]
-        input_grads = [
-            torch.empty_like(input) if input.requires_grad else None
-            for input in data_inputs
-        ]
-        parameter_grads = [None] * len(parameters)
-
-        for start in range(0, data_inputs[0].shape[0], ctx.chunk_size):
-            end = min(start + ctx.chunk_size, data_inputs[0].shape[0])
-            chunks = [input[start:end].detach() for input in data_inputs]
-            for chunk, input in zip(chunks, data_inputs, strict=True):
-                chunk.requires_grad_(input.requires_grad)
-            with torch.enable_grad():
-                chunk_output = ctx.fn(*chunks)
-            grad_targets = [
-                tensor
-                for tensor in (*chunks, *parameters)
-                if tensor.requires_grad
-            ]
-            chunk_grads = torch.autograd.grad(
-                chunk_output,
-                grad_targets,
-                grad_output[start:end],
-                allow_unused=True,
-            )
-            grad_iterator = iter(chunk_grads)
-            for input_grad, chunk in zip(input_grads, chunks, strict=True):
-                if input_grad is not None:
-                    chunk_grad = next(grad_iterator)
-                    if chunk_grad is not None:
-                        input_grad[start:end].copy_(chunk_grad)
-            for index, parameter in enumerate(parameters):
-                if not parameter.requires_grad:
-                    continue
-                chunk_grad = next(grad_iterator)
-                if chunk_grad is not None:
-                    if parameter_grads[index] is None:
-                        parameter_grads[index] = chunk_grad
-                    else:
-                        parameter_grads[index].add_(chunk_grad)
-
-        return (*input_grads, *parameter_grads, None, None, None)
 
 
 def apply_sequence_chunked(
@@ -89,21 +15,25 @@ def apply_sequence_chunked(
     hidden_states: torch.Tensor,
     chunk_size: int,
     *aligned_inputs: torch.Tensor,
-    parameters: tuple[torch.Tensor, ...] = (),
 ) -> torch.Tensor:
     """Run a token-separable projection in bounded sequence chunks."""
     if hidden_states.shape[0] <= chunk_size:
         return fn(hidden_states, *aligned_inputs)
     if any(input.shape[0] != hidden_states.shape[0] for input in aligned_inputs):
         raise ValueError("Aligned sequence inputs must have the same leading dimension")
-    return _SequenceChunkedFunction.apply(
-        hidden_states,
-        *aligned_inputs,
-        *parameters,
-        len(aligned_inputs),
-        chunk_size,
-        fn,
-    )
+
+    outputs = []
+    for start in range(0, hidden_states.shape[0], chunk_size):
+        end = min(start + chunk_size, hidden_states.shape[0])
+        chunk_inputs = (
+            hidden_states[start:end],
+            *(input[start:end] for input in aligned_inputs),
+        )
+        if torch.is_grad_enabled():
+            outputs.append(checkpoint(fn, *chunk_inputs, use_reentrant=False))
+        else:
+            outputs.append(fn(*chunk_inputs))
+    return torch.cat(outputs, dim=0)
 
 
 def _get_tensor_output(
@@ -119,9 +49,6 @@ def _get_tensor_output(
 
 def _wrap_mlp_forward(module: torch.nn.Module, chunk_size: int) -> None:
     original_forward = module.forward
-    trainable_parameters = tuple(
-        parameter for parameter in module.parameters() if parameter.requires_grad
-    )
 
     def forward(
         self: torch.nn.Module,
@@ -140,12 +67,7 @@ def _wrap_mlp_forward(module: torch.nn.Module, chunk_size: int) -> None:
             def run_chunk(chunk: torch.Tensor) -> torch.Tensor:
                 return _get_tensor_output(original_forward(chunk, **kwargs))
 
-            output = apply_sequence_chunked(
-                run_chunk,
-                hidden_states,
-                chunk_size,
-                parameters=trainable_parameters,
-            )
+            output = apply_sequence_chunked(run_chunk, hidden_states, chunk_size)
         else:
 
             def run_scaled_chunk(
@@ -162,7 +84,6 @@ def _wrap_mlp_forward(module: torch.nn.Module, chunk_size: int) -> None:
                 hidden_states,
                 chunk_size,
                 per_token_scale,
-                parameters=trainable_parameters,
             )
         return output, None
 

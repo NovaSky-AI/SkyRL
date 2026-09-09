@@ -3,6 +3,7 @@ import copy
 import pytest
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from skyrl.backends.skyrl_train.patches.megatron.gdn_sequence_chunking import (
     _get_packed_sequence_ranges,
@@ -112,12 +113,7 @@ def _run_backward(
     if chunk_size is None:
         output = module(hidden_states)
     else:
-        output = apply_sequence_chunked(
-            module,
-            hidden_states,
-            chunk_size,
-            parameters=tuple(module.parameters()),
-        )
+        output = apply_sequence_chunked(module, hidden_states, chunk_size)
     grad_output = torch.linspace(-0.7, 0.9, output.numel()).reshape_as(output)
     output.backward(grad_output)
     parameter_grads = [
@@ -237,6 +233,26 @@ def test_mlp_wrapper_chunks_per_token_scale_and_preserves_gradients() -> None:
         chunked.projection.weight.grad, reference.projection.weight.grad
     )
     assert max(chunked.forward_sizes) == 4
+
+
+def test_sequence_chunking_composes_with_outer_and_stateful_checkpoints() -> None:
+    torch.manual_seed(29)
+    recurrent = _TinyRecurrentProjection()
+    mlp = _TinySwiGLU()
+    hidden_states = torch.randn(9, 2, 8, requires_grad=True)
+
+    def run_block(chunk_input: torch.Tensor) -> torch.Tensor:
+        recurrent_output = apply_stateful_sequence_chunked(
+            recurrent.forward_chunk, chunk_input, 4
+        )
+        return apply_sequence_chunked(mlp, recurrent_output, 4)
+
+    output = checkpoint(run_block, hidden_states, use_reentrant=False)
+    output.square().mean().backward()
+
+    assert hidden_states.grad is not None
+    assert all(parameter.grad is not None for parameter in recurrent.parameters())
+    assert all(parameter.grad is not None for parameter in mlp.parameters())
 
 
 @pytest.mark.parametrize("chunk_size", [0, -1])
