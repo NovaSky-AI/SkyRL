@@ -85,12 +85,7 @@ def _install_save_redirect(cls: type) -> None:
     cls.save_aot_compiled_function = save_aot_compiled_function
 
 
-def apply_compile_cache_device_path_patch() -> None:
-    """Redirect both halves of the AOT artifact round trip, once per process.
-
-    vLLM resolves the loader by name at call time, so replacing it covers the
-    load; the loader in turn installs the save redirect on the model's class.
-    """
+def _apply_compile_cache_device_path_patch() -> None:
     global _PATCHED
     if _PATCHED:
         return
@@ -114,3 +109,16 @@ def apply_compile_cache_device_path_patch() -> None:
     decorators._try_load_aot_compiled_fn = try_load_aot_compiled_fn
     _PATCHED = True
     logger.info("Patched vLLM AOT compile cache to use a per-device artifact directory")
+
+
+def apply_compile_cache_device_path_patch() -> None:
+    """Redirect both halves of the AOT artifact round trip, once per process.
+
+    vLLM resolves the loader by name at call time, so replacing it covers the
+    load; the loader in turn installs the save redirect on the model's class.
+    """
+    try:
+        _apply_compile_cache_device_path_patch()
+    except ModuleNotFoundError as e:
+        logger.info(f"Skipping compile cache device path due to exception: {e}")
+        pass

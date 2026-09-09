@@ -68,6 +68,7 @@ except ModuleNotFoundError:
 # the same reason as the registrations above: this module is loaded in every
 # worker process before model init, and the device is read lazily at compile
 # time, once it is live.
+# TODO (sumanthrh): Remove the patch after https://github.com/vllm-project/vllm/pull/53312 lands.
 from skyrl.backends.skyrl_train.patches.vllm.patch_compile_cache_device_path import (  # noqa: E402
     apply_compile_cache_device_path_patch,
 )
