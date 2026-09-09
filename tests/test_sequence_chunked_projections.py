@@ -129,7 +129,10 @@ def test_stateful_chunking_preserves_gdn_projection_output_and_gradients() -> No
         torch.testing.assert_close(chunked_parameter.grad, reference_parameter.grad)
 
 
-def test_gdn_wrapper_chunks_training_sequence_len_offset_zero(monkeypatch) -> None:
+@pytest.mark.parametrize("sequence_len_offset", [0, 262144])
+def test_gdn_wrapper_chunks_training_sequence_offset(
+    monkeypatch, sequence_len_offset: int
+) -> None:
     module = _TinyGDNWrapperTarget()
     chunk_calls = 0
 
@@ -145,7 +148,12 @@ def test_gdn_wrapper_chunks_training_sequence_len_offset_zero(monkeypatch) -> No
     )
     wrap_gdn_forward(module, 4)
 
-    output, bias = module(torch.randn(9, 1, 8), None, sequence_len_offset=0)
+    output, bias = module(
+        torch.randn(9, 1, 8),
+        None,
+        sequence_len_offset=sequence_len_offset,
+        ignored_training_kwarg=True,
+    )
 
     assert output.shape == (9, 1, 8)
     assert bias is None

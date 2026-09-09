@@ -123,8 +123,6 @@ def wrap_gdn_forward(module: torch.nn.Module, chunk_size: int) -> None:
             hidden_states.shape[0] <= chunk_size
             or inference_context is not None
             or inference_params is not None
-            or sequence_len_offset not in (None, 0)
-            or kwargs
         ):
             return original_forward(
                 hidden_states,
