@@ -510,6 +510,7 @@ class ModelData(BaseModel):
     base_model: str
     lora_config: LoRAConfig | None = None
     model_name: str | None = None
+    tokenizer_id: str | None = None
 
 
 class ModelInfoResponse(BaseModel):
@@ -1098,7 +1099,10 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
     model_data = ModelData(
-        base_model=model.base_model, lora_config=LoRAConfig(rank=lora_config.rank), model_name=model.base_model
+        base_model=model.base_model,
+        lora_config=LoRAConfig(rank=lora_config.rank),
+        model_name=model.base_model,
+        tokenizer_id=model.base_model,
     )
 
     return ModelInfoResponse(model_id=model.model_id, status=model.status, model_data=model_data)

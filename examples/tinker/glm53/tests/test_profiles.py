@@ -21,6 +21,7 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(cfg["trainer.policy.torch_profiler_config"]["ranks"], [0])
         self.assertEqual(cfg["trainer.placement.policy_num_gpus_per_node"], 1)
         self.assertEqual(cfg["generator.inference_engine.tensor_parallel_size"], 1)
+        self.assertFalse(cfg["trainer.policy.megatron_config.lora_config.merge_lora"])
         self.assertEqual(cfg["generator.inference_engine.engine_init_kwargs"]["model"], "/models/qwen")
 
     def test_profiles_preserve_nested_common_settings(self):

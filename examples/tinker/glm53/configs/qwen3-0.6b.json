@@ -9,6 +9,7 @@
   "trainer.policy.megatron_config.tensor_model_parallel_size": 1,
   "trainer.policy.megatron_config.pipeline_model_parallel_size": 1,
   "trainer.policy.megatron_config.context_parallel_size": 1,
+  "trainer.policy.megatron_config.lora_config.merge_lora": false,
   "trainer.policy.model.lora.rank": 32,
   "trainer.policy.model.lora.alpha": 32,
   "trainer.policy.model.lora.target_modules": "all-linear",
