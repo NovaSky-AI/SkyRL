@@ -79,6 +79,7 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     LoraSignature,
     iter_opts,
 )
+from skyrl.backends.skyrl_train.workers.megatron.gradient_scaling import scale_gradients
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
@@ -1485,7 +1486,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
-    def optim_step(self) -> Optional[float]:
+    def optim_step(self, gradient_scale: float = 1.0) -> float | None:
         """
         Perform optimizer step.
 
@@ -1509,6 +1510,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # is not idempotent -- running it per call corrupts gradients once a window
         # spans more than one call.
         self.model.run_pending_grad_sync()
+        scale_gradients(self.actor_module, gradient_scale)
 
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
 

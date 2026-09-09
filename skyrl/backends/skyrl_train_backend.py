@@ -1032,7 +1032,7 @@ class SkyRLTrainBackend(AbstractBackend):
         adam_params = request_data.adam_params
         self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
-        grad_norm = self._dispatch.optim_step(role, model_id=model_id)
+        grad_norm = self._dispatch.optim_step(role, model_id=model_id, gradient_scale=request_data.gradient_scale)
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
 
         metrics: dict[str, float] = {}
