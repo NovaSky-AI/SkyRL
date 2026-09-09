@@ -6,6 +6,7 @@ from torch import nn
 
 from skyrl.backends.skyrl_train.patches.megatron.gdn_sequence_chunking import (
     apply_stateful_sequence_chunked,
+    wrap_gdn_forward,
 )
 from skyrl.backends.skyrl_train.patches.megatron.sequence_chunked_projections import (
     apply_sequence_chunked,
@@ -46,6 +47,26 @@ class _TinyRecurrentProjection(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.forward_chunk(hidden_states)[0]
+
+
+class _TinyGDNWrapperTarget(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.original_forward_calls = 0
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        inference_context=None,
+        packed_seq_params=None,
+        sequence_len_offset=None,
+        *,
+        inference_params=None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, None]:
+        self.original_forward_calls += 1
+        return hidden_states, None
 
 
 def _run_backward(
@@ -106,6 +127,30 @@ def test_stateful_chunking_preserves_gdn_projection_output_and_gradients() -> No
         chunked.parameters(), reference.parameters(), strict=True
     ):
         torch.testing.assert_close(chunked_parameter.grad, reference_parameter.grad)
+
+
+def test_gdn_wrapper_chunks_training_sequence_len_offset_zero(monkeypatch) -> None:
+    module = _TinyGDNWrapperTarget()
+    chunk_calls = 0
+
+    def run_chunk(module, hidden_states, *states):
+        del module, states
+        nonlocal chunk_calls
+        chunk_calls += 1
+        return hidden_states, hidden_states[-1]
+
+    monkeypatch.setattr(
+        "skyrl.backends.skyrl_train.patches.megatron.gdn_sequence_chunking._run_gdn_chunk",
+        run_chunk,
+    )
+    wrap_gdn_forward(module, 4)
+
+    output, bias = module(torch.randn(9, 1, 8), None, sequence_len_offset=0)
+
+    assert output.shape == (9, 1, 8)
+    assert bias is None
+    assert chunk_calls == 3
+    assert module.original_forward_calls == 0
 
 
 @pytest.mark.parametrize("chunk_size", [0, -1])
