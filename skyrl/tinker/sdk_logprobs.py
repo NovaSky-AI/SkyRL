@@ -14,13 +14,15 @@ from skyrl.tinker.logprob_checks import (
 )
 
 
-def prepare_probes(trainer):
+def prepare_probes(trainer, tokenizer=None):
+    if tokenizer is None:
+        tokenizer = trainer.get_tokenizer()
     return [
         types.Datum(
             model_input=types.ModelInput.from_ints(tokens[:-1]),
             loss_fn_inputs={"target_tokens": tokens[1:], "weights": [1.0] * (len(tokens) - 1)},
         )
-        for tokens in build_probe_sequences(trainer.get_tokenizer())
+        for tokens in build_probe_sequences(tokenizer)
     ]
 
 

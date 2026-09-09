@@ -50,3 +50,13 @@ def test_sdk_stages_use_native_update_direction_assertions(monkeypatch, sampler_
         with pytest.raises(AssertionError):
             checks.check_published_update(None, [], report, 0.05, 0.005)
     assert report["updated"] == sampler_after
+
+
+def test_explicit_tokenizer_preserves_probes_without_loading_remote_model_path():
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [3, 7, 11])
+    trainer = SimpleNamespace(get_tokenizer=Mock(return_value=tokenizer))
+    expected = checks.prepare_probes(trainer)
+    trainer.get_tokenizer = Mock(side_effect=AssertionError("remote path unavailable locally"))
+    actual = checks.prepare_probes(trainer, tokenizer)
+    trainer.get_tokenizer.assert_not_called()
+    assert [datum.model_dump() for datum in actual] == [datum.model_dump() for datum in expected]
