@@ -6,9 +6,24 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+import torch
 
+from examples.model_checks import megatron_lora
 from examples.tinker.glm53 import run_lora_logprobs
 from examples.tinker.glm53.run_lora_logprobs import validate_config
+
+
+def test_trainer_scores_preserve_unequal_length_sample_positions(monkeypatch):
+    batch = {"response_mask": torch.tensor([[0, 0, 1, 1], [1, 1, 1, 1]])}
+    output = SimpleNamespace(loss_fn_outputs=[{"logprobs": [-1.0, -2.0]}, {"logprobs": [-3.0, -4.0, -5.0, -6.0]}])
+    policy = SimpleNamespace(actor_infos=[], async_run_ray_method=lambda *args, **kwargs: output)
+    monkeypatch.setattr(megatron_lora.ray, "get", lambda value: value)
+    monkeypatch.setattr(megatron_lora.WorkerOutput, "cat", lambda *args: output)
+    assert megatron_lora.score_trainer(policy, batch) == [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]
+
+    output.loss_fn_outputs[0]["logprobs"].append(0.0)
+    with pytest.raises(AssertionError):
+        megatron_lora.score_trainer(policy, batch)
 
 
 @pytest.mark.parametrize(

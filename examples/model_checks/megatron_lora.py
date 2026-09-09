@@ -6,7 +6,7 @@ import ray
 import torch
 
 from examples.model_checks.lora_logprobs import perturb_adapters
-from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput, loss_fn_outputs_to_tensor
+from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.inference_servers.setup import build_new_inference_client
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import MegatronPolicyWorkerBase
@@ -92,8 +92,10 @@ def build_batch(sequences, pad_token_id):
 def score_trainer(policy, batch):
     results = ray.get(policy.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy"))
     output = WorkerOutput.cat(policy.actor_infos, results)
-    scores = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
-    return scores[batch["response_mask"].bool()].tolist()
+    lengths = batch["response_mask"].sum(dim=1).tolist()
+    assert [len(row["logprobs"]) for row in output.loss_fn_outputs] == lengths
+    # The loss path already removes padding from each sample's outputs.
+    return [score for row in output.loss_fn_outputs for score in row["logprobs"]]
 
 
 async def score_sampler(client, sequences, model):
