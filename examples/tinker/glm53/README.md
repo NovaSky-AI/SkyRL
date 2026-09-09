@@ -23,8 +23,15 @@ timeout --signal=TERM --kill-after=30s 2h \
 Create the parent directories; use fresh output/state paths. Keep the explicit
 `python` in the server command for the API's uv-environment discovery.
 Start uv-managed Ray with `--block` so its temporary environment stays alive.
-For GLM, set `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=1200` before
-starting Ray on each node so workers inherit the startup deadline.
+For GLM, set both deadlines before starting Ray on every node:
+
+```bash
+export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=1200
+export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=1800
+```
+
+The worker collective deadline also covers ranks waiting while rank 0 exports
+and loads the adapter. Keep an outer job deadline; these are not speed optimizations.
 
 `run_client.run()` shows the protocol: create → initial publish/sample →
 warmup + two measured updates → checkpoint/unload. Each update is one batched
@@ -38,7 +45,8 @@ GLM/256K profiles still need their own qualification.
 
 The client saves exact datums, replay batches and phase JSONL. Every trainer rank
 profiles warmup and updates; verify CUDA traces. Optimizer request time includes
-trace export and aggregation. OOM export/restart is best-effort; it does not recover model state.
+trace export; this example disables eager kernel-summary aggregation. OOM
+export/restart is best-effort; it does not recover model state.
 Cold model loading, vLLM, SIGKILL and failed exports are outside profiler coverage.
 Short samples do not qualify full-context inference. Unload does not release the
 deployment; the owner must enforce deadlines and tear down its resources.
