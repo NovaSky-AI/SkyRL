@@ -38,9 +38,10 @@ class _Client:
 class _Extractor:
     """Records whether the metadata/chunk channels were touched at all."""
 
-    def __init__(self) -> None:
+    def __init__(self, derives_metadata_from_chunks: bool = False) -> None:
         self.metadata_calls = 0
         self.extract_calls = 0
+        self.derives_metadata_from_chunks = derives_metadata_from_chunks
 
     def get_weight_metadata(self, dtype):
         self.metadata_calls += 1
@@ -165,6 +166,19 @@ class TestSend:
         inner = _FakeRdtSender()
         await ShardedRdtWeightTransferSender(inner).send(_Extractor(), "torch.bfloat16", reset_prefix_cache=True)
         assert len(inner.sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_send_refuses_serialized_fp8_extractors(self):
+        """The weight sources publish whole bridge tensors, so an FP8 sync would
+        land dequantized weights in modules vLLM built for FP8 -- wrong rollout
+        weights rather than an error."""
+        inner = _FakeRdtSender()
+        extractor = _Extractor(derives_metadata_from_chunks=True)
+
+        with pytest.raises(ValueError, match="serialized FP8"):
+            await ShardedRdtWeightTransferSender(inner).send(extractor, "torch.bfloat16")
+
+        assert inner.sent == []
 
     @pytest.mark.asyncio
     async def test_send_chunks_refuses_with_an_explanation(self):

@@ -21,28 +21,33 @@ async def test_asample_serializes_future_row_transactions(
     active_transactions = 0
     max_active_transactions = 0
 
-    async def get_sampling_model(request: api.SampleRequest, session: _Session):
+    async def get_sampling_model(
+        request: api.SampleRequest,
+        http_request: SimpleNamespace,
+        session: _Session,
+    ) -> tuple[str, None]:
+        del request, http_request, session
+        return "test-model", None
+
+    async def create_future(**kwargs: object) -> int:
         nonlocal active_transactions, max_active_transactions
-        del request, session
+        nonlocal next_request_id
+        del kwargs
         active_transactions += 1
         max_active_transactions = max(max_active_transactions, active_transactions)
         await asyncio.sleep(0.01)
         active_transactions -= 1
-        return "test-model", None
-
-    next_request_id = 0
-
-    async def create_future(**kwargs):
-        nonlocal next_request_id
-        del kwargs
         next_request_id += 1
         return next_request_id
+
+    next_request_id = 0
 
     monkeypatch.setattr(api, "get_sampling_model", get_sampling_model)
     monkeypatch.setattr(api, "create_future", create_future)
 
     state = SimpleNamespace(
         external_inference_client=None,
+        external_future_store=None,
         sample_request_db_lock=asyncio.Lock(),
     )
     http_request = SimpleNamespace(app=SimpleNamespace(state=state))

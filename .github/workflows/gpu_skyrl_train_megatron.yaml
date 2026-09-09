@@ -75,7 +75,7 @@ jobs:
           envsubst < ci/anyscale_gpu_ci_skyrl_train_megatron.yaml > ci/anyscale_gpu_ci_skyrl_train_megatron_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           JOB_NAME="skyrl-train-gpu-ci-megatron-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
-          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_train_megatron_envsubst.yaml "$JOB_NAME" 12000
+          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_train_megatron_envsubst.yaml "$JOB_NAME" 15000
           rm -f ci/anyscale_gpu_ci_skyrl_train_megatron_envsubst.yaml
       # Cancelling the run stops the runner, not the cluster. GitHub still runs
       # `if: cancelled()` steps, so this is where an orphaned GPU job gets reaped.
