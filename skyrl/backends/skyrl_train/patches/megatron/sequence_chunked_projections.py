@@ -141,10 +141,14 @@ def install_sequence_chunked_projections(
         config = module.config
         if (
             config.activation_func_fp8_input_store
-            or (config.cpu_offloading and config.cpu_offloading_activations)
+            or (
+                config.cpu_offloading
+                and getattr(config, "cpu_offloading_activations", False)
+            )
             or config.activation_func_clamp_value is not None
-            or config.activation_func_tanh_clamp_scale is not None
-            or config.activation_func_tanh_clamp_scale_linear is not None
+            or getattr(config, "activation_func_tanh_clamp_scale", None) is not None
+            or getattr(config, "activation_func_tanh_clamp_scale_linear", None)
+            is not None
         ):
             raise ValueError(
                 "Sequence-chunked Triton SwiGLU does not support activation storage or clamps"

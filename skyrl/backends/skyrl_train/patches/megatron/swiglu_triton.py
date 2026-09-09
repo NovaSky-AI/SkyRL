@@ -68,9 +68,7 @@ class TritonSwiGLUFunction(torch.autograd.Function):
         input: torch.Tensor,
         fp8_input_store: bool,
         cpu_offload_input: bool,
-        clamp_value: float | None,
-        gate_clamp_scale: float | None,
-        linear_clamp_scale: float | None,
+        *clamp_args: float | None,
     ) -> torch.Tensor:
         if triton is None or not input.is_cuda:
             raise RuntimeError(
@@ -80,11 +78,12 @@ class TritonSwiGLUFunction(torch.autograd.Function):
             raise ValueError(
                 "The Triton SwiGLU path does not support activation storage transforms"
             )
-        if (
-            clamp_value is not None
-            or gate_clamp_scale is not None
-            or linear_clamp_scale is not None
-        ):
+        if len(clamp_args) not in (0, 3):
+            raise ValueError(
+                "The Triton SwiGLU path expects either the legacy 3-input or "
+                f"current 6-input Megatron signature, got {3 + len(clamp_args)} inputs"
+            )
+        if any(value is not None for value in clamp_args):
             raise ValueError(
                 "The Triton SwiGLU path does not support clamped activations"
             )
@@ -102,6 +101,7 @@ class TritonSwiGLUFunction(torch.autograd.Function):
             output_elements,
             BLOCK_SIZE=256,
         )
+        ctx.clamp_arg_count = len(clamp_args)
         ctx.save_for_backward(input)
         return output
 
@@ -120,7 +120,7 @@ class TritonSwiGLUFunction(torch.autograd.Function):
             output_elements,
             BLOCK_SIZE=256,
         )
-        return grad_input, None, None, None, None, None
+        return (grad_input, None, None, *((None,) * ctx.clamp_arg_count))
 
 
 def install_triton_swiglu() -> None:

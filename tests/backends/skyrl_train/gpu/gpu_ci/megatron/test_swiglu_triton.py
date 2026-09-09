@@ -24,23 +24,26 @@ def _run_reference(input: torch.Tensor, grad_output: torch.Tensor):
     return output.detach(), input.grad.detach()
 
 
-def _run_triton(input: torch.Tensor, grad_output: torch.Tensor):
+def _run_triton(input: torch.Tensor, grad_output: torch.Tensor, clamp_args: tuple):
     input = input.detach().clone().requires_grad_(True)
-    output = TritonSwiGLUFunction.apply(input, False, False, None, None, None)
+    output = TritonSwiGLUFunction.apply(input, False, False, *clamp_args)
     output.backward(grad_output)
     return output.detach(), input.grad.detach()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "clamp_args", [(), (None, None, None)], ids=["legacy", "current"]
+)
 def test_triton_swiglu_matches_torch_output_and_input_gradient(
-    dtype: torch.dtype,
+    dtype: torch.dtype, clamp_args: tuple
 ) -> None:
     torch.manual_seed(17)
     input = torch.randn(7, 3, 260, device="cuda", dtype=dtype)
     grad_output = torch.randn(7, 3, 130, device="cuda", dtype=dtype)
 
     reference_output, reference_grad = _run_reference(input, grad_output)
-    triton_output, triton_grad = _run_triton(input, grad_output)
+    triton_output, triton_grad = _run_triton(input, grad_output, clamp_args)
 
     tolerances = (
         {"atol": 2e-2, "rtol": 2e-2}
