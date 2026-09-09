@@ -86,7 +86,9 @@ class _TinyLoRALinear(nn.Module):
 
     def base_linear_forward(self, hidden_states, *args, **kwargs):
         del args, kwargs
-        return self.base(hidden_states), None, hidden_states
+        output = self.base(hidden_states)
+        output, _ = torch.chunk(torch.cat((output, output), dim=-1), 2, dim=-1)
+        return output, None, hidden_states
 
     def adapter_forward(self, adapter, hidden_states, *args, **kwargs):
         del args, kwargs

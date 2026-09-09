@@ -23,6 +23,7 @@ def _wrap_lora_linear_forward(module: torch.nn.Module, chunk_size: int) -> None:
         linear_output, bias, layernorm_output = self.base_linear_forward(
             hidden_states, *args, **kwargs
         )
+        combined_output = torch.empty_like(linear_output)
         for start in range(0, hidden_states.shape[0], chunk_size):
             end = min(start + chunk_size, hidden_states.shape[0])
             adapter_output = self.adapter_forward(
@@ -32,10 +33,12 @@ def _wrap_lora_linear_forward(module: torch.nn.Module, chunk_size: int) -> None:
                 **kwargs,
             )
             output_slice = linear_output[start:end]
-            output_slice.add_(adapter_output.reshape(output_slice.shape))
+            combined_output[start:end].copy_(
+                output_slice + adapter_output.reshape(output_slice.shape)
+            )
         if not self._base_returns_tuple:
-            return linear_output
-        return linear_output, bias
+            return combined_output
+        return combined_output, bias
 
     module.forward = MethodType(forward, module)
     module._skyrl_lora_sequence_chunked = True
