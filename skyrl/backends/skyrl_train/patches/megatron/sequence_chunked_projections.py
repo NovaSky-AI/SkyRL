@@ -102,12 +102,10 @@ def _wrap_mlp_forward(module: torch.nn.Module, chunk_size: int) -> None:
 
 def _wrap_projection_forward(module: torch.nn.Module, chunk_size: int) -> None:
     original_forward = module.forward
-    if getattr(module, "bias", None) is not None:
-        raise ValueError(
-            "Sequence-chunked GDN projections require bias-free Megatron linears"
-        )
 
-    def forward(self: torch.nn.Module, hidden_states: torch.Tensor, *args, **kwargs):
+    def forward(
+        self: torch.nn.Module, hidden_states: torch.Tensor, *args, **kwargs
+    ):
         if args or kwargs or hidden_states.shape[0] <= chunk_size:
             return original_forward(hidden_states, *args, **kwargs)
 
@@ -117,7 +115,10 @@ def _wrap_projection_forward(module: torch.nn.Module, chunk_size: int) -> None:
             # chunk. TP1 needs no collective, so use the underlying weight directly.
             return F.linear(chunk, self.weight)
 
-        return apply_sequence_chunked(run_chunk, hidden_states, chunk_size), None
+        return (
+            apply_sequence_chunked(run_chunk, hidden_states, chunk_size),
+            self.bias,
+        )
 
     module.forward = MethodType(forward, module)
     module._skyrl_sequence_chunked = True

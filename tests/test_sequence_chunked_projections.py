@@ -28,12 +28,15 @@ class _TinyProjection(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(13, 8))
         nn.init.kaiming_uniform_(self.weight)
-        self.bias = None
+        self.bias = nn.Parameter(torch.empty(13))
+        nn.init.uniform_(self.bias)
         self.forward_calls = 0
 
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
+    def forward(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         self.forward_calls += 1
-        return torch.nn.functional.linear(hidden_states, self.weight), None
+        return torch.nn.functional.linear(hidden_states, self.weight), self.bias
 
 
 def _run_backward(
@@ -84,14 +87,14 @@ def test_projection_wrapper_preserves_output_and_gradients() -> None:
 
     reference_output, reference_bias = reference(reference_input)
     chunked_output, chunked_bias = chunked(chunked_input)
-    reference_output.backward(grad_output)
-    chunked_output.backward(grad_output)
+    (reference_output + reference_bias).backward(grad_output)
+    (chunked_output + chunked_bias).backward(grad_output)
 
-    assert reference_bias is None
-    assert chunked_bias is None
     torch.testing.assert_close(chunked_output, reference_output)
+    torch.testing.assert_close(chunked_bias, reference_bias)
     torch.testing.assert_close(chunked_input.grad, reference_input.grad)
     torch.testing.assert_close(chunked.weight.grad, reference.weight.grad)
+    torch.testing.assert_close(chunked.bias.grad, reference.bias.grad)
     assert chunked.forward_calls == 0
 
 
