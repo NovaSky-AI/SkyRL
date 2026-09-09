@@ -33,6 +33,12 @@ def test_warmup_oom_exports_active_trace_before_any_optimizer_step(tmp_path):
     assert len(traces) == 1
     trace = json.loads(traces[0].read_text())
     assert any(event["name"] == "warmup_before_oom" for event in trace["traceEvents"])
+    with torch.profiler.record_function("next_client_work"):
+        torch.ones(8).add_(2)
+    worker.profiler.step()
+    worker.profiler.stop()
+    traces = [json.loads(path.read_text()) for path in tmp_path.glob("*.pt.trace.json")]
+    assert any(event["name"] == "next_client_work" for trace in traces for event in trace["traceEvents"])
 
 
 @pytest.mark.parametrize("profiling_enabled", [False, True])

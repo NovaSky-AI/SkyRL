@@ -31,7 +31,7 @@ def flush_profile_on_oom(method):
             logger.exception(f"OOM in {method.__name__}; flushing the local worker's profiler")
             if self.profiler is not None:
                 self.profiler.stop()
-                self.profiler.enable = False
+                self.profiler.start()
             raise
 
     return wrapped
