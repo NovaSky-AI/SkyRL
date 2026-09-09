@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -44,7 +44,7 @@ def checkpoint_engine(tmp_path):
     engine.db_engine.dispose()
 
 
-@pytest.mark.parametrize("outcome", ["success", "backend_error", "unloaded"])
+@pytest.mark.parametrize("outcome", ["success", "backend_error", "backend_value_error", "unloaded"])
 @pytest.mark.parametrize("mode", ["training", "sampler", "ephemeral_sampler"])
 def test_checkpoint_and_future_reach_matching_terminal_status(checkpoint_engine, mode, outcome):
     engine = checkpoint_engine
@@ -72,8 +72,21 @@ def test_checkpoint_and_future_reach_matching_terminal_status(checkpoint_engine,
     save = engine.backend.save_checkpoint if training else engine.backend.save_sampler_checkpoint
     if outcome == "backend_error":
         save.side_effect = OSError("checkpoint write failed")
+    elif outcome == "backend_value_error":
+        save.side_effect = ValueError("checkpoint write failed")
 
-    engine.process_single_requests({str(request_id): ("model", request_type, request_data)})
+    with patch("skyrl.tinker.engine.logger") as captured_log:
+        engine.process_single_requests({str(request_id): ("model", request_type, request_data)})
+
+    if outcome == "unloaded":
+        captured_log.exception.assert_not_called()
+        captured_log.info.assert_called_once()
+        assert "model not loaded" in captured_log.info.call_args.args[0]
+        captured_log.warning.assert_not_called()
+    elif outcome in ("backend_error", "backend_value_error"):
+        assert captured_log.exception.call_count == 2
+    else:
+        captured_log.exception.assert_not_called()
 
     with Session(engine.db_engine) as session:
         future = session.get(FutureDB, request_id)

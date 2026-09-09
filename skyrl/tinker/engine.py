@@ -30,6 +30,10 @@ from skyrl.utils.log import logger
 _MAX_IDS_PER_QUERY = 500
 
 
+class _ModelNotLoadedError(ValueError):
+    """A stale request targets a model that is no longer loaded."""
+
+
 def _model_not_found_error(model_id: str) -> types.ErrorResponse:
     """Log and return an ErrorResponse for a request targeting a model that isn't loaded."""
     logger.info(
@@ -321,7 +325,8 @@ class TinkerEngine:
             status = CheckpointStatus.COMPLETED
             error_message = None
         except Exception as e:
-            logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
+            if not isinstance(e, _ModelNotLoadedError):
+                logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
             error_message = str(e)
             raise
         finally:
@@ -655,7 +660,7 @@ class TinkerEngine:
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
             if not self.backend.has_model(model_id):
-                raise ValueError(_model_not_found_error(model_id).error)
+                raise _ModelNotLoadedError(_model_not_found_error(model_id).error)
             self.backend.save_checkpoint(output_path, model_id)
             logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
 
@@ -679,7 +684,7 @@ class TinkerEngine:
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
             if not self.backend.has_model(model_id):
-                raise ValueError(_model_not_found_error(model_id).error)
+                raise _ModelNotLoadedError(_model_not_found_error(model_id).error)
             self.backend.save_sampler_checkpoint(output_path, model_id, persist=persist)
             logger.info(f"Saved sampler checkpoint for model {model_id} to {output_path}")
 
@@ -754,7 +759,8 @@ class TinkerEngine:
                 try:
                     result = self.process_single_request(request_type, model_id, request_data)
                 except Exception as e:
-                    logger.exception(f"Error processing request {request_id}: {e}")
+                    if not isinstance(e, _ModelNotLoadedError):
+                        logger.exception(f"Error processing request {request_id}: {e}")
                     result = types.ErrorResponse(error=str(e), status="failed")
             results[request_id] = result
         self._complete_futures(results)
