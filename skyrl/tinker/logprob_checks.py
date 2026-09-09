@@ -54,9 +54,11 @@ def check_updated_adapter(report, atol):
     trainer_norm = trainer_delta.norm().item()
     sampler_norm = sampler_delta.norm().item()
     report["update_delta"].update(
-        cosine=(trainer_delta @ sampler_delta).item() / (trainer_norm * sampler_norm)
-        if trainer_norm and sampler_norm
-        else None,
+        cosine=(
+            (trainer_delta @ sampler_delta).item() / (trainer_norm * sampler_norm)
+            if trainer_norm and sampler_norm
+            else None
+        ),
         scale=sampler_norm / trainer_norm if trainer_norm else None,
         relative_l2=(trainer_delta - sampler_delta).norm().item() / trainer_norm if trainer_norm else None,
     )
