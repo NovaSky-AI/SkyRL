@@ -11,17 +11,20 @@ from skyrl.backends.skyrl_train.patches.megatron.swiglu_triton import (
 
 class _SequenceChunkedFunction(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx, hidden_states: torch.Tensor, chunk_size: int, fn: Callable
-    ) -> torch.Tensor:
+    def forward(ctx, hidden_states: torch.Tensor, *args) -> torch.Tensor:
+        aligned_inputs = args[:-2]
+        chunk_size, fn = args[-2:]
         ctx.chunk_size = chunk_size
         ctx.fn = fn
-        ctx.save_for_backward(hidden_states)
+        ctx.save_for_backward(hidden_states, *aligned_inputs)
 
         output = None
         for start in range(0, hidden_states.shape[0], chunk_size):
             end = min(start + chunk_size, hidden_states.shape[0])
-            chunk_output = fn(hidden_states[start:end])
+            chunk_output = fn(
+                hidden_states[start:end],
+                *(aligned_input[start:end] for aligned_input in aligned_inputs),
+            )
             if output is None:
                 output_shape = (*hidden_states.shape[:-1], chunk_output.shape[-1])
                 output = hidden_states.new_empty(output_shape)
@@ -32,33 +35,41 @@ class _SequenceChunkedFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple:
-        (hidden_states,) = ctx.saved_tensors
-        hidden_states_grad = (
-            torch.empty_like(hidden_states) if hidden_states.requires_grad else None
-        )
+        saved_inputs = ctx.saved_tensors
+        input_grads = [
+            torch.empty_like(input) if input.requires_grad else None
+            for input in saved_inputs
+        ]
 
-        for start in range(0, hidden_states.shape[0], ctx.chunk_size):
-            end = min(start + ctx.chunk_size, hidden_states.shape[0])
-            chunk = hidden_states[start:end].detach()
-            chunk.requires_grad_(hidden_states.requires_grad)
+        for start in range(0, saved_inputs[0].shape[0], ctx.chunk_size):
+            end = min(start + ctx.chunk_size, saved_inputs[0].shape[0])
+            chunks = [input[start:end].detach() for input in saved_inputs]
+            for chunk, input in zip(chunks, saved_inputs, strict=True):
+                chunk.requires_grad_(input.requires_grad)
             with torch.enable_grad():
-                chunk_output = ctx.fn(chunk)
+                chunk_output = ctx.fn(*chunks)
             torch.autograd.backward(chunk_output, grad_output[start:end])
-            if hidden_states_grad is not None:
-                hidden_states_grad[start:end].copy_(chunk.grad)
+            for input_grad, chunk in zip(input_grads, chunks, strict=True):
+                if input_grad is not None:
+                    input_grad[start:end].copy_(chunk.grad)
 
-        return hidden_states_grad, None, None
+        return (*input_grads, None, None)
 
 
 def apply_sequence_chunked(
-    fn: Callable[[torch.Tensor], torch.Tensor],
+    fn: Callable[..., torch.Tensor],
     hidden_states: torch.Tensor,
     chunk_size: int,
+    *aligned_inputs: torch.Tensor,
 ) -> torch.Tensor:
     """Run a token-separable projection in bounded sequence chunks."""
     if hidden_states.shape[0] <= chunk_size:
-        return fn(hidden_states)
-    return _SequenceChunkedFunction.apply(hidden_states, chunk_size, fn)
+        return fn(hidden_states, *aligned_inputs)
+    if any(input.shape[0] != hidden_states.shape[0] for input in aligned_inputs):
+        raise ValueError("Aligned sequence inputs must have the same leading dimension")
+    return _SequenceChunkedFunction.apply(
+        hidden_states, *aligned_inputs, chunk_size, fn
+    )
 
 
 def _get_tensor_output(
@@ -82,19 +93,35 @@ def _wrap_mlp_forward(module: torch.nn.Module, chunk_size: int) -> None:
         **kwargs,
     ) -> tuple[torch.Tensor, None]:
         del self
-        if (
-            per_token_scale is not None
-            or kwargs
-            or hidden_states.shape[0] <= chunk_size
-        ):
+        if hidden_states.shape[0] <= chunk_size:
             return original_forward(
                 hidden_states, per_token_scale=per_token_scale, **kwargs
             )
 
-        def run_chunk(chunk: torch.Tensor) -> torch.Tensor:
-            return _get_tensor_output(original_forward(chunk))
+        if per_token_scale is None:
 
-        return apply_sequence_chunked(run_chunk, hidden_states, chunk_size), None
+            def run_chunk(chunk: torch.Tensor) -> torch.Tensor:
+                return _get_tensor_output(original_forward(chunk, **kwargs))
+
+            output = apply_sequence_chunked(run_chunk, hidden_states, chunk_size)
+        else:
+
+            def run_scaled_chunk(
+                chunk: torch.Tensor, scale_chunk: torch.Tensor
+            ) -> torch.Tensor:
+                return _get_tensor_output(
+                    original_forward(
+                        chunk, per_token_scale=scale_chunk, **kwargs
+                    )
+                )
+
+            output = apply_sequence_chunked(
+                run_scaled_chunk,
+                hidden_states,
+                chunk_size,
+                per_token_scale,
+            )
+        return output, None
 
     module.forward = MethodType(forward, module)
     module._skyrl_sequence_chunked = True

@@ -10,6 +10,7 @@ from skyrl.backends.skyrl_train.patches.megatron.gdn_sequence_chunking import (
     wrap_gdn_forward,
 )
 from skyrl.backends.skyrl_train.patches.megatron.sequence_chunked_projections import (
+    _wrap_mlp_forward,
     apply_sequence_chunked,
 )
 
@@ -82,6 +83,26 @@ class _TinyPackedSequenceParams:
     cu_seqlens_kv_padded = None
     cu_seqlens_q = torch.tensor([0, 4, 9])
     cu_seqlens_kv = torch.tensor([0, 4, 9])
+
+
+class _TinyScaledMLP(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.projection = nn.Linear(8, 8, bias=False)
+        self.forward_sizes = []
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        per_token_scale: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, None]:
+        del kwargs
+        self.forward_sizes.append(hidden_states.shape[0])
+        output = self.projection(hidden_states)
+        if per_token_scale is not None:
+            output = output * per_token_scale.unsqueeze(-1)
+        return output, None
 
 
 def _run_backward(
@@ -182,6 +203,35 @@ def test_packed_sequence_ranges_pair_adjacent_boundaries() -> None:
     )
 
     assert ranges == [(0, 4), (4, 9)]
+
+
+def test_mlp_wrapper_chunks_per_token_scale_and_preserves_gradients() -> None:
+    torch.manual_seed(23)
+    reference = _TinyScaledMLP()
+    chunked = copy.deepcopy(reference)
+    _wrap_mlp_forward(chunked, 4)
+    reference_input = torch.randn(9, 2, 8, requires_grad=True)
+    chunked_input = reference_input.detach().clone().requires_grad_(True)
+    reference_scale = torch.randn(9, 2, requires_grad=True)
+    chunked_scale = reference_scale.detach().clone().requires_grad_(True)
+    grad_output = torch.randn(9, 2, 8)
+
+    reference_output, _ = reference(
+        reference_input, per_token_scale=reference_scale, ignored_kwarg=True
+    )
+    chunked_output, _ = chunked(
+        chunked_input, per_token_scale=chunked_scale, ignored_kwarg=True
+    )
+    reference_output.backward(grad_output)
+    chunked_output.backward(grad_output)
+
+    torch.testing.assert_close(chunked_output, reference_output)
+    torch.testing.assert_close(chunked_input.grad, reference_input.grad)
+    torch.testing.assert_close(chunked_scale.grad, reference_scale.grad)
+    torch.testing.assert_close(
+        chunked.projection.weight.grad, reference.projection.weight.grad
+    )
+    assert max(chunked.forward_sizes) == 4
 
 
 @pytest.mark.parametrize("chunk_size", [0, -1])
