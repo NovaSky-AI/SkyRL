@@ -802,20 +802,30 @@ class TinkerEngine:
                     results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in group}
             self._complete_futures(results)
 
+    def _collect_pending_requests(self):
+        with Session(self.db_engine) as session:
+            forward_backward_requests = self.find_batchable_model_passes(
+                session, types.RequestType.FORWARD_BACKWARD
+            )
+            forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
+            sample_requests = self.find_batchable_sample(session)
+            other_requests = self.find_single_requests(session)
+        return forward_backward_requests, forward_requests, sample_requests, other_requests
+
+    def collect_pending_requests(self):
+        """Collect one scheduler iteration, allowing large model-pass uploads to coalesce."""
+        requests = self._collect_pending_requests()
+        if (requests[0] or requests[1]) and self.config.model_pass_batching_window_sec:
+            time.sleep(self.config.model_pass_batching_window_sec)
+            requests = self._collect_pending_requests()
+        return requests
+
     def process_pending_requests(self):
         """Main loop to process pending requests."""
         while True:
-            # Query for pending requests and extract data within session context
-            with Session(self.db_engine) as session:
-                # Use look-ahead scheduling to find batchable forward_backward and forward model passes
-                forward_backward_requests = self.find_batchable_model_passes(
-                    session, types.RequestType.FORWARD_BACKWARD
-                )
-                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
-                # Find pending sample requests that can be batched
-                sample_requests = self.find_batchable_sample(session)
-                # Get other pending requests (non forward_backward and non sampling)
-                other_requests = self.find_single_requests(session)
+            forward_backward_requests, forward_requests, sample_requests, other_requests = (
+                self.collect_pending_requests()
+            )
 
             # Process batches outside of session context
             self.process_batch_requests(

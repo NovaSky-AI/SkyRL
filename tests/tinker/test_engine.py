@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from cloudpathlib import AnyPath
@@ -418,6 +418,33 @@ def test_find_batchable_model_passes_stops_at_barrier(scheduling_engine):
     model_id, request_data = batchable[str(request_ids[0])]
     assert model_id == "model_a"
     assert request_data.data[0].loss_fn_inputs.target_tokens.data == [1, 2, 3]
+
+
+def test_collect_pending_requests_coalesces_large_model_pass_uploads(scheduling_engine):
+    engine = scheduling_engine
+    engine.config = EngineConfig(
+        base_model=BASE_MODEL,
+        backend="fsdp",
+        model_pass_batching_window_sec=2.0,
+    )
+    payload = forward_backward_payload()
+    first_id = add_futures(engine, [(types.RequestType.FORWARD_BACKWARD, "model_a", payload)])[0]
+
+    second_ids = []
+
+    def commit_remaining_requests(_seconds):
+        second_ids.extend(
+            add_futures(engine, [(types.RequestType.FORWARD_BACKWARD, "model_a", payload)] * 3)
+        )
+
+    with patch("skyrl.tinker.engine.time.sleep", side_effect=commit_remaining_requests) as sleep:
+        forward_backward, forward, sample, other = engine.collect_pending_requests()
+
+    sleep.assert_called_once_with(2.0)
+    assert set(forward_backward) == {str(first_id), *(str(request_id) for request_id in second_ids)}
+    assert not forward
+    assert not sample
+    assert not other
 
 
 def sample_payload(checkpoint_id: str) -> dict:

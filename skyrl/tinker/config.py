@@ -71,6 +71,15 @@ class EngineConfig(BaseModel):
             "env_var": "SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC",
         },
     )
+    model_pass_batching_window_sec: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "Seconds to wait after observing a pending forward or forward_backward request "
+            "before collecting the batch. This lets concurrently submitted large request "
+            "bodies commit before GPU dispatch."
+        ),
+    )
     session_cleanup_interval_sec: int = Field(
         default=60,
         description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",
