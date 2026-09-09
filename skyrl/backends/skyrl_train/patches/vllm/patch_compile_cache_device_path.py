@@ -86,6 +86,11 @@ def _install_save_redirect(cls: type) -> None:
 
 
 def _apply_compile_cache_device_path_patch() -> None:
+    """Redirect both halves of the AOT artifact round trip, once per process.
+
+    vLLM resolves the loader by name at call time, so replacing it covers the
+    load; the loader in turn installs the save redirect on the model's class.
+    """
     global _PATCHED
     if _PATCHED:
         return
@@ -116,6 +121,8 @@ def apply_compile_cache_device_path_patch() -> None:
 
     vLLM resolves the loader by name at call time, so replacing it covers the
     load; the loader in turn installs the save redirect on the model's class.
+
+    Additionally, guards against import errors if vLLM is not installed
     """
     try:
         _apply_compile_cache_device_path_patch()
