@@ -115,10 +115,10 @@ def _wrap_projection_forward(module: torch.nn.Module, chunk_size: int) -> None:
             # chunk. TP1 needs no collective, so use the underlying weight directly.
             return F.linear(chunk, self.weight)
 
-        return (
-            apply_sequence_chunked(run_chunk, hidden_states, chunk_size),
-            self.bias,
-        )
+        bias = self.bias
+        if bias is not None and bias.numel() == 0:
+            bias = None
+        return apply_sequence_chunked(run_chunk, hidden_states, chunk_size), bias
 
     module.forward = MethodType(forward, module)
     module._skyrl_sequence_chunked = True
