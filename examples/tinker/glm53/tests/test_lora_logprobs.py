@@ -189,3 +189,51 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(monkeypatch,
         "score_adapter",
         "cleanup",
     ]
+
+
+@pytest.mark.parametrize(
+    "nodes,gpus,tp,pp,cp,ep,temperature,error",
+    [
+        (1, 8, 8, 1, 1, 8, 1.0, None),
+        (1, 8, 4, 1, 2, 8, 1.0, None),
+        (2, 8, 8, 2, 1, 8, 1.0, None),
+        (2, 8, 4, 1, 2, 8, 1.0, None),
+        (1, 8, 8, 1, 1, 8, 0.7, "temperature=1"),
+        (1, 8, 1, 1, 1, 8, 1.0, "DP=1 or DP=2"),
+        (1, 8, 3, 1, 1, 1, 1.0, "divisible"),
+        (1, 8, 4, 2, 2, 8, 1.0, "divisible"),
+    ],
+)
+def test_load_rejects_incomparable_scores_before_startup(
+    tmp_path, monkeypatch, nodes, gpus, tp, pp, cp, ep, temperature, error
+):
+    overrides = {
+        "strategy": "megatron",
+        "trainer.placement.colocate_all": False,
+        "trainer.policy.model.lora.rank": 32,
+        "trainer.policy.megatron_config.lora_config.merge_lora": False,
+        "generator.inference_engine.run_engines_locally": True,
+    }
+    path = tmp_path / "input.json"
+    path.write_text(json.dumps(overrides))
+    parallel = SimpleNamespace(
+        tensor_model_parallel_size=tp,
+        pipeline_model_parallel_size=pp,
+        context_parallel_size=cp,
+        expert_model_parallel_size=ep,
+    )
+    cfg = SimpleNamespace(
+        trainer=SimpleNamespace(
+            algorithm=SimpleNamespace(temperature=temperature),
+            placement=SimpleNamespace(policy_num_nodes=nodes, policy_num_gpus_per_node=gpus),
+            policy=SimpleNamespace(megatron_config=parallel),
+        )
+    )
+    monkeypatch.setattr(run_lora_logprobs.SkyRLTrainConfig, "from_cli_overrides", lambda _: cfg)
+    if error:
+        with pytest.raises(ValueError, match=error):
+            run_lora_logprobs.load_config(path, tmp_path)
+        assert not (tmp_path / "backend-config.json").exists()
+    else:
+        assert run_lora_logprobs.load_config(path, tmp_path) is cfg
+    assert cfg.trainer.algorithm.temperature == temperature

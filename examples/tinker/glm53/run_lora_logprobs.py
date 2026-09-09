@@ -21,8 +21,8 @@ from examples.model_checks.megatron_lora import (
     score_trainer,
 )
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
-from skyrl.train.config import SkyRLTrainConfig
 from skyrl.tinker.logprob_checks import build_probe_sequences as build_sequences
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.utils.tok import get_tokenizer
 
 
@@ -95,6 +95,21 @@ def validate_config(overrides):
             raise ValueError(f"This owned-runtime diagnostic does not support {key}")
 
 
+def validate_scoring_config(trainer):
+    if trainer.algorithm.temperature != 1.0:
+        raise ValueError("Prompt-logprob comparison requires trainer temperature=1")
+    placement = trainer.placement
+    world_size = placement.policy_num_nodes * placement.policy_num_gpus_per_node
+    parallel = trainer.policy.megatron_config
+    model_size = (
+        parallel.tensor_model_parallel_size * parallel.pipeline_model_parallel_size * parallel.context_parallel_size
+    )
+    if world_size <= 0 or model_size <= 0 or world_size % model_size:
+        raise ValueError("Trainer GPU count must be divisible by TP * PP * CP")
+    if world_size // model_size not in (1, 2):
+        raise ValueError("The two probe sequences require trainer DP=1 or DP=2")
+
+
 def load_config(path, output_dir):
     overrides = json.loads(path.read_text())
     validate_config(overrides)
@@ -103,6 +118,7 @@ def load_config(path, output_dir):
     overrides["trainer.policy.torch_profiler_config"] = {"enable": False}
     overrides["trainer.log_path"] = str(output_dir / "runtime-logs")
     cfg = SkyRLTrainConfig.from_cli_overrides(overrides)
+    validate_scoring_config(cfg.trainer)
     with (output_dir / "backend-config.json").open("x") as receipt:
         json.dump(overrides, receipt, indent=2)
     return cfg
