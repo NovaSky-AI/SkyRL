@@ -112,7 +112,12 @@ def _run_backward(
     if chunk_size is None:
         output = module(hidden_states)
     else:
-        output = apply_sequence_chunked(module, hidden_states, chunk_size)
+        output = apply_sequence_chunked(
+            module,
+            hidden_states,
+            chunk_size,
+            parameters=tuple(module.parameters()),
+        )
     grad_output = torch.linspace(-0.7, 0.9, output.numel()).reshape_as(output)
     output.backward(grad_output)
     parameter_grads = [
