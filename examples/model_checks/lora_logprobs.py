@@ -1,58 +1,15 @@
-"""Numerical checks and adapter-only perturbation for the GPU LoRA test."""
+"""Deterministic adapter-only perturbation for native GPU checks."""
 
 import hashlib
 
 import torch
 
-
-def check_initial_adapter(report, atol):
-    report["base_zero"] = compare_logprobs(report["base"], report["zero"])
-    report["zero_parity"] = compare_logprobs(report["trainer_zero"], report["zero"])
-    report["repeat_noise"] = compare_logprobs(report["zero"], report["repeat"])
-    report["trainer_repeat_noise"] = compare_logprobs(report["trainer_zero"], report["trainer_repeat"])
-    assert report["base_zero"]["mean_abs"] < atol
-    assert report["zero_parity"]["mean_abs"] < atol
-
-
-def check_withheld_publication(report):
-    report["withheld_publication"] = compare_logprobs(report["repeat"], report["stale"])
-    noise_budget = max(1e-6, 3 * report["repeat_noise"]["mean_abs"])
-    assert report["withheld_publication"]["mean_abs"] <= noise_budget
-
-
-def check_updated_adapter(report, atol, delta_atol):
-    report["updated_parity"] = compare_logprobs(report["trainer_updated"], report["updated"])
-    report["sampler_change"] = compare_logprobs(report["zero"], report["updated"])
-    report["trainer_change"] = compare_logprobs(report["trainer_zero"], report["trainer_updated"])
-    noise_budget = max(1e-6, 3 * report["repeat_noise"]["mean_abs"], 3 * report["trainer_repeat_noise"]["mean_abs"])
-    assert report["updated_parity"]["mean_abs"] < atol
-    assert report["sampler_change"]["mean_abs"] > noise_budget
-    assert (
-        report["trainer_change"]["mean_abs"] > delta_atol + noise_budget
-    ), "update too small to distinguish stale publication"
-    trainer_delta = torch.as_tensor(report["trainer_updated"], dtype=torch.float64) - torch.as_tensor(
-        report["trainer_zero"], dtype=torch.float64
-    )
-    sampler_delta = torch.as_tensor(report["updated"], dtype=torch.float64) - torch.as_tensor(
-        report["zero"], dtype=torch.float64
-    )
-    report["update_delta"] = compare_logprobs(trainer_delta, sampler_delta)
-    assert report["update_delta"]["mean_abs"] < delta_atol
-
-
-def compare_logprobs(reference, actual):
-    reference = torch.as_tensor(reference, dtype=torch.float64)
-    actual = torch.as_tensor(actual, dtype=torch.float64)
-    assert reference.ndim == actual.ndim == 1
-    assert reference.shape == actual.shape and reference.numel() > 0
-    assert torch.isfinite(reference).all() and torch.isfinite(actual).all()
-    error = (reference - actual).abs()
-    return {
-        "tokens": error.numel(),
-        "mean_abs": error.mean().item(),
-        "p99_abs": error.quantile(0.99).item(),
-        "max_abs": error.max().item(),
-    }
+from skyrl.tinker.logprob_checks import (
+    check_initial_adapter as check_initial_adapter,
+    check_updated_adapter as check_updated_adapter,
+    check_withheld_publication as check_withheld_publication,
+    compare_logprobs as compare_logprobs,
+)
 
 
 @torch.no_grad()

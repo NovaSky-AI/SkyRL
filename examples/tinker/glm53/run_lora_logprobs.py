@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import json
 import math
-from itertools import cycle, islice
 from pathlib import Path
 from time import perf_counter
 
@@ -23,6 +22,7 @@ from examples.model_checks.megatron_lora import (
 )
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.tinker.logprob_checks import build_probe_sequences as build_sequences
 from skyrl.utils.tok import get_tokenizer
 
 
@@ -73,13 +73,6 @@ async def check_unpublished_sampler(client, sequences, adapter, report):
 async def check_published_update(client, sequences, adapter, report, atol, delta_atol):
     report["updated"] = await score_sampler(client, sequences, adapter)
     check_updated_adapter(report, atol, delta_atol)
-
-
-def build_sequences(tokenizer):
-    return [
-        list(islice(cycle(tokenizer.encode(text, add_special_tokens=False)), length))
-        for text, length in [("A river flows beneath a bridge. ", 65), ("Calculate seven times eight. ", 129)]
-    ]
 
 
 def validate_config(overrides):
