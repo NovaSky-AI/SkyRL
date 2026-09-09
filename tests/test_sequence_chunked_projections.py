@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from skyrl.backends.skyrl_train.patches.megatron.gdn_sequence_chunking import (
+    _get_packed_sequence_ranges,
     apply_stateful_sequence_chunked,
     wrap_gdn_forward,
 )
@@ -67,6 +68,20 @@ class _TinyGDNWrapperTarget(nn.Module):
     ) -> tuple[torch.Tensor, None]:
         self.original_forward_calls += 1
         return hidden_states, None
+
+    def _resolve_cu_seqlens(
+        self, cu_seqlens_padded, cu_seqlens, total_seq_len, name
+    ) -> torch.Tensor:
+        del total_seq_len, name
+        return cu_seqlens_padded if cu_seqlens_padded is not None else cu_seqlens
+
+
+class _TinyPackedSequenceParams:
+    qkv_format = "thd"
+    cu_seqlens_q_padded = None
+    cu_seqlens_kv_padded = None
+    cu_seqlens_q = torch.tensor([0, 4, 9])
+    cu_seqlens_kv = torch.tensor([0, 4, 9])
 
 
 def _run_backward(
@@ -159,6 +174,14 @@ def test_gdn_wrapper_chunks_training_sequence_offset(
     assert bias is None
     assert chunk_calls == 3
     assert module.original_forward_calls == 0
+
+
+def test_packed_sequence_ranges_pair_adjacent_boundaries() -> None:
+    ranges = _get_packed_sequence_ranges(
+        _TinyGDNWrapperTarget(), torch.randn(9, 1, 8), _TinyPackedSequenceParams()
+    )
+
+    assert ranges == [(0, 4), (4, 9)]
 
 
 @pytest.mark.parametrize("chunk_size", [0, -1])

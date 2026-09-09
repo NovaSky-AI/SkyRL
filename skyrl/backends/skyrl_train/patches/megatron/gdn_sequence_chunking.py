@@ -101,7 +101,7 @@ def _get_packed_sequence_ranges(
     if not torch.equal(cu_seqlens_q, cu_seqlens_kv):
         raise ValueError("Sequence-chunked GDN requires equal q and kv lengths")
     boundaries = cu_seqlens_q.tolist()
-    return list(zip(boundaries, boundaries[1:], strict=True))
+    return list(zip(boundaries[:-1], boundaries[1:], strict=True))
 
 
 def wrap_gdn_forward(module: torch.nn.Module, chunk_size: int) -> None:
