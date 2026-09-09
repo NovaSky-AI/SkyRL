@@ -63,6 +63,16 @@ def test_failure_records_elapsed_time_without_claiming_completion():
     assert records[-1]["error"] == "worker failed"
 
 
+@pytest.mark.parametrize("metadata", [{"is_lora": False}, {"lora_rank": 16}])
+def test_reject_explicit_wrong_adapter_metadata(tmp_path, metadata):
+    info = types.GetInfoResponse.model_validate(
+        {"model_id": "model-test", "model_data": {"model_name": "test-model"}, **metadata}
+    )
+    trainer = SimpleNamespace(get_info=lambda: info)
+    with pytest.raises(ValueError, match="rank-32"):
+        module.prepare_full_context_inputs(trainer, SimpleNamespace(output_dir=tmp_path), io.StringIO())
+
+
 @pytest.mark.parametrize("values", [[-1.0], [-1.0, float("nan")]])
 def test_reject_short_or_nonfinite_training_results(values):
     result = SimpleNamespace(
@@ -100,7 +110,9 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
 
     events = []
     trainer = Mock(model_id="model-test")
-    trainer.get_info.return_value = SimpleNamespace(is_lora=True, lora_rank=32, model_dump=lambda **kw: {"rank": 32})
+    trainer.get_info.return_value = types.GetInfoResponse.model_validate(
+        {"model_id": "model-test", "model_data": {"model_name": "test-model"}}
+    )
     trainer.get_tokenizer.return_value.encode.side_effect = [[11, 12, 13], [21, 22, 23]]
 
     def future(name, value):

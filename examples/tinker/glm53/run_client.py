@@ -24,9 +24,7 @@ def run(args) -> None:
     # This example targets the local, unauthenticated SkyRL API only.
     service = tinker.ServiceClient(base_url=args.base_url, api_key="tml-dummy")
     with (args.output_dir / "phases.jsonl").open("w") as report:
-        with measure_phase(report, "create_model") as record:
-            trainer = service.create_lora_training_client(base_model=args.model_path, rank=32, seed=0)
-            record["model_id"] = trainer.model_id
+        trainer = create_training_client(service, args.model_path, report)
         try:
             datums = prepare_full_context_inputs(trainer, args, report)
             prompt = types.ModelInput.from_ints(datums[0].model_input.to_ints()[:128])
@@ -35,23 +33,37 @@ def run(args) -> None:
                 step_phase = "warmup" if step == 0 else f"step_{step}"
                 with measure_phase(report, step_phase):
                     batch = score_reference_batch(trainer, datums, args, report, step)
-                    with measure_phase(report, f"{step_phase}/forward_backward") as record:
-                        result = trainer.forward_backward(batch, "gspo").result()
-                        check_training_result(result, args.context, args.batch_size)
-                        record["scored_tokens"] = args.context * args.batch_size
-                        record["metrics"] = result.metrics
-                    with measure_phase(report, f"{step_phase}/optimizer") as record:
-                        result = trainer.optim_step(types.AdamParams(learning_rate=args.learning_rate)).result()
-                        norm = result.metrics["skyrl.ai/grad_norm"]
-                        if not math.isfinite(norm) or norm <= 0:
-                            raise ValueError(f"expected a finite nonzero gradient norm, got {norm}")
-                        record["metrics"] = result.metrics
+                    train_batch(trainer, batch, args, report, step_phase)
+                    update_optimizer(trainer, args.learning_rate, report, step_phase)
                     publish_and_sample(trainer, prompt, report, step_phase)
             with measure_phase(report, "checkpoint") as record:
                 record["path"] = trainer.save_state("full-context-final").result().path
         finally:
             with measure_phase(report, "unload"):
                 unload_model(args.base_url, trainer.model_id)
+
+
+def create_training_client(service, model_path: str, report):
+    with measure_phase(report, "create_model") as record:
+        trainer = service.create_lora_training_client(base_model=model_path, rank=32, seed=0)
+        record["model_id"] = trainer.model_id
+    return trainer
+
+
+def train_batch(trainer, batch, args, report, phase: str) -> None:
+    with measure_phase(report, f"{phase}/forward_backward") as record:
+        result = trainer.forward_backward(batch, "gspo").result()
+        check_training_result(result, args.context, args.batch_size)
+        record.update(scored_tokens=args.context * args.batch_size, metrics=result.metrics)
+
+
+def update_optimizer(trainer, learning_rate: float, report, phase: str) -> None:
+    with measure_phase(report, f"{phase}/optimizer") as record:
+        result = trainer.optim_step(types.AdamParams(learning_rate=learning_rate)).result()
+        norm = result.metrics["skyrl.ai/grad_norm"]
+        if not math.isfinite(norm) or norm <= 0:
+            raise ValueError(f"expected a finite nonzero gradient norm, got {norm}")
+        record["metrics"] = result.metrics
 
 
 def build_full_context_datum(seed_tokens: list[int], context_length: int) -> types.Datum:
@@ -154,7 +166,8 @@ def unload_model(base_url: str, model_id: str) -> None:
 def prepare_full_context_inputs(trainer, args, report) -> list[types.Datum]:
     with measure_phase(report, "prepare_inputs") as record:
         info = trainer.get_info()
-        if not info.is_lora or info.lora_rank != 32:
+        # The SDK fields are optional; SkyRL currently omits both from get_info.
+        if info.is_lora is False or info.lora_rank not in (None, 32):
             raise ValueError("expected a rank-32 LoRA training client")
         tokenizer = trainer.get_tokenizer()
         datums = [
