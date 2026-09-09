@@ -42,12 +42,22 @@ async def run(args, report):
     adapter = resolve_policy_model_name(cfg)
 
     async with open_runtime(cfg, tokenizer) as (policy, client):
-        await check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, args.mean_atol)
-        apply_trainer_update(policy, batch, report)
-        await check_unpublished_sampler(client, sequences, adapter, report)
-        check_update_stimulus(report, args.mean_atol)
-        await publish(policy, client, cfg)
-        await check_published_update(client, sequences, adapter, report, args.mean_atol)
+        try:
+            await check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, args.mean_atol)
+            apply_trainer_update(policy, batch, report)
+            await check_unpublished_sampler(client, sequences, adapter, report)
+            check_update_stimulus(report, args.mean_atol)
+            await publish(policy, client, cfg)
+            await check_published_update(client, sequences, adapter, report, args.mean_atol)
+        finally:
+            # Preserve failed assertions even if subsequent runtime cleanup hangs.
+            write_report(args.output_dir, report)
+
+
+def write_report(output_dir, report):
+    temporary = output_dir / "logprobs.json.tmp"
+    temporary.write_text(json.dumps(report, indent=2, allow_nan=False))
+    temporary.replace(output_dir / "logprobs.json")
 
 
 async def check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, atol):
@@ -142,8 +152,7 @@ def main():
         report["passed"] = True
     finally:
         report["seconds"] = perf_counter() - started
-        with (args.output_dir / "logprobs.json").open("x") as receipt:
-            json.dump(report, receipt, indent=2, allow_nan=False)
+        write_report(args.output_dir, report)
 
 
 if __name__ == "__main__":

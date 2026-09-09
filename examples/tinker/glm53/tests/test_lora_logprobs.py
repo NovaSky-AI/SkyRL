@@ -137,6 +137,9 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
         try:
             yield "policy", client
         finally:
+            snapshot = json.loads((tmp_path / "logprobs.json").read_text())
+            assert snapshot["stale_parity"] == report["stale_parity"]
+            assert not (tmp_path / "logprobs.json.tmp").exists()
             calls.append("cleanup")
 
     async def publish(*args):
