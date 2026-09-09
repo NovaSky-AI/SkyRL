@@ -8,6 +8,28 @@ from skyrl.backends.skyrl_train.patches.megatron.swiglu_triton import (
 )
 
 
+class _AddLoRAChunkInPlace(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        base_output: torch.Tensor,
+        adapter_output: torch.Tensor,
+        start: int,
+    ) -> torch.Tensor:
+        ctx.start = start
+        ctx.end = start + adapter_output.shape[0]
+        ctx.adapter_shape = adapter_output.shape
+        base_output.detach()[ctx.start : ctx.end].add_(
+            adapter_output.reshape(base_output[ctx.start : ctx.end].shape)
+        )
+        return base_output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple:
+        adapter_grad = grad_output[ctx.start : ctx.end].reshape(ctx.adapter_shape)
+        return grad_output, adapter_grad, None
+
+
 def _wrap_lora_linear_forward(module: torch.nn.Module, chunk_size: int) -> None:
     original_forward = module.forward
 
@@ -31,8 +53,9 @@ def _wrap_lora_linear_forward(module: torch.nn.Module, chunk_size: int) -> None:
                 *args,
                 **kwargs,
             )
-            output_slice = linear_output[start:end]
-            output_slice.add_(adapter_output.reshape(output_slice.shape))
+            linear_output = _AddLoRAChunkInPlace.apply(
+                linear_output, adapter_output, start
+            )
         if not self._base_returns_tuple:
             return linear_output
         return linear_output, bias
