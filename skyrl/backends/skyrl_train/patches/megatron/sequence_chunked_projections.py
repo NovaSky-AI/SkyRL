@@ -87,11 +87,17 @@ def install_sequence_chunked_projections(
             )
     if swiglu_modules:
         install_triton_swiglu()
+    lora_modules = [
+        linear
+        for mlp in swiglu_modules
+        for linear in (mlp.linear_fc1, mlp.linear_fc2)
+        if isinstance(linear, LoRALinear)
+    ]
 
     lora_count = 0
     gdn_count = 0
     for module in modules:
-        if isinstance(module, LoRALinear) and not getattr(
+        if module in lora_modules and not getattr(
             module, "_skyrl_lora_sequence_chunked", False
         ):
             _wrap_lora_linear_forward(module, chunk_size)
