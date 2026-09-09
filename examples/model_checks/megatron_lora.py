@@ -1,6 +1,7 @@
 """Native SkyRL calls used by the standalone LoRA score diagnostic."""
 
 from contextlib import asynccontextmanager
+import math
 
 import ray
 import torch
@@ -95,7 +96,10 @@ def score_trainer(policy, batch):
     lengths = batch["response_mask"].sum(dim=1).tolist()
     assert [len(row["logprobs"]) for row in output.loss_fn_outputs] == lengths
     # The loss path already removes padding from each sample's outputs.
-    return [score for row in output.loss_fn_outputs for score in row["logprobs"]]
+    scores = [score for row in output.loss_fn_outputs for score in row["logprobs"]]
+    if not all(map(math.isfinite, scores)):
+        raise ValueError("nonfinite trainer logprobs")
+    return scores
 
 
 async def score_sampler(client, sequences, model):
@@ -116,6 +120,8 @@ async def score_sampler(client, sequences, model):
         values = result["prompt_logprobs"]
         assert values is not None and len(values) == len(tokens)
         assert values[0] is None and all(value is not None for value in values[1:])
+        if not all(map(math.isfinite, values[1:])):
+            raise ValueError("nonfinite sampler logprobs")
         scores.extend(values[1:])
     return scores
 

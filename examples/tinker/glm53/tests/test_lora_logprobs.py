@@ -26,6 +26,35 @@ def test_trainer_scores_preserve_unequal_length_sample_positions(monkeypatch):
         megatron_lora.score_trainer(policy, batch)
 
 
+@pytest.mark.parametrize("bad_score", [float("nan"), float("inf"), -float("inf")])
+def test_trainer_nonfinite_scores_do_not_enter_json_receipt(monkeypatch, bad_score):
+    batch = {"response_mask": torch.tensor([[1]])}
+    output = SimpleNamespace(loss_fn_outputs=[{"logprobs": [bad_score]}])
+    policy = SimpleNamespace(actor_infos=[], async_run_ray_method=lambda *args, **kwargs: output)
+    monkeypatch.setattr(megatron_lora.ray, "get", lambda value: value)
+    monkeypatch.setattr(megatron_lora.WorkerOutput, "cat", lambda *args: output)
+    report = {"passed": False}
+    with pytest.raises(ValueError, match="nonfinite trainer logprobs"):
+        report["trainer_updated"] = megatron_lora.score_trainer(policy, batch)
+    assert json.loads(json.dumps(report, allow_nan=False)) == {"passed": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_score", [float("nan"), float("inf"), -float("inf")])
+async def test_sampler_nonfinite_scores_do_not_enter_json_receipt(bad_score):
+    async def reset_prefix_cache():
+        return None
+
+    async def sample(request):
+        return {"prompt_logprobs": [None, bad_score]}
+
+    client = SimpleNamespace(reset_prefix_cache=reset_prefix_cache, sample=sample)
+    report = {"passed": False}
+    with pytest.raises(ValueError, match="nonfinite sampler logprobs"):
+        report["updated"] = await megatron_lora.score_sampler(client, [[1, 2]], "adapter")
+    assert json.loads(json.dumps(report, allow_nan=False)) == {"passed": False}
+
+
 @pytest.mark.parametrize(
     "key,value",
     [
