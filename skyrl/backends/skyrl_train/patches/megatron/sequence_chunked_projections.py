@@ -100,14 +100,19 @@ def _wrap_mlp_forward(module: torch.nn.Module, chunk_size: int) -> None:
     module._skyrl_sequence_chunked = True
 
 
-def install_sequence_chunked_mlp(
+def install_sequence_chunked_projections(
     model_chunks: list[torch.nn.Module], chunk_size: int
-) -> int:
-    """Chunk dense SwiGLU blocks along Megatron's sequence axis."""
+) -> tuple[int, int]:
+    """Chunk dense SwiGLU and recurrent GDN blocks along the sequence axis."""
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
 
+    from megatron.core.ssm.gated_delta_net import GatedDeltaNet, GatedDeltaNet2
     from megatron.core.transformer.mlp import MLP
+
+    from skyrl.backends.skyrl_train.patches.megatron.gdn_sequence_chunking import (
+        wrap_gdn_forward,
+    )
 
     modules = [
         module for model_chunk in model_chunks for module in model_chunk.modules()
@@ -139,11 +144,21 @@ def install_sequence_chunked_mlp(
         install_triton_swiglu()
 
     mlp_count = 0
+    gdn_count = 0
     for module in modules:
         if module in swiglu_modules and not getattr(
             module, "_skyrl_sequence_chunked", False
         ):
             _wrap_mlp_forward(module, chunk_size)
             mlp_count += 1
+        if isinstance(module, (GatedDeltaNet, GatedDeltaNet2)) and not getattr(
+            module, "_skyrl_sequence_chunked", False
+        ):
+            if module.tp_size != 1 or module.cp_size != 1 or module.sp_size != 1:
+                raise ValueError(
+                    "Sequence-chunked GDN currently requires TP1, CP1, and sequence_parallel=False"
+                )
+            wrap_gdn_forward(module, chunk_size)
+            gdn_count += 1
 
-    return mlp_count
+    return mlp_count, gdn_count

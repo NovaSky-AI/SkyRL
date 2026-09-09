@@ -4,6 +4,9 @@ import pytest
 import torch
 from torch import nn
 
+from skyrl.backends.skyrl_train.patches.megatron.gdn_sequence_chunking import (
+    apply_stateful_sequence_chunked,
+)
 from skyrl.backends.skyrl_train.patches.megatron.sequence_chunked_projections import (
     apply_sequence_chunked,
 )
@@ -20,6 +23,29 @@ class _TinySwiGLU(nn.Module):
         return self.down(
             torch.nn.functional.silu(self.gate(hidden_states)) * self.up(hidden_states)
         )
+
+
+class _TinyRecurrentProjection(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_proj = nn.Linear(8, 12, bias=False)
+        self.out_proj = nn.Linear(4, 8, bias=False)
+        self.decay = nn.Parameter(torch.tensor(0.8))
+
+    def forward_chunk(
+        self, hidden_states: torch.Tensor, *states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        projected = self.in_proj(hidden_states)
+        value, gate, update = projected.chunk(3, dim=-1)
+        state = states[0] if states else torch.zeros_like(value[0])
+        outputs = []
+        for value_t, gate_t, update_t in zip(value, gate, update, strict=True):
+            state = self.decay * state + torch.tanh(update_t) * value_t
+            outputs.append(torch.sigmoid(gate_t) * state)
+        return self.out_proj(torch.stack(outputs)), state
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.forward_chunk(hidden_states)[0]
 
 
 def _run_backward(
@@ -59,11 +85,34 @@ def test_sequence_chunking_preserves_swiglu_output_and_gradients() -> None:
         torch.testing.assert_close(chunked_grad, reference_grad)
 
 
+def test_stateful_chunking_preserves_gdn_projection_output_and_gradients() -> None:
+    torch.manual_seed(17)
+    reference = _TinyRecurrentProjection()
+    chunked = copy.deepcopy(reference)
+    reference_input = torch.randn(11, 2, 8, requires_grad=True)
+    chunked_input = reference_input.detach().clone().requires_grad_(True)
+    grad_output = torch.randn(11, 2, 8)
+
+    reference_output = reference(reference_input)
+    chunked_output = apply_stateful_sequence_chunked(
+        chunked.forward_chunk, chunked_input, 3
+    )
+    reference_output.backward(grad_output)
+    chunked_output.backward(grad_output)
+
+    torch.testing.assert_close(chunked_output, reference_output)
+    torch.testing.assert_close(chunked_input.grad, reference_input.grad)
+    for chunked_parameter, reference_parameter in zip(
+        chunked.parameters(), reference.parameters(), strict=True
+    ):
+        torch.testing.assert_close(chunked_parameter.grad, reference_parameter.grad)
+
+
 @pytest.mark.parametrize("chunk_size", [0, -1])
 def test_sequence_chunking_rejects_nonpositive_chunk_size(chunk_size: int) -> None:
     with pytest.raises(ValueError, match="chunk_size must be positive"):
         from skyrl.backends.skyrl_train.patches.megatron.sequence_chunked_projections import (
-            install_sequence_chunked_mlp,
+            install_sequence_chunked_projections,
         )
 
-        install_sequence_chunked_mlp([], chunk_size)
+        install_sequence_chunked_projections([], chunk_size)

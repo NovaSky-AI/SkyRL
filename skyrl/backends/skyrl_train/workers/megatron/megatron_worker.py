@@ -708,19 +708,20 @@ class MegatronWorker:
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
-        chunk_size = self.megatron_config.sequence_chunked_mlp_size
+        chunk_size = self.megatron_config.sequence_chunked_projection_size
         if chunk_size is not None:
             if self.megatron_config.tensor_model_parallel_size != 1:
-                raise ValueError("sequence_chunked_mlp_size currently requires tensor_model_parallel_size=1")
+                raise ValueError("sequence_chunked_projection_size currently requires tensor_model_parallel_size=1")
             from skyrl.backends.skyrl_train.patches.megatron.sequence_chunked_projections import (
-                install_sequence_chunked_mlp,
+                install_sequence_chunked_projections,
             )
 
-            mlp_count = install_sequence_chunked_mlp(model, chunk_size)
+            mlp_count, gdn_count = install_sequence_chunked_projections(model, chunk_size)
             logger.info(
-                "Sequence-chunked MLPs enabled: chunk_size={}, MLPs={}",
+                "Sequence-chunked projections enabled: chunk_size={}, MLPs={}, GDNs={}",
                 chunk_size,
                 mlp_count,
+                gdn_count,
             )
         return model
 
