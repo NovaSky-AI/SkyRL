@@ -8,7 +8,7 @@ import sys
 
 
 def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: Path) -> dict:
-    root = Path(__file__).parent
+    root = Path(__file__).parent / "configs"
     config = {} if profile == "qwen3-0.6b" else json.loads((root / "common.json").read_text())
     overrides = json.loads((root / f"{profile}.json").read_text())
     for key, value in overrides.items():

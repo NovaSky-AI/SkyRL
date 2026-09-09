@@ -41,6 +41,8 @@ Each B300 node has eight GPUs; verify physical trainer/inference separation.
 | `glm53-256k-2n` | 1 node, TP4/CP2/EP8 | 1 node, TP8 | 262,144 |
 | `glm53-256k-3n` | 2 nodes, TP8/PP2/EP8 (38/40 layers) | 1 node, TP8 | 262,144 |
 
+The five profiles and shared GLM defaults live in [configs/](configs/).
+
 All profiles preserve rank-32 attention/MLP LoRA, default FP32 publication and disabled MTP.
 Inference uses BF16 weights/KV, with a 0.80 GPU-memory fraction. The default sequence ceiling
 is 1024—not proven concurrent capacity. In particular, 256K KV capacity must still be measured.
@@ -75,7 +77,7 @@ this is a new current-stack candidate, not a reproduction of an older FP8 GLM 5.
 
 ### Small-model control
 
-`qwen3-0.6b.json` uses the same model/all-linear LoRA combination as
+[`configs/qwen3-0.6b.json`](configs/qwen3-0.6b.json) uses the same model/all-linear LoRA combination as
 [the existing Megatron LoRA example](../../train/megatron/run_megatron_lora_qwen3-0.6b.sh),
 with separate trainer/inference GPUs. It does not inherit GLM's DSA or expert settings.
 Download `Qwen/Qwen3-0.6B` to `/shared/models/qwen3-0.6b` and record the checkpoint revision.
