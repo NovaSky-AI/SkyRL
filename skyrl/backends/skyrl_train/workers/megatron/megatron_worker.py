@@ -716,11 +716,11 @@ class MegatronWorker:
                 install_sequence_chunked_projections,
             )
 
-            mlp_count, gdn_count = install_sequence_chunked_projections(model, chunk_size)
+            lora_count, gdn_count = install_sequence_chunked_projections(model, chunk_size)
             logger.info(
-                "Sequence-chunked projections enabled: chunk_size={}, MLPs={}, GDNs={}",
+                "Sequence-chunked projections enabled: chunk_size={}, LoRA linears={}, GDNs={}",
                 chunk_size,
-                mlp_count,
+                lora_count,
                 gdn_count,
             )
         return model

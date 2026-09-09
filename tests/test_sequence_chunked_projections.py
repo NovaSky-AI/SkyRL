@@ -11,22 +11,8 @@ from skyrl.backends.skyrl_train.patches.megatron.gdn_sequence_chunking import (
     wrap_gdn_forward,
 )
 from skyrl.backends.skyrl_train.patches.megatron.sequence_chunked_projections import (
-    _wrap_mlp_forward,
-    apply_sequence_chunked,
+    _wrap_lora_linear_forward,
 )
-
-
-class _TinySwiGLU(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.gate = nn.Linear(8, 12, bias=False)
-        self.up = nn.Linear(8, 12, bias=False)
-        self.down = nn.Linear(12, 8, bias=False)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.down(
-            torch.nn.functional.silu(self.gate(hidden_states)) * self.up(hidden_states)
-        )
 
 
 class _TinyRecurrentProjection(nn.Module):
@@ -86,61 +72,40 @@ class _TinyPackedSequenceParams:
     cu_seqlens_kv = torch.tensor([0, 4, 9])
 
 
-class _TinyScaledMLP(nn.Module):
+class _TinyLoRALinear(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.projection = nn.Linear(8, 8, bias=False)
-        self.forward_sizes = []
+        self.base = nn.Linear(8, 8, bias=False)
+        self.adapter = nn.Sequential(
+            nn.Linear(8, 3, bias=False),
+            nn.Linear(3, 8, bias=False),
+        )
+        self._adapter_enabled = True
+        self._base_returns_tuple = True
+        self.adapter_forward_sizes = []
+
+    def base_linear_forward(self, hidden_states, *args, **kwargs):
+        del args, kwargs
+        return self.base(hidden_states), None, hidden_states
+
+    def adapter_forward(self, adapter, hidden_states, *args, **kwargs):
+        del args, kwargs
+        self.adapter_forward_sizes.append(hidden_states.shape[0])
+        return adapter(hidden_states) * 0.5
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        per_token_scale: torch.Tensor | None = None,
+        *args,
         **kwargs,
     ) -> tuple[torch.Tensor, None]:
-        del kwargs
-        self.forward_sizes.append(hidden_states.shape[0])
-        output = self.projection(hidden_states)
-        if per_token_scale is not None:
-            output = output * per_token_scale.unsqueeze(-1)
-        return output, None
-
-
-def _run_backward(
-    module: nn.Module, hidden_states: torch.Tensor, chunk_size: int | None
-):
-    hidden_states = hidden_states.detach().clone().requires_grad_(True)
-    if chunk_size is None:
-        output = module(hidden_states)
-    else:
-        output = apply_sequence_chunked(module, hidden_states, chunk_size)
-    grad_output = torch.linspace(-0.7, 0.9, output.numel()).reshape_as(output)
-    output.backward(grad_output)
-    parameter_grads = [
-        parameter.grad.detach().clone() for parameter in module.parameters()
-    ]
-    return output.detach(), hidden_states.grad.detach(), parameter_grads
-
-
-def test_sequence_chunking_preserves_swiglu_output_and_gradients() -> None:
-    torch.manual_seed(7)
-    reference = _TinySwiGLU()
-    chunked = copy.deepcopy(reference)
-    hidden_states = torch.randn(11, 2, 8)
-
-    reference_output, reference_input_grad, reference_parameter_grads = _run_backward(
-        reference, hidden_states, None
-    )
-    chunked_output, chunked_input_grad, chunked_parameter_grads = _run_backward(
-        chunked, hidden_states, 3
-    )
-
-    torch.testing.assert_close(chunked_output, reference_output)
-    torch.testing.assert_close(chunked_input_grad, reference_input_grad)
-    for chunked_grad, reference_grad in zip(
-        chunked_parameter_grads, reference_parameter_grads, strict=True
-    ):
-        torch.testing.assert_close(chunked_grad, reference_grad)
+        base_output, bias, layernorm_output = self.base_linear_forward(
+            hidden_states, *args, **kwargs
+        )
+        adapter_output = self.adapter_forward(
+            self.adapter, layernorm_output, *args, **kwargs
+        )
+        return base_output + adapter_output, bias
 
 
 def test_stateful_chunking_preserves_gdn_projection_output_and_gradients() -> None:
@@ -206,53 +171,48 @@ def test_packed_sequence_ranges_pair_adjacent_boundaries() -> None:
     assert ranges == [(0, 4), (4, 9)]
 
 
-def test_mlp_wrapper_chunks_per_token_scale_and_preserves_gradients() -> None:
+def test_lora_wrapper_chunks_adapter_and_preserves_gradients() -> None:
     torch.manual_seed(23)
-    reference = _TinyScaledMLP()
+    reference = _TinyLoRALinear()
     chunked = copy.deepcopy(reference)
-    _wrap_mlp_forward(chunked, 4)
+    _wrap_lora_linear_forward(chunked, 4)
     reference_input = torch.randn(9, 2, 8, requires_grad=True)
     chunked_input = reference_input.detach().clone().requires_grad_(True)
-    reference_scale = torch.randn(9, 2, requires_grad=True)
-    chunked_scale = reference_scale.detach().clone().requires_grad_(True)
     grad_output = torch.randn(9, 2, 8)
 
-    reference_output, _ = reference(
-        reference_input, per_token_scale=reference_scale, ignored_kwarg=True
-    )
-    chunked_output, _ = chunked(
-        chunked_input, per_token_scale=chunked_scale, ignored_kwarg=True
-    )
+    reference_output, _ = reference(reference_input, ignored_kwarg=True)
+    chunked_output, _ = chunked(chunked_input, ignored_kwarg=True)
     reference_output.backward(grad_output)
     chunked_output.backward(grad_output)
 
     torch.testing.assert_close(chunked_output, reference_output)
     torch.testing.assert_close(chunked_input.grad, reference_input.grad)
-    torch.testing.assert_close(chunked_scale.grad, reference_scale.grad)
-    torch.testing.assert_close(
-        chunked.projection.weight.grad, reference.projection.weight.grad
-    )
-    assert max(chunked.forward_sizes) == 4
+    for chunked_parameter, reference_parameter in zip(
+        chunked.parameters(), reference.parameters(), strict=True
+    ):
+        torch.testing.assert_close(chunked_parameter.grad, reference_parameter.grad)
+    assert max(chunked.adapter_forward_sizes) == 4
 
 
 def test_sequence_chunking_composes_with_outer_and_stateful_checkpoints() -> None:
     torch.manual_seed(29)
     recurrent = _TinyRecurrentProjection()
-    mlp = _TinySwiGLU()
+    lora = _TinyLoRALinear()
+    _wrap_lora_linear_forward(lora, 4)
     hidden_states = torch.randn(9, 2, 8, requires_grad=True)
 
     def run_block(chunk_input: torch.Tensor) -> torch.Tensor:
         recurrent_output = apply_stateful_sequence_chunked(
             recurrent.forward_chunk, chunk_input, 4
         )
-        return apply_sequence_chunked(mlp, recurrent_output, 4)
+        return lora(recurrent_output)[0]
 
     output = checkpoint(run_block, hidden_states, use_reentrant=True)
     output.square().mean().backward()
 
     assert hidden_states.grad is not None
     assert all(parameter.grad is not None for parameter in recurrent.parameters())
-    assert all(parameter.grad is not None for parameter in mlp.parameters())
+    assert all(parameter.grad is not None for parameter in lora.parameters())
 
 
 @pytest.mark.parametrize("chunk_size", [0, -1])
