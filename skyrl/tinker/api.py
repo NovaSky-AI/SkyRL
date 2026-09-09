@@ -1521,13 +1521,15 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
             content = external_future_store.proto_result(request_id) if found_in_memory else None
             if content is None:
                 async with req.app.state.proto_serialization_lock:
-                    content = await asyncio.to_thread(
-                        _serialize_proto_result,
-                        types.RequestType(request_type),
-                        result_data,
-                    )
-                if found_in_memory:
-                    external_future_store.cache_proto(request_id, content)
+                    content = external_future_store.proto_result(request_id) if found_in_memory else None
+                    if content is None:
+                        content = await asyncio.to_thread(
+                            _serialize_proto_result,
+                            types.RequestType(request_type),
+                            result_data,
+                        )
+                        if found_in_memory:
+                            external_future_store.cache_proto(request_id, content)
             response: Response = Response(content=content, media_type=PROTO_CONTENT_TYPE)
         else:
             if result_data is None and found_in_memory:

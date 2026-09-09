@@ -176,3 +176,25 @@ async def test_retrieve_future_encodes_json_stored_result_once_for_proto_clients
 
     assert first.body == second.body == serialize_sample_output(SEQUENCES, None, None)
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_future_overlapping_proto_waiters_encode_once(monkeypatch):
+    """Concurrent polls for one JSON-stored result must not each re-encode it."""
+    store = ExternalFutureStore()
+    request_id = store.create("model_a", SimpleNamespace())
+    output = types.SampleOutput(
+        sequences=[types.GeneratedSequence(stop_reason=s, tokens=t, logprobs=lp) for s, t, lp in SEQUENCES]
+    )
+    await store.complete(request_id, output, RequestStatus.COMPLETED)
+    calls: list = []
+    real = api._serialize_proto_result
+    monkeypatch.setattr(api, "_serialize_proto_result", lambda *a: calls.append(a) or real(*a))
+    request = _request(store, PROTO_CONTENT_TYPE, calls)
+
+    responses = await asyncio.gather(
+        *(api.retrieve_future(api.RetrieveFutureRequest(request_id=str(request_id)), request) for _ in range(8))
+    )
+
+    assert {r.body for r in responses} == {serialize_sample_output(SEQUENCES, None, None)}
+    assert len(calls) == 1
