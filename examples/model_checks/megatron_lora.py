@@ -52,18 +52,18 @@ async def open_runtime(cfg, tokenizer):
         ray.shutdown()
 
 
-def perturb_trainer(policy):
-    return ray.get(policy.async_run_ray_method("pass_through", "perturb_test_adapter"))
+def perturb_trainer(policy, multiplier=10):
+    return ray.get(policy.async_run_ray_method("pass_through", "perturb_test_adapter", multiplier))
 
 
 class LoRALogprobWorker(MegatronPolicyWorkerBase):
-    def perturb_test_adapter(self):
+    def perturb_test_adapter(self, multiplier=10):
         parameters = (
             (f"chunk{index}.{name}", parameter)
             for index, chunk in enumerate(self.actor_module)
             for name, parameter in chunk.named_parameters()
         )
-        return perturb_adapters(parameters)
+        return perturb_adapters(parameters, multiplier=multiplier)
 
 
 def build_batch(sequences, pad_token_id):

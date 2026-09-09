@@ -100,6 +100,7 @@ def test_cli_records_success_only_after_runtime_finishes(tmp_path, monkeypatch, 
     )
 
     async def run_fixture(args, report):
+        assert args.lora_b_multiplier == 10
         report["updated_parity"] = {"mean_abs": 0.01}
         if cleanup_fails:
             raise RuntimeError("cleanup failed")
@@ -113,6 +114,30 @@ def test_cli_records_success_only_after_runtime_finishes(tmp_path, monkeypatch, 
     report = json.loads((output_dir / "logprobs.json").read_text())
     assert report["passed"] is (not cleanup_fails)
     assert report["updated_parity"]["mean_abs"] == 0.01
+
+
+@pytest.mark.parametrize("multiplier", ["0", "-1", "nan", "inf"])
+def test_cli_rejects_invalid_stimulus_before_creating_output(tmp_path, monkeypatch, multiplier):
+    output_dir = tmp_path / "result"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_lora_logprobs",
+            "--backend-config",
+            "missing.json",
+            "--output-dir",
+            str(output_dir),
+            "--mean-atol",
+            "0.05",
+            "--lora-b-multiplier",
+            multiplier,
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        run_lora_logprobs.main()
+    assert error.value.code == 2
+    assert not output_dir.exists()
 
 
 @pytest.mark.asyncio
@@ -149,6 +174,7 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
 
     def perturb(*args):
         nonlocal changed
+        assert args == ("policy", 32)
         changed = True
         calls.append("update_trainer")
         return {"seed": 0}
@@ -171,7 +197,7 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
         ("score_sampler", score_sampler),
     ]:
         monkeypatch.setattr(run_lora_logprobs, name, function)
-    args = SimpleNamespace(backend_config="config.json", output_dir=tmp_path, mean_atol=0.05)
+    args = SimpleNamespace(backend_config="config.json", output_dir=tmp_path, mean_atol=0.05, lora_b_multiplier=32)
     report = {}
     if update_size < 0.05:
         with pytest.raises(AssertionError, match="insufficient test stimulus"):

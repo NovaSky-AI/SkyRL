@@ -1,13 +1,16 @@
 """Deterministic adapter-only perturbation for native GPU checks."""
 
 import hashlib
+import math
 
 import torch
 
 
 @torch.no_grad()
-def perturb_adapters(named_parameters, seed=0):
+def perturb_adapters(named_parameters, seed=0, multiplier=10):
     """Preserve Bridge's A tensors and give zero-init B a fixed, name-seeded stimulus."""
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        raise ValueError("LoRA B multiplier must be positive and finite")
     changed = 0
     tensors = 0
     for name, parameter in named_parameters:
@@ -24,7 +27,7 @@ def perturb_adapters(named_parameters, seed=0):
             torch.randn(parameter.shape, generator=generator, device=parameter.device, dtype=parameter.dtype),
             alpha=1e-3,
         )
-        parameter.mul_(10)
+        parameter.mul_(multiplier)
         changed += parameter.numel()
         tensors += 1
     assert changed > 0
@@ -33,5 +36,5 @@ def perturb_adapters(named_parameters, seed=0):
         "changed_b_elements": changed,
         "seed": seed,
         "noise_std": 1e-3,
-        "multiplier": 10,
+        "multiplier": multiplier,
     }

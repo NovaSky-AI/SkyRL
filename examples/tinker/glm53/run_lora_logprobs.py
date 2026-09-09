@@ -37,6 +37,7 @@ async def run(args, report):
         tokens=sequences,
         scored_positions=[len(tokens) - 1 for tokens in sequences],
         mean_atol=args.mean_atol,
+        lora_b_multiplier=args.lora_b_multiplier,
         model=cfg.trainer.policy.model.path,
     )
     adapter = resolve_policy_model_name(cfg)
@@ -44,7 +45,7 @@ async def run(args, report):
     async with open_runtime(cfg, tokenizer) as (policy, client):
         try:
             await check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, args.mean_atol)
-            apply_trainer_update(policy, batch, report)
+            apply_trainer_update(policy, batch, report, args.lora_b_multiplier)
             await check_unpublished_sampler(client, sequences, adapter, report)
             check_update_stimulus(report, args.mean_atol)
             await publish(policy, client, cfg)
@@ -71,8 +72,8 @@ async def check_zero_initialized_policy(policy, client, cfg, batch, sequences, r
     check_initial_adapter(report, atol)
 
 
-def apply_trainer_update(policy, batch, report):
-    report["perturbation"] = perturb_trainer(policy)
+def apply_trainer_update(policy, batch, report, multiplier=10):
+    report["perturbation"] = perturb_trainer(policy, multiplier)
     report["trainer_updated"] = score_trainer(policy, batch)
 
 
@@ -140,9 +141,14 @@ def main():
     parser.add_argument("--backend-config", type=Path, required=True, help="Rendered run_server.py backend config")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--mean-atol", type=float, required=True, help="Reviewed mean logprob error budget")
+    parser.add_argument(
+        "--lora-b-multiplier", type=float, default=10, help="Predeclared test stimulus, not an adaptive acceptance knob"
+    )
     args = parser.parse_args()
     if not math.isfinite(args.mean_atol) or args.mean_atol <= 0:
         parser.error("logprob budget must be positive and finite")
+    if not math.isfinite(args.lora_b_multiplier) or args.lora_b_multiplier <= 0:
+        parser.error("LoRA B multiplier must be positive and finite")
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     report = {"passed": False}

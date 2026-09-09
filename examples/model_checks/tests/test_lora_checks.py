@@ -151,6 +151,29 @@ def test_perturbation_rejects_an_already_updated_adapter():
         perturb_adapters([("adapter.linear_out.weight", torch.nn.Parameter(torch.ones(4)))])
 
 
+@pytest.mark.parametrize("multiplier", [10, 32])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_explicit_stimulus_preserves_a_and_scales_seeded_b(multiplier, dtype):
+    a = torch.nn.Parameter(torch.ones(4, dtype=dtype))
+    b = torch.nn.Parameter(torch.zeros(4, dtype=dtype))
+    direction = torch.nn.Parameter(torch.zeros_like(b))
+    perturb_adapters([("adapter.linear_out.weight", direction)], multiplier=1)
+    report = perturb_adapters(
+        [("adapter.linear_in.weight", a), ("adapter.linear_out.weight", b)], multiplier=multiplier
+    )
+    assert torch.equal(a, torch.ones_like(a))
+    assert torch.equal(b, direction * multiplier)
+    assert report["multiplier"] == multiplier
+
+
+@pytest.mark.parametrize("multiplier", [0, -1, float("nan"), float("inf")])
+def test_invalid_stimulus_fails_before_adapter_mutation(multiplier):
+    b = torch.nn.Parameter(torch.zeros(4))
+    with pytest.raises(ValueError, match="positive and finite"):
+        perturb_adapters([("adapter.linear_out.weight", b)], multiplier=multiplier)
+    assert torch.equal(b, torch.zeros_like(b))
+
+
 def test_perturbation_rejects_full_weight_training():
     with pytest.raises(AssertionError, match="trainable base"):
         perturb_adapters([("weight", torch.nn.Parameter(torch.ones(4)))])
