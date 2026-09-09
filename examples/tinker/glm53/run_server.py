@@ -42,7 +42,9 @@ def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: P
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("profile", choices=["qwen3-0.6b", "glm52-32k-2n", "32k-2n", "256k-2n", "256k-3n"])
+    parser.add_argument(
+        "profile", choices=["qwen3-0.6b", "glm52-32k-2n", "glm53-32k-2n", "glm53-256k-2n", "glm53-256k-3n"]
+    )
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--database-path", type=Path, required=True)

@@ -26,9 +26,9 @@ class TestProfiles(unittest.TestCase):
     def test_profiles_preserve_nested_common_settings(self):
         for name, nodes, tp, cp, pp, context in (
             ("glm52-32k-2n", 1, 8, 1, 1, 32768),
-            ("32k-2n", 1, 8, 1, 1, 32768),
-            ("256k-2n", 1, 4, 2, 1, 262144),
-            ("256k-3n", 2, 8, 1, 2, 262144),
+            ("glm53-32k-2n", 1, 8, 1, 1, 32768),
+            ("glm53-256k-2n", 1, 4, 2, 1, 262144),
+            ("glm53-256k-3n", 2, 8, 1, 2, 262144),
         ):
             with self.subTest(profile=name):
                 cfg = module.build_config(name, Path("/models/glm"), Path("/state/service"), Path("/scratch/traces"))
@@ -59,7 +59,7 @@ class TestProfiles(unittest.TestCase):
 
     def test_glm52_and_glm53_32k_profiles_have_identical_runtime_knobs(self):
         glm52 = module.build_config("glm52-32k-2n", Path("/models/glm52"), Path("/state"), Path("/traces"))
-        glm53 = module.build_config("32k-2n", Path("/models/glm53"), Path("/state"), Path("/traces"))
+        glm53 = module.build_config("glm53-32k-2n", Path("/models/glm53"), Path("/state"), Path("/traces"))
         for cfg in (glm52, glm53):
             cfg.pop("trainer.policy.model.path")
             cfg["generator.inference_engine.engine_init_kwargs"].pop("model")
@@ -70,7 +70,7 @@ class TestProfiles(unittest.TestCase):
             [
                 sys.executable,
                 str(ROOT / "run_server.py"),
-                "256k-3n",
+                "glm53-256k-3n",
                 "--model-path",
                 "/nonexistent/model",
                 "--state-dir",
@@ -88,19 +88,19 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["trainer.placement.policy_num_nodes"], 2)
 
     def test_profile_overrides_do_not_leak_between_calls(self):
-        first = module.build_config("256k-3n", Path("/m"), Path("/s"), Path("/scratch/traces"))
+        first = module.build_config("glm53-256k-3n", Path("/m"), Path("/s"), Path("/scratch/traces"))
         first["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"] = "fp8"
-        second = module.build_config("32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
+        second = module.build_config("glm53-32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
         self.assertEqual(second["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"], "auto")
 
     def test_profiling_has_no_warmup_gap_or_one_update_cutoff(self):
-        profiled = module.build_config("32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
+        profiled = module.build_config("glm53-32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
         profiler = profiled["trainer.policy.torch_profiler_config"]
         self.assertTrue(profiler["enable"])
         self.assertEqual((profiler["skip_first"], profiler["wait"], profiler["warmup"]), (0, 0, 0))
         self.assertEqual((profiler["active"], profiler["repeat"]), (1, 0))
         with self.assertRaisesRegex(ValueError, "absolute path"):
-            module.build_config("32k-2n", Path("/m"), Path("/s"), Path("relative/traces"))
+            module.build_config("glm53-32k-2n", Path("/m"), Path("/s"), Path("relative/traces"))
 
 
 if __name__ == "__main__":

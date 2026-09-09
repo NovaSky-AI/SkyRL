@@ -37,9 +37,9 @@ Each B300 node has eight GPUs; verify physical trainer/inference separation.
 | --- | --- | --- | --- |
 | `qwen3-0.6b` | 1 GPU, TP1 | 1 separate GPU, TP1 | 32,768 |
 | `glm52-32k-2n` | 1 node, TP8/CP1/EP8 | 1 node, TP8 | 32,768 |
-| `32k-2n` | 1 node, TP8/CP1/EP8 | 1 node, TP8 | 32,768 |
-| `256k-2n` | 1 node, TP4/CP2/EP8 | 1 node, TP8 | 262,144 |
-| `256k-3n` | 2 nodes, TP8/PP2/EP8 (38/40 layers) | 1 node, TP8 | 262,144 |
+| `glm53-32k-2n` | 1 node, TP8/CP1/EP8 | 1 node, TP8 | 32,768 |
+| `glm53-256k-2n` | 1 node, TP4/CP2/EP8 | 1 node, TP8 | 262,144 |
+| `glm53-256k-3n` | 2 nodes, TP8/PP2/EP8 (38/40 layers) | 1 node, TP8 | 262,144 |
 
 All profiles preserve rank-32 attention/MLP LoRA, default FP32 publication and disabled MTP.
 Inference uses BF16 weights/KV, with a 0.80 GPU-memory fraction. The default sequence ceiling
@@ -51,10 +51,13 @@ hf download zai-org/GLM-5.3-BF16 --revision 304b8051cfb2b260b61ce0cbe330e02a98e7
   --local-dir /shared/models/glm53-bf16
 
 export RAY_ADDRESS=auto
-uv run --isolated --extra tinker --extra megatron examples/tinker/glm53/run_server.py 32k-2n \
+uv run --isolated --extra tinker --extra megatron python examples/tinker/glm53/run_server.py glm53-32k-2n \
   --model-path /shared/models/glm53-bf16 --state-dir /shared/glm53-control \
   --database-path /local/glm53/tinker.db --profile-dir /local/glm53/traces/run-01
 ```
+
+Keep the explicit `python`: the API recovers its engine's uv flags from the parent
+command and does not recognize a direct `uv run ... run_server.py` invocation.
 
 Start Ray with `ray start --head --port=6379 --num-gpus=8` on the head and
 `ray start --address=HEAD_IP:6379 --num-gpus=8` on workers, if not already running.
@@ -67,7 +70,7 @@ this newer dependency matrix (Torch 2.13 rather than historical 2.11).
 For GLM 5.2, use profile `glm52-32k-2n` and the native-BF16 checkpoint
 [`zai-org/GLM-5.2`](https://huggingface.co/zai-org/GLM-5.2/tree/cf457fa734ab149ffef225f80893eb38c6ff5cdc)
 at revision `cf457fa734ab149ffef225f80893eb38c6ff5cdc`. Download it to a separate model
-directory and pass that path to both server and client. Its runtime knobs match `32k-2n`;
+directory and pass that path to both server and client. Its runtime knobs match `glm53-32k-2n`;
 this is a new current-stack candidate, not a reproduction of an older FP8 GLM 5.2 run.
 
 ### Small-model control
