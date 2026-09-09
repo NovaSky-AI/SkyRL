@@ -2,12 +2,30 @@
 
 import argparse
 import math
+import time
 from pathlib import Path
 
 import tinker
 from tinker import types
 
 from skyrl.tinker import sdk_checks as checks
+
+
+def wait_for_inference_profile_url(path: Path) -> str:
+    """Wait at most 30 seconds for the launcher's atomic endpoint-file handoff."""
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            url = path.read_text().strip()
+        except FileNotFoundError as error:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("inference profiling endpoint file was not ready within 30 seconds") from error
+            time.sleep(min(0.25, remaining))
+            continue
+        if not url:
+            raise ValueError("inference profiling endpoint file is empty")
+        return url
 
 
 def run(args) -> None:
@@ -22,9 +40,8 @@ def run(args) -> None:
             checks.publish_and_sample(trainer, prompt, report, "initial")
             inference_profile_url = args.inference_profile_url
             if args.inference_profile_url_file is not None:
-                inference_profile_url = args.inference_profile_url_file.read_text().strip()
-                if not inference_profile_url:
-                    raise ValueError("inference profiling endpoint file is empty")
+                with checks.measure_phase(report, "inference_profiler_endpoint"):
+                    inference_profile_url = wait_for_inference_profile_url(args.inference_profile_url_file)
             for step in range(args.steps):
                 step_phase = "warmup" if step == 0 else f"step_{step}"
                 with checks.measure_phase(report, step_phase):

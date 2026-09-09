@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from examples.tinker.glm53 import run_client
 
 from skyrl.tinker import sdk_checks as checks
 
@@ -78,3 +79,46 @@ def test_disabled_inference_capture_does_not_contact_an_endpoint(monkeypatch):
     with checks.profile_inference(None, report, "sample"):
         pass
     assert report.getvalue() == ""
+
+
+def test_endpoint_handoff_waits_for_the_atomic_writer(monkeypatch):
+    clock = [0.0]
+
+    def read_text():
+        if clock[0] < 0.5:
+            raise FileNotFoundError("not published yet")
+        return "http://example.com:9000\n"
+
+    monkeypatch.setattr(run_client.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(run_client.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    assert run_client.wait_for_inference_profile_url(SimpleNamespace(read_text=read_text)) == "http://example.com:9000"
+    assert clock[0] == 0.5
+
+
+def test_missing_endpoint_handoff_stops_after_thirty_seconds(monkeypatch):
+    clock = [0.0]
+
+    def read_text():
+        raise FileNotFoundError("writer failed")
+
+    monkeypatch.setattr(run_client.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(run_client.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(TimeoutError, match="within 30 seconds"):
+        run_client.wait_for_inference_profile_url(SimpleNamespace(read_text=read_text))
+    assert clock[0] == 30.0
+
+
+@pytest.mark.parametrize("error", [PermissionError("denied"), IsADirectoryError("wrong path")])
+def test_endpoint_handoff_does_not_retry_other_io_failures(monkeypatch, error):
+    def read_text():
+        raise error
+
+    monkeypatch.setattr(run_client.time, "sleep", lambda seconds: pytest.fail("unexpected retry"))
+    with pytest.raises(type(error)):
+        run_client.wait_for_inference_profile_url(SimpleNamespace(read_text=read_text))
+
+
+def test_empty_endpoint_handoff_fails_without_waiting(monkeypatch):
+    monkeypatch.setattr(run_client.time, "sleep", lambda seconds: pytest.fail("unexpected retry"))
+    with pytest.raises(ValueError, match="file is empty"):
+        run_client.wait_for_inference_profile_url(SimpleNamespace(read_text=lambda: " \n"))
