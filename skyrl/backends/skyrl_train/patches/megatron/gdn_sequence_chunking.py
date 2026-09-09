@@ -15,8 +15,10 @@ def apply_stateful_sequence_chunked(
     states: tuple[torch.Tensor, ...] = ()
     for start in range(0, hidden_states.shape[0], chunk_size):
         chunk = hidden_states[start : start + chunk_size]
-        if torch.is_grad_enabled():
-            result = checkpoint(fn, chunk, *states, use_reentrant=False)
+        if torch.is_grad_enabled() and any(
+            tensor.requires_grad for tensor in (chunk, *states)
+        ):
+            result = checkpoint(fn, chunk, *states, use_reentrant=True)
         else:
             result = fn(chunk, *states)
         output, *states = result
