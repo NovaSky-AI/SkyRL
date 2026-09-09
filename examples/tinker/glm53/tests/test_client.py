@@ -1,5 +1,6 @@
 """CPU checks for exact-length data, failure accounting and bounded cleanup."""
 
+import hashlib
 import io
 import json
 from types import SimpleNamespace
@@ -234,6 +235,8 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
             assert saved["loss_fn_inputs"]["advantages"]["data"] == [-1.0] * 7
             metadata = json.loads((args.output_dir / "run.json").read_text())
             assert metadata["warmup_steps"] == metadata["measured_steps"] == 1
+            fixture = (args.output_dir / "datums.json").read_bytes()
+            assert metadata["datums_sha256"] == hashlib.sha256(fixture).hexdigest()
             records = [json.loads(line) for line in (args.output_dir / "phases.jsonl").read_text().splitlines()]
             completed = {record["phase"]: record for record in records if record["status"] == "completed"}
             assert completed["prepare_inputs"]["input_positions"] == [7, 7]
@@ -253,3 +256,4 @@ def test_explicit_tokenizer_preserves_inputs_for_remote_local_model(tmp_path):
     with patch.object(trainer, "get_tokenizer", side_effect=AssertionError("remote path unavailable locally")):
         actual = module.prepare_full_context_inputs(trainer, args, io.StringIO(), tokenizer)
     assert module.serialize_batch(actual) == module.serialize_batch(expected)
+    assert (tmp_path / "datums.json").read_text() == module.serialize_batch(expected) + "\n"

@@ -155,8 +155,8 @@ def prepare_full_context_inputs(trainer, args, report, tokenizer=None) -> list[t
         if datums[0].model_input.to_ints() == datums[1].model_input.to_ints():
             raise ValueError("opposite-advantage fixtures must not have identical token inputs")
         datums = [datums[index % len(datums)] for index in range(args.batch_size)]
-        fixture = serialize_batch(datums)
-        (args.output_dir / "datums.json").write_text(fixture + "\n")
+        fixture = serialize_batch(datums) + "\n"
+        (args.output_dir / "datums.json").write_text(fixture)
         record["input_positions"] = [len(datum.model_input.to_ints()) for datum in datums]
         record["scored_positions"] = [len(datum.loss_fn_inputs["target_tokens"].data) for datum in datums]
         metadata = {
