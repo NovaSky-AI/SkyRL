@@ -60,7 +60,10 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
-from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
+from skyrl.backends.skyrl_train.utils.profiler import (
+    build_profiler_from_policy_cfg,
+    flush_profile_on_oom,
+)
 from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
@@ -1171,6 +1174,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # standard CUDA memory; only subsequent activations use expandable segments.
         self._set_expandable_segments(True)
 
+    @flush_profile_on_oom
     def forward(
         self,
         data: TrainingInputBatch,
@@ -1281,6 +1285,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
+    @flush_profile_on_oom
     def forward_backward(
         self,
         data: TrainingInputBatch,
@@ -1487,6 +1492,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
+    @flush_profile_on_oom
     def optim_step(self) -> Optional[float]:
         """
         Perform optimizer step.

@@ -1,4 +1,5 @@
 import os
+from functools import wraps
 
 import torch
 import torch.distributed
@@ -17,6 +18,23 @@ def build_profiler_from_policy_cfg(trainer_cfg):
     if not cfg.enable:
         return None
     return Profiler(cfg)
+
+
+def flush_profile_on_oom(method):
+    """Export this worker's active trace before propagating a training OOM."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except torch.OutOfMemoryError:
+            logger.exception(f"OOM in {method.__name__}; flushing the local worker's profiler")
+            if self.profiler is not None:
+                self.profiler.stop()
+                self.profiler.enable = False
+            raise
+
+    return wrapped
 
 
 class Profiler:

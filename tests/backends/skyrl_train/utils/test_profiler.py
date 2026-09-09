@@ -1,12 +1,59 @@
 """CPU tests for the config-driven torch.profiler wrapper."""
 
 import glob
+import json
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 from unittest.mock import patch
 
-from skyrl.backends.skyrl_train.utils.profiler import Profiler
+import pytest
+import torch
+
+from skyrl.backends.skyrl_train.utils.profiler import Profiler, flush_profile_on_oom
+
+
+def test_warmup_oom_exports_active_trace_before_any_optimizer_step(tmp_path):
+    class Worker:
+        profiler = Profiler(_ProfCfg(save_path=str(tmp_path), repeat=0, profile_memory=True))
+
+        @flush_profile_on_oom
+        def forward_backward(self):
+            with torch.profiler.record_function("warmup_before_oom"):
+                torch.ones(8).add_(1)
+            raise failure
+
+    failure = torch.OutOfMemoryError("injected warmup failure")
+    worker = Worker()
+    worker.profiler.start()
+    with pytest.raises(torch.OutOfMemoryError) as caught:
+        worker.forward_backward()
+    assert caught.value is failure
+    traces = list(tmp_path.glob("*.pt.trace.json"))
+    assert len(traces) == 1
+    trace = json.loads(traces[0].read_text())
+    assert any(event["name"] == "warmup_before_oom" for event in trace["traceEvents"])
+
+
+@pytest.mark.parametrize("profiling_enabled", [False, True])
+def test_oom_export_failure_preserves_original_error(tmp_path, profiling_enabled):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    profiler = Profiler(_ProfCfg(save_path=str(tmp_path))) if profiling_enabled else None
+    if profiler is not None:
+        profiler.prof = Mock()
+        profiler.prof.stop.side_effect = RuntimeError("trace export failed")
+    worker = SimpleNamespace(profiler=profiler)
+    failure = torch.OutOfMemoryError("original allocation failure")
+
+    @flush_profile_on_oom
+    def run_backward(self):
+        raise failure
+
+    with pytest.raises(torch.OutOfMemoryError) as caught:
+        run_backward(worker)
+    assert caught.value is failure
 
 
 @dataclass
