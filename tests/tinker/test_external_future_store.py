@@ -277,6 +277,12 @@ async def test_retrieve_future_bounds_protobuf_serialization_off_event_loop(monk
         def mark_retrieved(self, request_id):
             pass
 
+        def proto_result(self, request_id):
+            return None
+
+        def cache_proto(self, request_id, proto):
+            pass
+
     def serialize_result_in_thread(request_type, result_data):
         nonlocal active_serializations, max_active_serializations
         serialization_thread_ids.append(threading.get_ident())
