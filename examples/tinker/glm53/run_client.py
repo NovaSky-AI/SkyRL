@@ -34,7 +34,18 @@ def run(args) -> None:
             for step in range(args.steps):
                 step_phase = "warmup" if step == 0 else f"step_{step}"
                 with measure_phase(report, step_phase):
-                    run_gspo_step(trainer, datums, args, report, step)
+                    batch = score_reference_batch(trainer, datums, args, report, step)
+                    with measure_phase(report, f"{step_phase}/forward_backward") as record:
+                        result = trainer.forward_backward(batch, "gspo").result()
+                        check_training_result(result, args.context, args.batch_size)
+                        record["scored_tokens"] = args.context * args.batch_size
+                        record["metrics"] = result.metrics
+                    with measure_phase(report, f"{step_phase}/optimizer") as record:
+                        result = trainer.optim_step(types.AdamParams(learning_rate=args.learning_rate)).result()
+                        norm = result.metrics["skyrl.ai/grad_norm"]
+                        if not math.isfinite(norm) or norm <= 0:
+                            raise ValueError(f"expected a finite nonzero gradient norm, got {norm}")
+                        record["metrics"] = result.metrics
                     publish_and_sample(trainer, prompt, report, step_phase)
             with measure_phase(report, "checkpoint") as record:
                 record["path"] = trainer.save_state("full-context-final").result().path
@@ -56,7 +67,7 @@ def build_full_context_datum(seed_tokens: list[int], context_length: int) -> typ
     )
 
 
-def build_gspo_batch(datum: types.Datum, reference, advantage: float) -> list[types.Datum]:
+def build_gspo_batch(datums: list[types.Datum], reference) -> list[types.Datum]:
     """Attach frozen old-policy scores and a sequence-constant synthetic advantage."""
     return [
         types.Datum(
@@ -64,10 +75,10 @@ def build_gspo_batch(datum: types.Datum, reference, advantage: float) -> list[ty
             loss_fn_inputs={
                 **datum.loss_fn_inputs,
                 "logprobs": output["logprobs"],
-                "advantages": [advantage] * len(datum.model_input.to_ints()),
+                "advantages": [1.0 if index % 2 == 0 else -1.0] * len(datum.model_input.to_ints()),
             },
         )
-        for output in reference.loss_fn_outputs
+        for index, (datum, output) in enumerate(zip(datums, reference.loss_fn_outputs, strict=True))
     ]
 
 
@@ -97,6 +108,10 @@ def measure_phase(report, phase_name: str):
     try:
         yield record
         record["status"] = "completed"
+    except Exception as error:
+        record["error_type"] = type(error).__name__
+        record["error"] = str(error)
+        raise
     finally:
         if record["status"] == "running":
             record["status"] = "failed"
@@ -148,6 +163,7 @@ def prepare_full_context_inputs(trainer, args, report) -> list[types.Datum]:
         ]
         if datums[0].model_input.to_ints() == datums[1].model_input.to_ints():
             raise ValueError("opposite-advantage fixtures must not have identical token inputs")
+        datums = [datums[index % len(datums)] for index in range(args.batch_size)]
         fixture = serialize_batch(datums)
         (args.output_dir / "datums.json").write_text(fixture + "\n")
         record["input_positions"] = [len(datum.model_input.to_ints()) for datum in datums]
@@ -157,7 +173,7 @@ def prepare_full_context_inputs(trainer, args, report) -> list[types.Datum]:
             "tinker_version": tinker.__version__,
             "context": args.context,
             "batch_size": args.batch_size,
-            "backwards_per_step": 2,
+            "backwards_per_step": 1,
             "steps": args.steps,
             "warmup_steps": 1,
             "measured_steps": args.steps - 1,
@@ -173,30 +189,16 @@ def prepare_full_context_inputs(trainer, args, report) -> list[types.Datum]:
     return datums
 
 
-def run_gspo_step(trainer, datums, args, report, step: int) -> None:
+def score_reference_batch(trainer, datums, args, report, step: int) -> list[types.Datum]:
     phase_prefix = "warmup" if step == 0 else f"step_{step}"
-    batches = []
-    for index, (datum, advantage) in enumerate(zip(datums, [1.0, -1.0], strict=True)):
-        with measure_phase(report, f"{phase_prefix}/reference_{index}") as record:
-            # cross_entropy here is a forward-only scoring request, never an update.
-            reference = trainer.forward([datum] * args.batch_size, "cross_entropy").result()
-            check_training_result(reference, args.context, args.batch_size)
-            batches.append(build_gspo_batch(datum, reference, advantage))
-            record["scored_tokens"] = args.context * args.batch_size
-        (args.output_dir / f"step_{step}_batch_{index}.json").write_text(serialize_batch(batches[-1]) + "\n")
-
-    for backward, batch in enumerate(batches):
-        with measure_phase(report, f"{phase_prefix}/backward_{backward}") as record:
-            result = trainer.forward_backward(batch, "gspo").result()
-            check_training_result(result, args.context, args.batch_size)
-            record["scored_tokens"] = args.context * args.batch_size
-            record["metrics"] = result.metrics
-    with measure_phase(report, f"{phase_prefix}/optimizer") as record:
-        result = trainer.optim_step(types.AdamParams(learning_rate=args.learning_rate)).result()
-        norm = result.metrics["skyrl.ai/grad_norm"]
-        if not math.isfinite(norm) or norm <= 0:
-            raise ValueError(f"expected a finite nonzero gradient norm, got {norm}")
-        record["metrics"] = result.metrics
+    with measure_phase(report, f"{phase_prefix}/reference") as record:
+        # cross_entropy here is a forward-only scoring request, never an update.
+        reference = trainer.forward(datums, "cross_entropy").result()
+        check_training_result(reference, args.context, args.batch_size)
+        batch = build_gspo_batch(datums, reference)
+        record["scored_tokens"] = args.context * args.batch_size
+    (args.output_dir / f"step_{step}_batch.json").write_text(serialize_batch(batch) + "\n")
+    return batch
 
 
 def publish_and_sample(trainer, prompt, report, phase_prefix: str) -> None:
@@ -219,12 +221,12 @@ def main() -> None:
         "--output-dir", type=Path, required=True, help="New directory for inputs, phase timings and metrics"
     )
     parser.add_argument("--context", type=int, default=32768)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=2, help="Total full-context sequences per update")
     parser.add_argument("--steps", type=int, default=3, help="Total updates: one warmup, then measured updates")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     args = parser.parse_args()
-    if args.context < 2 or args.batch_size < 1 or args.steps < 2:
-        parser.error("context >= 2, batch-size >= 1 and steps >= 2 are required")
+    if args.context < 2 or args.batch_size < 2 or args.steps < 2:
+        parser.error("context >= 2, batch-size >= 2 and steps >= 2 are required")
     if not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
         parser.error("learning-rate must be positive and finite")
     run(args)

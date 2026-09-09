@@ -39,10 +39,10 @@ def test_reject_empty_or_invalid_fixture(tokens, context):
 def test_gspo_keeps_reference_scores_targets_and_full_context_masks():
     datum = module.build_full_context_datum([11, 12, 13], 7)
     scores = types.TensorData(data=[-0.5] * 7, dtype="float32", shape=[7])
-    reference = SimpleNamespace(loss_fn_outputs=[{"logprobs": scores}])
-    for advantage in [1.0, -1.0]:
-        batch = module.build_gspo_batch(datum, reference, advantage)
-        fields = batch[0].loss_fn_inputs
+    reference = SimpleNamespace(loss_fn_outputs=[{"logprobs": scores}, {"logprobs": scores}])
+    batch = module.build_gspo_batch([datum, datum], reference)
+    for item, advantage in zip(batch, [1.0, -1.0], strict=True):
+        fields = item.loss_fn_inputs
         assert fields["logprobs"].data == scores.data
         assert fields["advantages"].data == [advantage] * 7
         assert fields["weights"].data == [1.0] * 7
@@ -59,6 +59,8 @@ def test_failure_records_elapsed_time_without_claiming_completion():
     records = [json.loads(line) for line in report.getvalue().splitlines()]
     assert [record["status"] for record in records] == ["running", "failed"]
     assert records[-1]["seconds"] >= 0
+    assert records[-1]["error_type"] == "RuntimeError"
+    assert records[-1]["error"] == "worker failed"
 
 
 @pytest.mark.parametrize("values", [[-1.0], [-1.0, float("nan")]])
@@ -110,25 +112,28 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
 
         return SimpleNamespace(result=result)
 
-    def output(logprob):
+    def output(logprob, count):
         return SimpleNamespace(
-            loss_fn_outputs=[{"logprobs": types.TensorData(data=[logprob] * 7, dtype="float32", shape=[7])}],
+            loss_fn_outputs=[{"logprobs": types.TensorData(data=[logprob] * 7, dtype="float32", shape=[7])}] * count,
             metrics={"loss": 0.0},
         )
 
     def forward(data, loss):
         assert loss == "cross_entropy"
+        assert len(data) == 2
         assert "advantages" not in data[0].loss_fn_inputs
-        return future("reference", output(-1.0 - events.count("optimizer")))
+        return future("reference", output(-1.0 - events.count("optimizer"), len(data)))
 
     def backward(data, loss):
         assert loss == "gspo"
-        assert events.count("reference") == 2 * (events.count("optimizer") + 1)
-        fields = data[0].loss_fn_inputs
-        assert fields["logprobs"].data == [-1.0 - events.count("optimizer")] * 7
-        assert fields["advantages"].data == ([1.0] if data[0].model_input.to_ints()[0] == 11 else [-1.0]) * 7
-        assert fields["weights"].data == [1.0] * 7
-        return future("backward", output(-1.0))
+        assert events.count("reference") == events.count("optimizer") + 1
+        assert len(data) == 2
+        for datum, advantage in zip(data, [1.0, -1.0], strict=True):
+            fields = datum.loss_fn_inputs
+            assert fields["logprobs"].data == [-1.0 - events.count("optimizer")] * 7
+            assert fields["advantages"].data == [advantage] * 7
+            assert fields["weights"].data == [1.0] * 7
+        return future("backward", output(-1.0, len(data)))
 
     trainer.forward.side_effect = forward
     trainer.forward_backward.side_effect = backward
@@ -155,7 +160,7 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
         base_url="http://example.com",
         model_path="test-model",
         context=7,
-        batch_size=1,
+        batch_size=2,
         steps=2,
         learning_rate=1e-5,
     )
@@ -165,7 +170,7 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
     ):
         expected = (
             ["publication", "sample"]
-            + ["reference", "reference", "backward", "backward", "optimizer", "publication", "sample"] * 2
+            + ["reference", "backward", "optimizer", "publication", "sample"] * 2
             + ["checkpoint", "unload"]
         )
         if failure:
@@ -175,9 +180,9 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
         else:
             module.run(args)
             assert events == expected
-            assert json.loads((args.output_dir / "run.json").read_text())["backwards_per_step"] == 2
+            assert json.loads((args.output_dir / "run.json").read_text())["backwards_per_step"] == 1
             assert json.loads((args.output_dir / "run.json").read_text())["loss_fn"] == "gspo"
-            saved = json.loads((args.output_dir / "step_1_batch_1.json").read_text())[0]
+            saved = json.loads((args.output_dir / "step_1_batch.json").read_text())[1]
             assert saved["loss_fn_inputs"]["logprobs"]["data"] == [-2.0] * 7
             assert saved["loss_fn_inputs"]["advantages"]["data"] == [-1.0] * 7
             metadata = json.loads((args.output_dir / "run.json").read_text())

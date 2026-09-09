@@ -9,10 +9,10 @@ import sys
 
 def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: Path) -> dict:
     root = Path(__file__).parent
-    config = json.loads((root / "common.json").read_text())
+    config = {} if profile == "qwen3-0.6b" else json.loads((root / "common.json").read_text())
     overrides = json.loads((root / f"{profile}.json").read_text())
     for key, value in overrides.items():
-        if isinstance(value, dict):
+        if isinstance(value, dict) and key in config:
             config[key].update(value)
         else:
             config[key] = value
@@ -24,7 +24,9 @@ def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: P
     # Existing Tinker profiler hooks are runtime-scoped, not client-session scoped.
     config["trainer.policy.torch_profiler_config"] = {
         "enable": True,
-        "ranks": list(range(config["trainer.placement.policy_num_nodes"] * 8)),
+        "ranks": list(
+            range(config["trainer.placement.policy_num_nodes"] * config["trainer.placement.policy_num_gpus_per_node"])
+        ),
         "save_path": str(profile_dir),
         "skip_first": 0,
         "wait": 0,
@@ -40,7 +42,7 @@ def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: P
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("profile", choices=["32k-2n", "256k-2n", "256k-3n"])
+    parser.add_argument("profile", choices=["qwen3-0.6b", "32k-2n", "256k-2n", "256k-3n"])
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--database-path", type=Path, required=True)

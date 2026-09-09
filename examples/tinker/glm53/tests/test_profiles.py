@@ -14,6 +14,15 @@ spec.loader.exec_module(module)
 
 
 class TestProfiles(unittest.TestCase):
+    def test_small_model_does_not_inherit_glm_attention_or_expert_settings(self):
+        cfg = module.build_config("qwen3-0.6b", Path("/models/qwen"), Path("/state/qwen"), Path("/scratch/traces"))
+        self.assertNotIn("trainer.policy.megatron_config.transformer_config_kwargs", cfg)
+        self.assertNotIn("trainer.policy.megatron_config.expert_model_parallel_size", cfg)
+        self.assertEqual(cfg["trainer.policy.torch_profiler_config"]["ranks"], [0])
+        self.assertEqual(cfg["trainer.placement.policy_num_gpus_per_node"], 1)
+        self.assertEqual(cfg["generator.inference_engine.tensor_parallel_size"], 1)
+        self.assertEqual(cfg["generator.inference_engine.engine_init_kwargs"]["model"], "/models/qwen")
+
     def test_profiles_preserve_nested_common_settings(self):
         for name, nodes, tp, cp, pp, context in (
             ("32k-2n", 1, 8, 1, 1, 32768),

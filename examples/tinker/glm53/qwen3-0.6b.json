@@ -1,0 +1,31 @@
+{
+  "strategy": "megatron",
+  "trainer.bf16": true,
+  "trainer.algorithm.use_kl_loss": false,
+  "trainer.algorithm.loss_reduction": "sequence_mean",
+  "trainer.placement.colocate_all": false,
+  "trainer.placement.policy_num_nodes": 1,
+  "trainer.placement.policy_num_gpus_per_node": 1,
+  "trainer.policy.megatron_config.tensor_model_parallel_size": 1,
+  "trainer.policy.megatron_config.pipeline_model_parallel_size": 1,
+  "trainer.policy.megatron_config.context_parallel_size": 1,
+  "trainer.policy.model.lora.rank": 32,
+  "trainer.policy.model.lora.alpha": 32,
+  "trainer.policy.model.lora.target_modules": "all-linear",
+  "trainer.policy.optimizer_config.offload_after_step": false,
+  "trainer.max_tokens_per_microbatch": 16384,
+  "trainer.micro_train_batch_size_per_gpu": 1,
+  "trainer.micro_forward_batch_size_per_gpu": 1,
+  "trainer.remove_microbatch_padding": true,
+  "generator.inference_engine.backend": "vllm",
+  "generator.inference_engine.model_dtype": "bfloat16",
+  "generator.inference_engine.num_engines": 1,
+  "generator.inference_engine.tensor_parallel_size": 1,
+  "generator.inference_engine.run_engines_locally": true,
+  "generator.inference_engine.weight_sync_backend": "nccl",
+  "generator.inference_engine.gpu_memory_utilization": 0.8,
+  "generator.inference_engine.engine_init_kwargs": {
+    "max_model_len": 32768,
+    "kv_cache_dtype": "auto"
+  }
+}
