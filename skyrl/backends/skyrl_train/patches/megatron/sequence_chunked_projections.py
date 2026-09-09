@@ -100,38 +100,13 @@ def _wrap_mlp_forward(module: torch.nn.Module, chunk_size: int) -> None:
     module._skyrl_sequence_chunked = True
 
 
-def _wrap_projection_forward(module: torch.nn.Module, chunk_size: int) -> None:
-    original_forward = module.forward
-
-    def forward(
-        self: torch.nn.Module, hidden_states: torch.Tensor, *args, **kwargs
-    ):
-        if args or kwargs or hidden_states.shape[0] <= chunk_size:
-            return original_forward(hidden_states, *args, **kwargs)
-
-        def run_chunk(chunk: torch.Tensor) -> torch.Tensor:
-            # TransformerEngine linears reuse internal workspaces across calls. Calling the
-            # module repeatedly from custom autograd can therefore corrupt an outstanding
-            # chunk. TP1 needs no collective, so use the underlying weight directly.
-            return F.linear(chunk, self.weight)
-
-        bias = self.bias
-        if bias is not None and bias.numel() == 0:
-            bias = None
-        return apply_sequence_chunked(run_chunk, hidden_states, chunk_size), bias
-
-    module.forward = MethodType(forward, module)
-    module._skyrl_sequence_chunked = True
-
-
-def install_sequence_chunked_projections(
+def install_sequence_chunked_mlp(
     model_chunks: list[torch.nn.Module], chunk_size: int
-) -> tuple[int, int]:
-    """Chunk dense SwiGLU blocks and GDN projections along Megatron's sequence axis."""
+) -> int:
+    """Chunk dense SwiGLU blocks along Megatron's sequence axis."""
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
 
-    from megatron.core.ssm.gated_delta_net import GatedDeltaNet, GatedDeltaNet2
     from megatron.core.transformer.mlp import MLP
 
     modules = [
@@ -164,17 +139,11 @@ def install_sequence_chunked_projections(
         install_triton_swiglu()
 
     mlp_count = 0
-    projection_count = 0
     for module in modules:
         if module in swiglu_modules and not getattr(
             module, "_skyrl_sequence_chunked", False
         ):
             _wrap_mlp_forward(module, chunk_size)
             mlp_count += 1
-        if isinstance(module, (GatedDeltaNet, GatedDeltaNet2)):
-            for projection in (module.in_proj, module.out_proj):
-                if not getattr(projection, "_skyrl_sequence_chunked", False):
-                    _wrap_projection_forward(projection, chunk_size)
-                    projection_count += 1
 
-    return mlp_count, projection_count
+    return mlp_count
