@@ -59,4 +59,8 @@ def test_explicit_tokenizer_preserves_probes_without_loading_remote_model_path()
     trainer.get_tokenizer = Mock(side_effect=AssertionError("remote path unavailable locally"))
     actual = checks.prepare_probes(trainer, tokenizer)
     trainer.get_tokenizer.assert_not_called()
-    assert [datum.model_dump() for datum in actual] == [datum.model_dump() for datum in expected]
+    for observed, reference in zip(actual, expected, strict=True):
+        assert observed.model_input.to_ints() == reference.model_input.to_ints()
+        assert {key: value.data for key, value in observed.loss_fn_inputs.items()} == {
+            key: value.data for key, value in reference.loss_fn_inputs.items()
+        }
