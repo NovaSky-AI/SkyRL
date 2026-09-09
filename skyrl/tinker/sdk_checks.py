@@ -140,13 +140,14 @@ def unload_model(base_url: str, model_id: str) -> None:
     raise TimeoutError(f"unload did not finish for {model_id}; inspect the server before reusing it")
 
 
-def prepare_full_context_inputs(trainer, args, report) -> list[types.Datum]:
+def prepare_full_context_inputs(trainer, args, report, tokenizer=None) -> list[types.Datum]:
     with measure_phase(report, "prepare_inputs") as record:
         info = trainer.get_info()
         # Older SkyRL revisions omit these optional SDK fields.
         if info.is_lora is False or info.lora_rank not in (None, 32):
             raise ValueError("expected a rank-32 LoRA training client")
-        tokenizer = trainer.get_tokenizer()
+        if tokenizer is None:
+            tokenizer = trainer.get_tokenizer()
         datums = [
             build_full_context_datum(tokenizer.encode(seed, add_special_tokens=False), args.context)
             for seed in SEED_TEXTS

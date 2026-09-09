@@ -240,3 +240,16 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
             assert completed["prepare_inputs"]["scored_positions"] == [7, 7]
             assert "initial/publication" in completed
             assert "warmup" in completed and "step_1" in completed and "step_0" not in completed
+
+
+def test_explicit_tokenizer_preserves_inputs_for_remote_local_model(tmp_path):
+    info = types.GetInfoResponse.model_validate(
+        {"model_id": "model-test", "model_data": {"model_name": "/remote/model"}}
+    )
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [11, 12] if text.startswith("A river") else [21, 22])
+    trainer = SimpleNamespace(get_info=lambda: info, get_tokenizer=lambda: tokenizer)
+    args = SimpleNamespace(output_dir=tmp_path, context=7, batch_size=2, steps=3, learning_rate=1e-5)
+    expected = module.prepare_full_context_inputs(trainer, args, io.StringIO())
+    with patch.object(trainer, "get_tokenizer", side_effect=AssertionError("remote path unavailable locally")):
+        actual = module.prepare_full_context_inputs(trainer, args, io.StringIO(), tokenizer)
+    assert module.serialize_batch(actual) == module.serialize_batch(expected)
