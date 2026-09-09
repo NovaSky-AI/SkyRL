@@ -22,6 +22,7 @@ def test_cuda_oom_exports_trace_and_keeps_profiling(tmp_path):
             ranks=[0],
             save_path=str(tmp_path),
             activities=["cpu", "cuda"],
+            skip_first=0,
             warmup=0,
             active=1,
             repeat=0,
