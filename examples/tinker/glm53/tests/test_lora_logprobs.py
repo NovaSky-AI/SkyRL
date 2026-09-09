@@ -96,8 +96,6 @@ def test_cli_records_success_only_after_runtime_finishes(tmp_path, monkeypatch, 
             str(output_dir),
             "--mean-atol",
             "0.05",
-            "--delta-mean-atol",
-            "0.005",
         ],
     )
 
@@ -119,7 +117,10 @@ def test_cli_records_success_only_after_runtime_finishes(tmp_path, monkeypatch, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrong_publication", [False, True])
-async def test_run_checks_the_actual_published_update_and_cleans_up(monkeypatch, tmp_path, wrong_publication):
+@pytest.mark.parametrize("update_size", [0.2, 0.01])
+async def test_run_checks_the_actual_published_update_and_cleans_up(
+    monkeypatch, tmp_path, wrong_publication, update_size
+):
     calls = []
     changed = False
     publications = 0
@@ -151,13 +152,13 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(monkeypatch,
 
     def score_trainer(*args):
         calls.append("score_trainer")
-        return [-1.98, -2.98] if changed else [-2.0, -3.0]
+        return [-2.0 + update_size, -3.0 + update_size] if changed else [-2.0, -3.0]
 
     async def score_sampler(client, sequences, model):
         calls.append(f"score_{model}")
         if publications < 2:
             return [-2.0, -3.0]
-        return [-2.02, -3.02] if wrong_publication else [-1.98, -2.98]
+        return [-2.2, -3.2] if wrong_publication else [-1.8, -2.8]
 
     for name, function in [
         ("open_runtime", open_runtime),
@@ -167,15 +168,19 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(monkeypatch,
         ("score_sampler", score_sampler),
     ]:
         monkeypatch.setattr(run_lora_logprobs, name, function)
-    args = SimpleNamespace(backend_config="config.json", output_dir=tmp_path, mean_atol=0.05, delta_mean_atol=0.005)
+    args = SimpleNamespace(backend_config="config.json", output_dir=tmp_path, mean_atol=0.05)
     report = {}
-    if wrong_publication:
+    if update_size < 0.05:
+        with pytest.raises(AssertionError, match="insufficient test stimulus"):
+            await run_lora_logprobs.run(args, report)
+        assert publications == 1
+    elif wrong_publication:
         with pytest.raises(AssertionError):
             await run_lora_logprobs.run(args, report)
     else:
         await run_lora_logprobs.run(args, report)
         assert report["update_delta"]["mean_abs"] < 1e-12
-    assert calls == [
+    expected = [
         "score_base",
         "publish",
         "score_adapter",
@@ -185,10 +190,10 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(monkeypatch,
         "update_trainer",
         "score_trainer",
         "score_adapter",
-        "publish",
-        "score_adapter",
-        "cleanup",
     ]
+    if update_size >= 0.05:
+        expected += ["publish", "score_adapter"]
+    assert calls == expected + ["cleanup"]
 
 
 @pytest.mark.parametrize(

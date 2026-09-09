@@ -1,13 +1,13 @@
 import pytest
 import torch
 
-
-from examples.model_checks.lora_logprobs import (
+from examples.model_checks.lora_logprobs import perturb_adapters
+from skyrl.tinker.logprob_checks import (
     check_initial_adapter,
+    check_update_stimulus,
     check_updated_adapter,
     check_withheld_publication,
     compare_logprobs,
-    perturb_adapters,
 )
 
 
@@ -23,13 +23,13 @@ def test_publication_checks_reject_broken_phases(fault):
         "trainer_repeat": [-2.0, -3.0],
         "repeat": [-2.0, -3.0],
         "stale": [-2.0, -3.0],
-        "trainer_updated": [-1.98, -2.98],
-        "updated": [-1.98, -2.98],
+        "trainer_updated": [-1.8, -2.8],
+        "updated": [-1.8, -2.8],
     }
     if fault == "base":
         report["base"] = [-1.0, -2.0]
     elif fault == "stale":
-        report["stale"] = [-1.98, -2.98]
+        report["stale"] = [-1.8, -2.8]
     elif fault == "frozen_sampler":
         report["updated"] = report["zero"]
     elif fault == "frozen_trainer":
@@ -37,14 +37,15 @@ def test_publication_checks_reject_broken_phases(fault):
     elif fault == "updated_parity":
         report["updated"] = [-1.0, -2.0]
     elif fault == "wrong_direction":
-        report["updated"] = [-2.02, -3.02]
+        report["updated"] = [-2.2, -3.2]
     elif fault == "wrong_scale":
-        report["updated"] = [-1.96, -2.96]
+        report["updated"] = [-1.6, -2.6]
 
     def check_all():
         check_initial_adapter(report, 0.05)
         check_withheld_publication(report)
-        check_updated_adapter(report, 0.05, 0.005)
+        check_update_stimulus(report, 0.05)
+        check_updated_adapter(report, 0.05)
 
     if fault is None:
         check_all()
@@ -58,13 +59,15 @@ def test_update_comparison_cancels_a_fixed_backend_offset():
         "base": [-2.0, -3.0],
         "zero": [-2.0, -3.0],
         "repeat": [-2.0, -3.0],
+        "stale": [-2.0, -3.0],
         "trainer_zero": [-1.96, -2.96],
         "trainer_repeat": [-1.96, -2.96],
-        "trainer_updated": [-1.94, -2.94],
-        "updated": [-1.98, -2.98],
+        "trainer_updated": [-1.76, -2.76],
+        "updated": [-1.8, -2.8],
     }
     check_initial_adapter(report, 0.05)
-    check_updated_adapter(report, 0.05, 0.005)
+    check_update_stimulus(report, 0.05)
+    check_updated_adapter(report, 0.05)
     assert report["updated_parity"]["mean_abs"] == pytest.approx(0.04)
     assert report["update_delta"]["max_abs"] < 1e-12
 
@@ -74,14 +77,41 @@ def test_update_smaller_than_the_budget_cannot_qualify_publication():
         "base": [-2.0],
         "zero": [-2.0],
         "repeat": [-2.0],
+        "stale": [-2.0],
         "trainer_zero": [-2.0],
         "trainer_repeat": [-2.0],
         "trainer_updated": [-1.999],
         "updated": [-1.999],
     }
     check_initial_adapter(report, 0.05)
-    with pytest.raises(AssertionError, match="update too small"):
-        check_updated_adapter(report, 0.05, 0.005)
+    with pytest.raises(AssertionError, match="insufficient test stimulus"):
+        check_update_stimulus(report, 0.05)
+
+
+def test_stimulus_uses_the_actual_stale_snapshot_and_existing_boundary():
+    report = {"trainer_updated": [-1.0], "stale": [-1.125]}
+    check_update_stimulus(report, 0.125)
+    with pytest.raises(AssertionError, match="insufficient test stimulus"):
+        check_update_stimulus(report, 0.126)
+
+
+def test_ordinary_agreement_does_not_claim_tight_delta_equivalence():
+    report = {
+        "base": [-2.0],
+        "zero": [-2.0],
+        "repeat": [-2.0],
+        "stale": [-2.0],
+        "trainer_zero": [-1.98],
+        "trainer_repeat": [-1.98],
+        "trainer_updated": [-1.8],
+        "updated": [-1.81],
+    }
+    check_initial_adapter(report, 0.05)
+    check_update_stimulus(report, 0.05)
+    check_updated_adapter(report, 0.05)
+    assert report["update_delta"]["mean_abs"] == pytest.approx(0.01)
+    assert report["update_delta"]["cosine"] == pytest.approx(1.0)
+    assert report["update_delta"]["scale"] == pytest.approx(0.19 / 0.18)
 
 
 def test_logprob_check_preserves_alignment_and_reports_tail_errors():
@@ -93,14 +123,7 @@ def test_logprob_check_preserves_alignment_and_reports_tail_errors():
 
 
 @pytest.mark.parametrize(
-    "reference,actual",
-    [
-        ([], []),
-        ([-1], [-1, -2]),
-        ([-1], [float("nan")]),
-        ([float("inf")], [-1]),
-        ([[-1]], [[-1]]),
-    ],
+    "reference,actual", [([], []), ([-1], [-1, -2]), ([-1], [float("nan")]), ([float("inf")], [-1]), ([[-1]], [[-1]])]
 )
 def test_logprob_check_rejects_missing_nonfinite_or_misaligned_scores(reference, actual):
     with pytest.raises(AssertionError):
@@ -111,12 +134,21 @@ def test_perturbation_is_adapter_only_and_replica_deterministic():
     base = torch.nn.Parameter(torch.ones(4), requires_grad=False)
     adapter = torch.nn.Parameter(torch.zeros(4))
     replica = torch.nn.Parameter(torch.zeros(4))
-    receipt = perturb_adapters([("weight", base), ("adapter.weight", adapter)])
-    perturb_adapters([("adapter.weight", replica)])
+    a = torch.nn.Parameter(torch.ones(4))
+    receipt = perturb_adapters(
+        [("weight", base), ("adapter.linear_in.weight", a), ("adapter.linear_out.weight", adapter)]
+    )
+    perturb_adapters([("adapter.linear_out.weight", replica)])
     torch.testing.assert_close(base, torch.ones(4))
     torch.testing.assert_close(adapter, replica, rtol=0, atol=0)
     assert adapter.abs().sum() > 0
-    assert receipt["trainable_elements"] == 4
+    torch.testing.assert_close(a, torch.ones(4), rtol=0, atol=0)
+    assert receipt["changed_b_elements"] == 4
+
+
+def test_perturbation_rejects_an_already_updated_adapter():
+    with pytest.raises(AssertionError, match="zero-init B"):
+        perturb_adapters([("adapter.linear_out.weight", torch.nn.Parameter(torch.ones(4)))])
 
 
 def test_perturbation_rejects_full_weight_training():

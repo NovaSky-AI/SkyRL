@@ -7,11 +7,6 @@ import math
 from pathlib import Path
 from time import perf_counter
 
-from examples.model_checks.lora_logprobs import (
-    check_initial_adapter,
-    check_updated_adapter,
-    check_withheld_publication,
-)
 from examples.model_checks.megatron_lora import (
     build_batch,
     open_runtime,
@@ -22,6 +17,12 @@ from examples.model_checks.megatron_lora import (
 )
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.tinker.logprob_checks import build_probe_sequences as build_sequences
+from skyrl.tinker.logprob_checks import (
+    check_initial_adapter,
+    check_update_stimulus,
+    check_updated_adapter,
+    check_withheld_publication,
+)
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.utils.tok import get_tokenizer
 
@@ -36,7 +37,6 @@ async def run(args, report):
         tokens=sequences,
         scored_positions=[len(tokens) - 1 for tokens in sequences],
         mean_atol=args.mean_atol,
-        delta_mean_atol=args.delta_mean_atol,
         model=cfg.trainer.policy.model.path,
     )
     adapter = resolve_policy_model_name(cfg)
@@ -45,8 +45,9 @@ async def run(args, report):
         await check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, args.mean_atol)
         apply_trainer_update(policy, batch, report)
         await check_unpublished_sampler(client, sequences, adapter, report)
+        check_update_stimulus(report, args.mean_atol)
         await publish(policy, client, cfg)
-        await check_published_update(client, sequences, adapter, report, args.mean_atol, args.delta_mean_atol)
+        await check_published_update(client, sequences, adapter, report, args.mean_atol)
 
 
 async def check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, atol):
@@ -70,9 +71,9 @@ async def check_unpublished_sampler(client, sequences, adapter, report):
     check_withheld_publication(report)
 
 
-async def check_published_update(client, sequences, adapter, report, atol, delta_atol):
+async def check_published_update(client, sequences, adapter, report, atol):
     report["updated"] = await score_sampler(client, sequences, adapter)
-    check_updated_adapter(report, atol, delta_atol)
+    check_updated_adapter(report, atol)
 
 
 def validate_config(overrides):
@@ -129,10 +130,9 @@ def main():
     parser.add_argument("--backend-config", type=Path, required=True, help="Rendered run_server.py backend config")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--mean-atol", type=float, required=True, help="Reviewed mean logprob error budget")
-    parser.add_argument("--delta-mean-atol", type=float, required=True, help="Reviewed mean update-delta error budget")
     args = parser.parse_args()
-    if any(not math.isfinite(value) or value <= 0 for value in (args.mean_atol, args.delta_mean_atol)):
-        parser.error("logprob and update-delta budgets must be positive and finite")
+    if not math.isfinite(args.mean_atol) or args.mean_atol <= 0:
+        parser.error("logprob budget must be positive and finite")
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     report = {"passed": False}

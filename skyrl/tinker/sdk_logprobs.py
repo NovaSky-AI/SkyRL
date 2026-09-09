@@ -68,6 +68,6 @@ def check_withheld_publication(trainer, sampler, probes, report):
     check_withheld_scores(report)
 
 
-def check_published_update(sampler, probes, report, atol, delta_atol):
+def check_published_update(sampler, probes, report, atol):
     report["updated"] = score_sampler(sampler, probes)
-    check_updated_adapter(report, atol, delta_atol)
+    check_updated_adapter(report, atol)

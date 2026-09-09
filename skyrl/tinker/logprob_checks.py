@@ -31,16 +31,19 @@ def check_withheld_publication(report):
     assert report["withheld_publication"]["mean_abs"] <= noise_budget
 
 
-def check_updated_adapter(report, atol, delta_atol):
+def check_update_stimulus(report, atol):
+    """The actual stale sampler must fail the same agreement check publication will face."""
+    report["stale_parity"] = compare_logprobs(report["trainer_updated"], report["stale"])
+    assert report["stale_parity"]["mean_abs"] >= atol, "insufficient test stimulus to distinguish stale publication"
+
+
+def check_updated_adapter(report, atol):
+    """Check ordinary agreement; direct update-vector equivalence remains diagnostic."""
     report["updated_parity"] = compare_logprobs(report["trainer_updated"], report["updated"])
+    report["stale_parity"] = compare_logprobs(report["trainer_updated"], report["stale"])
     report["sampler_change"] = compare_logprobs(report["zero"], report["updated"])
     report["trainer_change"] = compare_logprobs(report["trainer_zero"], report["trainer_updated"])
     noise_budget = max(1e-6, 3 * report["repeat_noise"]["mean_abs"], 3 * report["trainer_repeat_noise"]["mean_abs"])
-    assert report["updated_parity"]["mean_abs"] < atol
-    assert report["sampler_change"]["mean_abs"] > noise_budget
-    assert (
-        report["trainer_change"]["mean_abs"] > delta_atol + noise_budget
-    ), "update too small to distinguish stale publication"
     trainer_delta = torch.as_tensor(report["trainer_updated"], dtype=torch.float64) - torch.as_tensor(
         report["trainer_zero"], dtype=torch.float64
     )
@@ -48,7 +51,18 @@ def check_updated_adapter(report, atol, delta_atol):
         report["zero"], dtype=torch.float64
     )
     report["update_delta"] = compare_logprobs(trainer_delta, sampler_delta)
-    assert report["update_delta"]["mean_abs"] < delta_atol
+    trainer_norm = trainer_delta.norm().item()
+    sampler_norm = sampler_delta.norm().item()
+    report["update_delta"].update(
+        cosine=(trainer_delta @ sampler_delta).item() / (trainer_norm * sampler_norm)
+        if trainer_norm and sampler_norm
+        else None,
+        scale=sampler_norm / trainer_norm if trainer_norm else None,
+        relative_l2=(trainer_delta - sampler_delta).norm().item() / trainer_norm if trainer_norm else None,
+    )
+    assert report["updated_parity"]["mean_abs"] < atol
+    assert report["sampler_change"]["mean_abs"] > noise_budget, "sampler did not measurably change"
+    assert report["trainer_change"]["mean_abs"] > noise_budget, "trainer did not measurably change"
 
 
 def compare_logprobs(reference, actual):

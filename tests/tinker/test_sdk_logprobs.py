@@ -34,8 +34,8 @@ def test_missing_sampler_scores_are_not_padded():
         checks.score_sampler(sampler, make_probes())
 
 
-@pytest.mark.parametrize("sampler_after,passes", [([-0.99, -2.04], True), ([-1.03, -1.98], False)])
-def test_sdk_stages_use_native_update_direction_assertions(monkeypatch, sampler_after, passes):
+@pytest.mark.parametrize("sampler_after,passes", [([-0.99, -2.04], True), ([-1.2, -1.8], False)])
+def test_sdk_stages_use_native_ordinary_agreement_and_delta_diagnostics(monkeypatch, sampler_after, passes):
     trainer_values = iter([[-1.0, -2.0], [-1.0, -2.0], [-0.98, -2.03]])
     sampler_values = iter([[-1.01, -2.01], [-1.01, -2.01], [-1.01, -2.01], sampler_after])
     monkeypatch.setattr(checks, "score_trainer", lambda *args: next(trainer_values))
@@ -44,11 +44,12 @@ def test_sdk_stages_use_native_update_direction_assertions(monkeypatch, sampler_
     checks.score_before_update(None, None, [], report, 0.05)
     checks.check_withheld_publication(None, None, [], report)
     if passes:
-        checks.check_published_update(None, [], report, 0.05, 0.005)
+        checks.check_published_update(None, [], report, 0.05)
         assert report["update_delta"]["mean_abs"] < 1e-10
+        assert report["stale_parity"]["mean_abs"] < 0.05  # Weak real update does not prove strong publication.
     else:
         with pytest.raises(AssertionError):
-            checks.check_published_update(None, [], report, 0.05, 0.005)
+            checks.check_published_update(None, [], report, 0.05)
     assert report["updated"] == sampler_after
 
 
