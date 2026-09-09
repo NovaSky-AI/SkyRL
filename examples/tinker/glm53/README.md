@@ -23,6 +23,8 @@ timeout --signal=TERM --kill-after=30s 2h \
 Create the parent directories; use fresh output/state paths. Keep the explicit
 `python` in the server command for the API's uv-environment discovery.
 Start uv-managed Ray with `--block` so its temporary environment stays alive.
+For GLM, set `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=1200` before
+starting Ray on each node so workers inherit the startup deadline.
 
 `run_client.run()` shows the protocol: create → initial publish/sample →
 warmup + two measured updates → checkpoint/unload. Each update is one batched
@@ -36,7 +38,7 @@ GLM/256K profiles still need their own qualification.
 
 The client saves exact datums, replay batches and phase JSONL. Every trainer rank
 profiles warmup and updates; verify CUDA traces. Optimizer request time includes
-trace export. OOM export/restart is best-effort; it does not recover model state.
+trace export and aggregation. OOM export/restart is best-effort; it does not recover model state.
 Cold model loading, vLLM, SIGKILL and failed exports are outside profiler coverage.
 Short samples do not qualify full-context inference. Unload does not release the
 deployment; the owner must enforce deadlines and tear down its resources.
@@ -49,9 +51,10 @@ a seeded adapter change, withheld publication, weight sync, and updated scores:
 ```bash
 uv run --isolated --extra tinker --extra megatron python -m examples.tinker.glm53.run_lora_logprobs \
   --backend-config /local/backend-config.json --output-dir /local/lora-check \
-  --mean-atol "$MEAN_ATOL" --delta-mean-atol "$DELTA_MEAN_ATOL"
+  --mean-atol "$MEAN_ATOL"
 ```
 
-Use the rendered server backend config and explicit reviewed error budgets; provisional
-budgets are diagnostic, not qualification. These short synthetic inputs do not prove
+Use the rendered backend config and a reviewed absolute error budget. The actual withheld
+adapter must fail that budget before the published adapter passes it; direct update deltas
+remain diagnostic. These short synthetic inputs do not prove
 full-context capacity, real optimizer behavior, or learning.

@@ -43,7 +43,7 @@ class TestProfiles(unittest.TestCase):
                 self.assertEqual(engine["max_model_len"], context)
                 self.assertEqual(engine["model"], "/models/glm")
                 self.assertEqual(engine["moe_backend"], "triton")
-                self.assertEqual(engine["kv_cache_dtype"], "auto")
+                self.assertEqual(engine["kv_cache_dtype"], "bfloat16" if name == "glm53-32k-2n" else "auto")
                 self.assertEqual(cfg["generator.inference_engine.model_dtype"], "bfloat16")
                 self.assertLessEqual(cfg["generator.inference_engine.gpu_memory_utilization"], 0.8)
                 self.assertNotIn("lora_target_modules", engine)
@@ -58,12 +58,20 @@ class TestProfiles(unittest.TestCase):
                 else:
                     self.assertNotIn("num_layers_in_first_pipeline_stage", attention)
 
-    def test_glm52_and_glm53_32k_profiles_have_identical_runtime_knobs(self):
+    def test_glm53_startup_overrides_leave_all_other_runtime_knobs_unchanged(self):
         glm52 = module.build_config("glm52-32k-2n", Path("/models/glm52"), Path("/state"), Path("/traces"))
         glm53 = module.build_config("glm53-32k-2n", Path("/models/glm53"), Path("/state"), Path("/traces"))
         for cfg in (glm52, glm53):
             cfg.pop("trainer.policy.model.path")
             cfg["generator.inference_engine.engine_init_kwargs"].pop("model")
+        self.assertEqual(glm53.pop("generator.inference_engine.max_num_batched_tokens"), 8192)
+        self.assertEqual(glm52.pop("generator.inference_engine.max_num_batched_tokens"), 32768)
+        engine53 = glm53["generator.inference_engine.engine_init_kwargs"]
+        engine52 = glm52["generator.inference_engine.engine_init_kwargs"]
+        self.assertFalse(engine53.pop("enable_flashinfer_autotune"))
+        self.assertNotIn("enable_flashinfer_autotune", engine52)
+        self.assertEqual(engine53.pop("kv_cache_dtype"), "bfloat16")
+        self.assertEqual(engine52.pop("kv_cache_dtype"), "auto")
         self.assertEqual(glm52, glm53)
 
     def test_dry_run_needs_no_download_or_gpu_imports(self):
@@ -92,7 +100,7 @@ class TestProfiles(unittest.TestCase):
         first = module.build_config("glm53-256k-3n", Path("/m"), Path("/s"), Path("/scratch/traces"))
         first["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"] = "fp8"
         second = module.build_config("glm53-32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
-        self.assertEqual(second["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"], "auto")
+        self.assertEqual(second["generator.inference_engine.engine_init_kwargs"]["kv_cache_dtype"], "bfloat16")
 
     def test_profiling_has_no_warmup_gap_or_one_update_cutoff(self):
         profiled = module.build_config("glm53-32k-2n", Path("/m"), Path("/s"), Path("/scratch/traces"))
