@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from types import MethodType
 
 import torch
@@ -8,60 +9,163 @@ from skyrl.backends.skyrl_train.patches.megatron.swiglu_triton import (
 )
 
 
-class _AddLoRAChunkInPlace(torch.autograd.Function):
+class _SequenceChunkedFunction(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx,
-        base_output: torch.Tensor,
-        adapter_output: torch.Tensor,
-        start: int,
-    ) -> torch.Tensor:
-        ctx.start = start
-        ctx.end = start + adapter_output.shape[0]
-        ctx.adapter_shape = adapter_output.shape
-        base_output.detach()[ctx.start : ctx.end].add_(
-            adapter_output.reshape(base_output[ctx.start : ctx.end].shape)
-        )
-        return base_output
+    def forward(ctx, hidden_states: torch.Tensor, *args) -> torch.Tensor:
+        tensor_inputs = args[:-3]
+        aligned_input_count, chunk_size, fn = args[-3:]
+        aligned_inputs = tensor_inputs[:aligned_input_count]
+        ctx.chunk_size = chunk_size
+        ctx.fn = fn
+        ctx.aligned_input_count = aligned_input_count
+        ctx.save_for_backward(hidden_states, *tensor_inputs)
+
+        output = None
+        for start in range(0, hidden_states.shape[0], chunk_size):
+            end = min(start + chunk_size, hidden_states.shape[0])
+            chunk_output = fn(
+                hidden_states[start:end],
+                *(aligned_input[start:end] for aligned_input in aligned_inputs),
+            )
+            if output is None:
+                output_shape = (*hidden_states.shape[:-1], chunk_output.shape[-1])
+                output = hidden_states.new_empty(output_shape)
+            output[start:end].copy_(chunk_output)
+
+        assert output is not None
+        return output
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple:
-        adapter_grad = grad_output[ctx.start : ctx.end].reshape(ctx.adapter_shape)
-        return grad_output, adapter_grad, None
+        saved_inputs = ctx.saved_tensors
+        data_input_count = 1 + ctx.aligned_input_count
+        data_inputs = saved_inputs[:data_input_count]
+        parameters = saved_inputs[data_input_count:]
+        input_grads = [
+            torch.empty_like(input) if input.requires_grad else None
+            for input in data_inputs
+        ]
+        parameter_grads: list[torch.Tensor | None] = [None] * len(parameters)
+
+        for start in range(0, data_inputs[0].shape[0], ctx.chunk_size):
+            end = min(start + ctx.chunk_size, data_inputs[0].shape[0])
+            chunks = [input[start:end].detach() for input in data_inputs]
+            for chunk, input in zip(chunks, data_inputs, strict=True):
+                chunk.requires_grad_(input.requires_grad)
+            with torch.enable_grad():
+                chunk_output = ctx.fn(*chunks)
+            grad_targets = [
+                tensor for tensor in (*chunks, *parameters) if tensor.requires_grad
+            ]
+            chunk_grads = torch.autograd.grad(
+                chunk_output,
+                grad_targets,
+                grad_output[start:end],
+                allow_unused=True,
+            )
+            grad_iterator = iter(chunk_grads)
+            for input_grad, chunk in zip(input_grads, chunks, strict=True):
+                if input_grad is not None:
+                    chunk_grad = next(grad_iterator)
+                    if chunk_grad is not None:
+                        input_grad[start:end].copy_(chunk_grad)
+            for index, parameter in enumerate(parameters):
+                if not parameter.requires_grad:
+                    continue
+                chunk_grad = next(grad_iterator)
+                if chunk_grad is not None:
+                    if parameter_grads[index] is None:
+                        parameter_grads[index] = chunk_grad
+                    else:
+                        parameter_grads[index].add_(chunk_grad)
+
+        return (*input_grads, *parameter_grads, None, None, None)
 
 
-def _wrap_lora_linear_forward(module: torch.nn.Module, chunk_size: int) -> None:
+def apply_sequence_chunked(
+    fn: Callable[..., torch.Tensor],
+    hidden_states: torch.Tensor,
+    chunk_size: int,
+    *aligned_inputs: torch.Tensor,
+    parameters: tuple[torch.Tensor, ...] = (),
+) -> torch.Tensor:
+    """Run a token-separable projection in bounded sequence chunks."""
+    if hidden_states.shape[0] <= chunk_size:
+        return fn(hidden_states, *aligned_inputs)
+    if any(input.shape[0] != hidden_states.shape[0] for input in aligned_inputs):
+        raise ValueError("Aligned sequence inputs must have the same leading dimension")
+    return _SequenceChunkedFunction.apply(
+        hidden_states,
+        *aligned_inputs,
+        *parameters,
+        len(aligned_inputs),
+        chunk_size,
+        fn,
+    )
+
+
+def _get_tensor_output(
+    output: tuple[torch.Tensor, torch.Tensor | None],
+) -> torch.Tensor:
+    tensor, bias = output
+    if bias is not None:
+        raise ValueError(
+            "Sequence-chunked projections require bias-free Megatron linears"
+        )
+    return tensor
+
+
+def _wrap_mlp_forward(module: torch.nn.Module, chunk_size: int) -> None:
     original_forward = module.forward
+    trainable_parameters = tuple(
+        parameter for parameter in module.parameters() if parameter.requires_grad
+    )
 
     def forward(
         self: torch.nn.Module,
         hidden_states: torch.Tensor,
-        *args,
+        per_token_scale: torch.Tensor | None = None,
         **kwargs,
-    ):
-        if hidden_states.shape[0] <= chunk_size or not self._adapter_enabled:
-            return original_forward(hidden_states, *args, **kwargs)
+    ) -> tuple[torch.Tensor, None]:
+        del self
+        if hidden_states.shape[0] <= chunk_size:
+            return original_forward(
+                hidden_states, per_token_scale=per_token_scale, **kwargs
+            )
 
-        linear_output, bias, layernorm_output = self.base_linear_forward(
-            hidden_states, *args, **kwargs
-        )
-        for start in range(0, hidden_states.shape[0], chunk_size):
-            end = min(start + chunk_size, hidden_states.shape[0])
-            adapter_output = self.adapter_forward(
-                self.adapter,
-                layernorm_output[start:end].contiguous(),
-                *args,
-                **kwargs,
+        if per_token_scale is None:
+
+            def run_chunk(chunk: torch.Tensor) -> torch.Tensor:
+                return _get_tensor_output(original_forward(chunk, **kwargs))
+
+            output = apply_sequence_chunked(
+                run_chunk,
+                hidden_states,
+                chunk_size,
+                parameters=trainable_parameters,
             )
-            linear_output = _AddLoRAChunkInPlace.apply(
-                linear_output, adapter_output, start
+        else:
+
+            def run_scaled_chunk(
+                chunk: torch.Tensor, scale_chunk: torch.Tensor
+            ) -> torch.Tensor:
+                return _get_tensor_output(
+                    original_forward(
+                        chunk, per_token_scale=scale_chunk, **kwargs
+                    )
+                )
+
+            output = apply_sequence_chunked(
+                run_scaled_chunk,
+                hidden_states,
+                chunk_size,
+                per_token_scale,
+                parameters=trainable_parameters,
             )
-        if not self._base_returns_tuple:
-            return linear_output
-        return linear_output, bias
+        return output, None
 
     module.forward = MethodType(forward, module)
-    module._skyrl_lora_sequence_chunked = True
+    module._skyrl_sequence_chunked = True
 
 
 def install_sequence_chunked_projections(
@@ -71,7 +175,6 @@ def install_sequence_chunked_projections(
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
 
-    from megatron.bridge.peft.lora_layers import LoRALinear
     from megatron.core.ssm.gated_delta_net import GatedDeltaNet, GatedDeltaNet2
     from megatron.core.transformer.mlp import MLP
 
@@ -107,21 +210,17 @@ def install_sequence_chunked_projections(
             )
     if swiglu_modules:
         install_triton_swiglu()
-    lora_modules = [
-        linear
-        for mlp in swiglu_modules
-        for linear in (mlp.linear_fc1, mlp.linear_fc2)
-        if isinstance(linear, LoRALinear)
-    ]
+        for module in swiglu_modules:
+            module.config.bias_activation_fusion = True
 
-    lora_count = 0
+    mlp_count = 0
     gdn_count = 0
     for module in modules:
-        if module in lora_modules and not getattr(
-            module, "_skyrl_lora_sequence_chunked", False
+        if module in swiglu_modules and not getattr(
+            module, "_skyrl_sequence_chunked", False
         ):
-            _wrap_lora_linear_forward(module, chunk_size)
-            lora_count += 1
+            _wrap_mlp_forward(module, chunk_size)
+            mlp_count += 1
         if isinstance(module, (GatedDeltaNet, GatedDeltaNet2)) and not getattr(
             module, "_skyrl_sequence_chunked", False
         ):
@@ -132,4 +231,4 @@ def install_sequence_chunked_projections(
             wrap_gdn_forward(module, chunk_size)
             gdn_count += 1
 
-    return lora_count, gdn_count
+    return mlp_count, gdn_count
