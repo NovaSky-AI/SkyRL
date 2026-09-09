@@ -40,3 +40,18 @@ trace export. OOM export/restart is best-effort; it does not recover model state
 Cold model loading, vLLM, SIGKILL and failed exports are outside profiler coverage.
 Short samples do not qualify full-context inference. Unload does not release the
 deployment; the owner must enforce deadlines and tear down its resources.
+
+## LoRA scores
+
+On an owned Ray cluster, `run_lora_logprobs.py` checks zero-init agreement,
+a seeded adapter change, withheld publication, weight sync, and updated scores:
+
+```bash
+uv run --isolated --extra tinker --extra megatron python -m examples.tinker.glm53.run_lora_logprobs \
+  --backend-config /local/backend-config.json --output-dir /local/lora-check \
+  --mean-atol "$MEAN_ATOL" --delta-mean-atol "$DELTA_MEAN_ATOL"
+```
+
+Use the rendered server backend config and explicit reviewed error budgets; provisional
+budgets are diagnostic, not qualification. These short synthetic inputs do not prove
+full-context capacity, real optimizer behavior, or learning.

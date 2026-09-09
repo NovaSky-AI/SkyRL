@@ -1,9 +1,7 @@
 """CPU checks for exact-length data, failure accounting and bounded cleanup."""
 
-import importlib.util
 import io
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,11 +9,8 @@ import httpx
 import pytest
 from tinker import types
 
-spec = importlib.util.spec_from_file_location(
-    "glm53_client_example", Path(__file__).resolve().parents[1] / "run_client.py"
-)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+from examples.tinker.glm53 import run_client as example
+from skyrl.tinker import sdk_checks as module
 
 
 @pytest.mark.parametrize("context", [2, 7, 32768, 262144])
@@ -227,10 +222,10 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
         )
         if failure:
             with pytest.raises(RuntimeError, match="worker failed"):
-                module.run(args)
+                example.run(args)
             assert events == expected[: expected.index(failure) + 1] + ["unload"]
         else:
-            module.run(args)
+            example.run(args)
             assert events == expected
             assert json.loads((args.output_dir / "run.json").read_text())["backwards_per_step"] == 1
             assert json.loads((args.output_dir / "run.json").read_text())["loss_fn"] == "gspo"
