@@ -465,31 +465,49 @@ class WorkerDispatch:
     # the colocation offload state.
     # ------------------------------------------------------------------
 
-    def start_profile(self, model: str) -> None:
-        """Start profiling on ``model`` workers."""
+    def start_profile(self, model: str, config: Optional[dict] = None, raise_on_error: bool = False) -> None:
+        """Start profiling on ``model`` workers.
+
+        ``config`` builds the profiler on the workers (Tinker path); omit it to
+        arm a statically configured one (trainer path).
+
+        Failures are swallowed by default: a broken profiler must never kill a
+        training run. Callers that report the outcome to a user — the Tinker
+        endpoints — pass ``raise_on_error=True``, since a start that silently
+        failed would otherwise be reported as success.
+        """
         if model not in self._actor_groups:
+            if raise_on_error:
+                raise ValueError(f"no actor group registered for model {model!r}")
             return
         try:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "start_profile"))
+            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "start_profile", config))
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.warning(f"[profiler] start_profile dispatch for {model} failed: {e}")
 
-    def profile_step(self, model: str) -> None:
-        """Advance profiling by one global step."""
+    def profile_step(self, model: str) -> Optional[List[Optional[str]]]:
+        """Advance profiling by one global step, returning per-rank errors."""
         if model not in self._actor_groups:
-            return
+            return None
         try:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"))
+            return ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"))
         except Exception as e:
             logger.warning(f"[profiler] profile_step dispatch for {model} failed: {e}")
+            return None
 
-    def stop_profile(self, model: str) -> None:
+    def stop_profile(self, model: str, raise_on_error: bool = False) -> None:
         """Stop profiling on ``model`` workers."""
         if model not in self._actor_groups:
+            if raise_on_error:
+                raise ValueError(f"no actor group registered for model {model!r}")
             return
         try:
             ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "stop_profile"))
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.warning(f"[profiler] stop_profile dispatch for {model} failed: {e}")
 
     def dump_profiler_summary(self, model: str) -> Optional[List]:

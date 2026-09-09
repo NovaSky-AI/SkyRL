@@ -321,6 +321,10 @@ class TorchProfilerConfig(BaseConfig):
     """Passed to ``torch.profiler.profile``."""
     with_modules: bool = False
     """Passed to ``torch.profiler.profile``."""
+    use_gzip: bool = False
+    """Gzip chrome traces (``*.pt.trace.json.gz``). Traces are repetitive JSON and
+    compress several-fold, which matters most when they are uploaded to cloud storage.
+    The gzip runs inside ``on_trace_ready``, i.e. on the training thread."""
     export_type: str = "chrome_trace"
     """Either ``chrome_trace`` or ``stacks``.
     ``chrome_trace`` writes ``*.pt.trace.json``; ``stacks`` writes self-CUDA-time stacks and

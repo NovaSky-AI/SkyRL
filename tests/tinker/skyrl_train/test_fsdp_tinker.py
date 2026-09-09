@@ -75,7 +75,7 @@ BACKEND_CONFIG = {
 
 
 @contextmanager
-def _api_server(port: int, backend_config: dict | None = None):
+def _api_server(port: int, backend_config: dict | None = None, extra_args: list[str] | None = None):
     with tempfile.TemporaryDirectory() as tmp_dir:
         log_path = os.path.join(tmp_dir, "server.log")
         db_path = os.path.join(tmp_dir, "server.db")
@@ -103,6 +103,7 @@ def _api_server(port: int, backend_config: dict | None = None):
             "--database-url",
             f"sqlite:///{db_path}",
         ]
+        cmd.extend(extra_args or [])
         with open(log_path, "w") as log_file:
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
             try:
@@ -236,3 +237,83 @@ def test_sample_after_training(training_client):
     ).result()
     tokens = list(out.sequences[0].tokens)
     assert len(tokens) > 0, "expected at least one sampled token from the FSDP-synced adapter"
+
+
+# Own port and server: the module-scoped one is started without --torch-profiler,
+# which makes the profiling endpoints 404 by design.
+TEST_PROFILER_PORT = 8013
+
+
+def _post_json(port: int, path: str, payload: dict) -> dict:
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"http://0.0.0.0:{port}{path}",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read())
+
+
+def test_torch_profiler_end_to_end(tmp_path):
+    """Profile real FSDP training steps and get a trace with CUDA kernels in it.
+
+    The rest of the profiler suite runs on CPU against synthetic loops. This is
+    the only test that proves the profiler is actually attached to policy-worker
+    GPU work, which is the thing a synthetic loop cannot show.
+    """
+    import glob
+
+    export_dir = str(tmp_path / "traces")
+    profiler_cfg = json.dumps({"export_dir": export_dir, "ranks": [0]})
+    # FSDP2-native CPU offload. The default manual path offloads via
+    # torch.utils.swap_tensors, which cannot run while the profiler holds
+    # references to the parameters.
+    backend_config = dict(BACKEND_CONFIG)
+    backend_config["trainer.policy.fsdp_config.cpu_offload"] = True
+
+    with _api_server(
+        TEST_PROFILER_PORT,
+        backend_config=backend_config,
+        extra_args=["--torch-profiler", profiler_cfg],
+    ):
+        sc = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_PROFILER_PORT}/", api_key=TINKER_API_KEY)
+        client = sc.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+        tok = client.get_tokenizer()
+        data = [_make_datum(tok, "Question: 1+1?\nAnswer:", " 2")]
+
+        started = _post_json(
+            TEST_PROFILER_PORT,
+            "/start_profiling",
+            {
+                "model_id": client.model_id,
+                "global_step": 7,
+                # Capture the very next optim step: the window closes on the
+                # second prof.step(), so two optim steps are enough.
+                "schedule_options": {"skip_first": 0, "wait": 0, "warmup": 0, "active": 1, "repeat": 1},
+                "profile_options": {"activities": ["cpu", "cuda"], "use_gzip": False},
+            },
+        )
+        assert started["active"] is True
+        assert started["export_path"] == f"{export_dir}/7"
+
+        for _ in range(2):
+            client.forward_backward(data, "cross_entropy").result()
+            client.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
+
+        stopped = _post_json(TEST_PROFILER_PORT, "/stop_profiling", {"model_id": client.model_id})
+        assert stopped["active"] is False
+
+        traces = glob.glob(os.path.join(export_dir, "7", "*.pt.trace.json"))
+        assert traces, f"no trace written under {export_dir}/7"
+
+        with open(traces[0]) as fh:
+            events = json.load(fh)["traceEvents"]
+        assert events, "trace has no events"
+        categories = {e.get("cat") for e in events}
+        assert {"kernel", "gpu_memcpy", "gpu_memset"} & categories, (
+            f"no CUDA activity in the trace, so the profiler was not attached to GPU work; "
+            f"categories={sorted(c for c in categories if c)}"
+        )

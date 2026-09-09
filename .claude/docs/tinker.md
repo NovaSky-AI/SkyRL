@@ -62,6 +62,36 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 
   A bare `.../checkpoints/{checkpoint_id}` with no type prefix and no `checkpoint_type` query param is rejected with a `400`. This removes the saved archive from `checkpoints_base`; it does not unload the live model.
 
+## torch.profiler
+
+Not part of the Tinker API -- a SkyRL extension driven with a plain HTTP client.
+Start the server with `--torch-profiler '{"export_dir": ..., "ranks": [0]}'` to
+enable it; without the flag the endpoints return 404. `export_dir` may be a
+cloud URI (traces stage locally and each closed window is uploaded, then deleted).
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /start_profiling` | Claim the single slot; body takes `model_id`, `global_step`, `export_path_extra`, `schedule_options`, `profile_options`, `overwrite` |
+| `POST /stop_profiling` | Stop and flush; body takes `model_id`, which must own the session |
+| `GET /profiling_status` | `active`, `model_id`, `export_path`, `step`, `error` |
+
+- Traces land in `{export_dir}/{global_step}[_{export_path_extra}]`. A non-empty
+  target is a `409` unless `overwrite=true`.
+- Exactly one session server-wide, claimed with a compare-and-swap on
+  `ProfilerControlDB`. Kineto is process-global, so concurrent profilers either
+  raise or silently corrupt each other's traces.
+- The profiler advances one step per `optim_step` **for the owning model only**.
+- `max_session_duration_sec` (default 7200) releases the slot if a client never
+  calls `/stop_profiling`.
+- **FSDP needs `trainer.policy.fsdp_config.cpu_offload=true`** in
+  `backend_config` whenever the policy is under offload management -- which
+  includes `colocate_all=false`, since `colocate_policy_ref` defaults to true.
+  The manual offload path uses `swap_tensors`, which fails while the profiler
+  holds parameter references. Only a fully uncolocated setup (both flags false)
+  can profile without it. Megatron is unaffected.
+- `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected at
+  startup -- static config would fight the endpoints over `worker.profiler`.
+
 ## Testing
 
 ```bash

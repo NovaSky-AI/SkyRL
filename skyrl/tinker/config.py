@@ -81,6 +81,63 @@ class EngineConfig(BaseModel):
         default=300,
         description="Seconds without heartbeat before session is considered stale. Set to -1 to disable cleanup.",
     )
+    torch_profiler: dict = Field(
+        default_factory=dict,
+        description=(
+            "torch.profiler settings as JSON, e.g. "
+            '{"export_dir": "s3://bucket/traces", "ranks": [0]}. '
+            "Passing the flag enables the /start_profiling, /stop_profiling and "
+            "/profiling_status endpoints; omitting it makes them return 404. "
+            "See TinkerTorchProfilerConfig for the accepted fields."
+        ),
+        json_schema_extra={"argparse_type": json.loads},
+    )
+    """NOTE: annotated `dict`, not TinkerTorchProfilerConfig. `config_to_argv` dispatches on
+    `field.annotation is dict` to JSON-serialize this for the engine subprocess; a BaseModel
+    annotation falls through to `str(value)` and the engine gets a repr `json.loads` cannot
+    read. Validate into the model at the point of use instead."""
+
+
+class TinkerTorchProfilerConfig(BaseModel):
+    """Operator-controlled torch profiler settings for the Tinker server.
+
+    Split of responsibility: the operator fixes where traces land and which ranks
+    pay the cost (here, at startup); the client picks the schedule and names the
+    capture (per request, at /start_profiling). There is no `enabled` field --
+    passing `--torch-profiler` at all is what turns the endpoints on -- so
+    `export_dir` is required and there is no configured-but-off state.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    export_dir: str = Field(
+        ...,
+        description="Where traces are written. Local absolute path, or a cloud URI (s3://, gs://, gcs://).",
+    )
+    ranks: list[int] = Field(default_factory=lambda: [0], description="Global ranks to profile.")
+    max_session_duration_sec: int = Field(
+        default=7200,
+        gt=0,
+        description=(
+            "How long one client may hold the single profiling slot before the engine "
+            "finalizes the session and releases it. Guards against a client that starts "
+            "profiling and never calls /stop_profiling, which would otherwise lock out "
+            "every other client."
+        ),
+    )
+
+    def validate_startup(self) -> None:
+        """Fail fast at server startup on settings that cannot work."""
+        if not self.ranks:
+            raise ValueError("`torch_profiler.ranks` must be non-empty.")
+        from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
+
+        if not is_cloud_path(self.export_dir) and not os.path.isabs(self.export_dir):
+            raise ValueError(
+                f"`torch_profiler.export_dir` must be an absolute local path or a cloud URI; "
+                f"got {self.export_dir!r}. Ray workers run from a /tmp/ray runtime working dir, "
+                f"so a relative path would write traces there."
+            )
 
 
 def convert_env_var(env_name: str, env_value: str, expected_type: type):
