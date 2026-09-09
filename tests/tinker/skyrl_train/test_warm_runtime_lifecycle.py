@@ -44,6 +44,7 @@ def _backend(
     }
     backend._cfg = Mock()
     backend._cfg.trainer.strategy = strategy
+    backend._cfg.trainer.policy.torch_profiler_config.enable = False
     backend._dispatch = Mock()
     backend._colocate_pg = None
     backend._inference_engine_client = Mock()
@@ -79,6 +80,31 @@ def test_last_lora_unload_keeps_runtime_warm_when_enabled():
 
 def test_keep_runtime_warm_defaults_to_true():
     assert MegatronBackendOverrides().keep_runtime_warm_on_last_unload is True
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_profiler_advances_once_per_policy_optimizer_step(enabled):
+    backend = _backend(keep_runtime_warm=True)
+    backend._cfg.trainer.policy.torch_profiler_config.enable = enabled
+    backend._dispatch.optim_step.return_value = 1.0
+    request = types.OptimStepInput(adam_params=types.AdamParams(learning_rate=1e-5))
+    backend.optim_step("model-a", request)
+    assert backend._dispatch.profile_step.call_count == int(enabled)
+    if enabled:
+        assert backend._dispatch.method_calls[-2:] == [
+            ("optim_step", ("policy",), {"model_id": "model-a"}),
+            ("profile_step", ("policy",), {}),
+        ]
+
+
+@pytest.mark.parametrize("keep_warm", [False, True])
+def test_profiler_stops_only_when_shared_runtime_is_torn_down(keep_warm):
+    backend = _backend(keep_runtime_warm=keep_warm)
+    backend._cfg.trainer.policy.torch_profiler_config.enable = True
+    dispatch = backend._dispatch
+    with patch("skyrl.backends.skyrl_train_backend.ray.shutdown"):
+        backend.delete_model("model-a")
+    assert dispatch.stop_profile.call_count == int(not keep_warm)
 
 
 def test_last_lora_unload_tears_down_when_disabled():

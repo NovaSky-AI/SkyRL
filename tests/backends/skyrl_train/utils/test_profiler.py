@@ -1,12 +1,65 @@
 """CPU tests for the config-driven torch.profiler wrapper."""
 
 import glob
+import json
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 from unittest.mock import patch
 
-from skyrl.backends.skyrl_train.utils.profiler import Profiler
+import pytest
+import torch
+
+from skyrl.backends.skyrl_train.utils.profiler import Profiler, flush_profile_on_oom
+
+
+def test_warmup_oom_exports_active_trace_before_any_optimizer_step(tmp_path):
+    class Worker:
+        profiler = Profiler(_ProfCfg(save_path=str(tmp_path), repeat=0, profile_memory=True))
+
+        @flush_profile_on_oom
+        def forward_backward(self):
+            with torch.profiler.record_function("warmup_before_oom"):
+                torch.ones(8).add_(1)
+            raise failure
+
+    failure = torch.OutOfMemoryError("injected warmup failure")
+    worker = Worker()
+    worker.profiler.start()
+    with pytest.raises(torch.OutOfMemoryError) as caught:
+        worker.forward_backward()
+    assert caught.value is failure
+    traces = list(tmp_path.glob("*.pt.trace.json"))
+    assert len(traces) == 1
+    trace = json.loads(traces[0].read_text())
+    assert any(event["name"] == "warmup_before_oom" for event in trace["traceEvents"])
+    with torch.profiler.record_function("next_client_work"):
+        torch.ones(8).add_(2)
+    worker.profiler.step()
+    worker.profiler.stop()
+    traces = [json.loads(path.read_text()) for path in tmp_path.glob("*.pt.trace.json")]
+    assert any(event["name"] == "next_client_work" for trace in traces for event in trace["traceEvents"])
+
+
+@pytest.mark.parametrize("profiling_enabled", [False, True])
+def test_oom_export_failure_preserves_original_error(tmp_path, profiling_enabled):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    profiler = Profiler(_ProfCfg(save_path=str(tmp_path))) if profiling_enabled else None
+    if profiler is not None:
+        profiler.prof = Mock()
+        profiler.prof.stop.side_effect = RuntimeError("trace export failed")
+    worker = SimpleNamespace(profiler=profiler)
+    failure = torch.OutOfMemoryError("original allocation failure")
+
+    @flush_profile_on_oom
+    def run_backward(self):
+        raise failure
+
+    with pytest.raises(torch.OutOfMemoryError) as caught:
+        run_backward(worker)
+    assert caught.value is failure
 
 
 @dataclass
@@ -27,6 +80,7 @@ class _ProfCfg:
     with_stack: bool = False
     with_flops: bool = False
     with_modules: bool = False
+    collect_kernel_summary: bool = True
     export_type: str = "chrome_trace"
 
 
@@ -88,6 +142,23 @@ def test_save_path_is_taken_verbatim(tmp_path):
     explicit = str(tmp_path / "explicit")
     prof = Profiler(_ProfCfg(save_path=explicit))
     assert prof.save_path == explicit
+
+
+def test_trace_only_exports_memory_without_aggregating_events(tmp_path):
+    profiler = Profiler(_ProfCfg(save_path=str(tmp_path), profile_memory=True, collect_kernel_summary=False))
+    with patch.object(profiler.prof, "key_averages") as summarize:
+        profiler.start()
+        with torch.profiler.record_function("trace_only_work"):
+            torch.ones(8).add_(1)
+        profiler.step()
+        profiler.stop()
+        summarize.assert_not_called()
+    traces = list(tmp_path.glob("*.pt.trace.json"))
+    assert len(traces) == 1
+    events = json.loads(traces[0].read_text())["traceEvents"]
+    assert any(event["name"] == "trace_only_work" for event in events)
+    assert any(event["name"] == "[memory]" for event in events)
+    assert profiler.get_kernel_summary() is None
 
 
 def test_kernel_summary_none_when_disabled(tmp_path):
