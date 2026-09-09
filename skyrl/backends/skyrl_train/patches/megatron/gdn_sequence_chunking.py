@@ -2,26 +2,123 @@ from collections.abc import Callable
 from types import MethodType
 
 import torch
-from torch.utils.checkpoint import checkpoint
+
+
+class _StatefulSequenceChunkedFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        hidden_states: torch.Tensor,
+        chunk_size: int,
+        fn: Callable[..., tuple[torch.Tensor, ...]],
+        *parameters: torch.Tensor,
+    ) -> torch.Tensor:
+        ctx.chunk_size = chunk_size
+        ctx.fn = fn
+        ctx.parameter_count = len(parameters)
+
+        outputs = []
+        boundary_states = []
+        states: tuple[torch.Tensor, ...] = ()
+        for start in range(0, hidden_states.shape[0], chunk_size):
+            result = fn(hidden_states[start : start + chunk_size], *states)
+            output, *next_states = result
+            states = tuple(next_states)
+            outputs.append(output)
+            if start + chunk_size < hidden_states.shape[0]:
+                boundary_states.extend(states)
+
+        ctx.state_count = len(states)
+        ctx.boundary_count = len(boundary_states)
+        ctx.save_for_backward(hidden_states, *boundary_states, *parameters)
+        return torch.cat(outputs, dim=0)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple:
+        saved = ctx.saved_tensors
+        hidden_states = saved[0]
+        boundary_states = saved[1 : 1 + ctx.boundary_count]
+        parameters = saved[1 + ctx.boundary_count :]
+        hidden_states_grad = (
+            torch.empty_like(hidden_states) if ctx.needs_input_grad[0] else None
+        )
+        parameter_grads: list[torch.Tensor | None] = [None] * ctx.parameter_count
+        final_state_grads: tuple[torch.Tensor | None, ...] | None = None
+        chunk_count = (hidden_states.shape[0] + ctx.chunk_size - 1) // ctx.chunk_size
+
+        for chunk_index in reversed(range(chunk_count)):
+            start = chunk_index * ctx.chunk_size
+            end = min(start + ctx.chunk_size, hidden_states.shape[0])
+            chunk = hidden_states[start:end].detach().requires_grad_(True)
+            if chunk_index == 0:
+                initial_states: tuple[torch.Tensor, ...] = ()
+            else:
+                state_start = (chunk_index - 1) * ctx.state_count
+                initial_states = tuple(
+                    state.detach().requires_grad_(True)
+                    for state in boundary_states[
+                        state_start : state_start + ctx.state_count
+                    ]
+                )
+
+            with torch.enable_grad():
+                result = ctx.fn(chunk, *initial_states)
+            output, *next_states = result
+            outputs = [output]
+            output_grads = [grad_output[start:end]]
+            if final_state_grads is not None:
+                outputs.extend(next_states)
+                output_grads.extend(
+                    torch.zeros_like(state) if grad is None else grad
+                    for state, grad in zip(
+                        next_states, final_state_grads, strict=True
+                    )
+                )
+            grads = torch.autograd.grad(
+                outputs,
+                (chunk, *initial_states, *parameters),
+                output_grads,
+                allow_unused=True,
+            )
+            if hidden_states_grad is not None:
+                hidden_states_grad[start:end].copy_(grads[0])
+            final_state_grads = grads[1 : 1 + len(initial_states)]
+            for index, grad in enumerate(grads[1 + len(initial_states) :]):
+                if grad is None:
+                    continue
+                if parameter_grads[index] is None:
+                    parameter_grads[index] = grad.detach()
+                else:
+                    parameter_grads[index].add_(grad)
+
+        return hidden_states_grad, None, None, *parameter_grads
 
 
 def apply_stateful_sequence_chunked(
     fn: Callable[..., tuple[torch.Tensor, ...]],
     hidden_states: torch.Tensor,
     chunk_size: int,
+    parameters: tuple[torch.Tensor, ...] | None = None,
 ) -> torch.Tensor:
     """Run a recurrent sequence function in chunks while carrying its states."""
-    outputs = []
-    states: tuple[torch.Tensor, ...] = ()
-    for start in range(0, hidden_states.shape[0], chunk_size):
-        chunk = hidden_states[start : start + chunk_size]
-        if torch.is_grad_enabled():
-            result = checkpoint(fn, chunk, *states, use_reentrant=False)
-        else:
-            result = fn(chunk, *states)
-        output, *states = result
-        outputs.append(output)
-    return torch.cat(outputs, dim=0)
+    if not torch.is_grad_enabled():
+        outputs = []
+        states: tuple[torch.Tensor, ...] = ()
+        for start in range(0, hidden_states.shape[0], chunk_size):
+            output, *states = fn(hidden_states[start : start + chunk_size], *states)
+            outputs.append(output)
+        return torch.cat(outputs, dim=0)
+
+    if parameters is None:
+        module = getattr(fn, "__self__", None)
+        if module is None:
+            raise ValueError("Stateful sequence chunking requires parameters")
+        parameters = tuple(
+            parameter for parameter in module.parameters() if parameter.requires_grad
+        )
+    return _StatefulSequenceChunkedFunction.apply(
+        hidden_states, chunk_size, fn, *parameters
+    )
 
 
 def _run_gdn_chunk(
@@ -144,7 +241,14 @@ def wrap_gdn_forward(module: torch.nn.Module, chunk_size: int) -> None:
 
             outputs.append(
                 apply_stateful_sequence_chunked(
-                    run_chunk, hidden_states[start:end], chunk_size
+                    run_chunk,
+                    hidden_states[start:end],
+                    chunk_size,
+                    tuple(
+                        parameter
+                        for parameter in self.parameters()
+                        if parameter.requires_grad
+                    ),
                 )
             )
         return torch.cat(outputs, dim=0), None

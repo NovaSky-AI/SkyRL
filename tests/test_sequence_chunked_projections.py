@@ -196,7 +196,10 @@ def test_lora_wrapper_chunks_adapter_and_preserves_gradients() -> None:
     assert max(chunked.adapter_forward_sizes) == 4
 
 
-def test_sequence_chunking_composes_with_outer_and_stateful_checkpoints() -> None:
+@pytest.mark.parametrize("use_reentrant", [False, True])
+def test_sequence_chunking_composes_with_outer_checkpoint(
+    use_reentrant: bool,
+) -> None:
     torch.manual_seed(29)
     recurrent = _TinyRecurrentProjection()
     lora = _TinyLoRALinear()
@@ -209,7 +212,7 @@ def test_sequence_chunking_composes_with_outer_and_stateful_checkpoints() -> Non
         )
         return lora(recurrent_output)[0]
 
-    output = checkpoint(run_block, hidden_states, use_reentrant=True)
+    output = checkpoint(run_block, hidden_states, use_reentrant=use_reentrant)
     output.square().mean().backward()
 
     assert hidden_states.grad is not None
