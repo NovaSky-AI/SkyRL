@@ -889,7 +889,6 @@ class PolicyWorkerBase(Worker):
         self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
-        self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.algorithm.policy_loss_type)
 
@@ -1455,7 +1454,6 @@ class CriticWorkerBase(Worker):
         self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
-        self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.critic_loss_fn: Callable = ppo_critic_loss
         self._micro_batches_accumulated = 0

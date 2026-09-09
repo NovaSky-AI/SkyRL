@@ -3,7 +3,17 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.workers.worker import Worker, _is_cuda_oom
+from skyrl.backends.skyrl_train.workers.worker import (
+    CriticWorkerBase,
+    PolicyWorkerBase,
+    Worker,
+    _is_cuda_oom,
+)
+
+
+def _initialize_worker(worker: Worker, **kwargs) -> None:
+    worker.record_memory = kwargs["record_memory"]
+    worker.cfg = Mock()
 
 
 @pytest.mark.parametrize(
@@ -43,3 +53,14 @@ def test_snapshot_failure_does_not_mask_cuda_oom() -> None:
         worker.save_memory_snapshot_on_oom("forward_backward", torch.OutOfMemoryError("CUDA out of memory"))
 
     log_exception.assert_called_once_with("Failed to save CUDA memory snapshot after OOM")
+
+
+@pytest.mark.parametrize("worker_type", [PolicyWorkerBase, CriticWorkerBase])
+def test_worker_base_preserves_memory_recording(worker_type: type[Worker]) -> None:
+    with (
+        patch.object(Worker, "__init__", _initialize_worker),
+        patch("skyrl.backends.skyrl_train.workers.worker.PolicyLossRegistry.get", return_value=Mock()),
+    ):
+        worker = worker_type(record_memory=True)
+
+    assert worker.record_memory
