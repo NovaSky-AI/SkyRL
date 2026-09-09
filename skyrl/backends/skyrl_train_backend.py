@@ -156,6 +156,8 @@ class SkyRLTrainBackend(AbstractBackend):
         # Captured at first LoRA create_model; subsequent create_models must
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
+        self._tinker_profiler_started = False
+        self._tinker_profiler_windows = 0
 
         # New inference infrastructure
         self._server_groups: list = []
@@ -878,6 +880,7 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_model_inputs:
             return {}
 
+        self._start_tinker_profiler()
         self._sleep_inference_engines()
         results = {}
         for sub_batch in self._split_model_pass_batch_by_model_id(prepared_batch):
@@ -1033,6 +1036,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
         grad_norm = self._dispatch.optim_step(role, model_id=model_id)
+        self._step_tinker_profiler(role)
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
 
         metrics: dict[str, float] = {}
@@ -1040,6 +1044,26 @@ class SkyRLTrainBackend(AbstractBackend):
             metrics["skyrl.ai/grad_norm"] = float(grad_norm)
         metrics["skyrl.ai/learning_rate"] = adam_params.learning_rate
         return types.OptimStepOutput(metrics=metrics)
+
+    def _start_tinker_profiler(self) -> None:
+        """Start policy profiling on the first Tinker training request."""
+        if self._tinker_profiler_started or not self._cfg.trainer.policy.torch_profiler_config.enable:
+            return
+        self._dispatch.start_profile("policy")
+        self._tinker_profiler_started = True
+
+    def _step_tinker_profiler(self, role: str) -> None:
+        """Advance the profiler after a complete Tinker optimizer step."""
+        if role != "policy" or not self._tinker_profiler_started:
+            return
+        self._dispatch.profile_step(role)
+        summaries = self._dispatch.dump_profiler_summary(role) or []
+        completed = max((summary["window_count"] for summary in summaries if summary), default=0)
+        if completed <= self._tinker_profiler_windows:
+            return
+        self._tinker_profiler_windows = completed
+        pairs = [pair for summary in summaries if summary for pair in summary["pairs"]]
+        logger.info("[profiler] Tinker kernel summary: %s", sorted(pairs, key=lambda pair: pair[1], reverse=True)[:30])
 
     def sample(
         self,
