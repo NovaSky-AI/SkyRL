@@ -1151,6 +1151,36 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         loss_fn_config: Optional[Dict[str, Any]] = None,
         return_per_token_outputs: bool = True,
     ) -> WorkerOutput:
+        track_memory = self.record_memory and torch.cuda.is_available()
+        if track_memory:
+            torch.cuda.reset_peak_memory_stats()
+        try:
+            return self._forward_backward_impl(
+                data,
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
+                return_per_token_outputs=return_per_token_outputs,
+            )
+        except Exception as error:
+            self.save_memory_snapshot_on_oom("forward_backward", error)
+            raise
+        finally:
+            if track_memory:
+                logger.info(
+                    f"[fb-memory] global_rank={self._rank} dp_rank={mpu.get_data_parallel_rank()} "
+                    f"allocated_bytes={torch.cuda.memory_allocated()} "
+                    f"peak_allocated_bytes={torch.cuda.max_memory_allocated()} "
+                    f"reserved_bytes={torch.cuda.memory_reserved()} "
+                    f"peak_reserved_bytes={torch.cuda.max_memory_reserved()}"
+                )
+
+    def _forward_backward_impl(
+        self,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+        return_per_token_outputs: bool = True,
+    ) -> WorkerOutput:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
@@ -1268,12 +1298,31 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             and mpu.get_pipeline_model_parallel_rank() == 0
             and mpu.get_context_parallel_rank() == 0
         ):
-            real_tokens = int(sum(int(mb["attention_mask"].sum().item()) for mb in micro_buffer))
-            num_microbatches = len(micro_buffer)
+            real_micro_buffer = micro_buffer[:num_real_microbatches]
+            real_tokens = sum(int(mb["attention_mask"].sum().item()) for mb in real_micro_buffer)
+            real_datums = sum(int(mb["sequences"].shape[0]) for mb in real_micro_buffer)
+            max_sequence_tokens = max(
+                (
+                    int(row_tokens.max().item())
+                    for mb in real_micro_buffer
+                    for row_tokens in (mb["attention_mask"].sum(dim=1),)
+                ),
+                default=0,
+            )
             dp_rank = mpu.get_data_parallel_rank()
+            dp_size = mpu.get_data_parallel_world_size()
+            recompute_layers = self.cfg.policy.megatron_config.transformer_config_kwargs.get("recompute_num_layers")
             logger.info(
-                f"sequence packing | dp_rank={dp_rank} microbatches_this_step={num_microbatches} "
-                f"seq_len={seq_len} tokens={real_tokens}"
+                f"[fb-schedule] global_rank={self._rank} dp_rank={dp_rank}/{dp_size} "
+                f"tp={mpu.get_tensor_model_parallel_world_size()} "
+                f"pp={mpu.get_pipeline_model_parallel_world_size()} "
+                f"cp={mpu.get_context_parallel_world_size()} datums={real_datums} "
+                f"real_microbatches={num_real_microbatches} "
+                f"padding_microbatches={num_padding_microbatches} "
+                f"scheduled_microbatches={len(micro_buffer)} real_tokens={real_tokens} "
+                f"max_sequence_tokens={max_sequence_tokens} "
+                f"max_tokens_per_microbatch={self.cfg.max_tokens_per_microbatch} "
+                f"recompute_num_layers={recompute_layers}"
             )
 
         metrics_list = self.model.forward_backward_mini_batch(

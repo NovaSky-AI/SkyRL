@@ -77,6 +77,13 @@ if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
 
 
+def _is_cuda_oom(error: Exception) -> bool:
+    if isinstance(error, torch.OutOfMemoryError):
+        return True
+    message = str(error).lower()
+    return "out of memory" in message and any(runtime in message for runtime in ("cuda", "cudnn", "cublas"))
+
+
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
 class DistributedTorchRayActor:
     def __init__(
@@ -441,7 +448,7 @@ class Worker(DistributedTorchRayActor):
             "total": total,
         }
 
-    def save_memory_snapshot(self, tag: str = ""):
+    def save_memory_snapshot(self, tag: str = "", synchronize_ranks: bool = True):
         """Save a snapshot of memory usage on the Worker's CUDA device.
 
         No-ops if record_memory is False.
@@ -462,9 +469,12 @@ class Worker(DistributedTorchRayActor):
 
         rank = torch.distributed.get_rank()
         save_path = os.path.join(self.cfg.ckpt_path, "memory_snapshots")
-        if self._local_rank == 0 and not io.exists(save_path):
+        if synchronize_ranks:
+            if self._local_rank == 0 and not io.exists(save_path):
+                io.makedirs(save_path, exist_ok=True)
+            torch.distributed.barrier()
+        else:
             io.makedirs(save_path, exist_ok=True)
-        torch.distributed.barrier()
 
         tag_str = f"_{tag}" if tag else ""
         file_name = f"rank_{rank}{tag_str}_{self._snapshot_count}.pickle"
@@ -473,6 +483,17 @@ class Worker(DistributedTorchRayActor):
             # seeing issues if we don't remove the file first
             io.remove(record_memory_path)
         torch.cuda.memory._dump_snapshot(record_memory_path)
+
+        logger.info(f"Saved CUDA memory snapshot to {record_memory_path}")
+
+    def save_memory_snapshot_on_oom(self, tag: str, error: Exception) -> None:
+        """Dump the failing rank without a collective that could deadlock after OOM."""
+        if not self.record_memory or not _is_cuda_oom(error):
+            return
+        try:
+            self.save_memory_snapshot(f"{tag}_oom", synchronize_ranks=False)
+        except Exception:
+            logger.exception("Failed to save CUDA memory snapshot after OOM")
 
     async def init_weight_sync_state(
         self,
