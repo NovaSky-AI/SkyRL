@@ -1,7 +1,7 @@
 # GLM 5.3: full-context GSPO profiling
 
 Start with the **32K, two-node** profile. This example uses SkyRL's Tinker API directly;
-no TCLI, dataset, reward model or Tau rollout collection is needed. These are review
+no TCLI, dataset, reward model or task rollout collection is needed. These are review
 candidates, not GPU-qualified recipes or performance claims.
 
 ## What the client runs
@@ -23,6 +23,9 @@ The fixtures have distinct tokens and sequence-constant advantages +1 and -1. Ol
 logprobs come from real trainer forwards before each update and stay frozen for both
 backwards. All updates use GSPO; `cross_entropy` is only the forward-only scoring label.
 The profile uses sequence-mean reduction and upstream clipping defaults (0.2 each side).
+Two backward requests accumulate gradients before one optimizer update. This exercises
+the second backward with gradients already resident; it is an accumulation stress case,
+not a requirement that every training client issue two requests per update.
 
 ## Server setup
 
@@ -70,8 +73,7 @@ timeout --signal=TERM --kill-after=30s 2h \
 The log's parent must exist; use a new output directory. `--steps 3` means **one warmup
 optimizer update plus two measured updates**. Warmup changes the adapter/optimizer state;
 compare identical starting states and the same warmup protocol, not unlike runs.
-The default makes four publications: one initial and one after each update. Separating
-initialization this way adds one publication relative to the previous client loop.
+The default makes four publications: one initial and one after each update.
 Job settings (length, batch size, update count, learning rate) belong to the client.
 Placement, precision, memory/packing budgets and worker trace setup belong to the server.
 
@@ -83,6 +85,11 @@ Existing Tinker hooks are runtime-scoped: the server profiler warms up through t
 optimizer and records until the second. This includes warmup publication and the next
 reference/backward passes. It is not a client-session profiling API: unloading an adapter
 from a warm service does not reset the schedule for another job.
+
+An OOM before the first optimizer completes can leave no recorded GPU trace: that interval
+is profiler warmup. Phase records and server logs are still needed for failure diagnosis.
+This preset is for steady-state profiling, not warmup-OOM capture; even an active trace
+can be lost if its worker is killed before export.
 
 Traces cover CPU/CUDA shapes and memory on **policy rank 0**, not vLLM workers, all-rank peaks
 or cold model loading. Verify traces were actually exported. Profiling can retain tensors
@@ -96,7 +103,7 @@ and slow execution; use unprofiled repeats to credit speedups.
 Successful completion checks finite outputs/gradient norms, repeated full-context training,
 publication, checkpoint and adapter cleanup. It does **not** prove learning, train/sampler
 parity, heterogeneous packing, full-context inference or rollout concurrency. Trainer-sourced
-references are not sampler-parity evidence. Tau/GSM8K and stronger qualification follow later.
+references are not sampler-parity evidence.
 
 The client unloads its adapter; SkyRL keeps the service warm by default. A hard timeout can
 interrupt cleanup: inspect the recorded model ID and pending work before reuse. Node/service
