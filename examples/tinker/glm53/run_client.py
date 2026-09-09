@@ -22,7 +22,7 @@ SEED_TEXTS = (
 def run(args) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=False)
     # This example targets the local, unauthenticated SkyRL API only.
-    service = tinker.ServiceClient(base_url=args.base_url, api_key="skyrl-local")
+    service = tinker.ServiceClient(base_url=args.base_url, api_key="tml-dummy")
     with (args.output_dir / "phases.jsonl").open("w") as report:
         with measure_phase(report, "create_model") as record:
             trainer = service.create_lora_training_client(base_model=args.model_path, rank=32, seed=0)
