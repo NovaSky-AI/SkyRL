@@ -52,3 +52,19 @@ def test_triton_swiglu_matches_torch_output_and_input_gradient(
     )
     torch.testing.assert_close(triton_output, reference_output, **tolerances)
     torch.testing.assert_close(triton_grad, reference_grad, **tolerances)
+
+
+def test_triton_swiglu_handles_production_chunk_shape() -> None:
+    input = torch.randn(
+        4096, 1, 34816, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+
+    output = TritonSwiGLUFunction.apply(input, False, False)
+    torch.cuda.synchronize()
+    output.sum().backward()
+    torch.cuda.synchronize()
+
+    assert output.shape == (4096, 1, 17408)
+    assert input.grad is not None
+    assert torch.isfinite(output).all()
+    assert torch.isfinite(input.grad).all()

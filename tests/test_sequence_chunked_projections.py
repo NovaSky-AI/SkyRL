@@ -26,10 +26,14 @@ class _TinySwiGLU(nn.Module):
 class _TinyProjection(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.linear = nn.Linear(8, 13, bias=False)
+        self.weight = nn.Parameter(torch.empty(13, 8))
+        nn.init.kaiming_uniform_(self.weight)
+        self.bias = None
+        self.forward_calls = 0
 
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
-        return self.linear(hidden_states), None
+        self.forward_calls += 1
+        return torch.nn.functional.linear(hidden_states, self.weight), None
 
 
 def _run_backward(
@@ -87,7 +91,8 @@ def test_projection_wrapper_preserves_output_and_gradients() -> None:
     assert chunked_bias is None
     torch.testing.assert_close(chunked_output, reference_output)
     torch.testing.assert_close(chunked_input.grad, reference_input.grad)
-    torch.testing.assert_close(chunked.linear.weight.grad, reference.linear.weight.grad)
+    torch.testing.assert_close(chunked.weight.grad, reference.weight.grad)
+    assert chunked.forward_calls == 0
 
 
 @pytest.mark.parametrize("chunk_size", [0, -1])

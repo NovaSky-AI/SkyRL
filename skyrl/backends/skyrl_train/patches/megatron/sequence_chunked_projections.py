@@ -102,14 +102,20 @@ def _wrap_mlp_forward(module: torch.nn.Module, chunk_size: int) -> None:
 
 def _wrap_projection_forward(module: torch.nn.Module, chunk_size: int) -> None:
     original_forward = module.forward
+    if getattr(module, "bias", None) is not None:
+        raise ValueError(
+            "Sequence-chunked GDN projections require bias-free Megatron linears"
+        )
 
     def forward(self: torch.nn.Module, hidden_states: torch.Tensor, *args, **kwargs):
-        del self
         if args or kwargs or hidden_states.shape[0] <= chunk_size:
             return original_forward(hidden_states, *args, **kwargs)
 
         def run_chunk(chunk: torch.Tensor) -> torch.Tensor:
-            return _get_tensor_output(original_forward(chunk))
+            # TransformerEngine linears reuse internal workspaces across calls. Calling the
+            # module repeatedly from custom autograd can therefore corrupt an outstanding
+            # chunk. TP1 needs no collective, so use the underlying weight directly.
+            return F.linear(chunk, self.weight)
 
         return apply_sequence_chunked(run_chunk, hidden_states, chunk_size), None
 
