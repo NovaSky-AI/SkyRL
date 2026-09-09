@@ -2,10 +2,10 @@
 
 import importlib.util
 import json
-from pathlib import Path
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("glm53_server_example", ROOT / "run_server.py")
