@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 from skyrl.train.config.config import (
     BaseConfig,
     DeltaWeightSyncConfig,
+    MegatronConfig,
     SkyRLTrainConfig,
     TrainerConfig,
     _resolve_class_type,
@@ -152,6 +153,12 @@ def test_cli_overrides_empty_args():
 def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value):
     with pytest.raises(ValueError, match=field_name):
         TrainerConfig(**{field_name: value})
+
+
+@pytest.mark.parametrize("value", [0, -1, True])
+def test_megatron_config_rejects_invalid_sequence_chunk_size(value):
+    with pytest.raises(ValueError, match="sequence_chunked_projection_size"):
+        MegatronConfig(sequence_chunked_projection_size=value)
 
 
 def test_cli_overrides_plus_prefix_rejected():

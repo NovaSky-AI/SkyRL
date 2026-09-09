@@ -508,6 +508,9 @@ class MegatronConfig(BaseConfig):
     empty_cuda_cache: Optional[bool] = True
     """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
     This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer."""
+    sequence_chunked_projection_size: Optional[int] = None
+    """Megatron sequence tokens per custom-autograd chunk for dense SwiGLU blocks and GDN
+    input/output projections. ``None`` keeps the native path. This currently supports TP1 only."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge and RoPE resolution. Not a general HF-config override -- use
@@ -563,6 +566,14 @@ class MegatronConfig(BaseConfig):
     See ``_stage_async_request_to_host``."""
 
     def __post_init__(self):
+        if self.sequence_chunked_projection_size is not None and (
+            isinstance(self.sequence_chunked_projection_size, bool)
+            or self.sequence_chunked_projection_size <= 0
+        ):
+            raise ValueError(
+                "sequence_chunked_projection_size must be a positive integer or None, "
+                f"got {self.sequence_chunked_projection_size!r}."
+            )
         # Backfill defaults for any keys the user didn't override so an override dict
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
