@@ -33,6 +33,7 @@ class TestProfiles(unittest.TestCase):
                 self.assertEqual(engine["moe_backend"], "triton")
                 self.assertEqual(engine["kv_cache_dtype"], "auto")
                 self.assertEqual(cfg["generator.inference_engine.model_dtype"], "bfloat16")
+                self.assertLessEqual(cfg["generator.inference_engine.gpu_memory_utilization"], 0.8)
                 self.assertNotIn("lora_target_modules", engine)
                 self.assertNotIn("generator.inference_engine.max_num_seqs", cfg)
                 self.assertIn("linear_kv_up_proj", cfg["trainer.policy.model.lora.target_modules"])

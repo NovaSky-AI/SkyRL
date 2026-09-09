@@ -22,6 +22,7 @@ def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: P
     if profile_dir is not None:
         if not profile_dir.is_absolute():
             raise ValueError("profile-dir must be an absolute path on the policy nodes")
+        # Existing Tinker profiler hooks are runtime-scoped, not client-session scoped.
         config["trainer.policy.torch_profiler_config"] = {
             "enable": True,
             "ranks": [0],
@@ -45,7 +46,11 @@ def main() -> None:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--database-path", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--profile-dir", type=Path, help="Record one policy GPU trace; omit for timing control")
+    parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        help="Enable one runtime-scoped policy trace (one warmup + one active update); omit for timing control",
+    )
     parser.add_argument("--print-config", action="store_true")
     args = parser.parse_args()
     if not all(path.is_absolute() for path in (args.model_path, args.state_dir, args.database_path)):

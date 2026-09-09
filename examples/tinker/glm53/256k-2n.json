@@ -3,7 +3,7 @@
   "trainer.policy.megatron_config.context_parallel_size": 2,
   "trainer.remove_microbatch_padding": true,
   "trainer.max_tokens_per_microbatch": 262144,
-  "generator.inference_engine.gpu_memory_utilization": 0.95,
+  "generator.inference_engine.gpu_memory_utilization": 0.8,
   "generator.inference_engine.engine_init_kwargs": {
     "max_model_len": 262144
   }

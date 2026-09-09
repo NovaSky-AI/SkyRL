@@ -18,9 +18,9 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
-@pytest.mark.parametrize("context", [2, 7, 32768])
+@pytest.mark.parametrize("context", [2, 7, 32768, 262144])
 def test_exact_context_preserves_shift_and_scores_every_position(context):
-    datum = module.build_datum([11, 12, 13], context)
+    datum = module.build_full_context_datum([11, 12, 13], context)
     inputs = datum.model_input.to_ints()
     targets = datum.loss_fn_inputs["target_tokens"].data
     weights = datum.loss_fn_inputs["weights"].data
@@ -33,11 +33,11 @@ def test_exact_context_preserves_shift_and_scores_every_position(context):
 @pytest.mark.parametrize("tokens,context", [([], 32), ([1], 1)])
 def test_reject_empty_or_invalid_fixture(tokens, context):
     with pytest.raises(ValueError):
-        module.build_datum(tokens, context)
+        module.build_full_context_datum(tokens, context)
 
 
 def test_gspo_keeps_reference_scores_targets_and_full_context_masks():
-    datum = module.build_datum([11, 12, 13], 7)
+    datum = module.build_full_context_datum([11, 12, 13], 7)
     scores = types.TensorData(data=[-0.5] * 7, dtype="float32", shape=[7])
     reference = SimpleNamespace(loss_fn_outputs=[{"logprobs": scores}])
     for advantage in [1.0, -1.0]:
@@ -54,7 +54,7 @@ def test_gspo_keeps_reference_scores_targets_and_full_context_masks():
 def test_failure_records_elapsed_time_without_claiming_completion():
     report = io.StringIO()
     with pytest.raises(RuntimeError, match="worker failed"):
-        with module.measure(report, "backward"):
+        with module.measure_phase(report, "backward"):
             raise RuntimeError("worker failed")
     records = [json.loads(line) for line in report.getvalue().splitlines()]
     assert [record["status"] for record in records] == ["running", "failed"]
@@ -92,7 +92,7 @@ def test_unload_waits_for_terminal_completion_and_preserves_model_identity():
     ]
 
 
-@pytest.mark.parametrize("failure", [None, "reference", "backward"])
+@pytest.mark.parametrize("failure", [None, "publication", "sample", "reference", "backward", "optimizer", "checkpoint"])
 def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_path, failure):
     from unittest.mock import Mock
 
@@ -142,6 +142,8 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
 
     def publish():
         events.append("publication")
+        if failure == "publication":
+            raise RuntimeError("worker failed")
         return sampler
 
     trainer.save_weights_and_get_sampling_client.side_effect = publish
@@ -161,28 +163,28 @@ def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_p
         patch.object(module.tinker, "ServiceClient", return_value=service),
         patch.object(module, "unload_model", side_effect=lambda url, model: events.append("unload")),
     ):
+        expected = (
+            ["publication", "sample"]
+            + ["reference", "reference", "backward", "backward", "optimizer", "publication", "sample"] * 2
+            + ["checkpoint", "unload"]
+        )
         if failure:
             with pytest.raises(RuntimeError, match="worker failed"):
                 module.run(args)
-            assert events == (["reference"] if failure == "reference" else ["reference", "reference", "backward"]) + [
-                "unload"
-            ]
+            assert events == expected[: expected.index(failure) + 1] + ["unload"]
         else:
             module.run(args)
-            assert events == [
-                "reference",
-                "reference",
-                "backward",
-                "backward",
-                "optimizer",
-                "publication",
-                "sample",
-            ] * 2 + [
-                "checkpoint",
-                "unload",
-            ]
+            assert events == expected
             assert json.loads((args.output_dir / "run.json").read_text())["backwards_per_step"] == 2
             assert json.loads((args.output_dir / "run.json").read_text())["loss_fn"] == "gspo"
             saved = json.loads((args.output_dir / "step_1_batch_1.json").read_text())[0]
             assert saved["loss_fn_inputs"]["logprobs"]["data"] == [-2.0] * 7
             assert saved["loss_fn_inputs"]["advantages"]["data"] == [-1.0] * 7
+            metadata = json.loads((args.output_dir / "run.json").read_text())
+            assert metadata["warmup_steps"] == metadata["measured_steps"] == 1
+            records = [json.loads(line) for line in (args.output_dir / "phases.jsonl").read_text().splitlines()]
+            completed = {record["phase"]: record for record in records if record["status"] == "completed"}
+            assert completed["prepare_inputs"]["input_positions"] == [7, 7]
+            assert completed["prepare_inputs"]["scored_positions"] == [7, 7]
+            assert "initial/publication" in completed
+            assert "warmup" in completed and "step_1" in completed and "step_0" not in completed
