@@ -151,8 +151,11 @@ def unload_model(base_url: str, model_id: str) -> None:
         response = client.post("api/v1/unload_model", json={"model_id": model_id})
         response.raise_for_status()
         request_id = response.json()["request_id"]
-        while time.monotonic() < deadline:
-            response = client.post("api/v1/retrieve_future", json={"request_id": request_id})
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                response = client.post("api/v1/retrieve_future", json={"request_id": request_id}, timeout=remaining)
+            except httpx.ReadTimeout as error:
+                raise TimeoutError(f"unload did not finish for {model_id} within its polling budget") from error
             if response.status_code == 408:
                 continue
             response.raise_for_status()

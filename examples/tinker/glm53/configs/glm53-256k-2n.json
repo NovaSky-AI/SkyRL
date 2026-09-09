@@ -1,4 +1,5 @@
 {
+  "extends": "common",
   "trainer.policy.megatron_config.tensor_model_parallel_size": 4,
   "trainer.policy.megatron_config.context_parallel_size": 2,
   "trainer.remove_microbatch_padding": true,

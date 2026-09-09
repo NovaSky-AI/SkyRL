@@ -1,4 +1,5 @@
 {
+  "extends": "common",
   "trainer.placement.policy_num_nodes": 2,
   "trainer.policy.megatron_config.pipeline_model_parallel_size": 2,
   "trainer.policy.megatron_config.transformer_config_kwargs": {

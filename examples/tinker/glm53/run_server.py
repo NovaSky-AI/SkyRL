@@ -6,11 +6,17 @@ import os
 from pathlib import Path
 import sys
 
+CONFIG_DIR = Path(__file__).parent / "configs"
+
+
+def get_profiles() -> list[str]:
+    return sorted(path.stem for path in CONFIG_DIR.glob("*.json") if path.stem != "common")
+
 
 def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: Path) -> dict:
-    root = Path(__file__).parent / "configs"
-    config = {} if profile == "qwen3-0.6b" else json.loads((root / "common.json").read_text())
-    overrides = json.loads((root / f"{profile}.json").read_text())
+    overrides = json.loads((CONFIG_DIR / f"{profile}.json").read_text())
+    parent = overrides.pop("extends", None)
+    config = json.loads((CONFIG_DIR / f"{parent}.json").read_text()) if parent else {}
     for key, value in overrides.items():
         if isinstance(value, dict) and key in config:
             config[key].update(value)
@@ -42,9 +48,7 @@ def build_config(profile: str, model_path: Path, state_dir: Path, profile_dir: P
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "profile", choices=["qwen3-0.6b", "glm52-32k-2n", "glm53-32k-2n", "glm53-256k-2n", "glm53-256k-3n"]
-    )
+    parser.add_argument("profile", choices=get_profiles())
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--database-path", type=Path, required=True)

@@ -104,6 +104,46 @@ def test_unload_waits_for_terminal_completion_and_preserves_model_identity():
     ]
 
 
+def test_unload_poll_uses_remaining_budget_not_short_http_default():
+    clock = [0.0]
+    polls = []
+
+    def respond(request):
+        if request.url.path.endswith("unload_model"):
+            clock[0] = 5.0
+            return httpx.Response(200, json={"request_id": "42"})
+        polls.append(request.extensions["timeout"]["read"])
+        if len(polls) == 1:
+            clock[0] = 90.0
+            return httpx.Response(408)
+        return httpx.Response(200, json={"type": "unload_model", "model_id": "model-test"})
+
+    client = httpx.Client(base_url="http://example.com/", transport=httpx.MockTransport(respond))
+    with (
+        patch.object(module.httpx, "Client", return_value=client),
+        patch.object(module.time, "monotonic", side_effect=lambda: clock[0]),
+    ):
+        module.unload_model("http://example.com", "model-test")
+    assert polls == [115.0, 30.0]
+
+
+def test_unload_read_timeout_preserves_cause_and_does_not_resubmit():
+    calls = []
+
+    def respond(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("unload_model"):
+            return httpx.Response(200, json={"request_id": "42"})
+        raise httpx.ReadTimeout("long poll exceeded budget")
+
+    client = httpx.Client(base_url="http://example.com/", transport=httpx.MockTransport(respond))
+    with patch.object(module.httpx, "Client", return_value=client):
+        with pytest.raises(TimeoutError, match="polling budget") as failure:
+            module.unload_model("http://example.com", "model-test")
+    assert isinstance(failure.value.__cause__, httpx.ReadTimeout)
+    assert calls == ["/api/v1/unload_model", "/api/v1/retrieve_future"]
+
+
 @pytest.mark.parametrize("failure", [None, "publication", "sample", "reference", "backward", "optimizer", "checkpoint"])
 def test_client_refreshes_references_before_each_gspo_update_and_cleans_up(tmp_path, failure):
     from unittest.mock import Mock

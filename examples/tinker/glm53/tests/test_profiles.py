@@ -104,5 +104,20 @@ class TestProfiles(unittest.TestCase):
             module.build_config("glm53-32k-2n", Path("/m"), Path("/s"), Path("relative/traces"))
 
 
+def test_new_profile_is_discovered_without_inheriting_glm_settings(tmp_path, monkeypatch):
+    qwen = json.loads((ROOT / "configs" / "qwen3-0.6b.json").read_text())
+    (tmp_path / "new-model.json").write_text(json.dumps(qwen))
+    (tmp_path / "common.json").write_text(json.dumps({"glm_only": True}))
+    monkeypatch.setattr(module, "CONFIG_DIR", tmp_path)
+    assert module.get_profiles() == ["new-model"]
+    config = module.build_config("new-model", Path("/model"), Path("/state"), Path("/traces"))
+    assert "glm_only" not in config
+    qwen["extends"] = "common"
+    (tmp_path / "new-model.json").write_text(json.dumps(qwen))
+    inherited = module.build_config("new-model", Path("/model"), Path("/state"), Path("/traces"))
+    assert inherited["glm_only"] is True
+    assert "extends" not in inherited
+
+
 if __name__ == "__main__":
     unittest.main()
