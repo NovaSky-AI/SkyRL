@@ -587,6 +587,22 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
+        # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
+        # the residual it would re-materialize is the n-stream tensor consumed by the mHC
+        # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
+        # needs the mHC recompute managers, which SkyRL's mHC layer does not implement, so
+        # downgrade to selective recompute of the remaining modules instead of failing.
+        if getattr(provider, "enable_mhc_connections", False) and provider.recompute_granularity == "full":
+            provider.recompute_granularity = "selective"
+            provider.recompute_modules = [m for m in (provider.recompute_modules or ["core_attn"]) if m != "mhc"]
+            provider.recompute_method = None
+            provider.recompute_num_layers = None
+            logger.info(
+                "Hyper-connection model: activation recompute downgraded from full to selective "
+                f"(recompute_modules={provider.recompute_modules}); mHC is not compatible with "
+                "full recompute."
+            )
+
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
         # `len(pattern) == num_layers` in `get_linear_attention_pattern`. Truncate so a
@@ -1076,11 +1092,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if self.enable_router_replay:
             from skyrl.backends.skyrl_train.utils.replay_utils import (
-                patch_topk_router_expert_bias_padding_mask,
                 patch_topk_router_layer_number,
             )
 
-            patch_topk_router_expert_bias_padding_mask()
             patch_topk_router_layer_number()
 
         # Freeze MoE router params before optimizer build.

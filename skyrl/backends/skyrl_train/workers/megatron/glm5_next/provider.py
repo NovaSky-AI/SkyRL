@@ -36,9 +36,10 @@ class Glm5NextModelProvider(MLAModelProvider):
     use_fused_mhc: bool = False
     mhc_fused_backend: str = "auto"
     # GLM normalizes the flattened streams with a standard RMSNorm (``rsqrt(mean(x^2) + eps)``,
-    # eps = ``rms_norm_eps``) before the mHC mapping; upstream Megatron-LM's default is
-    # ``1 / (rms(x) + 1e-6)``. The residual streams of this model are small enough that the
-    # placement of the epsilon changes the mixing weights, so both knobs are explicit here.
+    # eps = ``rms_norm_eps``) before the mHC mapping; megatron-core's ``HyperConnectionModule``
+    # uses ``1 / (rms(x) + 1e-6)``. The residual streams of this model are small enough that the
+    # placement of the epsilon changes the mixing weights, so both knobs are explicit here;
+    # ``mhc_norm_eps_inside_sqrt`` selects mcore_ext's RMSNorm-input subclass.
     mhc_norm_eps: float = 1e-5
     mhc_norm_eps_inside_sqrt: bool = True
 

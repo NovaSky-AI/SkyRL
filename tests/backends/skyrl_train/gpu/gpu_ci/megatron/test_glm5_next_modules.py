@@ -2,7 +2,7 @@
 
 Single-GPU checks of the two modules SkyRL adds on top of megatron-core for GLM-5.3-Flash:
 
-- ``HyperConnectionModule`` (mHC, backport of Megatron-LM main) against
+- ``RMSNormInputHyperConnectionModule`` (megatron-core's mHC module with GLM's input norm) against
   ``Glm5NextTextHyperConnection`` -- mapping outputs and the n-stream residual update;
 - ``KimiDeltaAttention`` (KDA) against ``Glm5NextTextLinearAttention`` on packed sequences.
 
@@ -42,7 +42,7 @@ def _hyper_connection_parity():
 
     import skyrl.backends.skyrl_train.workers.megatron  # noqa: F401  (FA4 import guard)
     from skyrl.backends.skyrl_train.workers.megatron.mcore_ext.hyper_connection import (
-        HyperConnectionModule,
+        RMSNormInputHyperConnectionModule,
     )
 
     _init_single_rank_megatron()
@@ -89,7 +89,7 @@ def _hyper_connection_parity():
     ):
         setattr(cfg, name, value)
     with torch.device("cuda"):
-        mod = HyperConnectionModule(cfg, layer_number=1)
+        mod = RMSNormInputHyperConnectionModule(cfg, layer_number=1)
     with torch.no_grad():
         mod.mapping_proj.weight.copy_(hf.fn)
         mod.bias.copy_(hf.base)
@@ -118,11 +118,12 @@ def _hyper_connection_parity():
         "h_res": max_diff(h_res, comb.permute(1, 0, 2, 3)),
         "next_streams": max_diff(meg_next, hf_next.permute(1, 0, 2, 3)),
         "expand": max_diff(
-            HyperConnectionModule.input_expand(update, n).view(seq, batch, n, hidden),
+            RMSNormInputHyperConnectionModule.input_expand(update, n).view(seq, batch, n, hidden),
             update.unsqueeze(2).expand(-1, -1, n, -1),
         ),
         "contract": max_diff(
-            HyperConnectionModule.output_contract(streams.view(seq, batch, n * hidden), n), streams.mean(2)
+            RMSNormInputHyperConnectionModule.output_contract(streams.view(seq, batch, n * hidden), n),
+            streams.mean(2),
         ),
     }
 

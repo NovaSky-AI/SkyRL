@@ -417,14 +417,17 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
-# megatron-bridge main branch: latest as of 8/13/26
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "2b8cb21d90548a5796c748f1986c77fc1cfe2417", marker = "sys_platform == 'linux'"}
+# megatron-bridge main branch: latest as of 9/8/26
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "8e5f0e13b7dff8a951c6676e2f7b4a1853a34845", marker = "sys_platform == 'linux'"}
 # megatron-core must match the `3rdparty/Megatron-LM` submodule pin of the
 # megatron-bridge rev above -- that is the only megatron-core commit Bridge's
 # own CI validates against. Bump the two together, reading the submodule rev with
 # `git ls-tree <bridge-rev> 3rdparty/Megatron-LM`. This one is on the Megatron-LM
-# main branch (https://github.com/NVIDIA/Megatron-LM/tree/main), dated 8/12/26.
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "14346b65a2d0790e451919858f7771078105c5f0", marker = "sys_platform == 'linux'"}
+# main branch (https://github.com/NVIDIA/Megatron-LM/tree/main), dated 9/7/26. Megatron-LM main
+# is 3 commits ahead of it at the time of this bump; the extra commits rework
+# `experimental_attention_variant/dsa.py` (NVIDIA/Megatron-LM#6402), which the GLM 5 sparse
+# attention path builds on, so this stays on the rev Bridge validates rather than main's tip.
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "b3393bbb0b223223ee3f8becf95f408d231d0036", marker = "sys_platform == 'linux'"}
 # vLLM at 98ed0856f31fa3aaf5e27464e2b4ef5a8ee6b2f5 (vllm-project/vllm#53906, "[Model] add GLM-5.3-Flash
 # support", 2026-09-03), i.e. 0.28.1rc1.dev359 -- the first vLLM with the GLM-5.3-Flash (glm5_next: KDA +
 # DSA-kpool + mHC) model. Per-commit wheels are published by vLLM's CI at wheels.vllm.ai; this one is
@@ -436,6 +439,7 @@ vllm = [
     { url = "https://wheels.vllm.ai/98ed0856f31fa3aaf5e27464e2b4ef5a8ee6b2f5/vllm-0.28.1rc1.dev359%2Bg98ed0856f-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://wheels.vllm.ai/98ed0856f31fa3aaf5e27464e2b4ef5a8ee6b2f5/vllm-0.28.1rc1.dev359%2Bg98ed0856f-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
+# NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14 as well as a new `sticky_least_loaded` policy: https://github.com/SumanthRH/router/tree/session-aware-lb
 vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
