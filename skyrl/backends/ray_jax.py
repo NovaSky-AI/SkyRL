@@ -10,9 +10,15 @@ from skyrl.utils.log import logger
 
 
 def _get_random_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
+    # try a few different ports in case another process is using randomly assigned port
+    for _ in range(10):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                return s.getsockname()[1]
+        except OSError:
+            continue
+    raise RuntimeError("Could not allocate a free port")
 
 
 @ray.remote
