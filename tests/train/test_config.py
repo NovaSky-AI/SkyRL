@@ -183,6 +183,32 @@ def test_runtime_env_forwards_te_block_scale_mode(monkeypatch):
     assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "1"
 
 
+def test_runtime_env_forwards_wandb_environment(monkeypatch):
+    wandb_environment = {
+        "WANDB_API_KEY": "test-api-key",
+        "WANDB_MODE": "offline",
+        "WANDB_BASE_URL": "https://wandb.example.com",
+    }
+    for var_name, value in wandb_environment.items():
+        monkeypatch.setenv(var_name, value)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+
+    env_vars = prepare_runtime_environment(example_dummy_config())
+
+    assert {var_name: env_vars[var_name] for var_name in wandb_environment} == wandb_environment
+
+
+def test_runtime_env_omits_unset_wandb_environment(monkeypatch):
+    wandb_environment = {"WANDB_API_KEY", "WANDB_MODE", "WANDB_BASE_URL"}
+    for var_name in wandb_environment:
+        monkeypatch.delenv(var_name, raising=False)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+
+    env_vars = prepare_runtime_environment(example_dummy_config())
+
+    assert wandb_environment.isdisjoint(env_vars)
+
+
 def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.delenv("NVTE_FP8_BLOCK_AMAX_EPSILON", raising=False)
