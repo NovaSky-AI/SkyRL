@@ -59,9 +59,20 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             )
 
     async def _render_conversation(self, conversation: ConversationType) -> RenderedConversation:
-        rendered = await self.inference_engine_client.render_chat_completion(
-            {"json": {"model": self.inference_engine_client.model_name, "messages": conversation}}
-        )
+        body: Dict[str, Any] = {"model": self.inference_engine_client.model_name, "messages": conversation}
+        # Honor generator.chat_template / chat_template_kwargs (already supported
+        # by the base generator) on the render path. The deferred obs-token
+        # extraction below requires each re-render to be a token-prefix
+        # extension of the previous one (see NOTE in agent_loop); thinking-model
+        # vendor templates strip reasoning from history and violate that, so a
+        # thinking-preserving custom template is the supported way to train
+        # them (issue #2075). Servers need trust_request_chat_template for
+        # per-request templates.
+        if self.custom_chat_template:
+            body["chat_template"] = self.custom_chat_template
+        if self.generator_cfg.chat_template_kwargs:
+            body["chat_template_kwargs"] = dict(self.generator_cfg.chat_template_kwargs)
+        rendered = await self.inference_engine_client.render_chat_completion({"json": body})
         return RenderedConversation(prompt_ids=rendered["token_ids"], features=rendered.get("features", None))
 
     async def agent_loop(
@@ -129,12 +140,14 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             # sequences which are a prefix of subsequent turns. In general, this
             # will not hold for thinking models, e.g., Qwen3-Thinking.
             pending_obs_offset: Optional[int] = None
+            last_render_ids: Optional[List[int]] = None
 
             while not done:
                 # 1. Render full conversation for this turn's generation input
                 rendered_conversation = await self._render_conversation(conversation)
                 input_ids = rendered_conversation["prompt_ids"]
                 latest_features = rendered_conversation["features"]
+                last_render_ids = input_ids
 
                 # 1b. Flush pending obs tokens from the previous turn
                 if pending_obs_offset is not None:
@@ -208,6 +221,28 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             mm_kwargs = decode_mm_kwargs((latest_features or {}).get("kwargs_data"))
             pixel_values = mm_kwargs["pixel_values"]
             image_grid_thw = mm_kwargs["image_grid_thw"]
+
+            # ── Integrity guard: image tokens vs features ─────────────────
+            # The model forward pairs each image token with exactly one
+            # feature row; a mismatch fails there as an opaque torch._check
+            # deep into training. Detect it here, per trajectory, with an
+            # actionable message. Uses the render response's mm_placeholders,
+            # so no model constants are needed.
+            placeholders = (latest_features or {}).get("mm_placeholders", {}).get("image", [])
+            if placeholders:
+                render_ids = last_render_ids if last_render_ids is not None else prompt_ids
+                ph0 = placeholders[0]
+                image_token = render_ids[ph0["offset"] + ph0["length"] // 2]
+                expected = sum(ph["length"] for ph in placeholders)
+                actual = (list(prompt_ids) + list(response_ids)).count(image_token)
+                if actual != expected:
+                    raise RuntimeError(
+                        f"trajectory image-token mismatch: sequence has {actual} image tokens, "
+                        f"render declares {expected} across {len(placeholders)} images "
+                        f"(stop_reason={stop_reason}). The trajectory token stream diverged from "
+                        f"the render -- typically a history-editing chat template breaking the "
+                        f"prefix-extension assumption (issue #2075)."
+                    )
 
             # ── Cleanup ───────────────────────────────────────────────────
             env_metrics = env.get_metrics()
