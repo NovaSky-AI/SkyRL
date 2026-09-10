@@ -83,12 +83,10 @@ cloud URI (traces stage locally and each closed window is uploaded, then deleted
 - The profiler advances one step per `optim_step` **for the owning model only**.
 - `max_session_duration_sec` (default 7200) releases the slot if a client never
   calls `/stop_profiling`.
-- **FSDP needs `trainer.policy.fsdp_config.cpu_offload=true`** in
-  `backend_config` whenever the policy is under offload management -- which
-  includes `colocate_all=false`, since `colocate_policy_ref` defaults to true.
-  The manual offload path uses `swap_tensors`, which fails while the profiler
-  holds parameter references. Only a fully uncolocated setup (both flags false)
-  can profile without it. Megatron is unaffected.
+- **FSDP with `colocate_all=true` needs `trainer.policy.fsdp_config.cpu_offload=true`**
+  in `backend_config`: the policy is offloaded between requests and the manual
+  path uses `swap_tensors`, which fails while the profiler holds parameter
+  references. Megatron is unaffected.
 - `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected at
   startup -- static config would fight the endpoints over `worker.profiler`.
 

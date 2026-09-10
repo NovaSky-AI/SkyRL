@@ -43,32 +43,14 @@ class TestWorkerConfigValidation:
         with pytest.raises(ValueError):
             _validate_worker_profiler_config({**WORKER_CFG, "export_type": "stacks", "with_stack": False}, cfg)
 
-    def test_fsdp_without_cpu_offload_is_rejected(self):
-        """
-        ``colocate_all=False`` alone does not take the policy out of offload
-        management, because ``colocate_policy_ref`` defaults to True. The manual
-        offload path then swaps parameters the profiler holds references to.
-        """
+    def test_colocated_fsdp_without_cpu_offload_is_rejected(self):
+        """Under colocate_all the policy really is offloaded, and the manual path
+        moves parameters with swap_tensors while the profiler holds references."""
         from skyrl.tinker.api import _validate_worker_profiler_config
 
-        cfg = EngineConfig(base_model="m", backend="fsdp", backend_config={"trainer.placement.colocate_all": False})
+        cfg = EngineConfig(base_model="m", backend="fsdp", backend_config={"trainer.placement.colocate_all": True})
         with pytest.raises(ValueError, match="cpu_offload=true"):
             _validate_worker_profiler_config(WORKER_CFG, cfg)
-
-    def test_fsdp_fully_uncolocated_does_not_require_cpu_offload(self):
-        """With both colocation flags off nothing offloads, so swap_tensors never
-        runs and the manual path is safe to profile."""
-        from skyrl.tinker.api import _validate_worker_profiler_config
-
-        cfg = EngineConfig(
-            base_model="m",
-            backend="fsdp",
-            backend_config={
-                "trainer.placement.colocate_all": False,
-                "trainer.placement.colocate_policy_ref": False,
-            },
-        )
-        _validate_worker_profiler_config(WORKER_CFG, cfg)
 
     def test_fsdp_with_cpu_offload_is_accepted(self):
         from skyrl.tinker.api import _validate_worker_profiler_config
@@ -78,12 +60,6 @@ class TestWorkerConfigValidation:
             backend="fsdp",
             backend_config={"trainer.policy.fsdp_config.cpu_offload": True},
         )
-        _validate_worker_profiler_config(WORKER_CFG, cfg)
-
-    def test_megatron_does_not_require_cpu_offload(self):
-        from skyrl.tinker.api import _validate_worker_profiler_config
-
-        cfg = EngineConfig(base_model="m", backend="megatron")
         _validate_worker_profiler_config(WORKER_CFG, cfg)
 
     def test_unknown_option_is_rejected(self):

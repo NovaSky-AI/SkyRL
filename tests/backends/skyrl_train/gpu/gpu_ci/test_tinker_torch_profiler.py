@@ -44,17 +44,11 @@ TINKER_API_KEY = "tml-dummy"
 TEST_PORT = 8013
 GLOBAL_STEP = 7
 
-# One GPU for the FSDP policy worker. cpu_offload=true is required to profile:
-# the default manual offload path moves parameters with torch.utils.swap_tensors,
-# which fails while the profiler holds references to them. That applies whenever
-# the policy is under offload management, which includes colocate_all=false since
-# colocate_policy_ref defaults to true.
 BACKEND_CONFIG = {
     "strategy": "fsdp",
     "trainer.placement.policy_num_gpus_per_node": 1,
     "trainer.placement.policy_num_nodes": 1,
     "trainer.placement.colocate_all": False,
-    "trainer.policy.fsdp_config.cpu_offload": True,
 }
 
 

@@ -9,12 +9,13 @@ set -euo pipefail
 # be a cloud URI (s3://, gs://, gcs://), in which case each closed window is
 # uploaded and the local copy dropped.
 #
-# FSDP needs cpu_offload=true whenever the policy is under offload management,
-# which includes colocate_all=false since colocate_policy_ref defaults to true.
-# The default manual offload path moves parameters with torch.utils.swap_tensors,
-# which fails while the profiler holds references to them.
+# colocate_all=false, so nothing offloads the policy and cpu_offload is left at
+# its default. To profile a colocated server instead, set colocate_all=true and
+# trainer.policy.fsdp_config.cpu_offload=true: the default manual offload path
+# moves parameters with torch.utils.swap_tensors, which fails while the profiler
+# holds references to them.
 
-DEFAULT_BACKEND_CONFIG='{"trainer.placement.colocate_all": false, "trainer.placement.policy_num_gpus_per_node": 1, "trainer.policy.fsdp_config.cpu_offload": true, "trainer.policy.model.lora.max_loras": 4}'
+DEFAULT_BACKEND_CONFIG='{"trainer.placement.colocate_all": false, "trainer.placement.policy_num_gpus_per_node": 1, "trainer.policy.model.lora.max_loras": 4}'
 BACKEND_CONFIG="${BACKEND_CONFIG:-$DEFAULT_BACKEND_CONFIG}"
 
 EXPORT_DIR="${EXPORT_DIR:-gs://sumanth-test/skyrl_traces_test/}"

@@ -1010,13 +1010,9 @@ def _validate_worker_profiler_config(worker_config: dict, engine_config: EngineC
 
     backend_cfg = engine_config.backend_config or {}
     probe = TorchProfilerConfig(**{**worker_config, "save_path": "/tmp/skyrl_profiler_validate"})
-    # Defaults mirror PlacementConfig's. colocate_policy_ref defaults to True and
-    # stays True when colocate_all is False, which still places the policy under
-    # offload management (WorkerDispatch._should_manage_offload).
     probe.validate(
         strategy=engine_config.backend,
         colocate_all=bool(backend_cfg.get("trainer.placement.colocate_all", True)),
-        colocate_policy_ref=bool(backend_cfg.get("trainer.placement.colocate_policy_ref", True)),
         fsdp_cpu_offload=bool(backend_cfg.get("trainer.policy.fsdp_config.cpu_offload", False)),
     )
 

@@ -104,7 +104,7 @@ Traces land in `{export_dir}/{global_step}_{export_path_extra}`. `schedule_optio
 Only one profiling session runs at a time server-wide — a second `/start_profiling` gets a `409`, and only the owning `model_id` may stop it. A non-empty target directory is also a `409` unless `overwrite: true` is passed.
 
 <Callout type="warn">
-On the FSDP backend, profiling requires `trainer.policy.fsdp_config.cpu_offload: true` whenever the policy is under offload management — which includes `colocate_all: false`, since `colocate_policy_ref` defaults to `true`. The manual offload path moves parameters with `torch.utils.swap_tensors`, which fails while the profiler holds references to them. Megatron is unaffected.
+On the FSDP backend with `colocate_all: true`, profiling requires `trainer.policy.fsdp_config.cpu_offload: true`. The policy is offloaded to CPU between requests, and the default manual offload path moves parameters with `torch.utils.swap_tensors`, which fails while the profiler holds references to them.
 </Callout>
 
 Only policy workers are profiled; inference engines are not. Setting `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected at startup — static config would compete with these endpoints for the same profiler.
