@@ -1,0 +1,118 @@
+---
+title: "Kimi K2.x: 1T-param RL with INT4 rollouts + LoRA"
+---
+
+<Callout type="info">
+Requires the `megatron` backend. The reference run uses two 8-GPU nodes
+(verified on 2 x 8 B300) at the full 262,144-token context.
+</Callout>
+
+This example trains **moonshotai/Kimi-K2.7-Code** — a 1T-parameter
+DeepSeek-V3-architecture MoE (61 layers, 384 routed experts, MLA) released as
+a `KimiK25ForConditionalGeneration` checkpoint whose expert weights are
+INT4 QAT-quantized (compressed-tensors pack-quantized, `group_size=32`,
+Kimi convention `scale_divisor=7.0 / q_min=-7`) — with GRPO (DAPO-style),
+LoRA, and bit-exact fake-INT4 quantization-aware training.
+
+## How the pieces fit together
+
+- **vLLM serves the release INT4 checkpoint as-is** (compressed-tensors
+  W4A16, ~595 GB), one engine per node, with the LoRA adapter hot-loaded from
+  disk after every optimizer step (`merge_lora=false`). The INT4 base weights
+  in the engine never change.
+- **The Megatron trainer holds BF16 "master" weights** dequantized from the
+  INT4 release, with LoRA adapters on `linear_proj` (attention out) and
+  `linear_fc1`/`linear_fc2` (dense MLP, shared expert, and all routed
+  experts — the routed experts carry ~96% of the parameters).
+- **Fake-INT4 QAT** (`trainer.policy.model.fake_int4_qat`) fake-quantizes the
+  frozen expert GEMMs onto the same INT4 grid in the trainer's forward pass
+  (straight-through backward). For Kimi QAT checkpoints the dequantized
+  masters are a *fixed point* of this quantizer, so the trainer's experts are
+  bit-exact with what vLLM serves; [TIS](../algorithms/off_policy_correction)
+  corrects the residual (LoRA-off-policy) mismatch.
+- **Text-only training** (`language_model_only=true` on both the trainer and
+  the inference engine): the vision tower stays frozen inside vLLM and is
+  never built on the Megatron side.
+
+## One-time setup
+
+**1) Dequantize the INT4 release to BF16 masters** on every node (or a shared
+filesystem). This also verifies, tensor by tensor, that re-quantizing the
+masters reproduces the released INT4 grid bit-for-bit:
+
+```bash
+uv run examples/train/megatron/dequantize_compressed_tensors_int4.py \
+    --input <path-to-Kimi-K2.7-Code-snapshot> \
+    --output /data/skyrl/models/Kimi-K2.7-Code-BF16
+```
+
+(~595 GB in, ~2.1 TB out. For RTN-quantized checkpoints — `scale_divisor=7.5`
+— use the original BF16 release as masters instead; a dequantized RTN grid is
+not its own fixed point and the script will fail loudly if you try.)
+
+**2) Download the math data** (any dataset/environment works; the reference
+script reuses the standard DAPO prep):
+
+```bash
+bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+```
+
+**3) Start Ray on both nodes** with the same repo checkout and venv path,
+then run the training script on the head node only. See the environment
+block in the run script for the CUDA-13 / cuDNN library paths that must be
+exported before `ray start` on every node.
+
+## Running
+
+```bash
+bash examples/train/megatron/run_megatron_dapo_kimi_k2.7_code_lora_int4_qat.sh
+```
+
+The key configuration (2 nodes x 8 GPUs, colocated):
+
+```bash
+# vLLM: one engine per node serving the INT4 release, TP=8
+NUM_INFERENCE_ENGINES=2
+INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
+
+# Megatron: TP=2 x CP=8 (DP=1), experts sharded EP=16 (24 experts/GPU/layer,
+# ~127 GB of frozen BF16 masters + ~12 GB non-expert per GPU)
+MEGATRON_TP=2  MEGATRON_CP=8  MEGATRON_EP=16  MEGATRON_ETP=1  MEGATRON_PP=1
+
+# Full 262,144-token context
+MAX_PROMPT_LENGTH=$((1024 * 8))
+MAX_RESPONSE_LENGTH=$((262144 - MAX_PROMPT_LENGTH))
+
+# INT4-served actor: trainer loads BF16 masters, fake-quantizes experts
+trainer.policy.model.path="moonshotai/Kimi-K2.7-Code"
+trainer.policy.model.fake_int4_qat.enabled=true
+trainer.policy.model.fake_int4_qat.scale_divisor=7.0   # Kimi QAT convention
+trainer.policy.model.fake_int4_qat.q_min=-7
+trainer.policy.model.fake_int4_qat.bf16_base_path=/data/skyrl/models/Kimi-K2.7-Code-BF16
+trainer.policy.megatron_config.lora_config.merge_lora=false
+trainer.policy.language_model_only=true
+generator.inference_engine.language_model_only=true
+trainer.flash_attn=false        # MLA + sample packing needs TE cuDNN fused attention
+```
+
+`QAT_MODE=off bash ...` runs the ablation: the INT4 engine stays, but the
+trainer's fake-quant and TIS are disabled, exposing the uncorrected
+train/infer mismatch (same toggle as the Qwen3.6 INT4 study).
+
+## Notes
+
+- **Multi-node adapter sync**: with `merge_lora=false` the adapter files are
+  written once per node (each vLLM worker reads `lora_sync_path` from its
+  local filesystem), so no shared filesystem is required.
+- **Blackwell-Ultra (B300 / sm103)** needs the CUDA-13 dependency stack (the
+  cu12x vLLM wheels ship no sm103 kernel images): install it with
+  `bash deploy/cuda13/install.sh` (see `deploy/cuda13/README.md`; NVIDIA
+  driver >= R580 and a CUDA >= 13.0 toolkit required), and see the
+  environment block in the run script for the runtime library paths.
+- The LoRA targets deliberately exclude the MLA q/kv projections: mcore names
+  them differently (`linear_q_down_proj`, ...) and vLLM's MLA weight
+  absorption does not apply adapters to `kv_b_proj`.
+- Checkpoints save the LoRA adapters + optimizer state only (the frozen base
+  is reloaded from `bf16_base_path` on resume); exported adapters reference
+  the INT4 release as `base_model_name_or_path`, so they can be served
+  directly against the public checkpoint.
