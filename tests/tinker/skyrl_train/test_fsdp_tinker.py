@@ -6,20 +6,17 @@ module need at least one GPU and the ``tinker`` + ``fsdp`` extras installed. The
 sampling test additionally brings up a vLLM engine (non-colocated), so a second
 GPU is required for it.
 
-Scope: this mirrors ``test_multi_lora_megatron.py`` but exercises only the
-*single-adapter* (non multi-LoRA) path on FSDP — multi-tenant LoRA / the
-worker-side AdapterStore is currently Megatron-only and the FSDP worker raises
-a clear ``NotImplementedError`` for it. FSDP therefore supports exactly one
-adapter for the lifetime of a server, so every test shares one module-scoped
-training client. These tests confirm that initialising an FSDP Tinker engine
-and sending basic requests works:
+Scope: this mirrors ``test_multi_lora_megatron.py`` using FSDP's CPU-backed
+adapter store. FSDP keeps one PEFT adapter live on GPU and swaps per-model
+weights, gradients, and optimizer state between requests.
 
   - test_forward_backward_optim_step_improves_loss: the adapter trains; loss on
     a fixed micro-batch decreases after an optim step.
   - test_forward_only_returns_logprobs: a forward-only pass returns per-token
     logprobs + elementwise loss without mutating optimizer state.
-  - test_second_adapter_rejected: creating a second adapter is rejected with a
-    clear NotImplementedError (multi-tenant LoRA is Megatron-only for now).
+  - test_second_adapter_trains: a second adapter can be registered and trained.
+  - test_per_adapter_step_isolation: identical alternating updates keep two
+    pristine adapters bit-identical.
   - test_sample_after_training: weight-sync to vLLM + greedy sampling returns a
     deterministic token sequence.
 
@@ -83,11 +80,7 @@ def _api_server(port: int, backend_config: dict | None = None):
         cmd = [
             "uv",
             "run",
-            "--isolated",
-            "--extra",
-            "tinker",
-            "--extra",
-            "fsdp",
+            "--no-sync",
             "-m",
             "skyrl.tinker.api",
             "--host",
@@ -162,9 +155,8 @@ def service_client(server):
 def training_client(server):
     """A single LoRA training client shared by every test.
 
-    FSDP supports exactly one adapter per server (multi-tenant LoRA is
-    Megatron-only), so all tests must reuse the same client. Tests are additive
-    (each mutates the shared adapter) but their assertions are self-contained.
+    Tests are additive (each mutates the shared adapter) but their assertions
+    are self-contained.
     """
     sc = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_PORT}/", api_key=TINKER_API_KEY)
     return sc.create_lora_training_client(base_model=BASE_MODEL, rank=8)
@@ -209,12 +201,37 @@ def test_forward_only_returns_logprobs(training_client):
     assert all(isinstance(x, float) for x in logprobs)
 
 
-def test_second_adapter_rejected(training_client, service_client):
-    """Test that creating a second adapter against the same FSDP server is rejected."""
-    with pytest.raises(Exception) as exc:
-        service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
-    msg = str(exc.value).lower()
-    assert "not implemented" in msg
+def test_second_adapter_trains(training_client, service_client):
+    """A second adapter can train without rebuilding the FSDP worker group."""
+    second_client = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+    tok = second_client.get_tokenizer()
+    data = [_make_datum(tok, "Question: 3+3?\nAnswer:", " 6")]
+
+    output = second_client.forward_backward(data, "cross_entropy").result()
+    second_client.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
+
+    assert _sum_loss(output) > 0
+
+
+def test_per_adapter_step_isolation(service_client):
+    """Adam state and weights advance independently for each adapter."""
+    client_a = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+    client_b = service_client.create_lora_training_client(base_model=BASE_MODEL, rank=8)
+    tok = client_a.get_tokenizer()
+    data = [_make_datum(tok, "Question: 4+4?\nAnswer:", " 8")]
+
+    def forward_backward_and_step(client):
+        output = client.forward_backward(data, "cross_entropy").result()
+        client.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
+        return _sum_loss(output)
+
+    a_step_0 = forward_backward_and_step(client_a)
+    b_step_0 = forward_backward_and_step(client_b)
+    a_step_1 = forward_backward_and_step(client_a)
+    b_step_1 = forward_backward_and_step(client_b)
+
+    assert a_step_0 == b_step_0
+    assert a_step_1 == b_step_1
 
 
 @pytest.mark.skipif(cuda_device_count < 2, reason="sampling brings up a separate vLLM engine (needs a 2nd GPU)")
