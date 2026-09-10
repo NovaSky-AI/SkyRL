@@ -8,6 +8,13 @@ fp8_param=true persistent params for the fp8_param row) and vLLM
 (quantization=fp8 fed by fp8_weight_sync_mode=blockwise), with FP32
 block scales (NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1, set by
 _extra_env_vars_for_model). Select them with: -k "full_fp8 or fp8_param".
+
+The glm-5.3-flash-full row loads the real 45-layer GLM-5.3-Flash checkpoint (~313B params,
+~627 GiB in bf16) and needs a single 8xB300 node. It carries pytest.mark.b300 and is
+auto-skipped everywhere else; run it with:
+
+uv run --isolated --extra dev --extra megatron -- pytest -s -m b300 \
+    tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py
 """
 
 import os
@@ -137,6 +144,10 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
     # fla's TileLang GDN backend aborts on Blackwell; fall back to Triton.
     if "qwen3.5" in model_name.lower():
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0" if is_blackwell_or_newer() else "1")
+    # Same story for GLM-5.3-Flash's KDA layers, which run fla kernels too. Only forced on
+    # Blackwell so the H100 rows keep whatever fla picks by default.
+    if "glm-5.3-flash" in model_name.lower() and is_blackwell_or_newer():
+        env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0")
     return env or None
 
 
@@ -303,6 +314,36 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             id="glm-5.3-flash-4layer_h100_tp2_ep4",
             marks=pytest.mark.h100,
+        ),
+        # GLM-5.3-Flash, the full 45-layer checkpoint: 34 KDA + 11 NoPE-MLA/DSA layers,
+        # 3 dense + 42 x 288-expert MoE, mHC on every block. ~313B params in bf16 (~627 GiB,
+        # 97% of it routed experts) with ~17B activated, so it needs a whole 8xB300 node
+        # (288 GiB/GPU) and is not part of any CI suite -- opt in with `-m b300`.
+        #
+        # Mesh: Megatron TP2 EP8 ETP1 -> DP4 (EP x ETP == TP x DP), vLLM TP8 colocated on the
+        # same 8 GPUs. EP is the scaling dimension for a MoE this sparse -- 36 experts/GPU,
+        # ~76 GiB -- while TP only has to cover the ~9B of non-expert weights. PP stays at 1
+        # because megatron-core rejects mHC with pipeline_model_parallel_size > 1, and CP at 1
+        # because KDA has no context-parallel path.
+        #
+        # Unlike the 4-layer slice this is a coherent model, so generation should read as
+        # sensible text both before and after weight sync. Thresholds mirror the other
+        # large-MoE entries rather than the slice's looser ones; they have not been measured
+        # on this checkpoint yet, so expect to tune them on the first run.
+        pytest.param(
+            2,
+            1,
+            1,
+            8,
+            1,
+            8,
+            8,
+            "zai-org/GLM-5.3-Flash",
+            3e-1,
+            5e-2,
+            None,
+            id="glm-5.3-flash-full_b300_tp2_ep8",
+            marks=pytest.mark.b300,
         ),
         pytest.param(
             2,
