@@ -20,6 +20,8 @@ BACKEND_CONFIG="${BACKEND_CONFIG:-$DEFAULT_BACKEND_CONFIG}"
 EXPORT_DIR="${EXPORT_DIR:-/tmp/skyrl_traces}"
 TORCH_PROFILER="{\"export_dir\": \"${EXPORT_DIR}\", \"ranks\": [0]}"
 
+export SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1
+
 uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
   --base-model "Qwen/Qwen3-0.6B" \
   --backend fsdp \
