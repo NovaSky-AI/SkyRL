@@ -301,6 +301,22 @@ def load_megatron_model_to_gpu(models):
 
 
 @torch.no_grad()
+def release_megatron_model_cpu_copy(models):
+    """Release host copies after model parameters are restored to GPU."""
+    for model_chunk in models:
+        if not isinstance(model_chunk, DDP):
+            continue
+
+        for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+            buffer.param_data_cpu = None
+
+        for _, param in model_chunk.named_parameters():
+            if hasattr(param, "_offload_cpu_data"):
+                del param._offload_cpu_data
+                del param._offload_cuda_numel
+
+
+@torch.no_grad()
 def offload_megatron_copy_params(optimizers):
     """
     Offload optimizer parameters to CPU. Supports both Megatron optimizers
