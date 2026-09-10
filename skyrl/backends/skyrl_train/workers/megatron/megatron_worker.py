@@ -1491,13 +1491,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         from safetensors.torch import save_file
 
         # Every rank must participate in the bridge's collective export, but only
-        # the per-node writer ranks materialize the gathered tensors: with MoE
-        # expert adapters the full float32 adapter state can reach tens of GB
-        # (per-expert replication), and keeping a copy on all ranks multiplies
-        # the CPU spike by ranks-per-node (enough to OOM a node during sync).
+        # the writer ranks materialize the gathered tensors: with MoE expert
+        # adapters the full adapter state can reach tens of GB (per-expert
+        # replication), and keeping a copy on all ranks multiplies the CPU
+        # spike by ranks-per-node (enough to OOM a node during sync). `cpu`
+        # only gates the bridge's trailing device-to-host copy (not its
+        # collectives), so non-writers skip that copy for tensors they discard.
         keep_state = self._is_lora_sync_writer_rank()
         adapter_state = {}
-        for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
+        for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=keep_state, show_progress=False):
             if keep_state:
                 # Keep the training dtype (bf16): upcasting to float32 doubles
                 # the already-large per-expert adapter state (and the file the
