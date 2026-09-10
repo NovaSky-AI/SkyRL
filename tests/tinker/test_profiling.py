@@ -499,3 +499,146 @@ async def test_status_endpoint_reports_a_missing_control_row():
         await profiling_status(request)
     assert excinfo.value.status_code == 500
     assert "missing" in excinfo.value.detail
+
+
+async def _server_with_running_session(owner: str = "model-a", loaded=("model-a", "model-b")):
+    """A DB where ``owner`` already holds the profiling slot, plus a request stub.
+
+    Returns (db_engine, request). The models in ``loaded`` exist, so endpoint
+    checks that run before the slot logic pass and the status code under test is
+    the one the ownership rules produce.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlmodel.ext.asyncio.session import AsyncSession
+
+    from skyrl.tinker.db_models import ModelDB, SessionDB
+
+    db_engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with db_engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+    async with AsyncSession(db_engine) as s:
+        s.add(SessionDB(session_id="sess-1", sdk_version="0.0.0"))
+        for model_id in loaded:
+            s.add(
+                ModelDB(
+                    model_id=model_id,
+                    base_model="m",
+                    lora_config={},
+                    status="active",
+                    request_id=1,
+                    session_id="sess-1",
+                )
+            )
+        s.add(
+            ProfilerControlDB(
+                singleton_id=1,
+                desired_state=ProfilerState.RUNNING,
+                owner_model_id=owner,
+                config_json=json.dumps(WORKER_CFG),
+                version=1,
+                applied_version=1,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                db_engine=db_engine,
+                profiler_cfg=TinkerTorchProfilerConfig(**PROFILER_CFG),
+                engine_config=EngineConfig(
+                    base_model="m",
+                    backend="fsdp",
+                    torch_profiler=PROFILER_CFG,
+                    # Uncolocated: the request itself must be valid, so the status
+                    # under test comes from the ownership rules rather than from
+                    # config validation, which runs first.
+                    backend_config={"trainer.placement.colocate_all": False},
+                ),
+            )
+        )
+    )
+    return db_engine, request
+
+
+async def _read_row(db_engine):
+    from sqlmodel.ext.asyncio.session import AsyncSession
+
+    async with AsyncSession(db_engine) as s:
+        return await s.get(ProfilerControlDB, 1)
+
+
+@pytest.mark.asyncio
+async def test_second_client_cannot_start_while_a_session_is_running():
+    """A second client calling /start_profiling while another holds the slot gets a
+    409 naming the owner, and the control row is left untouched so the engine never
+    sees a second claim.
+
+    TestStartCAS exercises the UPDATE predicate directly; this goes through
+    start_profiling itself, with a different model_id than the one holding the slot.
+    """
+    from fastapi import HTTPException
+
+    from skyrl.tinker.api import StartProfilingRequest, start_profiling
+
+    db_engine, request = await _server_with_running_session(owner="model-a")
+
+    with pytest.raises(HTTPException) as excinfo:
+        await start_profiling(StartProfilingRequest(model_id="model-b", global_step=1), request)
+
+    assert excinfo.value.status_code == 409
+    assert "model-a" in excinfo.value.detail
+
+    row = await _read_row(db_engine)
+    assert row.owner_model_id == "model-a"
+    assert row.version == 1, "a refused claim must not bump the version"
+    assert row.desired_state == ProfilerState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_second_client_cannot_stop_another_clients_session():
+    """/stop_profiling from a model that does not own the session is a 409, and the
+    session keeps running. Otherwise one client could truncate another's capture."""
+    from fastapi import HTTPException
+
+    from skyrl.tinker.api import StopProfilingRequest, stop_profiling
+
+    db_engine, request = await _server_with_running_session(owner="model-a")
+
+    with pytest.raises(HTTPException) as excinfo:
+        await stop_profiling(StopProfilingRequest(model_id="model-b"), request)
+
+    assert excinfo.value.status_code == 409
+    assert "model-a" in excinfo.value.detail and "model-b" in excinfo.value.detail
+
+    row = await _read_row(db_engine)
+    assert row.desired_state == ProfilerState.RUNNING, "the owner's session must survive"
+    assert row.owner_model_id == "model-a"
+    assert row.version == 1, "a refused release must not bump the version"
+
+
+@pytest.mark.asyncio
+async def test_stop_is_refused_when_no_session_is_running():
+    """/stop_profiling with nothing running is a 409 rather than a silent success."""
+    from fastapi import HTTPException
+    from sqlmodel.ext.asyncio.session import AsyncSession
+
+    from skyrl.tinker.api import StopProfilingRequest, stop_profiling
+
+    db_engine, request = await _server_with_running_session(owner="model-a")
+    async with AsyncSession(db_engine) as s:
+        row = await s.get(ProfilerControlDB, 1)
+        row.desired_state = ProfilerState.STOPPED
+        row.owner_model_id = None
+        s.add(row)
+        await s.commit()
+
+    with pytest.raises(HTTPException) as excinfo:
+        await stop_profiling(StopProfilingRequest(model_id="model-a"), request)
+
+    assert excinfo.value.status_code == 409
+    assert "no profiling session is active" in excinfo.value.detail
