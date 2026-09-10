@@ -1009,13 +1009,13 @@ def vocab_parallel_entropy_packed_sequences(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     chunk_size: Optional[int] = None,
     chunk_memory_mb: int = 512,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute action-token entropy directly on TP+CP sharded packed logits.
 
     Returns:
-        A tuple of (global entropy metric, local entropy term for loss). The
-        local term is normalized by the global action-token count. Megatron's
-        schedule already applies the CP loss scale for two-output loss funcs.
+        A tuple of (global entropy metric, local entropy term for loss, global entropy sum,
+        global action-token count). The local term is normalized by the global action-token
+        count. Megatron's schedule already applies the CP loss scale for two-output loss funcs.
     """
     device = vocab_parallel_logits.device
     dtype = vocab_parallel_logits.dtype
@@ -1080,11 +1080,11 @@ def vocab_parallel_entropy_packed_sequences(
     if cp_size > 1:
         torch.distributed.all_reduce(global_count, group=cp_group)
         torch.distributed.all_reduce(global_entropy_sum, group=cp_group)
-    global_count = global_count.clamp(min=1.0)
-
-    entropy = global_entropy_sum / global_count
-    entropy_for_loss = local_entropy_sum / global_count
-    return entropy, entropy_for_loss
+    # `global_count` is returned unclamped so the metric nnz is exact; it is only clamped
+    # (to guard a divide-by-zero) inside the per-micro-batch mean below.
+    entropy = global_entropy_sum / global_count.clamp(min=1.0)
+    entropy_for_loss = local_entropy_sum / global_count.clamp(min=1.0)
+    return entropy, entropy_for_loss, global_entropy_sum, global_count
 
 
 def _fused_vocab_parallel_entropy_from_hidden(
@@ -1134,7 +1134,7 @@ def from_parallel_hidden_to_entropy_packed_sequences(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     chunk_size: Optional[int] = None,
     temperature: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused-LM-head variant of :func:`vocab_parallel_entropy_packed_sequences`.
 
     Identical action-token weighting / CP logic, but per-token entropy is
@@ -1201,11 +1201,11 @@ def from_parallel_hidden_to_entropy_packed_sequences(
     if cp_size > 1:
         torch.distributed.all_reduce(global_count, group=cp_group)
         torch.distributed.all_reduce(global_entropy_sum, group=cp_group)
-    global_count = global_count.clamp(min=1.0)
-
-    entropy = global_entropy_sum / global_count
-    entropy_for_loss = local_entropy_sum / global_count
-    return entropy, entropy_for_loss
+    # `global_count` is returned unclamped so the metric nnz is exact; it is only clamped
+    # (to guard a divide-by-zero) inside the per-micro-batch mean below.
+    entropy = global_entropy_sum / global_count.clamp(min=1.0)
+    entropy_for_loss = local_entropy_sum / global_count.clamp(min=1.0)
+    return entropy, entropy_for_loss, global_entropy_sum, global_count
 
 
 class AllGatherPackedCPTensor(torch.autograd.Function):
