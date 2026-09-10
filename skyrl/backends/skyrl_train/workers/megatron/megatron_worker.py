@@ -1624,9 +1624,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             raise RuntimeError("AdapterStore not initialised (FFT path)")
         self.adapter_store.delete(model_id)
         # Drop the per-tenant safetensors subdir written by
-        # _save_lora_adapters_and_sync. Rank 0 wrote it; rank 0 cleans it.
-        # Other ranks no-op. Best-effort — log on failure but don't propagate.
-        if self._rank == 0:
+        # _save_lora_adapters_and_sync. The first rank on each node wrote it
+        # (see _is_lora_sync_writer_rank), so the same rank cleans it; other
+        # ranks no-op. All ranks run delete_adapter (pass_through dispatch), so
+        # the predicate's one-time collective is safe here even before the
+        # first sync. Best-effort — log on failure but don't propagate.
+        if self._is_lora_sync_writer_rank():
             _, lora_sync_path = self._resolve_lora_sync_target(model_id)
             base_sync_path = self.cfg.policy.model.lora.lora_sync_path
             if lora_sync_path != base_sync_path:
