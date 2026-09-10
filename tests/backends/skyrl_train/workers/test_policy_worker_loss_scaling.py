@@ -103,6 +103,42 @@ def _all_reduce_payload(strategy, op, key):
     raise AssertionError(f"No all_reduce call found for op={op!r}, key={key!r}")
 
 
+def test_policy_forward_trims_dense_fsdp_microbatches_and_restores_output_width():
+    cfg = _make_loss_scaling_cfg("dual_clip", micro_batch_size=1)
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.max_tokens_per_microbatch = -1
+
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[0, 0, 0, 0, 11, 12], [21, 22, 23, 24, 25, 26]]),
+            "attention_mask": torch.tensor([[0, 0, 0, 0, 1, 1], [1, 1, 1, 1, 1, 1]]),
+            "response_mask": torch.tensor([[0, 0, 1], [1, 1, 1]]),
+        }
+    )
+    batch.metadata = {"response_length": 3}
+
+    model_calls = []
+
+    def model_forward(sequences, num_actions, attention_mask, **kwargs):
+        model_calls.append((sequences.clone(), num_actions, attention_mask.clone()))
+        return torch.ones((sequences.shape[0], num_actions))
+
+    model = MagicMock(side_effect=model_forward)
+    worker = _make_policy_worker(cfg, model=model)
+
+    with _patch_worker_cuda_for_cpu():
+        result = worker.forward(batch)
+
+    assert [(call[0].shape, call[1]) for call in model_calls] == [
+        (torch.Size([1, 2]), 1),
+        (torch.Size([1, 6]), 3),
+    ]
+    assert result.loss_fn_outputs == [
+        {"logprobs": [0.0, 0.0, 1.0]},
+        {"logprobs": [1.0, 1.0, 1.0]},
+    ]
+
+
 @pytest.mark.parametrize("loss_fn", ["cross_entropy", "dual_clip"])
 def test_policy_forward_backward_loss_scaling_with_mocked_ranks(loss_fn):
     """FSDP forward_backward scales local microbatch losses before DP reduction."""
