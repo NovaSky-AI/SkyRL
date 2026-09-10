@@ -20,6 +20,7 @@ from vllm_router.router_args import RouterArgs
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
     find_and_reserve_port,
+    format_http_url,
     get_node_ip,
 )
 from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
@@ -121,7 +122,7 @@ class VLLMRouter:
         self._process.start()
 
         ip = get_node_ip()
-        router_url = f"http://{ip}:{self._router_args.port}"
+        router_url = format_http_url(ip, self._router_args.port)
         self._wait_until_healthy(router_url)
 
         is_pd = self._router_args.vllm_pd_disaggregation or self._router_args.pd_disaggregation
