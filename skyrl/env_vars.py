@@ -90,6 +90,28 @@ See https://github.com/ray-project/ray/issues/56697 for details on why this is n
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Attention
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_DISABLE_FA4 = str(os.environ.get("SKYRL_DISABLE_FA4", "False")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+"""
+Force Transformer Engine to ignore FlashAttention 4, falling back to FA2 (or
+cuDNN fused attention). FA4 is opt-in via the ``fa4`` extra -- SkyRL ships FA4's
+kernels inside the combined ``flash-attn`` wheel, but TE only enables them when
+the metadata-only ``flash-attn-4`` companion is installed. This variable turns
+FA4 back off for an environment that already has it, without re-resolving.
+
+Useful for A/B-ing FA2 against FA4 without rebuilding the environment, and as an
+escape hatch if an FA4 kernel misbehaves on a shape SkyRL exercises.
+
+Default: False (use FA4 where supported).
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────────────────────────────────────
 

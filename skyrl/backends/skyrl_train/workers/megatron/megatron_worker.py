@@ -53,6 +53,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
 from skyrl.backends.skyrl_train.patches.megatron.patch_mla_thd_v_pad import (
     patch_mla_thd_v_pad,
 )
+from skyrl.backends.skyrl_train.patches.te.disable_fa4 import (
+    disable_fa4_if_requested,
+)
 from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
@@ -754,6 +757,10 @@ class MegatronWorker:
         # TE patch to allow FA2 for head_dim 256 on SM103 (B300)
         # Delete along with the patch module once the TE pin includes NVIDIA/TransformerEngine#3360.
         patch_fa2_head_dim_allowlist()
+
+        # Honor SKYRL_DISABLE_FA4. FA4 is otherwise opt-in via the `fa4` extra;
+        # this turns it back off without rebuilding the environment.
+        disable_fa4_if_requested()
 
         # Isolate the DSA index-share holder per checkpointed forward (GLM 5 and
         # other DSA models under activation recompute on the non-packed path).
