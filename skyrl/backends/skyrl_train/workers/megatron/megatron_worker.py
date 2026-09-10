@@ -53,11 +53,11 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
 from skyrl.backends.skyrl_train.patches.megatron.patch_mla_thd_v_pad import (
     patch_mla_thd_v_pad,
 )
+from skyrl.backends.skyrl_train.patches.te.disable_fa4 import (
+    disable_fa4_if_requested,
+)
 from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
-)
-from skyrl.backends.skyrl_train.patches.te.patch_fa4_sm_arch import (
-    patch_fa4_sm_arch,
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
@@ -758,10 +758,9 @@ class MegatronWorker:
         # Delete along with the patch module once the TE pin includes NVIDIA/TransformerEngine#3360.
         patch_fa2_head_dim_allowlist()
 
-        # TE's FA4 gate only excludes < sm80, so sm86/sm87/sm89 (L4, L40S, A10)
-        # select FA4 and then fail to launch its kernels. Delete along with the
-        # patch module once the TE pin's FA4 gate matches FA4's real support.
-        patch_fa4_sm_arch()
+        # Honor SKYRL_DISABLE_FA4. FA4 is otherwise opt-in via the `fa4` extra;
+        # this turns it back off without rebuilding the environment.
+        disable_fa4_if_requested()
 
         # Isolate the DSA index-share holder per checkpointed forward (GLM 5 and
         # other DSA models under activation recompute on the non-packed path).

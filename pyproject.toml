@@ -148,17 +148,6 @@ megatron = [
     # metadata requires there, so the two agree without an override.
     "transformer-engine-cu13==2.16.0+cu.13.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
-    # FA4 ships only inside the combined wheels below, which cover cp312-cp314
-    # on x86_64 and aarch64 -- hence both bounds here, and dropping either one
-    # breaks resolution outright:
-    #   * `< '3.15'` matches the companion's own `Requires-Python`. skyrl's
-    #     `requires-python` has no upper bound, so uv resolves a 3.15 split in
-    #     which the companion would have no eligible version.
-    #   * the `platform_machine` bound keeps the companion off other Linux
-    #     arches, where no combined wheel exists: `flash-attn` there resolves to
-    #     plain PyPI 2.8.3, which cannot satisfy the companion's hard dep on
-    #     ==2.8.3+cu.13.0.torch.2.13.fa4b28.skyrl1.
-    "flash-attn-4[cu13]==4.0.0b28; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64') and python_version < '3.15'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1; sys_platform == 'linux'",
@@ -179,6 +168,35 @@ megatron = [
     "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
     "fast-hadamard-transform; sys_platform == 'linux'",
+]
+
+# Opt-in FlashAttention 4. NOT part of `megatron`, so the default install runs FA2.
+#
+# The combined `flash-attn` wheel (see [tool.uv.sources]) always carries FA4's
+# `flash_attn/cute/` tree -- that is what stops it colliding with flash-attn 2's
+# stale copy. But both consumers gate on the *`flash-attn-4` distribution
+# metadata*, not on the tree:
+#   * Transformer Engine: `get_pkg_version("flash-attn-4")` raising
+#     PackageNotFoundError leaves `flash_attn_func_v4 = None`, so TE never
+#     imports or dispatches to FA4.
+#   * megatron-core: `HAVE_FA4` is False for the same reason.
+# So installing this companion is exactly the switch that turns FA4 on, and
+# leaving it out keeps FA2 as the default with no shim and no runtime patching.
+#
+# Markers: `< '3.15'` matches the companion's own `Requires-Python`, and the
+# `platform_machine` bound keeps it off Linux arches with no combined wheel
+# (there `flash-attn` resolves to plain PyPI 2.8.3, which cannot satisfy the
+# companion's hard dep on ==2.8.3+cu.13.0.torch.2.13.fa4b28.skyrl1). Dropping
+# either bound makes resolution fail outright.
+#
+# FA4 4.0.0b28 is a beta, and TE disables it under context parallelism (TE <= 2.18;
+# main lifts this for cp_comm_type p2p/all_gather/a2a). Note TE 2.16's arch gate
+# only excludes < sm80, so FA4 is selected on sm86/sm87/sm89 (A10, L4, L40S, 4090)
+# where its kernels cannot launch -- set SKYRL_DISABLE_FA4=1 there, or just do not
+# install this extra.
+fa4 = [
+    "skyrl[megatron]",
+    "flash-attn-4[cu13]==4.0.0b28; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64') and python_version < '3.15'",
 ]
 
 miniswe = [
