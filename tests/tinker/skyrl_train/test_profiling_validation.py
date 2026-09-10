@@ -1,10 +1,7 @@
 """Validation for /start_profiling that reaches into SkyRL-Train config.
 
-Lives here rather than in ``tests/tinker/`` because these exercise
-``TorchProfilerConfig`` and the SkyRL-Train backend, which need the fsdp/megatron
-extras. The top-level tinker suite runs jax-only. CPU-only: no Ray, no GPU. Run:
-  uv run --isolated --extra tinker --extra fsdp --with pytest \\
-    pytest tests/tinker/skyrl_train/test_profiling_validation.py
+Run:  uv run --isolated --extra skyrl-train --extra tinker --extra dev \\
+    pytest tests/tinker/skyrl_train/
 """
 
 from __future__ import annotations
