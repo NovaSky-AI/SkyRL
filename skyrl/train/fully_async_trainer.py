@@ -527,6 +527,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                     with Timer("step", self.all_timings):
+                        self._mark_step_start()
                         self._loop_gauges.set(
                             "skyrl_gen_buffer_qsize",
                             generation_output_group_buffer.qsize(),
@@ -644,6 +645,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if self._vllm_metrics_scraper is not None:
                         timing_payload.update(await self._vllm_metrics_scraper.sample())
                     self.tracker.log(timing_payload, step=self.global_step, commit=True)
+                    self._mark_step_end()
                     self.all_timings = {}
                     self.global_step += 1
 
