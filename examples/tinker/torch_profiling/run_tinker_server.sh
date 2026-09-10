@@ -17,12 +17,12 @@ set -euo pipefail
 DEFAULT_BACKEND_CONFIG='{"trainer.placement.colocate_all": false, "trainer.placement.policy_num_gpus_per_node": 1, "trainer.policy.fsdp_config.cpu_offload": true, "trainer.policy.model.lora.max_loras": 4}'
 BACKEND_CONFIG="${BACKEND_CONFIG:-$DEFAULT_BACKEND_CONFIG}"
 
-EXPORT_DIR="${EXPORT_DIR:-/tmp/skyrl_traces}"
+EXPORT_DIR="${EXPORT_DIR:-gs://sumanth-test/skyrl_traces_test/}"
 TORCH_PROFILER="{\"export_dir\": \"${EXPORT_DIR}\", \"ranks\": [0]}"
 
 export SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1
 
-uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
+uv run --extra tinker --extra fsdp --with ray==2.56 -m skyrl.tinker.api \
   --base-model "Qwen/Qwen3-0.6B" \
   --backend fsdp \
   --port 8000 \
