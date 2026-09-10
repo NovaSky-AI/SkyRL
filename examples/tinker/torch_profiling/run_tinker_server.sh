@@ -23,7 +23,7 @@ TORCH_PROFILER="{\"export_dir\": \"${EXPORT_DIR}\", \"ranks\": [0]}"
 
 export SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1
 
-uv run --extra tinker --extra fsdp --with ray==2.56 -m skyrl.tinker.api \
+uv run --extra tinker --extra fsdp --isolated -m skyrl.tinker.api \
   --base-model "Qwen/Qwen3-0.6B" \
   --backend fsdp \
   --port 8000 \

@@ -62,8 +62,6 @@ def _api_server(port: int, export_dir: str):
             "tinker",
             "--extra",
             "fsdp",
-            "--with",
-            "ray==2.56.0",
             "-m",
             "skyrl.tinker.api",
             "--host",
