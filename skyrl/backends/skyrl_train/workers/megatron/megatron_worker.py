@@ -548,6 +548,24 @@ class MegatronWorker:
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+        normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
+        if normalize_moe_lora and getattr(self.provider, "num_moe_experts", None):
+            # megatron-bridge rounds the expert rank (rank // topk) up to a
+            # multiple of expert TP. vLLM sizes its LoRA buffers from r = rank
+            # (adapter_config.json / max_lora_rank), so a rounded expert rank
+            # above that cannot be loaded.
+            topk = self.provider.moe_router_topk
+            etp = mpu.get_expert_tensor_parallel_world_size()
+            assert lora_config.rank % topk == 0, (
+                f"normalize_moe_lora requires lora.rank divisible by moe_router_topk; "
+                f"got rank={lora_config.rank}, topk={topk}"
+            )
+            expert_rank = -(-(lora_config.rank // topk) // etp) * etp
+            assert expert_rank <= lora_config.rank, (
+                f"normalize_moe_lora: expert rank {lora_config.rank // topk} (rank {lora_config.rank} // topk "
+                f"{topk}) rounds up to {expert_rank} for expert_tensor_parallel_size={etp}, exceeding the "
+                f"LoRA rank {lora_config.rank} that vLLM max_lora_rank is sized from"
+            )
         if lora_type == "lora":
             self.lora_cls = LoRA(
                 target_modules=(
