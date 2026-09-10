@@ -89,6 +89,17 @@ def _build_skyrl_train_config(
 
     # Apply user overrides from backend_config
     user_overrides = dict(overrides.model_extra)
+    # The Tinker path drives profiling through /start_profiling, which builds the
+    # profiler at request time. A static config here would fight it over the single
+    # `worker.profiler` slot, so reject it rather than letting both sources win
+    # unpredictably.
+    profiler_keys = [k for k in user_overrides if k.startswith("trainer.policy.torch_profiler_config")]
+    if profiler_keys:
+        raise ValueError(
+            f"`backend_config` may not set {sorted(profiler_keys)}. The Tinker server controls "
+            f"torch profiling at runtime: start the server with --torch-profiler to enable the "
+            f"endpoints, then call /start_profiling and /stop_profiling."
+        )
     # override base model path
     # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
     # that resolves other config derived from the policy model path.
@@ -141,6 +152,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._model_metadata: dict[str, types.ModelMetadata] = {}
         self._cfg = None
         self._dispatch: WorkerDispatch | None = None
+        # True while a Tinker profiling session is live on the policy workers.
+        self._profiling = False
         self._colocate_pg: ResolvedPlacementGroup | None = None
         self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
@@ -594,6 +607,15 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Last model (or non-LoRA path): tear down the shared Ray runtime.
         # The Tinker engine will rebuild on the next create_model().
+        # Stop profiling first: teardown destroys the workers holding the profiler,
+        # and stopping flushes and uploads the open window instead of losing it.
+        if getattr(self, "_profiling", False):
+            logger.info("Stopping active profiling session before runtime teardown")
+            try:
+                self.stop_profile()
+            except Exception as e:
+                logger.warning(f"[profiler] auto-stop during delete_model failed: {e}")
+                self._profiling = False
         logger.info(f"Deleting model {model_id}, shutting down shared SkyRL-Train runtime...")
         for group in self._server_groups:
             group.shutdown()
@@ -1023,6 +1045,34 @@ class SkyRLTrainBackend(AbstractBackend):
                 metrics={},
             )
         return results
+
+    # ------------------------------------------------------------------
+    # torch.profiler control for the Tinker /start_profiling endpoints.
+    # Only the policy role is profiled, matching the trainer path.
+    # ------------------------------------------------------------------
+
+    def start_profile(self, config: dict) -> None:
+        """Build and arm a profiler on the policy workers. Raises on failure."""
+        if self._dispatch is None:
+            raise RuntimeError("no training workers yet; create a model before profiling")
+        self._dispatch.start_profile("policy", config=config, raise_on_error=True)
+        self._profiling = True
+
+    def stop_profile(self) -> None:
+        """Stop and tear down the live profiling session, flushing its last window."""
+        if not self._profiling:
+            return
+        self._profiling = False
+        if self._dispatch is None:
+            return
+        self._dispatch.stop_profile("policy", raise_on_error=True)
+
+    def profile_step(self) -> str | None:
+        """Advance the profiler by one step, returning the first worker error seen."""
+        if not self._profiling or self._dispatch is None:
+            return None
+        errors = self._dispatch.profile_step("policy") or []
+        return next((e for e in errors if e), None)
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         role = self._get_role(model_id)
