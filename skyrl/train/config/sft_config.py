@@ -165,8 +165,11 @@ class SFTConfig(BaseConfig):
     ``train_datasets`` in length. Defaults to ``["train[:100]"]``."""
     train_dataset_weights: Optional[List[float]] = None
     """Per-dataset sampling weights: the approximate per-batch ratio of samples drawn from each
-    dataset, independent of dataset sizes. Only supported with ``sampler="random"`` (custom
-    samplers receive ratios via ``sampler_kwargs``). Defaults to equal mixing (``1/N`` each)."""
+    dataset, independent of dataset sizes (sampled with replacement). Only supported with
+    ``sampler="random"`` (custom samplers receive ratios via ``sampler_kwargs``). When left
+    unset (``None``), multiple datasets are instead sampled as their union -- a plain shuffle
+    over the concatenation, without replacement, so an epoch covers every sample exactly once
+    and each dataset's share follows its size."""
     pretokenized_dataset_paths: Optional[List[str]] = None
     """Local paths to *pretokenized* training datasets, each a file or
     directory holding parquet/JSONL/arrow files or a HF
@@ -342,8 +345,9 @@ _DEFAULT_EVAL_SPLIT = "validation"
 
 def _normalize_mixing_weights(cfg: SFTConfig, num_sources: int, sources_field: str) -> None:
     """Validate ``train_dataset_weights`` against the active training source list
-    (``train_datasets`` or ``pretokenized_dataset_paths``), defaulting to equal
-    mixing for ``sampler="random"``."""
+    (``train_datasets`` or ``pretokenized_dataset_paths``). Unset weights stay
+    ``None``: multiple sources then sample as their union (without replacement)
+    rather than as a weighted mix."""
     if cfg.train_dataset_weights is not None:
         if cfg.sampler != "random":
             raise ValueError(
@@ -358,10 +362,12 @@ def _normalize_mixing_weights(cfg: SFTConfig, num_sources: int, sources_field: s
             )
         if any(w <= 0 for w in cfg.train_dataset_weights):
             raise ValueError(f"train_dataset_weights must all be > 0, got {cfg.train_dataset_weights}.")
-    elif cfg.sampler == "random":
-        # Default: equal mixing. Left as None for other samplers (sequential
-        # ignores mixing; custom samplers take ratios via sampler_kwargs).
-        cfg.train_dataset_weights = [1.0 / num_sources] * num_sources
+    # When no weights are given, ``None`` is preserved deliberately: it selects
+    # union sampling (a plain shuffle over the concatenated datasets, without
+    # replacement, so an epoch covers every sample of every dataset exactly
+    # once). Explicit weights select weighted mixing, which samples with
+    # replacement -- the only way per-batch ratios can hold independent of
+    # dataset sizes.
 
 
 def _default_pretokenized_eval_names(paths: List[str]) -> List[str]:
