@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, Optional
 
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
+from skyrl.backends.skyrl_train.weight_sync.draft_weights import (
+    WEIGHT_UPDATE_TARGET_DRAFT,
+    WEIGHT_UPDATE_TARGET_MODEL,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -59,6 +63,7 @@ class WeightTransferSender(ABC):
         self,
         weight_extractor: Any,
         dtype: "torch.dtype",
+        sync_draft_weights: bool = False,
         **kwargs,
     ) -> None:
         """Send this rank's weights. Called on every training rank.
@@ -73,16 +78,36 @@ class WeightTransferSender(ABC):
         reports ``derives_metadata_from_chunks``; for those, precomputing is not
         just wasteful but unsupported, so the flag is forwarded instead.
 
+        With ``sync_draft_weights`` the main-model session is followed by a
+        second session targeting vLLM's spec-decode drafter, fed by
+        ``weight_extractor.draft_extractor()`` (see ``draft_weights.py``).
+
         Args:
             weight_extractor: The worker's extractor, already built.
             dtype: Inference dtype to convert to.
+            sync_draft_weights: Also sync the spec-decode draft model.
             **kwargs: Forwarded to :meth:`send_chunks`.
         """
+        draft_extractor = weight_extractor.draft_extractor() if sync_draft_weights else None
+        await self._send_extractor(weight_extractor, dtype, target=WEIGHT_UPDATE_TARGET_MODEL, **kwargs)
+        if sync_draft_weights:
+            await self._send_extractor(draft_extractor, dtype, target=WEIGHT_UPDATE_TARGET_DRAFT, **kwargs)
+
+    async def _send_extractor(
+        self,
+        weight_extractor: Any,
+        dtype: "torch.dtype",
+        *,
+        target: str,
+        **kwargs,
+    ) -> None:
+        """One weight-update session: the extractor's whole chunk stream into ``target``."""
         derive_metadata_from_chunks = weight_extractor.derives_metadata_from_chunks
         await self.send_chunks(
             weight_extractor.extract_weights(dtype),
             weight_metadata=(None if derive_metadata_from_chunks else weight_extractor.get_weight_metadata(dtype)),
             derive_metadata_from_chunks=derive_metadata_from_chunks,
+            target=target,
             **kwargs,
         )
 
@@ -92,6 +117,7 @@ class WeightTransferSender(ABC):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
         derive_metadata_from_chunks: bool = False,
+        target: str = WEIGHT_UPDATE_TARGET_MODEL,
         **kwargs,
     ) -> None:
         """Send chunks using this transfer strategy.
@@ -103,6 +129,8 @@ class WeightTransferSender(ABC):
             chunks: Iterable of WeightChunk objects to send.
             weight_metadata: Optional pre-computed metadata (names, dtype_names, shapes).
             derive_metadata_from_chunks: Derive metadata from each transferred chunk.
+            target: Which vLLM model receives this session, ``"model"`` (the main
+                model) or ``"draft"`` (the spec-decode drafter).
         """
         ...
 

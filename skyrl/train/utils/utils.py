@@ -306,6 +306,41 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
         }
 
 
+def _validate_draft_weight_sync_cfg(cfg: SkyRLTrainConfig):
+    """Validate training and transfer support for native MTP draft weights."""
+    from skyrl.backends.skyrl_train.weight_sync.draft_weights import (
+        needs_draft_weight_sync,
+    )
+
+    ie_cfg = cfg.generator.inference_engine
+    if not needs_draft_weight_sync(ie_cfg.speculative_config):
+        return
+    spec = ie_cfg.speculative_config
+    if cfg.trainer.strategy != "megatron":
+        raise ValueError(
+            f"speculative_config={spec} needs the draft model weight-synced, which requires "
+            f"trainer.strategy='megatron' (got {cfg.trainer.strategy!r}): the HF model held by the FSDP "
+            "trainer carries no MTP head tensors"
+        )
+    if ie_cfg.weight_sync_backend in {"sharded_rdt", "delta"}:
+        raise ValueError(
+            f"speculative_config={spec} needs the draft model weight-synced, which is not supported with "
+            f"weight_sync_backend={ie_cfg.weight_sync_backend!r}; use 'nccl'"
+        )
+    if ie_cfg.fp8_weight_sync_mode is not None:
+        raise ValueError(
+            f"speculative_config={spec} needs the draft model weight-synced, which is not supported with "
+            f"fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}: the draft session would carry "
+            "marker names and scale tensors the drafter has no loader for"
+        )
+    lora_cfg = cfg.trainer.policy.model.lora
+    if lora_cfg.rank > 0 and not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
+        raise ValueError(
+            f"speculative_config={spec} needs full-weight sync to keep the draft model aligned; "
+            "Megatron LoRA with merge_lora=false syncs adapters only"
+        )
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -328,6 +363,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
     # side (vLLM MTP speculative decoding) so both stay consistent.
     _apply_mtp_config(cfg)
+    _validate_draft_weight_sync_cfg(cfg)
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,

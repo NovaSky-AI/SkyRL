@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
     WeightExtractor,
+    needs_draft_weight_sync,
 )
 from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import (
     yield_module_grouped_chunks,
@@ -112,6 +113,12 @@ class FSDPWeightExtractor(WeightExtractor):
                 batch_size_threshold_gb=self.batch_size_threshold_gb,
             ):
                 yield chunk
+
+    def draft_extractor(self) -> "FSDPWeightExtractor":
+        raise NotImplementedError(
+            "Spec-decode draft weight sync requires the Megatron backend: the HF model held by the "
+            "FSDP trainer carries no MTP head tensors"
+        )
 
     def get_weight_metadata(self, dtype: torch.dtype) -> dict:
         """Return weight metadata without materializing full tensors.
@@ -303,7 +310,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         reset_prefix_cache: bool = use_prefix_cache and (
             not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync
         )
-        send_chunks_kwargs = {"reset_prefix_cache": reset_prefix_cache}
+        send_chunks_kwargs = {
+            "reset_prefix_cache": reset_prefix_cache,
+            # Spec decode (MTP): the drafter is a separate vLLM module, synced in
+            # its own session after the main model (weight_sync/draft_weights.py).
+            "sync_draft_weights": needs_draft_weight_sync(inference_engine_cfg.speculative_config),
+        }
 
         if reset_prefix_cache and torch.distributed.get_rank() == 0 and not sender_handles_prefix_cache_reset:
             # clear prefix cache

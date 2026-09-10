@@ -16,6 +16,9 @@ from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
     DeltaCheckpointPublisher,
     DeltaPublishResult,
 )
+from skyrl.backends.skyrl_train.weight_sync.draft_weights import (
+    WEIGHT_UPDATE_TARGET_MODEL,
+)
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferSender,
@@ -92,8 +95,17 @@ class DeltaWeightTransferSender(WeightTransferSender):
         weight_metadata: Optional[Dict[str, list]] = None,
         derive_metadata_from_chunks: bool = False,
         reset_prefix_cache: bool = False,
+        target: str = WEIGHT_UPDATE_TARGET_MODEL,
         **kwargs,
     ) -> None:
+        if target != WEIGHT_UPDATE_TARGET_MODEL:
+            # The receiver reloads the whole base checkpoint into one model
+            # (``supports_draft_weight_update = False`` on the engine); the
+            # delta format has no notion of a second target.
+            raise ValueError(
+                "Delta weight sync cannot sync spec-decode draft weights; "
+                "use the nccl weight sync backend with speculative decoding"
+            )
         if derive_metadata_from_chunks:
             # Serialized-FP8 wire chunks carry marker names and scale tensors
             # that the delta-checkpoint format cannot represent.
