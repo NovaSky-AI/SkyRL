@@ -1,0 +1,23 @@
+{
+  "trainer.strategy": "megatron",
+  "trainer.bf16": true,
+  "trainer.algorithm.use_kl_loss": false,
+  "trainer.algorithm.loss_reduction": "sequence_mean",
+  "trainer.placement.colocate_all": false,
+  "trainer.placement.policy_num_nodes": 1,
+  "trainer.placement.policy_num_gpus_per_node": 1,
+  "trainer.policy.megatron_config.tensor_model_parallel_size": 1,
+  "trainer.policy.megatron_config.pipeline_model_parallel_size": 1,
+  "trainer.policy.megatron_config.context_parallel_size": 1,
+  "trainer.policy.megatron_config.lora_config.merge_lora": false,
+  "trainer.policy.model.lora.rank": 32,
+  "trainer.policy.model.lora.alpha": 32,
+  "trainer.policy.model.lora.target_modules": "all-linear",
+  "trainer.policy.optimizer_config.offload_after_step": false,
+  "trainer.max_tokens_per_microbatch": 16384,
+  "trainer.micro_train_batch_size_per_gpu": 1,
+  "trainer.micro_forward_batch_size_per_gpu": 1,
+  "trainer.remove_microbatch_padding": false,
+  "trainer.fused_lm_head_logprob": true,
+  "trainer.fused_lm_head_logprob_backend": "torch"
+}
