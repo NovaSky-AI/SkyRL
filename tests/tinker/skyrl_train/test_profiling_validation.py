@@ -20,11 +20,11 @@ class TestWorkerConfigValidation:
 
     def test_cloud_export_dir_is_accepted(self):
         cfg = TinkerTorchProfilerConfig(export_dir="s3://bucket/traces")
-        cfg.validate_startup()
+        cfg.validate_startup("fsdp")
 
     def test_relative_export_dir_is_rejected(self):
         with pytest.raises(ValueError):
-            TinkerTorchProfilerConfig(export_dir="traces/").validate_startup()
+            TinkerTorchProfilerConfig(export_dir="traces/").validate_startup("fsdp")
 
     def test_bad_schedule_is_rejected(self):
         from skyrl.tinker.api import _validate_worker_profiler_config

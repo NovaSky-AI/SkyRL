@@ -126,8 +126,13 @@ class TinkerTorchProfilerConfig(BaseModel):
         ),
     )
 
-    def validate_startup(self) -> None:
+    def validate_startup(self, backend: str) -> None:
         """Fail fast at server startup on settings that cannot work."""
+        if backend == "jax":
+            raise ValueError(
+                "`--torch-profiler` is not supported for the jax backend. torch.profiler only "
+                "records the SkyRL-Train policy workers; use `--backend fsdp` or `--backend megatron`."
+            )
         if not self.ranks:
             raise ValueError("`torch_profiler.ranks` must be non-empty.")
         from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path

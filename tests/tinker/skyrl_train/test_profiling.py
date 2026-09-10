@@ -621,6 +621,16 @@ async def test_second_client_cannot_stop_another_clients_session():
     assert row.version == 1, "a refused release must not bump the version"
 
 
+def test_startup_rejects_the_jax_backend():
+    """torch.profiler only records SkyRL-Train policy workers, so a jax-backed
+    server must fail at startup rather than 400 on every request."""
+    cfg = TinkerTorchProfilerConfig(**PROFILER_CFG)
+    with pytest.raises(ValueError, match="jax backend"):
+        cfg.validate_startup("jax")
+    for backend in ("fsdp", "megatron"):
+        cfg.validate_startup(backend)
+
+
 @pytest.mark.asyncio
 async def test_stop_is_refused_when_no_session_is_running():
     """/stop_profiling with nothing running is a 409 rather than a silent success."""

@@ -305,7 +305,7 @@ async def lifespan(app: FastAPI):
     app.state.profiler_cfg = None
     if app.state.engine_config.torch_profiler:
         app.state.profiler_cfg = TinkerTorchProfilerConfig(**app.state.engine_config.torch_profiler)
-        app.state.profiler_cfg.validate_startup()
+        app.state.profiler_cfg.validate_startup(app.state.engine_config.backend)
 
     # The profiler CAS updates an existing row: without this insert every claim
     # would match zero rows and 409 forever.
