@@ -115,7 +115,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.28.0; sys_platform == 'linux'",
+    "vllm; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -127,9 +127,9 @@ fsdp = [
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.18; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.18; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -151,7 +151,7 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1; sys_platform == 'linux'",
-    "vllm==0.28.0; sys_platform == 'linux'",
+    "vllm; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -160,12 +160,12 @@ megatron = [
     # into the image for a module the shim would never load).
     "nixl; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.18; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.18; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
     "fast-hadamard-transform; sys_platform == 'linux'",
 ]
@@ -256,9 +256,9 @@ override-dependencies = [
     # so it doesn't pull a second, unused CUDA runtime in alongside the cu13 one.
     "nixl-cu12; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our pin, so all three flashinfer packages are held here. vLLM 0.28.0 needs
-    # >=0.6.16: it imports `flashinfer.autotuner.set_autotune_process_group`,
-    # which 0.6.14 does not have, and the engine fails to start without it.
+    # our pin, so all three flashinfer packages are held here. The pinned vLLM
+    # (0.28.1rc1.dev359, see `vllm` in [tool.uv.sources]) requires exactly 0.6.18; vLLM
+    # 0.28.0 already needed >=0.6.16 (`flashinfer.autotuner.set_autotune_process_group`).
     # flashinfer hard-errors when an installed cubin's version differs from its
     # own, so the three must move together.
     # They must also be >=0.6.13: older flashinfer rejects the `layout_code` vLLM's
@@ -268,9 +268,9 @@ override-dependencies = [
     # flashinfer-cubin is not published to PyPI past 0.6.13, so it (like
     # flashinfer-jit-cache) comes from flashinfer's own index -- see the
     # `flashinfer` index and [tool.uv.sources] below.
-    "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.18; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.18; sys_platform == 'linux' and platform_machine == 'x86_64'",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
     # vLLM 0.28.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both overrides
     # hold these at the versions the lock already resolved to before mamba-ssm moved
@@ -428,6 +428,17 @@ megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev =
 # `experimental_attention_variant/dsa.py` (NVIDIA/Megatron-LM#6402), which the GLM 5 sparse
 # attention path builds on, so this stays on the rev Bridge validates rather than main's tip.
 megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "b3393bbb0b223223ee3f8becf95f408d231d0036", marker = "sys_platform == 'linux'"}
+# vLLM at 98ed0856f31fa3aaf5e27464e2b4ef5a8ee6b2f5 (vllm-project/vllm#53906, "[Model] add GLM-5.3-Flash
+# support", 2026-09-03), i.e. 0.28.1rc1.dev359 -- the first vLLM with the GLM-5.3-Flash (glm5_next: KDA +
+# DSA-kpool + mHC) model. Per-commit wheels are published by vLLM's CI at wheels.vllm.ai; this one is
+# built for CUDA 13 / torch 2.13, matching the torch pinned above, so its vendored
+# `vllm.third_party.deep_gemm` extension loads and the GLM-5.3-Flash DSA indexer (which hard-requires
+# DeepGEMM) works without a separately installed `deep_gemm`. Move back to a plain PyPI pin once a
+# release containing #53906 ships.
+vllm = [
+    { url = "https://wheels.vllm.ai/98ed0856f31fa3aaf5e27464e2b4ef5a8ee6b2f5/vllm-0.28.1rc1.dev359%2Bg98ed0856f-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://wheels.vllm.ai/98ed0856f31fa3aaf5e27464e2b4ef5a8ee6b2f5/vllm-0.28.1rc1.dev359%2Bg98ed0856f-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14 as well as a new `sticky_least_loaded` policy: https://github.com/SumanthRH/router/tree/session-aware-lb
 vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
@@ -452,6 +463,7 @@ markers = [
     "vllm: requires the vllm package (present under the fsdp/megatron extras)",
     "megatron: requires the megatron extra",
     "megatron_models: long-running Megatron model-parity tests",
+    "b300: opt-in tests that need a B300 node; auto-skipped unless `-m b300` is passed",
     "integrations: third-party integration tests with extra install steps",
     "mooncake: requires the mooncake extra (mooncake-transfer-engine)",
 ]

@@ -8,6 +8,13 @@ fp8_param=true persistent params for the fp8_param row) and vLLM
 (quantization=fp8 fed by fp8_weight_sync_mode=blockwise), with FP32
 block scales (NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1, set by
 _extra_env_vars_for_model). Select them with: -k "full_fp8 or fp8_param".
+
+The glm-5.3-flash-full row loads the real 45-layer GLM-5.3-Flash checkpoint (~313B params,
+~627 GiB in bf16) and needs a single 8xB300 node. It carries pytest.mark.b300 and is
+auto-skipped everywhere else; run it with:
+
+uv run --isolated --extra dev --extra megatron -- pytest -s -m b300 \
+    tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py
 """
 
 import os
@@ -83,6 +90,20 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         cfg.trainer.ref.language_model_only = True
         # validate_cfg requires policy/ref/generator language_model_only to agree.
         cfg.generator.inference_engine.language_model_only = True
+    if "glm-5.3-flash" in model_name.lower():
+        # GLM-5.3-Flash (glm5_next) is a KDA + NoPE-MLA/DSA hybrid MoE with mHC residuals,
+        # shipped as a VL checkpoint. SkyRL bridges only the language model
+        # (workers/megatron/glm5_next), so route both trainer and vLLM to the text-only path.
+        # KDA needs packed (thd) sequences; the DSA layers run megatron-core's own sparse
+        # attention, so the TE attention backend setting is irrelevant.
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
+        # vLLM's KDA triton kernels put (num_seqs * kda_heads) in CUDA grid dim y; with the default
+        # max_num_seqs=1024 and 64 heads that is 65536 > 65535 and the CUDA-graph capture / profile
+        # run fails with "Triton Error [CUDA]: invalid argument". Stay below the limit.
+        cfg.generator.inference_engine.max_num_seqs = 512
     # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
@@ -91,6 +112,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower())
         or ("nemotron-3.5-lightning" in model_name.lower())
         or ("glm-4.7-flash" in model_name.lower())
+        or ("glm-5.3-flash" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -122,6 +144,10 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
     # fla's TileLang GDN backend aborts on Blackwell; fall back to Triton.
     if "qwen3.5" in model_name.lower():
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0" if is_blackwell_or_newer() else "1")
+    # Same story for GLM-5.3-Flash's KDA layers, which run fla kernels too. Only forced on
+    # Blackwell so the H100 rows keep whatever fla picks by default.
+    if "glm-5.3-flash" in model_name.lower() and is_blackwell_or_newer():
+        env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0")
     return env or None
 
 
@@ -152,6 +178,11 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
     if "glm-4.7-flash" in model_name.lower():
         # GLM-4.7-Flash's 202k default context would size the KV pool far past
         # what is left next to the colocated Megatron policy shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
+    if "glm-5.3-flash" in model_name.lower():
+        # 1M default context; the 4-layer slice is still ~24B params (288 experts x 3 MoE layers),
+        # colocated with the Megatron shard. The DSA indexer in vLLM needs DeepGEMM.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
     return overrides
@@ -257,6 +288,62 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             id="glm-4.7-flash_h100_tp4_ep4",
             marks=pytest.mark.h100,
+        ),
+        # GLM-5.3-Flash, 4-layer slice of the real checkpoint (eatang/GLM-5.3-Flash-4layer):
+        # 2 KDA + 2 NoPE-MLA/DSA layers, 1 dense + 3 x 288-expert MoE, mHC on every block; ~24B
+        # params in bf16 (the routed experts dominate), so it needs the same 4xH100 mesh as the
+        # other large MoE entries. Real (truncated) weights keep the logprob distribution peaked,
+        # unlike the random-init tiny models, so the vLLM/Megatron comparison is meaningful even
+        # though the slice itself is not a coherent LM. Exercises: KDA (fla), NoPE MLA + lightning
+        # indexer (dense regime, sequences <= index_topk), clamped SwiGLU MoE, mHC, HF<->Megatron
+        # bridge with `model.language_model.*` prefixes, weight sync into vLLM's glm5_next model.
+        # Threshold: the truncated slice has a very spread next-token distribution, so bf16
+        # per-token logprob noise is larger than on a full model (HF-bf16 vs HF-fp32 already
+        # differs by ~0.05 mean |dlogprob| on real text); vLLM vs Megatron lands at ~0.06.
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            "eatang/GLM-5.3-Flash-4layer",
+            3e-1,
+            1e-1,
+            None,
+            id="glm-5.3-flash-4layer_h100_tp2_ep4",
+            marks=pytest.mark.h100,
+        ),
+        # GLM-5.3-Flash, the full 45-layer checkpoint: 34 KDA + 11 NoPE-MLA/DSA layers,
+        # 3 dense + 42 x 288-expert MoE, mHC on every block. ~313B params in bf16 (~627 GiB,
+        # 97% of it routed experts) with ~17B activated, so it needs a whole 8xB300 node
+        # (288 GiB/GPU) and is not part of any CI suite -- opt in with `-m b300`.
+        #
+        # Mesh: Megatron TP2 EP8 ETP1 -> DP4 (EP x ETP == TP x DP), vLLM TP8 colocated on the
+        # same 8 GPUs. EP is the scaling dimension for a MoE this sparse -- 36 experts/GPU,
+        # ~76 GiB -- while TP only has to cover the ~9B of non-expert weights. PP stays at 1
+        # because megatron-core rejects mHC with pipeline_model_parallel_size > 1, and CP at 1
+        # because KDA has no context-parallel path.
+        #
+        # Unlike the 4-layer slice this is a coherent model, so generation should read as
+        # sensible text both before and after weight sync. Thresholds mirror the other
+        # large-MoE entries rather than the slice's looser ones; they have not been measured
+        # on this checkpoint yet, so expect to tune them on the first run.
+        pytest.param(
+            2,
+            1,
+            1,
+            8,
+            1,
+            8,
+            8,
+            "zai-org/GLM-5.3-Flash",
+            3e-1,
+            5e-2,
+            None,
+            id="glm-5.3-flash-full_b300_tp2_ep8",
+            marks=pytest.mark.b300,
         ),
         pytest.param(
             2,

@@ -3,23 +3,32 @@ import ray
 
 from tests.backends.skyrl_train.gpu.utils import ray_init_for_tests
 
+# Hardware the default CI runners do not have. Each marker is auto-skipped unless its own
+# name is passed via `-m`, so `-m megatron_models` never picks these up.
+_OPT_IN_GPU_MARKERS = {
+    "h100": "requires H100 GPUs",
+    "b300": "requires a B300 node",
+}
+
 
 def pytest_configure(config):
-    config.addinivalue_line(
-        "markers",
-        "h100: opt-in tests that require H100 GPUs; auto-skipped unless `-m h100` is passed.",
-    )
+    for marker, requirement in _OPT_IN_GPU_MARKERS.items():
+        config.addinivalue_line(
+            "markers",
+            f"{marker}: opt-in tests that {requirement}; auto-skipped unless `-m {marker}` is passed.",
+        )
     config.addinivalue_line("markers", "megatron: tests that require the Megatron backend extra.")
 
 
 def pytest_collection_modifyitems(config, items):
     markexpr = config.getoption("markexpr", default="") or ""
-    if "h100" in markexpr:
-        return
-    skip_h100 = pytest.mark.skip(reason="H100 test — run explicitly with `-m h100`")
-    for item in items:
-        if "h100" in item.keywords:
-            item.add_marker(skip_h100)
+    for marker, requirement in _OPT_IN_GPU_MARKERS.items():
+        if marker in markexpr:
+            continue
+        skip = pytest.mark.skip(reason=f"{marker} test ({requirement}) — run explicitly with `-m {marker}`")
+        for item in items:
+            if marker in item.keywords:
+                item.add_marker(skip)
 
 
 @pytest.fixture
