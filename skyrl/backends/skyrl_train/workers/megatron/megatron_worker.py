@@ -1421,24 +1421,54 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
     def _is_lora_sync_writer_rank(self) -> bool:
-        """True on the first rank of each node (by hostname).
+        """True on the ranks that write the LoRA adapter files to ``lora_sync_path``.
 
         With ``merge_lora=False`` every vLLM worker reads ``lora_sync_path``
         from its *local* filesystem when hot-loading the adapter, and in
         multi-node colocated runs inference engines live on every node -- so
         writing on global rank 0 alone only works with a shared filesystem.
-        Writing once per node (identical content, atomic renames) makes the
-        disk sync work on plain node-local paths and stays correct on shared
-        ones.
+        Rank 0 always writes. Any other rank writes only if it is the first rank
+        on its node (by hostname) *and* cannot see the probe file rank 0 wrote
+        into ``lora_sync_path``, i.e. the path is node-local. Collective on
+        first call (one all_gather); the result is cached.
         """
         cached = getattr(self, "_lora_sync_writer_cache", None)
         if cached is None:
             import socket
+            import uuid
 
-            hostnames = [None] * torch.distributed.get_world_size()
-            torch.distributed.all_gather_object(hostnames, socket.gethostname())
-            cached = hostnames.index(hostnames[torch.distributed.get_rank()]) == torch.distributed.get_rank()
+            rank = torch.distributed.get_rank()
+            base_sync_path = self.cfg.policy.model.lora.lora_sync_path
+            probe_path = os.path.join(base_sync_path, ".skyrl_lora_sync_probe")
+            token = uuid.uuid4().hex if rank == 0 else None
+            if rank == 0:
+                # Written before the gather so every rank checks after it exists.
+                os.makedirs(base_sync_path, exist_ok=True)
+                with open(probe_path, "w", encoding="utf-8") as f:
+                    f.write(token)
+
+            infos = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(infos, (socket.gethostname(), token))
+            hostnames = [host for host, _ in infos]
+            node_leader = hostnames.index(hostnames[rank]) == rank
+
+            # The token guards against a stale probe left on a node-local disk
+            # by an earlier run where this node hosted rank 0.
+            try:
+                with open(probe_path, "r", encoding="utf-8") as f:
+                    sees_rank0_probe = f.read() == infos[0][1]
+            except OSError:
+                sees_rank0_probe = False
+
+            cached = rank == 0 or (node_leader and not sees_rank0_probe)
             self._lora_sync_writer_cache = cached
+            if cached:
+                logger.info(
+                    "LoRA sync: rank {} ({}) writes adapter files to {}",
+                    rank,
+                    hostnames[rank],
+                    base_sync_path,
+                )
         return cached
 
     async def _save_lora_adapters_and_sync(
@@ -1447,10 +1477,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """Export LoRA adapter weights via Megatron-Bridge and tell the inference engine to load them.
 
         All ranks participate in the collective export (TP/PP/EP gathering is
-        handled internally by the bridge). The first rank on each node writes
-        the PEFT files (vLLM workers read them from their local filesystem;
-        see ``_is_lora_sync_writer_rank``), then rank 0 sends the
-        ``LoraLoadRequest`` once every node's files are in place.
+        handled internally by the bridge). The writer ranks (rank 0 on a shared
+        filesystem, else the first rank on each node; see
+        ``_is_lora_sync_writer_rank``) write the PEFT files, then rank 0 sends
+        the ``LoraLoadRequest`` once every node's files are in place.
         """
         import json
 
@@ -1642,8 +1672,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             raise RuntimeError("AdapterStore not initialised (FFT path)")
         self.adapter_store.delete(model_id)
         # Drop the per-tenant safetensors subdir written by
-        # _save_lora_adapters_and_sync. The first rank on each node wrote it
-        # (see _is_lora_sync_writer_rank), so the same rank cleans it; other
+        # _save_lora_adapters_and_sync. The writer ranks wrote it (see
+        # _is_lora_sync_writer_rank), so the same ranks clean it; other
         # ranks no-op. All ranks run delete_adapter (pass_through dispatch), so
         # the predicate's one-time collective is safe here even before the
         # first sync. Best-effort — log on failure but don't propagate.
