@@ -1,0 +1,43 @@
+name: taubench-eval
+entrypoint: |
+  set -e
+  echo "===== [taubench-eval] ENTRYPOINT START $(date -u) ====="
+  bash examples/train/tau_bench/run_eval_taubench.sh
+image_uri: novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8
+cloud: rkn-gpu-cloud
+ray_version: "2.51.1"
+working_dir: .
+max_retries: 0
+
+env_vars:
+  HF_HOME: "/mnt/cluster_storage/hf_cache"
+  HF_HUB_ENABLE_HF_TRANSFER: "1"
+  UV_CACHE_DIR: "/mnt/cluster_storage/.uv_cache"
+  UV_LINK_MODE: "copy"
+  VLLM_USE_V1: "1"
+  VLLM_ALLOW_INSECURE_SERIALIZATION: "1"
+  # SkyRL's ray.init sets some of the same env-var keys as this job-level runtime
+  # env; without this, Ray errors on the conflict instead of merging.
+  RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
+  RAY_worker_register_timeout_seconds: "1800"
+  SKYRL_RAY_PG_TIMEOUT_IN_S: "1800"
+  SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S: "3600"
+
+compute_config:
+  advanced_instance_config:
+    metadata:
+      labels:
+        kueue.x-k8s.io/queue-name: default-queue
+  # Single-node eval: the user-simulator vLLM server (GPUs 6,7) and the SkyRL eval
+  # engines (GPUs 0-5) are partitioned via CUDA_VISIBLE_DEVICES inside the run script
+  # and run as co-resident node-local processes. The entrypoint runs on the head, so
+  # the head node must carry the GPUs -> all 8 H100s on the head, no worker pool.
+  # (If your kueue only grants GPUs to the worker pool, move these to worker_nodes
+  #  with min_nodes/max_nodes: 1 and run the user-sim via Ray instead.)
+  head_node:
+    required_resources:
+      CPU: 92
+      memory: 960Gi
+      GPU: 8
+    required_labels:
+      ray.io/accelerator-type: H100
