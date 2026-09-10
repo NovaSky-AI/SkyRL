@@ -73,6 +73,9 @@ from skyrl.backends.skyrl_train.weight_sync import (
     WeightChunk,
     WeightExtractor,
 )
+from skyrl.backends.skyrl_train.weight_sync.adapter_serialization import (
+    save_adapter_state,
+)
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     BLOCKWISE_FP8,
     SerializedFp8Config,
@@ -1685,7 +1688,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             build_adapter_config_dict,
             infer_target_modules_from_adapter_weights,
         )
-        from safetensors.torch import save_file
 
         # Every rank must participate in the bridge's collective export, but only
         # the writer ranks materialize the gathered tensors: with MoE expert
@@ -1746,10 +1748,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
             # Atomic renames so concurrent writers (shared filesystem) and the
             # engines' readers never observe partial files.
-            weights_path = os.path.join(lora_sync_path, "adapter_model.safetensors")
             config_path = os.path.join(lora_sync_path, "adapter_config.json")
-            save_file(adapter_state, f"{weights_path}.tmp{rank}")
-            os.replace(f"{weights_path}.tmp{rank}", weights_path)
+            save_adapter_state(adapter_state, lora_sync_path, temporary_suffix=str(rank))
             with open(f"{config_path}.tmp{rank}", "w", encoding="utf-8") as f:
                 json.dump(adapter_config, f, ensure_ascii=False, indent=4)
             os.replace(f"{config_path}.tmp{rank}", config_path)
