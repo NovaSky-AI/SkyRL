@@ -43,6 +43,5 @@ Notes:
 - **FP8 configuration surface.** The scripts use the top-level
   `megatron_config.fp8*` fields; the same keys under
   `transformer_config_kwargs` override them if you need to.
-- **KV cache.** FP8 KV cache for these hybrid-attention models is a separate
-  compatibility PR; once available, add
+- **KV cache.** The scripts leave the rollout KV cache in BF16. To run it in FP8 too, add
   `generator.inference_engine.engine_init_kwargs.kv_cache_dtype=fp8_e4m3`.

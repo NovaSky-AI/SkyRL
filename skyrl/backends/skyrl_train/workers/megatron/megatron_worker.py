@@ -1083,11 +1083,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if self.enable_router_replay:
             from skyrl.backends.skyrl_train.utils.replay_utils import (
-                patch_topk_router_expert_bias_padding_mask,
                 patch_topk_router_layer_number,
             )
 
-            patch_topk_router_expert_bias_padding_mask()
             patch_topk_router_layer_number()
 
         # Freeze MoE router params before optimizer build.

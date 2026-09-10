@@ -37,31 +37,6 @@ def parallel_state(monkeypatch):
     return mpu
 
 
-def test_patch_topk_router_expert_bias_excludes_padding(monkeypatch):
-    router_module = types.ModuleType("megatron.core.transformer.moe.router")
-
-    class TopKRouter:
-        def __init__(self):
-            self.local_tokens_per_expert = torch.zeros(3, dtype=torch.int64)
-
-        def _apply_expert_bias(self, routing_map, padding_mask=None):
-            if padding_mask is not None:
-                routing_map = routing_map & (~padding_mask)
-            self.local_tokens_per_expert += routing_map.sum(dim=0)
-
-    router_module.TopKRouter = TopKRouter
-    monkeypatch.setitem(sys.modules, "megatron.core.transformer.moe.router", router_module)
-
-    replay_utils.patch_topk_router_expert_bias_padding_mask()
-    router = TopKRouter()
-    router._apply_expert_bias(
-        torch.tensor([[1, 0, 1], [0, 1, 1]], dtype=torch.bool),
-        torch.tensor([False, True]),
-    )
-
-    assert torch.equal(router.local_tokens_per_expert, torch.tensor([1, 0, 1]))
-
-
 @pytest.mark.parametrize("dtype", [torch.uint8, torch.int16, torch.int32])
 def test_replay_padding_indices_are_unique(dtype):
     padding = make_replay_padding_indices((2, 3, 4, 3), dtype=dtype)
