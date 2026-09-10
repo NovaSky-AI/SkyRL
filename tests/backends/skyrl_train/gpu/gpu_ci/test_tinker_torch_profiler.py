@@ -24,18 +24,14 @@ import urllib.request
 from contextlib import contextmanager
 
 import pytest
-
-cuda_available = False
-try:  # pragma: no cover - import guard
-    import torch
-
-    cuda_available = torch.cuda.is_available() and torch.cuda.device_count() > 0
-except Exception:
-    cuda_available = False
+import torch
 
 pytestmark = [
     pytest.mark.tinker,
-    pytest.mark.skipif(not cuda_available, reason="Tinker profiling e2e requires at least one CUDA GPU"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available(),
+        reason="Profiler E2E test requires a GPU",
+    ),
 ]
 
 tinker = pytest.importorskip("tinker")
@@ -74,6 +70,8 @@ def _api_server(port: int, export_dir: str):
             "tinker",
             "--extra",
             "fsdp",
+            "--with",
+            "ray==2.56.0",
             "-m",
             "skyrl.tinker.api",
             "--host",
