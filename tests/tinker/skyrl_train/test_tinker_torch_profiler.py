@@ -5,12 +5,13 @@ the only one that shows the profiler attached to real policy-worker GPU work: it
 brackets a few optim steps with /start_profiling and /stop_profiling and asserts
 the resulting trace contains CUDA kernel events.
 
-Single GPU, tiny model. Needs the ``tinker`` extra for the SDK client, so it is
-gated with importorskip and marked ``tinker``.
+Single GPU, tiny model. GPU-gated and skipped without the ``tinker`` SDK, so it
+skips on the CPU job that also runs this directory and runs in the Tinker
+SkyRL-Train GPU workflow (``ci/gpu_ci_run_tinker_skyrl_train_backend.sh``).
 
 Run with:
-  uv run --isolated --extra dev --extra fsdp --extra tinker --with pytest \\
-    pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_tinker_torch_profiler.py
+  uv run --isolated --extra tinker --extra fsdp --with pytest \\
+    pytest -s tests/tinker/skyrl_train/test_tinker_torch_profiler.py
 """
 
 from __future__ import annotations
@@ -26,18 +27,15 @@ from contextlib import contextmanager
 import pytest
 import torch
 
-pytestmark = [
-    pytest.mark.tinker,
-    pytest.mark.skipif(
-        not torch.cuda.is_available(),
-        reason="Profiler E2E test requires a GPU",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Profiler E2E test requires a GPU",
+)
 
 tinker = pytest.importorskip("tinker")
 from tinker import types as tinker_types  # noqa: E402
 
-from tests.backends.skyrl_train.gpu.utils import wait_for_server  # noqa: E402
+from tests.tinker.conftest import wait_for_condition  # noqa: E402
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 TINKER_API_KEY = "tml-dummy"
@@ -86,9 +84,7 @@ def _api_server(port: int, export_dir: str):
         with open(log_path, "w") as log_file:
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
             try:
-                try:
-                    wait_for_server(f"0.0.0.0:{port}", "api/v1/healthz", timeout=180)
-                except TimeoutError:
+                if not wait_for_condition(lambda: _server_is_up(port), timeout_sec=180, poll_interval_sec=2):
                     with open(log_path) as f:
                         print(f"=== Server failed to start ===\n{f.read()}")
                     pytest.fail("Tinker API server did not come up in time")
@@ -99,6 +95,16 @@ def _api_server(port: int, export_dir: str):
                     proc.wait(timeout=15)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+
+
+def _server_is_up(port: int) -> bool:
+    import urllib.error
+
+    try:
+        urllib.request.urlopen(f"http://0.0.0.0:{port}/api/v1/healthz", timeout=2).read()
+        return True
+    except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError):
+        return False
 
 
 def _post_json(port: int, path: str, payload: dict) -> dict:

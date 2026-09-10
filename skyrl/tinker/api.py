@@ -1114,13 +1114,13 @@ async def start_profiling(req: StartProfilingRequest, request: Request):
         )
 
     worker_config = {
-        "enable": True,
-        "ranks": cfg.ranks,
-        "save_path": export_path,
         **DEFAULT_PROFILER_SCHEDULE,
         **DEFAULT_PROFILER_OPTIONS,
         **req.profile_options,
         **req.schedule_options,
+        "enable": True,
+        "ranks": cfg.ranks,
+        "save_path": export_path,
     }
     try:
         _validate_worker_profiler_config(worker_config, request.app.state.engine_config)

@@ -518,7 +518,6 @@ markers = [
     "megatron_models: long-running Megatron model-parity tests",
     "integrations: third-party integration tests with extra install steps",
     "mooncake: requires the mooncake extra (mooncake-transfer-engine)",
-    "tinker: requires the tinker extra (the Tinker SDK client)",
 ]
 
 [tool.black]
