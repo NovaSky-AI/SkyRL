@@ -225,7 +225,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
 
     # Private fields excluded from repr for cleaner output
-    _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
+    # aiohttp.ClientSession is bound to the event loop that created it, so one session is kept per loop.
+    _sessions: Dict[asyncio.AbstractEventLoop, aiohttp.ClientSession] = field(default_factory=dict, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
     _gen_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     _detok_sem: Optional[asyncio.Semaphore] = field(default=None, repr=False)
@@ -282,28 +283,27 @@ class RemoteInferenceClient(InferenceEngineInterface):
             self._sem_loop = current_loop
         return self._gen_sem, self._detok_sem
 
+    def _drop_closed_loop_sessions(self) -> None:
+        """Forget sessions whose event loop has been closed.
+
+        Such a session cannot be closed from any other loop; dropping the
+        reference lets garbage collection release its sockets.
+        """
+        for loop in list(self._sessions):
+            if loop.is_closed():
+                self._sessions.pop(loop, None)
+
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create the aiohttp session."""
-        # Re-use the existing session object if it is not closed.
-        # Note that we also create a new session object if the event loop has changed, since
-        # aiohttp.ClientSession is tied to the event loop.
+        """Get or create the aiohttp session bound to the running event loop.
+
+        Sessions are kept per loop so a call on one loop never replaces or
+        closes a session that another live loop (e.g. the Tinker engine's
+        continuous sampler thread) is still using.
+        """
+        self._drop_closed_loop_sessions()
         current_loop = asyncio.get_running_loop()
-        if self._session is not None and not self._session.closed and self._session.loop != current_loop:
-            # Event loop changed - the old session is unusable (bound to another,
-            # possibly dead, loop) and cannot be aclose()'d from here. Close its
-            # connector synchronously (sync API in aiohttp 3.x) so the sockets are
-            # released now and GC doesn't log "Unclosed client session" errors —
-            # this handoff happens routinely between the engine main thread's
-            # transient loops (wake/sleep/adapter loads) and the continuous
-            # sampler's persistent loop.
-            old_connector = getattr(self._session, "_connector", None)
-            try:
-                if old_connector is not None:
-                    old_connector.close()
-            except Exception:
-                pass
-            self._session = None
-        if self._session is None or self._session.closed:
+        session = self._sessions.get(current_loop)
+        if session is None or session.closed:
             # keepalive_timeout must be shorter than the server's timeout_keep_alive
             # (uvicorn default: 5s). Otherwise aiohttp reuses connections the server
             # has already closed, causing ECONNRESET under high concurrency.
@@ -311,8 +311,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 limit=SKYRL_HTTP_CONNECTION_LIMIT,
                 keepalive_timeout=2,
             )
-            self._session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
-        return self._session
+            session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
+            self._sessions[current_loop] = session
+        return session
 
     async def _post(self, url: str, json: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
         """POST with retry + backoff on transient connection errors.
@@ -1416,10 +1417,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
     # ---------------------------
 
     async def teardown(self) -> None:
-        """Close HTTP session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
+        """Close the HTTP session bound to the running event loop."""
+        await self.aclose()
 
     async def __aenter__(self) -> "RemoteInferenceClient":
         """Async context manager entry."""
@@ -1436,7 +1435,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
     def __getstate__(self) -> dict:
         """Exclude non-serializable fields from pickle."""
         state = self.__dict__.copy()
-        state["_session"] = None
+        state["_sessions"] = {}
         state["_gen_sem"] = None
         state["_detok_sem"] = None
         state["_sem_loop"] = None
@@ -1445,19 +1444,24 @@ class RemoteInferenceClient(InferenceEngineInterface):
     def __setstate__(self, state: dict) -> None:
         """Restore state after unpickling."""
         self.__dict__.update(state)
-        self._session = None
+        self._sessions = {}
         self._gen_sem = None
         self._detok_sem = None
         self._sem_loop = None
 
     async def aclose(self):
-        if self._session is not None:
+        """Close the session bound to the running event loop.
+
+        Sessions owned by other live loops are left untouched; they can only be
+        closed from their own loop.
+        """
+        self._drop_closed_loop_sessions()
+        session = self._sessions.pop(asyncio.get_running_loop(), None)
+        if session is not None and not session.closed:
             try:
-                await self._session.close()
+                await session.close()
             except Exception as e:
                 logger.warning(f"Encountered exception {e} while closing client session")
-                pass
-            self._session = None
 
 
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:
