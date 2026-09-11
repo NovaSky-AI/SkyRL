@@ -1366,10 +1366,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 if resp.status >= 400:
                     body = await resp.json()
                     raise_for_status(resp, body)
-                return server_url, {"status": resp.status, "body": await resp.text()}
+                return server_url, {
+                    "status": resp.status,
+                    "body": await resp.text(),
+                    "sha256": {filename: sha256 for filename, _, sha256 in files},
+                }
 
         results = await asyncio.gather(*[_upload_to_server(url) for url in self.server_urls])
-        logger.info(f"Uploaded LoRA adapter '{lora_name}' to {len(results)} inference servers")
+        logger.info(
+            f"Uploaded LoRA adapter '{lora_name}' to {len(results)} inference servers "
+            f"with sha256={{{', '.join(f'{filename}:{sha256}' for filename, _, sha256 in files)}}}"
+        )
         return {url: resp for url, resp in results}
 
     async def unload_lora_adapter(self, lora_name: str) -> Dict[str, Any]:

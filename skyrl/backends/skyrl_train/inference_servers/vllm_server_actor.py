@@ -517,6 +517,7 @@ class VLLMServerActor(ServerActorProtocol):
                 if actual_sha256 != expected_sha256:
                     raise HTTPException(status_code=400, detail="LoRA upload checksum mismatch.")
                 os.replace(temporary, destination)
+                logger.info(f"Received LoRA adapter file {filename} with sha256={actual_sha256}")
             finally:
                 if os.path.exists(temporary):
                     os.remove(temporary)

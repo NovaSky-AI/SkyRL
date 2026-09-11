@@ -1109,6 +1109,8 @@ class TestLoRAControlPlane:
             "adapter_config.json": {"sha256": hashlib.sha256(config_bytes).hexdigest(), "size": len(config_bytes)},
         }
         assert all(len(upload) == 1 and next(iter(upload.values())) == expected for upload in uploads)
+        expected_sha256 = {filename: receipt["sha256"] for filename, receipt in expected.items()}
+        assert all(response["sha256"] == expected_sha256 for response in result.values())
 
     @pytest.mark.asyncio
     async def test_load_lora_adapter_inplace_reload(self, client, mock_servers):
