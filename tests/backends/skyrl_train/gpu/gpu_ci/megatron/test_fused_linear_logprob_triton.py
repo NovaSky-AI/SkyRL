@@ -11,7 +11,9 @@ TF32 path with looser tolerances.
         tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_fused_linear_logprob_triton.py
 """
 
+import ast
 import os
+from pathlib import Path
 
 import pytest
 import torch
@@ -35,12 +37,154 @@ pytestmark = [
 ]
 
 
+def _kernel_source() -> str:
+    return Path(fused_linear_logprob_triton.__file__).read_text()
+
+
+def _load_schedule_symbols() -> dict[str, object]:
+    module = ast.parse(_kernel_source())
+    wanted = {
+        "_AUTOTUNE_MIN_TOKEN_BUCKET",
+        "_AUTOTUNE_MAX_TOKEN_BUCKET",
+        "_FORWARD_MAINLOOP_CONFIG_SPECS",
+        "_EPILOGUE_CONFIG_SPECS",
+        "_EPILOGUE_UPDATE_CONFIG_SPECS",
+        "_BACKWARD_CONFIG_SPECS",
+        "_autotune_token_bucket",
+    }
+    nodes = [
+        node
+        for node in module.body
+        if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id in wanted)
+        or (isinstance(node, ast.FunctionDef) and node.name in wanted)
+    ]
+    namespace: dict[str, object] = {}
+    exec(
+        compile(ast.Module(nodes, type_ignores=[]), filename="<schedule>", mode="exec"),
+        namespace,
+    )
+    return namespace
+
+
+_SCHEDULE_SYMBOLS = _load_schedule_symbols()
+_FORWARD_MAINLOOP_CONFIG_SPECS = _SCHEDULE_SYMBOLS["_FORWARD_MAINLOOP_CONFIG_SPECS"]
+_EPILOGUE_CONFIG_SPECS = _SCHEDULE_SYMBOLS["_EPILOGUE_CONFIG_SPECS"]
+_EPILOGUE_UPDATE_CONFIG_SPECS = _SCHEDULE_SYMBOLS["_EPILOGUE_UPDATE_CONFIG_SPECS"]
+_BACKWARD_CONFIG_SPECS = _SCHEDULE_SYMBOLS["_BACKWARD_CONFIG_SPECS"]
+_autotune_token_bucket = _SCHEDULE_SYMBOLS["_autotune_token_bucket"]
+
+
+def test_autotune_schedules_include_incumbents_and_variants() -> None:
+    assert (128, 256, 32, 5, 8) in _FORWARD_MAINLOOP_CONFIG_SPECS
+    assert (128, 256, 32, 3, 8) in _FORWARD_MAINLOOP_CONFIG_SPECS
+    assert (16, 64, 4) in _EPILOGUE_CONFIG_SPECS
+    assert (16, 4) in _EPILOGUE_UPDATE_CONFIG_SPECS
+    assert (128, 256, 32, 16, 3, 8) in _BACKWARD_CONFIG_SPECS
+    for specs in (
+        _FORWARD_MAINLOOP_CONFIG_SPECS,
+        _EPILOGUE_CONFIG_SPECS,
+        _EPILOGUE_UPDATE_CONFIG_SPECS,
+        _BACKWARD_CONFIG_SPECS,
+    ):
+        assert len(specs) == len(set(specs))
+
+
+def test_all_triton_entrypoints_use_bucketed_cached_autotune() -> None:
+    module = ast.parse(_kernel_source())
+    autotune_decorators = [
+        decorator
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        for decorator in node.decorator_list
+        if (
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Attribute)
+            and decorator.func.attr == "autotune"
+        )
+    ]
+    assert len(autotune_decorators) == 5
+    for decorator in autotune_decorators:
+        keywords = {keyword.arg: keyword.value for keyword in decorator.keywords}
+        assert ast.literal_eval(keywords["cache_results"]) is True
+        keys = ast.literal_eval(keywords["key"])
+        assert "num_tokens_bucket" in keys
+        assert "COMPUTE_ENTROPY" in keys
+
+
+def test_skyrl_adapter_disables_unused_entropy() -> None:
+    module = ast.parse(_kernel_source())
+    adapter = next(
+        node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "FusedLinearLogprobTriton"
+    )
+    methods = {node.name: node for node in adapter.body if isinstance(node, ast.FunctionDef)}
+    expected_calls = {
+        "forward": "efficient_entropy_forward",
+        "backward": "efficient_entropy_backward",
+    }
+    for method_name, call_name in expected_calls.items():
+        calls = [
+            node
+            for node in ast.walk(methods[method_name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == call_name
+        ]
+        assert len(calls) == 1
+        keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+        assert isinstance(keywords["compute_entropy"], ast.Constant)
+        assert keywords["compute_entropy"].value is False
+
+
+def test_autotuned_epilogues_do_not_overwrite_inputs() -> None:
+    module = ast.parse(_kernel_source())
+    expected_output_arguments = {
+        "efficient_entropy_triton_kernel_epilogue": {"result_logprobs_ptr"},
+        "efficient_entropy_triton_epilogue_tp_update": {
+            "result_entropy_b_ptr",
+            "result_logprobs_ptr",
+        },
+    }
+    for node in module.body:
+        if not isinstance(node, ast.FunctionDef) or node.name not in expected_output_arguments:
+            continue
+        argument_names = {argument.arg for argument in node.args.args}
+        assert expected_output_arguments[node.name] <= argument_names
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected_bucket"),
+    [
+        (1, 128),
+        (128, 128),
+        (129, 256),
+        (16384, 16384),
+        (20000, 32768),
+        (262144, 262144),
+        (262145, 524288),
+        (524288, 524288),
+        (1048576, 1048576),
+    ],
+)
+def test_autotune_token_bucket(num_tokens: int, expected_bucket: int) -> None:
+    assert _autotune_token_bucket(num_tokens) == expected_bucket
+
+
+def test_autotune_token_bucket_rejects_empty_input() -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        _autotune_token_bucket(0)
+
+
 def _direct_fused_logprobs(hidden, weight_shard, target_shifted, vstart, vend, chunk_size, grad_seed):
     """Run the Triton Function on already-shifted targets."""
     leaf_h = hidden.detach().clone().requires_grad_(True)
     leaf_w = weight_shard.detach().clone().requires_grad_(True)
     lp = FusedLinearLogprobTriton.apply(
-        leaf_h, leaf_w, target_shifted, vstart, vend, chunk_size, dist.group.WORLD, False
+        leaf_h,
+        leaf_w,
+        target_shifted,
+        vstart,
+        vend,
+        chunk_size,
+        dist.group.WORLD,
+        False,
     )
     lp.backward(grad_seed.clone())
     return lp.detach(), leaf_h.grad.detach(), leaf_w.grad.detach()
@@ -186,3 +330,54 @@ def test_fused_triton_matches_stock_logits_path(dtype_str, world_size, chunk_siz
         assert r["fwd_ok"], f"forward mismatch rank={rank}: {r}"
         assert r["gh_ok"], f"grad-hidden mismatch rank={rank}: {r}"
         assert r["gw_ok"], f"grad-weight mismatch rank={rank}: {r}"
+
+
+@pytest.mark.parametrize("logit_offset", [-20.0, -120.0])
+def test_epilogue_handles_strongly_negative_logits(logit_offset) -> None:
+    """The epilogue's log-sum-exp shift must be the true row max, not max(0, max).
+
+    A zero-initialised ``global_max`` leaves the shift at 0 whenever every logit for
+    a token is negative, so ``exp(logit - 0)`` underflows to 0, ``log(accu)`` becomes
+    -inf, and the log-prob comes back +inf with NaN grads. -20 is the control (it
+    passes either way); -120 reproduces the failure.
+    """
+    device = torch.device("cuda")
+    previous = fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION
+    fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = True
+    try:
+        num_tokens, hidden_size, vocab_size = 64, 128, 2048  # 2 forward splits
+        gen = torch.Generator(device=device).manual_seed(0)
+        hidden = torch.rand(num_tokens, hidden_size, device=device, generator=gen) + 0.5
+        weight = torch.randn(vocab_size, hidden_size, device=device, generator=gen) * (hidden_size**-0.5)
+        # Shift every logit of every token below zero (hidden is strictly positive).
+        weight += logit_offset / hidden.sum(-1).min()
+        labels = torch.randint(0, vocab_size, (num_tokens,), device=device, generator=gen)
+        grad_logprobs = torch.linspace(0.5, 1.5, num_tokens, device=device)
+
+        logits = hidden.double() @ weight.double().T
+        assert logits.max().item() < 0.0, "setup must drive every logit negative"
+        expected = logits.gather(1, labels[:, None]).squeeze(1) - torch.logsumexp(logits, dim=-1)
+
+        logprobs, entropy, maximum, accumulate, entropy_b = fused_linear_logprob_triton.efficient_entropy_forward(
+            hidden, weight, labels, 1.0, None
+        )
+        d_hidden, d_weight = fused_linear_logprob_triton.efficient_entropy_backward(
+            grad_logprobs,
+            torch.zeros_like(grad_logprobs),
+            hidden,
+            weight,
+            labels,
+            maximum,
+            accumulate,
+            entropy_b,
+            False,
+            1.0,
+            None,
+        )
+
+        assert torch.isfinite(logprobs).all(), f"non-finite log-probs at max logit {logits.max().item():.1f}"
+        assert torch.isfinite(entropy).all(), "non-finite entropy"
+        assert torch.isfinite(d_hidden).all() and torch.isfinite(d_weight).all(), "non-finite grads"
+        torch.testing.assert_close(logprobs.double(), expected, rtol=1e-3, atol=1e-3)
+    finally:
+        fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = previous
