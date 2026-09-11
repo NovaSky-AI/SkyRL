@@ -1,6 +1,7 @@
 """Tests for the /skyrl/v1/generate payload contract."""
 
 import base64
+import json
 import math
 from dataclasses import dataclass
 
@@ -11,10 +12,26 @@ import torch
 
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
+    PackedArrayKey,
+    PackedField,
     build_logprobs_content,
     decode_packed_routed_experts,
+    load_packed_body,
+    pack_ndarray,
     pack_routed_experts,
+    unpack_ndarray,
 )
+
+_FLOAT32 = frozenset({np.dtype(np.float32)})
+_INT16 = frozenset({np.dtype(np.int16)})
+
+
+def _support_envelope(support: np.ndarray) -> dict:
+    return pack_ndarray(support, allowed_dtypes=_FLOAT32)
+
+
+def _body(**choice_fields) -> dict:
+    return {"choices": [{"token_ids": [1, 2, 3], "finish_reason": "stop", **choice_fields}]}
 
 
 @dataclass
@@ -183,3 +200,189 @@ def test_decode_rejects_noncanonical_dtype():
 
     with pytest.raises(ValueError, match="non-canonical dtype"):
         decode_packed_routed_experts(payload)
+
+
+@pytest.mark.parametrize(
+    "arr,allowed_dtypes,extra",
+    [
+        (np.arange(6, dtype=np.float32).reshape(2, 3), _FLOAT32, None),
+        (np.arange(6, dtype=np.float32).reshape(2, 3), _FLOAT32, {"prompt_start": 4, "labels": ["a", "b"]}),
+        (np.arange(12, dtype=np.int16).reshape(3, 2, 2), _INT16, {"prompt_start": 0}),
+        (np.empty((0, 3), dtype=np.float32), _FLOAT32, None),
+    ],
+)
+def test_ndarray_round_trip_with_sidecar_fields(arr, allowed_dtypes, extra):
+    payload = pack_ndarray(arr, allowed_dtypes=allowed_dtypes, extra=extra)
+    decoded, sidecar = unpack_ndarray(payload, allowed_dtypes=allowed_dtypes, ndim=arr.ndim)
+
+    assert np.array_equal(decoded, arr)
+    assert decoded.dtype == arr.dtype
+    assert decoded.flags.c_contiguous
+    assert sidecar == (extra or {})
+
+
+def test_packed_envelope_leads_with_data():
+    payload = pack_ndarray(np.zeros((2, 2), np.float32), allowed_dtypes=_FLOAT32, extra={"prompt_start": 1})
+
+    assert list(payload) == [PackedArrayKey.DATA, PackedArrayKey.SHAPE, PackedArrayKey.DTYPE, "prompt_start"]
+    assert orjson.dumps(payload).startswith(b'{"data":"')
+
+
+def test_pack_routed_experts_is_byte_identical_to_the_hand_built_envelope():
+    routes = np.arange(12).reshape(3, 2, 2)
+
+    assert orjson.dumps(pack_routed_experts(routes)) == b'{"data":"AAECAwQFBgcICQoL","shape":[3,2,2],"dtype":"uint8"}'
+
+
+@pytest.mark.parametrize(
+    "wrap", [str, lambda data: memoryview(data.encode("ascii")), lambda data: data.encode("ascii")]
+)
+def test_unpack_accepts_str_and_buffers(wrap):
+    support = np.arange(6, dtype=np.float32).reshape(2, 3)
+    payload = dict(_support_envelope(support))
+    payload[PackedArrayKey.DATA.value] = wrap(payload[PackedArrayKey.DATA.value])
+
+    decoded, _ = unpack_ndarray(payload, allowed_dtypes=_FLOAT32, ndim=2)
+    assert np.array_equal(decoded, support)
+
+
+def test_pack_rejects_disallowed_dtype():
+    with pytest.raises(ValueError, match="dtype"):
+        pack_ndarray(np.zeros((2, 2), np.float64), allowed_dtypes=_FLOAT32)
+
+
+def test_pack_rejects_sidecar_collision_with_envelope_keys():
+    with pytest.raises(ValueError, match="collide"):
+        pack_ndarray(np.zeros((2, 2), np.float32), allowed_dtypes=_FLOAT32, extra={"dtype": "float64"})
+
+
+def test_unpack_rejects_disallowed_dtype():
+    payload = pack_ndarray(np.zeros((2, 2), np.float32), allowed_dtypes=_FLOAT32)
+
+    with pytest.raises(ValueError, match="dtype"):
+        unpack_ndarray(payload, allowed_dtypes=_INT16, ndim=2)
+
+
+@pytest.mark.parametrize("ndim", [1, 3])
+def test_unpack_rejects_wrong_ndim(ndim):
+    payload = pack_ndarray(np.zeros((2, 2), np.float32), allowed_dtypes=_FLOAT32)
+
+    with pytest.raises(ValueError, match="dimensions"):
+        unpack_ndarray(payload, allowed_dtypes=_FLOAT32, ndim=ndim)
+
+
+def test_unpack_rejects_byte_count_mismatched_with_declared_shape():
+    payload = pack_ndarray(np.zeros((2, 3), np.float32), allowed_dtypes=_FLOAT32)
+    payload[PackedArrayKey.SHAPE.value] = [2, 4]
+
+    with pytest.raises(ValueError, match="24 bytes, expected 32"):
+        unpack_ndarray(payload, allowed_dtypes=_FLOAT32, ndim=2)
+
+
+def test_load_packed_body_splices_both_blobs_in_one_body():
+    routes = np.arange(12).reshape(3, 2, 2)
+    support = np.arange(6, dtype=np.float32).reshape(2, 3)
+    raw = orjson.dumps(
+        _body(
+            logprobs={"content": [{"logprob": -0.5}]},
+            routed_experts=pack_routed_experts(routes),
+            rollout_sample_support=_support_envelope(support),
+        )
+    )
+
+    choice = load_packed_body(raw)["choices"][0]
+
+    assert all(
+        isinstance(choice[field][PackedArrayKey.DATA], memoryview)
+        for field in (PackedField.ROUTED_EXPERTS, PackedField.ROLLOUT_SAMPLE_SUPPORT)
+    )
+    assert np.array_equal(decode_packed_routed_experts(choice[PackedField.ROUTED_EXPERTS]), routes)
+    decoded_support, _ = unpack_ndarray(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT], allowed_dtypes=_FLOAT32, ndim=2)
+    assert np.array_equal(decoded_support, support)
+    assert choice["logprobs"] == {"content": [{"logprob": -0.5}]}
+
+
+def test_load_packed_body_keeps_sidecar_fields():
+    support = np.arange(4, dtype=np.float32).reshape(2, 2)
+    envelope = pack_ndarray(support, allowed_dtypes=_FLOAT32, extra={"prompt_start": 7})
+    raw = orjson.dumps(_body(rollout_sample_support=envelope))
+
+    decoded, sidecar = unpack_ndarray(
+        load_packed_body(raw)["choices"][0][PackedField.ROLLOUT_SAMPLE_SUPPORT],
+        allowed_dtypes=_FLOAT32,
+        ndim=2,
+    )
+
+    assert np.array_equal(decoded, support)
+    assert sidecar == {"prompt_start": 7}
+
+
+@pytest.mark.parametrize("value", [None, "absent"])
+def test_load_packed_body_passes_through_absent_and_null_fields(value):
+    fields = {} if value == "absent" else {PackedField.ROUTED_EXPERTS.value: None}
+    body = _body(logprobs=None, **fields)
+
+    assert load_packed_body(orjson.dumps(body)) == body
+
+
+def test_load_packed_body_rejects_reordered_envelope_keys():
+    routes = np.arange(12).reshape(3, 2, 2)
+    envelope = pack_routed_experts(routes)
+    reordered = {key: envelope[key] for key in reversed(list(envelope))}
+
+    with pytest.raises(ValueError, match="layout drifted"):
+        load_packed_body(orjson.dumps(_body(routed_experts=reordered)))
+
+
+def test_load_packed_body_rejects_a_reserialized_body():
+    # stdlib json spaces its separators; the blob would silently land in a
+    # ~121 MiB Python str instead, which is exactly the cost this avoids.
+    raw = json.dumps(_body(routed_experts=pack_routed_experts(np.arange(12).reshape(3, 2, 2)))).encode()
+
+    with pytest.raises(ValueError, match="layout drifted"):
+        load_packed_body(raw)
+
+
+def test_load_packed_body_is_not_spoofable_from_a_string_value():
+    routes = np.arange(12).reshape(3, 2, 2)
+    spoof = '"routed_experts":{"data":"AAAA","shape":[1,1,1],"dtype":"uint8"}'
+    raw = orjson.dumps(_body(note=spoof, routed_experts=pack_routed_experts(routes)))
+
+    choice = load_packed_body(raw)["choices"][0]
+
+    assert choice["note"] == spoof
+    assert np.array_equal(decode_packed_routed_experts(choice[PackedField.ROUTED_EXPERTS]), routes)
+
+
+def test_load_packed_body_ignores_unregistered_packed_fields():
+    envelope = pack_ndarray(np.zeros((2, 2), np.float32), allowed_dtypes=_FLOAT32)
+    body = _body(some_other_array=envelope)
+
+    assert load_packed_body(orjson.dumps(body)) == body
+
+
+def test_load_packed_body_honours_a_narrowed_field_registry():
+    routes = np.arange(12).reshape(3, 2, 2)
+    raw = orjson.dumps(_body(routed_experts=pack_routed_experts(routes)))
+
+    body = load_packed_body(raw, fields=(PackedField.ROLLOUT_SAMPLE_SUPPORT,))
+
+    assert isinstance(body["choices"][0][PackedField.ROUTED_EXPERTS][PackedArrayKey.DATA], str)
+
+
+def test_load_packed_body_splices_one_blob_per_choice():
+    first, second = np.arange(12).reshape(3, 2, 2), np.arange(12, 24).reshape(3, 2, 2)
+    raw = orjson.dumps({"choices": [{"routed_experts": pack_routed_experts(routes)} for routes in (first, second)]})
+
+    choices = load_packed_body(raw)["choices"]
+
+    assert np.array_equal(decode_packed_routed_experts(choices[0][PackedField.ROUTED_EXPERTS]), first)
+    assert np.array_equal(decode_packed_routed_experts(choices[1][PackedField.ROUTED_EXPERTS]), second)
+
+
+def test_load_packed_body_rejects_an_unterminated_blob():
+    raw = orjson.dumps(_body(routed_experts=pack_routed_experts(np.arange(12).reshape(3, 2, 2))))
+    truncated = raw[: raw.index(b'"shape"') - 2]
+
+    with pytest.raises(ValueError, match="unterminated"):
+        load_packed_body(truncated)

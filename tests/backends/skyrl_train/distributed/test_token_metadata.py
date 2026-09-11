@@ -1,10 +1,16 @@
 import sys
 import types
 
+import numpy as np
 import pytest
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron import token_metadata
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    TokenMetadataTrace,
+)
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertTrace
 
 
 @pytest.fixture
@@ -86,3 +92,133 @@ def test_packed_layout_aligns_next_token_metadata_and_scatters_rows(monkeypatch,
 
     assert aligned.tolist() == [[11, 12, -1, -1, 21, -1, -1, -1]]
     assert batch_values.tolist() == [[0.0, 1.0, 2.0], [0.0, 0.0, 5.0]]
+
+
+def test_token_metadata_trace_chunks_and_independent_schema() -> None:
+    trace, other = TokenMetadataTrace(), TokenMetadataTrace()
+    trace.append(np.ones((2, 3), dtype=np.int32), expected_rows=2)
+    trace.append(np.zeros((1, 3), dtype=np.int32), expected_rows=1)
+    other.append(np.empty((0, 4), dtype=np.float32), expected_rows=0)
+
+    with pytest.raises(ValueError, match="expected 4"):
+        trace.finalize(expected_rows=4)
+    result = trace.finalize(expected_rows=3)
+    assert result.shape == (3, 3)
+    assert other.finalize(expected_rows=0).shape == (0, 4)
+    with pytest.raises(RuntimeError, match="already finalized"):
+        trace.finalize(expected_rows=3)
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected", "match"),
+    [
+        (np.ones((2, 2), dtype=np.int32), 1, "has 2 rows"),
+        (np.ones((2, 2), dtype=np.int32)[:, ::2], 2, "contiguous"),
+        (np.ones((1, 3), dtype=np.int32), 1, "schema changed"),
+        (np.ones((1, 2), dtype=np.int16), 1, "schema changed"),
+    ],
+)
+def test_token_metadata_trace_rejects_invalid_chunks(rows, expected, match) -> None:
+    trace = TokenMetadataTrace()
+    if rows.shape[0] == 1:
+        trace.append(np.ones((1, 2), dtype=np.int32), expected_rows=1)
+    with pytest.raises(ValueError, match=match):
+        trace.append(rows, expected_rows=expected)
+
+
+def routes(rows: int) -> np.ndarray:
+    return np.arange(rows * 4, dtype=np.int32).reshape(rows, 2, 2) % 8
+
+
+def test_routed_expert_trace_tracks_multiturn_suffix_and_terminal_gap() -> None:
+    trace = RoutedExpertTrace()
+    trace.record_generation(prompt_token_count=3, generated_token_count=2, routed_experts=routes(4))
+    assert trace.prompt_start == 4
+    trace.record_generation(prompt_token_count=7, generated_token_count=2, routed_experts=routes(4))
+
+    result = trace.finalize(token_count=9, loss_mask=[0, 0, 0, 1, 1, 0, 0, 1, 1])
+    assert result.shape == (9, 2, 2) and result.dtype == np.uint8
+    assert np.array_equal(result[-1, 0], [0, 1])
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_routed_expert_trace_only_pads_masked_suffix(active: bool) -> None:
+    trace = RoutedExpertTrace()
+    trace.record_generation(prompt_token_count=3, generated_token_count=1, routed_experts=routes(3))
+    mask = [0, 0, 0, 0, int(active)]
+    if active:
+        with pytest.raises(ValueError, match="loss-active target"):
+            trace.finalize(token_count=5, loss_mask=mask)
+    else:
+        result = trace.finalize(token_count=5, loss_mask=mask)
+        assert np.array_equal(result[-2:, 0], [[0, 1], [0, 1]])
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_align_token_rows_places_each_trajectory_from_its_own_row_source(monkeypatch, parallel_state, packed):
+    """``_align_token_rows`` is the one placement loop both alignment entry points share."""
+    monkeypatch.setattr(token_metadata, "get_packed_seq_align_size", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
+    attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
+    rows = [torch.tensor([10, 11, 12], dtype=torch.int32), torch.tensor([20, 21], dtype=torch.int32)]
+    layout = token_metadata.build_token_metadata_layout(
+        attention_mask,
+        rows[0].device,
+        packed=packed,
+        fp8_enabled=False,
+    )
+
+    aligned = token_metadata._align_token_rows(
+        rows.__getitem__,
+        rows[0],
+        (),
+        layout,
+        -1,
+    )
+
+    if packed:
+        assert aligned.tolist() == [[10, 11, 12, -1, 20, 21, -1, -1]]
+    else:
+        assert aligned.tolist() == [[10, 11, 12, -1], [20, 21, -1, -1]]
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_align_packed_token_metadata_honours_per_segment_starts(monkeypatch, parallel_state, packed):
+    """A response-suffix channel covers part of a trajectory and needs its own start."""
+    monkeypatch.setattr(token_metadata, "get_packed_seq_align_size", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
+    attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
+    # Trajectory 0 keeps its last 2 of 3 real tokens; trajectory 1 keeps its last 1 of 2.
+    suffix = PackedTensor.from_segments(
+        [torch.tensor([11, 12], dtype=torch.int32), torch.tensor([21], dtype=torch.int32)]
+    )
+    layout = token_metadata.build_token_metadata_layout(
+        attention_mask,
+        suffix.device,
+        packed=packed,
+        fp8_enabled=False,
+    )
+
+    aligned = token_metadata.align_packed_token_metadata(suffix, layout, -1, segment_starts=[1, 1])
+
+    if packed:
+        assert aligned.tolist() == [[-1, 11, 12, -1, -1, 21, -1, -1]]
+    else:
+        assert aligned.tolist() == [[-1, 11, 12, -1], [-1, 21, -1, -1]]
+
+
+def test_align_packed_token_metadata_rejects_segments_that_leave_the_trajectory(monkeypatch, parallel_state):
+    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
+    attention_mask = torch.tensor([[0, 1, 1, 1]])
+    suffix = PackedTensor.from_segments([torch.tensor([11, 12], dtype=torch.int32)])
+    layout = token_metadata.build_token_metadata_layout(
+        attention_mask,
+        suffix.device,
+        packed=False,
+        fp8_enabled=False,
+    )
+
+    with pytest.raises(ValueError, match="spans real tokens"):
+        token_metadata.align_packed_token_metadata(suffix, layout, -1, segment_starts=[2])
+    with pytest.raises(ValueError, match="do not match"):
+        token_metadata.align_packed_token_metadata(suffix, layout, -1)
