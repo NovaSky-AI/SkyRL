@@ -282,7 +282,7 @@ def _ref_packed_rows(collator: PackedDataCollator, examples, max_packed_len, fla
     def _round_up(x, m):
         return ((x + m - 1) // m) * m
 
-    align_size = collator.tp_size * collator.cp_size * 2 if collator.cp_size > 1 else collator.tp_size
+    align_size = collator.tp_size * collator.cp_size * 2 if collator.cp_size > 1 else 1
     full_loss_masks = []
     for ex in examples:
         n_pad = len(ex["input_ids"]) - ex["num_actions"]
@@ -348,7 +348,16 @@ def test_packed_collator_bit_identical(seed, tp, pp, cp, dp):
     from skyrl.train.dataset.bin_packing import make_seq_packer
 
     seq_lengths = [len(ex["input_ids"]) for ex in examples]
-    packer = make_seq_packer("first_fit_decreasing", bin_capacity=bin_capacity, min_bin_count=dp, bin_count_multiple=dp)
+    align_size = tp * cp * 2 if cp > 1 else 1
+    packing_align_size_total = tp * cp * 2 if cp > 1 else tp
+    packer = make_seq_packer(
+        "first_fit_decreasing",
+        bin_capacity=bin_capacity,
+        min_bin_count=dp,
+        bin_count_multiple=dp,
+        sequence_length_multiple=align_size,
+        packed_length_multiple=packing_align_size_total,
+    )
     bins = packer.pack(seq_lengths)
     shard_bins: List[List[List[int]]] = [[] for _ in range(dp)]
     for bin_idx, bi in enumerate(bins):
@@ -360,10 +369,12 @@ def test_packed_collator_bit_identical(seed, tp, pp, cp, dp):
     def _round_up(x, m):
         return ((x + m - 1) // m) * m
 
-    align_size = tp * cp * 2 if cp > 1 else tp
-    bin_packed_lengths = [sum(_round_up(seq_lengths[idx], align_size) for idx in bi) for bi in flat_bins]
+    bin_packed_lengths = [
+        _round_up(sum(_round_up(seq_lengths[idx], align_size) for idx in bi), packing_align_size_total)
+        for bi in flat_bins
+    ]
     if pp > 1:
-        max_packed_len = _round_up(max(bin_packed_lengths), align_size)
+        max_packed_len = _round_up(max(bin_packed_lengths), packing_align_size_total)
     else:
         max_packed_len = max(bin_packed_lengths)
 
