@@ -34,13 +34,15 @@ class DummyStatefulDataLoader:
 
 
 class DummyGenerator(GeneratorInterface):
-    def __init__(self, output: GeneratorOutput):
-        self.output = output
+    def __init__(self, output: GeneratorOutput | list[GeneratorOutput]):
+        # A list is returned one element per `generate()` call, in order (clamped to the last);
+        # a single output is returned on every call.
+        self.outputs = list(output) if isinstance(output, list) else [output]
         self.seen_inputs = []
 
     async def generate(self, input_batch):
         self.seen_inputs.append(input_batch)
-        return self.output
+        return self.outputs[min(len(self.seen_inputs), len(self.outputs)) - 1]
 
 
 @pytest.mark.asyncio
@@ -319,3 +321,104 @@ async def test_evaluate_step_wise_dump_keeps_every_step(dummy_config, tmp_path):
     assert [row["score"] for row in rows_a] == [0.0, 1.0]
     assert [row["score"] for row in rows_b] == [0.0]
     assert (dump_dir / "aggregated_results.jsonl").exists()
+
+
+# ---------------------------------------------------------------------------
+# Two batches: `_EvalRows.extend()` and cross-batch `concatenate_generator_outputs`
+# ---------------------------------------------------------------------------
+
+
+def _prompts(*rows):
+    """One prompt per (uid, data_source) pair, with the default env class."""
+    return [
+        {
+            "prompt": [{"role": "user", "content": f"question-{uid}"}],
+            "env_class": None,
+            "env_extras": {"data_source": data_source},
+            "uid": uid,
+        }
+        for uid, data_source in rows
+    ]
+
+
+def _plain_output_for(rewards) -> GeneratorOutput:
+    n = len(rewards)
+    return {
+        "prompt_token_ids": [[100 + i] for i in range(n)],
+        "response_ids": [[200 + i] for i in range(n)],
+        "rewards": list(rewards),
+        "loss_masks": [[1]] * n,
+        "stop_reasons": ["stop"] * n,
+        "rollout_logprobs": None,
+    }
+
+
+def _step_wise_output_for(trajectories) -> GeneratorOutput:
+    """``trajectories``: (uid, per-step rewards) in order; each trajectory is a contiguous block."""
+    out = _plain_output_for([r for _, rewards in trajectories for r in rewards])
+    out["trajectory_ids"] = [TrajectoryID(uid, 0) for uid, rewards in trajectories for _ in rewards]
+    out["is_last_step"] = [i == len(rewards) - 1 for _, rewards in trajectories for i in range(len(rewards))]
+    return out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step_wise", [False, True])
+async def test_evaluate_two_batches_keeps_rows_aligned_across_batches(dummy_config, tmp_path, step_wise):
+    """Two dataloader batches: exercises ``_EvalRows.extend()`` and cross-batch
+    ``concatenate_generator_outputs``. Datasets alternate within each batch, so the per-dataset
+    metrics only come out right if batch 2's rows are attributed to batch 2's prompts."""
+    cfg = _configure_eval(dummy_config, tmp_path, step_wise=step_wise, dump_results=True)
+    batch_1 = _prompts(("uid-1", "dataset/a"), ("uid-2", "dataset/b"))
+    batch_2 = _prompts(("uid-3", "dataset/a"), ("uid-4", "dataset/b"))
+    if step_wise:
+        # uid-1: two steps, reward on the last; uid-2: one step. uid-3: one step; uid-4: two steps.
+        outputs = [
+            _step_wise_output_for([("uid-1", [0.0, 1.0]), ("uid-2", [0.0])]),
+            _step_wise_output_for([("uid-3", [0.0]), ("uid-4", [0.0, 1.0])]),
+        ]
+    else:
+        outputs = [_plain_output_for([1.0, 0.0]), _plain_output_for([0.0, 1.0])]
+    generator = DummyGenerator(outputs)
+    trajectory_logger = MagicMock()
+
+    metrics = await evaluate(
+        eval_dataloader=DummyStatefulDataLoader([batch_1, batch_2]),
+        generator=generator,
+        cfg=cfg,
+        global_step=5,
+        tokenizer=_tokenizer(),
+        trajectory_logger=trajectory_logger,
+    )
+
+    # One generate() per batch, each with that batch's prompts.
+    assert [len(inp["prompts"]) for inp in generator.seen_inputs] == [2, 2]
+    assert generator.seen_inputs[1]["prompts"] == [p["prompt"] for p in batch_2]
+
+    # Per-dataset metrics span both batches: a = {uid-1: 1.0, uid-3: 0.0}, b = {uid-2: 0.0, uid-4: 1.0}.
+    for key in (
+        "eval/dataset_a/avg_score",
+        "eval/dataset_b/avg_score",
+        "eval/all/avg_score",
+        "eval/all/pass_at_1",
+    ):
+        assert metrics[key] == pytest.approx(0.5), key
+    assert "eval/all/generate/avg_num_tokens" in metrics  # rollout metrics re-aggregated across batches
+
+    # One logged sample per trajectory across both batches, in row order.
+    kwargs = trajectory_logger.log.call_args.kwargs
+    assert len(kwargs["prompts"]) == 4
+    assert kwargs["generator_output"]["rewards"] == [1.0, 0.0, 0.0, 1.0]
+    assert kwargs["num_turns_list"] == ([2, 1, 1, 2] if step_wise else None)
+
+    # The dump attributes every row (every step when step-wise) to its own batch's dataset.
+    dump_dir = tmp_path / "dumped_evals" / "global_step_5_evals"
+
+    def _scores(name):
+        return [json.loads(line)["score"] for line in (dump_dir / f"{name}.jsonl").read_text().splitlines()]
+
+    if step_wise:
+        assert _scores("dataset_a") == [0.0, 1.0, 0.0]  # uid-1 (2 steps) then uid-3 (1 step)
+        assert _scores("dataset_b") == [0.0, 0.0, 1.0]  # uid-2 (1 step) then uid-4 (2 steps)
+    else:
+        assert _scores("dataset_a") == [1.0, 0.0]
+        assert _scores("dataset_b") == [0.0, 1.0]
