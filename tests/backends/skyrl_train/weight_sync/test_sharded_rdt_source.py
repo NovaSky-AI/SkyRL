@@ -292,6 +292,24 @@ class TestExpertNameResolution:
     which is what lets this be a CPU test.
     """
 
+    @pytest.mark.parametrize("projection", ["fc1", "fc2"])
+    def test_lora_expert_template_resolves_in_qwen_registry(self, projection):
+        pytest.importorskip("megatron.bridge", reason="needs the megatron extra")
+        from megatron.bridge.models.qwen.qwen3_moe_bridge import Qwen3MoEBridge
+
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            MegatronStackedWeightSource,
+        )
+
+        sample = f"decoder.layers.3.mlp.experts.linear_{projection}.to_wrap.weight5"
+        name = MegatronStackedWeightSource._mg_expert_template(sample).format(layer=47, e=11)
+        mapping = Qwen3MoEBridge.mapping_registry(None).megatron_to_hf_lookup(name)
+
+        base = "model.layers.47.mlp.experts.11"
+        expected = {"gate": f"{base}.gate_proj.weight", "up": f"{base}.up_proj.weight"}
+        assert mapping is not None
+        assert mapping.hf_param == (expected if projection == "fc1" else f"{base}.down_proj.weight")
+
     def test_template_resubstitutes_both_indices(self):
         """Only the SHAPE of the sample name is kept — a foreign expert this rank
         holds no task for still gets the right name."""

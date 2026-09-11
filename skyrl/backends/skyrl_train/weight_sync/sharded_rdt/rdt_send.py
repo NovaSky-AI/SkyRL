@@ -521,6 +521,10 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         re-substituted, so the same template serves foreign experts this rank
         holds no task for.
         """
+        # Conversion tasks retain LoRA wrapper names; the mapping registry uses
+        # unwrapped base names, just as Bridge's conversion-task lookup does.
+        sample_global_param_name = sample_global_param_name.replace(".to_wrap.", ".")
+
         head, _, rest = sample_global_param_name.partition("layers.")
         _layer, _, tail = rest.partition(".")
         base = tail.rsplit("weight", 1)[0]
