@@ -191,7 +191,14 @@ def _stub_request(async_engine, waiters, headers: dict | None = None):
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(db_engine=async_engine, future_waiters=waiters)),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                db_engine=async_engine,
+                external_future_store=None,
+                future_waiters=waiters,
+                proto_serialization_lock=asyncio.Lock(),
+            )
+        ),
         headers=headers or {},
     )
 

@@ -112,6 +112,27 @@ there first.
   generator in HF-canonical order that gathers TP/PP/EP internally. `metadata()` must
   materialize once to learn shapes, so it runs a dry export and caches.
 
+### Serialized FP8 rollout sync
+
+`generator.inference_engine.fp8_weight_sync_mode=blockwise` currently supports the
+Megatron trainer with the NCCL or CUDA-IPC backends. Megatron first exports the normal
+HF weight stream, then `SerializedFp8WeightSource` replaces each source tensor with the
+serialized FP8 tensors that vLLM loads: the quantized weight and its inverse scale. Its
+metadata is derived from that same serialized stream, so the trainer engine's buffer
+layout remains identical to the tensors sent on the wire.
+
+The inference launch path supplies vLLM's FP8 dummy-load configuration, including the
+model-specific ignored layers. The receiver reload proxy recognizes the compact batched
+MoE FP8 tensors before forwarding ordinary weights to `model.load_weights`; this keeps
+the compact expert representation intact for both NCCL and IPC reloads. FP8 serialization
+is incompatible with the delta and sharded-RDT transfer backends.
+
+For Qwen3.5-35B-A3B on Hopper, use rollout TP=4. Its routed-expert intermediate
+dimension is 512, and vLLM block-FP8 requires every TP shard to have 128-wide blocks;
+TP=8 produces 64-wide shards. The Hopper example starts four TP=4 rollout engines
+across 16 GPUs. Qwen3.5's shared expert and vision modules stay BF16 when their
+sharded dimensions cannot satisfy the block-FP8 shape requirement.
+
 ### Control plane
 
 `control_plane.SkyrlWeightSyncClient` is a **blocking** HTTP client over vLLM's native

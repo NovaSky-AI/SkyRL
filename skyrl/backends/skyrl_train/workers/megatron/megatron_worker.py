@@ -52,7 +52,13 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
-from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest
+from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest, get_transfer_strategy
+from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+    BLOCKWISE_FP8,
+    SerializedFp8Config,
+    registered_fp8_spec_names,
+    resolve_fp8_spec,
+)
 from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     AdapterStore,
     LoraSignature,
@@ -1185,6 +1191,32 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = learning_rate
 
+    async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
+        """Resolve serialized FP8 before the parent builds the weight source."""
+        self._serialized_fp8_config = None
+        mode = inference_engine_cfg.fp8_weight_sync_mode
+        if mode is not None:
+            if mode != BLOCKWISE_FP8:
+                raise ValueError(f"Unsupported fp8_weight_sync_mode={mode!r}. Supported value: {BLOCKWISE_FP8!r}.")
+            resolved_backend = get_transfer_strategy(
+                inference_engine_cfg.weight_sync_backend,
+                self.cfg.placement.colocate_all,
+            )
+            if resolved_backend not in {"nccl", "ipc"}:
+                raise ValueError(
+                    "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
+                    f"got {resolved_backend!r}."
+                )
+            spec = resolve_fp8_spec(self.strategy.hf_config)
+            if spec is None:
+                raise ValueError(
+                    "FP8 weight sync requires a registered model spec for the configured checkpoint "
+                    f"(registered specs: {', '.join(registered_fp8_spec_names())})."
+                )
+            self._serialized_fp8_config = SerializedFp8Config(spec=spec)
+
+        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
+
     def _build_weight_source(self, dtype: "torch.dtype", backend: str):
         """``WeightSource`` over the Megatron policy model, via Megatron-Bridge."""
         if backend == "sharded_rdt":
@@ -1198,7 +1230,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         from skyrl.backends.skyrl_train.weight_sync.sources import MegatronWeightSource
 
-        return MegatronWeightSource(self.bridge, self.actor_module, dtype)
+        source = MegatronWeightSource(self.bridge, self.actor_module, dtype)
+        if self._serialized_fp8_config is not None:
+            from skyrl.backends.skyrl_train.weight_sync.sources import SerializedFp8WeightSource
+
+            return SerializedFp8WeightSource(source, self._serialized_fp8_config)
+        return source
 
     async def _save_lora_adapters_and_sync(
         self, lora_sync_path, inference_engine_client, lora_name: str = SKYRL_LORA_ADAPTER_NAME

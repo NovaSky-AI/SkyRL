@@ -27,6 +27,7 @@ __all__ = [
     "FsdpWeightSource",
     "MegatronWeightSource",
     "ParamMeta",
+    "SerializedFp8WeightSource",
     "WeightSource",
     "materialize_full_tensor",
 ]
@@ -118,3 +119,41 @@ class MegatronWeightSource(WeightSource):
         for name, tensor in self._export():
             full = tensor.to(device=device, dtype=self._dtype, non_blocking=True).detach().contiguous()
             yield name, full
+
+
+class SerializedFp8WeightSource(WeightSource):
+    """Serialize a dense source into blockwise-FP8 checkpoint tensors.
+
+    The vLLM trainer engines require metadata and iteration to expose the same
+    expanded stream. The first metadata call therefore runs one dry conversion
+    and caches the result; subsequent weight syncs stream the wrapped source
+    lazily through vLLM's packed buffer.
+    """
+
+    def __init__(self, source: WeightSource, config: Any) -> None:
+        self._source = source
+        self._config = config
+        self._meta: Optional[List[ParamMeta]] = None
+
+    def _serialized(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        from skyrl.backends.skyrl_train.weight_sync.fp8 import iter_serialized_fp8_tensors
+
+        for name, tensor in self._source:
+            for serialized_name, serialized_tensor in iter_serialized_fp8_tensors(
+                name,
+                tensor,
+                tensor.dtype,
+                self._config,
+            ):
+                yield serialized_name, serialized_tensor.detach().contiguous()
+
+    def metadata(self) -> List[ParamMeta]:
+        if self._meta is None:
+            self._meta = [
+                ParamMeta(name, tensor.dtype, tuple(tensor.shape))
+                for name, tensor in self._serialized()
+            ]
+        return self._meta
+
+    def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        yield from self._serialized()

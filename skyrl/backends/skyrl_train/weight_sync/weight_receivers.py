@@ -56,39 +56,38 @@ class _LoadWeightsProxy:
 
 
 class SkyrlDrafterReloadMixin:
-    """Reload the spec-decode drafter from the same weights the main model got.
+    """Handle SkyRL-specific reloads around the engine's model load.
 
-    Wrap the engine's own load in :meth:`skyrl_drafter_reload`. Costs nothing
-    when this process has no drafter: the proxy is not installed at all.
+    The wrapper splits the compact batched-MoE FP8 wire tensors from ordinary
+    checkpoint weights, then reloads a spec-decode drafter when one is present.
     """
 
     @contextmanager
     def skyrl_drafter_reload(self) -> Iterator[None]:
-        """Install the drafter-reloading proxy over ``self.model``, if needed."""
+        """Install the FP8-aware, drafter-reloading proxy over ``self.model`."""
         from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
             current_model_runner,
         )
 
         model_runner = current_model_runner()
         drafter = getattr(model_runner, "drafter", None) if model_runner is not None else None
-        if drafter is None or getattr(drafter, "model", None) is None:
-            # No speculative decoding, or a proposer with no loadable model
-            # (ngram): nothing to interpose.
-            yield
-            return
-
-        from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
-            _reload_spec_decode_drafter,
+        from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
+            _load_checkpoint_weights,
         )
 
         model = self.model
 
         def load_weights(weights: Any, **kwargs: Any) -> Any:
-            # The engines hand us a one-shot generator, and the drafter needs its
-            # own pass to filter for the names it consumes.
+            # The engines hand us a one-shot generator. The compact FP8 loader
+            # and a speculative drafter both need a complete view of the stream.
             weight_list = list(weights)
-            loaded = model.load_weights(weights=weight_list, **kwargs)
-            _reload_spec_decode_drafter(model_runner, weight_list)
+            loaded = _load_checkpoint_weights(model, weight_list, **kwargs)
+            if drafter is not None and getattr(drafter, "model", None) is not None:
+                from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
+                    _reload_spec_decode_drafter,
+                )
+
+                _reload_spec_decode_drafter(model_runner, weight_list)
             return loaded
 
         # The proxy scopes the override to the `WeightTransferEngine` context

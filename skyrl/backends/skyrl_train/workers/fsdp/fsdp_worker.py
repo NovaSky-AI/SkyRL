@@ -32,6 +32,11 @@ from skyrl.backends.skyrl_train.workers.worker import (
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
+    async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
+        if inference_engine_cfg.fp8_weight_sync_mode is not None:
+            raise ValueError("Serialized FP8 weight sync currently requires trainer.strategy='megatron'.")
+        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
+
     def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.strategy == "fsdp"
         strategy = FSDPStrategy(
