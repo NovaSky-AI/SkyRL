@@ -1,26 +1,28 @@
 """GPU integration tests for Kimi K2.5-family (``KimiK25ForConditionalGeneration``) support.
 
-Covers the pieces added for Kimi-K2.7-Code:
+Covers the pieces the logprob-parity row in ``test_megatron_models.py`` cannot:
+its LoRA adapter is zero-initialized, so parity is blind to what the exported
+adapter actually contains.
 
-- ``KimiK25TextBridge`` dispatch + MLA/MoE provider construction from the
-  nested VL config (``text_config`` + ``language_model.`` weight prefix)
-- BF16-master loading via ``fake_int4_qat.bf16_base_path`` with the INT4
-  release as the logical model
-- LoRA on the text model and PEFT adapter export through the production
-  ``merge_lora=false`` disk-sync path (per-node writer + vLLM MoE layout)
-- fake-INT4 STE active on the grouped expert GEMMs during the forward
+- vLLM's ``SupportsLoRA`` protocol gate on the patched wrapper (no checkpoint
+  needed, so this one runs anywhere vLLM is installed)
+- the ``merge_lora=false`` PEFT export layout vLLM hot-loads: per-expert keys,
+  flat 2D tensors, and an adapter that points at the INT4 release
 
-The worker tests load the REAL checkpoint truncated to its first two layers
-(one dense + one MoE; ~40 GB) via ``transformer_config_kwargs.num_layers``, so
-they need the artifacts on disk and are skipped otherwise:
+Bridge dispatch and provider construction are not asserted here: the
+``kimi-k2.5-2layer-int4-qat`` row in ``test_megatron_models.py`` covers them
+harder, by requiring the resulting forward to match what vLLM serves.
 
-- ``SKYRL_TEST_KIMI_MODEL`` (default ``moonshotai/Kimi-K2.7-Code``; must be in
-  the local HF cache)
-- ``SKYRL_TEST_KIMI_BF16``  (default ``/data/skyrl/models/Kimi-K2.7-Code-BF16``;
-  produced by ``examples/train/megatron/dequantize_compressed_tensors_int4.py``)
+The worker test loads the 2-layer slice of the real checkpoint (~41 GB of BF16
+masters on one GPU), so it carries ``pytest.mark.h100``. Override the defaults
+to run it against a full checkpoint:
+
+- ``SKYRL_TEST_KIMI_MODEL`` -- INT4 release the inference engine serves
+- ``SKYRL_TEST_KIMI_BF16``  -- BF16 masters the trainer loads, from
+  ``examples/train/megatron/dequantize_compressed_tensors_int4.py``
 
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_kimi_k25_bridge.py
+uv run --isolated --extra dev --extra megatron -- pytest -s -m h100 tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_kimi_k25_bridge.py
 """
 
 import json
@@ -40,26 +42,10 @@ from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import init_worker_with_type
 
-KIMI_MODEL = os.environ.get("SKYRL_TEST_KIMI_MODEL", "moonshotai/Kimi-K2.7-Code")
-KIMI_BF16 = os.environ.get("SKYRL_TEST_KIMI_BF16", "/data/skyrl/models/Kimi-K2.7-Code-BF16")
-
-
-def _kimi_artifacts_available() -> bool:
-    if not os.path.isfile(os.path.join(KIMI_BF16, "config.json")):
-        return False
-    try:
-        from huggingface_hub import snapshot_download
-
-        snapshot_download(KIMI_MODEL, local_files_only=True)
-    except Exception:
-        return os.path.isdir(KIMI_MODEL)  # local-path model
-    return True
-
-
-_needs_kimi = pytest.mark.skipif(
-    not _kimi_artifacts_available(),
-    reason=f"Kimi checkpoints not available locally ({KIMI_MODEL} in HF cache + {KIMI_BF16})",
-)
+# 2-layer slices of moonshotai/Kimi-K2.5: layer 0 dense + layer 1 with all 384
+# routed experts, the INT4 release and its dequantized masters.
+KIMI_MODEL = os.environ.get("SKYRL_TEST_KIMI_MODEL", "eatang/Kimi-K2.5-2layer")
+KIMI_BF16 = os.environ.get("SKYRL_TEST_KIMI_BF16", "eatang/Kimi-K2.5-2layer-BF16")
 
 
 class _NullInferenceClient:
@@ -95,49 +81,8 @@ def test_kimi_k25_vllm_lora_patch():
     assert not KimiK25ForConditionalGeneration.is_3d_moe_weight  # per-expert LoRA keys
 
 
-@_needs_kimi
-@pytest.mark.megatron
-def test_kimi_bridge_dispatch_and_provider():
-    """AutoBridge must dispatch the KimiK25 arch to the text bridge and build a correct MLA/MoE provider."""
-    from megatron.bridge import AutoBridge
-
-    from skyrl.backends.skyrl_train.workers.megatron import model_bridges
-
-    assert hasattr(model_bridges, "KimiK25TextBridge")
-
-    bridge = AutoBridge.from_hf_pretrained(KIMI_BF16, trust_remote_code=True)
-    provider = bridge.to_megatron_provider(load_weights=False)
-
-    assert provider.multi_latent_attention
-    assert provider.num_layers == 61
-    assert provider.hidden_size == 7168
-    assert provider.q_lora_rank == 1536
-    assert provider.kv_lora_rank == 512
-    assert provider.num_moe_experts == 384
-    assert provider.moe_router_topk == 8
-    assert provider.moe_router_score_function == "sigmoid"
-    assert provider.moe_router_enable_expert_bias
-    assert provider.moe_layer_freq[0] == 0 and all(f == 1 for f in provider.moe_layer_freq[1:])
-    assert provider.rotary_base == 50000.0
-    assert provider.rotary_scaling_factor == 64.0
-    assert provider.vocab_size == 163840
-
-    # The HF side of every weight mapping must live under the unified VL prefix.
-    registry = bridge._model_bridge.mapping_registry() if hasattr(bridge, "_model_bridge") else None
-    if registry is None:
-        kimi_bridge = model_bridges.KimiK25TextBridge()
-        kimi_bridge.hf_config = bridge.hf_pretrained.config
-        registry = kimi_bridge.mapping_registry()
-    mappings = getattr(registry, "mappings", None) or getattr(registry, "_mappings", None)
-    for mapping in mappings:
-        hf_params = [mapping.hf_param] if isinstance(mapping.hf_param, str) else list(mapping.hf_param.values())
-        for hf_param in hf_params:
-            assert hf_param.startswith("language_model."), f"unprefixed mapping: {hf_param}"
-
-
 def _kimi_worker_cfg(lora_sync_path: str) -> SkyRLTrainConfig:
-    """Production Kimi settings (LoRA + fake-INT4 QAT + language_model_only),
-    truncated to the first two layers (dense layer 0 + MoE layer 1) for memory."""
+    """Production Kimi settings: LoRA + fake-INT4 QAT + language_model_only."""
     cfg = SkyRLTrainConfig()
     cfg.trainer.strategy = "megatron"
     cfg.trainer.policy.model.path = KIMI_MODEL
@@ -176,8 +121,9 @@ def _kimi_worker_cfg(lora_sync_path: str) -> SkyRLTrainConfig:
     mcfg = cfg.trainer.policy.megatron_config
     if mcfg.transformer_config_kwargs is None:
         mcfg.transformer_config_kwargs = {}
-    # Truncate the 61-layer model; moe_layer_freq is a per-layer list on
-    # DeepSeek-V3-family providers so it must be truncated alongside.
+    # A no-op on the 2-layer slice, but keeps the test runnable against a full
+    # 61-layer checkpoint. moe_layer_freq is a per-layer list on
+    # DeepSeek-V3-family providers, so it must be truncated alongside.
     mcfg.transformer_config_kwargs["num_layers"] = 2
     mcfg.transformer_config_kwargs["moe_layer_freq"] = [0, 1]
 
@@ -185,9 +131,9 @@ def _kimi_worker_cfg(lora_sync_path: str) -> SkyRLTrainConfig:
     return cfg
 
 
-@_needs_kimi
 @pytest.mark.asyncio
 @pytest.mark.megatron
+@pytest.mark.h100
 async def test_kimi_worker_forward_and_lora_export():
     """End-to-end through the real worker: BF16-master load, fake-INT4 forward,
     and the merge_lora=false PEFT adapter export that vLLM hot-loads."""
@@ -241,7 +187,9 @@ async def test_kimi_worker_forward_and_lora_export():
     num_experts = 384
     for proj in ("gate_proj", "up_proj", "down_proj"):
         expert_keys = [k for k in keys if ".layers.1.mlp.experts." in k and f".{proj}.lora_A.weight" in k]
-        assert len(expert_keys) == num_experts, f"{proj}: expected {num_experts} expert LoRA keys, got {len(expert_keys)}"
+        assert (
+            len(expert_keys) == num_experts
+        ), f"{proj}: expected {num_experts} expert LoRA keys, got {len(expert_keys)}"
     assert any(".layers.1.mlp.experts.0.gate_proj.lora_A.weight" in k for k in keys)
 
     # The adapter must reference the INT4 release (what vLLM serves), not the BF16 masters.
