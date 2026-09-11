@@ -173,6 +173,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # New inference infrastructure
         self._server_groups: list = []
         self._inference_router = None
+        self._engines_sleep_level: int | None = None
 
         # Optional hook invoked on inference-engine state changes (after
         # _create_new_inference_client, on delete_model teardown). The host
@@ -409,6 +410,9 @@ class SkyRLTrainBackend(AbstractBackend):
         # LoRA weight sync is in use, since level 2 would discard the base model).
         if is_colocated:
             asyncio.run(client.sleep())
+            # Record the effective level: sleep() defaults to 2 but the client
+            # clamps to 1 when LoRA weight sync keeps a CPU base-model backup.
+            self._engines_sleep_level = 1 if client.uses_lora_weight_sync else 2
 
     def _create_render_client(self) -> RendererClientProtocol:
         """Return a client for vLLM's ``/v1/chat/completions/render``.
@@ -444,6 +448,11 @@ class SkyRLTrainBackend(AbstractBackend):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
         if self._inference_engines_initialized:
             return
+
+        # A preceding training op (another tenant's forward/forward_backward)
+        # may have left the trainer GPU-resident. Offload the trainer before bringing the engines up
+        if self._dispatch is not None:
+            self._dispatch.offload_for_sampling()
 
         self._create_new_inference_client()
 
@@ -633,6 +642,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch = None
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._engines_sleep_level = None
         self._inference_adapter_ids = set()
         self._renderer = None
         self._colocate_pg = None
@@ -847,11 +857,47 @@ class SkyRLTrainBackend(AbstractBackend):
     def _sleep_inference_engines(self):
         """Sleep inference engines to free GPU memory for training."""
         if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
+            if self._engines_sleep_level is not None:
+                return
             lora_cfg = self._cfg.trainer.policy.model.lora
             # TODO(team): remove once vllm fixes this
             # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
             sleep_level = 1 if lora_cfg and lora_cfg.rank > 0 else 2
             asyncio.run(self._inference_engine_client.sleep(level=sleep_level))
+            self._engines_sleep_level = sleep_level
+
+    def _wake_inference_engines_for_sampling(self) -> str | None:
+        """Wake colocated engines before serving sample requests.
+
+        Inverse of :meth:`_sleep_inference_engines`. A cold sample -- a
+        request against an already-synced adapter with no
+        ``save_weights_for_sampler`` of its own in between (a training op,
+        this tenant's or another's, slept the engines since the last sync)
+        -- must not rely on the sync having woken the engines: without this,
+        requests queue against sleeping engines and hang. The trainer may be
+        GPU-resident from a preceding forward / optim op, so it is offloaded
+        first to give the engines their VRAM back.
+
+        Returns an error message (and does not wake) when the engines were
+        slept at level 2: that discards the weights, so a plain wake would
+        serve uninitialized memory as samples. Only a weight sync
+        (save_weights_for_sampler) can wake engines out of a level-2 sleep.
+        """
+        if not (self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all):
+            return None
+        if self._engines_sleep_level is None:
+            return None
+        if self._engines_sleep_level != 1:
+            return (
+                "inference engines have no synced weights (slept at level 2, which discards them); "
+                "call save_weights_for_sampler before sampling"
+            )
+        self._dispatch.offload_for_sampling()
+        try:
+            asyncio.run(self._inference_engine_client.wake_up())
+        finally:
+            self._engines_sleep_level = None
+        return None
 
     def _validate_batch_role_and_loss(self, role: str, loss_fn: str):
         if role == "critic" and loss_fn not in {"ppo", "ppo_critic"}:
@@ -1103,6 +1149,10 @@ class SkyRLTrainBackend(AbstractBackend):
         """
         # 1. Ensure inference engines are initialized
         self._ensure_inference_engines()
+        wake_error = self._wake_inference_engines_for_sampling()
+        if wake_error is not None:
+            error = types.ErrorResponse(error=wake_error, status="error")
+            return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
 
         # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
         # mixes adapters in one batched sample call (the engine batches across
@@ -1360,11 +1410,16 @@ class SkyRLTrainBackend(AbstractBackend):
         # Lazily create inference engines on first sampling-related call
         self._ensure_inference_engines()
 
+        self._sleep_inference_engines()
+
         # Multi-LoRA: pass model_id so the dispatch swaps the right adapter in
         # before broadcasting and the worker registers it on vLLM under that
         # name. None for the FFT / single-tenant path uses legacy behavior.
         sync_id = model_id if self._base_lora_signature is not None else None
-        asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
+        try:
+            asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
+        finally:
+            self._engines_sleep_level = None
         if sync_id is not None:
             # The sync registered this tenant's adapter on vLLM; remember it
             # so delete_model can unload it.
