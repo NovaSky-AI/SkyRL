@@ -444,6 +444,7 @@ def test_payload_lookup_is_chunked(scheduling_engine):
 # ---------------------------------------------------------------------------
 
 import asyncio  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 
 from sqlmodel import select  # noqa: E402
@@ -550,6 +551,28 @@ def test_continuous_sampling_completes_futures_independently(continuous_engine):
 
     assert _wait_for(lambda: _future_status(engine, rid_slow) == RequestStatus.COMPLETED, timeout=3.0)
     assert engine.backend.prepare_calls == 1
+
+
+def test_continuous_sampling_writes_results_off_the_event_loop(continuous_engine):
+    """The result write (JSON serialization + DB commit) must not run on the
+    sampler's event loop thread, where it would stall every other in-flight
+    request's HTTP handling for its duration."""
+    engine = continuous_engine
+    writer_threads: list[str] = []
+    real_complete = engine._complete_futures
+
+    def recording_complete(results):
+        writer_threads.append(threading.current_thread().name)
+        real_complete(results)
+
+    engine._complete_futures = recording_complete
+    (rid,) = add_futures(engine, [(types.RequestType.SAMPLE, "model_a", sample_payload(""))])
+
+    engine.process_pending_requests_once()
+    assert _wait_for(lambda: _future_status(engine, rid) == RequestStatus.COMPLETED, timeout=3.0)
+
+    assert writer_threads and all(name != "tinker-sampler" for name in writer_threads)
+    assert all(name.startswith("tinker-sampler-db") for name in writer_threads)
 
 
 def test_blocking_single_request_drains_inflight_samples(continuous_engine):

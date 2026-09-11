@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -240,6 +241,11 @@ class _ContinuousSampler:
         self._idle = threading.Event()
         self._idle.set()
         self._loop = asyncio.new_event_loop()
+        # Result serialization and the DB write block; they run on this single
+        # worker so completions are written in order without stalling the event
+        # loop's HTTP handling for the other in-flight requests. The default
+        # executor is left to aiohttp (DNS resolution).
+        self._db_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tinker-sampler-db")
         self._thread = threading.Thread(target=self._loop.run_forever, name="tinker-sampler", daemon=True)
         self._thread.start()
 
@@ -269,7 +275,7 @@ class _ContinuousSampler:
             logger.exception(f"Continuous sample request {request_id} failed: {e}")
             results = {request_id: types.ErrorResponse(error=str(e), status="failed")}
         try:
-            self._engine._complete_futures(results)
+            await self._loop.run_in_executor(self._db_executor, self._engine._complete_futures, results)
         except Exception:  # noqa: BLE001 - losing a result write must not kill the sampler
             logger.exception(f"Failed to write result for sample request {request_id}")
         finally:
