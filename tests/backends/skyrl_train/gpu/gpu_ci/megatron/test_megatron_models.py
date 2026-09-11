@@ -27,6 +27,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    _uses_lora_weight_sync,
+    resolve_policy_model_name,
+)
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
@@ -40,6 +44,9 @@ from tests.backends.skyrl_train.gpu.utils import (
     get_test_generator_input,
     init_worker_with_type,
 )
+
+# BF16 masters for the INT4-served Kimi row: the same slice, experts dequantized.
+KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -59,7 +66,9 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # and that we enable nvte fused attn for moonlight models with remove_microbatch_padding=True
     # need to enable nvte fused attn for router replay tests when using moonlight models with remove_microbatch_padding=True
     cfg.trainer.logger = "console"
-    is_mla_model = "moonlight" in model_name.lower() or "glm-4" in model_name.lower()
+    is_mla_model = (
+        "moonlight" in model_name.lower() or "glm-4" in model_name.lower() or "kimi-k2.5" in model_name.lower()
+    )
     if is_mla_model:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
@@ -83,6 +92,34 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         cfg.trainer.ref.language_model_only = True
         # validate_cfg requires policy/ref/generator language_model_only to agree.
         cfg.generator.inference_engine.language_model_only = True
+    if "kimi-k2.5" in model_name.lower():
+        # Unified VL checkpoint with a DeepSeek-V3 language model under a
+        # `language_model.` prefix; MegatronWorker refuses it without
+        # language_model_only. vLLM builds the (frozen) vision tower either way.
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
+
+        # Production recipe: vLLM serves the INT4 release, the trainer loads BF16
+        # masters (Megatron-Bridge cannot read compressed-tensors) and fake-quantizes
+        # its experts to the same grid. scale_divisor=7.0/q_min=-7 is Kimi's QAT
+        # convention, and the masters are a fixed point of that STE.
+        fq = cfg.trainer.policy.model.fake_int4_qat
+        fq.enabled = True
+        fq.group_size = 32
+        fq.scale_divisor = 7.0
+        fq.q_min = -7.0
+        fq.bf16_base_path = KIMI_BF16_MASTERS
+
+        # INT4 base weights cannot take a bf16 broadcast, so merge_lora=False syncs a
+        # PEFT adapter instead; normalize_moe_lora keeps it small at 384 experts.
+        lora = cfg.trainer.policy.model.lora
+        lora.rank = 8
+        lora.alpha = 16
+        lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
+        cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+        cfg.trainer.policy.megatron_config.lora_config.normalize_moe_lora = True
     # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
@@ -91,6 +128,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower())
         or ("nemotron-3.5-lightning" in model_name.lower())
         or ("glm-4.7-flash" in model_name.lower())
+        or ("kimi-k2.5" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -102,7 +140,7 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
     env: dict[str, str] = {}
     # MLA models need cuDNN fused attention (the conftest globally sets
     # NVTE_FUSED_ATTN=0; re-enable it here so the fused backend is available).
-    if "moonlight" in model_name.lower() or "glm-4" in model_name.lower():
+    if "moonlight" in model_name.lower() or "glm-4" in model_name.lower() or "kimi-k2.5" in model_name.lower():
         env["NVTE_FUSED_ATTN"] = "1"
     if fp8_mode:
         # Serialized-FP8 block-scale contract, mirroring what
@@ -152,6 +190,11 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
     if "glm-4.7-flash" in model_name.lower():
         # GLM-4.7-Flash's 202k default context would size the KV pool far past
         # what is left next to the colocated Megatron policy shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
+    if "kimi-k2.5" in model_name.lower():
+        # Same story: a 262k default context, and 384 routed experts sitting next
+        # to the colocated Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
     return overrides
@@ -256,6 +299,34 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             None,
             id="glm-4.7-flash_h100_tp4_ep4",
+            marks=pytest.mark.h100,
+        ),
+        # Kimi K2.5 on its production path: vLLM serves the INT4 slice, Megatron trains
+        # BF16 masters with fake-INT4 experts and syncs a LoRA adapter back. Both repos
+        # are 2-layer slices of the real checkpoint (layer 0 dense + layer 1 with all 384
+        # routed experts, plus embedding/lm_head and the vision tower vLLM always builds;
+        # ~20B params, 16 GB INT4 / 41 GB bf16), so they need the same 4xH100 mesh as the
+        # other large-MoE rows. Covers KimiK25TextBridge dispatch, the `language_model.`
+        # prefix through the bridge, MLA + sample packing, MoE at EP=4, the fake-INT4 STE,
+        # and the merge_lora=false adapter export + vLLM hot-load.
+        #
+        # The Megatron-vs-vLLM bound is the signal: a forward on BF16 masters with
+        # fake-INT4 experts has to reproduce what the INT4 engine serves. Measured on
+        # 4xH100: 0.029 there, 0.008 on the post-sync common-prefix check. Its bound stays
+        # looser than the full-model rows -- 2 of 61 layers is not a coherent LM.
+        pytest.param(
+            4,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            "eatang/Kimi-K2.5-2layer",
+            1e-1,
+            1e-1,
+            None,
+            id="kimi-k2.5-2layer-int4-qat_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
         pytest.param(
@@ -393,8 +464,14 @@ async def test_logprobs_matching_roundtrip(
     """
     Check that logprob diff matches acrosss vllm and megatron.
     """
+    # See the comparison branch at the end of the test.
+    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower()
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
+        # With merge_lora=False the policy is served under the adapter name, which
+        # only exists after a sync -- so sync first, like the FP8 rows.
+        lora_sync = _uses_lora_weight_sync(cfg)
+        sync_before_first_generation = bool(fp8_mode) or lora_sync
         cfg.trainer.strategy = "megatron"
         cfg.generator.inference_engine.tensor_parallel_size = inference_tp
         cfg.generator.inference_engine.num_engines = num_gpus // inference_tp
@@ -456,6 +533,8 @@ async def test_logprobs_matching_roundtrip(
                 skyrl_gym_cfg=cfg.environment.skyrl_gym,
                 inference_engine_client=client,
                 tokenizer=tokenizer,
+                # None for every non-LoRA row, keeping them on the default model.
+                policy_model_name=resolve_policy_model_name(cfg) if lora_sync else None,
             )
 
             cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
@@ -468,12 +547,12 @@ async def test_logprobs_matching_roundtrip(
             cfg.trainer.micro_train_batch_size_per_gpu = 2
 
             policy = None
-            if fp8_mode:
-                # Serialized FP8 boots vLLM with load_format="dummy", so real
-                # weights must be synced from Megatron before generating
-                # (mirrors the trainer, which always syncs before the first
-                # rollout). Build the policy with the engines asleep, then
-                # run the same offload/wake/broadcast dance as the sync below.
+            if sync_before_first_generation:
+                # Sync before the first rollout, as the trainer does: serialized FP8
+                # boots vLLM with load_format="dummy" so the real weights only arrive
+                # over the sync, and LoRA rows have no adapter until one is synced.
+                # Build the policy with the engines asleep, then run the same
+                # offload/wake/broadcast dance as the sync below.
                 await client.sleep()
                 policy = init_worker_with_type(
                     "policy",
@@ -558,13 +637,13 @@ async def test_logprobs_matching_roundtrip(
                 generator, client, model_name, tokenizer, return_training_input=False
             )
 
-            if fp8_mode:
-                # In the FP8 flow both generations ran on identical synced
-                # weights, so compare logprobs only on each sequence's common
-                # prefix: once greedy decoding diverges at a near-tie token,
-                # later positions score different tokens and their diff is
-                # pure noise (measured up to ~0.14 mean on identical weights,
-                # vs ~1e-3 on common prefixes).
+            # Compare only each sequence's common prefix when the two greedy
+            # generations are expected to diverge: past a near-tie flip the two sides
+            # score different tokens and the diff is noise. FP8 rows ran on identical
+            # synced weights (~0.14 positional vs ~1e-3 on prefixes); the Kimi slice
+            # has a flat enough distribution that 53 of 80 sequences diverged
+            # (~0.93 positional vs ~0.008 on prefixes).
+            if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
                 assert lp_1 is not None and lp_2 is not None, "resync check needs rollout logprobs"

@@ -75,6 +75,15 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_compile_cache_device_path imp
 
 apply_compile_cache_device_path_patch()
 
+# Runs in every vLLM worker process before the model is loaded, so the
+# LoRA-capability declaration is in place for the supports_lora() gate.
+from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E402
+    apply_kimi_k25_lora_patch,
+)
+
+apply_kimi_k25_lora_patch()
+
+
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
 
