@@ -19,6 +19,8 @@ import httpx
 import ray
 from loguru import logger
 
+from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
+
 # vLLM metric base names after RayPrometheusStatLogger sanitization (`:` -> `_`)
 # AND the `ray_` prefix that Ray's metrics agent adds to every custom metric.
 # Counters are exported by Ray in both legacy (no suffix) and proper (`_total`)
@@ -163,7 +165,7 @@ def discover_ray_metrics_urls() -> List[str]:
         port = node.get("MetricsExportPort")
         if not ip or not port:
             continue
-        urls.append(f"http://{ip}:{port}/metrics")
+        urls.append(format_http_url(ip, port, "/metrics"))
     return urls
 
 

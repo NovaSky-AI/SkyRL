@@ -76,7 +76,6 @@ def test_kimi_k25_vllm_lora_patch():
     documented attributes)."""
     pytest.importorskip("vllm")
     from typing_extensions import get_protocol_members
-
     from vllm.model_executor.models.interfaces import SupportsLoRA, supports_lora
     from vllm.model_executor.models.kimi_k25 import KimiK25ForConditionalGeneration
 
@@ -241,7 +240,7 @@ async def test_kimi_worker_forward_and_lora_export():
     # format vLLM's LoRA loader consumes natively (EP-aware; see vllm/lora/lora_model.py).
     num_experts = 384
     for proj in ("gate_proj", "up_proj", "down_proj"):
-        expert_keys = [k for k in keys if f".layers.1.mlp.experts." in k and f".{proj}.lora_A.weight" in k]
+        expert_keys = [k for k in keys if ".layers.1.mlp.experts." in k and f".{proj}.lora_A.weight" in k]
         assert len(expert_keys) == num_experts, f"{proj}: expected {num_experts} expert LoRA keys, got {len(expert_keys)}"
     assert any(".layers.1.mlp.experts.0.gate_proj.lora_A.weight" in k for k in keys)
 

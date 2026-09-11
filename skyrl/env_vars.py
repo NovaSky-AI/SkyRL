@@ -90,6 +90,28 @@ See https://github.com/ray-project/ray/issues/56697 for details on why this is n
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Attention
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_DISABLE_FA4 = str(os.environ.get("SKYRL_DISABLE_FA4", "False")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+"""
+Force Transformer Engine to ignore FlashAttention 4, falling back to FA2 (or
+cuDNN fused attention). FA4 is opt-in via the ``fa4`` extra -- SkyRL ships FA4's
+kernels inside the combined ``flash-attn`` wheel, but TE only enables them when
+the metadata-only ``flash-attn-4`` companion is installed. This variable turns
+FA4 back off for an environment that already has it, without re-resolving.
+
+Useful for A/B-ing FA2 against FA4 without rebuilding the environment, and as an
+escape hatch if an FA4 kernel misbehaves on a shape SkyRL exercises.
+
+Default: False (use FA4 where supported).
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -104,4 +126,14 @@ instead of being redirected to the log file. Useful for debugging startup issues
 
 Default: False (infrastructure logs go to file only, stdout shows training progress).
 Set ``SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`` to show all logs on stdout.
+"""
+
+SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC = float(os.environ.get("SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC", 300))
+"""
+Read timeout in seconds for API-side requests forwarded to the SkyRL-Train-managed
+inference engine. This is applicable for SkyRL's Tinker server in non-colocated setups.
+
+The timeout must cover time spent queued behind other requests as well as generation time.
+Equivalent to the ``--forwarding-inference-timeout-sec`` flag of the Tinker API server
+(``EngineConfig.forwarding_inference_timeout_sec``); the flag takes precedence when both are set.
 """

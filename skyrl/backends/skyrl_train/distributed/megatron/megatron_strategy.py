@@ -16,7 +16,6 @@ from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
     get_default_save_sharded_strategy,
 )
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
@@ -45,6 +44,12 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
 
 # Seed offset per pipeline-parallel rank, matching Megatron's standard practice.
 _PP_SEED_OFFSET = 100
+
+# Process-wide queue of in-flight async checkpoint writes. Megatron-core has no
+# global for this; It has to be
+# module-level rather than an instance attribute because `_finalize_async_calls`
+# is a staticmethod, invoked from a finalization callback with no strategy handle.
+_async_calls: Optional[AsyncCallsQueue] = None
 
 
 def _stage_async_request_to_host(async_request):
@@ -181,7 +186,8 @@ class MegatronStrategy(DistributedStrategy):
 
         # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
         # short-lived background workers, which does not work well with Ray.
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+        global _async_calls
+        _async_calls = AsyncCallsQueue(persistent=True)
 
     def set_seed(self, seed: int) -> None:
         # Vary seed by pipeline parallel rank so that different PP stages get
@@ -299,6 +305,8 @@ class MegatronStrategy(DistributedStrategy):
         scheduler: Optional[OptimizerParamScheduler] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
     ):
+        global _async_calls
+
         # Extract base model.
         model: List[nn.Module] = model.actor_module
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
@@ -363,7 +371,7 @@ class MegatronStrategy(DistributedStrategy):
                     # Keeps GPU tensors from crossing the process boundary, which the writer
                     # cannot always do -- see `_stage_async_request_to_host`.
                     async_save_request = _stage_async_request_to_host(async_save_request)
-                ckpt_base.async_calls.schedule_async_request(async_save_request)
+                _async_calls.schedule_async_request(async_save_request)
             else:
                 assert async_save_request is None, "save() must not return a request when sync"
 
@@ -379,8 +387,8 @@ class MegatronStrategy(DistributedStrategy):
         if not async_save:
             # Async path keeps the pending request alive in the queue until its finalize;
             # tearing it down here would orphan that write.
-            ckpt_base.async_calls.close()
-            ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+            _async_calls.close()
+            _async_calls = AsyncCallsQueue(persistent=True)
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
 
     @staticmethod
@@ -389,7 +397,8 @@ class MegatronStrategy(DistributedStrategy):
         local_rank = os.environ.get("LOCAL_RANK")
         if local_rank is not None and torch.cuda.is_available():
             torch.cuda.set_device(int(local_rank))
-        ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
+        if _async_calls is not None:
+            _async_calls.maybe_finalize_async_calls(blocking=True)
 
     def finalize_pending_saves(self) -> None:
         """Block until any in-flight async checkpoint write completes.

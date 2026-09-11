@@ -24,11 +24,18 @@ Usage:
         skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap
 """
 
+from typing import Any
+
 import torch
 
 from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
     _empty_cuda_cache_rocm,
+)
+from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
+from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+    SKYRL_BATCHED_MOE_FP8_PREFIX,
+    batched_moe_wire_targets,
 )
 
 try:
@@ -40,6 +47,34 @@ try:
 except ModuleNotFoundError:
     pass
 
+# Registering the sharded_rdt engine into vLLM's WeightTransferEngineFactory must
+# happen inside every worker process (GPUWorker.load_model builds the engine via
+# the factory). Importing here — the worker-extension module vLLM loads before
+# model init — guarantees it runs on each worker. Guarded like the delta engine
+# above: this module is also imported from processes without the RDT dependencies
+# (e.g. a trainer process), and a missing optional dep must not break them.
+try:
+    from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
+        rdt_vllm_register,  # noqa: F401
+    )
+
+    rdt_vllm_register.ensure_registered()
+except ModuleNotFoundError:
+    pass
+
+# vLLM's AOT compile artifact directory carries no device, so engines on
+# different GPUs can overwrite each other's artifact and die with "CUDA driver
+# error: invalid argument". Scope it to the running device. Installed here for
+# the same reason as the registrations above: this module is loaded in every
+# worker process before model init, and the device is read lazily at compile
+# time, once it is live.
+# TODO (sumanthrh): Remove the patch after https://github.com/vllm-project/vllm/pull/53312 lands.
+from skyrl.backends.skyrl_train.patches.vllm.patch_compile_cache_device_path import (  # noqa: E402
+    apply_compile_cache_device_path_patch,
+)
+
+apply_compile_cache_device_path_patch()
+
 # Runs in every vLLM worker process before the model is loaded, so the
 # LoRA-capability declaration is in place for the supports_lora() gate.
 from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E402
@@ -48,7 +83,130 @@ from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E40
 
 apply_kimi_k25_lora_patch()
 
+
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
+
+
+# checkpoint-name suffix -> (fused vLLM parameter suffix, FusedMoE shard id),
+# derived from the registered ModelFp8Specs so per-model fused-loader knowledge
+# lives in exactly one place (weight_sync/fp8/models).
+_BATCHED_MOE_TARGETS = batched_moe_wire_targets()
+
+
+def _map_hf_weight_name(model: torch.nn.Module, name: str) -> str:
+    """Apply a top-level vLLM model's HF-to-runtime prefix mapping."""
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    if mapper is None:
+        return name
+    mapped = mapper.apply_list([name])
+    if len(mapped) != 1:
+        raise ValueError(f"Unable to map batched MoE checkpoint name {name!r}")
+    return mapped[0]
+
+
+def _load_batched_moe_fp8_tensor(
+    model: torch.nn.Module,
+    params_dict: dict[str, torch.nn.Parameter],
+    wire_name: str,
+    loaded_weight: torch.Tensor,
+) -> bool:
+    """Load one expert-batched FP8 weight/scale through FusedMoE's loader.
+
+    Returns ``False`` for ordinary checkpoint tensors. Marked tensors are
+    required to resolve successfully so a protocol mismatch cannot silently
+    leave stale rollout weights behind.
+    """
+    if not wire_name.startswith(SKYRL_BATCHED_MOE_FP8_PREFIX):
+        return False
+    if loaded_weight.ndim != 3:
+        raise ValueError(
+            f"Batched MoE wire tensor must be 3D, got name={wire_name!r}, shape={tuple(loaded_weight.shape)}"
+        )
+
+    checkpoint_name = wire_name.removeprefix(SKYRL_BATCHED_MOE_FP8_PREFIX)
+    mapped_name = _map_hf_weight_name(model, checkpoint_name)
+    target_name = None
+    shard_id = None
+    for checkpoint_suffix, (
+        target_suffix,
+        candidate_shard_id,
+    ) in _BATCHED_MOE_TARGETS.items():
+        if mapped_name.endswith(checkpoint_suffix):
+            target_name = mapped_name[: -len(checkpoint_suffix)] + target_suffix
+            shard_id = candidate_shard_id
+            break
+    if target_name is None or shard_id is None:
+        raise ValueError(f"Unsupported batched MoE wire tensor name {wire_name!r}")
+    if target_name not in params_dict:
+        # vLLM 0.26 turned FusedMoE into a factory returning a MoERunner whose
+        # RoutedExperts submodule registers the expert parameters, adding one
+        # segment to every runtime name; earlier engines register them on the
+        # experts module directly.
+        module_path, _, param_leaf = target_name.rpartition(".")
+        nested_name = f"{module_path}.routed_experts.{param_leaf}"
+        if nested_name not in params_dict:
+            raise ValueError(
+                f"Batched MoE target parameter was not found for wire tensor {wire_name!r}: "
+                f"tried {target_name!r} and {nested_name!r}"
+            )
+        target_name = nested_name
+
+    param = params_dict[target_name]
+    weight_loader = getattr(param, "weight_loader", None)
+    if weight_loader is None or not getattr(weight_loader, "supports_moe_loading", False):
+        # Layerwise reload wraps the loader with functools.wraps, which copies
+        # this marker from FusedMoE.weight_loader onto the wrapper.
+        raise ValueError(f"Parameter {target_name!r} does not expose a FusedMoE weight loader")
+
+    if param.shape[0] == loaded_weight.shape[0]:
+        success = weight_loader(
+            param,
+            loaded_weight,
+            target_name,
+            shard_id=shard_id,
+            expert_id=0,
+            return_success=True,
+        )
+        if not success:
+            raise ValueError(f"Fused loading failed for batched MoE tensor {wire_name!r}")
+        return True
+
+    # Expert-parallel vLLM keeps only a subset locally. Retain the compact wire
+    # format, but let the loader map global expert IDs one view at a time.
+    loaded_any = False
+    for expert_id, expert_weight in enumerate(loaded_weight.unbind(0)):
+        loaded_any = (
+            bool(
+                weight_loader(
+                    param,
+                    expert_weight,
+                    target_name,
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                    return_success=True,
+                )
+            )
+            or loaded_any
+        )
+    if not loaded_any:
+        raise ValueError(f"No local expert accepted batched MoE tensor {wire_name!r}")
+    return True
+
+
+def _load_checkpoint_weights(model: torch.nn.Module, weights: list[tuple[str, torch.Tensor]]) -> Any:
+    """Load ordinary HF tensors plus SkyRL's compact batched-MoE tensors."""
+    params_dict: dict[str, torch.nn.Parameter] | None = None
+    ordinary_weights: list[tuple[str, torch.Tensor]] = []
+    for name, weight in weights:
+        if name.startswith(SKYRL_BATCHED_MOE_FP8_PREFIX):
+            if params_dict is None:
+                params_dict = dict(model.named_parameters())
+            _load_batched_moe_fp8_tensor(model, params_dict, name, weight)
+        else:
+            ordinary_weights.append((name, weight))
+    if ordinary_weights:
+        return model.load_weights(weights=ordinary_weights)
+    return set()
 
 
 class _LoadWeightsProxy:
@@ -133,7 +291,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         handles = pickle.loads(base64.b64decode(pickled))
 
         device_index = torch.cuda.current_device()
-        physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
+        physical_gpu_id = cuda_uuid_to_str(torch.cuda.get_device_properties(device_index).uuid)
         if physical_gpu_id not in handles:
             raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. " f"Available: {list(handles)}")
         func, args = handles[physical_gpu_id]
@@ -156,7 +314,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         model = self.model_runner.model
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             if self._skyrl_is_checkpoint_format:
-                model.load_weights(weights=weights)
+                _load_checkpoint_weights(model, weights)
                 # vLLM's load only updates the main model; the spec-decode (MTP/Eagle)
                 # drafter is a separate module and must be reloaded from the same
                 # checkpoint-format weights (see spec_decode_utils).
@@ -179,9 +337,13 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         Receive a batched weight update via vLLM's NCCL weight transfer engine.
 
         Alternative to update_weights_ipc for the broadcast (non-IPC) sender:
-        the trainer initiates an NCCL broadcast via
-        NCCLWeightTransferEngine.trainer_send_weights, and each inference
-        worker calls weight_transfer_engine.receive_weights here.
+        the trainer initiates an NCCL broadcast via the vendored
+        ``nccl_trainer_send_weights``, and each inference worker calls
+        weight_transfer_engine.receive_weights here.
+
+        ``update_info`` carries only names/dtype_names/shapes. Since vLLM 0.28.0
+        whether the transfer is packed is fixed at init (from the
+        ``/init_weight_transfer_engine`` payload), not per round.
 
         Routed through this skyrl wrap (rather than vLLM's native
         /update_weights endpoint) so the load is wrapped with
@@ -213,7 +375,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
 
         def _load_weights(weights):
             weights = list(weights)
-            loaded = model.load_weights(weights=weights)
+            loaded = _load_checkpoint_weights(model, weights)
             _reload_spec_decode_drafter(self.model_runner, weights)
             return loaded
 
@@ -286,3 +448,58 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
             post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
             if post_wake is not None:
                 post_wake()
+
+    def init_weight_transfer_engine_rdt(self, init_info: dict) -> None:
+        """
+        Initialize + bake the sharded_rdt weight-transfer engine.
+
+        GPUWorker.load_model already constructed the engine via the factory (the
+        sharded_rdt backend is registered in rdt_vllm_register); here we run its
+        one-time bake. Routed through this skyrl wrap (rather than vLLM's native
+        /init_weight_transfer_engine endpoint) so the bake runs under
+        set_current_vllm_config + torch.device(self.device): the bake drives
+        model.load_weights against meta params, and process_weights_after_loading
+        on MoE models reads get_current_vllm_config() to build kernels.
+
+        Args:
+            init_info: asdict(ShardedRDTWeightTransferInitInfo) — trainer actor
+                name/namespace, produce method name, M:N + ring knobs, and the
+                group-major names/dtype_names/shapes/group_lens the bake plans over.
+        """
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Set weight_transfer_config with "
+                "backend='sharded_rdt' to enable the RDT weight-transfer engine."
+            )
+
+        from vllm.config import set_current_vllm_config
+
+        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+
+    def update_weights_rdt(self, update_info: dict) -> None:
+        """
+        Pull this worker's consumed slices via the sharded_rdt engine.
+
+        Called once per sync (the engine pre-built its static whole-model plan at
+        init, so update_info is empty). The engine pulls every slice over NIXL,
+        pipelined across its receive-buffer ring, and DEFERS the GPU
+        post-processing (materialize/scatter/quant/kernel-copy) to background
+        threads — so, unlike the ipc/nccl paths, we do NOT synchronize here.
+        skyrl_finish_weight_update drains the deferred work before finalize.
+        """
+        if not getattr(self, "_skyrl_weight_update_active", False):
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_rdt.")
+
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Set weight_transfer_config with "
+                "backend='sharded_rdt' to enable the RDT weight-transfer engine."
+            )
+
+        from vllm.config import set_current_vllm_config
+
+        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            self.weight_transfer_engine.receive_weights(typed_update_info)

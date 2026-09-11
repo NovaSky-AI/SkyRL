@@ -207,12 +207,13 @@ class TestWorkerProfilerRPCs:
             start=lambda: calls.append("start"),
             step=lambda: calls.append("step"),
             stop=lambda: calls.append("stop"),
+            close=lambda: calls.append("close"),
         )
         stub = SimpleNamespace(profiler=fake_profiler)
         Worker.start_profile(stub)
         Worker.profile_step(stub)
         Worker.stop_profile(stub)
-        assert calls == ["start", "step", "stop"]
+        assert calls == ["start", "step", "stop", "close"]
 
 
 class TestBuildProfilerFromPolicyCfg:
@@ -356,3 +357,216 @@ class TestTrainerProfilerHelpers:
         trainer._profiler_step()
         trainer._profiler_stop()
         assert calls == [("start", "policy"), ("step", "policy"), ("stop", "policy")]
+
+
+class TestPerWindowUpload:
+    """Cloud export: each closed window is uploaded and dropped locally."""
+
+    @staticmethod
+    def _cloud_cfg(**kw):
+        return _ProfCfg(save_path="s3://bucket/traces/120", skip_first=0, wait=0, **kw)
+
+    def test_each_window_uploads_then_deletes_local_copy(self):
+        # Two cycles -> two windows -> two uploads, and nothing left staged.
+        prof = Profiler(self._cloud_cfg(warmup=1, active=1, repeat=2))
+        assert prof.remote_dir == "s3://bucket/traces/120"
+        assert prof.save_path != prof.remote_dir, "cloud traces must stage to a local dir"
+
+        uploads = []
+        with patch(
+            "skyrl.backends.skyrl_train.utils.profiler.upload_directory",
+            side_effect=lambda local, remote: uploads.append(remote),
+        ):
+            _run_loop(prof, 8)
+
+        assert uploads == ["s3://bucket/traces/120"] * 2, uploads
+        # Staging dir must not accumulate: that is a disk-exhaustion bug on a
+        # long-running server, not just inefficiency.
+        assert os.listdir(prof.save_path) == []
+        prof.close()
+
+    def test_upload_failure_keeps_file_and_retries_next_window(self):
+        prof = Profiler(self._cloud_cfg(warmup=1, active=1, repeat=2))
+        calls = {"n": 0}
+
+        def flaky(local, remote):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("s3 boom")
+
+        with patch("skyrl.backends.skyrl_train.utils.profiler.upload_directory", side_effect=flaky):
+            prof.start()
+            # First window closes and its upload fails.
+            for _ in range(3):
+                prof.step()
+            assert prof.last_error is not None and "s3 boom" in prof.last_error
+            staged = os.listdir(prof.save_path)
+            assert len(staged) == 1, "failed upload must leave the trace on disk for retry"
+
+            # Second window closes; the retry carries both files out.
+            for _ in range(3):
+                prof.step()
+            prof.stop()
+
+        assert calls["n"] >= 2
+        assert prof.last_error is None, "a successful upload must clear the error"
+        assert os.listdir(prof.save_path) == []
+        prof.close()
+
+    def test_local_export_does_not_stage_or_upload(self, tmp_path):
+        prof = Profiler(_ProfCfg(save_path=str(tmp_path), skip_first=0, wait=0, warmup=0, active=1))
+        assert prof.remote_dir is None
+        assert prof.save_path == str(tmp_path)
+        with patch("skyrl.backends.skyrl_train.utils.profiler.upload_directory") as up:
+            _run_loop(prof, 3)
+        up.assert_not_called()
+        assert len(glob.glob(os.path.join(str(tmp_path), "*.pt.trace.json*"))) == 1
+
+    def test_window_names_are_deterministic_and_unique(self, tmp_path):
+        prof = Profiler(_ProfCfg(save_path=str(tmp_path), skip_first=0, wait=0, warmup=1, active=1, repeat=2))
+        _run_loop(prof, 8)
+        names = sorted(os.path.basename(f) for f in glob.glob(os.path.join(str(tmp_path), "*")))
+        assert names == ["rank0_w0.pt.trace.json", "rank0_w1.pt.trace.json"], names
+
+    def test_gzip_export(self, tmp_path):
+        import gzip
+
+        cfg = _ProfCfg(save_path=str(tmp_path), skip_first=0, wait=0, warmup=0, active=1)
+        cfg.use_gzip = True
+        prof = Profiler(cfg)
+        _run_loop(prof, 3)
+        files = glob.glob(os.path.join(str(tmp_path), "*.gz"))
+        assert len(files) == 1, files
+        with gzip.open(files[0], "rb") as fh:
+            assert fh.read(1), "gzipped trace must be readable"
+
+
+class TestDynamicProfilerSession:
+    """start_profile(config) builds a session; stop tears it down."""
+
+    @staticmethod
+    def _worker_stub():
+        from types import SimpleNamespace
+
+        return SimpleNamespace(profiler=None)
+
+    def _cfg(self, save_path, active):
+        return {
+            "enable": True,
+            "ranks": [0],
+            "save_path": save_path,
+            "skip_first": 0,
+            "wait": 0,
+            "warmup": 0,
+            "active": active,
+            "repeat": 1,
+            "activities": ["cpu"],
+            "with_stack": False,
+            "record_shapes": False,
+        }
+
+    def test_start_with_config_builds_profiler(self, tmp_path):
+        from skyrl.backends.skyrl_train.workers.worker import Worker
+
+        stub = self._worker_stub()
+        Worker.start_profile(stub, self._cfg(str(tmp_path), 1))
+        assert stub.profiler is not None
+        assert stub.profiler.save_path == str(tmp_path)
+        Worker.stop_profile(stub)
+        # Torn down, so the next session cannot inherit this one's schedule.
+        assert stub.profiler is None
+
+    def test_second_session_does_not_inherit_first_config(self, tmp_path):
+        from skyrl.backends.skyrl_train.workers.worker import Worker
+
+        first, second = str(tmp_path / "s1"), str(tmp_path / "s2")
+        stub = self._worker_stub()
+
+        Worker.start_profile(stub, self._cfg(first, 1))
+        Worker.stop_profile(stub)
+        Worker.start_profile(stub, self._cfg(second, 3))
+
+        assert stub.profiler.save_path == second
+        assert stub.profiler.config.active == 3
+        Worker.stop_profile(stub)
+
+    def test_statically_built_profiler_is_also_torn_down(self):
+        """A profiler is scoped to one start/stop pair on every path, so the
+        trainer's init_model-built profiler is discarded on stop too. Both
+        trainers start and stop exactly once per run."""
+        from types import SimpleNamespace
+
+        from skyrl.backends.skyrl_train.workers.worker import Worker
+
+        calls = []
+        static = SimpleNamespace(
+            start=lambda: calls.append("start"),
+            step=lambda: calls.append("step"),
+            stop=lambda: calls.append("stop"),
+            close=lambda: calls.append("close"),
+        )
+        stub = SimpleNamespace(profiler=static)
+        Worker.start_profile(stub)
+        Worker.stop_profile(stub)
+        assert calls == ["start", "stop", "close"]
+        assert stub.profiler is None
+
+    def test_profile_step_returns_worker_error(self):
+        from types import SimpleNamespace
+
+        from skyrl.backends.skyrl_train.workers.worker import Worker
+
+        stub = SimpleNamespace(
+            profiler=SimpleNamespace(step=lambda: None, last_error="trace upload failed: boom"),
+        )
+        assert Worker.profile_step(stub) == "trace upload failed: boom"
+
+
+class TestDispatchRaiseOnError:
+    """raise_on_error surfaces worker faults for the Tinker endpoints only."""
+
+    def test_raises_when_requested(self):
+        from types import SimpleNamespace
+
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        def boom(_):
+            raise RuntimeError("ray.get boom")
+
+        group = SimpleNamespace(async_run_ray_method=lambda *a, **k: ["x"])
+        stub = SimpleNamespace(_actor_groups={"policy": group})
+        with patch("skyrl.backends.skyrl_train.workers.worker_dispatch.ray.get", side_effect=boom):
+            import pytest
+
+            with pytest.raises(RuntimeError):
+                WorkerDispatch.start_profile(stub, "policy", config={}, raise_on_error=True)
+            with pytest.raises(RuntimeError):
+                WorkerDispatch.stop_profile(stub, "policy", raise_on_error=True)
+
+    def test_unknown_model_raises_when_requested(self):
+        from types import SimpleNamespace
+
+        import pytest
+
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        stub = SimpleNamespace(_actor_groups={})
+        with pytest.raises(ValueError):
+            WorkerDispatch.start_profile(stub, "policy", config={}, raise_on_error=True)
+
+    def test_config_is_threaded_to_workers(self):
+        from types import SimpleNamespace
+
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        seen = []
+
+        def async_run_ray_method(mode, method, *args, **kwargs):
+            seen.append((method, args))
+            return ["ok"]
+
+        stub = SimpleNamespace(_actor_groups={"policy": SimpleNamespace(async_run_ray_method=async_run_ray_method)})
+        cfg = {"enable": True, "save_path": "/tmp/x"}
+        with patch("skyrl.backends.skyrl_train.workers.worker_dispatch.ray.get", side_effect=lambda x: x):
+            WorkerDispatch.start_profile(stub, "policy", config=cfg)
+        assert seen == [("start_profile", (cfg,))]

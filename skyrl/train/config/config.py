@@ -109,13 +109,18 @@ class SkyRLLoraConfig(BaseConfig):
     Must be accessible to all workers in distributed setups."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
-    ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module list
-    on Megatron. A list of specific module names can be given instead."""
+    ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
+    list on Megatron (attention, MLP, and GatedDeltaNet projections). GatedDeltaNet ``in_proj``
+    is dropped for models like Qwen3-Next whose fused HF checkpoint layout cannot round-trip a
+    LoRA adapter through Megatron-Bridge. A list of specific module names can be given instead."""
     exclude_modules: Optional[str] = None
     """Modules to exclude from LoRA."""
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
+
+    share_expert_adapters: bool = True
+    """Share one LoRA adapter across local grouped experts."""
 
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
@@ -137,7 +142,7 @@ class FakeInt4QatConfig(BaseConfig):
     BF16 masters, enabling this fake-quantizes the frozen expert GEMMs onto the
     same INT4 grid in the forward pass (straight-through backward), removing the
     train/infer weight mismatch. See
-    ``skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat``.
+    ``skyrl.backends.skyrl_train.workers.megatron.quantization.fake_int4_qat``.
     """
 
     enabled: bool = False
@@ -250,6 +255,10 @@ class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
+    fp8_param_gather: bool = False
+    """Keep the DDP parameter all-gather in FP8.
+    Must be ``True`` when training with ``transformer_config_kwargs.fp8_param=true`` so persistent
+    FP8 params stay FP8 through the distributed-optimizer all-gather."""
     average_in_collective: bool = True
 
 
@@ -312,6 +321,10 @@ class TorchProfilerConfig(BaseConfig):
     """Passed to ``torch.profiler.profile``."""
     with_modules: bool = False
     """Passed to ``torch.profiler.profile``."""
+    use_gzip: bool = False
+    """Gzip chrome traces (``*.pt.trace.json.gz``). Traces are repetitive JSON and
+    compress several-fold, which matters most when they are uploaded to cloud storage.
+    The gzip runs inside ``on_trace_ready``, i.e. on the training thread."""
     export_type: str = "chrome_trace"
     """Either ``chrome_trace`` or ``stacks``.
     ``chrome_trace`` writes ``*.pt.trace.json``; ``stacks`` writes self-CUDA-time stacks and
@@ -501,13 +514,37 @@ class MegatronConfig(BaseConfig):
     https://docs.skyrl.ai/docs/examples/megatron for the accepted names and per-field checks.
     ``use_precision_aware_optimizer=True`` can cause checkpointing to fail
     (https://github.com/nvidia/megatron-lm/issues/1820); leaving it ``False`` is recommended."""
+    fp8: Optional[str] = None
+    """TransformerEngine FP8 compute format for linear-layer GEMMs, e.g. ``"e4m3"`` or
+    ``"hybrid"``. ``None`` (default) trains without FP8. Folded into
+    ``transformer_config_kwargs["fp8"]``; an explicit kwarg takes precedence."""
+    fp8_recipe: Optional[str] = None
+    """TransformerEngine FP8 scaling recipe. ``"auto"`` resolves to the architecture-native
+    recipe — ``blockwise``/FP32 scales on Hopper, native MXFP8 on Blackwell/SM100+ (where TE
+    also requires every weight dim to be divisible by 32). Folded into
+    ``transformer_config_kwargs["fp8_recipe"]``; an explicit kwarg takes precedence."""
+    fp8_param: Optional[bool] = None
+    """Store Megatron primary parameters in FP8 (E4M3). Supported with
+    ``fp8_recipe=blockwise`` + FP32 block scales only and requires
+    ``ddp_config.fp8_param_gather=true``. Folded into
+    ``transformer_config_kwargs["fp8_param"]``; an explicit kwarg takes precedence."""
+    fp8_amax_compute_algo: Optional[str] = None
+    """TransformerEngine amax history reduction, e.g. ``"most_recent"`` or ``"max"``. Folded
+    into ``transformer_config_kwargs["fp8_amax_compute_algo"]``; an explicit kwarg takes
+    precedence."""
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
     """Pass-through kwargs for Megatron's ``TransformerConfig``:
     https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py
     Also the place to put HuggingFace config overrides (e.g. ``rope_parameters``) for the Megatron
-    backend, where FSDP would use ``model_config_kwargs``."""
+    backend, where FSDP would use ``model_config_kwargs``.
+
+    FP8 training is configured through the top-level ``fp8``, ``fp8_recipe``, ``fp8_param``, and
+    ``fp8_amax_compute_algo`` fields above, which fold into these kwargs; setting the same keys
+    here directly overrides them. The block-scale env contract
+    (``NVTE_FP8_BLOCK_SCALING_FP32_SCALES``, ``VLLM_USE_DEEP_GEMM_E8M0``) is defaulted and
+    validated per architecture at startup and forwarded to all Ray actors."""
     empty_cuda_cache: Optional[bool] = True
     """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
     This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer."""
@@ -570,6 +607,16 @@ class MegatronConfig(BaseConfig):
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
             self.transformer_config_kwargs = {}
+        # The top-level FP8 fields fold into the TransformerConfig kwargs; explicitly
+        # configured kwargs take precedence.
+        for key, value in (
+            ("fp8", self.fp8),
+            ("fp8_recipe", self.fp8_recipe),
+            ("fp8_param", self.fp8_param),
+            ("fp8_amax_compute_algo", self.fp8_amax_compute_algo),
+        ):
+            if value is not None:
+                self.transformer_config_kwargs.setdefault(key, value)
         for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
             self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
         if self.optimizer_config_kwargs is None:
@@ -642,8 +689,9 @@ class PolicyConfig(BaseConfig):
     Backend-specific behavior:
     - FSDP: initialize weights in bf16 instead of fp32 (skipping the fp32 master weights
       that mixed-precision training requires) and skip optimizer/LR-scheduler construction.
-    - Megatron: skip optimizer/LR-scheduler construction (DistributedOptimizer eagerly
-      materializes fp32 master + AdamW state on GPU)."""
+    - Megatron: skip the DDP wrap, whose ``_ParamAndGradBuffer`` holds a param and a
+      grad copy of the model, and skip optimizer/LR-scheduler construction
+      (DistributedOptimizer eagerly materializes fp32 master + AdamW state on GPU)."""
 
 
 @dataclass
@@ -1100,6 +1148,13 @@ class DeltaWeightSyncConfig(BaseConfig):
             self.publish_staging_dir = str(_default_publish_staging_dir(self.sync_dir))
 
 
+#: vLLM speculative-decoding methods SkyRL supports, validated in
+#: ``validate_inference_engine_cfg``.
+#:
+#: Only ``mtp`` is supported
+SUPPORTED_SPECULATIVE_DECODING_METHODS = ("mtp",)
+
+
 @dataclass
 class InferenceEngineConfig(BaseConfig):
     """Configuration for inference engine instantiation and management."""
@@ -1108,6 +1163,14 @@ class InferenceEngineConfig(BaseConfig):
     """Should match the dtype used by the inference engine.
     Also used during full-weight sync, where policy weights are cast to this dtype before being sent
     to the inference engine. The LoRA-adapter sync path exports fp32 instead."""
+    fp8_weight_sync_mode: Optional[str] = None
+    """Optional rollout weight format. ``"blockwise"`` sends FP8 checkpoint weights and
+    scales (one FP32 scale per 128x128 block) instead of ``model_dtype`` tensors, halving transfer
+    volume and letting vLLM serve FP8. Requires ``trainer.strategy="megatron"`` and a model with a
+    registered FP8 spec (see ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The
+    vLLM engine settings this needs (``quantization="fp8"``, ``load_format="dummy"``, and the
+    matching ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
+    automatically; the first weight sync supplies real weights before any generation."""
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
     When ``False``, point SkyRL at an external HTTP/vLLM deployment via ``external_proxy_url`` and/or
@@ -1200,7 +1263,7 @@ class InferenceEngineConfig(BaseConfig):
     ``trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters`` (Megatron). The two
     must agree, and are validated against each other."""
     speculative_config: Optional[Dict[str, Any]] = None
-    """Speculative-decoding config passed through to vLLM for MTP drafter decoding. 
+    """Speculative-decoding config passed through to vLLM for MTP drafter decoding.
     (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train mtp). ``None`` disables it."""
     external_proxy_url: Optional[str] = None
     """Data-plane URL (load-balanced router) for the new inference layer.
@@ -1215,6 +1278,14 @@ class InferenceEngineConfig(BaseConfig):
     """Number of prefill engines when ``enable_pd=True``. Decode engines = ``num_engines - num_prefill``
 
     NOTE: SkyRL counts data parallel workers separately, so the total number of prefill workers will be ``data_parallel_size * num_prefill``."""
+    prefill_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """Pass-through kwargs for the vLLM engine, applied only to prefill engines when
+    ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs``: provide role-specific
+    kwargs (including shared ones like ``kv_transfer_config``) via ``prefill_init_kwargs`` /
+    ``decode_init_kwargs`` instead."""
+    decode_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """Pass-through kwargs for the vLLM engine, applied only to decode engines when
+    ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs`` (see ``prefill_init_kwargs``)."""
     router_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs applied to ``RouterArgs`` for the vllm-router.
     Names must match ``vllm_router.RouterArgs`` fields (e.g. ``policy``, ``request_timeout_secs``)."""
