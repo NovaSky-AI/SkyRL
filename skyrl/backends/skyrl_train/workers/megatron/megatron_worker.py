@@ -62,9 +62,12 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
+    append_packed_field_padding,
+    packed_dummy_row_segments,
 )
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
-from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
@@ -607,6 +610,15 @@ class MegatronWorker:
             )
             provider.linear_attention_freq = linear_attention_freq[: provider.num_layers]
 
+        # Check the resolved provider because it may supply its own VPP default. Interleaved
+        # chunks desynchronise each RouterReplay instance's backward FIFO.
+        vpp_size = provider.virtual_pipeline_model_parallel_size
+        if provider.moe_enable_routing_replay and vpp_size is not None and vpp_size > 1:
+            raise ValueError(
+                f"moe_enable_routing_replay is incompatible with virtual_pipeline_model_parallel_size={vpp_size}: "
+                "interleaved chunks desync the replay FIFO. Unset virtual_pipeline_model_parallel_size."
+            )
+
         # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
         if not enable_mtp:
             provider.mtp_num_layers = None
@@ -660,6 +672,7 @@ class MegatronWorker:
         self.strategy.hf_config = hf_config_original
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
+        self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
     def _load_deferred_fp8_param_weights(self, *, retain_unquantized_state: bool = False) -> None:
         """Load deferred FP8 weights and optionally retain exact master tensors."""
@@ -841,6 +854,11 @@ class MegatronWorker:
                     "num_actions": micro.metadata["response_length"],
                     "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
                     "router_padding_mask": micro.get("router_padding_mask") if self.enable_router_replay else None,
+                    SAMPLE_SUPPORT_FIELD: (
+                        micro.get(SAMPLE_SUPPORT_FIELD) if self.enable_sample_support_replay else None
+                    ),
+                    # The support scorer needs the loss mask to find the appended EOS.
+                    "loss_mask": micro.get("loss_mask") if self.enable_sample_support_replay else None,
                     "sub_seq_lengths": micro.get("sub_seq_lengths"),
                     **vlm_inputs,
                 }
@@ -940,6 +958,12 @@ class MegatronWorker:
             if value is None:
                 padded[key] = None
                 continue
+            if isinstance(value, PackedTensor):
+                # Per-token fields cover the dummy attended token; response fields do not.
+                padded[key] = append_packed_field_padding(
+                    key, value, segment_lengths=packed_dummy_row_segments(key, pad_count)
+                )
+                continue
             if isinstance(value, torch.Tensor):
                 if key == "loss_mask":
                     # Pad with zeros so padded samples don't contribute to loss
@@ -957,12 +981,6 @@ class MegatronWorker:
                     pad_tensor = torch.arange(seq_len, device=device).unsqueeze(0).expand(pad_count, -1)
                 elif key == "router_padding_mask":
                     pad_tensor = torch.ones((pad_count, *value.shape[1:]), dtype=torch.bool, device=device)
-                elif key == "rollout_expert_indices":
-                    pad_tensor = make_replay_padding_indices(
-                        (pad_count, *value.shape[1:]),
-                        dtype=value.dtype,
-                        device=device,
-                    )
                 elif key == "response_mask":
                     # response_mask should be zeros for padded samples
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
@@ -1242,6 +1260,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
+                    SAMPLE_SUPPORT_FIELD: (
+                        experience.rollout_sample_support if self.enable_sample_support_replay else None
+                    ),
                     "sub_seq_lengths": experience.sub_seq_lengths,
                     **vlm_inputs,
                 }
@@ -1367,6 +1388,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
+                    SAMPLE_SUPPORT_FIELD: (
+                        experience.rollout_sample_support if self.enable_sample_support_replay else None
+                    ),
                     # used with global sequence packing (None when token-based batching is active)
                     "sub_seq_lengths": experience.sub_seq_lengths,
                     "is_padding_batch": (
