@@ -247,6 +247,43 @@ async def test_evaluate_reports_turn_counts_to_trajectory_logger(dummy_config, t
 
 
 @pytest.mark.asyncio
+async def test_evaluate_step_wise_counts_turns_per_repetition(dummy_config, tmp_path):
+    """With ``eval_n_samples_per_prompt > 1`` the repetitions of one prompt share a uid (which is
+    what pass@n groups by) but are distinct trajectories: each last-step row must report its own
+    repetition's step count, not the sum over the prompt."""
+    cfg = _configure_eval(dummy_config, tmp_path, step_wise=True)
+    cfg.generator.eval_n_samples_per_prompt = 2
+    # One prompt, two repetitions: rep 0 takes three steps (reward on its last), rep 1 takes two.
+    output: GeneratorOutput = {
+        "prompt_token_ids": [[101], [101, 201], [101, 201, 202], [101], [101, 203]],
+        "response_ids": [[201], [202], [204], [203], [205]],
+        "rewards": [0.0, 0.0, 1.0, 0.0, 0.0],
+        "loss_masks": [[1]] * 5,
+        "stop_reasons": ["stop"] * 5,
+        "rollout_logprobs": None,
+        "trajectory_ids": [TrajectoryID("uid-1", 0)] * 3 + [TrajectoryID("uid-1", 1)] * 2,
+        "is_last_step": [False, False, True, False, True],
+    }
+    trajectory_logger = MagicMock()
+
+    metrics = await evaluate(
+        eval_dataloader=DummyStatefulDataLoader([[_PROMPTS_BATCH[0]]]),
+        generator=DummyGenerator(output),
+        cfg=cfg,
+        global_step=5,
+        tokenizer=_tokenizer(),
+        trajectory_logger=trajectory_logger,
+    )
+
+    kwargs = trajectory_logger.log.call_args.kwargs
+    assert len(kwargs["prompts"]) == 2
+    assert kwargs["num_turns_list"] == [3, 2]
+    # pass@n still groups the two repetitions under their shared prompt id.
+    assert metrics["eval/dataset_a/pass_at_2"] == pytest.approx(1.0)
+    assert metrics["eval/dataset_a/avg_score"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("step_wise", [False, True])
 async def test_evaluate_surfaces_rollout_metrics(dummy_config, tmp_path, step_wise):
     cfg = _configure_eval(dummy_config, tmp_path, step_wise=step_wise)
