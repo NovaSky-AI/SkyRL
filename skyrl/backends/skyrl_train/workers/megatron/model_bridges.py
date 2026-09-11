@@ -177,11 +177,16 @@ try:
     # Trained text-only: the vision tower and mm projector are never built on
     # the Megatron side (they stay frozen in the inference engine), so
     # ``MegatronWorker`` requires ``language_model_only=True`` for these
-    # checkpoints. Unlike Qwen3.5 there is no upstream VL bridge to bypass, so
-    # the real architecture name is registered directly: AutoBridge dispatches
-    # remote-code checkpoints via ``config.auto_map["AutoModelForCausalLM"]``
-    # (-> "KimiK25ForConditionalGeneration") and its ``from_hf_pretrained``
-    # validation requires an implementation registered under that exact name.
+    # checkpoints. Registering the real architecture name is what AutoBridge
+    # dispatch needs -- it resolves remote-code checkpoints through
+    # ``config.auto_map["AutoModelForCausalLM"]`` (-> "KimiK25ForConditionalGeneration")
+    # and ``from_hf_pretrained`` requires an implementation under that exact name.
+    #
+    # megatron-bridge also registers that name, for its own ``KimiK25VLBridge`` ->
+    # ``KimiK25VLModel``. The dispatch registry is last-write-wins and this module is
+    # imported after ``megatron.bridge.models``, so the text bridge overrides it;
+    # ``MegatronWorker.init_configs`` asserts the override actually took effect
+    # rather than leaving it to import order.
 
     def _prefix_hf_param(hf_param, prefix: str):
         """Re-root a mapping's HF-side name(s) (str or compound dict) under ``prefix``."""

@@ -545,8 +545,20 @@ class MegatronWorker:
                 "(native GDN thd packing path; vision tower dropped)"
             )
         if language_model_only and getattr(hf_config_original, "model_type", None) == "kimi_k25":
-            # Dispatch is automatic (KimiK25TextBridge registers the real architecture
-            # name); this log only makes the text-only load explicit.
+            # megatron-bridge ships its own KimiK25VLBridge for this architecture, whose
+            # provider builds a vision tower this backend cannot train. model_bridges
+            # registers KimiK25TextBridge under the same name and wins the dispatch only
+            # by registering later (the registry is last-write-wins), so check the
+            # resolved bridge rather than trusting import order.
+            dispatched = type(getattr(bridge, "_model_bridge", None)).__name__
+            if dispatched != "KimiK25TextBridge":
+                raise RuntimeError(
+                    f"Kimi K2.5-family checkpoint dispatched to {dispatched}, not "
+                    "KimiK25TextBridge. The upstream VL bridge builds a vision tower that "
+                    "the Megatron backend cannot train; ensure "
+                    "skyrl.backends.skyrl_train.workers.megatron.model_bridges is imported "
+                    "before AutoBridge.from_hf_pretrained."
+                )
             logger.info(
                 "language_model_only=True: Kimi K2.5-family checkpoint -> text-only "
                 "DeepSeek-V3 bridge (vision tower + mm projector dropped)"

@@ -27,7 +27,6 @@ uv run --isolated --extra dev --extra megatron -- pytest -s -m h100 tests/backen
 
 import json
 import os
-import tempfile
 
 import pytest
 import ray
@@ -134,14 +133,14 @@ def _kimi_worker_cfg(lora_sync_path: str) -> SkyRLTrainConfig:
 @pytest.mark.asyncio
 @pytest.mark.megatron
 @pytest.mark.h100
-async def test_kimi_worker_forward_and_lora_export():
+async def test_kimi_worker_forward_and_lora_export(tmp_path):
     """End-to-end through the real worker: BF16-master load, fake-INT4 forward,
     and the merge_lora=false PEFT adapter export that vLLM hot-loads."""
     from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_worker import (
         get_test_training_batch,
     )
 
-    lora_sync_path = tempfile.mkdtemp(prefix="skyrl_kimi_lora_sync_")
+    lora_sync_path = str(tmp_path / "skyrl_kimi_lora_sync")
     cfg = _kimi_worker_cfg(lora_sync_path)
     batch = get_test_training_batch(4)
 
