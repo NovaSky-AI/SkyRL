@@ -3,10 +3,14 @@ vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
+import uuid
 from argparse import Namespace
 from typing import List, Optional, Tuple
 
@@ -51,6 +55,18 @@ from skyrl.env_vars import (
 )
 
 logger = logging.getLogger(__name__)
+
+_LORA_ADAPTER_FILENAMES = frozenset(("adapter_model.safetensors", "adapter_config.json"))
+
+
+def _get_uploaded_lora_path(upload_id: str, filename: str) -> str:
+    try:
+        uuid.UUID(upload_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid LoRA upload id.") from exc
+    if filename not in _LORA_ADAPTER_FILENAMES:
+        raise HTTPException(status_code=400, detail="Unsupported LoRA adapter file.")
+    return os.path.join(tempfile.gettempdir(), "skyrl_lora_uploads", upload_id, filename)
 
 
 class VLLMServerActor(ServerActorProtocol):
@@ -444,6 +460,13 @@ class VLLMServerActor(ServerActorProtocol):
             body = await request.json()
             lora_name = body.get("lora_name")
             lora_path = body.get("lora_path")
+            upload_id = body.get("upload_id")
+            if upload_id is not None:
+                if lora_path is not None:
+                    raise HTTPException(status_code=400, detail="Provide either lora_path or upload_id.")
+                lora_path = os.path.dirname(_get_uploaded_lora_path(upload_id, "adapter_model.safetensors"))
+                if not all(os.path.isfile(os.path.join(lora_path, filename)) for filename in _LORA_ADAPTER_FILENAMES):
+                    raise HTTPException(status_code=400, detail="LoRA upload is incomplete.")
             if not lora_name or not lora_path:
                 raise HTTPException(
                     status_code=400,
@@ -467,11 +490,37 @@ class VLLMServerActor(ServerActorProtocol):
                 lora_request.load_inplace = False
                 models.lora_requests[lora_name] = lora_request
 
+            if upload_id is not None:
+                shutil.rmtree(lora_path)
+
             return {
                 "status": "ok",
                 "lora_name": lora_name,
                 "lora_int_id": lora_int_id,
             }
+
+        @app.put("/skyrl/v1/lora-adapters/{upload_id}/{filename}")
+        async def _upload_lora_adapter_file(upload_id: str, filename: str, request: Request):
+            expected_sha256 = request.headers.get("X-SkyRL-SHA256")
+            if expected_sha256 is None:
+                raise HTTPException(status_code=400, detail="Missing X-SkyRL-SHA256 header.")
+            destination = _get_uploaded_lora_path(upload_id, filename)
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            temporary = f"{destination}.partial"
+            digest = hashlib.sha256()
+            try:
+                with open(temporary, "wb") as file:
+                    async for chunk in request.stream():
+                        digest.update(chunk)
+                        await asyncio.to_thread(file.write, chunk)
+                actual_sha256 = digest.hexdigest()
+                if actual_sha256 != expected_sha256:
+                    raise HTTPException(status_code=400, detail="LoRA upload checksum mismatch.")
+                os.replace(temporary, destination)
+            finally:
+                if os.path.exists(temporary):
+                    os.remove(temporary)
+            return {"filename": filename, "sha256": actual_sha256}
 
         # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
         # endpoint /inference/v1/generate does not support returning routed expert IDs.

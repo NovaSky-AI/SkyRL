@@ -1,4 +1,10 @@
+import asyncio
+import hashlib
+import tempfile
+import uuid
 from argparse import Namespace
+from collections import defaultdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -51,3 +57,75 @@ async def test_route_endpoint_resolves_lora_by_model(model, uses_lora):
     assert response.status_code == 200
     assert engine.lora_request is (lora_request if uses_lora else None)
     assert response.json()["choices"][0]["routed_experts"] is not None
+
+
+@pytest.mark.asyncio
+async def test_lora_upload_rejects_bad_checksum(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    app = FastAPI()
+    VLLMServerActor._add_custom_endpoints(app, _FakeEngine(), Namespace())
+    upload_id = str(uuid.uuid4())
+    content = b"adapter-bytes"
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.put(
+            f"/skyrl/v1/lora-adapters/{upload_id}/adapter_model.safetensors",
+            content=content,
+            headers={"X-SkyRL-SHA256": hashlib.sha256(content).hexdigest()},
+        )
+        bad = await client.put(
+            f"/skyrl/v1/lora-adapters/{upload_id}/adapter_config.json",
+            content=b"config",
+            headers={"X-SkyRL-SHA256": "not-the-file-sha"},
+        )
+
+    destination = tmp_path / "skyrl_lora_uploads" / upload_id / "adapter_model.safetensors"
+    assert response.status_code == 200
+    assert destination.read_bytes() == content
+    assert bad.status_code == 400
+    assert not (tmp_path / "skyrl_lora_uploads" / upload_id / "adapter_config.json").exists()
+
+
+class _FakeLoraEngineClient:
+    def __init__(self) -> None:
+        self.adapter_bytes = None
+
+    async def add_lora(self, request) -> None:
+        self.adapter_bytes = Path(request.lora_path, "adapter_model.safetensors").read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_lora_upload_loads_verified_adapter(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    engine_client = _FakeLoraEngineClient()
+    app = FastAPI()
+    app.state.openai_serving_models = SimpleNamespace(
+        lora_requests={},
+        lora_resolver_lock=defaultdict(asyncio.Lock),
+        lora_id_counter=SimpleNamespace(inc=lambda _: 1),
+        engine_client=engine_client,
+    )
+    VLLMServerActor._add_custom_endpoints(app, _FakeEngine(), Namespace())
+    upload_id = str(uuid.uuid4())
+    files = {
+        "adapter_model.safetensors": b"adapter-bytes",
+        "adapter_config.json": b'{"r": 32}',
+    }
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        for filename, content in files.items():
+            response = await client.put(
+                f"/skyrl/v1/lora-adapters/{upload_id}/{filename}",
+                content=content,
+                headers={"X-SkyRL-SHA256": hashlib.sha256(content).hexdigest()},
+            )
+            assert response.status_code == 200
+        response = await client.post(
+            "/skyrl/v1/load_lora_adapter",
+            json={"lora_name": "adapter_test", "upload_id": upload_id},
+        )
+
+    assert response.status_code == 200
+    assert engine_client.adapter_bytes == files["adapter_model.safetensors"]
+    assert app.state.openai_serving_models.lora_requests["adapter_test"].load_inplace is False
+    assert not (tmp_path / "skyrl_lora_uploads" / upload_id).exists()

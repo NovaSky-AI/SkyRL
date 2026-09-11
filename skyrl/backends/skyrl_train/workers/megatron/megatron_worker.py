@@ -1764,7 +1764,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             )
 
             if isinstance(inference_engine_client, RemoteInferenceClient):
-                await inference_engine_client.load_lora_adapter(lora_name, lora_sync_path)
+                await inference_engine_client.load_lora_adapter(
+                    lora_name,
+                    lora_sync_path,
+                    self.cfg.policy.model.lora.transfer_mode,
+                )
             else:
                 lora_request = LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)
                 await inference_engine_client.update_named_weights(lora_request)
