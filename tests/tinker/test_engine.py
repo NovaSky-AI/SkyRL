@@ -473,9 +473,7 @@ class _FakeContinuousBackend:
         self.sample_calls.append(request_id)
         await asyncio.sleep(self.delays.get(request_id, 0.05))
         self.order.append(f"sample:{request_id}")
-        out = types.SampleOutput(
-            sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1], logprobs=[0.0])]
-        )
+        out = types.SampleOutput(sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1], logprobs=[0.0])])
         return {request_id: out}
 
     def optim_step(self, model_id, request_data):
@@ -621,9 +619,7 @@ def test_serial_fallback_when_continuous_disabled(continuous_engine):
     def fake_sample(prepared):
         rids = [str(s[0]) for s in prepared.request_batch_slices]
         serial_batches.append(rids)
-        out = types.SampleOutput(
-            sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1], logprobs=[0.0])]
-        )
+        out = types.SampleOutput(sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1], logprobs=[0.0])])
         return {rid: out for rid in rids}
 
     engine.backend.sample = fake_sample

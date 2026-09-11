@@ -533,6 +533,9 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id to (model_id, request_data) tuples
         """
+        sampler = getattr(self, "_sampler", None)
+        inflight_ids = sampler.inflight_ids if sampler is not None else set()
+
         # checkpoint_id is extracted in the database so prompts stay out of this query
         sample_query = (
             select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_data["checkpoint_id"].as_string())
@@ -541,12 +544,6 @@ class TinkerEngine:
             .order_by(FutureDB.request_id)
         )
         sample_ops = session.exec(sample_query).all()
-
-        # Requests admitted to the continuous sampler stay PENDING in the DB
-        # until their futures complete; don't hand them out twice.
-        # (getattr: scheduling-only engine instances skip __init__ in tests.)
-        sampler = getattr(self, "_sampler", None)
-        inflight_ids = sampler.inflight_ids if sampler is not None else set()
 
         batchable = []
         model_checkpoints = {}  # Map from model_id to checkpoint_id of first request to that model
@@ -939,15 +936,11 @@ class TinkerEngine:
             self.backend.prepare_for_sampling()
         except Exception as e:  # noqa: BLE001 - match serial batch failure semantics
             logger.exception(f"prepare_for_sampling failed; failing {len(valid_requests)} sample request(s): {e}")
-            self._complete_futures(
-                {rid: types.ErrorResponse(error=str(e), status="failed") for rid in valid_requests}
-            )
+            self._complete_futures({rid: types.ErrorResponse(error=str(e), status="failed") for rid in valid_requests})
             return
         for request_id, (model_id, request_data) in valid_requests.items():
             self._sampler.submit(request_id, model_id, request_data)
-        logger.debug(
-            f"Admitted {len(valid_requests)} sample request(s); {self._sampler.inflight_count()} in flight"
-        )
+        logger.debug(f"Admitted {len(valid_requests)} sample request(s); {self._sampler.inflight_count()} in flight")
 
     def process_pending_requests_once(self) -> None:
         """One scheduling iteration; see ``process_pending_requests``.
