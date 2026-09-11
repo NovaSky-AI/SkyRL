@@ -160,11 +160,6 @@ class SkyRLTrainBackend(AbstractBackend):
         # New inference infrastructure
         self._server_groups: list = []
         self._inference_router = None
-        # Colocated engines are slept after init and around training ops;
-        # sample paths must wake them. None = awake; otherwise the vLLM sleep
-        # level in effect: level 1 keeps a CPU backup of the weights (wakeable
-        # as-is), level 2 discards them, so a wake is only valid together with
-        # a weight sync.
         self._engines_sleep_level: int | None = None
 
         # Optional hook invoked on inference-engine state changes (after
@@ -442,10 +437,7 @@ class SkyRLTrainBackend(AbstractBackend):
             return
 
         # A preceding training op (another tenant's forward/forward_backward)
-        # may have left the trainer GPU-resident; under colocate_all the
-        # engines' startup allocation (gpu_memory_utilization of each GPU)
-        # then OOMs. Offload the trainer before bringing the engines up --
-        # the same order the build path uses (build -> offload -> engines).
+        # may have left the trainer GPU-resident. Offload the trainer before bringing the engines up
         if self._dispatch is not None:
             self._dispatch.offload_for_sampling()
 
@@ -878,20 +870,10 @@ class SkyRLTrainBackend(AbstractBackend):
                 "inference engines have no synced weights (slept at level 2, which discards them); "
                 "call save_weights_for_sampler before sampling"
             )
-        # The offload runs outside the try: if it fails, no wake was issued and
-        # the engines really are still asleep, so the level must stay recorded
-        # (clearing it would make the next sample skip the wake and hang).
         self._dispatch.offload_for_sampling()
         try:
-            # One untagged wake restores weights and KV cache together. The
-            # split weights -> KV-cache phasing only matters when a weight
-            # broadcast has to run between the two (the sync dance); nothing
-            # happens between them here.
             asyncio.run(self._inference_engine_client.wake_up())
         finally:
-            # Even a partial wake leaves the engines no longer cleanly asleep:
-            # mark them awake so the next _sleep_inference_engines issues a
-            # real sleep instead of early-returning on a stale flag.
             self._engines_sleep_level = None
         return None
 
@@ -1115,9 +1097,7 @@ class SkyRLTrainBackend(AbstractBackend):
         save_weights_for_sampler() explicitly before calling sample() if weights
         have been updated.
         """
-        # 1. Ensure inference engines are initialized and awake. The wake
-        # refuses when the engines were slept at level 2 (weights discarded):
-        # sampling then needs a weight sync first, not a plain wake.
+        # 1. Ensure inference engines are initialized
         self._ensure_inference_engines()
         wake_error = self._wake_inference_engines_for_sampling()
         if wake_error is not None:
@@ -1380,8 +1360,6 @@ class SkyRLTrainBackend(AbstractBackend):
         # Lazily create inference engines on first sampling-related call
         self._ensure_inference_engines()
 
-        # The colocated sync dance (wake weights -> broadcast -> wake KV cache)
-        # assumes engines start asleep; a preceding sample leaves them awake.
         self._sleep_inference_engines()
 
         # Multi-LoRA: pass model_id so the dispatch swaps the right adapter in
@@ -1391,9 +1369,6 @@ class SkyRLTrainBackend(AbstractBackend):
         try:
             asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
         finally:
-            # The colocated sync path wakes the engines (weights + KV cache)
-            # even when the broadcast then fails partway; mark them awake so
-            # the next sleep is issued for real.
             self._engines_sleep_level = None
         if sync_id is not None:
             # The sync registered this tenant's adapter on vLLM; remember it
