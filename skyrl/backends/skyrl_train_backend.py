@@ -883,8 +883,11 @@ class SkyRLTrainBackend(AbstractBackend):
         # (clearing it would make the next sample skip the wake and hang).
         self._dispatch.offload_for_sampling()
         try:
-            asyncio.run(self._inference_engine_client.wake_up(tags=["weights"]))
-            asyncio.run(self._inference_engine_client.wake_up(tags=["kv_cache"]))
+            # One untagged wake restores weights and KV cache together. The
+            # split weights -> KV-cache phasing only matters when a weight
+            # broadcast has to run between the two (the sync dance); nothing
+            # happens between them here.
+            asyncio.run(self._inference_engine_client.wake_up())
         finally:
             # Even a partial wake leaves the engines no longer cleanly asleep:
             # mark them awake so the next _sleep_inference_engines issues a
