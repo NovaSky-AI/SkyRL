@@ -59,7 +59,9 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # and that we enable nvte fused attn for moonlight models with remove_microbatch_padding=True
     # need to enable nvte fused attn for router replay tests when using moonlight models with remove_microbatch_padding=True
     cfg.trainer.logger = "console"
-    is_mla_model = "moonlight" in model_name.lower() or "glm-4" in model_name.lower()
+    is_mla_model = (
+        "moonlight" in model_name.lower() or "glm-4" in model_name.lower() or "kimi-k2.5" in model_name.lower()
+    )
     if is_mla_model:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
@@ -83,6 +85,16 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         cfg.trainer.ref.language_model_only = True
         # validate_cfg requires policy/ref/generator language_model_only to agree.
         cfg.generator.inference_engine.language_model_only = True
+    if "kimi-k2.5" in model_name.lower():
+        # Kimi K2.5-family checkpoints are unified VL checkpoints whose language
+        # model is DeepSeek-V3 architecture (MLA + MoE) under a `language_model.`
+        # prefix. SkyRL bridges only the language model (KimiK25TextBridge), and
+        # MegatronWorker refuses these checkpoints unless language_model_only is
+        # set; vLLM still builds the (frozen) vision tower either way.
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
     # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
@@ -91,6 +103,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         ("qwen3.5-35b" in model_name.lower() and "tiny" not in model_name.lower())
         or ("nemotron-3.5-lightning" in model_name.lower())
         or ("glm-4.7-flash" in model_name.lower())
+        or ("kimi-k2.5" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -102,7 +115,7 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
     env: dict[str, str] = {}
     # MLA models need cuDNN fused attention (the conftest globally sets
     # NVTE_FUSED_ATTN=0; re-enable it here so the fused backend is available).
-    if "moonlight" in model_name.lower() or "glm-4" in model_name.lower():
+    if "moonlight" in model_name.lower() or "glm-4" in model_name.lower() or "kimi-k2.5" in model_name.lower():
         env["NVTE_FUSED_ATTN"] = "1"
     if fp8_mode:
         # Serialized-FP8 block-scale contract, mirroring what
@@ -152,6 +165,12 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
     if "glm-4.7-flash" in model_name.lower():
         # GLM-4.7-Flash's 202k default context would size the KV pool far past
         # what is left next to the colocated Megatron policy shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
+    if "kimi-k2.5" in model_name.lower():
+        # Same story: the slice inherits Kimi K2.5's 262k max_position_embeddings,
+        # and the 384 routed experts of its single MoE layer sit next to the
+        # colocated Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
     return overrides
@@ -256,6 +275,44 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             None,
             id="glm-4.7-flash_h100_tp4_ep4",
+            marks=pytest.mark.h100,
+        ),
+        # Kimi K2.5, 2-layer slice of the real checkpoint (eatang/Kimi-K2.5-2layer-BF16):
+        # layer 0 dense + layer 1 with the full 384-expert MoE (first_k_dense_replace=1),
+        # plus the embedding/lm_head and the vision tower vLLM always builds. ~20B params
+        # in bf16 -- the routed experts are 33 of its 41 GB -- so it takes the same 4xH100
+        # mesh as the other large-MoE entries. The routed experts are dequantized from the
+        # INT4 release (the only quantized tensors in it; attention, shared experts, dense
+        # MLP and lm_head ship in bf16), so both sides load plain bf16 here and the INT4
+        # QAT path is left to test_kimi_k25_bridge.py.
+        #
+        # Real (truncated) weights, not random init, so Megatron and vLLM are compared on
+        # the same non-degenerate function -- but 2 of 61 layers is not a coherent LM and
+        # its next-token distribution stays flat, which is why the post-sync check below
+        # compares common prefixes rather than positions. Exercises: KimiK25TextBridge dispatch on the `KimiK25ForConditionalGeneration`
+        # arch, provider construction from the nested `text_config`, the `language_model.`
+        # weight prefix through the HF<->Megatron bridge, MLA + sample packing, 384-expert
+        # MoE at EP=4, and weight sync into vLLM's kimi_k25 model.
+        #
+        # Thresholds from a measured 4xH100 run: Megatron vs vLLM 0.028 mean |dlogprob|,
+        # and 0.011 on the post-sync common-prefix comparison (see the branch at the end
+        # of the test -- this row compares common prefixes because its flat distribution
+        # makes the two greedy generations diverge at near-ties). Both bounds keep ~4-9x
+        # headroom; the Megatron one stays looser than the full-model rows because a
+        # 2-layer slice is noisier than a coherent model.
+        pytest.param(
+            4,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            "eatang/Kimi-K2.5-2layer-BF16",
+            1e-1,
+            1e-1,
+            None,
+            id="kimi-k2.5-2layer_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
         pytest.param(
@@ -393,6 +450,9 @@ async def test_logprobs_matching_roundtrip(
     """
     Check that logprob diff matches acrosss vllm and megatron.
     """
+    # See the comparison branch at the end: rows whose two greedy generations are
+    # expected to diverge at a near-tie token are compared on common prefixes.
+    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower()
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         cfg.trainer.strategy = "megatron"
@@ -558,13 +618,20 @@ async def test_logprobs_matching_roundtrip(
                 generator, client, model_name, tokenizer, return_training_input=False
             )
 
-            if fp8_mode:
-                # In the FP8 flow both generations ran on identical synced
-                # weights, so compare logprobs only on each sequence's common
-                # prefix: once greedy decoding diverges at a near-tie token,
-                # later positions score different tokens and their diff is
-                # pure noise (measured up to ~0.14 mean on identical weights,
-                # vs ~1e-3 on common prefixes).
+            # Compare logprobs only on each sequence's common prefix when the two
+            # greedy generations are expected to diverge: once decoding takes a
+            # different branch at a near-tie token, later positions score
+            # different tokens and their diff is pure noise. Two cases:
+            #   - FP8: both generations ran on identical synced weights, so any
+            #     divergence is a near-tie flip (measured up to ~0.14 mean on
+            #     identical weights, vs ~1e-3 on common prefixes).
+            #   - The Kimi K2.5 slice: 2 layers give a very flat next-token
+            #     distribution (logprob mean ~-4.3, std ~1.3), so near-ties are
+            #     everywhere and bf16 reduction-order differences across the
+            #     sync flip them -- 63 of 80 sequences diverged on a measured
+            #     run. Positionally that reads as a ~0.93 mean diff; on common
+            #     prefixes the same run measures ~0.011.
+            if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
                 assert lp_1 is not None and lp_2 is not None, "resync check needs rollout logprobs"
