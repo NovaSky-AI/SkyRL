@@ -138,16 +138,14 @@ def _scored_view(
             ), f"Length mismatch: {len(value)} != {len(is_last_step)} for key {key}"
             view[key] = [value[i] for i in keep]
 
-    # TODO (kyuds): this count is likely wrong when `eval_n_samples_per_prompt > 1`. `rows.uids`
-    # holds `TrajectoryID.instance_id`, i.e. the *prompt* id, which every repetition of that prompt
-    # shares; counting by it merges repetitions, so if repetition 0 of a prompt took 3 steps and
-    # repetition 1 took 2, both of their last-step rows report 5 turns. Only the wandb trajectory
-    # table's turn column is affected. Keying the count and the lookup on
-    # `TrajectoryID.to_string()` (instance + repetition) would fix it; preserved as-is here because
-    # this consolidation must not change behaviour.
-    step_counts = Counter(rows.uids)  # counted BEFORE the filter, as today
+    # Steps per trajectory, keyed on the full TrajectoryID (instance + repetition): with
+    # `eval_n_samples_per_prompt > 1` the repetitions of one prompt share `rows.uids` (the prompt
+    # id, which is what pass@n groups by) but are separate trajectories with their own step counts.
+    # Counted over every row, BEFORE the last-step filter; looked up per surviving last-step row.
+    trajectory_keys = [traj_id.to_string() for traj_id in concat_generator_outputs["trajectory_ids"]]
+    step_counts = Counter(trajectory_keys)
     scored_rows = rows.select(keep)
-    return view, scored_rows, [step_counts[uid] for uid in scored_rows.uids]
+    return view, scored_rows, [step_counts[trajectory_keys[i]] for i in keep]
 
 
 @torch.no_grad()
