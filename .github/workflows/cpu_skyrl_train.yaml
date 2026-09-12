@@ -42,7 +42,6 @@ jobs:
         with:
           # Semantic version range syntax or exact version of a Python version
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -64,7 +63,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -73,6 +71,8 @@ jobs:
         run:  uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "not vllm"
       - name: Run cpu tests (with vllm)
         run: uv run --isolated --extra fsdp --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "vllm"
+      - name: Run tinker tests
+        run: uv run --isolated --extra fsdp --extra tinker --extra dev pytest tests/tinker/skyrl_train/
   
   skyrl_gym_tests:
     needs: check_code_quality
@@ -88,7 +88,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:

@@ -25,7 +25,7 @@ uv run --isolated --extra skyrl-train \
 
 What each flag does:
 
-- `--isolated` — resolves a fresh env from scratch instead of using SkyRL's lockfile. Required because `tool.uv.sources` in `pyproject.toml` pins vLLM to the cu129 index (vLLM 0.23 only), but `arctic-inference[vllm]` needs vLLM 0.18.
+- `--isolated` — resolves a fresh env from scratch instead of using SkyRL's lockfile. Required because SkyRL pins vLLM 0.26 on a CUDA 13 / torch 2.11 stack, but `arctic-inference[vllm]` needs vLLM 0.18 on torch 2.10. The `--with` wheel URLs below are pinned to that older stack and are deliberately **not** CUDA 13.
 - `--extra skyrl-train` — pulls SkyRL's training deps (`ray`, `deepspeed`, `hydra-core`, …).
 - `--with arctic-platform`, `--with 'arctic-inference[vllm]'`, `--with liger-kernel` — the three Arctic packages.
 - `--with 'transformers==4.57.6'` — vLLM 0.18 needs transformers `<5`; pinned exact (not `<5`) because Ray's worker-spawn shell parses `<5` as a redirect from fd 5.

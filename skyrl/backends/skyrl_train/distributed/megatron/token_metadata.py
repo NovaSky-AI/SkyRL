@@ -1,6 +1,7 @@
 """Token-aligned metadata layout transforms shared by training features."""
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -43,6 +44,7 @@ def build_token_metadata_layout(
     *,
     packed: bool,
     fp8_enabled: bool,
+    fp8_recipe: Optional[str] = None,
 ) -> TokenMetadataLayout:
     """Compute the shared layout once for all replayed token metadata."""
     import megatron.core.parallel_state as mpu
@@ -53,7 +55,7 @@ def build_token_metadata_layout(
     tp_size = mpu.get_tensor_model_parallel_world_size()
 
     if not packed:
-        align_size = get_unpacked_seq_align_size(tp_size, fp8_enabled=fp8_enabled)
+        align_size = get_unpacked_seq_align_size(tp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
         max_sequence_length = max(sequence_lengths)
         aligned_sequence_length = max_sequence_length + (-max_sequence_length % align_size)
         return TokenMetadataLayout(
@@ -63,7 +65,7 @@ def build_token_metadata_layout(
         )
 
     cp_size = mpu.get_context_parallel_world_size()
-    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
+    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
     padded_sequence_lengths_tensor = sequence_lengths_tensor + (-sequence_lengths_tensor % align_size)
     padded_sequence_lengths = padded_sequence_lengths_tensor.tolist()
     cu_seqlens_padded = torch.cat(
