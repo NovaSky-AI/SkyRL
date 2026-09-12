@@ -337,47 +337,61 @@ def _is_custom_proposer_path(model: str) -> bool:
 def _validate_mtp_prefix_caching(cfg: SkyRLTrainConfig) -> None:
     """Reject vLLM MTP with prefix caching on recurrent linear-attention models."""
     ie_cfg = cfg.generator.inference_engine
-    engine_kwargs = ie_cfg.engine_init_kwargs or {}
-    enable_prefix_caching = engine_kwargs.get("enable_prefix_caching", ie_cfg.enable_prefix_caching)
-    speculative_config = engine_kwargs.get("speculative_config", ie_cfg.speculative_config)
+    engine_kwargs_list = []
 
-    if not enable_prefix_caching or not speculative_config:
-        return
+    if ie_cfg.enable_pd and (ie_cfg.prefill_init_kwargs or ie_cfg.decode_init_kwargs):
+        if ie_cfg.prefill_init_kwargs:
+            engine_kwargs_list.append(get_config_as_dict(ie_cfg.prefill_init_kwargs))
+        if ie_cfg.decode_init_kwargs:
+            engine_kwargs_list.append(get_config_as_dict(ie_cfg.decode_init_kwargs))
+    else:
+        engine_kwargs_list.append(get_config_as_dict(ie_cfg.engine_init_kwargs or {}))
 
-    from transformers import AutoConfig
+    for engine_kwargs in engine_kwargs_list:
+        enable_prefix_caching = engine_kwargs.get("enable_prefix_caching", ie_cfg.enable_prefix_caching)
+        speculative_config = engine_kwargs.get("speculative_config", ie_cfg.speculative_config)
+        if speculative_config is not None:
+            speculative_config = get_config_as_dict(speculative_config)
 
-    method = speculative_config.get("method")
-    uses_mtp = method == "mtp" or (isinstance(method, str) and method.endswith("_mtp"))
-    if method is None and speculative_config.get("model"):
-        draft_model = speculative_config["model"]
-        if draft_model in ("ngram", "[ngram]") or _is_custom_proposer_path(draft_model):
-            return
-        draft_config = AutoConfig.from_pretrained(
-            draft_model,
+        if not enable_prefix_caching or not speculative_config:
+            continue
+
+        from transformers import AutoConfig
+
+        method = speculative_config.get("method")
+        uses_mtp = method == "mtp" or (isinstance(method, str) and method.endswith("_mtp"))
+        if method is None and speculative_config.get("model"):
+            draft_model = speculative_config["model"]
+            if draft_model in ("ngram", "[ngram]") or _is_custom_proposer_path(draft_model):
+                continue
+            draft_config = AutoConfig.from_pretrained(
+                draft_model,
+                trust_remote_code=engine_kwargs.get("trust_remote_code", True),
+                revision=speculative_config.get("revision"),
+                code_revision=speculative_config.get("code_revision"),
+            )
+            uses_mtp = _has_native_mtp_capability(draft_config)
+        if not uses_mtp:
+            continue
+
+        model_config = AutoConfig.from_pretrained(
+            engine_kwargs.get("model", cfg.trainer.policy.model.path),
             trust_remote_code=engine_kwargs.get("trust_remote_code", True),
-            revision=speculative_config.get("revision"),
-            code_revision=speculative_config.get("code_revision"),
+            revision=engine_kwargs.get("revision"),
         )
-        uses_mtp = _has_native_mtp_capability(draft_config)
-    if not uses_mtp:
-        return
+        text_config = model_config.get_text_config(decoder=True)
+        if "linear_attention" not in (getattr(text_config, "layer_types", None) or []):
+            continue
 
-    model_config = AutoConfig.from_pretrained(
-        engine_kwargs.get("model", cfg.trainer.policy.model.path),
-        trust_remote_code=engine_kwargs.get("trust_remote_code", True),
-        revision=engine_kwargs.get("revision"),
-    )
-    text_config = model_config.get_text_config(decoder=True)
-    if "linear_attention" not in (getattr(text_config, "layer_types", None) or []):
-        return
-
-    raise ValueError(
-        "MTP speculative decoding with prefix caching is unsafe for models with recurrent "
-        "linear-attention layers. Set generator.inference_engine.enable_prefix_caching=false "
-        "and remove any engine_init_kwargs.enable_prefix_caching override, or disable MTP "
-        "speculative decoding (SKYRL_DISABLE_SPEC=1 for trainer.mtp, or remove speculative_config). See "
-        "vllm-project/vllm#43559 and vllm-project/vllm#50021."
-    )
+        raise ValueError(
+            "MTP speculative decoding with prefix caching is unsafe for models with recurrent "
+            "linear-attention layers (such as Qwen3.5/Qwen3-Next). Recurrent state cannot be shared across "
+            "different token histories, which causes silent output corruption. Set "
+            "generator.inference_engine.enable_prefix_caching=false or remove MTP speculative decoding. "
+            "and remove any engine_init_kwargs.enable_prefix_caching override, or disable MTP "
+            "speculative decoding (SKYRL_DISABLE_SPEC=1 for trainer.mtp, or remove speculative_config). See "
+            "vllm-project/vllm#43559 and vllm-project/vllm#50021."
+        )
 
 
 def validate_cfg(cfg: SkyRLTrainConfig):

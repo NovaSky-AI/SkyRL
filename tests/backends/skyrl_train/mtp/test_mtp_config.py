@@ -293,3 +293,39 @@ def test_validate_mtp_prefix_caching_uses_effective_engine_model(tmp_path, hybri
             validate_inference_engine_cfg(cfg)
     else:
         validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    ("decode_init_kwargs", "should_raise"),
+    [
+        ({"enable_prefix_caching": True}, True),
+        ({"enable_prefix_caching": False}, False),
+        ({"speculative_config": {"method": "mtp", "num_speculative_tokens": 1}}, True),
+        ({"speculative_config": {"method": "eagle", "num_speculative_tokens": 1}}, False),
+    ],
+)
+def test_validate_mtp_prefix_caching_checks_pd_role_kwargs(tmp_path, decode_init_kwargs, should_raise):
+    from transformers import Qwen3_5TextConfig
+
+    Qwen3_5TextConfig(num_hidden_layers=2, layer_types=["linear_attention", "full_attention"]).save_pretrained(tmp_path)
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = str(tmp_path)
+    cfg.generator.inference_engine.enable_pd = True
+    cfg.generator.inference_engine.enable_prefix_caching = decode_init_kwargs.get("enable_prefix_caching", True)
+    if "speculative_config" not in decode_init_kwargs:
+        cfg.generator.inference_engine.speculative_config = {"method": "mtp", "num_speculative_tokens": 1}
+
+    cfg.generator.inference_engine.prefill_init_kwargs = {
+        "enable_prefix_caching": False,
+        "kv_transfer_config": {"kv_connector": "PyTorchConnector"},
+    }
+    decode_kwargs = {"kv_transfer_config": {"kv_connector": "PyTorchConnector"}}
+    decode_kwargs.update(decode_init_kwargs)
+    cfg.generator.inference_engine.decode_init_kwargs = decode_kwargs
+
+    if should_raise:
+        with pytest.raises(ValueError, match="MTP speculative decoding with prefix caching"):
+            _validate_mtp_prefix_caching(cfg)
+    else:
+        _validate_mtp_prefix_caching(cfg)
