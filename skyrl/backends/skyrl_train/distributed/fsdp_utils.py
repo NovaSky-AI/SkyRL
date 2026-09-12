@@ -224,11 +224,20 @@ def apply_fsdp2(model, fsdp_kwargs, config: Union[FSDPConfig, DictConfig]):
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
     modules = []
+    wrapped_module_names = []
+    embeddings = []
+    tie_word_embeddings = getattr(getattr(model, "config", None), "tie_word_embeddings", False)
     for name, module in model.named_modules():
-        if module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap or (
-            isinstance(module, nn.Embedding) and not model.config.tie_word_embeddings
-        ):
+        if module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap:
             modules.append(module)
+            wrapped_module_names.append(name)
+        elif isinstance(module, nn.Embedding) and not tie_word_embeddings:
+            embeddings.append((name, module))
+
+    for name, module in embeddings:
+        if any(name.startswith(f"{parent_name}.") for parent_name in wrapped_module_names if parent_name):
+            continue
+        modules.append(module)
 
     for idx, module in enumerate(modules):
         fully_shard(module, **fsdp_kwargs)
