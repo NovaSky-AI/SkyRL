@@ -12,6 +12,7 @@ import torch
 from jaxtyping import Float
 from loguru import logger
 from ray.util.placement_group import placement_group
+from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -58,6 +59,7 @@ from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
+from skyrl.train.eval import BaseEvalDispatcher, BlockingEvalDispatcher, EvalResult
 from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -161,6 +163,8 @@ class RayPPOTrainer:
         self._training_control = TrainingControl()
         self._current_epoch: int = 0
 
+        self._eval_dispatcher: BaseEvalDispatcher = self._build_eval_dispatcher()
+
         configure_ray_worker_logging()
 
         self._num_training_gpus = (
@@ -172,21 +176,50 @@ class RayPPOTrainer:
         self._callback_handler.add(callback)
 
     def _build_callback_input(self, **fields) -> CallbackInput:
-        """Snapshot loop counters + per-event fields into a CallbackInput."""
+        """Snapshot loop counters + per-event fields into a CallbackInput.
+
+        An event may override the counters: eval events carry the step that was *evaluated*, which
+        under an asynchronous eval dispatcher is older than the loop's current step.
+        """
         steps_per_epoch = len(self.train_dataloader) if self.train_dataloader is not None else 0
-        total_steps = self.total_training_steps or 0
-        return CallbackInput(
+        defaults = dict(
             global_step=self.global_step,
             epoch=self._current_epoch,
-            total_steps=total_steps,
+            total_steps=self.total_training_steps or 0,
             steps_per_epoch=steps_per_epoch,
-            **fields,
         )
+        return CallbackInput(**{**defaults, **fields})
 
     def _fire(self, event_name: str, **fields) -> None:
         """Build a CallbackInput and dispatch the given event to all callbacks."""
         cb_input = self._build_callback_input(**fields)
         getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
+
+    def _build_eval_dispatcher(self) -> BaseEvalDispatcher:
+        """The eval dispatcher for this run: blocking (inline on the training engines) for now; a
+        later PR selects an asynchronous one from config here.
+
+        Both collaborators are looked up at call time rather than captured: ``eval`` so subclass
+        overrides and the post-construction ``trajectory_logger`` are honoured (and the trainer
+        tests can monkeypatch it); ``_fire`` for uniformity -- a bound method would already read
+        its state at call time, but a reader should not have to work out why one of the two is
+        different.
+        """
+        return BlockingEvalDispatcher(
+            run_eval=lambda *args, **kwargs: self.eval(*args, **kwargs),
+            on_event=lambda event_name, **fields: self._fire(event_name, **fields),
+        )
+
+    def _log_eval_results(self, results: List[EvalResult]) -> None:
+        """Write each settled eval to the tracker at the step it evaluated -- under an asynchronous
+        dispatcher, older than the loop's current step. The eval callbacks have already fired from
+        the dispatcher; a skipped eval leaves a single ``eval/skipped_<reason>`` marker."""
+        for res in results:
+            if res.skipped_reason is None:
+                payload = res.metrics
+            else:
+                payload = {f"eval/skipped_{res.skipped_reason}": 1.0}
+            self.tracker.log(payload, step=res.global_step)
 
     @property
     def has_critic(self) -> bool:
@@ -229,12 +262,23 @@ class RayPPOTrainer:
                 self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
 
     @torch.no_grad()
-    async def eval(self, vllm_metrics_scraper: Optional[VLLMMetricsScraper] = None) -> Dict[str, float]:
+    async def eval(
+        self,
+        vllm_metrics_scraper: Optional[VLLMMetricsScraper] = None,
+        *,
+        generator: Optional[GeneratorInterface] = None,
+        eval_dataloader: Optional[StatefulDataLoader] = None,
+        global_step: Optional[int] = None,
+    ) -> Dict[str, float]:
         """
         Run generation and scoring on the evaluation dataset.
 
         The eval metrics are recorded after having finished training `self.global_step` steps.
         Metrics recorded in global_step 0 corresponds to evaluations before training.
+
+        This is the unit of work every eval dispatcher schedules. ``generator``, ``eval_dataloader``
+        and ``global_step`` default to the trainer's own; an asynchronous dispatcher passes a
+        generator bound to an older weight version, its own dataloader, and the step it measures.
 
         Args:
             vllm_metrics_scraper: when provided, the eval loop calls
@@ -245,10 +289,10 @@ class RayPPOTrainer:
             A dictionary of evaluation metrics.
         """
         return await evaluate(
-            eval_dataloader=self.eval_dataloader,
-            generator=self.generator,
+            eval_dataloader=self.eval_dataloader if eval_dataloader is None else eval_dataloader,
+            generator=self.generator if generator is None else generator,
             cfg=self.cfg,
-            global_step=self.global_step,
+            global_step=self.global_step if global_step is None else global_step,
             tokenizer=self.tokenizer,
             trajectory_logger=self.trajectory_logger,
             tracker=self.tracker,
@@ -283,15 +327,13 @@ class RayPPOTrainer:
 
         self._fire("on_train_start")
 
-        # Eval before training. Wrapped in eval callbacks + on_log so that e.g.
-        # a best-checkpoint callback sees the baseline reading.
+        # Eval before training. The dispatcher fires the eval callbacks; drain() makes the join
+        # explicit, so that e.g. a best-checkpoint callback sees the baseline reading before step 1,
+        # and the loop writes the metrics it hands back.
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
-            self._fire("on_eval_start")
             with Timer("eval", self.all_timings):
-                eval_metrics = await self.eval()
-            self._fire("on_eval_end", metrics=eval_metrics)
-            self._fire("on_log", logs=eval_metrics)
-            self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+                await self._eval_dispatcher.submit(self.global_step)
+            self._log_eval_results(await self._eval_dispatcher.drain())
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -506,13 +548,15 @@ class RayPPOTrainer:
                         if self._vllm_metrics_scraper is not None:
                             await self._vllm_metrics_scraper.start("vllm/eval")
                             self._vllm_metrics_scraper.pause()
-                        self._fire("on_eval_start")
                         with Timer("eval", self.all_timings):
-                            eval_metrics = await self.eval(vllm_metrics_scraper=self._vllm_metrics_scraper)
-                            self.all_metrics.update(eval_metrics)
-                        self._fire("on_eval_end", metrics=eval_metrics)
+                            await self._eval_dispatcher.submit(
+                                self.global_step, vllm_metrics_scraper=self._vllm_metrics_scraper
+                            )
                         if self._vllm_metrics_scraper is not None:
                             vllm_metrics.update(await self._vllm_metrics_scraper.stop())
+                    # Write every settled eval at the step it evaluated: blocking, the one just run;
+                    # asynchronous, evals of earlier steps. Every step, before this step's own row.
+                    self._log_eval_results(self._eval_dispatcher.get_completed())
 
                     log_payload = {
                         **self.all_metrics,
@@ -527,7 +571,7 @@ class RayPPOTrainer:
 
                     self._fire("on_log", logs=log_payload)
 
-                    self.tracker.log(log_payload, step=self.global_step, commit=True)
+                    self.tracker.log(log_payload, step=self.global_step)
                     self.all_metrics = {}
                     self.all_timings = {}
 
@@ -576,6 +620,11 @@ class RayPPOTrainer:
                 self.save_models()
                 logger.info("Saved final model.")
 
+        # Join any eval still in flight so its metrics are written before teardown. No-op under the
+        # blocking dispatcher: everything it runs is collected on the step that submitted it.
+        self._log_eval_results(await self._eval_dispatcher.drain())
+        await self._eval_dispatcher.close()
+
         # Drain any in-flight async checkpoint write before teardown. Unconditional:
         # a save may have happened outside the periodic path. No-op when nothing is pending.
         self.dispatch.finalize_pending_saves("policy")
@@ -605,7 +654,7 @@ class RayPPOTrainer:
             **{f"timing/{k}": v for k, v in self.all_timings.items()},
         }
         try:
-            self.tracker.log(log_payload, step=self.global_step, commit=True)
+            self.tracker.log(log_payload, step=self.global_step)
         except Exception as e:
             logger.warning(f"Failed to flush pending metrics at step {self.global_step}: {e}")
         self.all_metrics = {}
