@@ -549,6 +549,8 @@ class MegatronWorker:
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
         normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
+        # TODO: We should improve test coverage for this normalization logic and add a GPU-based integration test
+        # that asserts consistency between megatron and vllm.
         if normalize_moe_lora and getattr(self.provider, "num_moe_experts", None):
             # megatron-bridge rounds the expert rank (rank // topk) up to a
             # multiple of expert TP. vLLM sizes its LoRA buffers from r = rank
