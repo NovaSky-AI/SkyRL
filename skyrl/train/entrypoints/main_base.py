@@ -80,6 +80,7 @@ class BasePPOExp:
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=8,
+            chat_template_kwargs=self.cfg.generator.chat_template_kwargs,
         )
         # make sure the dataset is large enough to train on
         assert (
@@ -99,6 +100,7 @@ class BasePPOExp:
                 tokenizer=self.tokenizer,
                 max_prompt_length=self.cfg.trainer.max_prompt_length,
                 num_workers=8,
+                chat_template_kwargs=self.cfg.generator.chat_template_kwargs,
             )
             return prompts_dataset
         return None
