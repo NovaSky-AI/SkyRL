@@ -333,7 +333,8 @@ class RayPPOTrainer:
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
                 await self._eval_dispatcher.submit(self.global_step)
-            self._log_eval_results(await self._eval_dispatcher.drain())
+                results = await self._eval_dispatcher.drain()
+            self._log_eval_results(results)
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
