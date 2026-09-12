@@ -29,3 +29,51 @@ The JAX backend supports the following models:
 - Deepseek-V3
 - Llama-3
 - Qwen3 Dense/MoE
+
+### Apple Silicon (experimental)
+
+On macOS 14 or newer, the JAX backend can use Apple Silicon GPUs through the experimental
+[`jax-mps`](https://github.com/tillahoffmann/jax-mps) PJRT plugin. Install the
+JAX and MPS extras together and select the backend explicitly:
+
+```bash
+JAX_PLATFORMS=mps uv run --isolated --extra jax --extra mps --extra tinker \
+  -m skyrl.tinker.api \
+  --base-model Qwen/Qwen3-0.6B \
+  --backend jax \
+  --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 8, "train_micro_batch_size": 1, "sample_max_num_sequences": 4, "gradient_checkpointing": true}'
+```
+
+This path supports the JAX backend's LoRA training and sampling API. It does
+not enable the FSDP or Megatron backends on macOS. `jax-mps` currently supports
+one Apple GPU and does not implement every JAX operation, so start with a small
+dense model and single-device parallelism (`fsdp=ep=tp=1`).
+
+To run one complete RL iteration, keep the server running and execute the
+[Tinker cookbook](https://github.com/thinking-machines-lab/tinker-cookbook) math
+recipe from a separate checkout:
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --isolated --extra math-rl --with tinker==0.22.4 \
+  python -m tinker_cookbook.recipes.math_rl.train \
+  base_url=http://127.0.0.1:8000 \
+  model_name=Qwen/Qwen3-0.6B \
+  renderer_name=qwen3_disable_thinking \
+  lora_rank=8 \
+  env=gsm8k \
+  groups_per_batch=2 \
+  group_size=4 \
+  max_tokens=96 \
+  temperature=1.2 \
+  max_steps=1 \
+  learning_rate=4e-5 \
+  eval_every=0 \
+  save_every=0 \
+  behavior_if_log_dir_exists=delete
+```
+
+This exercises rollout sampling, GSM8K rewards, group-relative advantages,
+the importance-sampling loss, an optimizer update, sampler weight sync, and
+final checkpointing. On an M4 Max with 64 GB of unified memory, the validated
+iteration generated eight rollouts and completed in about 30 seconds after the
+server initialized.
