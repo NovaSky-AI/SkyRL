@@ -482,11 +482,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
 
-        # Eval before training
+        # Eval before training. The dispatcher fires the eval callbacks; the loop writes the metrics.
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with self._phase_gauge.timed_phase("eval", self.all_timings):
-                eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+                await self._eval_dispatcher.submit(self.global_step)
+            self._log_eval_results(await self._eval_dispatcher.drain())
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
@@ -620,11 +620,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         or self.global_step == self.total_training_steps
                     ):
                         with self._phase_gauge.timed_phase("eval", self.all_timings):
-                            eval_metrics = await self.eval()
-                            self.all_metrics.update(eval_metrics)
+                            await self._eval_dispatcher.submit(self.global_step)
+                    # Write every settled eval at the step it evaluated, before this step's own row.
+                    self._log_eval_results(self._eval_dispatcher.get_completed())
 
                     # Log metrics for this step after evaluation
-                    self.tracker.log(self.all_metrics, step=self.global_step, commit=False)
+                    self.tracker.log(self.all_metrics, step=self.global_step)
                     self.all_metrics = {}
 
                     # 7. Checkpointing. At interval and at the last step of each epoch.
@@ -643,7 +644,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         timing_payload.update(self._ray_gpu_monitor.flush())
                     if self._vllm_metrics_scraper is not None:
                         timing_payload.update(await self._vllm_metrics_scraper.sample())
-                    self.tracker.log(timing_payload, step=self.global_step, commit=True)
+                    self.tracker.log(timing_payload, step=self.global_step)
                     self.all_timings = {}
                     self.global_step += 1
 
@@ -724,6 +725,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
                 await asyncio.to_thread(self.save_models)
                 logger.info("Saved final model.")
+
+        # Join any eval still in flight so its metrics are written before teardown. No-op under the
+        # blocking dispatcher: everything it runs is collected on the step that submitted it.
+        self._log_eval_results(await self._eval_dispatcher.drain())
+        await self._eval_dispatcher.close()
 
         # Drain any in-flight async checkpoint write before teardown. Unconditional:
         # a save may have happened outside the periodic path. No-op when nothing is pending.

@@ -2,7 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -14,6 +14,7 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.eval import EvalResult
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import validate_batch_sizes
 from tests.train.util import example_dummy_config
@@ -270,9 +271,7 @@ def test_flush_pending_metrics_logs_and_clears(dummy_config):
 
     trainer.flush_pending_metrics()
 
-    trainer.tracker.log.assert_called_once_with(
-        {"reward/avg_raw_reward": 0.5, "timing/generate": 42.0}, step=7, commit=True
-    )
+    trainer.tracker.log.assert_called_once_with({"reward/avg_raw_reward": 0.5, "timing/generate": 42.0}, step=7)
     assert trainer.all_metrics == {}
     assert trainer.all_timings == {}
 
@@ -698,3 +697,77 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Eval dispatcher wiring
+# ---------------------------------------------------------------------------
+
+
+def _bare_trainer(cfg, tokenizer) -> RayPPOTrainer:
+    return RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=tokenizer,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+
+
+def test_callback_input_fields_override_loop_counters(dummy_config, dummy_tokenizer):
+    """An event may carry a step other than the loop's current one (eval events carry the step
+    that was evaluated); the remaining counters still come from the loop."""
+    trainer = _bare_trainer(dummy_config, dummy_tokenizer)
+    trainer.global_step = 5
+
+    cb_input = trainer._build_callback_input(global_step=3, metrics={"eval/x": 1.0})
+
+    assert cb_input.global_step == 3
+    assert cb_input.metrics == {"eval/x": 1.0}
+    assert cb_input.total_steps == (trainer.total_training_steps or 0)
+    assert trainer._build_callback_input().global_step == 5
+
+
+@pytest.mark.asyncio
+async def test_default_dispatcher_late_binds_eval_and_fire(dummy_config, dummy_tokenizer, monkeypatch):
+    """The blocking dispatcher resolves ``eval`` and ``_fire`` on the trainer at dispatch time:
+    both are monkeypatched after construction, as the trainer tests do with ``eval``."""
+    trainer = _bare_trainer(dummy_config, dummy_tokenizer)
+    monkeypatch.setattr(trainer, "eval", AsyncMock(return_value={"eval/score": 0.5}))
+    fired = []
+    monkeypatch.setattr(trainer, "_fire", lambda event_name, **fields: fired.append((event_name, fields)))
+    trainer.global_step = 7
+
+    await trainer._eval_dispatcher.submit(trainer.global_step, vllm_metrics_scraper=None)
+    results = trainer._eval_dispatcher.get_completed()
+
+    trainer.eval.assert_awaited_once_with(vllm_metrics_scraper=None)
+    assert [(r.global_step, r.metrics) for r in results] == [(7, {"eval/score": 0.5})]
+    assert fired == [
+        ("on_eval_start", {"global_step": 7}),
+        ("on_eval_end", {"global_step": 7, "metrics": {"eval/score": 0.5}}),
+    ]
+
+
+def test_log_eval_results_writes_each_result_at_its_own_step(dummy_config, dummy_tokenizer, monkeypatch):
+    """The loop, not the dispatcher, writes eval metrics: one row per result at the step it
+    evaluated, a skip as a single marker key, and no callbacks fired in the process."""
+    trainer = _bare_trainer(dummy_config, dummy_tokenizer)
+    trainer.tracker = MagicMock()
+    monkeypatch.setattr(trainer, "_fire", MagicMock())
+    trainer.global_step = 9
+
+    trainer._log_eval_results(
+        [
+            EvalResult(global_step=3, metrics={"eval/score": 0.5}),
+            EvalResult(global_step=5, skipped_reason="busy"),
+        ]
+    )
+
+    assert trainer.tracker.log.call_args_list == [
+        call({"eval/score": 0.5}, step=3),
+        call({"eval/skipped_busy": 1.0}, step=5),
+    ]
+    trainer._fire.assert_not_called()

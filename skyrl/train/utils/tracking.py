@@ -43,12 +43,10 @@ class Tracking:
     ):
         assert backend in self.supported_backends, f"{backend} is not supported"
         self.backend = backend
+        self._warned_commit = False
 
         if backend == "wandb":
-            import wandb
-
-            wandb.init(project=project_name, name=experiment_name, config=get_config_as_dict(config), tags=tags)
-            self.logger: Any = wandb
+            self.logger: Any = _WandbAdapter(project_name, experiment_name, config, tags)
         elif backend == "mlflow":
             self.logger = _MlflowLoggingAdapter(project_name, experiment_name, config)
         elif backend == "swanlab":
@@ -76,11 +74,17 @@ class Tracking:
 
         self._exception_logged = False
 
-    def log(self, data, step, commit=False):
-        if self.backend == "wandb":
-            self.logger.log(data=data, step=step, commit=commit)
-        else:
-            self.logger.log(data=data, step=step)
+    def log(self, data, step, commit=None):
+        """Log ``data`` at x = ``step``, on every backend.
+
+        ``commit`` is deprecated and ignored: the wandb adapter commits every write itself (one row
+        per call), so there is no open-row accumulation left for it to control. Passing it warns
+        once per tracker, attributed to the caller's line.
+        """
+        if commit is not None and not self._warned_commit:
+            self._warned_commit = True
+            logger.opt(depth=1).warning("Tracking.log(commit=...) is deprecated and ignored.")
+        self.logger.log(data=data, step=step)
 
     def finish(self):
         if self.backend == "console":
@@ -89,10 +93,7 @@ class Tracking:
         # This is because wandb often errors out with a BrokenPipeError when closing.
         # https://github.com/wandb/wandb/issues/6449
         try:
-            if self.backend == "wandb":
-                self.logger.finish(exit_code=0)
-            else:
-                self.logger.finish()
+            self.logger.finish()
         except Exception as e:
             logger.warning(f"Attempted to finish tracking with backend {self.backend} but got error {e}")
 
@@ -121,10 +122,7 @@ class Tracking:
 
                 error_table = wandb.Table(columns=["step", "type", "traceback"])
                 error_table.add_data(step, type(e).__name__, tb_str)
-                # Note: omit `step=` here. Per-step logs use commit=True, so
-                # re-logging at the same step would be dropped. The step value
-                # is also embedded in the table row itself.
-                self.logger.log({"error/tracebacks": error_table})
+                self.logger.log_table("error/tracebacks", error_table, step=step)
                 # Tables upload asynchronously. Finish the run so the upload
                 # completes before the caller re-raises and the process dies.
                 try:
@@ -169,7 +167,7 @@ class Tracking:
         new_table = wandb.Table(columns=columns, data=list(self._sample_tables[key].data))
         for row in samples:
             new_table.add_data(*row)
-        self.logger.log({key: new_table}, step=step)
+        self.logger.log_table(key, new_table, step=step)
         self._sample_tables[key] = new_table
 
     def __del__(self):
@@ -177,6 +175,40 @@ class Tracking:
             self.finish()
         except Exception as e:
             logger.warning(f"Attempted to finish tracking but got error {e}")
+
+
+class _WandbAdapter:
+    """wandb with a custom step axis, so rows can be logged in any step order.
+
+    W&B's built-in ``_step`` must be monotonic and one row per step: a value logged at a step below
+    the current one, or at an already-committed step, is silently dropped (only ``debug-core.log``
+    says so). Declaring ``STEP_METRIC`` as the step metric for every key makes panels plot against
+    it instead, and each ``log`` becomes its own row with ``_step`` a call counter. Every row
+    therefore carries ``STEP_METRIC``, injected here from ``step``.
+    """
+
+    STEP_METRIC = "global_step"
+    """The custom step axis. Namespace-free on purpose: it indexes ``eval/*``, ``timing/*`` and
+    ``vllm/*`` rows as well as the trainer's, and is distinct from the ``trainer/global_step`` metric."""
+
+    def __init__(self, project_name, experiment_name, config, tags):
+        import wandb
+
+        self._wandb = wandb
+        self.run = wandb.init(project=project_name, name=experiment_name, config=get_config_as_dict(config), tags=tags)
+        self.run.define_metric(self.STEP_METRIC, hidden=True)  # an axis, not a metric: no panel of its own
+        self.run.define_metric("*", step_metric=self.STEP_METRIC)
+
+    def log(self, data: Dict[str, Any], step: int) -> None:
+        # No `step=`, so `_step` is never a constraint. `commit=True` is the SDK default once `step`
+        # is omitted; spelled out so the one-row-per-call property is visible rather than inherited.
+        self._wandb.log({self.STEP_METRIC: step, **data}, commit=True)
+
+    def log_table(self, key: str, table: Any, step: int) -> None:
+        self._wandb.log({self.STEP_METRIC: step, key: table}, commit=True)
+
+    def finish(self) -> None:
+        self._wandb.finish(exit_code=0)
 
 
 class ConsoleLogger:
