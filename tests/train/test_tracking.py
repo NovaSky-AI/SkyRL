@@ -55,8 +55,9 @@ def test_wandb_adapter_declares_global_step_axis():
 
 
 def test_wandb_adapter_injects_step_and_never_passes_step_kwarg():
-    """Every write carries the step key and commits its own row. ``step=`` is never passed to
-    wandb, so a later write at an older step is not subject to the monotonic ``_step`` rule."""
+    """Every write carries the step key and commits its own row, on the run object. ``step=`` is
+    never passed to wandb, so a later write at an older step is not subject to the monotonic
+    ``_step`` rule."""
     with patch.dict("sys.modules", {"wandb": MagicMock()}) as mocked:
         wandb_mock = mocked["wandb"]
         tracker = Tracking(project_name="proj", experiment_name="exp", backend="wandb", config={})
@@ -64,10 +65,26 @@ def test_wandb_adapter_injects_step_and_never_passes_step_kwarg():
         tracker.log({"trainer/loss": 0.1}, step=47, commit=True)  # the deprecated kwarg is ignored
         tracker.log({"eval/score": 0.5}, step=40)
 
-        assert wandb_mock.log.call_args_list == [
+        assert wandb_mock.init.return_value.log.call_args_list == [
             call({_WandbAdapter.STEP_METRIC: 47, "trainer/loss": 0.1}, commit=True),
             call({_WandbAdapter.STEP_METRIC: 40, "eval/score": 0.5}, commit=True),
         ]
+        wandb_mock.log.assert_not_called()  # run-scoped, never the module-level log
+
+
+def test_wandb_adapter_is_inert_without_a_run():
+    """If ``wandb.init`` hands back None (a mocked or disabled wandb), the adapter logs nothing
+    and nothing crashes."""
+    with patch.dict("sys.modules", {"wandb": MagicMock()}) as mocked:
+        wandb_mock = mocked["wandb"]
+        wandb_mock.init.return_value = None
+        tracker = Tracking(project_name="proj", experiment_name="exp", backend="wandb", config={})
+
+        tracker.log({"a": 1.0}, step=1)
+        tracker.finish()
+
+        wandb_mock.log.assert_not_called()
+        wandb_mock.finish.assert_not_called()
 
 
 def test_log_warns_once_when_commit_is_passed():

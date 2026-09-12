@@ -194,21 +194,24 @@ class _WandbAdapter:
     def __init__(self, project_name, experiment_name, config, tags):
         import wandb
 
-        self._wandb = wandb
         self.run = wandb.init(project=project_name, name=experiment_name, config=get_config_as_dict(config), tags=tags)
-        self.run.define_metric(self.STEP_METRIC, hidden=True)  # an axis, not a metric: no panel of its own
-        self.run.define_metric("*", step_metric=self.STEP_METRIC)
+        if self.run is not None:
+            self.run.define_metric(self.STEP_METRIC, hidden=True)  # an axis, not a metric: no panel of its own
+            self.run.define_metric("*", step_metric=self.STEP_METRIC)
 
     def log(self, data: Dict[str, Any], step: int) -> None:
         # No `step=`, so `_step` is never a constraint. `commit=True` is the SDK default once `step`
         # is omitted; spelled out so the one-row-per-call property is visible rather than inherited.
-        self._wandb.log({self.STEP_METRIC: step, **data}, commit=True)
+        if self.run is not None:
+            self.run.log({self.STEP_METRIC: step, **data}, commit=True)
 
     def log_table(self, key: str, table: Any, step: int) -> None:
-        self._wandb.log({self.STEP_METRIC: step, key: table}, commit=True)
+        if self.run is not None:
+            self.run.log({self.STEP_METRIC: step, key: table}, commit=True)
 
     def finish(self) -> None:
-        self._wandb.finish(exit_code=0)
+        if self.run is not None:
+            self.run.finish(exit_code=0)
 
 
 class ConsoleLogger:
