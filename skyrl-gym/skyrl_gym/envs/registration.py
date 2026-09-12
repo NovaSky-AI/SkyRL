@@ -164,6 +164,10 @@ def load_env_creator(name: str) -> EnvCreator:
     Returns:
         The environment constructor for the given environment name.
     """
+    if name.count(":") != 1:
+        raise error.Error(
+            f"Malformed entry point '{name}'. Expected the form '(import path):(environment name)', e.g. 'my_pkg.envs:MyEnv'."
+        )
     mod_name, attr_name = name.split(":")
     mod = importlib.import_module(mod_name)
     fn = getattr(mod, attr_name)
