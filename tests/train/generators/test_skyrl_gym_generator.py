@@ -388,13 +388,13 @@ async def test_agent_loop_single_turn(
 
         expected_response_ids = mock_llm_output_ids.copy()
         if has_eos_in_mock:
-            # Had EOS: removed then re-added, so final IDs same as mock
+            # A sampled final EOS remains a loss-active action.
             expected_response_ids = mock_llm_output_ids
         else:
             # No EOS: just add it
             expected_response_ids = mock_llm_output_ids + [mock_tokenizer.eos_token_id]
 
-        expected_loss_mask = [1] * len(expected_response_ids)
+        expected_loss_mask = [1] * len(mock_llm_output_ids) + ([] if has_eos_in_mock else [0])
 
     if logprobs_setting is not None:
         assert output.rollout_logprobs is not None
@@ -1083,9 +1083,8 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
 
     # Response ids layout: step1 (3 tokens) + obs (1) + step2 (3) + final eos (1) = 8
     assert len(out.response_ids) == 8
-    # Indices: 2 (end of step1 assistant), 6 (end of step2 assistant), 7 (manually appended eos token)
-    # Note that the last reward is placed at the 7 instead of at 6 since we manually move
-    # it using the flag `appended_eos_token` in skyrl_gym_generator.py
+    # Reward indices: 2 (end of step1 without its intermediate EOS),
+    # 7 (the sampled final EOS, preserved as part of step2).
     expected_rewards = [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 1.7]
     assert isinstance(out.reward, list)
     assert out.reward == expected_rewards
@@ -1348,16 +1347,14 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     extras = {}
     out = await generator.agent_loop(prompt, mock_env_cfg.env_class, extras, max_tokens=5, max_input_length=1000)
 
-    # Untruncated response would be: 4 (step1) + 4 (step2) + 1 (final eos) = 9; we expect truncation to 5
+    # Four generated tokens followed by one synthetic EOS.
     assert len(out.response_ids) == 5
     assert isinstance(out.reward, list)
     assert len(out.reward) == 5
 
-    # Step1 end index relative should be 4 (0-based) - reward placed at EOS token
-    # NOTE(Dev): Because we manually append the eos token to the response, the reward is placed at the last token;
-    # See Charlie's comment in skyrl_gym_generator.py for more details.
-
-    assert out.reward[4] == 2.0
+    # Reward belongs to the last generated token, not the masked synthetic EOS.
+    assert out.reward == [0.0, 0.0, 0.0, 2.0, 0.0]
+    assert out.loss_mask == [1, 1, 1, 1, 0]
     assert sum(out.reward) == 2.0
     assert out.stop_reason == "stop"
 
