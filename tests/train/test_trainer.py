@@ -16,6 +16,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.eval import EvalResult
 from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils.callbacks import TrainingCallback
 from skyrl.train.utils.utils import validate_batch_sizes
 from tests.train.util import example_dummy_config
 
@@ -771,3 +772,91 @@ def test_log_eval_results_writes_each_result_at_its_own_step(dummy_config, dummy
         call({"eval/skipped_busy": 1.0}, step=5),
     ]
     trainer._fire.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Eval dispatcher teardown in train()
+# ---------------------------------------------------------------------------
+
+
+class _TwoExamples:
+    """One batch at train_batch_size=2, so the epoch loop has exactly one step to offer."""
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, idx):
+        return "dummy"
+
+    def collate_fn(self, batch):
+        return batch
+
+
+class _RaiseOnStepStart(TrainingCallback):
+    def on_step_start(self, trainer, callback_input, control):
+        raise RuntimeError("boom")
+
+
+def _fake_dispatcher():
+    dispatcher = MagicMock()
+    dispatcher.submit = AsyncMock()
+    dispatcher.get_completed = MagicMock(return_value=[])
+    dispatcher.drain = AsyncMock(return_value=[])
+    dispatcher.close = AsyncMock()
+    return dispatcher
+
+
+def _loop_only_trainer(cfg, tokenizer, monkeypatch, *, callbacks=()):
+    """A trainer whose ``train()`` reaches the epoch loop with almost nothing stubbed: no eval before
+    training, no saves, no colocation, no metrics scraper. The step body itself is never allowed to
+    run, so none of the generation / training / worker stubs are needed."""
+    cfg.trainer.eval_before_train = False
+    cfg.trainer.ckpt_interval = 0
+    cfg.trainer.hf_save_interval = 0
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.enable_ray_prometheus_stats = False
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=MagicMock(),
+        tokenizer=tokenizer,
+        train_dataset=_TwoExamples(),
+        eval_dataset=_TwoExamples(),
+        inference_engine_client=None,
+        generator=MagicMock(),
+        callbacks=list(callbacks),
+    )
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.save_weights_for_sampler = AsyncMock(return_value=None)
+    monkeypatch.setattr(trainer, "init_weight_sync_state", lambda: None)
+    trainer._eval_dispatcher = dispatcher = _fake_dispatcher()
+    return trainer, dispatcher
+
+
+@pytest.mark.asyncio
+async def test_train_drains_then_closes_the_dispatcher_on_a_healthy_exit(dummy_config, dummy_tokenizer, monkeypatch):
+    """The loop's exit path joins the last eval, then releases the dispatcher: drain before close,
+    once each. The resume position sits past the last epoch, so the loop body never runs."""
+    trainer, dispatcher = _loop_only_trainer(dummy_config, dummy_tokenizer, monkeypatch)
+    trainer.global_step = trainer.total_training_steps  # nothing left to train
+
+    await trainer.train()
+
+    teardown = [name for name, _, _ in dispatcher.mock_calls if name in ("drain", "close")]
+    assert teardown == ["drain", "close"]
+
+
+@pytest.mark.asyncio
+async def test_train_closes_but_does_not_drain_the_dispatcher_when_a_step_crashes(
+    dummy_config, dummy_tokenizer, monkeypatch
+):
+    """A crash inside the loop -- here a callback at on_step_start, before any generation -- still
+    releases the dispatcher from train()'s finally, and does not wait on evals in flight."""
+    trainer, dispatcher = _loop_only_trainer(
+        dummy_config, dummy_tokenizer, monkeypatch, callbacks=[_RaiseOnStepStart()]
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await trainer.train()
+
+    dispatcher.close.assert_awaited_once()
+    dispatcher.drain.assert_not_awaited()

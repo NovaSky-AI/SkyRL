@@ -705,10 +705,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
 
                 # End of an epoch.
+
+            # Drain remaining evals.
+            self._log_eval_results(await self._eval_dispatcher.drain())
         finally:
             self._profiler_stop()
             if self._ray_gpu_monitor is not None:
                 self._ray_gpu_monitor.stop()
+            try:
+                await self._eval_dispatcher.close()
+            except Exception as e:
+                # Don't re-raise error so that any original error raised in the training
+                # loop is properly propagated.
+                logger.error(f'Closing eval dispatcher failed: {e}')
 
         pbar.close()
 
@@ -726,11 +735,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
                 await asyncio.to_thread(self.save_models)
                 logger.info("Saved final model.")
-
-        # Join any eval still in flight so its metrics are written before teardown. No-op under the
-        # blocking dispatcher: everything it runs is collected on the step that submitted it.
-        self._log_eval_results(await self._eval_dispatcher.drain())
-        await self._eval_dispatcher.close()
 
         # Drain any in-flight async checkpoint write before teardown. Unconditional:
         # a save may have happened outside the periodic path. No-op when nothing is pending.
