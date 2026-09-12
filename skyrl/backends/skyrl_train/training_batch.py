@@ -482,6 +482,7 @@ class TrainingInput(TypedDict, total=False):
     advantages: Float[torch.Tensor, "batch_size response_len"]  # per-token advantage
     kl: Float[torch.Tensor, "batch_size response_len"]  # per-token KL, current vs reference policy
     rewards: Optional[Float[torch.Tensor, "batch_size response_len"]]  # env reward, typically only on the last token
+    reward_components: Optional[Float[torch.Tensor, "batch_size num_components"]]  # per-objective scores
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size response_len"]]  # sampling policy; off-policy corr.
     rollout_expert_indices: Optional[Integer[torch.Tensor, "batch_size seq_len layer_num topk"]]  # MoE router replay
     router_padding_mask: Optional[Bool[torch.Tensor, "batch_size seq_len"]]  # True = no captured route (skip in replay)

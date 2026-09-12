@@ -9,6 +9,8 @@ from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 
 TrainingPhase = Literal["train", "eval"]
 
+TokenLevelReward = List[float]
+
 
 @dataclass
 class TrajectoryID:
@@ -37,7 +39,8 @@ class GeneratorInput(TypedDict):
 class GeneratorOutput(TypedDict):
     prompt_token_ids: List[List[int]]
     response_ids: List[List[int]]
-    rewards: Union[List[float], List[List[float]]]
+    rewards: Union[List[float], List[TokenLevelReward]]
+    reward_components: Optional[List[Dict[str, float]]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]

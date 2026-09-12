@@ -409,6 +409,7 @@ class AdvantageEstimator(StrEnum):
     RLOO = "rloo"
     REINFORCE_PP = "reinforce++"
     MAXRL = "maxrl"
+    GDPO = "gdpo"
 
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
@@ -436,6 +437,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
             "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
             "maxrl": [AdvantageEstimator.MAXRL, compute_maxrl_advantage],
+            "gdpo": [AdvantageEstimator.GDPO, compute_gdpo_outcome_advantage],
         }
 
         for ae_name, (ae_type, ae_func) in ae_types.items():
@@ -1428,6 +1430,66 @@ def compute_maxrl_advantage(
     return scores, scores
 
 
+@register_advantage_estimator(AdvantageEstimator.GDPO)
+def compute_gdpo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    grpo_norm_by_std: bool = True,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for GDPO, operating only on Outcome vector reward.
+
+    Expects:
+        - token_level_rewards: Float[torch.Tensor, "batch_size num_rewards response_len"]
+        - response_mask: Float[torch.Tensor, "batch_size response_len"]
+        - index: np.ndarray (batch_size)
+        - epsilon: float
+        - grpo_norm_by_std: bool
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size response_len"]
+        - returns: Float[torch.Tensor, "batch_size response_len"]
+    """
+    from loguru import (
+        logger as logger_,  # have to do lazy import to avoid pickling error
+    )
+
+    # scores is [bsz, num_rewards]
+    scores = token_level_rewards.sum(dim=-1)
+    bsz, num_rewards = scores.shape
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+
+    with torch.no_grad():
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.zeros(num_rewards, dtype=scores.dtype, device=scores.device)
+                id2std[idx] = torch.ones(num_rewards, dtype=scores.dtype, device=scores.device)
+            else:
+                group_scores = torch.stack(id2score[idx])
+                id2mean[idx] = group_scores.mean(dim=0)
+                id2std[idx] = group_scores.std(dim=0)
+        for i in range(bsz):
+            if grpo_norm_by_std:
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            else:
+                scores[i] = scores[i] - id2mean[index[i]]
+        # Normalizing advantages separately
+        scores = scores.sum(dim=-1)
+        if bsz > 1:
+            scores = (scores - scores.mean()) / (scores.std() + epsilon)
+        else:
+            logger_.warning("Skipping GDPO batch normalization: it needs more than one sequence, got 1")
+        scores = scores.unsqueeze(-1) * response_mask
+    return scores, scores
+
+
 def repopulate_all_registries():
     PolicyLossRegistry.repopulate_registry()
     AdvantageEstimatorRegistry.repopulate_registry()
@@ -1443,6 +1505,8 @@ def compute_advantages_and_returns(
     grpo_norm_by_std: bool = True,
     gamma=1.0,
     lambd=1.0,
+    epsilon: float = 1e-6,
+    reward_component_names: Optional[List[str]] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     estimator_func = AdvantageEstimatorRegistry.get(adv_estimator)
@@ -1455,6 +1519,8 @@ def compute_advantages_and_returns(
         grpo_norm_by_std=grpo_norm_by_std,
         gamma=gamma,
         lambd=lambd,
+        epsilon=epsilon,
         config=config,
+        reward_component_names=reward_component_names,
         **kwargs,
     )

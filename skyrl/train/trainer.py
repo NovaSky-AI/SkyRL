@@ -66,6 +66,7 @@ from skyrl.train.generators.base import (
 )
 from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
+    get_metrics_from_rewards,
     merge_stepwise_output,
     prepare_generator_input,
 )
@@ -878,6 +879,7 @@ class RayPPOTrainer:
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
         rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
+        reward_components: Optional[List[Dict[str, float]]] = generator_output.get("reward_components", None)
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
@@ -928,12 +930,22 @@ class RayPPOTrainer:
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
 
         # 3. Create training input batch.
+        reward_component_names: Optional[List[str]] = None
+        reward_components_tensor = None
+        if reward_components:
+            reward_component_names = sorted(reward_components[0])
+            reward_components_tensor = torch.tensor(
+                [[components[name] for name in reward_component_names] for components in reward_components],
+                dtype=torch.float,
+            )
+
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
                 "attention_mask": attention_masks_tensor,
                 "response_mask": response_masks_tensor,
                 "rewards": rewards_tensor,
+                "reward_components": reward_components_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
@@ -943,6 +955,8 @@ class RayPPOTrainer:
             },
         )
         training_input.metadata = {"uids": uids}
+        if reward_component_names is not None:
+            training_input.metadata["reward_component_names"] = reward_component_names
         if generator_output.get("is_last_step", None) is not None:
             training_input.metadata["is_last_step"] = generator_output["is_last_step"]
 
@@ -1078,6 +1092,15 @@ class RayPPOTrainer:
             )
             uids = [tid.instance_id for tid in generator_output["trajectory_ids"]]
 
+        assert not (
+            self.cfg.trainer.algorithm.advantage_estimator == ppo_utils.AdvantageEstimator.GDPO
+            and generator_output.get("reward_components") is None
+        ), (
+            "advantage_estimator='gdpo' normalizes each reward component separately, but the generator "
+            "produced no `reward_components`. Have the reward function populate `GeneratorOutput["
+            "'reward_components']`, or use a single-reward estimator such as 'grpo'."
+        )
+
         # these use the full generator output
         rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
         responses: List[List[int]] = generator_output["response_ids"]
@@ -1089,14 +1112,22 @@ class RayPPOTrainer:
             per_token_rewards = rewards
         else:
             if self.cfg.trainer.algorithm.zero_variance_filter:
-                kept_indices_set = set(
-                    zero_variance_filter(
-                        rewards,
-                        uids,
-                        loss_masks=generator_output["loss_masks"],
-                        tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
+                # A group carries signal as long as some component varies, even when the totals match.
+                components = generator_output.get("reward_components")
+                if components:
+                    filter_signals = [[c[name] for c in components] for name in sorted(components[0])]
+                else:
+                    filter_signals = [rewards]
+                kept_indices_set = set()
+                for signal in filter_signals:
+                    kept_indices_set.update(
+                        zero_variance_filter(
+                            signal,
+                            uids,
+                            loss_masks=generator_output["loss_masks"],
+                            tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
+                        )
                     )
-                )
                 num_groups = len(set(uids))
                 num_kept_groups = len({uids[i] for i in kept_indices_set})
                 self.all_metrics["reward/num_zero_variance_filtered"] = num_groups - num_kept_groups
@@ -1121,6 +1152,20 @@ class RayPPOTrainer:
         logger.info(
             f"reward/avg_pass_at_{n_samples_per_prompt}: {overall_metrics['pass_at_n']}, reward/avg_raw_reward: {overall_metrics['avg_score']}, reward/mean_positive_reward: {overall_metrics['mean_positive_reward']}"
         )
+
+        components_for_metrics = generator_output_for_metrics.get("reward_components")
+        if components_for_metrics:
+            for name in sorted(components_for_metrics[0]):
+                component_metrics = get_metrics_from_rewards(
+                    [components[name] for components in components_for_metrics], uids_for_metrics
+                )
+                self.all_metrics.update(
+                    {
+                        f"reward/{name}/avg_pass_at_{n_samples_per_prompt}": component_metrics["pass_at_n"],
+                        f"reward/{name}/avg_raw_reward": component_metrics["avg_score"],
+                        f"reward/{name}/mean_positive_reward": component_metrics["mean_positive_reward"],
+                    }
+                )
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards
         return generator_output, uids
@@ -1135,7 +1180,11 @@ class RayPPOTrainer:
             - `["loss_mask"]`: Float[torch.Tensor, "batch_size response_len"]
             - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
             - `["rewards"]`: Float[torch.Tensor, "batch_size response_len"]
+            - `["reward_components"]`: Optional[Float[torch.Tensor, "batch_size num_components"]]. For
+                GDPO this replaces `rewards` as the estimator's `token_level_rewards`, expanded to
+                "batch_size num_components response_len".
             - `.metadata["uids"]`: List[str]
+            - `.metadata["reward_component_names"]`: List[str] naming the `reward_components` columns
             - `.metadata["is_last_step"]`: List[bool] for step-wise training
 
         Adds:
@@ -1143,6 +1192,20 @@ class RayPPOTrainer:
             - `["returns"]`: Float[torch.Tensor, "batch_size response_len"]
         """
         token_level_rewards = data["rewards"]
+        reward_component_names = data.metadata.get("reward_component_names")
+        # GDPO scores the components instead of the summed reward; `token_level_rewards` stays the
+        # summed reward for the metrics below.
+        estimator_rewards = token_level_rewards
+        if self.cfg.trainer.algorithm.advantage_estimator == ppo_utils.AdvantageEstimator.GDPO:
+            reward_components = data["reward_components"]
+            response_len = data["response_mask"].shape[1]
+            estimator_rewards = torch.zeros(
+                *reward_components.shape,
+                response_len,
+                dtype=reward_components.dtype,
+                device=reward_components.device,
+            )
+            estimator_rewards[..., -1] = reward_components
 
         if self.cfg.generator.step_wise_trajectories:
             is_last_step = torch.tensor(data.metadata["is_last_step"], dtype=torch.bool)
@@ -1163,7 +1226,7 @@ class RayPPOTrainer:
             #       (batch_size, response_len):        per-step response mask
             last_step_response_mask = data["response_mask"][is_last_step]
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
-                token_level_rewards=token_level_rewards[is_last_step],
+                token_level_rewards=estimator_rewards[is_last_step],
                 response_mask=torch.ones_like(last_step_response_mask, dtype=torch.float),
                 index=index[is_last_step.cpu().numpy()],
                 adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
@@ -1172,6 +1235,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                reward_component_names=reward_component_names,
             )
             traj_ids = (
                 torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
@@ -1185,7 +1249,7 @@ class RayPPOTrainer:
             returns = last_step_returns[traj_ids] * response_mask_float
         else:
             advantages, returns = ppo_utils.compute_advantages_and_returns(
-                token_level_rewards=token_level_rewards,
+                token_level_rewards=estimator_rewards,
                 response_mask=data["response_mask"],
                 index=data.metadata["uids"],
                 adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
@@ -1194,6 +1258,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                reward_component_names=reward_component_names,
             )
         data["returns"] = returns
         data["advantages"] = advantages

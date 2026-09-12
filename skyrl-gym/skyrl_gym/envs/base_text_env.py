@@ -9,6 +9,9 @@ ConversationType = List[MessageType]
 class BaseTextEnvStepOutput(TypedDict):
     observations: ConversationType  # OpenAI API Messages Format
     reward: float
+    # Breakdown of `reward` into named components, for multi-reward algorithms such as GDPO. Every
+    # step of every trajectory in a run must supply the same component names, or none at all.
+    reward_components: Optional[Dict[str, float]]
     done: bool
     metadata: Dict[str, Any]
     postprocessed_action: Optional[str] = None

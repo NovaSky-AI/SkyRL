@@ -25,6 +25,7 @@ def test_generator_output_concatenation():
         "prompt_token_ids",
         "response_ids",
         "rewards",
+        "reward_components",
         "loss_masks",
         "stop_reasons",
         "rollout_metrics",

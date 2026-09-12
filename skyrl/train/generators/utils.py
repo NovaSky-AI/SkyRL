@@ -185,13 +185,22 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n`, and `mean_positive_reward` from generator output.
 
+    Thin wrapper over `get_metrics_from_rewards` for the batch's primary `rewards` field.
+    """
+    return get_metrics_from_rewards(generator_output["rewards"], uids)
+
+
+@torch.no_grad()
+def get_metrics_from_rewards(rewards: Union[List[float], List[List[float]]], uids: List[str]) -> MetricsOutput:
+    """
+    Get `mean_raw_reward` (or avg_score), `pass_at_n`, and `mean_positive_reward` for one reward signal.
+
     The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
-    calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
-    unique examples.
+    calculated as `len(rewards) / len(uids)`, where `len(uids)` is the number of unique examples.
 
     Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
+    Multi-reward runs call this once per objective to get per-objective metrics.
     """
-    rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
@@ -288,6 +297,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),
         "response_ids": _flatten_field(generator_outputs, "response_ids"),
         "rewards": _flatten_field(generator_outputs, "rewards"),
+        "reward_components": _concat_optional_field(generator_outputs, "reward_components"),
         "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
         "stop_reasons": _concat_optional_field(generator_outputs, "stop_reasons"),
         "rollout_logprobs": _concat_optional_field(generator_outputs, "rollout_logprobs"),
@@ -822,6 +832,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     is_token_level_rewards = isinstance(gen_out["rewards"][0], list)
     has_logprobs = gen_out.get("rollout_logprobs") is not None
     has_stop_reasons = gen_out.get("stop_reasons") is not None
+    has_reward_components = gen_out.get("reward_components") is not None
 
     # Per-field output accumulators.
     # Fields that we take from all the entries in the merge group
@@ -834,6 +845,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
 
     # Fields that we only take from the last turn in the merge group
     out_stop_reasons: Optional[List[str]] = [] if has_stop_reasons else None
+    out_reward_components: Optional[List[Dict[str, float]]] = [] if has_reward_components else None
     out_trajectory_ids: list = []
     out_is_last_step: List[bool] = []
 
@@ -855,6 +867,8 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         out_rewards.append(acc_rewards_tokens if is_token_level_rewards else gen_out["rewards"][last])
         if has_stop_reasons:
             out_stop_reasons.append(gen_out["stop_reasons"][last])
+        if has_reward_components:
+            out_reward_components.append(gen_out["reward_components"][last])
         out_trajectory_ids.append(gen_out["trajectory_ids"][last])
         out_is_last_step.append(gen_out["is_last_step"][last])
 
@@ -902,6 +916,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         "prompt_token_ids": out_prompt_ids,
         "response_ids": out_response_ids,
         "rewards": out_rewards,
+        "reward_components": out_reward_components,
         "loss_masks": out_loss_masks,
         "stop_reasons": out_stop_reasons,
         "rollout_logprobs": out_logprobs,

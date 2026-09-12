@@ -18,6 +18,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_advantages_and_returns,
     compute_approx_kl,
     compute_gae_advantage_return,
+    compute_gdpo_outcome_advantage,
     compute_grpo_outcome_advantage,
     compute_maxrl_advantage,
     compute_reinforce_plus_plus_outcome_advantage,
@@ -235,6 +236,85 @@ def test_compute_maxrl_advantage():
     assert adv.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with MAXRL"
     assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def _gdpo_token_level_rewards(reward_components: torch.Tensor, response_len: int) -> torch.Tensor:
+    """Lay out per-response reward components the way the trainer does: (bsz, num_rewards, response_len)
+    with each score on the last position."""
+    token_level_rewards = torch.zeros(*reward_components.shape, response_len)
+    token_level_rewards[..., -1] = reward_components
+    return token_level_rewards
+
+
+def test_compute_gdpo_outcome_advantage():
+    # One group of 2, two components. Component 0 is [2.0, 0.0] (mean 1.0, std sqrt(2)), so its
+    # normalized advantages are [1, -1] / sqrt(2). Component 1 is flat, so its std is 0 and the
+    # epsilon guard leaves it contributing 0. Batch normalization of [1, -1] / sqrt(2) is a no-op
+    # since it already has zero mean and unit std.
+    reward_components = torch.tensor([[2.0, 0.0], [0.0, 0.0]])
+    token_level_rewards = _gdpo_token_level_rewards(reward_components, response_len=3)
+    response_mask = torch.ones(2, 3)
+
+    adv, ret = compute_gdpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=np.array([0, 0]),
+    )
+
+    expected = torch.tensor([1.0, -1.0]).div(math.sqrt(2.0)).unsqueeze(-1) * response_mask
+
+    assert adv.shape == response_mask.shape
+    assert torch.allclose(adv, ret), "Advantages and returns should be equal with GDPO"
+    assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def test_compute_gdpo_recovers_signal_that_grpo_collapses():
+    """Group 0's components differ but sum to the same total for every response, so GRPO sees no
+    spread and assigns zero advantage. GDPO normalizes each component separately and keeps the signal."""
+    reward_components = torch.tensor(
+        [
+            [2.0, 0.0, 0.0],  # sum = 2.0, group 0
+            [0.0, 1.0, 1.0],  # sum = 2.0, group 0
+            [1.0, 0.5, 0.5],  # sum = 2.0, group 0
+            [1.0, 1.0, 1.0],  # sum = 3.0, group 1
+            [0.0, 0.0, 0.0],  # sum = 0.0, group 1
+            [1.0, 0.0, 0.0],  # sum = 1.0, group 1
+        ]
+    )
+    response_mask = torch.ones(6, 2)
+    index = np.array([0, 0, 0, 1, 1, 1])
+
+    gdpo_adv, _ = compute_gdpo_outcome_advantage(
+        token_level_rewards=_gdpo_token_level_rewards(reward_components, response_len=2),
+        response_mask=response_mask,
+        index=index,
+    )
+
+    summed_rewards = torch.zeros(6, 2)
+    summed_rewards[:, -1] = reward_components.sum(dim=-1)
+    grpo_adv, _ = compute_grpo_outcome_advantage(
+        token_level_rewards=summed_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+
+    assert torch.allclose(grpo_adv[:3], torch.zeros(3, 2)), "GRPO should collapse the flat-sum group"
+    assert not torch.allclose(gdpo_adv[:3], torch.zeros(3, 2)), "GDPO should keep the per-component signal"
+    # The two responses that differ only in how the same total is split get opposite advantages.
+    assert gdpo_adv[0, 0] == pytest.approx(-gdpo_adv[1, 0], abs=1e-5)
+
+
+def test_compute_gdpo_single_sequence_skips_batch_normalization():
+    """Batch normalization needs more than one sequence; a single-row batch must not produce nan."""
+    token_level_rewards = _gdpo_token_level_rewards(torch.tensor([[1.0, 0.5]]), response_len=3)
+
+    adv, _ = compute_gdpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=torch.ones(1, 3),
+        index=np.array([0]),
+    )
+
+    assert not adv.isnan().any(), f"Single-sequence batch produced nan advantages: {adv}"
 
 
 def test_compute_gae_advantage_return(advantage_test_data):
