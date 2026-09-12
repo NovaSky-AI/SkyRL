@@ -40,9 +40,7 @@ class LoRATransportAdmissionGate:
 
 
 class LoRATransportAdmissionMiddleware:
-    def __init__(
-        self, app: ASGIApp, gate: LoRATransportAdmissionGate | None = None
-    ) -> None:
+    def __init__(self, app: ASGIApp, gate: LoRATransportAdmissionGate | None = None) -> None:
         self.app = app
         self.gate = gate
 

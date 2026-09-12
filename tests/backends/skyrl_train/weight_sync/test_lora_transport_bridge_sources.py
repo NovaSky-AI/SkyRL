@@ -36,13 +36,8 @@ def test_extract_lora_bridge_sources_separates_fp32_storage_from_stable_metadata
     assert tensors.keys() == {sources[0].key}
     assert tensors[sources[0].key].dtype is torch.float32
     assert sources[0].shape == (2, 4)
-    assert sources[0].hf_param_names == (
-        "base_model.model.layers.0.mlp.gate_proj.lora_A.weight",
-    )
-    assert (
-        validate_lora_bridge_source_layout(sources)[(sources[0].key, 0, 0)]
-        == sources[0]
-    )
+    assert sources[0].hf_param_names == ("base_model.model.layers.0.mlp.gate_proj.lora_A.weight",)
+    assert validate_lora_bridge_source_layout(sources)[(sources[0].key, 0, 0)] == sources[0]
 
 
 def test_extract_lora_bridge_sources_rejects_duplicate_or_non_fp32_sources():
@@ -50,9 +45,7 @@ def test_extract_lora_bridge_sources_rejects_duplicate_or_non_fp32_sources():
     with pytest.raises(ValueError, match="duplicate"):
         extract_lora_bridge_sources([record, record])
     with pytest.raises(ValueError, match="float32"):
-        extract_lora_bridge_sources(
-            [_record(weight=torch.ones((2, 4), dtype=torch.bfloat16))]
-        )
+        extract_lora_bridge_sources([_record(weight=torch.ones((2, 4), dtype=torch.bfloat16))])
 
 
 def test_reconstruct_lora_bridge_tensors_assembles_tp_and_ep_shards():
@@ -115,12 +108,8 @@ def test_reconstruct_lora_bridge_tensors_replicates_and_splits_gated_sources():
     result = reconstruct_lora_bridge_tensors((*sources_a, *sources_b), tensors)
 
     assert result["q.lora_A.weight"] is result["k.lora_A.weight"]
-    assert torch.equal(
-        result["gate.lora_B.weight"], torch.tensor([[0.0, 1.0], [2.0, 3.0]])
-    )
-    assert torch.equal(
-        result["up.lora_B.weight"], torch.tensor([[4.0, 5.0], [6.0, 7.0]])
-    )
+    assert torch.equal(result["gate.lora_B.weight"], torch.tensor([[0.0, 1.0], [2.0, 3.0]]))
+    assert torch.equal(result["up.lora_B.weight"], torch.tensor([[4.0, 5.0], [6.0, 7.0]]))
 
 
 def test_reconstruct_lora_bridge_tensors_splits_qkv_with_bridge_layout_config():
@@ -207,33 +196,18 @@ def test_reconstruct_lora_bridge_tensors_splits_gdn_with_bridge_layout_config():
             ]
         ),
     )
-    assert torch.equal(
-        result["z.lora_B.weight"], torch.tensor([[6.0, 7.0], [18.0, 19.0]])
-    )
-    assert torch.equal(
-        result["b.lora_B.weight"], torch.tensor([[8.0, 9.0], [20.0, 21.0]])
-    )
-    assert torch.equal(
-        result["a.lora_B.weight"], torch.tensor([[10.0, 11.0], [22.0, 23.0]])
-    )
+    assert torch.equal(result["z.lora_B.weight"], torch.tensor([[6.0, 7.0], [18.0, 19.0]]))
+    assert torch.equal(result["b.lora_B.weight"], torch.tensor([[8.0, 9.0], [20.0, 21.0]]))
+    assert torch.equal(result["a.lora_B.weight"], torch.tensor([[10.0, 11.0], [22.0, 23.0]]))
 
 
 def test_bridge_source_layout_digest_tracks_rank_ownership_and_rejects_duplicates():
     _, first_sources = extract_lora_bridge_sources([_record()], source_rank=0)
-    _, second_sources = extract_lora_bridge_sources(
-        [_record(tensor_parallel_rank=1)], source_rank=1
-    )
+    _, second_sources = extract_lora_bridge_sources([_record(tensor_parallel_rank=1)], source_rank=1)
     layout = LoRABridgeSourceLayout("adapter", (*first_sources, *second_sources))
 
-    _, remapped_sources = extract_lora_bridge_sources(
-        [_record(tensor_parallel_rank=1)], source_rank=2
-    )
-    assert (
-        layout.layout_digest
-        != LoRABridgeSourceLayout(
-            "adapter", (*first_sources, *remapped_sources)
-        ).layout_digest
-    )
+    _, remapped_sources = extract_lora_bridge_sources([_record(tensor_parallel_rank=1)], source_rank=2)
+    assert layout.layout_digest != LoRABridgeSourceLayout("adapter", (*first_sources, *remapped_sources)).layout_digest
     with pytest.raises(ValueError, match="ownership"):
         LoRABridgeSourceLayout(
             "adapter",
@@ -245,9 +219,7 @@ def test_bridge_source_layout_digest_tracks_rank_ownership_and_rejects_duplicate
 
 def test_bridge_source_layout_round_trips_over_the_control_plane_and_verifies_digest():
     _, first_sources = extract_lora_bridge_sources([_record()], source_rank=0)
-    _, second_sources = extract_lora_bridge_sources(
-        [_record(tensor_parallel_rank=1)], source_rank=1
-    )
+    _, second_sources = extract_lora_bridge_sources([_record(tensor_parallel_rank=1)], source_rank=1)
     layout = LoRABridgeSourceLayout("adapter", (*first_sources, *second_sources))
     payload = layout.to_json_dict()
 

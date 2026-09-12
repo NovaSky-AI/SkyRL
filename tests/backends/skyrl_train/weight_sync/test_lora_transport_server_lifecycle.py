@@ -145,9 +145,7 @@ async def test_failed_collective_stage_cleans_successful_ranks_before_retry():
                 self.staged[1] = kwargs["adapter_id"]
             elif method == "discard_lora_transport_adapter":
                 self.staged = {
-                    rank: adapter_id
-                    for rank, adapter_id in self.staged.items()
-                    if adapter_id != kwargs["adapter_id"]
+                    rank: adapter_id for rank, adapter_id in self.staged.items() if adapter_id != kwargs["adapter_id"]
                 }
 
     engine = PartialStageEngine()
@@ -201,13 +199,9 @@ async def test_transport_rejects_changed_layout_before_worker_collective():
 @pytest.mark.asyncio
 async def test_partial_stage_cleanup_failure_is_explicit():
     lifecycle = LoRATransportServerLifecycle()
-    engine = _Engine(
-        fail_methods={"stage_lora_nccl_adapter", "discard_lora_transport_adapter"}
-    )
+    engine = _Engine(fail_methods={"stage_lora_nccl_adapter", "discard_lora_transport_adapter"})
 
-    with pytest.raises(
-        LoRATransportRollbackError, match="could not discard partially staged"
-    ):
+    with pytest.raises(LoRATransportRollbackError, match="could not discard partially staged"):
         await _stage(lifecycle, engine, _request(), 4)
 
 
@@ -308,9 +302,7 @@ async def test_abort_preserves_committed_and_mismatched_generations():
 @pytest.mark.asyncio
 async def test_failed_stage_retains_cleanup_id_without_becoming_activatable():
     lifecycle = LoRATransportServerLifecycle()
-    engine = _Engine(
-        fail_methods={"stage_lora_nccl_adapter", "discard_lora_transport_adapter"}
-    )
+    engine = _Engine(fail_methods={"stage_lora_nccl_adapter", "discard_lora_transport_adapter"})
     with pytest.raises(LoRATransportRollbackError):
         await _stage(lifecycle, engine, _request(), 4)
     before = list(engine.calls)

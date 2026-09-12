@@ -341,9 +341,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
                 },
             )
         app.state.lora_registry[lora_name] = lora_path
-        return PlainTextResponse(
-            f"Success: LoRA adapter '{lora_name}' added successfully on server {server_id}."
-        )
+        return PlainTextResponse(f"Success: LoRA adapter '{lora_name}' added successfully on server {server_id}.")
 
     @app.post("/v1/unload_lora_adapter")
     async def unload_lora_adapter(request: Request):
@@ -359,9 +357,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
                 },
             )
         del app.state.lora_registry[lora_name]
-        return PlainTextResponse(
-            f"Success: LoRA adapter '{lora_name}' removed successfully on server {server_id}."
-        )
+        return PlainTextResponse(f"Success: LoRA adapter '{lora_name}' removed successfully on server {server_id}.")
 
     return app
 
@@ -550,9 +546,7 @@ class TestDataPlane:
 
         assert len(result["rollout_expert_indices"]) == 1
         assert result["rollout_expert_indices"][0].dtype == np.uint8
-        assert np.array_equal(
-            result["rollout_expert_indices"][0], np.arange(12).reshape(3, 2, 2)
-        )
+        assert np.array_equal(result["rollout_expert_indices"][0], np.arange(12).reshape(3, 2, 2))
 
     @pytest.mark.asyncio
     async def test_generate_rejects_list_routed_experts(self, monkeypatch):
@@ -779,9 +773,7 @@ class TestServerInfo:
         """world_size sums across servers and is cached after the first call."""
 
         async def _total_server_calls():
-            counts = await client._call_all_servers(
-                "/test/world_size_calls", {}, method="GET"
-            )
+            counts = await client._call_all_servers("/test/world_size_calls", {}, method="GET")
             return sum(response["body"]["count"] for response in counts.values())
 
         before = await _total_server_calls()
@@ -1076,9 +1068,7 @@ class TestMultiModalGeneration:
         assert result["stop_reasons"][0] == "stop"
 
         async with httpx.AsyncClient() as http:
-            resp = await http.get(
-                f"{mock_servers['proxy_url']}/test/last_generate_features"
-            )
+            resp = await http.get(f"{mock_servers['proxy_url']}/test/last_generate_features")
             captured = resp.json()
         assert captured["features"] == mm_features
 
@@ -1141,11 +1131,7 @@ class TestLoRAControlPlane:
             assert response["status"] == 200
             assert response["body"]["status"] == "active"
             assert response["body"]["body"]["transport"] == "nccl"
-        receipts = [
-            record.message
-            for record in caplog.records
-            if "lora_nccl_fleet_stage" in record.message
-        ]
+        receipts = [record.message for record in caplog.records if "lora_nccl_fleet_stage" in record.message]
         for phase in (
             "stage",
             "pause",
@@ -1154,10 +1140,7 @@ class TestLoRAControlPlane:
             "resume",
             "transaction_envelope",
         ):
-            assert any(
-                f"phase={phase}" in message and "generation=5" in message
-                for message in receipts
-            )
+            assert any(f"phase={phase}" in message and "generation=5" in message for message in receipts)
 
     @pytest.mark.asyncio
     async def test_load_lora_adapter_fans_out(self, client, mock_servers):
@@ -1422,9 +1405,7 @@ class TestExplicitModelRequired:
             await client.teardown()
 
     @pytest.mark.asyncio
-    async def test_render_chat_completion_defaults_to_base_when_no_lora(
-        self, mock_servers
-    ):
+    async def test_render_chat_completion_defaults_to_base_when_no_lora(self, mock_servers):
         client = RemoteInferenceClient(
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
@@ -1432,9 +1413,7 @@ class TestExplicitModelRequired:
             data_parallel_size=1,
         )
         try:
-            request_payload = {
-                "json": {"messages": [{"role": "user", "content": "hi"}]}
-            }
+            request_payload = {"json": {"messages": [{"role": "user", "content": "hi"}]}}
             result = await client.render_chat_completion(request_payload)
             assert result["model"] == "base-model"
             captured = await _get_last_models(mock_servers["server_urls"])
@@ -1443,9 +1422,7 @@ class TestExplicitModelRequired:
             await client.teardown()
 
     @pytest.mark.asyncio
-    async def test_render_chat_completion_raises_when_lora_and_no_model(
-        self, mock_servers
-    ):
+    async def test_render_chat_completion_raises_when_lora_and_no_model(self, mock_servers):
         client = RemoteInferenceClient(
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
@@ -1454,9 +1431,7 @@ class TestExplicitModelRequired:
             data_parallel_size=1,
         )
         try:
-            request_payload = {
-                "json": {"messages": [{"role": "user", "content": "hi"}]}
-            }
+            request_payload = {"json": {"messages": [{"role": "user", "content": "hi"}]}}
             with pytest.raises(ValueError, match="LoRA is enabled"):
                 await client.render_chat_completion(request_payload)
         finally:
@@ -1543,23 +1518,17 @@ class TestFinishSession:
         await client.finish_session("traj-finish-1")
         await client.finish_session("traj-finish-2")
 
-        finished = httpx.get(
-            f"{mock_servers['proxy_url']}/test/finished", timeout=2.0
-        ).json()["finished"]
+        finished = httpx.get(f"{mock_servers['proxy_url']}/test/finished", timeout=2.0).json()["finished"]
         assert "traj-finish-1" in finished
         assert "traj-finish-2" in finished
 
     @pytest.mark.asyncio
     async def test_empty_session_id_is_noop(self, client, mock_servers):
         """Empty or None session ids are not sent to the router."""
-        before = httpx.get(
-            f"{mock_servers['proxy_url']}/test/finished", timeout=2.0
-        ).json()["finished"]
+        before = httpx.get(f"{mock_servers['proxy_url']}/test/finished", timeout=2.0).json()["finished"]
         await client.finish_session("")
         await client.finish_session(None)
-        after = httpx.get(
-            f"{mock_servers['proxy_url']}/test/finished", timeout=2.0
-        ).json()["finished"]
+        after = httpx.get(f"{mock_servers['proxy_url']}/test/finished", timeout=2.0).json()["finished"]
         assert before == after
 
     @pytest.mark.asyncio
@@ -1591,9 +1560,7 @@ class TestFinishSession:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fail_unload", [False, True])
-async def test_nccl_unload_reopens_admission_after_transport_cleanup(
-    client, monkeypatch, fail_unload
-):
+async def test_nccl_unload_reopens_admission_after_transport_cleanup(client, monkeypatch, fail_unload):
     calls = []
 
     async def call_servers(endpoint, payload=None):

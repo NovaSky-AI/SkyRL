@@ -577,17 +577,13 @@ class SkyRLTrainBackend(AbstractBackend):
             return
         backend = self._cfg.generator.inference_engine.weight_sync_backend
         if backend == "lora_nccl":
-            asyncio.run(
-                self._inference_engine_client.unload_lora_nccl_adapter(model_id)
-            )
+            asyncio.run(self._inference_engine_client.unload_lora_nccl_adapter(model_id))
             self._inference_adapter_ids.discard(model_id)
             return
         try:
             asyncio.run(self._inference_engine_client.unload_lora_adapter(model_id))
         except Exception as e:
-            logger.warning(
-                f"Failed to unload LoRA adapter '{model_id}' from inference engines: {e}"
-            )
+            logger.warning(f"Failed to unload LoRA adapter '{model_id}' from inference engines: {e}")
         self._inference_adapter_ids.discard(model_id)
 
     def delete_model(self, model_id: str) -> None:

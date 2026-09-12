@@ -1277,9 +1277,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
     ) -> list[Dict[str, Any]]:
         """Collect the immutable rank-local consumer routes once per adapter."""
         if len(self.server_urls) != 1:
-            raise NotImplementedError(
-                "LoRA native transport initially supports one inference TP group"
-            )
+            raise NotImplementedError("LoRA native transport initially supports one inference TP group")
         responses = await self._call_all_servers(
             "/collective_rpc",
             {
@@ -1360,9 +1358,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             else:
                 payload["adapter_id"] = adapter_ids[server_url]
             _, response = await self._call_server(server_url, endpoint, payload)
-            phase = endpoint.removeprefix("/skyrl/v1/").removesuffix(
-                "_lora_transport_adapter"
-            )
+            phase = endpoint.removeprefix("/skyrl/v1/").removesuffix("_lora_transport_adapter")
             logger.info(
                 "lora_nccl_fleet_stage generation=%s server=%s phase=%s seconds=%.6f",
                 generation,
@@ -1402,19 +1398,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
             await LoRATransportFleetTransaction(self.server_urls).replace(
                 stage=stage,
                 pause=pause,
-                activate=lambda url: call_phase(
-                    "/skyrl/v1/activate_lora_transport_adapter", url
-                ),
-                rollback=lambda url: call_phase(
-                    "/skyrl/v1/rollback_lora_transport_adapter", url
-                ),
-                commit=lambda url: call_phase(
-                    "/skyrl/v1/commit_lora_transport_adapter", url
-                ),
+                activate=lambda url: call_phase("/skyrl/v1/activate_lora_transport_adapter", url),
+                rollback=lambda url: call_phase("/skyrl/v1/rollback_lora_transport_adapter", url),
+                commit=lambda url: call_phase("/skyrl/v1/commit_lora_transport_adapter", url),
                 resume=resume,
-                prepare_activation=(
-                    wait_for_producer if producer_ready is not None else None
-                ),
+                prepare_activation=(wait_for_producer if producer_ready is not None else None),
             )
         )
         logger.info(

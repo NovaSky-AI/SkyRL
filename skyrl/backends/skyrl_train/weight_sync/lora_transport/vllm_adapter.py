@@ -26,22 +26,16 @@ def discard_staged_vllm_lora_model(model_runner: Any, adapter_id: int) -> None:
 def _get_vllm_lora_manager(model_runner: Any) -> Any:
     manager = getattr(model_runner, "lora_manager", None)
     if manager is None:
-        raise RuntimeError(
-            "lora_transport requires a vLLM model runner with LoRA enabled"
-        )
+        raise RuntimeError("lora_transport requires a vLLM model runner with LoRA enabled")
     return manager
 
 
-def get_vllm_local_lora_plan(
-    model_runner: Any, adapter_config: Mapping[str, Any]
-) -> Any:
+def get_vllm_local_lora_plan(model_runner: Any, adapter_config: Mapping[str, Any]) -> Any:
     """Bind adapter targets to the actual vLLM rank's local buffers."""
     from vllm.lora.peft_helper import PEFTHelper
 
     manager = _get_vllm_lora_manager(model_runner)._adapter_manager
-    if not hasattr(manager, "get_local_adapter_plan") or not hasattr(
-        manager, "add_local_adapter"
-    ):
+    if not hasattr(manager, "get_local_adapter_plan") or not hasattr(manager, "add_local_adapter"):
         raise RuntimeError(
             "lora_transport requires the compatible vLLM fork with local-adapter plan and registration APIs"
         )
@@ -69,9 +63,7 @@ def stage_vllm_local_lora_factors(
     """Register independent local factors without activating a GPU slot."""
     manager = _get_vllm_lora_manager(model_runner)
     _validate_staging_capacity(manager, adapter_id)
-    if not manager._adapter_manager.add_local_adapter(
-        adapter_id, receiver_plan, dict(factors)
-    ):
+    if not manager._adapter_manager.add_local_adapter(adapter_id, receiver_plan, dict(factors)):
         raise RuntimeError(f"vLLM declined local LoRA adapter id {adapter_id}")
 
 
@@ -80,10 +72,6 @@ def _validate_staging_capacity(manager: Any, adapter_id: int) -> None:
     if adapter_id in registered:
         raise ValueError(f"LoRA adapter id {adapter_id} is already registered")
     if len(registered) >= manager._adapter_manager.capacity:
-        raise ValueError(
-            "lora_transport requires a free registered adapter slot to retain the previous generation"
-        )
+        raise ValueError("lora_transport requires a free registered adapter slot to retain the previous generation")
     if len(registered) >= manager._adapter_manager.lora_slots:
-        raise ValueError(
-            "lora_transport requires a free GPU adapter slot to retain the previous generation"
-        )
+        raise ValueError("lora_transport requires a free GPU adapter slot to retain the previous generation")

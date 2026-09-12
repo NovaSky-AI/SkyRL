@@ -49,16 +49,12 @@ class LoRATransportServerLifecycle:
         if adapter_id <= 0:
             raise ValueError(f"LoRA adapter ids must be positive, got {adapter_id}")
         if self._get_terminal_outcome(request, adapter_id) is not None:
-            raise ValueError(
-                f"LoRA generation {request.generation} has already completed"
-            )
+            raise ValueError(f"LoRA generation {request.generation} has already completed")
         self._validate_fixed_publication_contract(request)
         if request.adapter_name in self._unloaded:
             raise ValueError(f"LoRA adapter {request.adapter_name!r} has been unloaded")
         if request.adapter_name in self._staged:
-            raise ValueError(
-                f"LoRA adapter {request.adapter_name!r} already has a staged generation"
-            )
+            raise ValueError(f"LoRA adapter {request.adapter_name!r} already has a staged generation")
         staged = LoRATransportStagedGeneration(
             request,
             adapter_id,
@@ -86,14 +82,10 @@ class LoRATransportServerLifecycle:
             raise
         self._staged[request.adapter_name] = staged._replace(prepared=True)
 
-    async def activate(
-        self, engine: Any, request: LoRAUpdateRequest, adapter_id: int
-    ) -> None:
+    async def activate(self, engine: Any, request: LoRAUpdateRequest, adapter_id: int) -> None:
         """Activate a staged local generation while fleet admission is closed."""
         if not self._get_staged(request, adapter_id).prepared:
-            raise ValueError(
-                f"LoRA generation {request.generation} did not finish staging"
-            )
+            raise ValueError(f"LoRA generation {request.generation} did not finish staging")
         if self._active_ids.get(request.adapter_name) == adapter_id:
             return
         await engine.collective_rpc(
@@ -102,26 +94,18 @@ class LoRATransportServerLifecycle:
         )
         self._active_ids[request.adapter_name] = adapter_id
 
-    async def commit(
-        self, engine: Any, request: LoRAUpdateRequest, adapter_id: int
-    ) -> bool:
+    async def commit(self, engine: Any, request: LoRAUpdateRequest, adapter_id: int) -> bool:
         """Retire the prior buffer once and report whether the route needs finalizing."""
         outcome = self._get_terminal_outcome(request, adapter_id)
         if outcome == "committed":
             return False
         if outcome is not None:
-            raise ValueError(
-                f"LoRA generation {request.generation} was already rolled back"
-            )
+            raise ValueError(f"LoRA generation {request.generation} was already rolled back")
         previous_id = self._get_staged(request, adapter_id).previous_id
         if self._active_ids.get(request.adapter_name) != adapter_id:
-            raise ValueError(
-                f"LoRA generation {request.generation} has not been activated"
-            )
+            raise ValueError(f"LoRA generation {request.generation} has not been activated")
         if previous_id is not None:
-            await engine.collective_rpc(
-                LORA_TRANSPORT_REMOVE_METHOD, kwargs={"adapter_id": previous_id}
-            )
+            await engine.collective_rpc(LORA_TRANSPORT_REMOVE_METHOD, kwargs={"adapter_id": previous_id})
         del self._staged[request.adapter_name]
         self._terminal[request.adapter_name] = (request, adapter_id, "committed")
         return True
@@ -134,9 +118,7 @@ class LoRATransportServerLifecycle:
             if outcome == "rolled_back":
                 return False
             if outcome is not None:
-                raise ValueError(
-                    f"LoRA generation {request.generation} was already committed"
-                )
+                raise ValueError(f"LoRA generation {request.generation} was already committed")
         staged = self._staged.get(request.adapter_name)
         if staged is not None:
             return await self.rollback(engine, request, staged[1])
@@ -144,28 +126,20 @@ class LoRATransportServerLifecycle:
         self._terminal[request.adapter_name] = (request, 0, "rolled_back")
         return False
 
-    async def rollback(
-        self, engine: Any, request: LoRAUpdateRequest, adapter_id: int
-    ) -> bool:
+    async def rollback(self, engine: Any, request: LoRAUpdateRequest, adapter_id: int) -> bool:
         """Restore the prior route once without replaying destructive cleanup."""
         outcome = self._get_terminal_outcome(request, adapter_id)
         if outcome == "rolled_back":
             return False
         if outcome is not None:
-            raise ValueError(
-                f"LoRA generation {request.generation} was already committed"
-            )
+            raise ValueError(f"LoRA generation {request.generation} was already committed")
         previous_id = self._get_staged(request, adapter_id).previous_id
         if previous_id is not None:
-            await engine.collective_rpc(
-                LORA_TRANSPORT_RESTORE_METHOD, kwargs={"adapter_id": previous_id}
-            )
+            await engine.collective_rpc(LORA_TRANSPORT_RESTORE_METHOD, kwargs={"adapter_id": previous_id})
             self._active_ids[request.adapter_name] = previous_id
         elif self._active_ids.get(request.adapter_name) == adapter_id:
             self._active_ids.pop(request.adapter_name, None)
-        await engine.collective_rpc(
-            LORA_TRANSPORT_DISCARD_METHOD, kwargs={"adapter_id": adapter_id}
-        )
+        await engine.collective_rpc(LORA_TRANSPORT_DISCARD_METHOD, kwargs={"adapter_id": adapter_id})
         self._staged.pop(request.adapter_name, None)
         self._terminal[request.adapter_name] = (request, adapter_id, "rolled_back")
         return True
@@ -173,34 +147,24 @@ class LoRATransportServerLifecycle:
     async def unload(self, engine: Any, adapter_name: str) -> None:
         """Release the active buffer while admission is closed, retaining a name tombstone."""
         if adapter_name in self._staged:
-            raise ValueError(
-                f"LoRA adapter {adapter_name!r} has an unfinished replacement"
-            )
+            raise ValueError(f"LoRA adapter {adapter_name!r} has an unfinished replacement")
         self._unloaded.add(adapter_name)
         adapter_id = self._active_ids.get(adapter_name)
         if adapter_id is not None:
-            await engine.collective_rpc(
-                LORA_TRANSPORT_REMOVE_METHOD, kwargs={"adapter_id": adapter_id}
-            )
+            await engine.collective_rpc(LORA_TRANSPORT_REMOVE_METHOD, kwargs={"adapter_id": adapter_id})
         self._active_ids.pop(adapter_name, None)
         self._terminal.pop(adapter_name, None)
 
-    def _get_terminal_outcome(
-        self, request: LoRAUpdateRequest, adapter_id: int
-    ) -> str | None:
+    def _get_terminal_outcome(self, request: LoRAUpdateRequest, adapter_id: int) -> str | None:
         terminal = self._terminal.get(request.adapter_name)
         if terminal is None:
             return None
         previous_request, previous_id, outcome = terminal
         if request.generation < previous_request.generation:
-            raise ValueError(
-                f"LoRA generation {request.generation} is older than the last completed transaction"
-            )
+            raise ValueError(f"LoRA generation {request.generation} is older than the last completed transaction")
         if request.generation == previous_request.generation:
             if request != previous_request or adapter_id != previous_id:
-                raise ValueError(
-                    f"LoRA generation {request.generation} does not match its completed transaction"
-                )
+                raise ValueError(f"LoRA generation {request.generation} does not match its completed transaction")
             return outcome
         return None
 
@@ -215,12 +179,8 @@ class LoRATransportServerLifecycle:
         if request.source_dtype != previous_request.source_dtype:
             raise ValueError("LoRA update changed the fixed source dtype")
 
-    def _get_staged(
-        self, request: LoRAUpdateRequest, adapter_id: int
-    ) -> LoRATransportStagedGeneration:
+    def _get_staged(self, request: LoRAUpdateRequest, adapter_id: int) -> LoRATransportStagedGeneration:
         staged = self._staged.get(request.adapter_name)
         if staged is None or staged[:2] != (request, adapter_id):
-            raise ValueError(
-                f"LoRA adapter {request.adapter_name!r} generation {request.generation} is not staged"
-            )
+            raise ValueError(f"LoRA adapter {request.adapter_name!r} generation {request.generation} is not staged")
         return staged

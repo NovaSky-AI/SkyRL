@@ -47,12 +47,8 @@ def test_publication_planner_freezes_layout_and_advances_each_attempt():
     assert first.request.generation == 0
     assert second.request.generation == 1
     assert first.request.layout_digest == second.request.layout_digest
-    assert first.local_tensors["model.proj.adapter.linear_out.weight"].tolist() == [
-        [1.0, 2.0]
-    ]
-    assert second.local_tensors["model.proj.adapter.linear_out.weight"].tolist() == [
-        [3.0, 4.0]
-    ]
+    assert first.local_tensors["model.proj.adapter.linear_out.weight"].tolist() == [[1.0, 2.0]]
+    assert second.local_tensors["model.proj.adapter.linear_out.weight"].tolist() == [[3.0, 4.0]]
 
 
 def test_publication_planner_rejects_changed_or_reinitialized_layout():

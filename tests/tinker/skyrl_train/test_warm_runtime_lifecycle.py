@@ -37,13 +37,10 @@ def _backend(
 ) -> SkyRLTrainBackend:
     """Build a backend in the post-create_model state without running __init__."""
     backend = object.__new__(SkyRLTrainBackend)
-    backend.config = MegatronBackendOverrides(
-        keep_runtime_warm_on_last_unload=keep_runtime_warm
-    )
+    backend.config = MegatronBackendOverrides(keep_runtime_warm_on_last_unload=keep_runtime_warm)
     backend._model_ids_to_role = {model_id: "policy" for model_id in model_ids}
     backend._model_metadata = {
-        model_id: types.ModelMetadata(adapter_index=0, lora_config=LORA_CONFIG)
-        for model_id in model_ids
+        model_id: types.ModelMetadata(adapter_index=0, lora_config=LORA_CONFIG) for model_id in model_ids
     }
     backend._cfg = Mock()
     backend._cfg.trainer.strategy = strategy
@@ -56,9 +53,7 @@ def _backend(
     backend._inference_adapter_ids = set()
     backend._renderer = None
     backend._render_server = None
-    backend._base_lora_signature = (
-        (LORA_CONFIG.rank, int(LORA_CONFIG.alpha)) if lora else None
-    )
+    backend._base_lora_signature = (LORA_CONFIG.rank, int(LORA_CONFIG.alpha)) if lora else None
     backend._server_groups = []
     backend._inference_router = None
     backend._inference_state_publisher = Mock()
@@ -132,9 +127,7 @@ def test_delete_unloads_synced_adapter_from_inference_engines():
 
     backend.delete_model("model-a")
 
-    backend._inference_engine_client.unload_lora_adapter.assert_awaited_once_with(
-        "model-a"
-    )
+    backend._inference_engine_client.unload_lora_adapter.assert_awaited_once_with("model-a")
     assert backend._inference_adapter_ids == set()
 
 
@@ -159,9 +152,7 @@ def test_delete_skips_native_unload_before_first_publication():
 def test_delete_proceeds_when_inference_unload_fails():
     backend = _backend(keep_runtime_warm=True)
     backend._inference_adapter_ids.add("model-a")
-    backend._inference_engine_client.unload_lora_adapter.side_effect = RuntimeError(
-        "vLLM unreachable"
-    )
+    backend._inference_engine_client.unload_lora_adapter.side_effect = RuntimeError("vLLM unreachable")
 
     backend.delete_model("model-a")
 
@@ -206,9 +197,7 @@ def test_native_lora_delete_requires_receiver_cleanup_before_releasing_trainer(
         method_name,
         AsyncMock(side_effect=unload),
     )
-    backend._dispatch.delete_adapter.side_effect = lambda *args: events.append(
-        "trainer_cleanup"
-    )
+    backend._dispatch.delete_adapter.side_effect = lambda *args: events.append("trainer_cleanup")
     if cleanup_fails:
         with pytest.raises(RuntimeError, match="receiver cleanup failed"):
             backend.delete_model("model-a")

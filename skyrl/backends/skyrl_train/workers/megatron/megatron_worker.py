@@ -118,6 +118,7 @@ from skyrl.utils.tok import get_tokenizer
 
 patch_mla_thd_v_pad()
 
+
 class _LoRANativeNoopSender:
     """Carries sender capability flags for native LoRA publication."""
 
@@ -1874,39 +1875,26 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 adapter_config = build_adapter_config_dict(
                     self.lora_cls,
                     target_modules=target_modules,
-                    base_model_name_or_path=str(
-                        getattr(self, "_logical_model_path", "")
-                    ),
+                    base_model_name_or_path=str(getattr(self, "_logical_model_path", "")),
                 )
-                route_dicts = (
-                    await inference_engine_client.inspect_lora_transport_routes(
-                        publication.layout.to_json_dict(),
-                        adapter_config,
-                    )
+                route_dicts = await inference_engine_client.inspect_lora_transport_routes(
+                    publication.layout.to_json_dict(),
+                    adapter_config,
                 )
                 control[0] = (adapter_config, route_dicts)
             torch.distributed.broadcast_object_list(control, src=0)
             adapter_config, route_dicts = control[0]
             routes = {
-                int(route["inference_rank"]): LoRANcclConsumerRoute.from_json_dict(
-                    route
-                )
-                for route in route_dicts
+                int(route["inference_rank"]): LoRANcclConsumerRoute.from_json_dict(route) for route in route_dicts
             }
             plan = build_lora_nccl_plan(
                 routes,
                 packed_buffer_size_bytes=256 * 1024 * 1024,
             )
-            if {group.source_rank for group in plan.source_groups} != set(
-                range(world_size)
-            ):
-                raise ValueError(
-                    "lora_nccl requires exactly one source group per trainer rank"
-                )
+            if {group.source_rank for group in plan.source_groups} != set(range(world_size)):
+                raise ValueError("lora_nccl requires exactly one source group per trainer rank")
             if plan.inference_ranks != tuple(range(len(plan.inference_ranks))):
-                raise ValueError(
-                    "lora_nccl requires one contiguous inference TP rank group"
-                )
+                raise ValueError("lora_nccl requires one contiguous inference TP rank group")
             state = _LoRANcclPublicationState(
                 planner=planner,
                 plan=plan,
@@ -1951,9 +1939,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             )
             addresses = set(trainer_addresses)
             if len(addresses) != 1:
-                raise ValueError(
-                    "lora_nccl initially requires all trainer ranks on one node"
-                )
+                raise ValueError("lora_nccl initially requires all trainer ranks on one node")
             endpoint = [(next(iter(addresses)), get_free_port()) if rank == 0 else None]
             torch.distributed.broadcast_object_list(endpoint, src=0)
             master_address, master_port = endpoint[0]
@@ -1972,9 +1958,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         state.adapter_config,
                     )
                 )
-            source_group = next(
-                group for group in state.plan.source_groups if group.source_rank == rank
-            )
+            source_group = next(group for group in state.plan.source_groups if group.source_rank == rank)
             init_error = None
             try:
                 state.session = await asyncio.to_thread(
@@ -2006,28 +1990,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 reset_error = None
                 if rank == 0:
                     try:
-                        await inference_engine_client.reset_lora_nccl_transport(
-                            lora_name
-                        )
+                        await inference_engine_client.reset_lora_nccl_transport(lora_name)
                     except Exception as error:
                         reset_error = str(error)
                 reset_errors = [reset_error]
                 torch.distributed.broadcast_object_list(reset_errors, src=0)
                 state.rendezvous = None
                 reason = next(
-                    (
-                        error
-                        for error in (*init_errors, errors[0], reset_errors[0])
-                        if error is not None
-                    ),
+                    (error for error in (*init_errors, errors[0], reset_errors[0]) if error is not None),
                     "unknown initialization failure",
                 )
-                raise RuntimeError(
-                    f"lora_nccl transport initialization failed: {reason}"
-                )
+                raise RuntimeError(f"lora_nccl transport initialization failed: {reason}")
             logger.info(
-                "lora_nccl_publication_stage rank={} generation={} "
-                "phase=transport_initialization seconds={:.6f}",
+                "lora_nccl_publication_stage rank={} generation={} " "phase=transport_initialization seconds={:.6f}",
                 rank,
                 publication.request.generation,
                 time.perf_counter() - rendezvous_started,
@@ -2097,11 +2072,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             torch.distributed.broadcast_object_list(reset_errors, src=0)
             state.rendezvous = None
             reason = next(
-                (
-                    error
-                    for error in (*send_errors, errors[0], reset_errors[0])
-                    if error is not None
-                ),
+                (error for error in (*send_errors, errors[0], reset_errors[0]) if error is not None),
                 "unknown publication failure",
             )
             raise RuntimeError(f"lora_nccl publication failed: {reason}")
@@ -2109,15 +2080,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         final_sync_started = time.perf_counter()
         torch.distributed.barrier()
         logger.info(
-            "lora_nccl_publication_stage rank={} generation={} "
-            "phase=final_synchronization seconds={:.6f}",
+            "lora_nccl_publication_stage rank={} generation={} " "phase=final_synchronization seconds={:.6f}",
             rank,
             publication.request.generation,
             time.perf_counter() - final_sync_started,
         )
         logger.info(
-            "lora_nccl_publication_stage rank={} generation={} "
-            "phase=publication_envelope seconds={:.6f}",
+            "lora_nccl_publication_stage rank={} generation={} " "phase=publication_envelope seconds={:.6f}",
             rank,
             publication.request.generation,
             time.perf_counter() - publication_started,
@@ -2156,9 +2125,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if inference_engine_cfg.weight_sync_backend == "lora_nccl":
                 await self._publish_lora_nccl_adapter(inference_engine_client, lora_name)
             else:
-                await self._save_lora_adapters_and_sync(
-                    lora_sync_path, inference_engine_client, lora_name=lora_name
-                )
+                await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         else:
             # Send with the sender created at init time. Disable expandable_segments
             # around it: under colocate_all the CUDA-IPC path calls

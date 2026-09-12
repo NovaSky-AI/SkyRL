@@ -49,17 +49,12 @@ def test_plan_routes_only_requested_slices_and_has_stable_metadata():
 
     assert plan.plan_digest == repeated.plan_digest
     assert plan.inference_ranks == (0, 1)
-    assert [
-        (bucket.source_rank, bucket.inference_rank, bucket.source_bytes)
-        for bucket in plan.buckets
-    ] == [
+    assert [(bucket.source_rank, bucket.inference_rank, bucket.source_bytes) for bucket in plan.buckets] == [
         (0, 0, 32),
         (1, 0, 16),
         (1, 1, 32),
     ]
-    assert [
-        (group.source_rank, group.inference_ranks) for group in plan.source_groups
-    ] == [
+    assert [(group.source_rank, group.inference_ranks) for group in plan.source_groups] == [
         (0, (0,)),
         (1, (0, 1)),
     ]
@@ -173,10 +168,10 @@ def test_plan_receipt_counts_replication_and_edges():
     assert receipt.unique_source_bytes == 32
     assert receipt.transmitted_bytes == 64
     assert receipt.replication_bytes == 32
-    assert [
-        (edge.source_rank, edge.inference_rank, edge.transmitted_bytes)
-        for edge in receipt.edges
-    ] == [(0, 0, 32), (0, 1, 32)]
+    assert [(edge.source_rank, edge.inference_rank, edge.transmitted_bytes) for edge in receipt.edges] == [
+        (0, 0, 32),
+        (0, 1, 32),
+    ]
 
 
 def test_plan_receipt_rejects_ambiguous_partial_overlap():

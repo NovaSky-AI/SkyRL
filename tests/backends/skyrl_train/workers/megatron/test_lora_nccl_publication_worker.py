@@ -52,9 +52,7 @@ class _Session:
 
     def send(self, request, tensors):
         self.generations.append(request.generation)
-        assert set(tensors) == {
-            "decoder.layers.0.mlp.linear_fc2.adapter.linear_out.weight"
-        }
+        assert set(tensors) == {"decoder.layers.0.mlp.linear_fc2.adapter.linear_out.weight"}
         if request.generation == self.fail_generation:
             raise RuntimeError("injected send failure")
         return LoRANcclTransferReceipt(
@@ -99,9 +97,7 @@ def publication_environment(monkeypatch):
 
     worker = object.__new__(MegatronPolicyWorkerBase)
     worker.actor_module = object()
-    worker.bridge = SimpleNamespace(
-        export_local_adapter_weights=lambda actor_module: [_record()]
-    )
+    worker.bridge = SimpleNamespace(export_local_adapter_weights=lambda actor_module: [_record()])
     worker.lora_cls = object()
     worker._logical_model_path = "model"
 
@@ -140,9 +136,7 @@ def publication_environment(monkeypatch):
     monkeypatch.setattr(
         peft_bridge,
         "build_adapter_config_dict",
-        lambda lora_cls, target_modules, base_model_name_or_path: {
-            "target_modules": target_modules
-        },
+        lambda lora_cls, target_modules, base_model_name_or_path: {"target_modules": target_modules},
     )
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)

@@ -42,9 +42,7 @@ LocalLoRAPlan = local_adapter.LocalLoRAPlan
 
 
 def _values(shape, offset=0):
-    return (
-        torch.arange(prod(shape), dtype=torch.float32).reshape(shape) + offset
-    ) / 127 + 1
+    return (torch.arange(prod(shape), dtype=torch.float32).reshape(shape) + offset) / 127 + 1
 
 
 def _append_source(
@@ -60,17 +58,9 @@ def _append_source(
     ep_size=1,
     transform="identity",
 ):
-    ep_shards = (
-        tensor.chunk(ep_size, dim=ep_axis)
-        if ep_axis is not None
-        else [tensor] * ep_size
-    )
+    ep_shards = tensor.chunk(ep_size, dim=ep_axis) if ep_axis is not None else [tensor] * ep_size
     for ep_rank, ep_shard in enumerate(ep_shards):
-        tp_shards = (
-            ep_shard.chunk(tp_size, dim=tp_axis)
-            if tp_axis is not None
-            else [ep_shard] * tp_size
-        )
+        tp_shards = ep_shard.chunk(tp_size, dim=tp_axis) if tp_axis is not None else [ep_shard] * tp_size
         for tp_rank, shard in enumerate(tp_shards):
             source_rank = ep_rank * tp_size + tp_rank
             source = LoRABridgeSource(
@@ -147,18 +137,12 @@ def _execute(source_layout, tensors, module):
     before = {key: tensor.clone() for key, tensor in by_owner.items()}
     pulled = {}
     for pull in plan.pulls:
-        exact = by_owner[pull.source_rank, pull.source_slice.key][
-            pull.source_slice.indices
-        ]
+        exact = by_owner[pull.source_rank, pull.source_slice.key][pull.source_slice.indices]
         pulled[pull] = exact.contiguous().clone()
-        assert torch.equal(
-            pulled[pull].view(torch.uint8), exact.contiguous().view(torch.uint8)
-        )
+        assert torch.equal(pulled[pull].view(torch.uint8), exact.contiguous().view(torch.uint8))
     assert plan.source_bytes == sum(tensor.numel() * 4 for tensor in pulled.values())
     factors = assemble_lora_consumer_factors(plan, pulled, "cpu")[module.module_name]
-    source_storages = {
-        tensor.untyped_storage().data_ptr() for tensor in by_owner.values()
-    }
+    source_storages = {tensor.untyped_storage().data_ptr() for tensor in by_owner.values()}
     for component in factors:
         for tensor in component:
             assert tensor.dtype == torch.bfloat16
@@ -172,9 +156,7 @@ def _execute(source_layout, tensors, module):
 @pytest.mark.parametrize("layout", ["row", "column", "merged", "replicated"])
 def test_dense_source_rank_shards_match_real_vllm_slicing(tp_rank, layout):
     sources, tensors = [], {}
-    names = (
-        ["model.proj"] if layout != "merged" else ["model.gate_proj", "model.up_proj"]
-    )
+    names = ["model.proj"] if layout != "merged" else ["model.gate_proj", "model.up_proj"]
     for index, name in enumerate(names):
         for component, shape, axis in (("A", (4, 16), 0), ("B", (24, 4), 1)):
             _append_source(
@@ -212,12 +194,8 @@ def test_dense_source_rank_shards_match_real_vllm_slicing(tp_rank, layout):
                 [layer.slice_lora_a(a[0])],
                 [layer.slice_lora_b(b[0])],
             )
-    shapes = tuple(
-        (tuple(x.shape), tuple(y.shape)) for x, y in zip(expected_a, expected_b)
-    )
-    module = _module(
-        layout, [(name,) for name in names], shapes, tp_rank, [24] * len(names)
-    )
+    shapes = tuple((tuple(x.shape), tuple(y.shape)) for x, y in zip(expected_a, expected_b))
+    module = _module(layout, [(name,) for name in names], shapes, tp_rank, [24] * len(names))
     plan, (actual_a, actual_b), _ = _execute(_layout(sources), tensors, module)
     for actual, expected in zip(actual_a + actual_b, expected_a + expected_b):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -228,9 +206,7 @@ def test_dense_source_rank_shards_match_real_vllm_slicing(tp_rank, layout):
 
 
 @pytest.mark.parametrize("tp_rank", range(8))
-def test_native_shared_ep_factors_pull_once_and_match_global_peft_packing(
-    monkeypatch, tp_rank
-):
+def test_native_shared_ep_factors_pull_once_and_match_global_peft_packing(monkeypatch, tp_rank):
     monkeypatch.setattr("vllm.lora.lora_model.PIN_MEMORY", False)
     sources, tensors = [], {}
     root = "model.layers.0.mlp.experts"
@@ -243,14 +219,8 @@ def test_native_shared_ep_factors_pull_once_and_match_global_peft_packing(
             ("down_proj", "A", (4, 16)),
             ("down_proj", "B", (16, 4)),
         ):
-            projections = (
-                ("gate_proj", "up_proj") if projection == "gate_up" else (projection,)
-            )
-            names = [
-                f"{root}.{expert}.{name}.lora_{component}.weight"
-                for expert in experts
-                for name in projections
-            ]
+            projections = ("gate_proj", "up_proj") if projection == "gate_up" else (projection,)
+            names = [f"{root}.{expert}.{name}.lora_{component}.weight" for expert in experts for name in projections]
             _append_source(
                 sources,
                 tensors,
@@ -264,9 +234,7 @@ def test_native_shared_ep_factors_pull_once_and_match_global_peft_packing(
     model = LoRAModel.from_lora_tensors(
         1,
         {"base_model.model." + name: tensor for name, tensor in full.items()},
-        PEFTHelper(
-            r=4, lora_alpha=4, target_modules=["gate_proj", "up_proj", "down_proj"]
-        ),
+        PEFTHelper(r=4, lora_alpha=4, target_modules=["gate_proj", "up_proj", "down_proj"]),
         device="cpu",
         dtype=torch.bfloat16,
     )
@@ -344,19 +312,13 @@ def test_fused_expert_ep_and_rank_shards_match_flattening_and_vllm_half_slicing(
             0,
             2,
         )
-    canonical = convert_moe_experts_lora_to_vllm(
-        reconstruct_lora_bridge_tensors(sources, tensors)
-    )
+    canonical = convert_moe_experts_lora_to_vllm(reconstruct_lora_bridge_tensors(sources, tensors))
     # Reverse only the legacy PEFT flattening, as the real vLLM manager does.
     a = [
-        canonical[f"{name}.lora_A.weight"].reshape(4, 4, 16).to(torch.bfloat16)
-        for name in (root + ".base_layer", root)
+        canonical[f"{name}.lora_A.weight"].reshape(4, 4, 16).to(torch.bfloat16) for name in (root + ".base_layer", root)
     ]
     b = [
-        canonical[f"{name}.lora_B.weight"]
-        .reshape(size, 4, 4)
-        .permute(2, 0, 1)
-        .to(torch.bfloat16)
+        canonical[f"{name}.lora_B.weight"].reshape(size, 4, 4).permute(2, 0, 1).to(torch.bfloat16)
         for name, size in ((root + ".base_layer", 32), (root, 16))
     ]
     layer = object.__new__(FusedMoE3DWithLoRA)
@@ -380,9 +342,7 @@ def test_fused_expert_ep_and_rank_shards_match_flattening_and_vllm_half_slicing(
     for actual, expected in zip(actual_a + actual_b, expected_a + expected_b):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert plan.source_bytes == 4 * 4 * (4 * 16 + 4 * 4 + 4 * 2 + 16 * 4)
-    w13_pulls = [
-        pull for pull in plan.pulls if "gate_up_proj.lora_B" in pull.source_slice.key
-    ]
+    w13_pulls = [pull for pull in plan.pulls if "gate_up_proj.lora_B" in pull.source_slice.key]
     assert len(w13_pulls) == 8
     assert {pull.source_slice.starts[1] for pull in w13_pulls} == {
         2 * tp_rank,
@@ -414,15 +374,11 @@ def test_gated_bridge_split_and_replicated_mla_sources_select_only_consumed_outp
         2,
         transform="split_gated_mlp",
     )
-    module = _module(
-        "merged", [("model.gate",), ("model.up",)], [((4, 16), (2, 4))] * 2, 6, (16, 16)
-    )
+    module = _module("merged", [("model.gate",), ("model.up",)], [((4, 16), (2, 4))] * 2, 6, (16, 16))
     _, (a, b), _ = _execute(_layout(sources), tensors, module)
     full = reconstruct_lora_bridge_tensors(sources, tensors)
     for index, name in enumerate(("model.gate", "model.up")):
-        torch.testing.assert_close(
-            a[index], full[name + ".lora_A.weight"].to(torch.bfloat16), rtol=0, atol=0
-        )
+        torch.testing.assert_close(a[index], full[name + ".lora_A.weight"].to(torch.bfloat16), rtol=0, atol=0)
         torch.testing.assert_close(
             b[index],
             full[name + ".lora_B.weight"][12:14].to(torch.bfloat16),
@@ -467,12 +423,7 @@ def test_qkv_bridge_split_matches_reconstructed_merged_factors(tp_rank, output_g
         ("hidden_size", hidden),
         ("attention_output_gate", output_gate),
     )
-    sources = [
-        replace(source, transform_config=qkv_config)
-        if source.key == "qkv.B"
-        else source
-        for source in sources
-    ]
+    sources = [replace(source, transform_config=qkv_config) if source.key == "qkv.B" else source for source in sources]
     full = reconstruct_lora_bridge_tensors(sources, tensors)
     output_sizes = (
         heads * head_size * (2 if output_gate else 1),
@@ -497,9 +448,7 @@ def test_qkv_bridge_split_matches_reconstructed_merged_factors(tp_rank, output_g
     assert plan.source_bytes < sum(tensor.numel() * 4 for tensor in tensors.values())
 
 
-@pytest.mark.parametrize(
-    "invalid", ["shape", "missing", "overlap", "transform", "dtype", "tp"]
-)
+@pytest.mark.parametrize("invalid", ["shape", "missing", "overlap", "transform", "dtype", "tp"])
 def test_incompatible_source_map_fails_before_assembly(invalid):
     sources, tensors = [], {}
     for component, shape in (("A", (4, 16)), ("B", (24, 4))):
@@ -525,15 +474,11 @@ def test_incompatible_source_map_fails_before_assembly(invalid):
     else:
         module = replace(module, output_shard_ids=(9,))
     with pytest.raises((ValueError, NotImplementedError)):
-        build_lora_consumer_plan(
-            _layout(sources), LocalLoRAPlan(4, 4, ("proj",), (module,))
-        )
+        build_lora_consumer_plan(_layout(sources), LocalLoRAPlan(4, 4, ("proj",), (module,)))
 
 
 @pytest.mark.parametrize("invalid", ["missing", "dtype", "shape"])
-def test_bad_pulled_payload_is_rejected_before_destination_allocation(
-    monkeypatch, invalid
-):
+def test_bad_pulled_payload_is_rejected_before_destination_allocation(monkeypatch, invalid):
     sources, tensors = [], {}
     for component, shape in (("A", (4, 16)), ("B", (24, 4))):
         _append_source(
@@ -603,9 +548,7 @@ def test_ambiguous_producer_key_cannot_alias_distinct_tp_shards():
     sources = [replace(source, source_rank=0) for source in sources]
     module = _module("column", [("model.proj",)], [((4, 16), (3, 4))], 1, (24,))
     with pytest.raises(ValueError, match="producer key"):
-        build_lora_consumer_plan(
-            _layout(sources), LocalLoRAPlan(4, 4, ("proj",), (module,))
-        )
+        build_lora_consumer_plan(_layout(sources), LocalLoRAPlan(4, 4, ("proj",), (module,)))
 
 
 @pytest.mark.parametrize("prefix", ["", "base_model.model."])
@@ -672,9 +615,7 @@ def test_coverage_sweep_accepts_shuffled_rectangles_and_touching_boundaries(orde
     )
 
     rectangles = [((0, 0), (2, 2)), ((2, 0), (4, 2)), ((0, 2), (4, 4))]
-    copies = [
-        LoRAConsumerCopy(index, "module", 0, 0, *rectangles[index]) for index in order
-    ]
+    copies = [LoRAConsumerCopy(index, "module", 0, 0, *rectangles[index]) for index in order]
     _validate_factor_coverage((4, 4), copies)
 
 
@@ -687,17 +628,12 @@ def test_coverage_sweep_accepts_shuffled_rectangles_and_touching_boundaries(orde
         ([((0, 0), (0, 4)), ((0, 0), (4, 4))], "exceeds"),
     ],
 )
-def test_coverage_sweep_rejects_overlap_even_when_volume_matches_or_a_hole(
-    rectangles, error
-):
+def test_coverage_sweep_rejects_overlap_even_when_volume_matches_or_a_hole(rectangles, error):
     from skyrl.backends.skyrl_train.weight_sync.lora_transport.consumer_plan import (
         LoRAConsumerCopy,
         _validate_factor_coverage,
     )
 
-    copies = [
-        LoRAConsumerCopy(index, "module", 0, 0, start, stop)
-        for index, (start, stop) in enumerate(rectangles)
-    ]
+    copies = [LoRAConsumerCopy(index, "module", 0, 0, start, stop) for index, (start, stop) in enumerate(rectangles)]
     with pytest.raises(ValueError, match=error):
         _validate_factor_coverage((4, 4), copies)

@@ -364,11 +364,7 @@ def test_megatron_validation_rejects_unsupported_lora_nccl_topology(
     cfg.trainer.policy.model.lora.max_loras = 2
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
     cfg.generator.inference_engine.weight_sync_backend = "lora_nccl"
-    target = (
-        cfg.trainer.placement
-        if field == "policy_num_nodes"
-        else cfg.generator.inference_engine
-    )
+    target = cfg.trainer.placement if field == "policy_num_nodes" else cfg.generator.inference_engine
     setattr(target, field, value)
 
     with pytest.raises(ValueError, match=message):

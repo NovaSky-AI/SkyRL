@@ -123,9 +123,7 @@ class LoRANcclBucket:
 
     @property
     def source_bytes(self) -> int:
-        return torch.empty((), dtype=torch.float32).element_size() * sum(
-            _pull_elements(pull) for pull in self.pulls
-        )
+        return torch.empty((), dtype=torch.float32).element_size() * sum(_pull_elements(pull) for pull in self.pulls)
 
 
 @dataclass(frozen=True)
@@ -139,26 +137,14 @@ class LoRANcclSourceGroup:
     def __post_init__(self) -> None:
         if self.source_rank < 0:
             raise ValueError("LoRA NCCL source ranks must be non-negative")
-        if not self.inference_ranks or self.inference_ranks != tuple(
-            sorted(set(self.inference_ranks))
-        ):
-            raise ValueError(
-                "LoRA NCCL source-group consumers must be sorted and unique"
-            )
+        if not self.inference_ranks or self.inference_ranks != tuple(sorted(set(self.inference_ranks))):
+            raise ValueError("LoRA NCCL source-group consumers must be sorted and unique")
         if not self.buckets:
-            raise ValueError(
-                "LoRA NCCL source groups require at least one transfer bucket"
-            )
+            raise ValueError("LoRA NCCL source groups require at least one transfer bucket")
         if any(bucket.source_rank != self.source_rank for bucket in self.buckets):
-            raise ValueError(
-                "LoRA NCCL source-group buckets must belong to its producer"
-            )
-        if {bucket.inference_rank for bucket in self.buckets} != set(
-            self.inference_ranks
-        ):
-            raise ValueError(
-                "LoRA NCCL source-group buckets must cover exactly its consumers"
-            )
+            raise ValueError("LoRA NCCL source-group buckets must belong to its producer")
+        if {bucket.inference_rank for bucket in self.buckets} != set(self.inference_ranks):
+            raise ValueError("LoRA NCCL source-group buckets must cover exactly its consumers")
 
     @property
     def source_bytes(self) -> int:
@@ -208,9 +194,7 @@ class LoRANcclPlan:
     def __post_init__(self) -> None:
         if len(self.source_layout_digest) != 64:
             raise ValueError("LoRA NCCL plans require a SHA-256 source layout digest")
-        if not self.inference_ranks or self.inference_ranks != tuple(
-            sorted(set(self.inference_ranks))
-        ):
+        if not self.inference_ranks or self.inference_ranks != tuple(sorted(set(self.inference_ranks))):
             raise ValueError("LoRA NCCL inference ranks must be sorted and unique")
         if self.packed_buffer_size_bytes <= 0:
             raise ValueError("LoRA NCCL packed buffer size must be positive")
@@ -219,17 +203,10 @@ class LoRANcclPlan:
         source_ranks = tuple(group.source_rank for group in self.source_groups)
         if source_ranks != tuple(sorted(set(source_ranks))):
             raise ValueError("LoRA NCCL source groups must be ordered and unique")
-        if any(
-            bucket.source_bytes > self.packed_buffer_size_bytes
-            for bucket in self.buckets
-        ):
+        if any(bucket.source_bytes > self.packed_buffer_size_bytes for bucket in self.buckets):
             raise ValueError("LoRA NCCL bucket exceeds the packed buffer size")
-        if {bucket.inference_rank for bucket in self.buckets} != set(
-            self.inference_ranks
-        ):
-            raise ValueError(
-                "Every LoRA NCCL inference rank must receive at least one bucket"
-            )
+        if {bucket.inference_rank for bucket in self.buckets} != set(self.inference_ranks):
+            raise ValueError("Every LoRA NCCL inference rank must receive at least one bucket")
         payload = {
             "source_layout_digest": self.source_layout_digest,
             "inference_ranks": self.inference_ranks,
@@ -265,8 +242,7 @@ def build_lora_nccl_plan(
     if inference_ranks[0] < 0:
         raise ValueError("LoRA NCCL inference ranks must be non-negative")
     if any(
-        isinstance(route, LoRANcclConsumerRoute)
-        and route.inference_rank != inference_rank
+        isinstance(route, LoRANcclConsumerRoute) and route.inference_rank != inference_rank
         for inference_rank, route in consumer_plans.items()
     ):
         raise ValueError("LoRA NCCL route rank does not match its mapping key")
@@ -280,16 +256,12 @@ def build_lora_nccl_plan(
         for pull in consumer_plans[inference_rank].pulls:
             pulls_by_source.setdefault(pull.source_rank, []).append(pull)
         if not pulls_by_source:
-            raise ValueError(
-                f"LoRA NCCL inference rank {inference_rank} has no source slices"
-            )
+            raise ValueError(f"LoRA NCCL inference rank {inference_rank} has no source slices")
         for source_rank, pulls in sorted(pulls_by_source.items()):
             current = []
             current_bytes = 0
             for pull in sorted(pulls, key=_pull_sort_key):
-                pull_bytes = torch.empty(
-                    (), dtype=torch.float32
-                ).element_size() * _pull_elements(pull)
+                pull_bytes = torch.empty((), dtype=torch.float32).element_size() * _pull_elements(pull)
                 if pull_bytes > packed_buffer_size_bytes:
                     raise ValueError(
                         f"LoRA NCCL source slice {pull.source_slice.key!r} requires "
@@ -320,17 +292,9 @@ def build_lora_nccl_plan(
         LoRANcclSourceGroup(
             source_rank=source_rank,
             inference_ranks=tuple(
-                sorted(
-                    {
-                        bucket.inference_rank
-                        for bucket in buckets
-                        if bucket.source_rank == source_rank
-                    }
-                )
+                sorted({bucket.inference_rank for bucket in buckets if bucket.source_rank == source_rank})
             ),
-            buckets=tuple(
-                bucket for bucket in buckets if bucket.source_rank == source_rank
-            ),
+            buckets=tuple(bucket for bucket in buckets if bucket.source_rank == source_rank),
         )
         for source_rank in sorted({bucket.source_rank for bucket in buckets})
     )
@@ -365,10 +329,7 @@ def build_lora_nccl_plan_receipt(plan: LoRANcclPlan) -> LoRANcclPlanReceipt:
                         strict=True,
                     )
                 ):
-                    raise ValueError(
-                        "LoRA NCCL accounting does not support partially overlapping "
-                        "source slices"
-                    )
+                    raise ValueError("LoRA NCCL accounting does not support partially overlapping " "source slices")
     edges = tuple(
         LoRANcclEdgeReceipt(
             source_rank=group.source_rank,
@@ -379,13 +340,7 @@ def build_lora_nccl_plan_receipt(plan: LoRANcclPlan) -> LoRANcclPlanReceipt:
         )
         for group in plan.source_groups
         for inference_rank in group.inference_ranks
-        if (
-            edge_buckets := tuple(
-                bucket
-                for bucket in group.buckets
-                if bucket.inference_rank == inference_rank
-            )
-        )
+        if (edge_buckets := tuple(bucket for bucket in group.buckets if bucket.inference_rank == inference_rank))
     )
     unique_source_bytes = 4 * sum(_pull_elements(pull) for pull in unique_pulls)
     transmitted_bytes = plan.source_bytes
@@ -435,20 +390,11 @@ def pack_lora_nccl_bucket_into(
     packed_buffer: torch.Tensor,
 ) -> torch.Tensor:
     """Pack one bucket into the reusable prefix of caller-owned FP32 storage."""
-    if (
-        packed_buffer.dtype is not torch.float32
-        or packed_buffer.ndim != 1
-        or not packed_buffer.is_contiguous()
-    ):
-        raise ValueError(
-            "LoRA NCCL packed buffers must be contiguous flat FP32 tensors"
-        )
+    if packed_buffer.dtype is not torch.float32 or packed_buffer.ndim != 1 or not packed_buffer.is_contiguous():
+        raise ValueError("LoRA NCCL packed buffers must be contiguous flat FP32 tensors")
     required = bucket.source_bytes // packed_buffer.element_size()
     if packed_buffer.numel() < required:
-        raise ValueError(
-            f"LoRA NCCL packed buffer has {packed_buffer.numel()} elements, "
-            f"requires {required}"
-        )
+        raise ValueError(f"LoRA NCCL packed buffer has {packed_buffer.numel()} elements, " f"requires {required}")
     packed = packed_buffer[:required]
     offset = 0
     for pull in bucket.pulls:
@@ -467,9 +413,7 @@ def pack_lora_nccl_bucket_into(
             )
         )
         elements = prod(shape)
-        packed[offset : offset + elements].view(shape).copy_(
-            source[pull.source_slice.indices]
-        )
+        packed[offset : offset + elements].view(shape).copy_(source[pull.source_slice.indices])
         offset += elements
     return packed
 
@@ -479,19 +423,11 @@ def unpack_lora_nccl_bucket(
     packed: torch.Tensor,
 ) -> dict[LoRAConsumerPull, torch.Tensor]:
     """Expose validated FP32 views for the common BF16 assembly path."""
-    if (
-        packed.dtype is not torch.float32
-        or packed.ndim != 1
-        or not packed.is_contiguous()
-    ):
-        raise ValueError(
-            "LoRA NCCL receive buffers must be contiguous flat FP32 tensors"
-        )
+    if packed.dtype is not torch.float32 or packed.ndim != 1 or not packed.is_contiguous():
+        raise ValueError("LoRA NCCL receive buffers must be contiguous flat FP32 tensors")
     expected = sum(_pull_elements(pull) for pull in bucket.pulls)
     if packed.numel() != expected:
-        raise ValueError(
-            f"LoRA NCCL receive buffer has {packed.numel()} elements, expected {expected}"
-        )
+        raise ValueError(f"LoRA NCCL receive buffer has {packed.numel()} elements, expected {expected}")
     output = {}
     offset = 0
     for pull in bucket.pulls:

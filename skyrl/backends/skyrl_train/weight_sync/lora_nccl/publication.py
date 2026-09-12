@@ -52,16 +52,10 @@ class LoRANcclPublicationPlanner:
         )
         if self._layout is None:
             if gathered_sources is None:
-                raise ValueError(
-                    "LoRA NCCL first publication requires global source metadata"
-                )
+                raise ValueError("LoRA NCCL first publication requires global source metadata")
             sources = tuple(
                 sorted(
-                    (
-                        source
-                        for rank_sources in gathered_sources
-                        for source in rank_sources
-                    ),
+                    (source for rank_sources in gathered_sources for source in rank_sources),
                     key=lambda source: (
                         source.key,
                         source.expert_parallel_rank,
@@ -74,16 +68,9 @@ class LoRANcclPublicationPlanner:
         elif gathered_sources is not None:
             raise ValueError("LoRA NCCL source metadata is already initialized")
 
-        expected = tuple(
-            source
-            for source in self._layout.sources
-            if source.source_rank == self._source_rank
-        )
+        expected = tuple(source for source in self._layout.sources if source.source_rank == self._source_rank)
         if local_sources != expected:
-            raise ValueError(
-                f"LoRA NCCL adapter {self._adapter_name!r} changed its fixed "
-                "local source layout"
-            )
+            raise ValueError(f"LoRA NCCL adapter {self._adapter_name!r} changed its fixed " "local source layout")
         self._generation += 1
         return LoRANcclPublication(
             local_tensors,

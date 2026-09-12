@@ -60,7 +60,9 @@ from skyrl.env_vars import (
 
 logger = logging.getLogger(__name__)
 
-LORA_TRANSPORT_ADMISSION_MIDDLEWARE = "skyrl.backends.skyrl_train.weight_sync.lora_transport.request_gate.LoRATransportAdmissionMiddleware"
+LORA_TRANSPORT_ADMISSION_MIDDLEWARE = (
+    "skyrl.backends.skyrl_train.weight_sync.lora_transport.request_gate.LoRATransportAdmissionMiddleware"
+)
 
 
 class VLLMServerActor(ServerActorProtocol):
@@ -448,9 +450,7 @@ class VLLMServerActor(ServerActorProtocol):
                     await gate.wait_until_idle()
             except TimeoutError as error:
                 gate.open()
-                raise HTTPException(
-                    status_code=504, detail="Timed out draining LoRA requests"
-                ) from error
+                raise HTTPException(status_code=504, detail="Timed out draining LoRA requests") from error
             except asyncio.CancelledError:
                 gate.open()
                 raise
@@ -499,9 +499,7 @@ class VLLMServerActor(ServerActorProtocol):
             except (KeyError, TypeError, ValueError) as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
             if lora_name != update_request.adapter_name:
-                raise HTTPException(
-                    status_code=400, detail="lora_name does not match request adapter"
-                )
+                raise HTTPException(status_code=400, detail="lora_name does not match request adapter")
             return lora_name, update_request
 
         def _lora_transport_lifecycle(models):
@@ -527,9 +525,7 @@ class VLLMServerActor(ServerActorProtocol):
                     )
                 except Exception as error:
                     raise HTTPException(status_code=500, detail=str(error)) from error
-                previous = getattr(
-                    models, "_skyrl_lora_transport_previous_requests", {}
-                )
+                previous = getattr(models, "_skyrl_lora_transport_previous_requests", {})
                 previous[lora_name] = models.lora_requests.get(lora_name)
                 models._skyrl_lora_transport_previous_requests = previous
             return {"status": "staged", "lora_int_id": adapter_id}
@@ -540,15 +536,11 @@ class VLLMServerActor(ServerActorProtocol):
             lora_name, update_request = _parse_lora_request(body)
             adapter_id = int(body["adapter_id"])
             if body.get("transport") != "nccl":
-                raise HTTPException(
-                    status_code=400, detail="LoRA transport must be nccl"
-                )
+                raise HTTPException(status_code=400, detail="LoRA transport must be nccl")
             models = request.app.state.openai_serving_models
             async with models.lora_resolver_lock[lora_name]:
                 try:
-                    await _lora_transport_lifecycle(models).activate(
-                        engine, update_request, adapter_id
-                    )
+                    await _lora_transport_lifecycle(models).activate(engine, update_request, adapter_id)
                 except Exception as error:
                     raise HTTPException(status_code=500, detail=str(error)) from error
                 models.lora_requests[lora_name] = LoRARequest(
@@ -567,15 +559,11 @@ class VLLMServerActor(ServerActorProtocol):
             models = request.app.state.openai_serving_models
             async with models.lora_resolver_lock[lora_name]:
                 try:
-                    changed = await _lora_transport_lifecycle(models).commit(
-                        engine, update_request, adapter_id
-                    )
+                    changed = await _lora_transport_lifecycle(models).commit(engine, update_request, adapter_id)
                 except Exception as error:
                     raise HTTPException(status_code=500, detail=str(error)) from error
                 if changed:
-                    getattr(models, "_skyrl_lora_transport_previous_requests", {}).pop(
-                        lora_name, None
-                    )
+                    getattr(models, "_skyrl_lora_transport_previous_requests", {}).pop(lora_name, None)
             return {"status": "committed"}
 
         @app.post("/skyrl/v1/rollback_lora_transport_adapter")
@@ -587,17 +575,13 @@ class VLLMServerActor(ServerActorProtocol):
                 lifecycle = _lora_transport_lifecycle(models)
                 try:
                     if "adapter_id" in body:
-                        changed = await lifecycle.rollback(
-                            engine, update_request, int(body["adapter_id"])
-                        )
+                        changed = await lifecycle.rollback(engine, update_request, int(body["adapter_id"]))
                     else:
                         changed = await lifecycle.abort(engine, update_request)
                 except Exception as error:
                     raise HTTPException(status_code=500, detail=str(error)) from error
                 if changed:
-                    previous = getattr(
-                        models, "_skyrl_lora_transport_previous_requests", {}
-                    ).pop(lora_name, None)
+                    previous = getattr(models, "_skyrl_lora_transport_previous_requests", {}).pop(lora_name, None)
                     active_id = lifecycle.get_active_adapter_id(lora_name)
                     current = models.lora_requests.get(lora_name)
                     if active_id is None:
@@ -622,9 +606,7 @@ class VLLMServerActor(ServerActorProtocol):
                 except Exception as error:
                     raise HTTPException(status_code=500, detail=str(error)) from error
                 models.lora_requests.pop(lora_name, None)
-                getattr(models, "_skyrl_lora_transport_previous_requests", {}).pop(
-                    lora_name, None
-                )
+                getattr(models, "_skyrl_lora_transport_previous_requests", {}).pop(lora_name, None)
             return {"status": "unloaded"}
 
         @app.post("/skyrl/v1/load_lora_adapter")
@@ -789,9 +771,7 @@ async def _build_and_serve_vllm_server(
     # One uvicorn per port (no api_server_count fan-out), matching vLLM's own
     # single-server path, so SO_REUSEPORT stays off.
     sock = create_server_socket(sock_addr, reuse_port=False)
-    lora_transport_admission_gate = VLLMServerActor._prepare_lora_transport_admission(
-        cli_args
-    )
+    lora_transport_admission_gate = VLLMServerActor._prepare_lora_transport_admission(cli_args)
     app = build_app(cli_args)
     VLLMServerActor._bind_lora_transport_admission(app, lora_transport_admission_gate)
 

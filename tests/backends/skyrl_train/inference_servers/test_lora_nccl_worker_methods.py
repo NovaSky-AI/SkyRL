@@ -141,9 +141,7 @@ def test_worker_caches_route_initializes_once_and_stages_received_factors(monkey
     )
     monkeypatch.setattr(
         "skyrl.backends.skyrl_train.weight_sync.lora_transport.vllm_adapter.stage_vllm_local_lora_factors",
-        lambda runner, adapter_id, receiver_plan, factors: staged.append(
-            (runner, adapter_id, receiver_plan, factors)
-        ),
+        lambda runner, adapter_id, receiver_plan, factors: staged.append((runner, adapter_id, receiver_plan, factors)),
     )
     worker = _worker()
 
@@ -186,9 +184,7 @@ def test_worker_caches_route_initializes_once_and_stages_received_factors(monkey
             {"model.proj": (["a"], ["b"])},
         )
     ]
-    assert worker._skyrl_lora_transport_staged[
-        "adapter"
-    ].adapter_config_json == json.dumps(
+    assert worker._skyrl_lora_transport_staged["adapter"].adapter_config_json == json.dumps(
         config,
         sort_keys=True,
         separators=(",", ":"),

@@ -227,25 +227,16 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             raise ValueError(f"{backend} requires rank > 0 and merge_lora=false")
         if lora.max_loras < 2:
             raise ValueError(f"{backend} requires max_loras >= 2 for staging")
-        if (
-            megatron.pipeline_model_parallel_size != 1
-            or ie_cfg.pipeline_parallel_size != 1
-        ):
-            raise ValueError(
-                f"{backend} currently supports pipeline parallel size 1 only"
-            )
+        if megatron.pipeline_model_parallel_size != 1 or ie_cfg.pipeline_parallel_size != 1:
+            raise ValueError(f"{backend} currently supports pipeline parallel size 1 only")
         if cfg.trainer.mtp.enabled or ie_cfg.fully_sharded_loras:
             raise ValueError(f"{backend} does not support MTP or fully_sharded_loras")
         if megatron.transformer_config_kwargs.get("fp8"):
-            raise ValueError(
-                f"{backend} requires FP32 LoRA publication; FP8 is unsupported"
-            )
+            raise ValueError(f"{backend} requires FP32 LoRA publication; FP8 is unsupported")
         if megatron.lora_config.normalize_moe_lora:
             raise ValueError("lora_nccl does not support normalize_moe_lora")
         if cfg.trainer.placement.policy_num_nodes != 1:
-            raise ValueError(
-                "lora_nccl initially requires all trainer ranks on one node"
-            )
+            raise ValueError("lora_nccl initially requires all trainer ranks on one node")
         if ie_cfg.num_engines != 1:
             raise ValueError("lora_nccl initially supports one inference TP group")
 

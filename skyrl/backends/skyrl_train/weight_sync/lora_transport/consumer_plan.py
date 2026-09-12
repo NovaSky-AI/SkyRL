@@ -46,10 +46,7 @@ class LoRAConsumerPlan:
     @property
     def source_bytes(self) -> int:
         return 4 * sum(
-            prod(
-                b - a for a, b in zip(pull.source_slice.starts, pull.source_slice.stops)
-            )
-            for pull in self.pulls
+            prod(b - a for a, b in zip(pull.source_slice.starts, pull.source_slice.stops)) for pull in self.pulls
         )
 
 
@@ -67,18 +64,14 @@ def _intersect(starts, stops, other_starts, other_stops):
     return (lower, upper) if all(a < b for a, b in zip(lower, upper)) else None
 
 
-def _get_source_bounds(
-    source: LoRABridgeSource, ndim: int
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
+def _get_source_bounds(source: LoRABridgeSource, ndim: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
     start = [0] * ndim
     if source.tensor_parallel_axis is not None:
         axis = source.tensor_parallel_axis
         start[axis] += source.tensor_parallel_rank * source.shape[axis]
     if source.expert_parallel_axis is not None:
         axis = source.expert_parallel_axis
-        tp_multiplier = (
-            source.tensor_parallel_size if source.tensor_parallel_axis == axis else 1
-        )
+        tp_multiplier = source.tensor_parallel_size if source.tensor_parallel_axis == axis else 1
         start[axis] += source.expert_parallel_rank * source.shape[axis] * tp_multiplier
     return tuple(start), tuple(a + b for a, b in zip(start, source.shape))
 
@@ -87,29 +80,17 @@ def _build_qkv_output_tiles(
     group: list[LoRABridgeSource], full_shape: tuple[int, ...]
 ) -> dict[str, tuple[tuple[int, ...], list[_SourceTile]]]:
     first = group[0]
-    if (
-        first.component != "linear_out"
-        or len(first.hf_param_names) != 3
-        or len(full_shape) != 2
-    ):
-        raise NotImplementedError(
-            "QKV source splitting requires one 2D LoRA-B source and three outputs"
-        )
+    if first.component != "linear_out" or len(first.hf_param_names) != 3 or len(full_shape) != 2:
+        raise NotImplementedError("QKV source splitting requires one 2D LoRA-B source and three outputs")
     head_size, output_indices = get_qkv_lora_head_mapping(dict(first.transform_config))
     if full_shape[0] != sum(len(indices) for indices in output_indices) * head_size:
-        raise ValueError(
-            "QKV LoRA source shape does not match its Bridge transform config"
-        )
+        raise ValueError("QKV LoRA source shape does not match its Bridge transform config")
 
     outputs = {}
     for name, indices in zip(first.hf_param_names, output_indices, strict=True):
         if not name.endswith(".lora_B.weight"):
-            raise ValueError(
-                "QKV source component does not match its canonical factor names"
-            )
-        canonical_name = convert_moe_expert_lora_key(
-            name.removeprefix("base_model.model."), 2
-        )
+            raise ValueError("QKV source component does not match its canonical factor names")
+        canonical_name = convert_moe_expert_lora_key(name.removeprefix("base_model.model."), 2)
         output_shape = (len(indices) * head_size, full_shape[1])
         tiles = []
         for output_head, source_head in enumerate(indices):
@@ -117,34 +98,20 @@ def _build_qkv_output_tiles(
             region_stop = ((source_head + 1) * head_size, full_shape[1])
             output_start = (output_head * head_size, 0)
             for source in group:
-                if (
-                    source.tensor_parallel_axis is None
-                    and source.tensor_parallel_rank != 0
-                ):
+                if source.tensor_parallel_axis is None and source.tensor_parallel_rank != 0:
                     continue
-                if (
-                    source.expert_parallel_axis is None
-                    and source.expert_parallel_rank != 0
-                ):
+                if source.expert_parallel_axis is None and source.expert_parallel_rank != 0:
                     continue
                 source_start, source_stop = _get_source_bounds(source, 2)
-                overlap = _intersect(
-                    source_start, source_stop, region_start, region_stop
-                )
+                overlap = _intersect(source_start, source_stop, region_start, region_stop)
                 if overlap is None:
                     continue
                 lower, upper = overlap
                 tiles.append(
                     _SourceTile(
                         source,
-                        tuple(
-                            a + b - c
-                            for a, b, c in zip(output_start, lower, region_start)
-                        ),
-                        tuple(
-                            a + b - c
-                            for a, b, c in zip(output_start, upper, region_start)
-                        ),
+                        tuple(a + b - c for a, b, c in zip(output_start, lower, region_start)),
+                        tuple(a + b - c for a, b, c in zip(output_start, upper, region_start)),
                         tuple(a - b for a, b in zip(lower, source_start)),
                     )
                 )
@@ -160,9 +127,7 @@ def _build_source_tiles(
     for source in layout.sources:
         owner = (source.source_rank, source.key)
         if owner in owners:
-            raise ValueError(
-                "One producer key cannot own multiple distinct source shards"
-            )
+            raise ValueError("One producer key cannot own multiple distinct source shards")
         owners.add(owner)
         groups.setdefault(source.key, []).append(source)
     outputs = {}
@@ -174,28 +139,16 @@ def _build_source_tiles(
             "split_gated_mlp",
             "split_qkv",
         ):
-            raise NotImplementedError(
-                f"Consumer slices do not support Bridge transform {first.transform!r}"
-            )
-        if len(first.shape) not in (2, 3) or any(
-            source.shape != first.shape for source in group
-        ):
-            raise NotImplementedError(
-                "Consumer slices require uniform 2D or 3D source shards"
-            )
+            raise NotImplementedError(f"Consumer slices do not support Bridge transform {first.transform!r}")
+        if len(first.shape) not in (2, 3) or any(source.shape != first.shape for source in group):
+            raise NotImplementedError("Consumer slices require uniform 2D or 3D source shards")
         if first.transform == "identity" and len(first.hf_param_names) != 1:
             raise ValueError("Identity sources require exactly one output")
-        if first.transform == "split_gated_mlp" and (
-            len(first.hf_param_names) != 2 or len(first.shape) != 2
-        ):
+        if first.transform == "split_gated_mlp" and (len(first.hf_param_names) != 2 or len(first.shape) != 2):
             raise NotImplementedError("Gated source splitting requires two 2D outputs")
-        suffix = (
-            ".lora_A.weight" if first.component == "linear_in" else ".lora_B.weight"
-        )
+        suffix = ".lora_A.weight" if first.component == "linear_in" else ".lora_B.weight"
         if any(not name.endswith(suffix) for name in first.hf_param_names):
-            raise ValueError(
-                "Source component does not match its canonical factor names"
-            )
+            raise ValueError("Source component does not match its canonical factor names")
         full_shape = list(first.shape)
         for axis, size in (
             (first.tensor_parallel_axis, first.tensor_parallel_size),
@@ -212,32 +165,22 @@ def _build_source_tiles(
             outputs.update(qkv_outputs)
             continue
         for output_index, name in enumerate(first.hf_param_names):
-            name = convert_moe_expert_lora_key(
-                name.removeprefix("base_model.model."), len(first.shape)
-            )
+            name = convert_moe_expert_lora_key(name.removeprefix("base_model.model."), len(first.shape))
             if name in outputs:
                 raise ValueError(f"Multiple independent sources own HF output {name!r}")
             output_shape = full_shape.copy()
             output_start = [0] * len(full_shape)
             if first.transform == "split_gated_mlp":
                 if full_shape[0] % 2:
-                    raise ValueError(
-                        "Gated source output must divide into equal halves"
-                    )
+                    raise ValueError("Gated source output must divide into equal halves")
                 output_shape[0] //= 2
                 output_start[0] = output_index * output_shape[0]
             output_stop = tuple(a + b for a, b in zip(output_start, output_shape))
             tiles = []
             for source in group:
-                if (
-                    source.tensor_parallel_axis is None
-                    and source.tensor_parallel_rank != 0
-                ):
+                if source.tensor_parallel_axis is None and source.tensor_parallel_rank != 0:
                     continue
-                if (
-                    source.expert_parallel_axis is None
-                    and source.expert_parallel_rank != 0
-                ):
+                if source.expert_parallel_axis is None and source.expert_parallel_rank != 0:
                     continue
                 start, stop = _get_source_bounds(source, len(full_shape))
                 overlap = _intersect(start, stop, output_start, output_stop)
@@ -255,18 +198,10 @@ def _build_source_tiles(
     return outputs
 
 
-def build_lora_consumer_plan(
-    source_layout: LoRABridgeSourceLayout, receiver_plan: Any
-) -> LoRAConsumerPlan:
+def build_lora_consumer_plan(source_layout: LoRABridgeSourceLayout, receiver_plan: Any) -> LoRAConsumerPlan:
     """Intersect canonical source ownership with only the consumed local regions."""
-    if (
-        receiver_plan.rank <= 0
-        or not receiver_plan.modules
-        or not receiver_plan.target_modules
-    ):
-        raise ValueError(
-            "Consumer plans require a positive rank and nonempty targets and modules"
-        )
+    if receiver_plan.rank <= 0 or not receiver_plan.modules or not receiver_plan.target_modules:
+        raise ValueError("Consumer plans require a positive rank and nonempty targets and modules")
     module_names = [module.module_name for module in receiver_plan.modules]
     if len(module_names) != len(set(module_names)):
         raise ValueError("Consumer plans require unique module names")
@@ -298,31 +233,19 @@ def build_lora_consumer_plan(
                     desired_stop,
                     destination_start,
                 ) in regions:
-                    name = source_name + (
-                        ".lora_A.weight" if component == 0 else ".lora_B.weight"
-                    )
+                    name = source_name + (".lora_A.weight" if component == 0 else ".lora_B.weight")
                     if name not in sources:
                         raise ValueError(f"Missing canonical source for {name!r}")
                     source_shape, tiles = sources[name]
                     if source_shape != expected_shape:
-                        raise ValueError(
-                            f"Source {name!r} has shape {source_shape}, expected {expected_shape}"
-                        )
+                        raise ValueError(f"Source {name!r} has shape {source_shape}, expected {expected_shape}")
                     for tile in tiles:
-                        overlap = _intersect(
-                            tile.starts, tile.stops, desired_start, desired_stop
-                        )
+                        overlap = _intersect(tile.starts, tile.stops, desired_start, desired_stop)
                         if overlap is None:
                             continue
                         lower, upper = overlap
-                        starts = tuple(
-                            a + b - c
-                            for a, b, c in zip(tile.source_starts, lower, tile.starts)
-                        )
-                        stops = tuple(
-                            a + b - c
-                            for a, b, c in zip(tile.source_starts, upper, tile.starts)
-                        )
+                        starts = tuple(a + b - c for a, b, c in zip(tile.source_starts, lower, tile.starts))
+                        stops = tuple(a + b - c for a, b, c in zip(tile.source_starts, upper, tile.starts))
                         selection = LoRASourceSlice(tile.source.key, starts, stops)
                         selection.validate_shape(tile.source.shape)
                         pull = LoRAConsumerPull(tile.source.source_rank, selection)
@@ -332,16 +255,10 @@ def build_lora_consumer_plan(
                         # Per-expert 2D sources populate one expert of the local 3D factor.
                         prefix = len(destination_shape) - len(desired_start)
                         local_start = tuple(
-                            a + b - c
-                            for a, b, c in zip(
-                                destination_start[prefix:], lower, desired_start
-                            )
+                            a + b - c for a, b, c in zip(destination_start[prefix:], lower, desired_start)
                         )
                         local_stop = tuple(
-                            a + b - c
-                            for a, b, c in zip(
-                                destination_start[prefix:], upper, desired_start
-                            )
+                            a + b - c for a, b, c in zip(destination_start[prefix:], upper, desired_start)
                         )
                         copy = LoRAConsumerCopy(
                             pull_indices[pull],
@@ -349,15 +266,12 @@ def build_lora_consumer_plan(
                             factor_index,
                             component,
                             destination_start[:prefix] + local_start,
-                            tuple(value + 1 for value in destination_start[:prefix])
-                            + local_stop,
+                            tuple(value + 1 for value in destination_start[:prefix]) + local_stop,
                         )
                         factor_copies.append(copy)
                 _validate_factor_coverage(destination_shape, factor_copies)
                 copies.extend(factor_copies)
-    return LoRAConsumerPlan(
-        source_layout.layout_digest, receiver_plan, tuple(pulls), tuple(copies)
-    )
+    return LoRAConsumerPlan(source_layout.layout_digest, receiver_plan, tuple(pulls), tuple(copies))
 
 
 def _get_factor_regions(module, factor, component, shape, rank):
@@ -386,12 +300,8 @@ def _get_factor_regions(module, factor, component, shape, rank):
     if layout not in ("moe", "moe_3d"):
         raise NotImplementedError(f"Unsupported consumer source layout {layout!r}")
     expected_factors = 3 if layout == "moe" else 2
-    if len(module.factor_shapes) != expected_factors or module.expert_ids != tuple(
-        range(len(module.expert_ids))
-    ):
-        raise NotImplementedError(
-            "Consumer MoE slices require complete EP1 gated expert factors"
-        )
+    if len(module.factor_shapes) != expected_factors or module.expert_ids != tuple(range(len(module.expert_ids))):
+        raise NotImplementedError("Consumer MoE slices require complete EP1 gated expert factors")
     if len(shape) != 3 or shape[0] != len(module.expert_ids):
         raise ValueError("MoE factors must preserve the explicit expert axis")
     # The second runtime factor is the down projection in both MoE layouts.
@@ -454,19 +364,14 @@ def _validate_factor_coverage(shape, copies):
     endings: list[tuple[int, int]] = []
     actual = 0
     for index, copy in enumerate(sorted(copies, key=lambda item: item.starts[0])):
-        if any(
-            a < 0 or b <= a or b > size
-            for a, b, size in zip(copy.starts, copy.stops, shape, strict=True)
-        ):
+        if any(a < 0 or b <= a or b > size for a, b, size in zip(copy.starts, copy.stops, shape, strict=True)):
             raise ValueError("Consumer source mapping exceeds the local destination")
         while endings and endings[0][0] <= copy.starts[0]:
             _, expired = heappop(endings)
             del active[expired]
         for previous in active.values():
             if _intersect(copy.starts, copy.stops, previous.starts, previous.stops):
-                raise ValueError(
-                    "Consumer source ownership overlaps in the destination"
-                )
+                raise ValueError("Consumer source ownership overlaps in the destination")
         active[index] = copy
         heappush(endings, (copy.stops[0], index))
         actual += prod(b - a for a, b in zip(copy.starts, copy.stops))
@@ -483,21 +388,13 @@ def assemble_lora_consumer_factors(
     if set(pulled) != set(plan.pulls):
         raise ValueError("Pulled slices must match the complete consumer plan")
     for pull, tensor in pulled.items():
-        shape = tuple(
-            b - a for a, b in zip(pull.source_slice.starts, pull.source_slice.stops)
-        )
+        shape = tuple(b - a for a, b in zip(pull.source_slice.starts, pull.source_slice.stops))
         if tensor.dtype != torch.float32 or tuple(tensor.shape) != shape:
             raise ValueError("Pulled slices must preserve exact FP32 shape and dtype")
     factors = {
         module.module_name: (
-            [
-                torch.empty(pair[0], dtype=torch.bfloat16, device=device)
-                for pair in module.factor_shapes
-            ],
-            [
-                torch.empty(pair[1], dtype=torch.bfloat16, device=device)
-                for pair in module.factor_shapes
-            ],
+            [torch.empty(pair[0], dtype=torch.bfloat16, device=device) for pair in module.factor_shapes],
+            [torch.empty(pair[1], dtype=torch.bfloat16, device=device) for pair in module.factor_shapes],
         )
         for module in plan.receiver_plan.modules
     }
@@ -505,7 +402,5 @@ def assemble_lora_consumer_factors(
         tensor = pulled[plan.pulls[copy.pull_index]]
         shape = tuple(b - a for a, b in zip(copy.starts, copy.stops))
         destination = factors[copy.module_name][copy.component][copy.factor_index]
-        destination[tuple(slice(a, b) for a, b in zip(copy.starts, copy.stops))].copy_(
-            tensor.reshape(shape)
-        )
+        destination[tuple(slice(a, b) for a, b in zip(copy.starts, copy.stops))].copy_(tensor.reshape(shape))
     return factors

@@ -9,6 +9,7 @@ class _LoRALayout(Protocol):
     layout_digest: str
     source_dtype: str
 
+
 @dataclass(frozen=True)
 class LoRASourceSlice:
     """A rectangular selection from one producer-owned adapter tensor."""
@@ -19,23 +20,13 @@ class LoRASourceSlice:
 
     def __post_init__(self) -> None:
         if not self.key or not self.starts or len(self.starts) != len(self.stops):
-            raise ValueError(
-                "LoRA source slices require a key and matching nonempty bounds"
-            )
-        if any(
-            start < 0 or stop <= start for start, stop in zip(self.starts, self.stops)
-        ):
-            raise ValueError(
-                "LoRA source slice bounds must be nonnegative and nonempty"
-            )
+            raise ValueError("LoRA source slices require a key and matching nonempty bounds")
+        if any(start < 0 or stop <= start for start, stop in zip(self.starts, self.stops)):
+            raise ValueError("LoRA source slice bounds must be nonnegative and nonempty")
 
     def validate_shape(self, shape: tuple[int, ...]) -> None:
-        if len(shape) != len(self.stops) or any(
-            stop > size for stop, size in zip(self.stops, shape)
-        ):
-            raise ValueError(
-                f"LoRA source slice {self.key!r} exceeds source shape {shape}"
-            )
+        if len(shape) != len(self.stops) or any(stop > size for stop, size in zip(self.stops, shape)):
+            raise ValueError(f"LoRA source slice {self.key!r} exceeds source shape {shape}")
 
     @property
     def indices(self) -> tuple[slice, ...]:
@@ -52,9 +43,7 @@ class LoRAUpdateRequest:
     source_dtype: str
 
     @classmethod
-    def from_layout(
-        cls, layout: _LoRALayout, generation: int
-    ) -> "LoRAUpdateRequest":
+    def from_layout(cls, layout: _LoRALayout, generation: int) -> "LoRAUpdateRequest":
         return cls(
             adapter_name=layout.adapter_name,
             generation=generation,
@@ -73,13 +62,9 @@ class LoRAUpdateRequest:
         if not self.adapter_name:
             raise ValueError("LoRA update requests require a non-empty adapter name")
         if self.generation < 0:
-            raise ValueError(
-                f"LoRA generation must be non-negative, got {self.generation}"
-            )
+            raise ValueError(f"LoRA generation must be non-negative, got {self.generation}")
         if self.source_dtype != "float32":
-            raise ValueError(
-                f"lora_transport requires float32 sources, got {self.source_dtype!r}"
-            )
+            raise ValueError(f"lora_transport requires float32 sources, got {self.source_dtype!r}")
         if len(self.layout_digest) != 64:
             raise ValueError("LoRA update requests require a SHA-256 layout digest")
 
