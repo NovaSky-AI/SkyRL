@@ -370,6 +370,10 @@ class FSDPStrategy(DistributedStrategy):
                 peft_config["task_type"] = peft_config["task_type"].value
                 peft_config["peft_type"] = peft_config["peft_type"].value
                 peft_config["target_modules"] = list(peft_config["target_modules"])
+                if peft_config.get("exclude_modules") is not None and not isinstance(
+                    peft_config["exclude_modules"], str
+                ):
+                    peft_config["exclude_modules"] = list(peft_config["exclude_modules"])
 
         lora_params = layered_summon_lora_params(model)
 
