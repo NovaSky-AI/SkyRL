@@ -717,7 +717,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             except Exception as e:
                 # Don't re-raise error so that any original error raised in the training
                 # loop is properly propagated.
-                logger.error(f'Closing eval dispatcher failed: {e}')
+                logger.error(f"Closing eval dispatcher failed: {e}")
 
         pbar.close()
 
