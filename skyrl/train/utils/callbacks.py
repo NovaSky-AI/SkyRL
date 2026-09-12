@@ -105,7 +105,9 @@ class TrainingCallback:
         """Fires before an evaluation pass."""
 
     def on_eval_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
-        """Fires after an evaluation pass. ``callback_input.metrics`` holds the eval metrics."""
+        """Fires after an evaluation pass. ``callback_input.metrics`` holds the eval metrics and
+        ``callback_input.global_step`` is the step that was *evaluated* -- under an asynchronous
+        eval dispatcher, older than the loop's current step."""
 
     def on_save(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
         """Fires after a checkpoint is written. ``callback_input.ckpt_path`` is the folder path."""
