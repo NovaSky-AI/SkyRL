@@ -154,6 +154,27 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     # tests/backends/skyrl_train/mtp/test_build_vllm_cli_args_mtp.py
 
 
+@pytest.mark.vllm
+def test_build_vllm_cli_args_materializes_profiler_config():
+    from vllm.config import ProfilerConfig
+
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.engine_init_kwargs = {
+        "profiler_config": {
+            "profiler": "torch",
+            "torch_profiler_dir": "/profiles",
+            "torch_profiler_with_stack": False,
+        }
+    }
+
+    args = build_vllm_cli_args(cfg)
+
+    assert isinstance(args.profiler_config, ProfilerConfig)
+    assert args.profiler_config.profiler == "torch"
+    assert args.profiler_config.torch_profiler_dir == "/profiles"
+    assert not args.profiler_config.torch_profiler_with_stack
+
+
 def test_resolve_policy_model_name_uses_served_model_name():
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = "base-model"
