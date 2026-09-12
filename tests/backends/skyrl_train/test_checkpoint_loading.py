@@ -46,7 +46,7 @@ def test_weights_only_load_does_not_reset_live_optimizer():
 
     worker.strategy.load_checkpoint.assert_called_once_with(
         model=worker.model,
-        optimizer=None,
+        optimizer=live_optimizer,
         scheduler=None,
         ckpt_dir="/checkpoint",
         load_optimizer_states=False,
