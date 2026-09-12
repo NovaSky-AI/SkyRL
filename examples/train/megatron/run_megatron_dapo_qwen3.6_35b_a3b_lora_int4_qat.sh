@@ -20,6 +20,11 @@ set -x
 
 # INT4 actor served by vLLM; BF16 masters loaded by the trainer (Megatron-Bridge
 # can't load compressed-tensors, so it reads BF16 from FAKE_QUANT_BF16_PATH).
+# Qwen3.6's original BF16 release serves as the masters here. For QAT-convention
+# models with no BF16 release (Kimi K2.6: scale_divisor=7.0), dequantize the INT4
+# checkpoint instead:
+#   uv run --isolated -m skyrl.backends.skyrl_train.workers.megatron.dequantize_int4_checkpoint \
+#       <int4_checkpoint_dir> <bf16_masters_dir> --verify sample
 MODEL_NAME="${MODEL_NAME:-casperhansen/Qwen3.6-35B-A3B-INT4-RTN}"
 FAKE_QUANT_BF16_PATH="${FAKE_QUANT_BF16_PATH:-Qwen/Qwen3.6-35B-A3B}"
 
