@@ -27,9 +27,7 @@ def compact_adapter_state(
         identities[name] = identity
     if unique_bytes * 2 >= logical_bytes:
         return None
-    canonical_tensors = {
-        identity: tensor.clone() for identity, tensor in canonical_tensors.items()
-    }
+    canonical_tensors = {identity: tensor.clone() for identity, tensor in canonical_tensors.items()}
     return {name: canonical_tensors[identity] for name, identity in identities.items()}
 
 
