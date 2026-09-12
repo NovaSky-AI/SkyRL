@@ -95,3 +95,101 @@ def validate_concrete_fp8_recipe(transformer_config_kwargs: Optional[MutableMapp
             "fallback zeroes freshly loaded persistent params on the first param "
             "all-gather. Use fp8_param=false with mxfp8."
         )
+
+
+def validate_mxfp8_gdn_tp_alignment(
+    transformer_config_kwargs: Optional[MutableMapping[str, Any]],
+    hf_config: Any,
+    tensor_model_parallel_size: int,
+) -> None:
+    """Refuse mxfp8 + GDN + TP combinations whose weight shard TE cannot quantize.
+
+    Megatron fuses the GDN q/k/v/z/b/a projections into ONE column-parallel
+    ``in_proj`` GEMM (megatron/core/ssm/gated_delta_net.py)::
+
+        in_proj_dim = 2*qk_dim + 2*v_dim + 2*num_value_heads
+
+    TP shards that output dim, so each rank quantizes an
+    ``[in_proj_dim // TP, hidden]`` weight, and MXFP8 scales cover 1x32 groups,
+    so TE requires every dim of the *shard* to be a multiple of 32
+    (``MXFP8Quantizer::create_tensor``, transformer_engine/pytorch/csrc/quantizer.cpp).
+    Megatron's own guard checks only the GLOBAL dim, which can pass while the
+    shard is misaligned — Qwen3.5's 12352 = 32*386 shards to 6176 at TP=2 (fine)
+    but 3088 at TP=4 (rejected) — and the failure then surfaces as a TE C++
+    assert deep inside model build. Catch it here, with the arithmetic.
+    """
+    kwargs = transformer_config_kwargs or {}
+    if not is_fp8_enabled(kwargs.get("fp8")) or not is_mxfp8_recipe(kwargs.get("fp8_recipe")):
+        return
+    config = getattr(hf_config, "text_config", None) or hf_config
+    dims = [
+        getattr(config, name, None)
+        for name in (
+            "linear_num_key_heads",
+            "linear_num_value_heads",
+            "linear_key_head_dim",
+            "linear_value_head_dim",
+        )
+    ]
+    if any(dim is None for dim in dims):
+        return  # no GDN linear-attention layers in this model
+    num_key_heads, num_value_heads, key_head_dim, value_head_dim = dims
+    in_proj_dim = 2 * key_head_dim * num_key_heads + 2 * value_head_dim * num_value_heads + 2 * num_value_heads
+    tp = tensor_model_parallel_size
+    if in_proj_dim % (32 * tp) == 0:
+        return
+    raise ValueError(
+        f"fp8_recipe='mxfp8' cannot run this GDN model at tensor_model_parallel_size={tp}: "
+        f"Megatron fuses the GDN q/k/v/z/b/a projections into one column-parallel in_proj GEMM "
+        f"(megatron/core/ssm/gated_delta_net.py) with output dim {in_proj_dim} = "
+        f"2*{key_head_dim}*{num_key_heads} + 2*{value_head_dim}*{num_value_heads} + 2*{num_value_heads}, "
+        f"each TP rank quantizes an [{in_proj_dim}/{tp}, hidden] shard, and TE's MXFP8 quantizer "
+        f"(MXFP8Quantizer::create_tensor) rejects any dim not divisible by 32. Pick a "
+        f"tensor_model_parallel_size that divides in_proj_dim/32 = {in_proj_dim / 32:g}, "
+        f"or use fp8_recipe='blockwise'."
+    )
+
+
+def resolve_auto_wire_format(fp8_recipe: Any) -> str:
+    """Resolve ``fp8_weight_sync_mode="auto"`` from the policy's concrete recipe.
+
+    Keys off the *recipe*, never the architecture: the rollout must serve the
+    representation the trainer computes with, so an explicit blockwise recipe
+    on Blackwell keeps a blockwise wire. Call after ``resolve_auto_fp8_recipe``;
+    a recipe left ``"auto"`` by a GPU-less driver is refused rather than
+    guessed, because the wire chosen here reaches every engine's boot config —
+    unlike the recipe, it gets no second resolution on the workers.
+    """
+    if isinstance(fp8_recipe, str) and fp8_recipe.strip().lower() == AUTO_FP8_RECIPE:
+        raise ValueError(
+            'fp8_weight_sync_mode="auto" cannot be resolved while fp8_recipe is still "auto" '
+            "(a driver without a visible CUDA device defers recipe resolution to its workers). "
+            "Set transformer_config_kwargs.fp8_recipe to 'blockwise' or 'mxfp8', or set "
+            "fp8_weight_sync_mode explicitly."
+        )
+    # Lazy import: the wire-format constants live in weight_sync, whose package
+    # init pulls torch; this module stays importable without it.
+    from skyrl.backends.skyrl_train.weight_sync.fp8.models.base import (
+        BLOCKWISE_FP8,
+        MXFP8,
+    )
+
+    return MXFP8 if is_mxfp8_recipe(fp8_recipe) else BLOCKWISE_FP8
+
+
+def wire_to_engine_quantization(wire_format: str) -> str:
+    """Map a serialized wire format to the vLLM ``quantization`` method that serves it.
+
+    MXFP8 rides vLLM's compressed-tensors path; blockwise rides its fp8 path.
+    Engines need this value at boot (``engine_init_kwargs.quantization``),
+    before trainer-side config resolution runs, so launchers deriving it for
+    ``fp8_weight_sync_mode=auto`` call this instead of re-encoding the mapping.
+    """
+    from skyrl.backends.skyrl_train.weight_sync.fp8.models.base import (
+        MXFP8,
+        WIRE_FORMATS,
+    )
+
+    if wire_format not in WIRE_FORMATS:
+        raise ValueError(f"Unsupported wire format {wire_format!r}; expected one of {WIRE_FORMATS!r}")
+    return "compressed-tensors" if wire_format == MXFP8 else "fp8"

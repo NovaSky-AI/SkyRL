@@ -1,15 +1,18 @@
-"""Qwen3.5 ``ModelFp8Spec`` for serialized blockwise FP8 weight sync."""
+"""Qwen3.5 ``ModelFp8Spec`` for serialized FP8 weight sync (blockwise and MXFP8)."""
 
 from __future__ import annotations
 
 from typing import Any, Optional, Sequence
 
 from skyrl.backends.skyrl_train.weight_sync.fp8.models.base import (
+    BLOCKWISE_FP8,
+    MXFP8,
     ModelFp8Spec,
     MoeExpertSpec,
     MoeProjection,
     register_fp8_spec,
 )
+from skyrl.backends.skyrl_train.weight_sync.fp8.quantize import MXFP8_GROUP_SIZE
 
 _QWEN35_FP8_WEIGHT_SUFFIXES = (
     ".self_attn.q_proj.weight",
@@ -48,6 +51,15 @@ _QWEN35_VISION_BLOCK_PREFIX_TEMPLATES = (
     "{model_prefix}.visual.blocks.{block_idx}.mlp.linear_fc1",
     "{model_prefix}.visual.blocks.{block_idx}.mlp.linear_fc2",
 )
+# MXFP8 rejects the rest of the vision tower as well: its kernels require the
+# reduction dim to be a multiple of 32, and the vision intermediate size (4304)
+# leaves a remainder of 16. The tower is not evaluated on a text-only RL
+# rollout, so excluding all of it costs nothing measurable.
+_QWEN35_MXFP8_EXTRA_VISION_BLOCK_TEMPLATES = ("{model_prefix}.visual.blocks.{block_idx}.attn.qkv",)
+_QWEN35_MXFP8_VISION_MERGER_TEMPLATES = (
+    "{model_prefix}.visual.merger.linear_fc1",
+    "{model_prefix}.visual.merger.linear_fc2",
+)
 
 _MOE_GATE = MoeProjection(hf_name="gate_proj", vllm_param="w13_weight", shard_id="w1")
 _MOE_UP = MoeProjection(hf_name="up_proj", vllm_param="w13_weight", shard_id="w3")
@@ -62,12 +74,21 @@ def is_qwen35_config(hf_config: Any) -> bool:
     return model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
 
 
-def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -> list[str]:
+def get_qwen35_fp8_ignored_layers(
+    hf_config: Any,
+    wire_format: str = BLOCKWISE_FP8,
+    model_prefix: str = "model",
+) -> list[str]:
     """Return Qwen3.5 vLLM module prefixes excluded from serialized FP8.
 
-    Serialized sync excludes GDN ``in_proj_a`` and ``in_proj_b``. vLLM requires
-    every shard of the fused module to share a quantization scheme, so both
-    prefixes are ignored for text-only and conditional-generation checkpoints.
+    Both wire formats exclude GDN ``in_proj_a`` and ``in_proj_b`` — blockwise
+    because the 32-row shard is not 128-divisible, MXFP8 because its kernels
+    require ``out_features >= 128``. vLLM requires every shard of a fused module
+    to share a quantization scheme, so both prefixes are ignored for text-only
+    and conditional-generation checkpoints.
+
+    MXFP8 additionally excludes the whole vision tower; see the template
+    definitions above. The blockwise list is a strict subset of the MXFP8 one.
     """
 
     text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
@@ -100,22 +121,35 @@ def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -
             if isinstance(value, int) and value > 0:
                 vision_depth = value
                 break
+    block_templates = _QWEN35_VISION_BLOCK_PREFIX_TEMPLATES
+    if wire_format == MXFP8:
+        block_templates = block_templates + _QWEN35_MXFP8_EXTRA_VISION_BLOCK_TEMPLATES
     for block_idx in range(vision_depth):
-        for template in _QWEN35_VISION_BLOCK_PREFIX_TEMPLATES:
+        for template in block_templates:
             ignored.append(template.format(model_prefix=model_prefix, block_idx=block_idx))
+    if wire_format == MXFP8 and vision_depth:
+        for template in _QWEN35_MXFP8_VISION_MERGER_TEMPLATES:
+            ignored.append(template.format(model_prefix=model_prefix))
     return ignored
 
 
-def is_quantizable_weight_shape(name: str, shape: Sequence[int]) -> bool:
+def is_quantizable_weight_shape(name: str, shape: Sequence[int], wire_format: str = BLOCKWISE_FP8) -> bool:
     """Return whether an exported HF weight should be serialized as FP8.
 
     vLLM's FP8 config applies to Linear modules. HF checkpoints also contain 2D
     embedding/output weights, so keep known non-Linear weight tables unquantized.
+
+    MXFP8 additionally requires the reduction dimension to be a multiple of 32;
+    a weight that fails it has no valid group layout on the wire.
     """
 
     if not name.endswith(".weight") or len(shape) != 2:
         return False
-    return name.endswith(_QWEN35_FP8_WEIGHT_SUFFIXES)
+    if not name.endswith(_QWEN35_FP8_WEIGHT_SUFFIXES):
+        return False
+    if wire_format == MXFP8 and shape[1] % MXFP8_GROUP_SIZE != 0:
+        return False
+    return True
 
 
 def batched_moe_expert_spec(name: str) -> Optional[MoeExpertSpec]:

@@ -300,6 +300,10 @@ def test_batched_moe_wire_targets_derive_from_registered_specs():
         ".experts.gate_proj.weight_scale_inv": (".experts.w13_weight_scale_inv", "w1"),
         ".experts.up_proj.weight_scale_inv": (".experts.w13_weight_scale_inv", "w3"),
         ".experts.down_proj.weight_scale_inv": (".experts.w2_weight_scale_inv", "w2"),
+        # MXFP8 ships compressed-tensors' weight_scale instead of weight_scale_inv.
+        ".experts.gate_proj.weight_scale": (".experts.w13_weight_scale", "w1"),
+        ".experts.up_proj.weight_scale": (".experts.w13_weight_scale", "w3"),
+        ".experts.down_proj.weight_scale": (".experts.w2_weight_scale", "w2"),
     }
 
 

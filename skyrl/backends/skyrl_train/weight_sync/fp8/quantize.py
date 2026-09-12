@@ -1,12 +1,20 @@
-"""Blockwise FP8 quantization kernels and scale-mode helpers."""
+"""FP8 quantization kernels and scale-mode helpers for blockwise and MXFP8."""
 
 from __future__ import annotations
 
 import os
 from operator import index
-from typing import Sequence
+from typing import Any, Sequence
 
 import torch
+
+# MXFP8 (OCP microscaling) groups 32 consecutive elements along the reduction
+# dimension and stores one E8M0 exponent per group.
+MXFP8_GROUP_SIZE = 32
+E8M0_BIAS = 127
+# Widest exponent an E8M0 byte can carry once biased; 255 is the NaN encoding.
+_E8M0_MIN_EXP = -E8M0_BIAS
+_E8M0_MAX_EXP = 254 - E8M0_BIAS
 
 
 def use_power_2_scales_default() -> bool:
@@ -38,6 +46,11 @@ def normalize_block_size(block_size: Sequence[int]) -> tuple[int, int]:
     return values
 
 
+# --------------------------------------------------------------------------
+# Blockwise wire: 128x128 tiles, FP32 (or power-of-2) inverse scales.
+# --------------------------------------------------------------------------
+
+
 def blockwise_cast_to_fp8(
     weight: torch.Tensor,
     block_size: Sequence[int],
@@ -59,7 +72,7 @@ def blockwise_cast_to_fp8(
     padded_cols = ((cols + block_n - 1) // block_n) * block_n
 
     fp8_info = torch.finfo(torch.float8_e4m3fn)
-    weight_fp32 = weight.detach().to(torch.float32)
+    weight_fp32 = weight.detach().to(torch.float32).contiguous()
     if padded_rows != rows or padded_cols != cols:
         padded = weight_fp32.new_zeros((padded_rows, padded_cols))
         padded[:rows, :cols].copy_(weight_fp32)
@@ -134,3 +147,174 @@ def batched_blockwise_cast_to_fp8(
         scales[start:end].copy_(scale)
 
     return q_weight, scales
+
+
+# --------------------------------------------------------------------------
+# MXFP8 wire: 1x32 groups along the reduction dim, E8M0 exponent scales.
+# Torch implementation is the parity oracle; TE's kernel is the fast path.
+# --------------------------------------------------------------------------
+
+
+def _mx_shared_exponent(amax: torch.Tensor) -> torch.Tensor:
+    """Return the E8M0 shared exponent for each group.
+
+    Transformer Engine derives it as ``ceil(log2(amax / 448))`` -- the same
+    power-of-two rule the blockwise path applies to its FP32 scales. Groups that
+    are entirely zero have no representable exponent; they take the minimum so
+    every code in the group quantizes to zero.
+    """
+
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    exponent = torch.ceil(torch.log2(amax / fp8_max))
+    exponent = torch.where(amax > 0, exponent, torch.full_like(exponent, float(_E8M0_MIN_EXP)))
+    return exponent.clamp(min=_E8M0_MIN_EXP, max=_E8M0_MAX_EXP)
+
+
+_TE_MX_QUANTIZER: Any = None
+_TE_MX_PROBED = False
+
+
+def _te_mx_quantizer() -> Any:
+    """Transformer Engine's MXFP8 quantizer, or ``None`` when unusable.
+
+    TE's C++ kernel quantizes at memory bandwidth (~4 TB/s on B200) where the
+    torch-composed implementation below runs at ~100 GB/s, so it is the default
+    whenever it can run: CUDA tensor, TE importable, and the kernel actually
+    working on this device (it requires SM100+). Bitwise equality between the
+    two is enforced by tests/.../gpu_ci/test_mxfp8_te_parity.py — the torch
+    implementation is the oracle, TE is the fast path.
+
+    ``SKYRL_MX_CAST_BACKEND=python`` forces the torch path (escape hatch);
+    ``=te`` makes an unusable TE an error instead of a silent fallback.
+    """
+
+    global _TE_MX_QUANTIZER, _TE_MX_PROBED
+    backend = os.environ.get("SKYRL_MX_CAST_BACKEND", "auto").lower()
+    if backend == "python":
+        return None
+    if _TE_MX_PROBED:
+        if backend == "te" and _TE_MX_QUANTIZER is None:
+            raise RuntimeError("SKYRL_MX_CAST_BACKEND=te but the TE MXFP8 quantizer is unusable on this device")
+        return _TE_MX_QUANTIZER
+    _TE_MX_PROBED = True
+    try:
+        import importlib
+
+        import transformer_engine.pytorch  # noqa: F401  (registers wheel_lib on sys.path)
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        tex = importlib.import_module("transformer_engine_torch")
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+        probe = torch.zeros(128, MXFP8_GROUP_SIZE, dtype=torch.bfloat16, device="cuda")
+        quantizer(probe)
+        _TE_MX_QUANTIZER = quantizer
+    except Exception:
+        _TE_MX_QUANTIZER = None
+        if backend == "te":
+            raise
+    return _TE_MX_QUANTIZER
+
+
+def _te_mx_cast_2d(weight: torch.Tensor, quantizer: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run TE's quantizer and strip its padding back to the wire layout.
+
+    TE pads the scale matrix (rows to a multiple of 128, groups to a multiple
+    of 4); the wire ships the logical ``[rows, cols // 32]``.
+    """
+
+    rows, cols = weight.shape
+    quantized = quantizer(weight)
+    codes = quantized._rowwise_data
+    if codes.dtype != torch.float8_e4m3fn:
+        codes = codes.view(torch.float8_e4m3fn)
+    scales = quantized._rowwise_scale_inv
+    groups = cols // MXFP8_GROUP_SIZE
+    if tuple(scales.shape) != (rows, groups):
+        scales = scales[:rows, :groups].contiguous()
+    return codes.view(rows, cols), scales
+
+
+def mx_cast_to_fp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a 2D tensor to MXFP8: E4M3 codes plus one E8M0 scale per 32 columns.
+
+    Returns ``(codes, scales)`` where ``scales`` holds biased exponents as
+    ``uint8`` in vLLM's compressed-tensors layout ``[rows, cols // 32]``, and
+    ``weight ~= codes.float() * 2 ** (scales.int() - 127)``.
+
+    The receiver requires the reduction dimension to be a multiple of the group
+    size, so an unaligned tensor is a spec error rather than something to pad.
+    """
+
+    if weight.ndim != 2:
+        raise ValueError(f"MXFP8 expects a 2D tensor, got shape={tuple(weight.shape)}")
+    rows, cols = weight.shape
+    if cols % MXFP8_GROUP_SIZE != 0:
+        raise ValueError(
+            f"MXFP8 requires the reduction dimension to be a multiple of {MXFP8_GROUP_SIZE}, got cols={cols}"
+        )
+
+    # TE's quantize kernel additionally requires rows % 32 == 0 (it asserts on
+    # flat_first_dim); tensors that miss it take the torch path below.
+    if weight.is_cuda and rows % MXFP8_GROUP_SIZE == 0:
+        quantizer = _te_mx_quantizer()
+        if quantizer is not None:
+            return _te_mx_cast_2d(weight.detach().contiguous(), quantizer)
+
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    groups = weight.detach().to(torch.float32).contiguous().view(rows, cols // MXFP8_GROUP_SIZE, MXFP8_GROUP_SIZE)
+    exponent = _mx_shared_exponent(groups.abs().amax(dim=-1))
+    scale = torch.pow(2.0, exponent)
+
+    codes = (groups / scale[..., None]).clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
+    scales = (exponent + E8M0_BIAS).to(torch.uint8)
+    return codes.view(rows, cols).contiguous(), scales.contiguous()
+
+
+def batched_mx_cast_to_fp8(
+    weight: torch.Tensor,
+    expert_batch_size: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a 3D ``[experts, rows, cols]`` tensor to MXFP8.
+
+    Batches experts for the same reason the blockwise path does: one conversion
+    pipeline per batch instead of per expert, with bounded FP32 workspace.
+    """
+
+    if weight.ndim != 3:
+        raise ValueError(f"Batched MXFP8 expects a 3D tensor, got shape={tuple(weight.shape)}")
+    if isinstance(expert_batch_size, bool) or not isinstance(expert_batch_size, int) or expert_batch_size <= 0:
+        raise ValueError(f"expert_batch_size must be a positive integer, got {expert_batch_size!r}")
+
+    num_experts, rows, cols = weight.shape
+    if cols % MXFP8_GROUP_SIZE != 0:
+        raise ValueError(
+            f"MXFP8 requires the reduction dimension to be a multiple of {MXFP8_GROUP_SIZE}, got cols={cols}"
+        )
+
+    if weight.is_cuda and num_experts * rows > 0 and (num_experts * rows) % MXFP8_GROUP_SIZE == 0:
+        quantizer = _te_mx_quantizer()
+        if quantizer is not None:
+            # MX groups run along the last dim, so experts and rows flatten
+            # without crossing any group boundary: one kernel over [E*N, K]
+            # instead of a python loop of expert batches.
+            flat = weight.detach().reshape(num_experts * rows, cols).contiguous()
+            codes, scales = _te_mx_cast_2d(flat, quantizer)
+            return (
+                codes.view(num_experts, rows, cols),
+                scales.view(num_experts, rows, cols // MXFP8_GROUP_SIZE),
+            )
+
+    num_groups = cols // MXFP8_GROUP_SIZE
+    codes = torch.empty(weight.shape, dtype=torch.float8_e4m3fn, device=weight.device)
+    scales = torch.empty((num_experts, rows, num_groups), dtype=torch.uint8, device=weight.device)
+
+    for start in range(0, num_experts, expert_batch_size):
+        end = min(start + expert_batch_size, num_experts)
+        # MX groups run along the last dim, so a batch of experts flattens to
+        # 2D without crossing group boundaries; the 2D cast is the single
+        # owner of the quantization rule.
+        batch_codes, batch_scales = mx_cast_to_fp8(weight[start:end].detach().reshape(-1, cols))
+        codes[start:end].copy_(batch_codes.view(end - start, rows, cols))
+        scales[start:end].copy_(batch_scales.view(end - start, rows, num_groups))
+
+    return codes, scales
