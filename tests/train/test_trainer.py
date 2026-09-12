@@ -2,6 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -14,7 +15,9 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils.trainer_utils import ResumeMode
 from skyrl.train.utils.utils import validate_batch_sizes
 from tests.train.util import example_dummy_config
 
@@ -300,6 +303,166 @@ def test_flush_pending_metrics_swallows_tracker_errors(dummy_config):
 
     assert trainer.all_metrics == {}
     assert trainer.all_timings == {}
+
+
+@pytest.mark.parametrize(("load_global_step", "expected_global_step"), [(True, 7), (False, 0)])
+def test_resume_can_skip_training_states(dummy_config, tmp_path: Path, load_global_step, expected_global_step):
+    checkpoint_path = tmp_path / "global_step_7"
+    (checkpoint_path / "policy").mkdir(parents=True)
+    torch.save({"global_step": 7}, checkpoint_path / "trainer_state.pt")
+    torch.save({"position": 5}, checkpoint_path / "data.pt")
+
+    dummy_config.trainer.resume_mode = "from_path"
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.resume_load_global_step = load_global_step
+    dummy_config.trainer.resume_load_dataloader_state = False
+    dummy_config.trainer.resume_load_optimizer_states = False
+    dummy_config.trainer.resume_load_lr_scheduler_states = False
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.train_dataloader = MagicMock()
+    trainer.dispatch = MagicMock()
+    trainer.critic_model = None
+
+    global_step, loaded_path = trainer.load_checkpoints()
+
+    assert global_step == expected_global_step
+    assert loaded_path == str(checkpoint_path)
+    assert trainer._dataloader_state_restored is False
+    trainer.train_dataloader.load_state_dict.assert_not_called()
+    trainer.dispatch.load_checkpoint.assert_called_once_with(
+        "policy",
+        str(checkpoint_path / "policy"),
+        load_optimizer_states=False,
+        load_lr_scheduler_states=False,
+    )
+
+
+def test_resume_records_successful_dataloader_state_restore(dummy_config, tmp_path: Path):
+    checkpoint_path = tmp_path / "global_step_7"
+    (checkpoint_path / "policy").mkdir(parents=True)
+    torch.save({"global_step": 7}, checkpoint_path / "trainer_state.pt")
+    torch.save({"position": 5}, checkpoint_path / "data.pt")
+
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.train_dataloader = MagicMock()
+    trainer.dispatch = MagicMock()
+
+    assert trainer.load_checkpoints() == (7, str(checkpoint_path))
+    assert trainer._dataloader_state_restored is True
+    trainer.train_dataloader.load_state_dict.assert_called_once_with({"position": 5})
+
+
+@pytest.mark.parametrize(
+    ("global_step", "state_restored", "expected"),
+    [(7, False, 1), (8, False, 4), (7, True, None), (0, False, None)],
+)
+def test_resumed_epoch_steps_remaining(global_step, state_restored, expected):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.global_step = global_step
+    trainer._dataloader_state_restored = state_restored
+    trainer.train_dataloader = [object()] * 4
+
+    assert trainer._get_resumed_epoch_steps_remaining() == expected
+
+
+def test_resume_without_train_dataloader_skips_cursor_restore(dummy_config, tmp_path: Path):
+    checkpoint_path = tmp_path / "global_step_7"
+    (checkpoint_path / "policy").mkdir(parents=True)
+    torch.save({"global_step": 7}, checkpoint_path / "trainer_state.pt")
+    torch.save({"position": 5}, checkpoint_path / "data.pt")
+
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.train_dataloader = None
+    trainer.dispatch = MagicMock()
+
+    with patch("skyrl.train.trainer.logger") as mock_logger:
+        assert trainer.load_checkpoints() == (7, str(checkpoint_path))
+
+    mock_logger.info.assert_any_call("No train dataloader initialized; skipping dataloader state restore")
+    mock_logger.warning.assert_not_called()
+
+
+def test_fully_async_new_phase_resume_skips_async_state(dummy_config, tmp_path: Path):
+    checkpoint_path = tmp_path / "global_step_7"
+    (checkpoint_path / "policy").mkdir(parents=True)
+    torch.save({"global_step": 7}, checkpoint_path / "trainer_state.pt")
+    torch.save({"position": 5}, checkpoint_path / "data.pt")
+    torch.save(
+        {"consumed_uids": ["old-prompt"], "filtered_uids": [], "epoch": 3},
+        checkpoint_path / "fully_async_state.pt",
+    )
+
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.resume_load_global_step = False
+    dummy_config.trainer.resume_load_dataloader_state = False
+    dummy_config.trainer.resume_load_optimizer_states = False
+    dummy_config.trainer.resume_load_lr_scheduler_states = False
+
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.train_dataloader = MagicMock()
+    trainer.dispatch = MagicMock()
+
+    assert trainer.load_checkpoints() == (0, str(checkpoint_path), None, None, None)
+    trainer.train_dataloader.load_state_dict.assert_not_called()
+    trainer.dispatch.load_checkpoint.assert_called_once_with(
+        "policy",
+        str(checkpoint_path / "policy"),
+        load_optimizer_states=False,
+        load_lr_scheduler_states=False,
+    )
+
+
+def test_fully_async_resume_skips_async_state_without_dataloader_cursor(dummy_config, tmp_path: Path):
+    checkpoint_path = tmp_path / "global_step_7"
+    (checkpoint_path / "policy").mkdir(parents=True)
+    torch.save({"global_step": 7}, checkpoint_path / "trainer_state.pt")
+    torch.save({"position": 5}, checkpoint_path / "data.pt")
+    torch.save(
+        {"consumed_uids": ["trained", "filtered"], "filtered_uids": ["filtered"], "epoch": 3},
+        checkpoint_path / "fully_async_state.pt",
+    )
+
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.resume_load_dataloader_state = False
+
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.train_dataloader = MagicMock()
+    trainer.dispatch = MagicMock()
+
+    assert trainer.load_checkpoints() == (7, str(checkpoint_path), None, None, None)
+    trainer.train_dataloader.load_state_dict.assert_not_called()
+
+
+def test_fully_async_resume_without_data_state_restores_epoch_progress(dummy_config):
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.global_step = 7
+    trainer.async_train_dataloader = MagicMock()
+    trainer._staleness_manager = MagicMock()
+    trainer.num_steps_per_epoch = 4
+
+    start_epoch, steps_into_epoch = trainer._restore_async_training_state(None, None, None)
+
+    assert start_epoch == 1
+    assert steps_into_epoch == 3
+    assert steps_into_epoch + 1 == trainer.num_steps_per_epoch
+    trainer.async_train_dataloader.load_state_from_checkpoint.assert_not_called()
+    trainer._staleness_manager.load_state_from_checkpoint.assert_called_once_with(8)
 
 
 def test_run_flushes_pending_metrics_before_logging_exception():
