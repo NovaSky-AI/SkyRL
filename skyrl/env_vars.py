@@ -6,6 +6,14 @@ All environment variables used by SkyRL should be defined here for discoverabili
 
 import os
 
+_TRUTHY = ("true", "1", "yes")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment variable, treating "true"/"1"/"yes" as True."""
+    return os.environ.get(name, str(default)).strip().lower() in _TRUTHY
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Ray / Placement Group
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,22 +75,14 @@ Set to 0 to disable throttling (all tasks fire immediately).
 # Runtime Environment Exports
 # ─────────────────────────────────────────────────────────────────────────────
 
-SKYRL_LD_LIBRARY_PATH_EXPORT = str(os.environ.get("SKYRL_LD_LIBRARY_PATH_EXPORT", "False")).lower() in (
-    "true",
-    "1",
-    "yes",
-)
+SKYRL_LD_LIBRARY_PATH_EXPORT = _env_flag("SKYRL_LD_LIBRARY_PATH_EXPORT")
 """
 Whether to export ``LD_LIBRARY_PATH`` environment variable from the driver to the workers with Ray's runtime env.
 
 For example, if you are using RDMA, you may need to customize the ``LD_LIBRARY_PATH`` to include the RDMA libraries (Ex: EFA on AWS).
 """
 
-SKYRL_PYTHONPATH_EXPORT = str(os.environ.get("SKYRL_PYTHONPATH_EXPORT", "False")).lower() in (
-    "true",
-    "1",
-    "yes",
-)
+SKYRL_PYTHONPATH_EXPORT = _env_flag("SKYRL_PYTHONPATH_EXPORT")
 """
 Whether to export ``PYTHONPATH`` environment variable from the driver to the workers with Ray's runtime env.
 
@@ -93,11 +93,7 @@ See https://github.com/ray-project/ray/issues/56697 for details on why this is n
 # Logging
 # ─────────────────────────────────────────────────────────────────────────────
 
-SKYRL_DUMP_INFRA_LOG_TO_STDOUT = str(os.environ.get("SKYRL_DUMP_INFRA_LOG_TO_STDOUT", "False")).lower() in (
-    "true",
-    "1",
-    "yes",
-)
+SKYRL_DUMP_INFRA_LOG_TO_STDOUT = _env_flag("SKYRL_DUMP_INFRA_LOG_TO_STDOUT")
 """
 When enabled, infrastructure logs (vLLM, Ray, workers) are shown on stdout
 instead of being redirected to the log file. Useful for debugging startup issues.
