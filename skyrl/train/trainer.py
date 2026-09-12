@@ -58,7 +58,7 @@ from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
-from skyrl.train.evaluate import evaluate, evaluate_step_wise
+from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -244,29 +244,16 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
-        if self.cfg.generator.step_wise_trajectories:
-            eval_metrics = await evaluate_step_wise(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_logger=self.trajectory_logger,
-                tracker=self.tracker,
-                vllm_metrics_scraper=vllm_metrics_scraper,
-            )
-        else:
-            eval_metrics = await evaluate(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_logger=self.trajectory_logger,
-                tracker=self.tracker,
-                vllm_metrics_scraper=vllm_metrics_scraper,
-            )
-        return eval_metrics
+        return await evaluate(
+            eval_dataloader=self.eval_dataloader,
+            generator=self.generator,
+            cfg=self.cfg,
+            global_step=self.global_step,
+            tokenizer=self.tokenizer,
+            trajectory_logger=self.trajectory_logger,
+            tracker=self.tracker,
+            vllm_metrics_scraper=vllm_metrics_scraper,
+        )
 
     async def train(self):
         """
