@@ -20,7 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -41,8 +41,12 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
     get_unpacked_seq_align_size,
 )
+from skyrl.backends.skyrl_train.weight_sync.lora_layout import (
+    convert_moe_experts_lora_to_vllm,
+)
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
+_convert_moe_experts_lora_to_vllm = convert_moe_experts_lora_to_vllm
 
 
 def make_batch_generator(batches, vpp_size):
@@ -164,38 +168,6 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
                     layer.mlp.router.bias.requires_grad = False
     # modified in-place
     return model_or_models
-
-
-def _convert_moe_experts_lora_to_vllm(
-    adapter_state: Dict[str, "torch.Tensor"],
-) -> Dict[str, "torch.Tensor"]:
-    """Rewrite fused-MoE expert LoRA tensors into the layout vLLM expects.
-
-    Megatron-Bridge exports fused experts as 3D tensors keyed
-    ``...mlp.experts.gate_up_proj`` (w13) / ``...mlp.experts.down_proj`` (w2),
-    with ``lora_A=(E, rank, in)`` and ``lora_B=(E, out, rank)``. vLLM's 3D-MoE
-    loader (``FusedMoE3DWithLoRA`` / ``_stack_moe_lora_weights``) instead expects
-    the flat PEFT layout keyed ``...experts.base_layer`` (w13) / ``...experts``
-    (w2), with ``lora_A=(rank*E, in)`` and ``lora_B=(out, rank*E)``. This is the
-    exact inverse of vLLM's per-expert reshape. Non-expert tensors pass through.
-    """
-    converted: Dict[str, "torch.Tensor"] = {}
-    for key, tensor in adapter_state.items():
-        is_gate_up = ".mlp.experts.gate_up_proj." in key
-        is_down = ".mlp.experts.down_proj." in key
-        if (is_gate_up or is_down) and tensor.ndim == 3:
-            if key.endswith(".lora_A.weight"):
-                # (E, rank, in) -> (rank*E [expert-major], in)
-                tensor = tensor.reshape(-1, tensor.shape[-1]).contiguous()
-            elif key.endswith(".lora_B.weight"):
-                # (E, out, rank) -> (out, rank*E [expert-minor])
-                tensor = tensor.permute(1, 2, 0).contiguous().reshape(tensor.shape[1], -1)
-            if is_gate_up:
-                key = key.replace(".mlp.experts.gate_up_proj.", ".mlp.experts.base_layer.")
-            else:
-                key = key.replace(".mlp.experts.down_proj.", ".mlp.experts.")
-        converted[key] = tensor
-    return converted
 
 
 def gdn_in_proj_lora_is_safe(bridge) -> bool:

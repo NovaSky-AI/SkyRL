@@ -212,9 +212,42 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         "nccl",
         "delta",
         "sharded_rdt",
-    }, "only nccl, delta and sharded_rdt are supported for megatron weight sync"
+        "lora_nccl",
+    }, "only nccl, delta, sharded_rdt and lora_nccl are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
+
+    if ie_cfg.weight_sync_backend == "lora_nccl":
+        backend = ie_cfg.weight_sync_backend
+        lora = cfg.trainer.policy.model.lora
+        megatron = cfg.trainer.policy.megatron_config
+        if cfg.trainer.placement.colocate_all:
+            raise ValueError(f"{backend} requires non-colocated training and inference")
+        if lora.rank <= 0 or megatron.lora_config.merge_lora:
+            raise ValueError(f"{backend} requires rank > 0 and merge_lora=false")
+        if lora.max_loras < 2:
+            raise ValueError(f"{backend} requires max_loras >= 2 for staging")
+        if (
+            megatron.pipeline_model_parallel_size != 1
+            or ie_cfg.pipeline_parallel_size != 1
+        ):
+            raise ValueError(
+                f"{backend} currently supports pipeline parallel size 1 only"
+            )
+        if cfg.trainer.mtp.enabled or ie_cfg.fully_sharded_loras:
+            raise ValueError(f"{backend} does not support MTP or fully_sharded_loras")
+        if megatron.transformer_config_kwargs.get("fp8"):
+            raise ValueError(
+                f"{backend} requires FP32 LoRA publication; FP8 is unsupported"
+            )
+        if megatron.lora_config.normalize_moe_lora:
+            raise ValueError("lora_nccl does not support normalize_moe_lora")
+        if cfg.trainer.placement.policy_num_nodes != 1:
+            raise ValueError(
+                "lora_nccl initially requires all trainer ranks on one node"
+            )
+        if ie_cfg.num_engines != 1:
+            raise ValueError("lora_nccl initially supports one inference TP group")
 
     policy_cfg = cfg.trainer.policy
     policy_fp8_param = is_fp8_enabled(policy_cfg.megatron_config.transformer_config_kwargs.get("fp8_param"))

@@ -24,6 +24,8 @@ Usage:
         skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap
 """
 
+import json
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import torch
@@ -144,10 +146,14 @@ def _load_batched_moe_fp8_tensor(
 
     param = params_dict[target_name]
     weight_loader = getattr(param, "weight_loader", None)
-    if weight_loader is None or not getattr(weight_loader, "supports_moe_loading", False):
+    if weight_loader is None or not getattr(
+        weight_loader, "supports_moe_loading", False
+    ):
         # Layerwise reload wraps the loader with functools.wraps, which copies
         # this marker from FusedMoE.weight_loader onto the wrapper.
-        raise ValueError(f"Parameter {target_name!r} does not expose a FusedMoE weight loader")
+        raise ValueError(
+            f"Parameter {target_name!r} does not expose a FusedMoE weight loader"
+        )
 
     if param.shape[0] == loaded_weight.shape[0]:
         success = weight_loader(
@@ -159,7 +165,9 @@ def _load_batched_moe_fp8_tensor(
             return_success=True,
         )
         if not success:
-            raise ValueError(f"Fused loading failed for batched MoE tensor {wire_name!r}")
+            raise ValueError(
+                f"Fused loading failed for batched MoE tensor {wire_name!r}"
+            )
         return True
 
     # Expert-parallel vLLM keeps only a subset locally. Retain the compact wire
@@ -184,7 +192,9 @@ def _load_batched_moe_fp8_tensor(
     return True
 
 
-def _load_checkpoint_weights(model: torch.nn.Module, weights: list[tuple[str, torch.Tensor]]) -> Any:
+def _load_checkpoint_weights(
+    model: torch.nn.Module, weights: list[tuple[str, torch.Tensor]]
+) -> Any:
     """Load ordinary HF tensors plus SkyRL's compact batched-MoE tensors."""
     params_dict: dict[str, torch.nn.Parameter] | None = None
     ordinary_weights: list[tuple[str, torch.Tensor]] = []
@@ -218,6 +228,14 @@ class _LoadWeightsProxy:
         return getattr(self._model, name)
 
 
+@dataclass
+class _LoRANcclWorkerSession:
+    rendezvous: Any
+    adapter_config_json: str
+    consumer_plan: Any
+    session: Any
+
+
 class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
     """
     vLLM worker extension for chunked weight sync (new inference path).
@@ -234,7 +252,291 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         self.device
     """
 
-    def fetch_weights(self, target_version: int, sync_dir: str | None = None, uri: str | None = None):
+    def inspect_lora_transport_route(
+        self,
+        layout: dict,
+        adapter_config: dict,
+    ) -> dict:
+        """Return this worker's immutable LoRA source-pull route."""
+        from skyrl.backends.skyrl_train.weight_sync.lora_nccl import (
+            LoRANcclConsumerRoute,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport import (
+            LoRABridgeSourceLayout,
+            build_vllm_lora_consumer_plan,
+        )
+
+        source_layout = LoRABridgeSourceLayout.from_json_dict(layout)
+        config_json = json.dumps(
+            adapter_config,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        plans = getattr(self, "_skyrl_lora_nccl_consumer_plans", {})
+        cached = plans.get(source_layout.adapter_name)
+        if cached is None:
+            consumer_plan = build_vllm_lora_consumer_plan(
+                source_layout,
+                adapter_config,
+                self.model_runner,
+            )
+            plans[source_layout.adapter_name] = (
+                config_json,
+                consumer_plan,
+            )
+            self._skyrl_lora_nccl_consumer_plans = plans
+        else:
+            cached_config_json, consumer_plan = cached
+            if (
+                cached_config_json != config_json
+                or consumer_plan.source_layout_digest != source_layout.layout_digest
+            ):
+                raise ValueError(
+                    f"LoRA adapter {source_layout.adapter_name!r} changed its fixed "
+                    "NCCL consumer plan"
+                )
+        return LoRANcclConsumerRoute.from_consumer_plan(
+            self.rank,
+            consumer_plan,
+        ).to_json_dict()
+
+    def init_lora_nccl_transport(
+        self,
+        rendezvous: dict,
+        layout: dict,
+        adapter_config: dict,
+    ) -> dict:
+        """Join persistent source groups after this rank's route is frozen."""
+        from skyrl.backends.skyrl_train.weight_sync.lora_nccl import (
+            LoRANcclRendezvous,
+            open_lora_nccl_receiver_session,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport import (
+            LoRABridgeSourceLayout,
+        )
+
+        rendezvous_info = LoRANcclRendezvous.from_json_dict(rendezvous)
+        source_layout = LoRABridgeSourceLayout.from_json_dict(layout)
+        if rendezvous_info.adapter_name != source_layout.adapter_name:
+            raise ValueError("LoRA NCCL rendezvous changed the adapter name")
+        if rendezvous_info.source_layout_digest != source_layout.layout_digest:
+            raise ValueError("LoRA NCCL rendezvous changed the source layout")
+        config_json = json.dumps(
+            adapter_config,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        plans = getattr(self, "_skyrl_lora_nccl_consumer_plans", {})
+        cached = plans.get(source_layout.adapter_name)
+        if cached is None:
+            self.inspect_lora_transport_route(layout, adapter_config)
+            cached = self._skyrl_lora_nccl_consumer_plans[source_layout.adapter_name]
+        cached_config_json, consumer_plan = cached
+        if cached_config_json != config_json:
+            raise ValueError("LoRA NCCL rendezvous changed the adapter configuration")
+        sessions = getattr(self, "_skyrl_lora_nccl_sessions", {})
+        previous = sessions.get(source_layout.adapter_name)
+        if previous is not None:
+            if previous.rendezvous != rendezvous_info:
+                raise ValueError("LoRA NCCL adapter already uses another rendezvous")
+            return {
+                "adapter_name": source_layout.adapter_name,
+                "plan_digest": rendezvous_info.plan_digest,
+                "reused": True,
+            }
+        session = open_lora_nccl_receiver_session(
+            consumer_plan,
+            self.rank,
+            rendezvous_info,
+            self.device,
+        )
+        sessions[source_layout.adapter_name] = _LoRANcclWorkerSession(
+            rendezvous_info,
+            config_json,
+            consumer_plan,
+            session,
+        )
+        self._skyrl_lora_nccl_sessions = sessions
+        return {
+            "adapter_name": source_layout.adapter_name,
+            "plan_digest": rendezvous_info.plan_digest,
+            "reused": False,
+        }
+
+    def stage_lora_nccl_adapter(
+        self,
+        request: dict,
+        adapter_id: int,
+    ) -> dict:
+        """Receive FP32 buckets and stage independent local BF16 factors."""
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport import (
+            LoRAUpdateRequest,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport.contracts import (
+            LoRAReceiverGeneration,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport.vllm_adapter import (
+            stage_vllm_local_lora_factors,
+        )
+
+        update_request = LoRAUpdateRequest.from_json_dict(request)
+        sessions = getattr(self, "_skyrl_lora_nccl_sessions", {})
+        worker_session = sessions.get(update_request.adapter_name)
+        if worker_session is None:
+            raise RuntimeError(
+                f"LoRA NCCL adapter {update_request.adapter_name!r} is not initialized"
+            )
+        if (
+            update_request.layout_digest
+            != worker_session.rendezvous.source_layout_digest
+        ):
+            raise ValueError("LoRA NCCL update changed the fixed source layout")
+        staged = getattr(self, "_skyrl_lora_transport_staged", {})
+        active = getattr(self, "_skyrl_lora_transport_active", {})
+        if update_request.adapter_name in staged:
+            raise ValueError(
+                f"LoRA adapter {update_request.adapter_name!r} already has a staged generation"
+            )
+        next_record = LoRAReceiverGeneration(
+            update_request,
+            adapter_id,
+            worker_session.adapter_config_json,
+        )
+        active_record = active.get(update_request.adapter_name)
+        if active_record is not None:
+            if update_request.generation <= active_record.request.generation:
+                raise ValueError(
+                    f"LoRA generation {update_request.generation} is stale; "
+                    f"active generation is {active_record.request.generation}"
+                )
+            if update_request.layout_digest != active_record.request.layout_digest:
+                raise ValueError(
+                    f"LoRA adapter {update_request.adapter_name!r} changed its "
+                    "fixed receiver layout"
+                )
+            if next_record.adapter_config_json != active_record.adapter_config_json:
+                raise ValueError(
+                    f"LoRA adapter {update_request.adapter_name!r} changed its "
+                    "fixed receiver configuration"
+                )
+        factors, receipt = worker_session.session.receive(update_request)
+        stage_vllm_local_lora_factors(
+            self.model_runner,
+            adapter_id,
+            worker_session.consumer_plan.receiver_plan,
+            factors,
+        )
+        torch.cuda.synchronize(self.device)
+        staged[update_request.adapter_name] = next_record
+        self._skyrl_lora_transport_staged = staged
+        return {"adapter_id": adapter_id, **asdict(receipt)}
+
+    def close_lora_nccl_transport(self, adapter_name: str) -> None:
+        """Destroy persistent groups after the named adapter is unloaded."""
+        staged = getattr(self, "_skyrl_lora_transport_staged", {})
+        active = getattr(self, "_skyrl_lora_transport_active", {})
+        if adapter_name in staged or adapter_name in active:
+            raise ValueError(
+                f"LoRA NCCL adapter {adapter_name!r} must be unloaded before transport teardown"
+            )
+        self.reset_lora_nccl_transport(adapter_name)
+        getattr(self, "_skyrl_lora_nccl_consumer_plans", {}).pop(
+            adapter_name,
+            None,
+        )
+
+    def reset_lora_nccl_transport(self, adapter_name: str) -> None:
+        """Destroy poisoned groups while preserving the active generation."""
+        staged = getattr(self, "_skyrl_lora_transport_staged", {})
+        if adapter_name in staged:
+            raise ValueError(
+                f"LoRA NCCL adapter {adapter_name!r} must roll back staging "
+                "before transport reset"
+            )
+        sessions = getattr(self, "_skyrl_lora_nccl_sessions", {})
+        worker_session = sessions.pop(adapter_name, None)
+        if worker_session is not None:
+            worker_session.session.close()
+
+    def activate_lora_transport_adapter(self, request: dict, adapter_id: int) -> None:
+        """Activate an already staged generation after every TP rank staged it."""
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport import (
+            LoRAUpdateRequest,
+            activate_staged_vllm_lora_model,
+        )
+
+        update_request = LoRAUpdateRequest.from_json_dict(request)
+        staged = getattr(self, "_skyrl_lora_transport_staged", {})
+        staged_record = staged.get(update_request.adapter_name)
+        if (
+            staged_record is None
+            or staged_record.request != update_request
+            or staged_record.adapter_id != adapter_id
+        ):
+            raise ValueError(
+                f"LoRA adapter {update_request.adapter_name!r} generation "
+                f"{update_request.generation} is not staged as adapter id {adapter_id}"
+            )
+        activate_staged_vllm_lora_model(self.model_runner, adapter_id)
+        torch.cuda.synchronize(self.device)
+        active = getattr(self, "_skyrl_lora_transport_active", {})
+        previous = active.get(update_request.adapter_name)
+        if previous is not None:
+            retained = getattr(self, "_skyrl_lora_transport_retained", {})
+            retained[previous.adapter_id] = (update_request.adapter_name, previous)
+            self._skyrl_lora_transport_retained = retained
+        active[update_request.adapter_name] = staged_record
+        self._skyrl_lora_transport_active = active
+        del staged[update_request.adapter_name]
+
+    def restore_lora_transport_adapter(self, adapter_id: int) -> None:
+        """Restore the prior active adapter while admission remains paused."""
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport import (
+            activate_staged_vllm_lora_model,
+        )
+
+        active = getattr(self, "_skyrl_lora_transport_active", {})
+        retained = getattr(self, "_skyrl_lora_transport_retained", {})
+        previous = retained.get(adapter_id)
+        if previous is None:
+            if not any(record.adapter_id == adapter_id for record in active.values()):
+                raise ValueError(
+                    f"LoRA adapter id {adapter_id} has no retained generation"
+                )
+        activate_staged_vllm_lora_model(self.model_runner, adapter_id)
+        torch.cuda.synchronize(self.device)
+        if previous is not None:
+            adapter_name, record = previous
+            active[adapter_name] = record
+            del retained[adapter_id]
+
+    def discard_lora_transport_adapter(self, adapter_id: int) -> None:
+        """Remove a failed staged adapter before generation resumes."""
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport import (
+            discard_staged_vllm_lora_model,
+        )
+
+        discard_staged_vllm_lora_model(self.model_runner, adapter_id)
+        removed_names = set()
+        staged = getattr(self, "_skyrl_lora_transport_staged", {})
+        for adapter_name, record in tuple(staged.items()):
+            if record.adapter_id == adapter_id:
+                del staged[adapter_name]
+                removed_names.add(adapter_name)
+        active = getattr(self, "_skyrl_lora_transport_active", {})
+        for adapter_name, record in tuple(active.items()):
+            if record.adapter_id == adapter_id:
+                del active[adapter_name]
+                removed_names.add(adapter_name)
+        getattr(self, "_skyrl_lora_transport_retained", {}).pop(adapter_id, None)
+
+    def remove_lora_transport_adapter(self, adapter_id: int) -> None:
+        """Release a drained retired adapter after its replacement is active."""
+        self.discard_lora_transport_adapter(adapter_id)
+
+    def fetch_weights(
+        self, target_version: int, sync_dir: str | None = None, uri: str | None = None
+    ):
         """Fetch/apply a checkpoint delta before the paused reload phase."""
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -242,7 +544,9 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
             )
         fetch = getattr(self.weight_transfer_engine, "fetch_weights", None)
         if fetch is None:
-            raise RuntimeError(f"{type(self.weight_transfer_engine).__name__} does not support fetch_weights")
+            raise RuntimeError(
+                f"{type(self.weight_transfer_engine).__name__} does not support fetch_weights"
+            )
         return fetch(target_version=target_version, sync_dir=sync_dir, uri=uri)
 
     def update_weights_ipc(self, update_info: dict) -> None:
@@ -264,11 +568,14 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
                 - ipc_handles_pickled: b64(pickle({gpu_uuid: (func, args)}))
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_ipc.")
+            raise RuntimeError(
+                "skyrl_start_weight_update must be called before update_weights_ipc."
+            )
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
-                "Weight transfer not configured. " "Please set weight_transfer_config to enable weight transfer."
+                "Weight transfer not configured. "
+                "Please set weight_transfer_config to enable weight transfer."
             )
 
         # --- unpack SkyRL packed CUDA IPC format ---
@@ -282,9 +589,14 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         handles = pickle.loads(base64.b64decode(pickled))
 
         device_index = torch.cuda.current_device()
-        physical_gpu_id = cuda_uuid_to_str(torch.cuda.get_device_properties(device_index).uuid)
+        physical_gpu_id = cuda_uuid_to_str(
+            torch.cuda.get_device_properties(device_index).uuid
+        )
         if physical_gpu_id not in handles:
-            raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. " f"Available: {list(handles)}")
+            raise ValueError(
+                f"IPC handle not found for GPU UUID {physical_gpu_id}. "
+                f"Available: {list(handles)}"
+            )
         func, args = handles[physical_gpu_id]
         # Remap device index to the LOCAL current-device.
         list_args = list(args)
@@ -347,7 +659,9 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         https://github.com/vllm-project/vllm/pull/42577
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_nccl.")
+            raise RuntimeError(
+                "skyrl_start_weight_update must be called before update_weights_nccl."
+            )
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -410,8 +724,12 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         from vllm.device_allocator import get_mem_allocator_instance
 
         model = self.model_runner.model
-        self._skyrl_saved_buffers = {name: buf.cpu().clone() for name, buf in model.named_buffers()}
-        get_mem_allocator_instance().sleep(offload_tags=("kv_cache",) if offload_kv else ())
+        self._skyrl_saved_buffers = {
+            name: buf.cpu().clone() for name, buf in model.named_buffers()
+        }
+        get_mem_allocator_instance().sleep(
+            offload_tags=("kv_cache",) if offload_kv else ()
+        )
 
     def skyrl_wake_for_weight_sync(self, tags: list) -> None:
         """Wake the given allocator tags, restoring CPU-backed contents.
@@ -481,7 +799,9 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         skyrl_finish_weight_update drains the deferred work before finalize.
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_rdt.")
+            raise RuntimeError(
+                "skyrl_start_weight_update must be called before update_weights_rdt."
+            )
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
