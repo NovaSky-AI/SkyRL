@@ -1,4 +1,5 @@
 import pickle
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -6,12 +7,21 @@ import ray
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import (
+    BatchField,
     TensorBatch,
+    TensorFormat,
     TensorList,
     TrainingInput,
     TrainingInputBatch,
+    _deserialize_tensor,
+    _serialize_tensor,
     pad_training_input_batch,
 )
+from skyrl.backends.skyrl_train.utils.packed_tensor import (
+    PackedTensor,
+    cu_seqlens_from_lengths,
+)
+from skyrl.backends.skyrl_train.utils.routed_experts import ROUTED_EXPERT_DTYPES
 
 
 def test_train_batch_initialization():
@@ -576,7 +586,11 @@ def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> Training
         "kl": torch.randn(batch_size, seq_len),
         "rewards": torch.randn(batch_size, seq_len),
         "rollout_logprobs": torch.randn(batch_size, seq_len),
-        "rollout_expert_indices": torch.randint(0, 8, (batch_size, seq_len, 2, 3), dtype=torch.long),
+        # The fixture is fully attended, so each route segment has seq_len rows.
+        "rollout_expert_indices": PackedTensor(
+            torch.randint(0, 8, (batch_size * seq_len, 2, 3), dtype=torch.long),
+            cu_seqlens_from_lengths([seq_len] * batch_size),
+        ),
         "router_padding_mask": torch.zeros((batch_size, seq_len), dtype=torch.bool),
         "pixel_values": TensorList([torch.randn(i + 1, 3) for i in range(batch_size)]),  # batch_size * (i + 1) * 3
         "image_grid_thw": TensorList([torch.tensor([[1, 2, 3]]) for _ in range(batch_size)]),  # batch_size * 1 * 3
@@ -640,9 +654,11 @@ def test_pad_batch_all_fields():
     # padding rows are copies of row 0.
     assert torch.equal(padded["router_padding_mask"][:batch_size], batch["router_padding_mask"])
     assert torch.all(padded["router_padding_mask"][batch_size:])
-    assert torch.equal(padded["rollout_expert_indices"][:batch_size], batch["rollout_expert_indices"])
-    expected_routes = torch.tensor([0, 1, 2]).expand_as(padded["rollout_expert_indices"][batch_size:])
-    assert torch.equal(padded["rollout_expert_indices"][batch_size:], expected_routes)
+    assert padded["rollout_expert_indices"][:batch_size] == batch["rollout_expert_indices"]
+    padded_routes = padded["rollout_expert_indices"][batch_size:]
+    assert padded_routes.sequence_lengths.tolist() == [seq_len] * pad_size
+    expected_routes = torch.tensor([0, 1, 2]).expand_as(padded_routes.values)
+    assert torch.equal(padded_routes.values, expected_routes)
 
     regular_tensor_keys = EXPECTED_TRAINING_INPUT_FIELDS - {
         "loss_mask",
@@ -711,3 +727,141 @@ def test_pad_batch_preserves_none_fields():
     padded = pad_training_input_batch(batch, pad_size=1)
     assert padded["values"] is None
     assert padded.batch_size == 4
+
+
+def test_packed_tensor_field_survives_the_ray_pickle_round_trip():
+    """Packed route buffers cross to the workers via TensorBatch's custom pickle path."""
+    segment_lengths = [3, 1, 4]
+    routes = PackedTensor(
+        torch.randint(0, 128, (sum(segment_lengths), 2, 3), dtype=torch.int16),
+        cu_seqlens_from_lengths(segment_lengths),
+    )
+    data = TensorBatch(
+        {
+            "sequences": torch.randn(len(segment_lengths), 4),
+            "rollout_expert_indices": routes,
+        }
+    )
+    data.metadata = {"response_length": 4}
+
+    unpickled = pickle.loads(pickle.dumps(data))
+
+    restored = unpickled["rollout_expert_indices"]
+    assert isinstance(restored, PackedTensor)
+    assert restored.values.dtype == torch.int16
+    assert restored.cu_seqlens.dtype == routes.cu_seqlens.dtype
+    assert restored == routes
+    assert unpickled == data
+
+
+def test_serialized_field_formats_are_stable():
+    data = TensorBatch(
+        {
+            "sequences": torch.randn(2, 4),
+            "pixel_values": TensorList([torch.randn(1, 3), torch.randn(2, 3)]),
+            "rollout_expert_indices": PackedTensor(
+                torch.zeros((3, 2, 3), dtype=torch.int16), cu_seqlens_from_lengths([2, 1])
+            ),
+            "bf16_logprobs": torch.randn(2, 4, dtype=torch.bfloat16),
+        }
+    )
+
+    state = data.__getstate__()["batch_dict"]
+
+    assert state["sequences"]["format"] == TensorFormat.NUMPY
+    assert state["bf16_logprobs"]["format"] == TensorFormat.TORCH
+    assert state["pixel_values"]["format"] == TensorFormat.TENSOR_LIST
+    assert state["rollout_expert_indices"]["format"] == TensorFormat.PACKED_TENSOR
+
+
+ROUTE_KEY = "rollout_expert_indices"
+_ZERO_COPY_SEGMENT_LENGTHS = [512, 256, 256]
+_ZERO_COPY_BATCH_SIZE = len(_ZERO_COPY_SEGMENT_LENGTHS)
+
+# One test payload per opted-in field.
+_ZERO_COPY_PAYLOADS: dict[str, Callable[[], BatchField]] = {
+    ROUTE_KEY: lambda: PackedTensor(
+        torch.randint(0, 64, (sum(_ZERO_COPY_SEGMENT_LENGTHS), 2, 3), dtype=torch.int16),
+        cu_seqlens_from_lengths(_ZERO_COPY_SEGMENT_LENGTHS),
+    ),
+}
+
+
+def _zero_copy_buffer(value: BatchField) -> torch.Tensor:
+    """Return the payload buffer for a zero-copy field."""
+    return value.values if isinstance(value, PackedTensor) else value
+
+
+def test_zero_copy_keys_are_declared_and_have_payloads():
+    assert TensorBatch.ZERO_COPY_KEYS <= set(TrainingInput.__annotations__)
+    assert set(_ZERO_COPY_PAYLOADS) == TensorBatch.ZERO_COPY_KEYS
+
+
+@pytest.mark.parametrize("key", sorted(TensorBatch.ZERO_COPY_KEYS))
+def test_zero_copy_field_travels_out_of_band(key, oob_round_trip):
+    """Only opted-in fields travel out of band."""
+    field = _ZERO_COPY_PAYLOADS[key]()
+    sequences = torch.randint(0, 100, (_ZERO_COPY_BATCH_SIZE, 4))
+    batch = TrainingInputBatch({"sequences": sequences, key: field})
+    batch.metadata = {"info": "zero-copy"}
+    buffer = _zero_copy_buffer(field)
+
+    unpickled, payload, views = oob_round_trip(batch)
+
+    assert [view.nbytes for view in views] == [buffer.nbytes], f"{key} is the only out-of-band field"
+    assert len(payload) < buffer.nbytes, f"{key} must not ALSO sit in the pickle stream"
+    assert np.shares_memory(_zero_copy_buffer(unpickled[key]).numpy(), buffer.numpy())
+    assert not np.shares_memory(unpickled["sequences"].numpy(), sequences.numpy())
+    assert unpickled == batch
+
+
+@pytest.mark.parametrize("key", sorted(TensorBatch.ZERO_COPY_KEYS))
+def test_zero_copy_field_tolerates_read_only_plasma_buffer(key, oob_round_trip):
+    """Zero-copy fields preserve read-only buffers while ordinary fields stay writable."""
+    field = _ZERO_COPY_PAYLOADS[key]()
+    advantages = torch.randn(_ZERO_COPY_BATCH_SIZE, 256)
+    batch = TrainingInputBatch({"advantages": advantages, key: field})
+    batch.metadata = {}
+
+    unpickled, _, views = oob_round_trip(batch, read_only=True)
+
+    assert [view.readonly for view in views] == [True], f"{key} is the only out-of-band field"
+    restored = _zero_copy_buffer(unpickled[key]).numpy()
+    assert np.shares_memory(restored, np.frombuffer(views[0], dtype=restored.dtype)), "read-only buffer was copied"
+    assert unpickled[key] == field
+
+    got = unpickled["advantages"]
+    assert got.numpy().flags.writeable
+    got.add_(1.0)
+    assert torch.allclose(got, advantages + 1.0)
+    assert torch.allclose(batch["advantages"], advantages), "source must not be aliased"
+
+
+def test_packed_zero_copy_field_ships_only_its_values_buffer():
+    """Only a packed field's values use an out-of-band buffer."""
+    batch = TrainingInputBatch({ROUTE_KEY: _ZERO_COPY_PAYLOADS[ROUTE_KEY]()})
+
+    state = batch.__getstate__()["batch_dict"][ROUTE_KEY]
+
+    assert state["format"] == TensorFormat.PACKED_TENSOR
+    assert state["values"]["format"] == TensorFormat.NUMPY_VIEW
+    assert state["cu_seqlens"]["format"] == TensorFormat.NUMPY
+
+
+@pytest.mark.parametrize("dtype", sorted(ROUTED_EXPERT_DTYPES, key=str))
+def test_zero_copy_envelope_round_trips_every_route_dtype(dtype):
+    values = torch.from_numpy(np.arange(48, dtype=dtype).reshape(8, 2, 3))
+
+    envelope = _serialize_tensor(values, zero_copy=True)
+    restored = _deserialize_tensor(envelope)
+
+    assert envelope["format"] == TensorFormat.NUMPY_VIEW
+    assert restored.dtype == values.dtype
+    assert torch.equal(restored, values)
+
+
+def test_zero_copy_falls_back_for_bfloat16():
+    """The numpy TypeError guard must still run before the zero-copy branch."""
+    values = torch.randn(3, 4, dtype=torch.bfloat16)
+
+    assert _serialize_tensor(values, zero_copy=True)["format"] == TensorFormat.TORCH
