@@ -216,9 +216,24 @@ waits on the same channel, so a sharer that never arrives fails the same way.
 The `sharded_rdt_*.py` files are vendored from the vLLM PR: github.com/vllm-project/vllm/pull/43375; see each file's header for the removal plan once the pinned vLLM ships the trainer-side ABCs natively.
 
 ## Lifecycle (`NewInferenceWorkerWrap`)
-1. `start_weight_update(is_checkpoint_format=True)` — initializes layerwise reload (moves layers to meta device, wraps loaders).
-2. `update_weights_chunk(update_info)` — called repeatedly. Unpacks the SkyRL packed CUDA-IPC payload, slices the contiguous buffer per param, calls `model.load_weights(weights=...)` under `set_current_vllm_config`.
-3. `finish_weight_update()` — runs `finalize_layerwise_reload` (quantization repacking, attention weight postprocessing).
+1. `skyrl_start_weight_update(is_checkpoint_format=True)` — initializes layerwise reload on the main model.
+2. `update_weights_ipc(update_info)` / `update_weights_nccl(update_info)` — called repeatedly. Unpacks the SkyRL packed CUDA-IPC payload (or drives the NCCL engine's receive), and loads into the session's target under `set_current_vllm_config`.
+3. `skyrl_finish_weight_update()` — finalizes layerwise reload on the main model.
+
+## Spec-decode draft weights (MTP)
+
+Native MTP (`mtp`, `deepseek_mtp`) runs two sessions per sync: the target model,
+then the draft model. `MegatronWeightExtractor.draft_extractor` selects the MTP
+block and embedding/output weights by Megatron name; Bridge exports their HF names.
+A missing MTP block raises before transfer.
+
+Draft sessions use vLLM's `/start_draft_weight_update` and `/finish_weight_update`
+endpoints. SkyRL's packed IPC and NCCL loaders use the engine's selected model.
+The target model retains its existing SkyRL layerwise-reload lifecycle.
+
+Config validation rejects native MTP sync with FSDP, delta, sharded RDT,
+serialized FP8, or adapter-only LoRA. External Eagle/DFlash checkpoints keep
+their own draft weights.
 
 ## KV offload during non-colocated weight sync
 
@@ -249,6 +264,10 @@ uv run --extra dev --extra fsdp pytest tests/backends/skyrl_train/weight_sync/ -
 uv run --isolated --extra dev --extra fsdp \
   pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_weight_sync.py -v
 
+# GPU — MTP spec-decode weight sync round trip (Megatron -> vLLM drafter; CUDA IPC + NCCL)
+uv run --isolated --extra dev --extra megatron \
+  pytest tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_mtp_weight_sync.py -v
+
 # GPU — end-to-end delta sync (sparse perturbation, fsdp and megatron)
 uv run --isolated --extra dev --extra fsdp \
   pytest tests/backends/skyrl_train/gpu/gpu_ci/test_delta_weight_sync_e2e.py -m "not megatron" -v
@@ -265,6 +284,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | `WeightChunk` packing / size accounting | `tests/backends/skyrl_train/weight_sync/test_weight_chunk.py` |
 | Broadcast or CUDA IPC sender | `test_transfer_strategies.py` (CPU) **and** GPU `test_weight_sync.py` |
 | `NewInferenceWorkerWrap` | GPU `test_weight_sync.py` (CPU tests will not catch regressions) |
+| Draft (MTP) session: `draft_weights.py`, `draft_extractor`, session `target` | `tests/backends/skyrl_train/weight_sync/test_draft_weight_sync.py` **and** GPU `megatron/test_mtp_weight_sync.py` |
 | Delta publish / manifest / payload format | `test_delta_checkpoint.py` **and** GPU `test_delta_weight_sync_e2e.py` |
 | `LocalCheckpointStore` (fetch, replay, apply, cache keys) | `test_delta_checkpoint.py` |
 | `DeltaWeightTransferEngine` | GPU `test_delta_weight_sync_e2e.py` only — it runs inside the vLLM worker |

@@ -23,6 +23,9 @@ from skyrl.backends.skyrl_train.weight_sync.base import (
     WeightUpdateRequest,
     get_weight_chunk_metadata,
 )
+from skyrl.backends.skyrl_train.weight_sync.draft_weights import (
+    WEIGHT_UPDATE_TARGET_MODEL,
+)
 from skyrl.backends.skyrl_train.weight_sync.nccl_trainer_send import (
     nccl_trainer_init,
     nccl_trainer_send_weights,
@@ -135,6 +138,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
         derive_metadata_from_chunks: bool = False,
+        target: str = WEIGHT_UPDATE_TARGET_MODEL,
         **kwargs,
     ) -> None:
         """Send chunks via broadcast or vLLM native NCCL.
@@ -143,18 +147,20 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             chunks: Iterable of WeightChunk objects to send.
             weight_metadata: Complete metadata for the batched update path.
             derive_metadata_from_chunks: Send each chunk with derived metadata.
+            target: The vLLM model this session loads into (``"model"`` / ``"draft"``).
         """
         if derive_metadata_from_chunks:
             if weight_metadata is not None:
                 raise ValueError("weight_metadata must be omitted when deriving metadata from chunks")
-            await self._send_serialized_fp8_chunks_vllm_native(chunks)
+            await self._send_serialized_fp8_chunks_vllm_native(chunks, target=target)
         else:
-            await self._send_chunks_vllm_native(chunks, weight_metadata)
+            await self._send_chunks_vllm_native(chunks, weight_metadata, target=target)
 
     async def _send_chunks_vllm_native(
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]],
+        target: str = WEIGHT_UPDATE_TARGET_MODEL,
     ) -> None:
         """Batched path: one update_weights call + nccl_trainer_send_weights.
 
@@ -177,7 +183,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         # patch lands (vllm-project/vllm weight-sync-fix).
         # https://github.com/vllm-project/vllm/pull/42577
         if torch.distributed.get_rank() == 0:
-            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+            await self._inference_client.start_weight_update(is_checkpoint_format=True, target=target)
 
             # vLLM 0.28.0 dropped `packed` (and the buffer geometry) from
             # NCCLWeightTransferUpdateInfo -- it is agreed once at init instead,
@@ -194,7 +200,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             )
             await update_task
 
-            await self._inference_client.finish_weight_update()
+            await self._inference_client.finish_weight_update(target=target)
         else:
             # Non-rank-0 still needs to participate in extractor collectives.
             for _ in weight_iterator():
@@ -205,17 +211,18 @@ class BroadcastWeightTransferSender(WeightTransferSender):
     async def _send_serialized_fp8_chunks_vllm_native(
         self,
         chunks: Iterable[WeightChunk],
+        target: str = WEIGHT_UPDATE_TARGET_MODEL,
     ) -> None:
         """Send lazy mixed-dtype serialized-FP8 chunks through vLLM NCCL."""
         if torch.distributed.get_rank() == 0:
-            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+            await self._inference_client.start_weight_update(is_checkpoint_format=True, target=target)
 
         for chunk in chunks:
             if torch.distributed.get_rank() == 0:
                 await self._send_chunk_vllm_native(chunk)
 
         if torch.distributed.get_rank() == 0:
-            await self._inference_client.finish_weight_update()
+            await self._inference_client.finish_weight_update(target=target)
 
         torch.distributed.barrier()
 

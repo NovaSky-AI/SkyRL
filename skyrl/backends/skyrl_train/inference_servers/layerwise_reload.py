@@ -91,6 +91,15 @@ class LayerwiseReloadWorkerMixin:
     model_config: "ModelConfig"
     device: torch.device
 
+    def skyrl_weight_update_target(self):
+        """Return the model selected by the active SkyRL or native draft session."""
+        if not getattr(self, "_weight_update_active", False):
+            raise RuntimeError("start_weight_update must be called before loading weights.")
+        if getattr(self, "_weight_update_is_draft", False):
+            engine = self.weight_transfer_engine
+            return engine.model, engine.model_config
+        return self.model_runner.model, self.model_config
+
     # NOTE: named with a `skyrl_` prefix to avoid colliding with vLLM's own
     # Worker.start_weight_update / finish_weight_update (added in vllm-project/vllm
     # #39212, merge e3b65a5, shipped in vLLM 0.22.0+). vLLM injects the
@@ -121,8 +130,7 @@ class LayerwiseReloadWorkerMixin:
         if getattr(self, "_weight_update_active", False):
             raise RuntimeError("vLLM native weight update is already active. Call finish_weight_update first.")
 
-        # Ensure the get_numel_loaded patch is in effect before layerwise
-        # reload runs.
+        # Patch once before the main and draft sessions run.
         global _PATCHED_LAYERWISE_NUMEL_LOADED
         if not _PATCHED_LAYERWISE_NUMEL_LOADED:
             # use patched version, based on https://github.com/vllm-project/vllm/pull/44814
@@ -148,6 +156,7 @@ class LayerwiseReloadWorkerMixin:
         # update_weights for transports such as checkpoint-delta.
         self._is_checkpoint_format = is_checkpoint_format
         self._weight_update_active = True
+        self._weight_update_is_draft = False
 
     def skyrl_finish_weight_update(self) -> None:
         """

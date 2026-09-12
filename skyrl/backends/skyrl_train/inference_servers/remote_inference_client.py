@@ -1168,35 +1168,21 @@ class RemoteInferenceClient(InferenceEngineInterface):
             kwargs["uri"] = uri
         return await self._call_all_servers("/fetch_weights", kwargs)
 
-    # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
-    # these three methods from /collective_rpc to the native vLLM endpoints
-    # (/start_weight_update, /update_weights, /finish_weight_update) and remove
-    # the NewInferenceWorkerWrap worker extension.
+    # TODO: Migrate the main-model session after removing the SkyRL layerwise patches.
 
-    async def start_weight_update(
-        self,
-        is_checkpoint_format: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        Start a new chunked weight update via /collective_rpc.
+    async def start_weight_update(self, is_checkpoint_format: bool = True, target: str = "model") -> Dict[str, Any]:
+        """Start a target-model session or a native vLLM draft session."""
+        from skyrl.backends.skyrl_train.weight_sync.draft_weights import (
+            validate_weight_update_target,
+        )
 
-        Calls the NewInferenceWorkerWrap.skyrl_start_weight_update method on all
-        workers. For checkpoint-format weights this initializes layerwise
-        reload. Must be called before any update_weights_ipc calls.
-
-        Args:
-            is_checkpoint_format: True if weights are in checkpoint format
-                (need layerwise processing), False for kernel format.
-
-        Returns:
-            Dict mapping server_url to response.
-        """
+        if validate_weight_update_target(target) == "draft":
+            if not is_checkpoint_format:
+                raise ValueError("Draft weight sync requires checkpoint-format weights")
+            return await self._call_all_servers("/start_draft_weight_update", {})
         return await self._call_all_servers(
             "/collective_rpc",
-            {
-                "method": "skyrl_start_weight_update",
-                "kwargs": {"is_checkpoint_format": is_checkpoint_format},
-            },
+            {"method": "skyrl_start_weight_update", "kwargs": {"is_checkpoint_format": is_checkpoint_format}},
         )
 
     async def update_weights_ipc(
@@ -1254,20 +1240,15 @@ class RemoteInferenceClient(InferenceEngineInterface):
             },
         )
 
-    async def finish_weight_update(self) -> Dict[str, Any]:
-        """
-        Finish the current chunked weight update via /collective_rpc.
-
-        Calls NewInferenceWorkerWrap.skyrl_finish_weight_update on all workers.
-        For checkpoint-format weights, runs layerwise postprocessing.
-
-        Returns:
-            Dict mapping server_url to response.
-        """
-        return await self._call_all_servers(
-            "/collective_rpc",
-            {"method": "skyrl_finish_weight_update"},
+    async def finish_weight_update(self, target: str = "model") -> Dict[str, Any]:
+        """Finalize the session ``start_weight_update`` opened on ``target``."""
+        from skyrl.backends.skyrl_train.weight_sync.draft_weights import (
+            validate_weight_update_target,
         )
+
+        if validate_weight_update_target(target) == "draft":
+            return await self._call_all_servers("/finish_weight_update", {})
+        return await self._call_all_servers("/collective_rpc", {"method": "skyrl_finish_weight_update"})
 
     async def load_lora_adapter(
         self,

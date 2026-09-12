@@ -3,7 +3,7 @@ import os
 import shutil
 from collections import defaultdict
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 import megatron.core.parallel_state as mpu
 import ray
@@ -69,6 +69,11 @@ from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     WeightChunk,
     WeightExtractor,
+    needs_draft_weight_sync,
+)
+from skyrl.backends.skyrl_train.weight_sync.draft_weights import (
+    is_megatron_draft_param,
+    is_megatron_mtp_param,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     BLOCKWISE_FP8,
@@ -130,6 +135,9 @@ class MegatronWeightExtractor(WeightExtractor):
         enable_bucketing: If True, group parameters into size-based buckets for packing
         bucket_size_threshold_GB: Size threshold in GB for bucketing (only used if enable_bucketing=True)
         training_dtype: Training dtype for size calculation (only used if enable_bucketing=True)
+        param_filter: Optional predicate over the *Megatron* (module-unwrapped, global)
+            parameter name; only matching conversion tasks are exported. Forces
+            bucketing, since only the bucketed path exports a chosen task subset.
     """
 
     def __init__(
@@ -141,12 +149,16 @@ class MegatronWeightExtractor(WeightExtractor):
         training_dtype: torch.dtype = torch.bfloat16,
         fp8_weight_sync_mode: Optional[str] = None,
         hf_config=None,
+        param_filter: Optional[Callable[[str], bool]] = None,
     ):
         self.bridge = bridge
         self.actor_module = actor_module
-        self.enable_bucketing = enable_bucketing
+        self.enable_bucketing = enable_bucketing or param_filter is not None
         self.bucket_size_threshold_GB = bucket_size_threshold_GB
         self.training_dtype = training_dtype
+        self.param_filter = param_filter
+        self.fp8_weight_sync_mode = fp8_weight_sync_mode
+        self.hf_config = hf_config
         if fp8_weight_sync_mode is None:
             self.serialized_fp8_config = None
         elif fp8_weight_sync_mode == BLOCKWISE_FP8:
@@ -202,14 +214,27 @@ class MegatronWeightExtractor(WeightExtractor):
             # (see the layout note below), in which case there is no size to agree on.
             return broadcast_object_across_pp_ranks(size_in_bytes, allow_missing=True)
 
-        sizes = [
-            calculate_size_in_bytes(
-                task.param_weight,
-                task.mapping.tp_size,
-                task.mapping.ep_size if task.mapping.is_expert else 1,
-            )
-            for task in weight_conversion_tasks
+        # Filter by global name so all ranks enter the same PP collectives.
+        kept = [
+            self.param_filter is None or self.param_filter(task.global_param_name) for task in weight_conversion_tasks
         ]
+        sizes = [
+            (
+                calculate_size_in_bytes(
+                    task.param_weight,
+                    task.mapping.tp_size,
+                    task.mapping.ep_size if task.mapping.is_expert else 1,
+                )
+                if keep
+                else None
+            )
+            for task, keep in zip(weight_conversion_tasks, kept)
+        ]
+        if self.param_filter is not None and not any(size is not None for size in sizes):
+            raise ValueError(
+                f"{type(self).__name__}: the parameter filter selected no conversion tasks "
+                f"({len(weight_conversion_tasks)} tasks total)"
+            )
 
         # ---- Separate grouped-export tasks from regular tasks ----
         # Grouped-export tasks (is_grouped_export=True, e.g. FusedGatedExpertMapping /
@@ -266,6 +291,30 @@ class MegatronWeightExtractor(WeightExtractor):
         and shapes are only known once the chunk is built, so metadata has to
         come off the stream rather than from :meth:`get_weight_metadata`."""
         return self.serialized_fp8_config is not None
+
+    def draft_extractor(self) -> "MegatronWeightExtractor":
+        """Select MTP, embedding, and output weights for vLLM's draft session."""
+        cached = getattr(self, "_draft_extractor", None)
+        if cached is not None:
+            return cached
+        tasks = self.bridge.get_conversion_tasks(self.actor_module)
+        if not any(is_megatron_mtp_param(task.global_param_name) for task in tasks):
+            raise ValueError(
+                "Spec-decode draft weight sync requested, but the Megatron model has no MTP block "
+                "(no `mtp.*` parameters). Enable trainer.mtp (or policy.megatron_config.mtp_num_layers) "
+                "on an MTP-capable checkpoint, or disable speculative decoding."
+            )
+        self._draft_extractor = MegatronWeightExtractor(
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            enable_bucketing=True,
+            bucket_size_threshold_GB=self.bucket_size_threshold_GB,
+            training_dtype=self.training_dtype,
+            fp8_weight_sync_mode=self.fp8_weight_sync_mode,
+            hf_config=self.hf_config,
+            param_filter=is_megatron_draft_param,
+        )
+        return self._draft_extractor
 
     def get_weight_metadata(self, dtype: torch.dtype) -> dict:
         """Return weight metadata without keeping tensors in memory.
@@ -1668,7 +1717,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         reset_prefix_cache: bool = use_prefix_cache and (
             not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync
         )
-        send_chunks_kwargs = {"reset_prefix_cache": reset_prefix_cache}
+        send_chunks_kwargs = {
+            "reset_prefix_cache": reset_prefix_cache,
+            "sync_draft_weights": needs_draft_weight_sync(inference_engine_cfg.speculative_config),
+        }
 
         if reset_prefix_cache and torch.distributed.get_rank() == 0 and not sender_handles_prefix_cache_reset:
             # clear prefix cache
