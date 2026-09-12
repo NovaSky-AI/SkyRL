@@ -486,7 +486,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with self._phase_gauge.timed_phase("eval", self.all_timings):
                 await self._eval_dispatcher.submit(self.global_step)
-            self._log_eval_results(await self._eval_dispatcher.drain())
+                results = await self._eval_dispatcher.drain()
+            self._log_eval_results(results)
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
