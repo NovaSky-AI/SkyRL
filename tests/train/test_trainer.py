@@ -2,7 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -309,6 +309,7 @@ def test_run_flushes_pending_metrics_before_logging_exception():
     exp = BasePPOExp.__new__(BasePPOExp)
     trainer = MagicMock()
     trainer.global_step = 7
+    trainer.shutdown.side_effect = RuntimeError("cleanup failed")
 
     def fake_setup_trainer():
         # Mirror _setup_trainer: expose the trainer on the exp, then crash
@@ -322,11 +323,31 @@ def test_run_flushes_pending_metrics_before_logging_exception():
         exp.run()
 
     ordered_calls = [
-        name for name, _, _ in trainer.mock_calls if name in ("flush_pending_metrics", "tracker.log_exception")
+        name
+        for name, _, _ in trainer.mock_calls
+        if name in ("flush_pending_metrics", "tracker.log_exception", "shutdown")
     ]
-    assert ordered_calls == ["flush_pending_metrics", "tracker.log_exception"]
+    assert ordered_calls == ["flush_pending_metrics", "tracker.log_exception", "shutdown"]
     trainer.tracker.log_exception.assert_called_once()
     assert trainer.tracker.log_exception.call_args.kwargs["step"] == 7
+
+
+def test_run_shuts_down_trainer_after_success():
+    from skyrl.train.entrypoints.main_base import BasePPOExp
+
+    exp = BasePPOExp.__new__(BasePPOExp)
+    trainer = MagicMock()
+    trainer.train = AsyncMock()
+
+    def fake_setup_trainer():
+        exp.trainer = trainer
+        return trainer
+
+    exp._setup_trainer = fake_setup_trainer
+
+    exp.run()
+
+    trainer.shutdown.assert_called_once_with()
 
 
 def test_micro_batches_accumulated_initialized():

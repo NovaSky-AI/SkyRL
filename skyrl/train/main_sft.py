@@ -42,7 +42,6 @@ def sft_entrypoint(cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig):
     try:
         trainer.setup()
         trainer.train()
-        trainer.shutdown()
     except Exception as e:
         # OOMs (and other crashes) raised inside actor init / training surface
         # here. Route them through the tracker so wandb users see them as an
@@ -52,6 +51,11 @@ def sft_entrypoint(cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig):
         else:
             logger.error(f"SFT setup failed before tracker was initialized:\n{e}")
         raise
+    finally:
+        try:
+            trainer.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down SFT trainer resources")
 
 
 def main():

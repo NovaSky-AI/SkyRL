@@ -27,6 +27,7 @@ from skyrl.train.utils.trainer_utils import (
     handle_replace_sampling,
     run_on_each_node,
     sanitize_data_source,
+    shutdown_dataloader,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
     zero_variance_filter,
@@ -970,6 +971,21 @@ def test_build_dataloader_worker_config(
         None if dataloader.multiprocessing_context is None else dataloader.multiprocessing_context.get_start_method()
     )
     assert start_method == expected_start_method
+
+
+def test_shutdown_dataloader_stops_spawned_workers(dummy_config) -> None:
+    config = copy.deepcopy(dummy_config)
+    config.data.dataloader.num_workers = 1
+    dataloader = build_dataloader(config, MultiItemDataset(size=8), is_train=True)
+
+    next(iter(dataloader))
+    workers = list(dataloader._iterator._workers)
+    assert all(worker.is_alive() for worker in workers)
+
+    shutdown_dataloader(dataloader)
+    shutdown_dataloader(dataloader)
+
+    assert all(not worker.is_alive() for worker in workers)
 
 
 def test_validate_generator_output_invalid_rewards():
