@@ -1,6 +1,8 @@
+import pytest
 import torch
 from safetensors.torch import load_file
 
+from skyrl.backends.skyrl_train.weight_sync import adapter_serialization
 from skyrl.backends.skyrl_train.weight_sync.adapter_serialization import (
     compact_adapter_state,
     save_adapter_state,
@@ -66,6 +68,31 @@ def test_serialization_replaces_stale_format_when_compaction_changes(tmp_path):
 
     save_adapter_state(duplicate_state, str(tmp_path))
     assert (tmp_path / "adapter_model.bin").is_file()
+    assert not (tmp_path / "adapter_model.safetensors").exists()
+
+
+def test_format_change_keeps_previous_artifact_if_cleanup_fails(tmp_path, monkeypatch):
+    repeated = torch.arange(12, dtype=torch.bfloat16).reshape(3, 4)
+    duplicate_state = {
+        "first": repeated.clone(),
+        "second": repeated.clone(),
+        "third": repeated.clone(),
+    }
+    unique_state = {
+        "first": repeated.clone(),
+        "second": (repeated + 1).clone(),
+    }
+    save_adapter_state(duplicate_state, str(tmp_path))
+    original = (tmp_path / "adapter_model.bin").read_bytes()
+
+    def fail_cleanup(_path):
+        raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(adapter_serialization.os, "remove", fail_cleanup)
+    with pytest.raises(OSError, match="injected cleanup failure"):
+        save_adapter_state(unique_state, str(tmp_path), temporary_suffix="7")
+
+    assert (tmp_path / "adapter_model.bin").read_bytes() == original
     assert not (tmp_path / "adapter_model.safetensors").exists()
 
 

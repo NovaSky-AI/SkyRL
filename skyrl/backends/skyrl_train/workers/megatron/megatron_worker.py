@@ -1746,8 +1746,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 base_model_name_or_path=base_model_name_or_path,
             )
 
-            # Atomic renames so concurrent writers (shared filesystem) and the
-            # engines' readers never observe partial files.
+            # Write the selected representation through a temporary path. On a
+            # format change, remove the stale higher-priority file before the
+            # atomic replace so cleanup failure preserves the previous artifact.
             config_path = os.path.join(lora_sync_path, "adapter_config.json")
             save_adapter_state(adapter_state, lora_sync_path, temporary_suffix=str(rank))
             with open(f"{config_path}.tmp{rank}", "w", encoding="utf-8") as f:
