@@ -44,13 +44,25 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_routed_experts,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
+from skyrl.backends.skyrl_train.weight_sync.lora_transport import (
+    LoRATransportServerLifecycle,
+    LoRAUpdateRequest,
+)
+from skyrl.backends.skyrl_train.weight_sync.lora_transport.request_gate import (
+    LoRATransportAdmissionGate,
+)
 from skyrl.env_vars import (
+    SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC,
     SKYRL_HTTP_CONNECTION_LIMIT,
     SKYRL_VLLM_DP_PORT_OFFSET,
     SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
 
 logger = logging.getLogger(__name__)
+
+LORA_TRANSPORT_ADMISSION_MIDDLEWARE = (
+    "skyrl.backends.skyrl_train.weight_sync.lora_transport.request_gate.LoRATransportAdmissionMiddleware"
+)
 
 
 class VLLMServerActor(ServerActorProtocol):
@@ -394,7 +406,30 @@ class VLLMServerActor(ServerActorProtocol):
         )
 
     @staticmethod
-    def _add_custom_endpoints(app, engine, cli_args) -> None:
+    def _prepare_lora_transport_admission(
+        cli_args: Namespace,
+    ) -> LoRATransportAdmissionGate:
+        """Register request admission before vLLM finalizes its middleware stack."""
+        if LORA_TRANSPORT_ADMISSION_MIDDLEWARE not in cli_args.middleware:
+            cli_args.middleware = [
+                *cli_args.middleware,
+                LORA_TRANSPORT_ADMISSION_MIDDLEWARE,
+            ]
+        return LoRATransportAdmissionGate()
+
+    @staticmethod
+    def _bind_lora_transport_admission(app, gate: LoRATransportAdmissionGate) -> None:
+        """Expose the prepared gate to the installed middleware and endpoints."""
+        app.state.lora_transport_admission_gate = gate
+
+    @staticmethod
+    def _add_custom_endpoints(
+        app,
+        engine,
+        cli_args,
+        *,
+        lora_transport_admission_gate: LoRATransportAdmissionGate,
+    ) -> None:
         """Add custom SkyRL endpoints to the FastAPI app.
 
         Shared by the Ray-actor deployment and the standalone ``python -m``
@@ -404,6 +439,29 @@ class VLLMServerActor(ServerActorProtocol):
         # Most weight-sync endpoints are registered by vLLM dev mode. SkyRL
         # adds /fetch_weights because checkpoint-delta pulls and applies
         # payloads before the paused /update_weights reload.
+
+        gate = lora_transport_admission_gate
+
+        @app.post("/skyrl/v1/pause_lora_transport")
+        async def _pause_lora_transport():
+            gate.close()
+            try:
+                async with asyncio.timeout(SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC):
+                    await gate.wait_until_idle()
+            except TimeoutError as error:
+                gate.open()
+                raise HTTPException(status_code=504, detail="Timed out draining LoRA requests") from error
+            except asyncio.CancelledError:
+                gate.open()
+                raise
+            await engine.pause_generation(mode="wait", clear_cache=False)
+            return {"status": "paused"}
+
+        @app.post("/skyrl/v1/resume_lora_transport")
+        async def _resume_lora_transport():
+            await engine.resume_generation()
+            gate.open()
+            return {"status": "resumed"}
 
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
@@ -431,6 +489,125 @@ class VLLMServerActor(ServerActorProtocol):
                 kwargs["uri"] = body["uri"]
             result = await engine.collective_rpc("fetch_weights", kwargs=kwargs)
             return {"status": "ok", "result": result}
+
+        def _parse_lora_request(body):
+            lora_name = body.get("lora_name")
+            if not lora_name:
+                raise HTTPException(status_code=400, detail="'lora_name' is required")
+            try:
+                update_request = LoRAUpdateRequest.from_json_dict(body["request"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            if lora_name != update_request.adapter_name:
+                raise HTTPException(status_code=400, detail="lora_name does not match request adapter")
+            return lora_name, update_request
+
+        def _lora_transport_lifecycle(models):
+            lifecycle = getattr(models, "_skyrl_lora_transport_lifecycle", None)
+            if lifecycle is None:
+                lifecycle = LoRATransportServerLifecycle()
+                models._skyrl_lora_transport_lifecycle = lifecycle
+            return lifecycle
+
+        @app.post("/skyrl/v1/stage_lora_nccl_adapter")
+        async def _skyrl_stage_lora_nccl_adapter(request: Request):
+            body = await request.json()
+            lora_name, update_request = _parse_lora_request(body)
+            models = request.app.state.openai_serving_models
+            async with models.lora_resolver_lock[lora_name]:
+                adapter_id = models.lora_id_counter.inc(1)
+                try:
+                    await _lora_transport_lifecycle(models).stage_transport(
+                        engine,
+                        update_request,
+                        adapter_id,
+                        "stage_lora_nccl_adapter",
+                    )
+                except Exception as error:
+                    raise HTTPException(status_code=500, detail=str(error)) from error
+                previous = getattr(models, "_skyrl_lora_transport_previous_requests", {})
+                previous[lora_name] = models.lora_requests.get(lora_name)
+                models._skyrl_lora_transport_previous_requests = previous
+            return {"status": "staged", "lora_int_id": adapter_id}
+
+        @app.post("/skyrl/v1/activate_lora_transport_adapter")
+        async def _skyrl_activate_lora_transport_adapter(request: Request):
+            body = await request.json()
+            lora_name, update_request = _parse_lora_request(body)
+            adapter_id = int(body["adapter_id"])
+            if body.get("transport") != "nccl":
+                raise HTTPException(status_code=400, detail="LoRA transport must be nccl")
+            models = request.app.state.openai_serving_models
+            async with models.lora_resolver_lock[lora_name]:
+                try:
+                    await _lora_transport_lifecycle(models).activate(engine, update_request, adapter_id)
+                except Exception as error:
+                    raise HTTPException(status_code=500, detail=str(error)) from error
+                models.lora_requests[lora_name] = LoRARequest(
+                    lora_name=lora_name,
+                    lora_int_id=adapter_id,
+                    lora_path=f"lora_nccl://{lora_name}",
+                    load_inplace=False,
+                )
+            return {"status": "active", "lora_int_id": adapter_id}
+
+        @app.post("/skyrl/v1/commit_lora_transport_adapter")
+        async def _skyrl_commit_lora_transport_adapter(request: Request):
+            body = await request.json()
+            lora_name, update_request = _parse_lora_request(body)
+            adapter_id = int(body["adapter_id"])
+            models = request.app.state.openai_serving_models
+            async with models.lora_resolver_lock[lora_name]:
+                try:
+                    changed = await _lora_transport_lifecycle(models).commit(engine, update_request, adapter_id)
+                except Exception as error:
+                    raise HTTPException(status_code=500, detail=str(error)) from error
+                if changed:
+                    getattr(models, "_skyrl_lora_transport_previous_requests", {}).pop(lora_name, None)
+            return {"status": "committed"}
+
+        @app.post("/skyrl/v1/rollback_lora_transport_adapter")
+        async def _skyrl_rollback_lora_transport_adapter(request: Request):
+            body = await request.json()
+            lora_name, update_request = _parse_lora_request(body)
+            models = request.app.state.openai_serving_models
+            async with models.lora_resolver_lock[lora_name]:
+                lifecycle = _lora_transport_lifecycle(models)
+                try:
+                    if "adapter_id" in body:
+                        changed = await lifecycle.rollback(engine, update_request, int(body["adapter_id"]))
+                    else:
+                        changed = await lifecycle.abort(engine, update_request)
+                except Exception as error:
+                    raise HTTPException(status_code=500, detail=str(error)) from error
+                if changed:
+                    previous = getattr(models, "_skyrl_lora_transport_previous_requests", {}).pop(lora_name, None)
+                    active_id = lifecycle.get_active_adapter_id(lora_name)
+                    current = models.lora_requests.get(lora_name)
+                    if active_id is None:
+                        models.lora_requests.pop(lora_name, None)
+                    elif current is None or current.lora_int_id != active_id:
+                        if previous is None or previous.lora_int_id != active_id:
+                            raise HTTPException(
+                                status_code=500,
+                                detail="Restored LoRA route is unavailable",
+                            )
+                        models.lora_requests[lora_name] = previous
+            return {"status": "rolled_back"}
+
+        @app.post("/skyrl/v1/unload_lora_transport_adapter")
+        async def _skyrl_unload_lora_transport_adapter(request: Request):
+            body = await request.json()
+            lora_name = body["lora_name"]
+            models = request.app.state.openai_serving_models
+            async with models.lora_resolver_lock[lora_name]:
+                try:
+                    await _lora_transport_lifecycle(models).unload(engine, lora_name)
+                except Exception as error:
+                    raise HTTPException(status_code=500, detail=str(error)) from error
+                models.lora_requests.pop(lora_name, None)
+                getattr(models, "_skyrl_lora_transport_previous_requests", {}).pop(lora_name, None)
+            return {"status": "unloaded"}
 
         @app.post("/skyrl/v1/load_lora_adapter")
         async def _skyrl_load_lora_adapter(request: Request):
@@ -594,7 +771,9 @@ async def _build_and_serve_vllm_server(
     # One uvicorn per port (no api_server_count fan-out), matching vLLM's own
     # single-server path, so SO_REUSEPORT stays off.
     sock = create_server_socket(sock_addr, reuse_port=False)
+    lora_transport_admission_gate = VLLMServerActor._prepare_lora_transport_admission(cli_args)
     app = build_app(cli_args)
+    VLLMServerActor._bind_lora_transport_admission(app, lora_transport_admission_gate)
 
     # Initialize the engine (this loads the model - takes time)
     engine_args = AsyncEngineArgs.from_cli_args(cli_args)
@@ -614,7 +793,12 @@ async def _build_and_serve_vllm_server(
     logger.info(f"Engine initialized on {cli_args.host}:{cli_args.port}, adding custom endpoints...")
 
     # Add custom SkyRL endpoints
-    VLLMServerActor._add_custom_endpoints(app, engine, cli_args)
+    VLLMServerActor._add_custom_endpoints(
+        app,
+        engine,
+        cli_args,
+        lora_transport_admission_gate=lora_transport_admission_gate,
+    )
 
     await init_app_state(engine, app.state, cli_args)
 

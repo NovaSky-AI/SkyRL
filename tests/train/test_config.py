@@ -321,6 +321,70 @@ def test_power_2_mode_rejects_persistent_fp8_without_serialized_sync(monkeypatch
         prepare_runtime_environment(cfg)
 
 
+def test_megatron_validation_accepts_fixed_layout_native_lora():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.policy.model.lora.rank = 32
+    cfg.trainer.policy.model.lora.max_loras = 2
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    cfg.generator.inference_engine.weight_sync_backend = "lora_nccl"
+
+    train_utils.validate_megatron_cfg(cfg)
+
+
+def test_megatron_validation_rejects_native_lora_with_merged_adapter():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.policy.model.lora.rank = 32
+    cfg.trainer.policy.model.lora.max_loras = 2
+    cfg.generator.inference_engine.weight_sync_backend = "lora_nccl"
+
+    with pytest.raises(ValueError, match="merge_lora=false"):
+        train_utils.validate_megatron_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("policy_num_nodes", 2, "all trainer ranks on one node"),
+        ("num_engines", 2, "one inference TP group"),
+    ],
+)
+def test_megatron_validation_rejects_unsupported_lora_nccl_topology(
+    field,
+    value,
+    message,
+):
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.policy.model.lora.rank = 32
+    cfg.trainer.policy.model.lora.max_loras = 2
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    cfg.generator.inference_engine.weight_sync_backend = "lora_nccl"
+    target = cfg.trainer.placement if field == "policy_num_nodes" else cfg.generator.inference_engine
+    setattr(target, field, value)
+
+    with pytest.raises(ValueError, match=message):
+        train_utils.validate_megatron_cfg(cfg)
+
+
+def test_megatron_validation_rejects_normalized_moe_lora():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.policy.model.lora.rank = 32
+    cfg.trainer.policy.model.lora.max_loras = 2
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    cfg.trainer.policy.megatron_config.lora_config.normalize_moe_lora = True
+    cfg.generator.inference_engine.weight_sync_backend = "lora_nccl"
+
+    with pytest.raises(ValueError, match="normalize_moe_lora"):
+        train_utils.validate_megatron_cfg(cfg)
+
+
 def test_megatron_validation_requires_fp8_param_gather_for_training():
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"

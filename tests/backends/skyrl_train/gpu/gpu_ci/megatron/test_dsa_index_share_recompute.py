@@ -32,7 +32,7 @@ pytestmark = pytest.mark.megatron
 
 @pytest.fixture(scope="module")
 def patched_megatron():
-    """Apply the backport, skipping if this megatron-core does not need it."""
+    """Apply the backport, or verify that megatron-core already includes it."""
     # Import the modules that do `from megatron.core.recompute import
     # checkpointed_forward` *before* patching. Without this the patch runs before
     # they exist, they later bind the already-patched function on first import,
@@ -41,11 +41,17 @@ def patched_megatron():
     import megatron.core.models.hybrid.hybrid_block  # noqa: F401
     import megatron.core.transformer.transformer_block  # noqa: F401
 
-    if not patch_dsa_index_share():
-        pytest.skip(
-            "DSA index-share patch did not apply -- megatron-core either already "
-            "contains NVIDIA/Megatron-LM#6793 or no longer matches the 0.20.0 source form"
-        )
+    if patch_dsa_index_share():
+        return
+
+    from megatron.core.transformer.experimental_attention_variant import dsa
+
+    from skyrl.backends.skyrl_train.patches.megatron import patch_dsa_index_share as mod
+
+    assert hasattr(dsa, mod._UPSTREAM_SENTINEL), (
+        "DSA index-share patch did not apply and the installed megatron-core does not "
+        "contain NVIDIA/Megatron-LM#6793"
+    )
 
 
 def _build_attention():
