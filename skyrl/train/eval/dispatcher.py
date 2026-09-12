@@ -67,7 +67,9 @@ class BaseEvalDispatcher(abc.ABC):
         """Block until every outstanding eval settles; return those results."""
 
     async def close(self) -> None:
-        """Release anything the dispatcher owns. Called once, after the final ``drain``."""
+        """Release anything the dispatcher owns. Called once, from the loop's ``finally``: after the
+        final ``drain`` on a healthy exit, with evals possibly still in flight after a crash.
+        Thus ``close`` should be implemented to cancel any inflight requests."""
 
 
 class BlockingEvalDispatcher(BaseEvalDispatcher):
