@@ -25,6 +25,7 @@ from skyrl.train.utils import utils as train_utils
 from skyrl.train.utils.utils import (
     prepare_runtime_environment,
     validate_cfg,
+    validate_generator_cfg,
     validate_inference_engine_cfg,
 )
 from tests.train.util import example_dummy_config
@@ -44,6 +45,14 @@ def _make_validated_test_config():
     cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
     cfg.trainer.critic_mini_batch_size = cfg.trainer.train_batch_size
     return cfg
+
+
+def test_validate_generator_cfg_defers_wandb_authentication(monkeypatch):
+    cfg = _make_validated_test_config()
+    cfg.trainer.logger = "wandb"
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+    validate_generator_cfg(cfg)
 
 
 # Helper dataclasses for testing
@@ -172,6 +181,32 @@ def test_runtime_env_forwards_te_block_scale_mode(monkeypatch):
     env_vars = prepare_runtime_environment(example_dummy_config())
 
     assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "1"
+
+
+def test_runtime_env_forwards_wandb_environment(monkeypatch):
+    wandb_environment = {
+        "WANDB_API_KEY": "test-api-key",
+        "WANDB_MODE": "offline",
+        "WANDB_BASE_URL": "https://wandb.example.com",
+    }
+    for var_name, value in wandb_environment.items():
+        monkeypatch.setenv(var_name, value)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+
+    env_vars = prepare_runtime_environment(example_dummy_config())
+
+    assert {var_name: env_vars[var_name] for var_name in wandb_environment} == wandb_environment
+
+
+def test_runtime_env_omits_unset_wandb_environment(monkeypatch):
+    wandb_environment = {"WANDB_API_KEY", "WANDB_MODE", "WANDB_BASE_URL"}
+    for var_name in wandb_environment:
+        monkeypatch.delenv(var_name, raising=False)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+
+    env_vars = prepare_runtime_environment(example_dummy_config())
+
+    assert wandb_environment.isdisjoint(env_vars)
 
 
 def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):

@@ -536,10 +536,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             "for multi-turn generation"
         )
 
-    # TODO(tgriggs): use a more modular config validation
-    if cfg.trainer.logger == "wandb":
-        assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
-
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
         if cfg.generator.sampling_params.logprobs > 1:
@@ -886,9 +882,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
-    if os.environ.get("WANDB_API_KEY"):
-        logger.info("Exporting wandb api key to ray runtime env")
-        env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
+    for var_name in ("WANDB_API_KEY", "WANDB_MODE", "WANDB_BASE_URL"):
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting `{var_name}` to ray runtime env")
+            env_vars[var_name] = value
 
     if os.environ.get("MLFLOW_TRACKING_URI"):
         logger.info("Exporting mlflow tracking uri to ray runtime env")
