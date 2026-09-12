@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from dataclasses import asdict
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
@@ -12,6 +13,10 @@ from omegaconf import OmegaConf
 from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
     call_model_with_fused_lm_head,
     fused_lm_head_output_processor,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.grad_sync import (
+    defer_grad_sync,
+    start_deferred_grad_sync,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
@@ -236,6 +241,7 @@ class MegatronModelWrapper:
         """
         pending = self._pending_grad_sync
         self._pending_grad_sync = None
+        start_deferred_grad_sync(self.actor_module)
         finalize_model_grads(self.actor_module, pending["num_tokens"] if pending else None)
 
     def train(self):
@@ -1166,7 +1172,8 @@ class MegatronModelWrapper:
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
         replay_enabled = any(batch["rollout_expert_indices"] is not None for batch in micro_batches)
-        with router_replay_schedule(replay_enabled):
+        grad_sync_context = nullcontext() if forward_only else defer_grad_sync(self.actor_module)
+        with router_replay_schedule(replay_enabled), grad_sync_context:
             metrics_list = forward_backward_func(
                 forward_step_func=forward_step,
                 data_iterator=batch_generator,
