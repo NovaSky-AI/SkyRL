@@ -39,7 +39,7 @@ RUN sudo apt-get update && sudo apt-get install -y --allow-change-held-packages 
 
 # ---------- PyTorch + cuDNN (setup for transformer-engine) ----------
 # PyTorch + cuDNN
-RUN uv pip install --system --no-cache-dir "torch==2.11.0" "nvidia-cudnn-cu13>=9.3" && \
+RUN uv pip install --system --no-cache-dir "torch==2.13.0" "nvidia-cudnn-cu13==9.20.0.48" && \
     CUDNN_PATH="$(python -c 'import nvidia.cudnn as c; print(c.__path__[0])')" && \
     sudo mkdir -p /opt && sudo ln -sfn "$CUDNN_PATH" /opt/cudnn && \
     echo "/opt/cudnn/lib" | sudo tee /etc/ld.so.conf.d/cudnn.conf >/dev/null && sudo ldconfig
