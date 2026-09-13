@@ -41,7 +41,13 @@ class _FakeEngine:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model", "status", "uses_lora"),
-    [("adapter_test", 200, True), ("base_test", 200, False), ("served_alias", 200, False), (None, 200, False), ("missing_test", 404, False)],
+    [
+        ("adapter_test", 200, True),
+        ("base_test", 200, False),
+        ("served_alias", 200, False),
+        (None, 200, False),
+        ("missing_test", 404, False),
+    ],
 )
 async def test_route_endpoint_resolves_lora_by_model(model, status, uses_lora):
     app = FastAPI()
