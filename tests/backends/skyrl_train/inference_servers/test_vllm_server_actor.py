@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 from fastapi import FastAPI
 
+pytest.importorskip("vllm", reason="vLLM server actor tests require the vLLM extra")
+
 from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
     _LORA_UPLOAD_MAX_BYTES,
     VLLMServerActor,
