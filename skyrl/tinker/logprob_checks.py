@@ -5,17 +5,17 @@ from itertools import cycle, islice
 import torch
 
 
-def check_initial_adapter(report, atol):
+def check_initial_adapter(report, mean_atol, max_atol):
     report["base_zero"] = compare_logprobs(report["base"], report["zero"])
-    check_policy_snapshot(report, atol)
-    assert report["base_zero"]["mean_abs"] < atol
+    check_policy_snapshot(report, mean_atol, max_atol)
+    check_agreement(report["base_zero"], mean_atol, max_atol)
 
 
-def check_policy_snapshot(report, atol):
+def check_policy_snapshot(report, mean_atol, max_atol):
     report["zero_parity"] = compare_logprobs(report["trainer_zero"], report["zero"])
     report["repeat_noise"] = compare_logprobs(report["zero"], report["repeat"])
     report["trainer_repeat_noise"] = compare_logprobs(report["trainer_zero"], report["trainer_repeat"])
-    assert report["zero_parity"]["mean_abs"] < atol
+    check_agreement(report["zero_parity"], mean_atol, max_atol)
 
 
 def build_probe_sequences(tokenizer):
@@ -37,7 +37,7 @@ def check_update_stimulus(report, atol):
     assert report["stale_parity"]["mean_abs"] >= atol, "insufficient test stimulus to distinguish stale publication"
 
 
-def check_updated_adapter(report, atol):
+def check_updated_adapter(report, mean_atol, max_atol):
     """Check ordinary agreement; direct update-vector equivalence remains diagnostic."""
     report["updated_parity"] = compare_logprobs(report["trainer_updated"], report["updated"])
     report["stale_parity"] = compare_logprobs(report["trainer_updated"], report["stale"])
@@ -62,9 +62,14 @@ def check_updated_adapter(report, atol):
         scale=sampler_norm / trainer_norm if trainer_norm else None,
         relative_l2=(trainer_delta - sampler_delta).norm().item() / trainer_norm if trainer_norm else None,
     )
-    assert report["updated_parity"]["mean_abs"] < atol
+    check_agreement(report["updated_parity"], mean_atol, max_atol)
     assert report["sampler_change"]["mean_abs"] > noise_budget, "sampler did not measurably change"
     assert report["trainer_change"]["mean_abs"] > noise_budget, "trainer did not measurably change"
+
+
+def check_agreement(result, mean_atol, max_atol):
+    assert result["mean_abs"] < mean_atol
+    assert result["max_abs"] < max_atol
 
 
 def compare_logprobs(reference, actual):

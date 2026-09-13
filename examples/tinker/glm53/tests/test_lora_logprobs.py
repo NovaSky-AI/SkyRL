@@ -96,6 +96,8 @@ def test_cli_records_success_only_after_runtime_finishes(tmp_path, monkeypatch, 
             str(output_dir),
             "--mean-atol",
             "0.05",
+            "--max-atol",
+            "0.5",
         ],
     )
 
@@ -130,6 +132,8 @@ def test_cli_rejects_invalid_stimulus_before_creating_output(tmp_path, monkeypat
             str(output_dir),
             "--mean-atol",
             "0.05",
+            "--max-atol",
+            "0.5",
             "--lora-b-multiplier",
             multiplier,
         ],
@@ -197,7 +201,9 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
         ("score_sampler", score_sampler),
     ]:
         monkeypatch.setattr(run_lora_logprobs, name, function)
-    args = SimpleNamespace(backend_config="config.json", output_dir=tmp_path, mean_atol=0.05, lora_b_multiplier=32)
+    args = SimpleNamespace(
+        backend_config="config.json", output_dir=tmp_path, mean_atol=0.05, max_atol=0.5, lora_b_multiplier=32
+    )
     report = {}
     if update_size < 0.05:
         with pytest.raises(AssertionError, match="insufficient test stimulus"):

@@ -37,6 +37,7 @@ async def run(args, report):
         tokens=sequences,
         scored_positions=[len(tokens) - 1 for tokens in sequences],
         mean_atol=args.mean_atol,
+        max_atol=args.max_atol,
         lora_b_multiplier=args.lora_b_multiplier,
         model=cfg.trainer.policy.model.path,
     )
@@ -44,12 +45,14 @@ async def run(args, report):
 
     async with open_runtime(cfg, tokenizer) as (policy, client):
         try:
-            await check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, args.mean_atol)
+            await check_zero_initialized_policy(
+                policy, client, cfg, batch, sequences, report, args.mean_atol, args.max_atol
+            )
             apply_trainer_update(policy, batch, report, args.lora_b_multiplier)
             await check_unpublished_sampler(client, sequences, adapter, report)
             check_update_stimulus(report, args.mean_atol)
             await publish(policy, client, cfg)
-            await check_published_update(client, sequences, adapter, report, args.mean_atol)
+            await check_published_update(client, sequences, adapter, report, args.mean_atol, args.max_atol)
         finally:
             # Preserve failed assertions even if subsequent runtime cleanup hangs.
             write_report(args.output_dir, report)
@@ -61,7 +64,7 @@ def write_report(output_dir, report):
     temporary.replace(output_dir / "logprobs.json")
 
 
-async def check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, atol):
+async def check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, mean_atol, max_atol):
     report["base"] = await score_sampler(client, sequences, client.model_name)
     await publish(policy, client, cfg)
     adapter = resolve_policy_model_name(cfg)
@@ -69,7 +72,7 @@ async def check_zero_initialized_policy(policy, client, cfg, batch, sequences, r
     report["trainer_zero"] = score_trainer(policy, batch)
     report["repeat"] = await score_sampler(client, sequences, adapter)
     report["trainer_repeat"] = score_trainer(policy, batch)
-    check_initial_adapter(report, atol)
+    check_initial_adapter(report, mean_atol, max_atol)
 
 
 def apply_trainer_update(policy, batch, report, multiplier=10):
@@ -82,9 +85,9 @@ async def check_unpublished_sampler(client, sequences, adapter, report):
     check_withheld_publication(report)
 
 
-async def check_published_update(client, sequences, adapter, report, atol):
+async def check_published_update(client, sequences, adapter, report, mean_atol, max_atol):
     report["updated"] = await score_sampler(client, sequences, adapter)
-    check_updated_adapter(report, atol)
+    check_updated_adapter(report, mean_atol, max_atol)
 
 
 def validate_config(overrides):
@@ -141,12 +144,13 @@ def main():
     parser.add_argument("--backend-config", type=Path, required=True, help="Rendered run_server.py backend config")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--mean-atol", type=float, required=True, help="Reviewed mean logprob error budget")
+    parser.add_argument("--max-atol", type=float, required=True, help="Reviewed maximum token logprob error budget")
     parser.add_argument(
         "--lora-b-multiplier", type=float, default=10, help="Predeclared test stimulus, not an adaptive acceptance knob"
     )
     args = parser.parse_args()
-    if not math.isfinite(args.mean_atol) or args.mean_atol <= 0:
-        parser.error("logprob budget must be positive and finite")
+    if any(not math.isfinite(bound) or bound <= 0 for bound in (args.mean_atol, args.max_atol)):
+        parser.error("logprob budgets must be positive and finite")
     if not math.isfinite(args.lora_b_multiplier) or args.lora_b_multiplier <= 0:
         parser.error("LoRA B multiplier must be positive and finite")
     args.output_dir = args.output_dir.resolve()

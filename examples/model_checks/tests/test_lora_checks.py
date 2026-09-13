@@ -42,16 +42,36 @@ def test_publication_checks_reject_broken_phases(fault):
         report["updated"] = [-1.6, -2.6]
 
     def check_all():
-        check_initial_adapter(report, 0.05)
+        check_initial_adapter(report, 0.05, 0.5)
         check_withheld_publication(report)
         check_update_stimulus(report, 0.05)
-        check_updated_adapter(report, 0.05)
+        check_updated_adapter(report, 0.05, 0.5)
 
     if fault is None:
         check_all()
     else:
         with pytest.raises(AssertionError):
             check_all()
+
+
+def test_localized_corruption_cannot_hide_below_mean_budget():
+    tokens = 192
+    report = {
+        "base": [-2.0] * tokens,
+        "zero": [-2.0] * tokens,
+        "repeat": [-2.0] * tokens,
+        "stale": [-2.0] * tokens,
+        "trainer_zero": [-2.0] * tokens,
+        "trainer_repeat": [-2.0] * tokens,
+        "trainer_updated": [-1.9] * tokens,
+        "updated": [-1.9] * (tokens - 1) + [-10.9],
+    }
+    check_initial_adapter(report, 0.05, 0.5)
+    check_update_stimulus(report, 0.05)
+    with pytest.raises(AssertionError):
+        check_updated_adapter(report, 0.05, 0.5)
+    assert report["updated_parity"]["mean_abs"] == pytest.approx(0.046875)
+    assert report["updated_parity"]["max_abs"] == 9.0
 
 
 def test_update_comparison_cancels_a_fixed_backend_offset():
@@ -65,9 +85,9 @@ def test_update_comparison_cancels_a_fixed_backend_offset():
         "trainer_updated": [-1.76, -2.76],
         "updated": [-1.8, -2.8],
     }
-    check_initial_adapter(report, 0.05)
+    check_initial_adapter(report, 0.05, 0.5)
     check_update_stimulus(report, 0.05)
-    check_updated_adapter(report, 0.05)
+    check_updated_adapter(report, 0.05, 0.5)
     assert report["updated_parity"]["mean_abs"] == pytest.approx(0.04)
     assert report["update_delta"]["max_abs"] < 1e-12
 
@@ -83,7 +103,7 @@ def test_update_smaller_than_the_budget_cannot_qualify_publication():
         "trainer_updated": [-1.999],
         "updated": [-1.999],
     }
-    check_initial_adapter(report, 0.05)
+    check_initial_adapter(report, 0.05, 0.5)
     with pytest.raises(AssertionError, match="insufficient test stimulus"):
         check_update_stimulus(report, 0.05)
 
@@ -106,9 +126,9 @@ def test_ordinary_agreement_does_not_claim_tight_delta_equivalence():
         "trainer_updated": [-1.8],
         "updated": [-1.81],
     }
-    check_initial_adapter(report, 0.05)
+    check_initial_adapter(report, 0.05, 0.5)
     check_update_stimulus(report, 0.05)
-    check_updated_adapter(report, 0.05)
+    check_updated_adapter(report, 0.05, 0.5)
     assert report["update_delta"]["mean_abs"] == pytest.approx(0.01)
     assert report["update_delta"]["cosine"] == pytest.approx(1.0)
     assert report["update_delta"]["scale"] == pytest.approx(0.19 / 0.18)

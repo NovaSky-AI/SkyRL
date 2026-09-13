@@ -41,15 +41,15 @@ def test_sdk_stages_use_native_ordinary_agreement_and_delta_diagnostics(monkeypa
     monkeypatch.setattr(checks, "score_trainer", lambda *args: next(trainer_values))
     monkeypatch.setattr(checks, "score_sampler", lambda *args: next(sampler_values))
     report = {}
-    checks.score_before_update(None, None, [], report, 0.05)
+    checks.score_before_update(None, None, [], report, 0.05, 0.5)
     checks.check_withheld_publication(None, None, [], report)
     if passes:
-        checks.check_published_update(None, [], report, 0.05)
+        checks.check_published_update(None, [], report, 0.05, 0.5)
         assert report["update_delta"]["mean_abs"] < 1e-10
         assert report["stale_parity"]["mean_abs"] < 0.05  # Weak real update does not prove strong publication.
     else:
         with pytest.raises(AssertionError):
-            checks.check_published_update(None, [], report, 0.05)
+            checks.check_published_update(None, [], report, 0.05, 0.5)
     assert report["updated"] == sampler_after
 
 
