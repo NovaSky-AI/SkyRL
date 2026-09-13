@@ -39,13 +39,16 @@ class _FakeEngine:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("model", "uses_lora"), [("adapter_test", True), ("base_test", False)])
-async def test_route_endpoint_resolves_lora_by_model(model, uses_lora):
+@pytest.mark.parametrize(
+    ("model", "status", "uses_lora"),
+    [("adapter_test", 200, True), ("base_test", 200, False), ("missing_test", 404, False)],
+)
+async def test_route_endpoint_resolves_lora_by_model(model, status, uses_lora):
     app = FastAPI()
     lora_request = object()
     app.state.openai_serving_models = SimpleNamespace(lora_requests={"adapter_test": lora_request})
     engine = _FakeEngine()
-    VLLMServerActor._add_custom_endpoints(app, engine, Namespace())
+    VLLMServerActor._add_custom_endpoints(app, engine, Namespace(model="base_test"))
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
@@ -57,9 +60,10 @@ async def test_route_endpoint_resolves_lora_by_model(model, uses_lora):
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == status
     assert engine.lora_request is (lora_request if uses_lora else None)
-    assert response.json()["choices"][0]["routed_experts"] is not None
+    if status == 200:
+        assert response.json()["choices"][0]["routed_experts"] is not None
 
 
 @pytest.mark.asyncio

@@ -561,7 +561,10 @@ class VLLMServerActor(ServerActorProtocol):
             token_ids = body["token_ids"]
             sampling_params_dict = body.get("sampling_params", {})
             cache_salt = body.get("cache_salt")
-            lora_request = request.app.state.openai_serving_models.lora_requests.get(body.get("model"))
+            model = body["model"]
+            lora_request = request.app.state.openai_serving_models.lora_requests.get(model)
+            if lora_request is None and model != cli_args.model:
+                raise HTTPException(status_code=404, detail=f"LoRA adapter '{model}' is not loaded.")
 
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
