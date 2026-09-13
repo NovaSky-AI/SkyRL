@@ -52,9 +52,7 @@ class LoRATransportFleetTransaction:
                 try:
                     await self._rollback_all(rollback)
                 except BaseException as rollback_error:
-                    activated.add_note(
-                        f"LoRA fleet rollback also failed: {rollback_error}"
-                    )
+                    activated.add_note(f"LoRA fleet rollback also failed: {rollback_error}")
                     raise activated from rollback_error
                 resume_after_update = True
                 raise activated
@@ -64,9 +62,7 @@ class LoRATransportFleetTransaction:
                 # Old adapters are retained through activation. A commit failure
                 # cannot expose a mixed generation, but it must stop a later
                 # replacement until the retained old buffer is reconciled.
-                raise RuntimeError(
-                    "LoRA activated everywhere but failed to retire an old adapter"
-                ) from committed
+                raise RuntimeError("LoRA activated everywhere but failed to retire an old adapter") from committed
             return activated
         except BaseException as error:
             primary_error = error
@@ -76,15 +72,11 @@ class LoRATransportFleetTransaction:
                 resumed = await self._run_phase(resume)
                 if isinstance(resumed, BaseException):
                     if primary_error is not None:
-                        primary_error.add_note(
-                            f"LoRA fleet resume also failed: {resumed}"
-                        )
+                        primary_error.add_note(f"LoRA fleet resume also failed: {resumed}")
                     else:
                         raise resumed
 
-    async def _run_phase(
-        self, operation: ServerCall
-    ) -> Mapping[str, Any] | BaseException:
+    async def _run_phase(self, operation: ServerCall) -> Mapping[str, Any] | BaseException:
         results = await asyncio.gather(
             *(operation(server_url) for server_url in self._server_urls),
             return_exceptions=True,

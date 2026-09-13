@@ -32,9 +32,7 @@ async def test_fleet_transaction_restores_every_server_after_activation_failure(
         events.append(("resume", url))
 
     with pytest.raises(RuntimeError, match="forced activation failure"):
-        await LoRATransportFleetTransaction(["a", "b"]).replace(
-            stage, pause, activate, rollback, commit, resume
-        )
+        await LoRATransportFleetTransaction(["a", "b"]).replace(stage, pause, activate, rollback, commit, resume)
 
     assert events == [
         ("stage", "a"),
@@ -107,14 +105,10 @@ async def test_failed_fleet_rollback_keeps_mixed_generations_paused():
         resumed = True
 
     with pytest.raises(RuntimeError, match="activation failed") as exc_info:
-        await LoRATransportFleetTransaction(["a", "b"]).replace(
-            stage, pause, activate, rollback, commit, resume
-        )
+        await LoRATransportFleetTransaction(["a", "b"]).replace(stage, pause, activate, rollback, commit, resume)
 
     assert str(exc_info.value) == "activation failed"
-    assert exc_info.value.__notes__ == [
-        "LoRA fleet rollback also failed: LoRA fleet rollback failed"
-    ]
+    assert exc_info.value.__notes__ == ["LoRA fleet rollback also failed: LoRA fleet rollback failed"]
     assert active == {"a": 2, "b": 1}
     assert not resumed
 
@@ -144,9 +138,7 @@ async def test_failed_retirement_resumes_only_the_uniform_new_generation():
         resumed.append(dict(active))
 
     with pytest.raises(RuntimeError, match="failed to retire"):
-        await LoRATransportFleetTransaction(["a", "b"]).replace(
-            stage, pause, activate, rollback, commit, resume
-        )
+        await LoRATransportFleetTransaction(["a", "b"]).replace(stage, pause, activate, rollback, commit, resume)
 
     assert resumed == [{"a": 2, "b": 2}, {"a": 2, "b": 2}]
 
