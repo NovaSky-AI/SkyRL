@@ -561,9 +561,11 @@ class VLLMServerActor(ServerActorProtocol):
             token_ids = body["token_ids"]
             sampling_params_dict = body.get("sampling_params", {})
             cache_salt = body.get("cache_salt")
-            model = body["model"]
+            model = body.get("model")
             lora_request = request.app.state.openai_serving_models.lora_requests.get(model)
-            if lora_request is None and model != cli_args.model:
+            served_model_names = getattr(cli_args, "served_model_name", None) or []
+            base_model_names = {cli_args.model, *served_model_names}
+            if model is not None and lora_request is None and model not in base_model_names:
                 raise HTTPException(status_code=404, detail=f"LoRA adapter '{model}' is not loaded.")
 
             sampling_params = VLLMSamplingParams(**sampling_params_dict)

@@ -41,20 +41,20 @@ class _FakeEngine:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model", "status", "uses_lora"),
-    [("adapter_test", 200, True), ("base_test", 200, False), ("missing_test", 404, False)],
+    [("adapter_test", 200, True), ("base_test", 200, False), ("served_alias", 200, False), (None, 200, False), ("missing_test", 404, False)],
 )
 async def test_route_endpoint_resolves_lora_by_model(model, status, uses_lora):
     app = FastAPI()
     lora_request = object()
     app.state.openai_serving_models = SimpleNamespace(lora_requests={"adapter_test": lora_request})
     engine = _FakeEngine()
-    VLLMServerActor._add_custom_endpoints(app, engine, Namespace(model="base_test"))
+    VLLMServerActor._add_custom_endpoints(app, engine, Namespace(model="base_test", served_model_name=["served_alias"]))
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/skyrl/v1/generate",
             json={
-                "model": model,
+                **({"model": model} if model is not None else {}),
                 "token_ids": [1, 2],
                 "sampling_params": {"max_tokens": 1, "temperature": 0.0},
             },
