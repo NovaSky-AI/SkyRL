@@ -481,17 +481,14 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         )
 
         discard_staged_vllm_lora_model(self.model_runner, adapter_id)
-        removed_names = set()
         staged = getattr(self, "_skyrl_lora_transport_staged", {})
         for adapter_name, record in tuple(staged.items()):
             if record.adapter_id == adapter_id:
                 del staged[adapter_name]
-                removed_names.add(adapter_name)
         active = getattr(self, "_skyrl_lora_transport_active", {})
         for adapter_name, record in tuple(active.items()):
             if record.adapter_id == adapter_id:
                 del active[adapter_name]
-                removed_names.add(adapter_name)
         getattr(self, "_skyrl_lora_transport_retained", {}).pop(adapter_id, None)
 
     def remove_lora_transport_adapter(self, adapter_id: int) -> None:

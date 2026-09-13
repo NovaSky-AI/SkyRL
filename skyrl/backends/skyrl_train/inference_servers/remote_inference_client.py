@@ -1368,9 +1368,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
             )
             return response
 
-        async def pause():
+        async def pause(server_url: str):
             phase_started = time.perf_counter()
-            response = await self._call_all_servers("/skyrl/v1/pause_lora_transport")
+            _, response = await self._call_server(server_url, "/skyrl/v1/pause_lora_transport")
             logger.info(
                 "lora_nccl_fleet_stage generation=%s phase=pause seconds=%.6f",
                 generation,
@@ -1378,9 +1378,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
             )
             return response
 
-        async def resume():
+        async def resume(server_url: str):
             phase_started = time.perf_counter()
-            response = await self._call_all_servers("/skyrl/v1/resume_lora_transport")
+            _, response = await self._call_server(server_url, "/skyrl/v1/resume_lora_transport")
             logger.info(
                 "lora_nccl_fleet_stage generation=%s phase=resume seconds=%.6f",
                 generation,

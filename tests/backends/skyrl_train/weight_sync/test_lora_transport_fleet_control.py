@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from skyrl.backends.skyrl_train.weight_sync.lora_transport.fleet_control import (
@@ -12,8 +14,8 @@ async def test_fleet_transaction_restores_every_server_after_activation_failure(
     async def stage(url):
         events.append(("stage", url))
 
-    async def pause():
-        events.append(("pause",))
+    async def pause(url):
+        events.append(("pause", url))
 
     async def activate(url):
         events.append(("activate", url))
@@ -26,21 +28,25 @@ async def test_fleet_transaction_restores_every_server_after_activation_failure(
     async def commit(url):
         events.append(("commit", url))
 
-    async def resume():
-        events.append(("resume",))
+    async def resume(url):
+        events.append(("resume", url))
 
     with pytest.raises(RuntimeError, match="forced activation failure"):
-        await LoRATransportFleetTransaction(["a", "b"]).replace(stage, pause, activate, rollback, commit, resume)
+        await LoRATransportFleetTransaction(["a", "b"]).replace(
+            stage, pause, activate, rollback, commit, resume
+        )
 
     assert events == [
         ("stage", "a"),
         ("stage", "b"),
-        ("pause",),
+        ("pause", "a"),
+        ("pause", "b"),
         ("activate", "a"),
         ("activate", "b"),
         ("rollback", "a"),
         ("rollback", "b"),
-        ("resume",),
+        ("resume", "a"),
+        ("resume", "b"),
     ]
 
 
@@ -80,7 +86,7 @@ async def test_failed_fleet_rollback_keeps_mixed_generations_paused():
     async def stage(url):
         pass
 
-    async def pause():
+    async def pause(url):
         pass
 
     async def activate(url):
@@ -96,15 +102,19 @@ async def test_failed_fleet_rollback_keeps_mixed_generations_paused():
     async def commit(url):
         raise AssertionError("commit must not run")
 
-    async def resume():
+    async def resume(url):
         nonlocal resumed
         resumed = True
 
     with pytest.raises(RuntimeError, match="activation failed") as exc_info:
-        await LoRATransportFleetTransaction(["a", "b"]).replace(stage, pause, activate, rollback, commit, resume)
+        await LoRATransportFleetTransaction(["a", "b"]).replace(
+            stage, pause, activate, rollback, commit, resume
+        )
 
     assert str(exc_info.value) == "activation failed"
-    assert exc_info.value.__notes__ == ["LoRA fleet rollback also failed: LoRA fleet rollback failed"]
+    assert exc_info.value.__notes__ == [
+        "LoRA fleet rollback also failed: LoRA fleet rollback failed"
+    ]
     assert active == {"a": 2, "b": 1}
     assert not resumed
 
@@ -117,7 +127,7 @@ async def test_failed_retirement_resumes_only_the_uniform_new_generation():
     async def stage(url):
         pass
 
-    async def pause():
+    async def pause(url):
         pass
 
     async def activate(url):
@@ -130,13 +140,15 @@ async def test_failed_retirement_resumes_only_the_uniform_new_generation():
         if url == "b":
             raise RuntimeError("retirement failed")
 
-    async def resume():
+    async def resume(url):
         resumed.append(dict(active))
 
     with pytest.raises(RuntimeError, match="failed to retire"):
-        await LoRATransportFleetTransaction(["a", "b"]).replace(stage, pause, activate, rollback, commit, resume)
+        await LoRATransportFleetTransaction(["a", "b"]).replace(
+            stage, pause, activate, rollback, commit, resume
+        )
 
-    assert resumed == [{"a": 2, "b": 2}]
+    assert resumed == [{"a": 2, "b": 2}, {"a": 2, "b": 2}]
 
 
 @pytest.mark.asyncio
@@ -173,4 +185,83 @@ async def test_fleet_transaction_rolls_back_before_activation_when_producer_fail
         ("producer_ready",),
         ("rollback", "a"),
         ("rollback", "b"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fleet_transaction_resumes_servers_after_partial_pause_failure():
+    events = []
+
+    async def stage(url):
+        events.append(("stage", url))
+
+    pause_completed = asyncio.Event()
+
+    async def pause(url):
+        events.append(("pause", url))
+        if url == "a":
+            await asyncio.sleep(0)
+            pause_completed.set()
+            return
+        raise RuntimeError("one server failed to pause")
+
+    async def rollback(url):
+        assert pause_completed.is_set()
+        events.append(("rollback", url))
+
+    async def resume(url):
+        events.append(("resume", url))
+
+    async def impossible(*_):
+        raise AssertionError("activation phase must not run")
+
+    with pytest.raises(RuntimeError, match="one server failed to pause"):
+        await LoRATransportFleetTransaction(["a", "b"]).replace(
+            stage,
+            pause,
+            impossible,
+            rollback,
+            impossible,
+            resume,
+        )
+
+    assert events == [
+        ("stage", "a"),
+        ("stage", "b"),
+        ("pause", "a"),
+        ("pause", "b"),
+        ("rollback", "a"),
+        ("rollback", "b"),
+        ("resume", "a"),
+        ("resume", "b"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pause_failure_remains_primary_when_recovery_also_fails():
+    async def noop(*_):
+        pass
+
+    async def pause(url):
+        raise RuntimeError("pause failed")
+
+    async def rollback(_):
+        raise RuntimeError("rollback failed")
+
+    async def resume(url):
+        raise RuntimeError("resume failed")
+
+    with pytest.raises(RuntimeError, match="pause failed") as exc_info:
+        await LoRATransportFleetTransaction(["a"]).replace(
+            noop,
+            pause,
+            noop,
+            rollback,
+            noop,
+            resume,
+        )
+
+    assert exc_info.value.__notes__ == [
+        "LoRA fleet rollback also failed: LoRA fleet rollback failed",
+        "LoRA fleet resume also failed: resume failed",
     ]
