@@ -13,6 +13,7 @@ import pytest
 from fastapi import FastAPI
 
 from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
+    _LORA_UPLOAD_MAX_BYTES,
     VLLMServerActor,
 )
 
@@ -71,19 +72,39 @@ async def test_lora_upload_rejects_bad_checksum(tmp_path, monkeypatch):
         response = await client.put(
             f"/skyrl/v1/lora-adapters/{upload_id}/adapter_model.safetensors",
             content=content,
-            headers={"X-SkyRL-SHA256": hashlib.sha256(content).hexdigest()},
+            headers={"X-SkyRL-SHA256": hashlib.sha256(content).hexdigest(), "X-SkyRL-File-Size": str(len(content))},
         )
+        bad_content = b"config"
         bad = await client.put(
             f"/skyrl/v1/lora-adapters/{upload_id}/adapter_config.json",
-            content=b"config",
-            headers={"X-SkyRL-SHA256": "not-the-file-sha"},
+            content=bad_content,
+            headers={"X-SkyRL-SHA256": "not-the-file-sha", "X-SkyRL-File-Size": str(len(bad_content))},
         )
 
-    destination = tmp_path / "skyrl_lora_uploads" / upload_id / "adapter_model.safetensors"
     assert response.status_code == 200
-    assert destination.read_bytes() == content
     assert bad.status_code == 400
-    assert not (tmp_path / "skyrl_lora_uploads" / upload_id / "adapter_config.json").exists()
+    assert not (tmp_path / "skyrl_lora_uploads" / upload_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_lora_upload_rejects_oversized_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    app = FastAPI()
+    VLLMServerActor._add_custom_endpoints(app, _FakeEngine(), Namespace())
+    upload_id = str(uuid.uuid4())
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.put(
+            f"/skyrl/v1/lora-adapters/{upload_id}/adapter_model.safetensors",
+            content=b"",
+            headers={
+                "X-SkyRL-SHA256": hashlib.sha256(b"").hexdigest(),
+                "X-SkyRL-File-Size": str(_LORA_UPLOAD_MAX_BYTES + 1),
+            },
+        )
+
+    assert response.status_code == 413
+    assert not (tmp_path / "skyrl_lora_uploads" / upload_id).exists()
 
 
 class _FakeLoraEngineClient:
@@ -117,7 +138,7 @@ async def test_lora_upload_loads_verified_adapter(tmp_path, monkeypatch):
             response = await client.put(
                 f"/skyrl/v1/lora-adapters/{upload_id}/{filename}",
                 content=content,
-                headers={"X-SkyRL-SHA256": hashlib.sha256(content).hexdigest()},
+                headers={"X-SkyRL-SHA256": hashlib.sha256(content).hexdigest(), "X-SkyRL-File-Size": str(len(content))},
             )
             assert response.status_code == 200
         response = await client.post(

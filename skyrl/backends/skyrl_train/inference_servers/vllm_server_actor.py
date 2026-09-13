@@ -57,6 +57,8 @@ from skyrl.env_vars import (
 logger = logging.getLogger(__name__)
 
 _LORA_ADAPTER_FILENAMES = frozenset(("adapter_model.safetensors", "adapter_config.json"))
+_LORA_UPLOAD_MAX_BYTES = 128 * 1024**3
+_LORA_UPLOAD_SIZE_HEADER = "X-SkyRL-File-Size"
 
 
 def _get_uploaded_lora_path(upload_id: str, filename: str) -> str:
@@ -491,7 +493,7 @@ class VLLMServerActor(ServerActorProtocol):
                 models.lora_requests[lora_name] = lora_request
 
             if upload_id is not None:
-                shutil.rmtree(lora_path)
+                await asyncio.to_thread(shutil.rmtree, lora_path, True)
 
             return {
                 "status": "ok",
@@ -499,28 +501,54 @@ class VLLMServerActor(ServerActorProtocol):
                 "lora_int_id": lora_int_id,
             }
 
+        @app.delete("/skyrl/v1/lora-adapters/{upload_id}")
+        async def _discard_lora_upload(upload_id: str):
+            upload_path = os.path.dirname(_get_uploaded_lora_path(upload_id, "adapter_model.safetensors"))
+            await asyncio.to_thread(shutil.rmtree, upload_path, True)
+            return {"status": "ok"}
+
         @app.put("/skyrl/v1/lora-adapters/{upload_id}/{filename}")
         async def _upload_lora_adapter_file(upload_id: str, filename: str, request: Request):
             expected_sha256 = request.headers.get("X-SkyRL-SHA256")
-            if expected_sha256 is None:
-                raise HTTPException(status_code=400, detail="Missing X-SkyRL-SHA256 header.")
+            expected_size_header = request.headers.get(_LORA_UPLOAD_SIZE_HEADER)
+            if expected_sha256 is None or expected_size_header is None:
+                raise HTTPException(status_code=400, detail="Missing LoRA upload integrity headers.")
+            try:
+                expected_size = int(expected_size_header)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid LoRA upload size.") from exc
+            if expected_size < 0 or expected_size > _LORA_UPLOAD_MAX_BYTES:
+                raise HTTPException(status_code=413, detail="LoRA upload exceeds the size limit.")
+
             destination = _get_uploaded_lora_path(upload_id, filename)
-            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            upload_path = os.path.dirname(destination)
+            os.makedirs(upload_path, exist_ok=True)
             temporary = f"{destination}.partial"
             digest = hashlib.sha256()
+            received = 0
             try:
                 with open(temporary, "wb") as file:
                     async for chunk in request.stream():
+                        received += len(chunk)
+                        if received > expected_size:
+                            raise HTTPException(status_code=400, detail="LoRA upload exceeds its declared size.")
                         digest.update(chunk)
                         await asyncio.to_thread(file.write, chunk)
+                if received != expected_size:
+                    raise HTTPException(status_code=400, detail="LoRA upload size mismatch.")
                 actual_sha256 = digest.hexdigest()
                 if actual_sha256 != expected_sha256:
                     raise HTTPException(status_code=400, detail="LoRA upload checksum mismatch.")
                 os.replace(temporary, destination)
                 logger.info(f"Received LoRA adapter file {filename} with sha256={actual_sha256}")
+            except BaseException:
+                await asyncio.to_thread(shutil.rmtree, upload_path, True)
+                raise
             finally:
-                if os.path.exists(temporary):
-                    os.remove(temporary)
+                try:
+                    await asyncio.to_thread(os.remove, temporary)
+                except FileNotFoundError:
+                    pass
             return {"filename": filename, "sha256": actual_sha256}
 
         # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native

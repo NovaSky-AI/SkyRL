@@ -42,6 +42,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     # Per-server LoRA registry: lora_name -> lora_path
     app.state.lora_registry = {}
     app.state.lora_uploads = {}
+    app.state.fail_lora_load = False
     app.state.fetch_weights_requests = []
     # Session ids received via /finish_session, in arrival order.
     app.state.finished_sessions = []
@@ -288,6 +289,16 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         }
         return {"filename": filename, "sha256": sha256}
 
+    @app.delete("/skyrl/v1/lora-adapters/{upload_id}")
+    async def discard_lora_upload(upload_id: str):
+        app.state.lora_uploads.pop(upload_id, None)
+        return {"status": "ok"}
+
+    @app.post("/test/fail_next_lora_load")
+    async def fail_next_lora_load():
+        app.state.fail_lora_load = True
+        return {"status": "ok"}
+
     @app.post("/skyrl/v1/load_lora_adapter")
     async def load_lora_adapter(request: Request):
         body = await request.json()
@@ -301,6 +312,9 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
             )
         if upload_id is not None:
             lora_path = f"uploaded:{upload_id}"
+        if app.state.fail_lora_load:
+            app.state.fail_lora_load = False
+            return JSONResponse(status_code=500, content={"error": {"message": "load failed"}})
         app.state.lora_registry[lora_name] = lora_path
         return PlainTextResponse(f"Success: LoRA adapter '{lora_name}' added successfully on server {server_id}.")
 
@@ -1103,17 +1117,28 @@ class TestLoRAControlPlane:
         result = await client.load_lora_adapter("lora-upload", str(adapter_path), "remote_upload")
 
         assert len(result) == 2
-        uploads = await _get_lora_uploads(mock_servers["server_urls"])
-        expected = {
-            "adapter_model.safetensors": {
-                "sha256": hashlib.sha256(adapter_bytes).hexdigest(),
-                "size": len(adapter_bytes),
-            },
-            "adapter_config.json": {"sha256": hashlib.sha256(config_bytes).hexdigest(), "size": len(config_bytes)},
+        expected_sha256 = {
+            "adapter_model.safetensors": hashlib.sha256(adapter_bytes).hexdigest(),
+            "adapter_config.json": hashlib.sha256(config_bytes).hexdigest(),
         }
-        assert all(len(upload) == 1 and next(iter(upload.values())) == expected for upload in uploads)
-        expected_sha256 = {filename: receipt["sha256"] for filename, receipt in expected.items()}
         assert all(response["sha256"] == expected_sha256 for response in result.values())
+        assert await _get_lora_uploads(mock_servers["server_urls"]) == [{}, {}]
+
+    @pytest.mark.asyncio
+    async def test_remote_upload_rolls_back_partial_publication(self, client, mock_servers, tmp_path):
+        adapter_path = tmp_path / "adapter-failure"
+        adapter_path.mkdir()
+        (adapter_path / "adapter_model.safetensors").write_bytes(b"adapter-bytes")
+        (adapter_path / "adapter_config.json").write_text('{"r": 32}')
+        async with httpx.AsyncClient() as http:
+            await http.post(f"{mock_servers['server_urls'][1]}/test/fail_next_lora_load")
+
+        with pytest.raises(RuntimeError, match="LoRA publication failed on 1 inference servers"):
+            await client.load_lora_adapter("lora-failure", str(adapter_path), "remote_upload")
+
+        registries = await _get_lora_registries(mock_servers["server_urls"])
+        assert all("lora-failure" not in registry for registry in registries)
+        assert await _get_lora_uploads(mock_servers["server_urls"]) == [{}, {}]
 
     @pytest.mark.asyncio
     async def test_load_lora_adapter_inplace_reload(self, client, mock_servers):
