@@ -1105,7 +1105,10 @@ class TestLoRAControlPlane:
         assert len(result) == 2
         uploads = await _get_lora_uploads(mock_servers["server_urls"])
         expected = {
-            "adapter_model.safetensors": {"sha256": hashlib.sha256(adapter_bytes).hexdigest(), "size": len(adapter_bytes)},
+            "adapter_model.safetensors": {
+                "sha256": hashlib.sha256(adapter_bytes).hexdigest(),
+                "size": len(adapter_bytes),
+            },
             "adapter_config.json": {"sha256": hashlib.sha256(config_bytes).hexdigest(), "size": len(config_bytes)},
         }
         assert all(len(upload) == 1 and next(iter(upload.values())) == expected for upload in uploads)

@@ -104,6 +104,7 @@ async def _stream_file(path: str):
         while chunk := await asyncio.to_thread(file.read, _LORA_UPLOAD_CHUNK_BYTES):
             yield chunk
 
+
 _TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
     "temperature": "temperature",
     "max_tokens": "max_tokens",
@@ -1342,14 +1343,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
     async def _upload_lora_adapter(self, lora_name: str, lora_path: str) -> Dict[str, Any]:
         upload_id = str(uuid.uuid4())
-        files = [
-            (filename, os.path.join(lora_path, filename))
-            for filename in _LORA_ADAPTER_FILENAMES
-        ]
-        files = [
-            (filename, path, await asyncio.to_thread(_get_file_sha256, path))
-            for filename, path in files
-        ]
+        files = [(filename, os.path.join(lora_path, filename)) for filename in _LORA_ADAPTER_FILENAMES]
+        files = [(filename, path, await asyncio.to_thread(_get_file_sha256, path)) for filename, path in files]
         session = await self._get_session()
 
         async def _upload_to_server(server_url: str):
