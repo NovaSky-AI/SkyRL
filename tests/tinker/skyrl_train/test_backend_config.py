@@ -24,9 +24,7 @@ def test_empty_policy_path_uses_api_model(policy_path: str | None):
 
 
 def test_critic_path_defaults_to_explicit_policy_path():
-    overrides = MegatronBackendOverrides(
-        **{"trainer.policy.model.path": "/models/policy-revision"}
-    )
+    overrides = MegatronBackendOverrides(**{"trainer.policy.model.path": "/models/policy-revision"})
 
     cfg = _build_skyrl_train_config("org/api-model", overrides)
 
