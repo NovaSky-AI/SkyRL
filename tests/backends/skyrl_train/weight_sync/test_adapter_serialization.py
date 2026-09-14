@@ -42,16 +42,13 @@ def test_compaction_preserves_exact_tensors_and_serialized_aliases(tmp_path):
     for name, tensor in state.items():
         assert restored[name].dtype == tensor.dtype
         assert restored[name].shape == tensor.shape
-        assert torch.equal(
-            restored[name].view(torch.uint8), tensor.detach().view(torch.uint8)
-        )
+        assert torch.equal(restored[name].view(torch.uint8), tensor.detach().view(torch.uint8))
 
 
 def test_compaction_keeps_nonexpert_tensors_independent():
     repeated = torch.ones((4, 2), dtype=torch.bfloat16)
     state = {
-        f"base_model.model.model.layers.{layer}.self_attn.q_proj.lora_B.weight": repeated.clone()
-        for layer in range(3)
+        f"base_model.model.model.layers.{layer}.self_attn.q_proj.lora_B.weight": repeated.clone() for layer in range(3)
     }
 
     assert compact_adapter_state(state) is None
@@ -82,12 +79,8 @@ def test_compacted_expert_aliases_are_copied_before_vllm_scaling(tmp_path):
     packed = PackedLoRALayerWeights.pack_moe(loras, "experts")
     packed.optimize()
 
-    assert all(
-        torch.equal(tensor, torch.ones_like(tensor)) for tensor in restored.values()
-    )
-    assert all(
-        torch.equal(tensor, torch.full_like(tensor, 0.5)) for tensor in packed.lora_b
-    )
+    assert all(torch.equal(tensor, torch.ones_like(tensor)) for tensor in restored.values())
+    assert all(torch.equal(tensor, torch.full_like(tensor, 0.5)) for tensor in packed.lora_b)
 
 
 def test_empty_adapter_state_is_rejected(tmp_path):
@@ -120,20 +113,14 @@ def test_serialization_replaces_stale_format_when_compaction_changes(tmp_path):
 
 
 @pytest.mark.parametrize("start_compact", [False, True])
-def test_format_change_installs_new_artifact_before_cleanup(
-    tmp_path, monkeypatch, start_compact
-):
+def test_format_change_installs_new_artifact_before_cleanup(tmp_path, monkeypatch, start_compact):
     repeated = torch.arange(12, dtype=torch.bfloat16).reshape(3, 4)
     duplicate_state = _expert_state(repeated)
     unique_state = {
         "first": repeated.clone(),
         "second": (repeated + 1).clone(),
     }
-    old_state, new_state = (
-        (duplicate_state, unique_state)
-        if start_compact
-        else (unique_state, duplicate_state)
-    )
+    old_state, new_state = (duplicate_state, unique_state) if start_compact else (unique_state, duplicate_state)
     save_adapter_state(old_state, str(tmp_path))
 
     def fail_cleanup(_path):
