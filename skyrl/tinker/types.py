@@ -177,6 +177,7 @@ class ErrorResponse(BaseModel):
 
 class OptimStepInput(BaseModel):
     adam_params: AdamParams
+    gradient_scale: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
 
 
 class OptimStepOutput(BaseModel):
