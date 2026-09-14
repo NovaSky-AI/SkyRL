@@ -1,7 +1,6 @@
 import pytest
 import torch
 from safetensors.torch import load_file
-from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 
 from skyrl.backends.skyrl_train.weight_sync import adapter_serialization
 from skyrl.backends.skyrl_train.weight_sync.adapter_serialization import (
@@ -54,7 +53,12 @@ def test_compaction_keeps_nonexpert_tensors_independent():
     assert compact_adapter_state(state) is None
 
 
+@pytest.mark.vllm
 def test_compacted_expert_aliases_are_copied_before_vllm_scaling(tmp_path):
+    weights = pytest.importorskip("vllm.lora.lora_weights")
+    LoRALayerWeights = weights.LoRALayerWeights
+    PackedLoRALayerWeights = weights.PackedLoRALayerWeights
+
     state = _expert_state(
         torch.ones((4, 2), dtype=torch.bfloat16),
         projections=("gate_proj", "down_proj", "up_proj"),
