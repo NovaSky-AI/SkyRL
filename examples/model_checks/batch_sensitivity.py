@@ -1,6 +1,17 @@
 """Compare identical token scores across batch sizes without prescribing a tolerance."""
 
+import json
 import math
+
+
+def load_fixture(path, model):
+    fixture = json.loads(path.read_text())
+    if model.resolve().name != fixture["model_revision"]:
+        raise ValueError("Model snapshot directory must be named for the fixture's pinned revision")
+    tokens = fixture["tokens"]
+    if len(tokens) < 2 or not all(type(token) is int and token >= 0 for token in tokens):
+        raise ValueError("Expected at least two nonnegative integer token IDs")
+    return fixture
 
 
 def compare_rows(reference, actual):

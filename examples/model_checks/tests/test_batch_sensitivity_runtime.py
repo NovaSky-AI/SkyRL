@@ -1,5 +1,7 @@
 """Native-import checks; run in the same Megatron environment as the GPU diagnostic."""
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,7 +30,11 @@ def test_worker_rejects_nonzero_adapter_and_preserves_production_scoring_path():
     worker.score_zero_adapter("batch")
     assert calls == [("batch", None)]
     parameter[0, 0] = 1
-    with pytest.raises(AssertionError):
+    with pytest.raises(RuntimeError, match="zero-initialized"):
+        worker.score_zero_adapter("batch")
+    assert calls == [("batch", None)]
+    worker.actor_module = []
+    with pytest.raises(RuntimeError, match="No LoRA"):
         worker.score_zero_adapter("batch")
     assert calls == [("batch", None)]
 
@@ -49,3 +55,53 @@ def test_dispatch_keeps_rows_separate_and_rejects_wrong_scored_length(monkeypatc
     output.loss_fn_outputs[1]["logprobs"].append(-3.0)
     with pytest.raises(ValueError):
         runner.score_batch(policy, "batch", 2, 2)
+
+
+def make_args(tmp_path):
+    fixtures = Path(__file__).parents[1] / "fixtures"
+    fixture = fixtures / "qwen3_8b_tokens.json"
+    model = tmp_path / json.loads(fixture.read_text())["model_revision"]
+    return SimpleNamespace(
+        model=model, fixture=fixture, backend_config=fixtures / "qwen3_8b_config.json", output_dir=tmp_path
+    )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"trainer.bf16": False},
+        {"trainer.policy.model.lora.rank": 0},
+        {"trainer.policy.megatron_config.context_parallel_size": 2},
+        {"trainer.placement.policy_num_gpus_per_node": 2},
+        {"trainer.remove_microbatch_padding": True},
+        {"trainer.max_tokens_per_microbatch": 129},
+    ],
+)
+def test_preflight_rejects_configs_that_change_the_control(tmp_path, override):
+    args = make_args(tmp_path)
+    config = json.loads(args.backend_config.read_text())
+    config.update(override)
+    args.backend_config = tmp_path / "config.json"
+    args.backend_config.write_text(json.dumps(config))
+    with pytest.raises(ValueError):
+        runner.load_config(args, 65)
+
+
+def test_ray_cleanup_runs_even_when_saving_a_failed_run_raises(tmp_path, monkeypatch):
+    args = make_args(tmp_path)
+    shutdowns = []
+    monkeypatch.setattr(runner, "get_tokenizer", lambda _: SimpleNamespace(pad_token_id=0))
+    monkeypatch.setattr(runner.ray, "is_initialized", lambda: False)
+    monkeypatch.setattr(runner.ray, "shutdown", lambda: shutdowns.append(True))
+
+    def fail_initialize(_cfg):
+        raise RuntimeError("initialization failed")
+
+    def fail_write(*_args):
+        raise OSError("report storage unavailable")
+
+    monkeypatch.setattr(runner, "initialize_ray", fail_initialize)
+    monkeypatch.setattr(runner, "write_report", fail_write)
+    with pytest.raises(OSError, match="report storage"):
+        runner.run(args, {})
+    assert shutdowns == [True]

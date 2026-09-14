@@ -9,7 +9,11 @@ from time import perf_counter
 import ray
 import torch
 
-from examples.model_checks.batch_sensitivity import compare_batches, compare_rows
+from examples.model_checks.batch_sensitivity import (
+    compare_batches,
+    compare_rows,
+    load_fixture,
+)
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
@@ -30,7 +34,10 @@ class BatchSensitivityWorker(MegatronPolicyWorkerBase):
             for name, parameter in chunk.named_parameters()
             if ".adapter.linear_out." in name
         ]
-        assert counts and int(torch.stack(counts).sum().cpu()) == 0
+        if not counts:
+            raise RuntimeError("No LoRA output parameters found")
+        if int(torch.stack(counts).sum().cpu()) != 0:
+            raise RuntimeError("Expected zero-initialized LoRA output parameters")
         # Preserve the observed production logprob path, rather than SFT forward-only.
         return self.forward(data, loss_fn=None)
 
@@ -76,11 +83,7 @@ def write_report(output_dir, report):
     temporary.replace(output_dir / "batch-sensitivity.json")
 
 
-def run(args, report):
-    fixture = json.loads(args.fixture.read_text())
-    tokens = fixture["tokens"]
-    assert args.model.resolve().name == fixture["model_revision"]
-    assert len(tokens) >= 2 and all(type(token) is int and token >= 0 for token in tokens)
+def load_config(args, positions):
     overrides = json.loads(args.backend_config.read_text())
     overrides["trainer.policy.model.path"] = str(args.model.resolve())
     overrides["trainer.log_path"] = str(args.output_dir / "runtime-logs")
@@ -89,18 +92,32 @@ def run(args, report):
     trainer = cfg.trainer
     parallel = trainer.policy.megatron_config
     placement = trainer.placement
-    assert trainer.strategy == "megatron" and trainer.bf16
-    assert trainer.policy.model.lora.rank > 0
-    assert parallel.pipeline_model_parallel_size == parallel.context_parallel_size == 1
-    assert placement.policy_num_nodes * placement.policy_num_gpus_per_node == parallel.tensor_model_parallel_size
-    assert not trainer.remove_microbatch_padding
-    assert trainer.max_tokens_per_microbatch >= 2 * len(tokens)
+    if trainer.strategy != "megatron" or not trainer.bf16:
+        raise ValueError("Expected a BF16 Megatron trainer")
+    if trainer.policy.model.lora.rank <= 0:
+        raise ValueError("Expected a positive LoRA rank")
+    if parallel.pipeline_model_parallel_size != 1 or parallel.context_parallel_size != 1:
+        raise ValueError("Batch sensitivity requires PP1 and CP1")
+    if placement.policy_num_nodes * placement.policy_num_gpus_per_node != parallel.tensor_model_parallel_size:
+        raise ValueError("Batch sensitivity requires DP1: trainer GPU count must equal TP")
+    if trainer.remove_microbatch_padding:
+        raise ValueError("Batch sensitivity requires rectangular padded batches")
+    if trainer.max_tokens_per_microbatch < 2 * positions:
+        raise ValueError("Token budget must keep both duplicate rows in one microbatch")
+    return cfg, overrides
+
+
+def run(args, report):
+    fixture = load_fixture(args.fixture, args.model)
+    tokens = fixture["tokens"]
+    cfg, overrides = load_config(args, len(tokens))
     tokenizer = get_tokenizer(cfg.trainer.policy.model.path)
     pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     single = build_batch(tokens, 1, pad)
     duplicate = build_batch(tokens, 2, pad)
     for key in ("sequences", "attention_mask", "response_mask", "loss_mask"):
-        assert torch.equal(single[key].expand_as(duplicate[key]), duplicate[key])
+        if not torch.equal(single[key].expand_as(duplicate[key]), duplicate[key]):
+            raise ValueError(f"Single and duplicate batches differ in {key}")
     report.update(
         fixture=fixture,
         fixture_sha256=hashlib.sha256(args.fixture.read_bytes()).hexdigest(),
@@ -115,6 +132,8 @@ def run(args, report):
         raise RuntimeError("Run in a fresh driver on an owned Ray allocation")
     try:
         initialize_ray(cfg)
+        trainer = cfg.trainer
+        placement = trainer.placement
         policy = PPORayActorGroup(
             trainer,
             num_nodes=placement.policy_num_nodes,
@@ -133,8 +152,10 @@ def run(args, report):
             write_report(args.output_dir, report)
         report["comparisons"] = compare_batches(report["scores"])
     finally:
-        write_report(args.output_dir, report)
-        ray.shutdown()
+        try:
+            write_report(args.output_dir, report)
+        finally:
+            ray.shutdown()
 
 
 def main():

@@ -1,6 +1,12 @@
+import json
+
 import pytest
 
-from examples.model_checks.batch_sensitivity import compare_batches, compare_rows
+from examples.model_checks.batch_sensitivity import (
+    compare_batches,
+    compare_rows,
+    load_fixture,
+)
 
 
 def test_batch_change_is_reported_separately_from_repeat_noise():
@@ -27,3 +33,19 @@ def test_misaligned_or_nonfinite_scores_are_rejected(actual):
 def test_unexpected_row_count_is_rejected():
     with pytest.raises(ValueError):
         compare_batches({"single": [[-1]], "duplicate": [[-1]], "repeat": [[-1]]})
+
+
+@pytest.mark.parametrize("tokens", [[], [1], [1, -1], [1, True], [1, 2.5]])
+def test_invalid_fixed_token_inputs_are_rejected(tmp_path, tokens):
+    fixture = tmp_path / "tokens.json"
+    fixture.write_text(json.dumps({"model_revision": "pinned", "tokens": tokens}))
+    with pytest.raises(ValueError, match="token IDs"):
+        load_fixture(fixture, tmp_path / "pinned")
+
+
+def test_snapshot_revision_and_fixed_tokens_are_preserved(tmp_path):
+    fixture = tmp_path / "tokens.json"
+    fixture.write_text(json.dumps({"model_revision": "pinned", "tokens": [1, 2, 3]}))
+    with pytest.raises(ValueError, match="pinned revision"):
+        load_fixture(fixture, tmp_path / "other")
+    assert load_fixture(fixture, tmp_path / "pinned")["tokens"] == [1, 2, 3]
