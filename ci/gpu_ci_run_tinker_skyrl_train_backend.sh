@@ -7,5 +7,5 @@ export CI=true
 # SkyRL-Train Megatron and exercise per-adapter swap, signature gating,
 # v1 single-tenant sample guard, per-adapter Adam step isolation, and
 # delete-then-train continuity.
-uv run --directory . --isolated --extra tinker --extra megatron --with pytest --with pytest-timeout \
+uv run --directory . --isolated --extra tinker --extra megatron --with pytest --with pytest-timeout --with pytest-asyncio \
     pytest -s --timeout=600 tests/tinker/skyrl_train/

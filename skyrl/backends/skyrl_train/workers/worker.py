@@ -46,6 +46,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     ppo_critic_loss,
 )
+from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -292,7 +293,8 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         self._transfer_strategy_cls = None  # Set in init_weight_transfer_communicator
-        # Populated by init_model when torch profiling is enabled.
+        # Populated by init_model when torch profiling is enabled, or by
+        # start_profile(config) on the Tinker path.
         self.profiler = None
 
         if self.cfg.algorithm.temperature is None:
@@ -376,20 +378,44 @@ class Worker(DistributedTorchRayActor):
     # torch.profiler RPCs, dispatched via WorkerDispatch pass_through.
     # ------------------------------------------------------------------
 
-    def start_profile(self) -> None:
-        """Arm the profiler before the training loop (no-op when disabled)."""
+    def start_profile(self, config: Optional[dict] = None) -> None:
+        """Arm the profiler before the training loop (no-op when disabled).
+
+        With ``config``, build a profiler from it first, replacing any live one.
+        This is how the Tinker path starts a session on a running server, where
+        the schedule is not known until the request arrives. Without ``config``,
+        behave exactly as before and just arm whatever ``init_model`` built.
+        """
+        if config is not None:
+            from skyrl.train.config.config import TorchProfilerConfig
+
+            self.profiler = Profiler(TorchProfilerConfig(**config))
         if self.profiler is not None:
             self.profiler.start()
 
-    def profile_step(self) -> None:
-        """Advance the profiler schedule by one global step."""
-        if self.profiler is not None:
-            self.profiler.step()
+    def profile_step(self) -> Optional[str]:
+        """Advance the profiler schedule by one global step.
+
+        Returns the profiler's last error (e.g. a failed trace upload) so the
+        caller can surface it, or None.
+        """
+        if self.profiler is None:
+            return None
+        self.profiler.step()
+        return getattr(self.profiler, "last_error", None)
 
     def stop_profile(self) -> None:
-        """Stop the profiler after the training loop, flushing any open window."""
-        if self.profiler is not None:
-            self.profiler.stop()
+        """Stop the profiler after the training loop, flushing any open window.
+
+        The session is always discarded: a profiler is scoped to one start/stop
+        pair, and keeping it would let the next start_profile(config) silently
+        reuse the previous schedule and save path.
+        """
+        if self.profiler is None:
+            return
+        self.profiler.stop()
+        self.profiler.close()
+        self.profiler = None
 
     def dump_profiler_summary(self):
         """Return this rank's last-window kernel summary, or None."""

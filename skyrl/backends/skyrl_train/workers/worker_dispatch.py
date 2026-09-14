@@ -36,8 +36,8 @@ if TYPE_CHECKING:
 class GPUState:
     """Tracks what's on GPU for a model."""
 
-    model_on_gpu: bool = False
-    optimizer_on_gpu: bool = False
+    model_on_gpu: bool
+    optimizer_on_gpu: bool
 
 
 class WorkerDispatch:
@@ -74,12 +74,19 @@ class WorkerDispatch:
         if ref_actor_group is not None:
             self._actor_groups["ref"] = ref_actor_group
 
-        # GPU state tracking (only matters when colocated)
-        self._gpu_state: Dict[str, GPUState] = {name: GPUState() for name in self._actor_groups.keys()}
+        # GPU state tracking (only matters when colocated). Every caller builds and
+        # initializes its actor groups on GPU before constructing the dispatch;
+        # colocated callers offload first and then immediately mark_all_offloaded(),
+        # so "resident" is the correct starting assumption here.
+        self._gpu_state: Dict[str, GPUState] = {
+            name: GPUState(model_on_gpu=True, optimizer_on_gpu=(name != "ref")) for name in self._actor_groups.keys()
+        }
 
     def register_actor_group(self, model: str, actor_group: PPORayActorGroup) -> None:
         self._actor_groups[model] = actor_group
-        self._gpu_state[model] = GPUState()
+        # Not initialized yet -- callers register, then call init_model(), which
+        # records the model as resident.
+        self._gpu_state[model] = GPUState(model_on_gpu=False, optimizer_on_gpu=False)
 
     # ------------------------------------------------------------------
     # Multi-LoRA: per-model adapter swap orchestration.
@@ -148,7 +155,7 @@ class WorkerDispatch:
     def _offload_inactive_model(self, model: str) -> None:
         """Offload an inactive colocated model to CPU."""
         self._actor_groups[model].offload_to_cpu()
-        self._gpu_state[model] = GPUState()
+        self._gpu_state[model] = GPUState(model_on_gpu=False, optimizer_on_gpu=False)
 
     def _ensure_on_gpu(self, model: str, need_optimizer: bool = True, need_model: bool = True) -> None:
         """Ensure model is on GPU, offloading others in same colocation group if needed."""
@@ -201,6 +208,20 @@ class WorkerDispatch:
         if offload_optimizer:
             self._gpu_state[model].optimizer_on_gpu = False
 
+    def offload_for_sampling(self) -> None:
+        """Fully offload every colocated trainer model so inference engines can reclaim VRAM.
+
+        Used by cold sample paths (no preceding weight sync): the engines are
+        woken directly, so any model left GPU-resident by a forward/optim op
+        (policy, critic, ...) must first move to CPU. No-op when nothing is on
+        the GPU.
+        """
+        if not self.colocate_all:
+            return
+        for model, state in self._gpu_state.items():
+            if state.model_on_gpu or state.optimizer_on_gpu:
+                self._offload(model, offload_optimizer=True, offload_model=True)
+
     def mark_all_offloaded(self) -> None:
         """Mark all models as offloaded (call after build_models when colocate_all)."""
         for model in self._actor_groups:
@@ -210,7 +231,7 @@ class WorkerDispatch:
         """Mark a specific model as offloaded without changing others."""
         if model not in self._actor_groups:
             return
-        self._gpu_state[model] = GPUState()
+        self._gpu_state[model] = GPUState(model_on_gpu=False, optimizer_on_gpu=False)
 
     def forward(
         self,
@@ -458,31 +479,49 @@ class WorkerDispatch:
     # the colocation offload state.
     # ------------------------------------------------------------------
 
-    def start_profile(self, model: str) -> None:
-        """Start profiling on ``model`` workers."""
+    def start_profile(self, model: str, config: Optional[dict] = None, raise_on_error: bool = False) -> None:
+        """Start profiling on ``model`` workers.
+
+        ``config`` builds the profiler on the workers (Tinker path); omit it to
+        arm a statically configured one (trainer path).
+
+        Failures are swallowed by default: a broken profiler must never kill a
+        training run. Callers that report the outcome to a user — the Tinker
+        endpoints — pass ``raise_on_error=True``, since a start that silently
+        failed would otherwise be reported as success.
+        """
         if model not in self._actor_groups:
+            if raise_on_error:
+                raise ValueError(f"no actor group registered for model {model!r}")
             return
         try:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "start_profile"))
+            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "start_profile", config))
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.warning(f"[profiler] start_profile dispatch for {model} failed: {e}")
 
-    def profile_step(self, model: str) -> None:
-        """Advance profiling by one global step."""
+    def profile_step(self, model: str) -> Optional[List[Optional[str]]]:
+        """Advance profiling by one global step, returning per-rank errors."""
         if model not in self._actor_groups:
-            return
+            return None
         try:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"))
+            return ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"))
         except Exception as e:
             logger.warning(f"[profiler] profile_step dispatch for {model} failed: {e}")
+            return None
 
-    def stop_profile(self, model: str) -> None:
+    def stop_profile(self, model: str, raise_on_error: bool = False) -> None:
         """Stop profiling on ``model`` workers."""
         if model not in self._actor_groups:
+            if raise_on_error:
+                raise ValueError(f"no actor group registered for model {model!r}")
             return
         try:
             ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "stop_profile"))
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.warning(f"[profiler] stop_profile dispatch for {model} failed: {e}")
 
     def dump_profiler_summary(self, model: str) -> Optional[List]:
