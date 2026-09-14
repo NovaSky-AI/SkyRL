@@ -438,8 +438,7 @@ class TestRemoteInferenceClientInit:
         assert restored.proxy_url == client.proxy_url
         assert restored.server_urls == client.server_urls
         assert restored.model_name == client.model_name
-        # Session should be None after unpickling
-        assert restored._session is None
+        assert restored._generate_client is None
 
 
 class TestDataPlane:
@@ -508,7 +507,7 @@ class TestDataPlane:
                 ]
             }
 
-        monkeypatch.setattr(client, "_post", return_list_routes)
+        monkeypatch.setattr(client._get_generate_client(), "_post", return_list_routes)
         with pytest.raises(ValueError, match="must return packed"):
             await client._generate_single([1], {}, None, "model")
 
@@ -1025,8 +1024,7 @@ class TestContextManager:
             result = await client.resume()
             assert len(result) == 2
 
-        # Session should be closed after exiting context
-        assert client._session is None or client._session.closed
+        assert client._generate_client is None or client._generate_client._session is None
 
 
 async def _get_lora_registries(server_urls: List[str]) -> List[Dict[str, str]]:
