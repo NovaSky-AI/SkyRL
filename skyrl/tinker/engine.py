@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-import os
 import threading
 import time
 from collections import defaultdict
@@ -17,6 +16,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, create_engine, func, select, update
 
 from skyrl.backends.utils import log_timing
+from skyrl.env_vars import SKYRL_TINKER_CONTINUOUS_SAMPLING
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig, add_model
 from skyrl.tinker.db_models import (
@@ -376,7 +376,7 @@ class TinkerEngine:
         # SKYRL_TINKER_CONTINUOUS_SAMPLING=0 falls back to the serial loop.
         self._sampler: Optional[_ContinuousSampler] = None
         self._continuous_sampling: bool = (
-            os.environ.get("SKYRL_TINKER_CONTINUOUS_SAMPLING", "1").lower() not in ("0", "false")
+            SKYRL_TINKER_CONTINUOUS_SAMPLING
             and hasattr(self.backend, "sample_batch_async")
             and hasattr(self.backend, "prepare_for_sampling")
         )
