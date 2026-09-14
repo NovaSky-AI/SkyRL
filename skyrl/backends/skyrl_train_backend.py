@@ -100,10 +100,12 @@ def _build_skyrl_train_config(
             f"torch profiling at runtime: start the server with --torch-profiler to enable the "
             f"endpoints, then call /start_profiling and /stop_profiling."
         )
-    # Use the API model identifier unless the backend pins a concrete trainer path.
+    # Use the API model identifier unless the backend pins a concrete policy path.
     # Keep these in the CLI overrides so post-init resolves model-derived config from them.
-    user_overrides.setdefault("trainer.policy.model.path", base_model)
-    user_overrides.setdefault("trainer.critic.model.path", base_model)
+    policy_model_path = user_overrides.get("trainer.policy.model.path") or base_model
+    critic_model_path = user_overrides.get("trainer.critic.model.path") or policy_model_path
+    user_overrides["trainer.policy.model.path"] = policy_model_path
+    user_overrides["trainer.critic.model.path"] = critic_model_path
     # Strategy must be set on the override dict (not after from_cli_overrides) so
     # TrainerConfig.__post_init__ sees the right value during validation —
     # e.g. logprobs_chunk_size=None is only valid when strategy=megatron.
