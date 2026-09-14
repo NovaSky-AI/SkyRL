@@ -957,9 +957,11 @@ class TinkerEngine:
         adapters, mutate the model registry, or tear the runtime down —
         model passes, single requests, session cleanup — first drains the
         in-flight samples, preserving the serial loop's safety invariant.
-        Pending samples are deferred (left in the DB) while blocking work
-        exists and are admitted on the next iteration instead of being
-        processed as a convoy batch.
+        Samples queued ahead of the earliest blocking request (lower request
+        id) are admitted first so the drain covers them and the blocking
+        request runs after them, as in the serial loop. Later samples are
+        deferred (left in the DB) and admitted on the next iteration instead
+        of being processed as a convoy batch.
         """
         # Query for pending requests and extract data within session context
         with Session(self.db_engine) as session:
@@ -979,6 +981,12 @@ class TinkerEngine:
         if self._continuous_sampling:
             blocking_work = bool(forward_backward_requests or forward_requests or other_requests)
             if blocking_work:
+                first_blocking_id = min(
+                    int(rid) for rid in (*forward_backward_requests, *forward_requests, *other_requests)
+                )
+                earlier_samples = {rid: req for rid, req in sample_requests.items() if int(rid) < first_blocking_id}
+                if earlier_samples:
+                    self._admit_samples_continuous(earlier_samples)
                 if self._sampler is not None:
                     blockers = [
                         name

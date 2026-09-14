@@ -619,6 +619,51 @@ def test_blocking_op_defers_new_sample_admission(continuous_engine):
     assert _wait_for(lambda: _future_status(engine, rid_sample) == RequestStatus.COMPLETED, timeout=3.0)
 
 
+def test_continuous_sample_before_optim_step_runs_before_optim(continuous_engine):
+    """A sample queued before a blocking request runs before it: it is admitted
+    and drained ahead of the blocking request instead of being deferred behind it."""
+    engine = continuous_engine
+    adam = types.AdamParams(learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0)
+    rid_sample, rid_optim = add_futures(
+        engine,
+        [
+            (types.RequestType.SAMPLE, "model_a", sample_payload("")),
+            (types.RequestType.OPTIM_STEP, "model_a", types.OptimStepInput(adam_params=adam).model_dump(mode="json")),
+        ],
+    )
+
+    engine.process_pending_requests_once()
+
+    assert _future_status(engine, rid_sample) == RequestStatus.COMPLETED
+    assert _future_status(engine, rid_optim) == RequestStatus.COMPLETED
+    assert engine.backend.order == [f"sample:{rid_sample}", "optim"]
+
+
+def test_continuous_only_samples_before_first_blocking_request_are_admitted(continuous_engine):
+    """Samples queued after the blocking request stay deferred until it has run."""
+    engine = continuous_engine
+    adam = types.AdamParams(learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0)
+    rid_before, rid_optim, rid_after = add_futures(
+        engine,
+        [
+            (types.RequestType.SAMPLE, "model_a", sample_payload("")),
+            (types.RequestType.OPTIM_STEP, "model_a", types.OptimStepInput(adam_params=adam).model_dump(mode="json")),
+            (types.RequestType.SAMPLE, "model_a", sample_payload("")),
+        ],
+    )
+
+    engine.process_pending_requests_once()
+
+    assert _future_status(engine, rid_before) == RequestStatus.COMPLETED
+    assert _future_status(engine, rid_optim) == RequestStatus.COMPLETED
+    assert _future_status(engine, rid_after) == RequestStatus.PENDING
+    assert engine.backend.order == [f"sample:{rid_before}", "optim"]
+
+    engine.process_pending_requests_once()
+    assert _wait_for(lambda: _future_status(engine, rid_after) == RequestStatus.COMPLETED, timeout=3.0)
+    assert engine.backend.order == [f"sample:{rid_before}", "optim", f"sample:{rid_after}"]
+
+
 def test_admission_fails_unknown_models_without_touching_backend(continuous_engine):
     """Stale requests for unloaded models (e.g. from a previous server) must
     be failed by the admission filter without triggering an engine build."""
