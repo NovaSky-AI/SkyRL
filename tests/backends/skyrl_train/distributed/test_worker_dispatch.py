@@ -235,3 +235,35 @@ def test_weight_sync_honors_optimizer_offload_policy(offload_after_step):
     dispatch._offload.reset_mock()
     dispatch._finish_weight_sync()
     dispatch._offload.assert_called_once_with("policy", offload_optimizer=offload_after_step, offload_model=True)
+
+
+def test_offload_inactive_model_records_offloaded_state():
+    """
+    ``_offload_inactive_model`` performs a real ``offload_to_cpu()``, so it must
+    record the model as not resident. Recording "resident" would make the next
+    ``_ensure_on_gpu`` skip the backload and run the model from CPU.
+    """
+    from skyrl.backends.skyrl_train.workers.worker_dispatch import (
+        GPUState,
+        WorkerDispatch,
+    )
+
+    calls = []
+    group = SimpleNamespace(offload_to_cpu=lambda *a, **k: calls.append("offload"))
+    stub = SimpleNamespace(
+        _actor_groups={"policy": group},
+        _gpu_state={"policy": GPUState(model_on_gpu=True, optimizer_on_gpu=True)},
+    )
+
+    WorkerDispatch._offload_inactive_model(stub, "policy")
+
+    assert calls == ["offload"]
+    assert stub._gpu_state["policy"] == GPUState(model_on_gpu=False, optimizer_on_gpu=False)
+
+
+def test_gpu_state_requires_explicit_intent():
+    """GPUState must not be constructible without stating both fields."""
+    from skyrl.backends.skyrl_train.workers.worker_dispatch import GPUState
+
+    with pytest.raises(TypeError):
+        GPUState()

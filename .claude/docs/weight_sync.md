@@ -48,13 +48,16 @@ The weight sync implementation relies on the native vLLM weight sync APIs - `Wei
 
 - **Broadcast** (`BroadcastTransferStrategy`): NCCL collective. Used for **non-colocated** setups. Training and inference are on different GPUs; weights cross the wire over a dedicated process group.
 - **CUDA IPC** (`CudaIpcTransferStrategy`): Per-chunk packed buffer + one IPC handle per rank. Used for **colocated** setups (`colocate_all=true`). Both sides live on the same GPU; the receiver maps the sender's CUDA allocation directly.
-- **Delta** (`DeltaTransferStrategy`): Weights travel as compressed XOR deltas against the base checkpoint, through a shared filesystem or object store instead of the network fabric. Selected with `generator.inference_engine.weight_sync_backend=delta`; intended for **non-colocated** setups where the two sides are not NCCL-reachable (separate clusters, PD-disaggregated serving). Not supported with LoRA (`validate_cfg` rejects it).
+- **Delta** (`DeltaTransferStrategy`): Weights travel as compressed XOR deltas against the base checkpoint, through a shared filesystem or object store instead of the network fabric. Selected with `generator.inference_engine.weight_sync_backend=delta`; intended for **non-colocated** setups where the two sides are not NCCL-reachable (separate clusters, PD-disaggregated serving). Not supported with LoRA, nor with serialized FP8 weight sync (`fp8_weight_sync_mode=blockwise`) whose marker names and scale tensors the delta checkpoint format cannot represent; `validate_cfg` rejects both.
 - **Sharded RDT** (`sharded_rdt`): the inference workers **pull** the slices they consume from
   the trainer ranks over NIXL/RDMA, instead of the trainer pushing every tensor to every
   worker. Selected with `generator.inference_engine.weight_sync_backend=sharded_rdt`;
   non-colocated only (`placement.colocate_all=false`), Megatron or FSDP, and it forces
-  `distributed_executor_backend=ray` because the workers dial named trainer actors. See
-  the dedicated section below for the capabilities it declares.
+  `distributed_executor_backend=ray` because the workers dial named trainer actors. Not
+  supported with serialized FP8 weight sync (`fp8_weight_sync_mode=blockwise`): the weight
+  sources publish whole bridge tensors, never payload+scale pairs, so
+  `validate_inference_engine_cfg` rejects the combination. See the dedicated section below
+  for the capabilities it declares.
 
 Strategy choice is decided by the sender (`get_transfer_strategy_cls`). The init info is expanded per server via `for_servers()` / `to_api_payload()` and pushed to the servers through the HTTP control plane (`init_weight_update_communicator` → vLLM's native `/init_weight_transfer_engine`); the receive side is vLLM's native weight-transfer engine, driven by `NewInferenceWorkerWrap`.
 

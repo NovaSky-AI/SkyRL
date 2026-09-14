@@ -42,6 +42,7 @@ from skyrl.backends.skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
 )
+from skyrl.backends.skyrl_train.workers.worker_utils import get_inference_weight_prefix
 from skyrl.train.utils.utils import str_to_torch_dtype
 
 if TYPE_CHECKING:
@@ -227,7 +228,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             )
             is CudaIpcTransferStrategy
         )
-        weight_prefix = "language_model." if self._is_multimodal_lm_only else ""
+        weight_prefix = get_inference_weight_prefix(self._is_multimodal_lm_only)
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
             enable_bucketing=enable_bucketing,
@@ -260,6 +261,19 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
 
         lora_params = collect_lora_params(module=self.model.model)
+        weight_prefix = get_inference_weight_prefix(self._is_multimodal_lm_only)
+        if weight_prefix:
+            # Keep PEFT's wrapper outermost; the inference namespace belongs inside it.
+            peft_wrapper_prefix = "base_model.model."
+            # Preserve unfamiliar naming formats rather than inventing a wrapper for them.
+            lora_params = {
+                (
+                    f"{peft_wrapper_prefix}{weight_prefix}{name.removeprefix(peft_wrapper_prefix)}"
+                    if name.startswith(peft_wrapper_prefix)
+                    else name
+                ): tensor
+                for name, tensor in lora_params.items()
+            }
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
