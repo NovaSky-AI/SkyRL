@@ -1746,9 +1746,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 base_model_name_or_path=base_model_name_or_path,
             )
 
-            # Write the selected representation through a temporary path. On a
-            # format change, remove the stale higher-priority file before the
-            # atomic replace so cleanup failure preserves the previous artifact.
+            # Write the selected representation through a temporary path. Install
+            # it before removing the stale format so a cleanup failure cannot
+            # leave the adapter without a complete artifact.
             config_path = os.path.join(lora_sync_path, "adapter_config.json")
             save_adapter_state(adapter_state, lora_sync_path, temporary_suffix=str(rank))
             with open(f"{config_path}.tmp{rank}", "w", encoding="utf-8") as f:
