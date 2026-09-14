@@ -113,6 +113,8 @@ def run(args, report):
     cfg, overrides = load_config(args, len(tokens))
     tokenizer = get_tokenizer(cfg.trainer.policy.model.path)
     pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    if pad is None:
+        raise ValueError("Tokenizer must define a pad_token_id or eos_token_id")
     single = build_batch(tokens, 1, pad)
     duplicate = build_batch(tokens, 2, pad)
     for key in ("sequences", "attention_mask", "response_mask", "loss_mask"):

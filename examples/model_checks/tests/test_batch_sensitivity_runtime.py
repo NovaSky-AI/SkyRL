@@ -87,6 +87,12 @@ def test_preflight_rejects_configs_that_change_the_control(tmp_path, override):
         runner.load_config(args, 65)
 
 
+def test_tokenizer_without_padding_or_eos_is_rejected_before_batching(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "get_tokenizer", lambda _: SimpleNamespace(pad_token_id=None, eos_token_id=None))
+    with pytest.raises(ValueError, match="pad_token_id or eos_token_id"):
+        runner.run(make_args(tmp_path), {})
+
+
 def test_ray_cleanup_runs_even_when_saving_a_failed_run_raises(tmp_path, monkeypatch):
     args = make_args(tmp_path)
     shutdowns = []
