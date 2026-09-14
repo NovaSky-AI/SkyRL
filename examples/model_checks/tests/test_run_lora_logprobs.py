@@ -1,4 +1,4 @@
-"""CPU checks for the configured GLM numerical runner."""
+"""CPU checks for the native LoRA publication runner."""
 
 import json
 import sys
@@ -8,18 +8,29 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from examples.model_checks import megatron_lora
-from examples.tinker.glm53 import run_lora_logprobs
-from examples.tinker.glm53.run_lora_logprobs import validate_config
+from examples.model_checks import megatron_lora, run_lora_logprobs
+from examples.model_checks.run_lora_logprobs import validate_config
 
 
 def test_trainer_scores_preserve_unequal_length_sample_positions(monkeypatch):
     batch = {"response_mask": torch.tensor([[0, 0, 1, 1], [1, 1, 1, 1]])}
-    output = SimpleNamespace(loss_fn_outputs=[{"logprobs": [-1.0, -2.0]}, {"logprobs": [-3.0, -4.0, -5.0, -6.0]}])
+    output = SimpleNamespace(
+        loss_fn_outputs=[
+            {"logprobs": [-1.0, -2.0]},
+            {"logprobs": [-3.0, -4.0, -5.0, -6.0]},
+        ]
+    )
     policy = SimpleNamespace(actor_infos=[], async_run_ray_method=lambda *args, **kwargs: output)
     monkeypatch.setattr(megatron_lora.ray, "get", lambda value: value)
     monkeypatch.setattr(megatron_lora.WorkerOutput, "cat", lambda *args: output)
-    assert megatron_lora.score_trainer(policy, batch) == [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]
+    assert megatron_lora.score_trainer(policy, batch) == [
+        -1.0,
+        -2.0,
+        -3.0,
+        -4.0,
+        -5.0,
+        -6.0,
+    ]
 
     output.loss_fn_outputs[0]["logprobs"].append(0.0)
     with pytest.raises(AssertionError):
@@ -156,7 +167,11 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
     cfg = SimpleNamespace(trainer=SimpleNamespace(policy=SimpleNamespace(model=SimpleNamespace(path="model"))))
     client = SimpleNamespace(model_name="base")
     monkeypatch.setattr(run_lora_logprobs, "load_config", lambda *args: cfg)
-    monkeypatch.setattr(run_lora_logprobs, "get_tokenizer", lambda *args: SimpleNamespace(pad_token_id=0))
+    monkeypatch.setattr(
+        run_lora_logprobs,
+        "get_tokenizer",
+        lambda *args: SimpleNamespace(pad_token_id=0),
+    )
     monkeypatch.setattr(run_lora_logprobs, "build_sequences", lambda *args: [[1, 2, 3]])
     monkeypatch.setattr(run_lora_logprobs, "build_batch", lambda *args: "batch")
     monkeypatch.setattr(run_lora_logprobs, "resolve_policy_model_name", lambda *args: "adapter")
@@ -202,7 +217,11 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
     ]:
         monkeypatch.setattr(run_lora_logprobs, name, function)
     args = SimpleNamespace(
-        backend_config="config.json", output_dir=tmp_path, mean_atol=0.05, max_atol=0.5, lora_b_multiplier=32
+        backend_config="config.json",
+        output_dir=tmp_path,
+        mean_atol=0.05,
+        max_atol=0.5,
+        lora_b_multiplier=32,
     )
     report = {}
     if update_size < 0.05:

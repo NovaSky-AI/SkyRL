@@ -1,4 +1,4 @@
-"""Check native LoRA publication on an owned Ray cluster, without TCLI or an API server."""
+"""Check native LoRA publication on an owned Ray cluster."""
 
 import argparse
 import asyncio
@@ -46,7 +46,14 @@ async def run(args, report):
     async with open_runtime(cfg, tokenizer) as (policy, client):
         try:
             await check_zero_initialized_policy(
-                policy, client, cfg, batch, sequences, report, args.mean_atol, args.max_atol
+                policy,
+                client,
+                cfg,
+                batch,
+                sequences,
+                report,
+                args.mean_atol,
+                args.max_atol,
             )
             apply_trainer_update(policy, batch, report, args.lora_b_multiplier)
             await check_unpublished_sampler(client, sequences, adapter, report)
@@ -141,12 +148,30 @@ def load_config(path, output_dir):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend-config", type=Path, required=True, help="Rendered run_server.py backend config")
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--mean-atol", type=float, required=True, help="Reviewed mean logprob error budget")
-    parser.add_argument("--max-atol", type=float, required=True, help="Reviewed maximum token logprob error budget")
     parser.add_argument(
-        "--lora-b-multiplier", type=float, default=10, help="Predeclared test stimulus, not an adaptive acceptance knob"
+        "--backend-config",
+        type=Path,
+        required=True,
+        help="Rendered run_server.py backend config",
+    )
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--mean-atol",
+        type=float,
+        required=True,
+        help="Reviewed mean logprob error budget",
+    )
+    parser.add_argument(
+        "--max-atol",
+        type=float,
+        required=True,
+        help="Reviewed maximum token logprob error budget",
+    )
+    parser.add_argument(
+        "--lora-b-multiplier",
+        type=float,
+        default=10,
+        help="Predeclared test stimulus, not an adaptive acceptance knob",
     )
     args = parser.parse_args()
     if any(not math.isfinite(bound) or bound <= 0 for bound in (args.mean_atol, args.max_atol)):
