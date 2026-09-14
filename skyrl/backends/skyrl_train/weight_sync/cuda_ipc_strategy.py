@@ -35,6 +35,9 @@ from skyrl.backends.skyrl_train.weight_sync.base import (
     iter_single_dtype_chunks,
     torch_dtype_name,
 )
+from skyrl.backends.skyrl_train.weight_sync.draft_weights import (
+    WEIGHT_UPDATE_TARGET_MODEL,
+)
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferSender,
@@ -154,6 +157,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
         derive_metadata_from_chunks: bool = False,
+        target: str = WEIGHT_UPDATE_TARGET_MODEL,
         **kwargs,
     ) -> None:
         """Send chunks via CUDA IPC.
@@ -162,13 +166,15 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             chunks: Iterable of WeightChunk objects to send.
             weight_metadata: Unused; IPC derives metadata from each tensor.
             derive_metadata_from_chunks: Accepted for sender interface compatibility.
+            target: The vLLM model this session loads into (``"model"`` / ``"draft"``).
         """
-        await self._send_chunks_vllm_native(chunks, weight_metadata)
+        await self._send_chunks_vllm_native(chunks, weight_metadata, target=target)
 
     async def _send_chunks_vllm_native(
         self,
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
+        target: str = WEIGHT_UPDATE_TARGET_MODEL,
     ) -> None:
         """Send weights chunk-by-chunk via vLLM native IPC (new inference path).
 
@@ -193,7 +199,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         device = torch.cuda.current_device()
         gpu_uuid = cuda_uuid_to_str(torch.cuda.get_device_properties(device).uuid)
         if rank == 0:
-            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+            await self._inference_client.start_weight_update(is_checkpoint_format=True, target=target)
         torch.distributed.barrier()
 
         for logical_chunk in chunks:
@@ -207,7 +213,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
                 )
 
         if rank == 0:
-            await self._inference_client.finish_weight_update()
+            await self._inference_client.finish_weight_update(target=target)
         torch.distributed.barrier()
 
     async def _send_single_dtype_chunk_vllm_native(

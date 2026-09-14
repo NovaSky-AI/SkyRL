@@ -273,6 +273,8 @@ def are_responses_similar(responses_a: List[str], responses_b: List[str], tolera
         diff = levenshtein(s1, s2)
         total_diff += diff
 
+    if total_length == 0:
+        return True
     difference = float(total_diff / total_length)
     return difference <= tolerance
 

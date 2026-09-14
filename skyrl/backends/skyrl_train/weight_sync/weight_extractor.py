@@ -55,3 +55,12 @@ class WeightExtractor(ABC):
             Dict with keys "names", "dtype_names", "shapes".
         """
         ...
+
+    def draft_extractor(self) -> "WeightExtractor":
+        """Return an extractor restricted to the spec-decode draft model's weights.
+
+        The sender runs it as a second weight-update session targeting vLLM's
+        drafter (see ``weight_sync/draft_weights.py``). Backends whose model
+        carries no draft head raise ``NotImplementedError``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot extract spec-decode draft weights")

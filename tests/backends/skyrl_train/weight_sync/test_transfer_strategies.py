@@ -898,10 +898,10 @@ def test_broadcast_sender_preserves_mixed_dtype_logical_chunk(monkeypatch):
         def __init__(self):
             self.events = []
 
-        async def start_weight_update(self, is_checkpoint_format):
+        async def start_weight_update(self, is_checkpoint_format, target="model"):
             self.events.append(("start", is_checkpoint_format))
 
-        async def finish_weight_update(self):
+        async def finish_weight_update(self, target="model"):
             self.events.append(("finish",))
 
     client = FakeInferenceClient()
@@ -1022,7 +1022,7 @@ def test_broadcast_sender_retains_precomputed_metadata_path(monkeypatch):
     )
     calls = []
 
-    async def record_batched(chunks, weight_metadata):
+    async def record_batched(chunks, weight_metadata, target="model"):
         calls.append((list(chunks), weight_metadata))
 
     monkeypatch.setattr(sender, "_send_chunks_vllm_native", record_batched)

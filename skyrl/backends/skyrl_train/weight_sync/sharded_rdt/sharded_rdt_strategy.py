@@ -85,6 +85,7 @@ class ShardedRdtWeightTransferSender(WeightTransferSender):
         self,
         weight_extractor: Any,
         dtype: "torch.dtype",
+        sync_draft_weights: bool = False,
         **kwargs,
     ) -> None:
         """Run one pull-based sync. Every rank must call it: the gather is a
@@ -96,6 +97,15 @@ class ShardedRdtWeightTransferSender(WeightTransferSender):
         prefix cache, so the worker resets it (``handles_prefix_cache_reset``
         stays False).
         """
+        if sync_draft_weights:
+            # The consumers' pull plan is baked against one model's parameter
+            # layout at init (``supports_draft_weight_update = False`` on the
+            # engine), so there is no session to retarget at the drafter. Config
+            # validation rejects the combination too.
+            raise ValueError(
+                "sharded_rdt cannot sync spec-decode draft weights; "
+                "use the nccl weight sync backend with speculative decoding"
+            )
         if weight_extractor.derives_metadata_from_chunks:
             # Serialized FP8 splits each tensor into a quantized payload plus
             # scales; the weight sources here publish whole bridge tensors, so
