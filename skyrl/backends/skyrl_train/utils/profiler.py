@@ -26,13 +26,15 @@ def measure_phase_seconds(metrics, name):
 
 @contextmanager
 def measure_megatron_schedule(model_config, timers):
-    """Measure synchronized schedule phases without replacing existing timers."""
+    """Measure rank-local schedule phases without replacing existing timers."""
     if model_config.timers is not None:
         raise ValueError("Cannot replace existing Megatron timers")
     phases = {"forward-compute": 2, "backward-compute": 2, "forward-backward": 1}
     for name, level in phases.items():
         timers(name, log_level=level).reset()
     report = {}
+    barrier_with_l1_time = model_config.barrier_with_L1_time
+    model_config.barrier_with_L1_time = False
     model_config.timers = timers
     try:
         yield report
@@ -40,6 +42,7 @@ def measure_megatron_schedule(model_config, timers):
             report[name] = timers(name).elapsed(reset=False, barrier=False)
     finally:
         model_config.timers = None
+        model_config.barrier_with_L1_time = barrier_with_l1_time
 
 
 def build_profiler_from_policy_cfg(trainer_cfg):

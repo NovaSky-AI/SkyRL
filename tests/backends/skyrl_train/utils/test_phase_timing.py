@@ -53,7 +53,7 @@ class FakeTimers:
 
 
 def test_schedule_accumulates_two_microbatches_without_reference_subtraction():
-    config, timers = SimpleNamespace(timers=None), FakeTimers()
+    config, timers = SimpleNamespace(timers=None, barrier_with_L1_time=True), FakeTimers()
     with profiler.measure_megatron_schedule(config, timers) as report:
         for forward, backward in ((2, 3), (4, 7)):
             config.timers("forward-compute").seconds += forward
@@ -65,6 +65,7 @@ def test_schedule_accumulates_two_microbatches_without_reference_subtraction():
         "forward-backward": 18,
     }
     assert config.timers is None
+    assert config.barrier_with_L1_time is True
     assert timers.levels == {
         "forward-compute": 2,
         "backward-compute": 2,
@@ -73,17 +74,26 @@ def test_schedule_accumulates_two_microbatches_without_reference_subtraction():
 
 
 def test_failed_schedule_restores_configuration_without_partial_receipt():
-    config = SimpleNamespace(timers=None)
+    config = SimpleNamespace(timers=None, barrier_with_L1_time=True)
     with pytest.raises(RuntimeError, match="backward failed"):
         with profiler.measure_megatron_schedule(config, FakeTimers()) as report:
             raise RuntimeError("backward failed")
     assert config.timers is None and report == {}
+    assert config.barrier_with_L1_time is True
 
 
 def test_existing_schedule_timers_are_not_overwritten():
     existing = object()
-    config = SimpleNamespace(timers=existing)
+    config = SimpleNamespace(timers=existing, barrier_with_L1_time=True)
     with pytest.raises(ValueError, match="existing Megatron timers"):
         with profiler.measure_megatron_schedule(config, FakeTimers()):
             pytest.fail("must reject before executing the schedule")
     assert config.timers is existing
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_schedule_disables_collective_timer_barriers_while_active(initial):
+    config = SimpleNamespace(timers=None, barrier_with_L1_time=initial)
+    with profiler.measure_megatron_schedule(config, FakeTimers()):
+        assert config.barrier_with_L1_time is False
+    assert config.barrier_with_L1_time is initial
