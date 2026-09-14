@@ -116,7 +116,10 @@ def test_engine_init_invalidates_cpu_render_state():
         _inference_engines_initialized=False,
         _inference_engine_client=object(),
         _create_new_inference_client=lambda: None,
-        _dispatch=SimpleNamespace(set_inference_engine_client=lambda client: None),
+        _dispatch=SimpleNamespace(
+            set_inference_engine_client=lambda client: None,
+            offload_for_sampling=lambda: None,
+        ),
         init_weight_sync_state=lambda: None,
         _renderer=object(),
         _render_server=render_server,

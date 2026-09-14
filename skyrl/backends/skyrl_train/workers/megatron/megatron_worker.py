@@ -22,6 +22,9 @@ from transformers import AutoConfig
 
 import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
 from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
+from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
+    fold_lora_rank_scale_for_vllm,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
 )
@@ -725,6 +728,27 @@ class MegatronWorker:
         torch.cuda.empty_cache()
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+        normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
+        # TODO: We should improve test coverage for this normalization logic and add a GPU-based integration test
+        # that asserts consistency between megatron and vllm.
+        if normalize_moe_lora and getattr(self.provider, "num_moe_experts", None):
+            # megatron-bridge rounds the expert rank (rank // topk) up to a
+            # multiple of expert TP. vLLM sizes its LoRA buffers from r = rank
+            # (adapter_config.json / max_lora_rank), so a rounded expert rank
+            # above that cannot be loaded.
+            topk = self.provider.moe_router_topk
+            etp = mpu.get_expert_tensor_parallel_world_size()
+            assert lora_config.rank % topk == 0, (
+                f"normalize_moe_lora requires lora.rank divisible by moe_router_topk; "
+                f"got rank={lora_config.rank}, topk={topk}"
+            )
+            expert_rank = -(-(lora_config.rank // topk) // etp) * etp
+            assert expert_rank <= lora_config.rank, (
+                f"normalize_moe_lora: expert rank {lora_config.rank // topk} (rank {lora_config.rank} // topk "
+                f"{topk}) rounds up to {expert_rank} for expert_tensor_parallel_size={etp}, exceeding the "
+                f"LoRA rank {lora_config.rank} that vLLM max_lora_rank is sized from"
+            )
+
         if lora_config.target_modules == "all-linear":
             if lora_type == "lora":
                 target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
@@ -759,6 +783,7 @@ class MegatronWorker:
                 share_expert_adapters=lora_config.share_expert_adapters,
             )
         elif lora_type == "canonical_lora":
+            # TODO (sumanthrh): Why is share_expert_adapters not passed here?
             self.lora_cls = CanonicalLoRA(
                 target_modules=target_modules,
                 dim=lora_config.rank,
@@ -1616,31 +1641,60 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             fp8_weight_sync_mode=inference_engine_cfg.fp8_weight_sync_mode,
             hf_config=self.strategy.hf_config,
         )
-
         # super picks the strategy and creates the sender (for sharded_rdt that
         # includes the eager rendezvous + bake, which is why the extractor is
         # built first).
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
     def _is_lora_sync_writer_rank(self) -> bool:
-        """True on the first rank of each node (by hostname).
+        """True on the ranks that write the LoRA adapter files to ``lora_sync_path``.
 
         With ``merge_lora=False`` every vLLM worker reads ``lora_sync_path``
         from its *local* filesystem when hot-loading the adapter, and in
         multi-node colocated runs inference engines live on every node -- so
         writing on global rank 0 alone only works with a shared filesystem.
-        Writing once per node (identical content, atomic renames) makes the
-        disk sync work on plain node-local paths and stays correct on shared
-        ones.
+        Rank 0 always writes. Any other rank writes only if it is the first rank
+        on its node (by hostname) *and* cannot see the probe file rank 0 wrote
+        into ``lora_sync_path``, i.e. the path is node-local. Collective on
+        first call (one all_gather); the result is cached.
         """
         cached = getattr(self, "_lora_sync_writer_cache", None)
         if cached is None:
             import socket
+            import uuid
 
-            hostnames = [None] * torch.distributed.get_world_size()
-            torch.distributed.all_gather_object(hostnames, socket.gethostname())
-            cached = hostnames.index(hostnames[torch.distributed.get_rank()]) == torch.distributed.get_rank()
+            rank = torch.distributed.get_rank()
+            base_sync_path = self.cfg.policy.model.lora.lora_sync_path
+            probe_path = os.path.join(base_sync_path, ".skyrl_lora_sync_probe")
+            token = uuid.uuid4().hex if rank == 0 else None
+            if rank == 0:
+                # Written before the gather so every rank checks after it exists.
+                os.makedirs(base_sync_path, exist_ok=True)
+                with open(probe_path, "w", encoding="utf-8") as f:
+                    f.write(token)
+
+            infos = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(infos, (socket.gethostname(), token))
+            hostnames = [host for host, _ in infos]
+            node_leader = hostnames.index(hostnames[rank]) == rank
+
+            # The token guards against a stale probe left on a node-local disk
+            # by an earlier run where this node hosted rank 0.
+            try:
+                with open(probe_path, "r", encoding="utf-8") as f:
+                    sees_rank0_probe = f.read() == infos[0][1]
+            except OSError:
+                sees_rank0_probe = False
+
+            cached = rank == 0 or (node_leader and not sees_rank0_probe)
             self._lora_sync_writer_cache = cached
+            if cached:
+                logger.info(
+                    "LoRA sync: rank {} ({}) writes adapter files to {}",
+                    rank,
+                    hostnames[rank],
+                    base_sync_path,
+                )
         return cached
 
     async def _save_lora_adapters_and_sync(
@@ -1649,10 +1703,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """Export LoRA adapter weights via Megatron-Bridge and tell the inference engine to load them.
 
         All ranks participate in the collective export (TP/PP/EP gathering is
-        handled internally by the bridge). The first rank on each node writes
-        the PEFT files (vLLM workers read them from their local filesystem;
-        see ``_is_lora_sync_writer_rank``), then rank 0 sends the
-        ``LoraLoadRequest`` once every node's files are in place.
+        handled internally by the bridge). The writer ranks (rank 0 on a shared
+        filesystem, else the first rank on each node; see
+        ``_is_lora_sync_writer_rank``) write the PEFT files, then rank 0 sends
+        the ``LoraLoadRequest`` once every node's files are in place.
         """
         import json
 
@@ -1663,13 +1717,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         from safetensors.torch import save_file
 
         # Every rank must participate in the bridge's collective export, but only
-        # the per-node writer ranks materialize the gathered tensors: with MoE
-        # expert adapters the full float32 adapter state can reach tens of GB
-        # (per-expert replication), and keeping a copy on all ranks multiplies
-        # the CPU spike by ranks-per-node (enough to OOM a node during sync).
+        # the writer ranks materialize the gathered tensors: with MoE expert
+        # adapters the full adapter state can reach tens of GB (per-expert
+        # replication), and keeping a copy on all ranks multiplies the CPU
+        # spike by ranks-per-node (enough to OOM a node during sync). `cpu`
+        # only gates the bridge's trailing device-to-host copy (not its
+        # collectives), so non-writers skip that copy for tensors they discard.
         keep_state = self._is_lora_sync_writer_rank()
         adapter_state = {}
-        for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
+        for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=keep_state, show_progress=False):
             if keep_state:
                 # Keep the training dtype (bf16): upcasting to float32 doubles
                 # the already-large per-expert adapter state (and the file the
@@ -1680,6 +1736,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         rank = torch.distributed.get_rank()
         if keep_state:
             os.makedirs(lora_sync_path, exist_ok=True)
+
+            # vLLM applies one `lora_alpha / r` (r = the config rank written
+            # below) to every module, while megatron-bridge scales each adapter
+            # by `alpha / dim` with that module's *effective* rank -- under
+            # normalize_moe_lora the grouped experts run at rank // topk. Fold
+            # the ratio into lora_B so the sampled policy is the trained one.
+            # Must run before the 3D->flat rewrite below erases the per-expert
+            # rank from the tensor shapes.
+            config_rank = self.lora_cls.dim
+            adapter_state, rescaled = fold_lora_rank_scale_for_vllm(adapter_state, config_rank=config_rank)
+            if rescaled and rank == 0:
+                logger.info(
+                    "LoRA sync: folded rank scale into lora_B for vLLM (config r={}): {}",
+                    config_rank,
+                    ", ".join(f"{n} tensors at rank {r} x{config_rank / r:g}" for r, n in sorted(rescaled.items())),
+                )
 
             # Rewrite fused-MoE expert LoRA into vLLM's flat PEFT layout so
             # merge_lora=False on-policy sync is accepted (otherwise
@@ -1837,9 +1909,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             raise RuntimeError("AdapterStore not initialised (FFT path)")
         self.adapter_store.delete(model_id)
         # Drop the per-tenant safetensors subdir written by
-        # _save_lora_adapters_and_sync. Rank 0 wrote it; rank 0 cleans it.
-        # Other ranks no-op. Best-effort — log on failure but don't propagate.
-        if self._rank == 0:
+        # _save_lora_adapters_and_sync. The writer ranks wrote it (see
+        # _is_lora_sync_writer_rank), so the same ranks clean it; other
+        # ranks no-op. All ranks run delete_adapter (pass_through dispatch), so
+        # the predicate's one-time collective is safe here even before the
+        # first sync. Best-effort — log on failure but don't propagate.
+        if self._is_lora_sync_writer_rank():
             _, lora_sync_path = self._resolve_lora_sync_target(model_id)
             base_sync_path = self.cfg.policy.model.lora.lora_sync_path
             if lora_sync_path != base_sync_path:
