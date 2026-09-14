@@ -93,7 +93,11 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         n_prompts = len(prompts) if isinstance(prompts, list) else 1
         return {
             "choices": [
-                {"index": i, "text": f"Response {i} from server {server_id}", "finish_reason": "stop"}
+                {
+                    "index": i,
+                    "text": f"Response {i} from server {server_id}",
+                    "finish_reason": "stop",
+                }
                 for i in range(n_prompts)
             ],
             "model": body.get("model"),
@@ -233,10 +237,17 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"prompt": "hello world"}
 
     # Control plane endpoints
+    @app.post("/skyrl/v1/pause_lora_transport")
     @app.post("/pause")
     async def pause(request: Request, mode: str = "abort", clear_cache: str = "true"):
-        return {"status": "paused", "server_id": server_id, "mode": mode, "clear_cache": clear_cache}
+        return {
+            "status": "paused",
+            "server_id": server_id,
+            "mode": mode,
+            "clear_cache": clear_cache,
+        }
 
+    @app.post("/skyrl/v1/resume_lora_transport")
     @app.post("/resume")
     async def resume():
         return {"status": "resumed", "server_id": server_id}
@@ -248,7 +259,12 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
     @app.post("/sleep")
     async def sleep(level: int = 2, tags: Optional[List[str]] = Query(None)):
-        return {"status": "sleeping", "server_id": server_id, "level": level, "tags": tags}
+        return {
+            "status": "sleeping",
+            "server_id": server_id,
+            "level": level,
+            "tags": tags,
+        }
 
     @app.post("/wake_up")
     async def wake_up(tags: Optional[List[str]] = Query(None)):
@@ -256,7 +272,11 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
     @app.post("/reset_prefix_cache")
     async def reset_prefix_cache(request: Request):
-        return {"status": "cache_reset", "server_id": server_id, "body": await request.json()}
+        return {
+            "status": "cache_reset",
+            "server_id": server_id,
+            "body": await request.json(),
+        }
 
     @app.post("/init_weight_transfer_engine")
     async def init_weight_transfer_engine(request: Request):
@@ -272,6 +292,40 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         app.state.fetch_weights_requests.append(body)
         return {"status": "ok", "server_id": server_id, "body": body}
 
+    @app.post("/skyrl/v1/stage_lora_nccl_adapter")
+    async def stage_lora_nccl_adapter(request: Request):
+        body = await request.json()
+        return {
+            "status": "staged",
+            "server_id": server_id,
+            "lora_int_id": 100 + server_id,
+            "body": body,
+        }
+
+    @app.post("/skyrl/v1/activate_lora_transport_adapter")
+    async def activate_lora_transport_adapter(request: Request):
+        return {
+            "status": "active",
+            "server_id": server_id,
+            "body": await request.json(),
+        }
+
+    @app.post("/skyrl/v1/commit_lora_transport_adapter")
+    async def commit_lora_transport_adapter(request: Request):
+        return {
+            "status": "committed",
+            "server_id": server_id,
+            "body": await request.json(),
+        }
+
+    @app.post("/skyrl/v1/rollback_lora_transport_adapter")
+    async def rollback_lora_transport_adapter(request: Request):
+        return {
+            "status": "rolled_back",
+            "server_id": server_id,
+            "body": await request.json(),
+        }
+
     @app.post("/skyrl/v1/load_lora_adapter")
     async def load_lora_adapter(request: Request):
         body = await request.json()
@@ -280,7 +334,11 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         if lora_name is None or lora_path is None:
             return JSONResponse(
                 status_code=400,
-                content={"object": "error", "message": "missing lora_name/lora_path", "type": "BadRequest"},
+                content={
+                    "object": "error",
+                    "message": "missing lora_name/lora_path",
+                    "type": "BadRequest",
+                },
             )
         app.state.lora_registry[lora_name] = lora_path
         return PlainTextResponse(f"Success: LoRA adapter '{lora_name}' added successfully on server {server_id}.")
@@ -305,7 +363,9 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
 
 @pytest.mark.asyncio
-async def test_build_new_inference_client_uses_served_model_name_for_chat_requests(mock_servers):
+async def test_build_new_inference_client_uses_served_model_name_for_chat_requests(
+    mock_servers,
+):
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = "Qwen/Qwen2.5-1.5B-Instruct"
     cfg.generator.inference_engine.served_model_name = "served-alias"
@@ -653,7 +713,12 @@ class TestWeightSync:
     @pytest.mark.asyncio
     async def test_init_weight_update_communicator(self, client):
         """Test init_weight_update_communicator expands init_info via to_api_payload and fans out."""
-        api_payload = {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5}
+        api_payload = {
+            "master_address": "127.0.0.1",
+            "master_port": 29500,
+            "rank_offset": 1,
+            "world_size": 5,
+        }
 
         class MockInitInfo:
             """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
@@ -1051,6 +1116,31 @@ async def _get_last_models(server_urls: List[str]) -> List[Dict[str, Optional[st
 
 class TestLoRAControlPlane:
     """Test load_lora_adapter / unload_lora_adapter fan-out and bookkeeping."""
+
+    @pytest.mark.asyncio
+    async def test_load_lora_nccl_adapter_uses_shared_atomic_transaction(
+        self,
+        client,
+        caplog,
+    ):
+        request = {"adapter_name": "lora-NCCL", "generation": 5}
+        result = await client.load_lora_nccl_adapter("lora-NCCL", request)
+
+        assert len(result) == 2
+        for response in result.values():
+            assert response["status"] == 200
+            assert response["body"]["status"] == "active"
+            assert response["body"]["body"]["transport"] == "nccl"
+        receipts = [record.message for record in caplog.records if "lora_nccl_fleet_stage" in record.message]
+        for phase in (
+            "stage",
+            "pause",
+            "activate",
+            "commit",
+            "resume",
+            "transaction_envelope",
+        ):
+            assert any(f"phase={phase}" in message and "generation=5" in message for message in receipts)
 
     @pytest.mark.asyncio
     async def test_load_lora_adapter_fans_out(self, client, mock_servers):
@@ -1466,3 +1556,38 @@ class TestFinishSession:
             await client.finish_session("traj-unreachable")
         finally:
             await client.teardown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_unload", [False, True])
+async def test_nccl_unload_reopens_admission_after_transport_cleanup(client, monkeypatch, fail_unload):
+    calls = []
+
+    async def call_servers(endpoint, payload=None):
+        calls.append((endpoint, payload))
+        if endpoint == "/skyrl/v1/unload_lora_transport_adapter" and fail_unload:
+            raise RuntimeError("receiver cleanup failed")
+        return {"server": {"status": 200}}
+
+    monkeypatch.setattr(client, "_call_all_servers", call_servers)
+    if fail_unload:
+        with pytest.raises(RuntimeError, match="receiver cleanup failed"):
+            await client.unload_lora_nccl_adapter("adapter")
+    else:
+        await client.unload_lora_nccl_adapter("adapter")
+    expected = [
+        ("/skyrl/v1/pause_lora_transport", None),
+        ("/skyrl/v1/unload_lora_transport_adapter", {"lora_name": "adapter"}),
+    ]
+    if not fail_unload:
+        expected.append(
+            (
+                "/collective_rpc",
+                {
+                    "method": "close_lora_nccl_transport",
+                    "kwargs": {"adapter_name": "adapter"},
+                },
+            )
+        )
+    expected.append(("/skyrl/v1/resume_lora_transport", None))
+    assert calls == expected

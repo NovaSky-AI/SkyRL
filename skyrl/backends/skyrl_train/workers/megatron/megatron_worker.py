@@ -1,7 +1,10 @@
+import asyncio
 import gc
 import os
 import shutil
+import time
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
@@ -114,6 +117,26 @@ from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
 
 patch_mla_thd_v_pad()
+
+
+class _LoRANativeNoopSender:
+    """Carries sender capability flags for native LoRA publication."""
+
+    handles_prefix_cache_reset = False
+    force_disable_expandable_segments = False
+    empty_cache_after_send = True
+
+
+@dataclass
+class _LoRANcclPublicationState:
+    """Cached trainer-side plan and persistent transport for one adapter."""
+
+    planner: Any
+    plan: Any
+    adapter_config: Dict[str, Any]
+    session: Any = None
+    rendezvous: Any = None
+
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.base import (
@@ -1599,6 +1622,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 param_group["lr"] = learning_rate
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
+        # Native LoRA publication bypasses the whole-model weight sender.
+        if inference_engine_cfg.weight_sync_backend == "lora_nccl":
+            self._weight_sync_inference_client = inference_engine_client
+            self._weight_transfer_sender = _LoRANativeNoopSender()
+            torch.distributed.barrier()
+            return
+
         # Initialize the weight extractor BEFORE super(): a strategy that
         # rendezvouses at init (sharded_rdt) is handed this extractor by
         # create_sender. It only depends on
@@ -1771,6 +1801,297 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         torch.distributed.barrier()
 
+    async def _publish_lora_nccl_adapter(
+        self,
+        inference_engine_client,
+        lora_name: str,
+    ) -> None:
+        """Publish one fixed-layout adapter through persistent packed NCCL."""
+        from megatron.bridge.models.conversion.peft_bridge import (
+            build_adapter_config_dict,
+            infer_target_modules_from_adapter_weights,
+        )
+
+        from skyrl.backends.skyrl_train.distributed.utils import get_free_port
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            RemoteInferenceClient,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.lora_layout import (
+            convert_moe_expert_lora_key,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.lora_nccl import (
+            LoRANcclConsumerRoute,
+            LoRANcclPublicationPlanner,
+            LoRANcclRendezvous,
+            build_lora_nccl_plan,
+            build_lora_nccl_plan_receipt,
+            open_lora_nccl_source_session,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport.bridge_sources import (
+            extract_lora_bridge_sources,
+        )
+
+        if not isinstance(inference_engine_client, RemoteInferenceClient):
+            raise TypeError("lora_nccl requires RemoteInferenceClient")
+        export = getattr(self.bridge, "export_local_adapter_weights", None)
+        if export is None:
+            raise RuntimeError(
+                "lora_nccl requires Megatron-Bridge export_local_adapter_weights; "
+                "install the pinned SkyRL Bridge fork before enabling this backend"
+            )
+
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        publication_started = time.perf_counter()
+        local_export_started = time.perf_counter()
+        records = list(export(self.actor_module))
+        local_export_seconds = time.perf_counter() - local_export_started
+        local_bytes = sum(record.weight.nbytes for record in records)
+        publication_states = getattr(self, "_lora_nccl_publication_states", {})
+        state = publication_states.get(lora_name)
+
+        if state is None:
+            static_started = time.perf_counter()
+            _, local_sources = extract_lora_bridge_sources(records, source_rank=rank)
+            gathered_sources = [None] * world_size
+            torch.distributed.all_gather_object(gathered_sources, local_sources)
+            planner = LoRANcclPublicationPlanner(lora_name, rank)
+            publication = planner.plan(records, gathered_sources)
+            control = [None]
+            if rank == 0:
+                target_modules = sorted(
+                    set(
+                        infer_target_modules_from_adapter_weights(
+                            convert_moe_expert_lora_key(
+                                f"base_model.model.{name}",
+                                len(source.shape),
+                            )
+                            for source in publication.layout.sources
+                            for name in source.hf_param_names
+                        )
+                    )
+                    - {"base_layer"}
+                )
+                adapter_config = build_adapter_config_dict(
+                    self.lora_cls,
+                    target_modules=target_modules,
+                    base_model_name_or_path=str(getattr(self, "_logical_model_path", "")),
+                )
+                route_dicts = await inference_engine_client.inspect_lora_transport_routes(
+                    publication.layout.to_json_dict(),
+                    adapter_config,
+                )
+                control[0] = (adapter_config, route_dicts)
+            torch.distributed.broadcast_object_list(control, src=0)
+            adapter_config, route_dicts = control[0]
+            routes = {
+                int(route["inference_rank"]): LoRANcclConsumerRoute.from_json_dict(route) for route in route_dicts
+            }
+            plan = build_lora_nccl_plan(
+                routes,
+                packed_buffer_size_bytes=256 * 1024 * 1024,
+            )
+            if {group.source_rank for group in plan.source_groups} != set(range(world_size)):
+                raise ValueError("lora_nccl requires exactly one source group per trainer rank")
+            if plan.inference_ranks != tuple(range(len(plan.inference_ranks))):
+                raise ValueError("lora_nccl requires one contiguous inference TP rank group")
+            state = _LoRANcclPublicationState(
+                planner=planner,
+                plan=plan,
+                adapter_config=adapter_config,
+            )
+            publication_states[lora_name] = state
+            self._lora_nccl_publication_states = publication_states
+            receipt = build_lora_nccl_plan_receipt(plan)
+            logger.info(
+                "lora_nccl_publication_stage rank={} generation={} "
+                "phase=static_plan seconds={:.6f} plan_digest={} "
+                "source_bytes={} transmitted_bytes={} edges={} buckets={}",
+                rank,
+                publication.request.generation,
+                time.perf_counter() - static_started,
+                receipt.plan_digest,
+                receipt.unique_source_bytes,
+                receipt.transmitted_bytes,
+                receipt.edge_count,
+                receipt.bucket_count,
+            )
+        else:
+            publication = state.planner.plan(records)
+
+        logger.info(
+            "lora_nccl_publication_stage rank={} generation={} "
+            "phase=bridge_local_export_submit seconds={:.6f} "
+            "local_tensors={} local_bytes={}",
+            rank,
+            publication.request.generation,
+            local_export_seconds,
+            len(records),
+            local_bytes,
+        )
+
+        if state.session is None:
+            rendezvous_started = time.perf_counter()
+            trainer_addresses = [None] * world_size
+            torch.distributed.all_gather_object(
+                trainer_addresses,
+                ray.util.get_node_ip_address(),
+            )
+            addresses = set(trainer_addresses)
+            if len(addresses) != 1:
+                raise ValueError("lora_nccl initially requires all trainer ranks on one node")
+            endpoint = [(next(iter(addresses)), get_free_port()) if rank == 0 else None]
+            torch.distributed.broadcast_object_list(endpoint, src=0)
+            master_address, master_port = endpoint[0]
+            state.rendezvous = LoRANcclRendezvous.from_plan(
+                state.plan,
+                lora_name,
+                master_address,
+                master_port,
+            )
+            receiver_task = None
+            if rank == 0:
+                receiver_task = asyncio.create_task(
+                    inference_engine_client.init_lora_nccl_transport(
+                        state.rendezvous.to_json_dict(),
+                        publication.layout.to_json_dict(),
+                        state.adapter_config,
+                    )
+                )
+            source_group = next(group for group in state.plan.source_groups if group.source_rank == rank)
+            init_error = None
+            try:
+                state.session = await asyncio.to_thread(
+                    open_lora_nccl_source_session,
+                    source_group,
+                    state.rendezvous,
+                    records[0].weight.device,
+                )
+            except Exception as error:
+                init_error = str(error)
+            init_errors = [None] * world_size
+            torch.distributed.all_gather_object(init_errors, init_error)
+            receiver_error = None
+            if rank == 0:
+                assert receiver_task is not None
+                try:
+                    await asyncio.wait_for(
+                        receiver_task,
+                        timeout=SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+                    )
+                except Exception as error:
+                    receiver_error = str(error)
+            errors = [receiver_error]
+            torch.distributed.broadcast_object_list(errors, src=0)
+            if any(init_errors) or errors[0] is not None:
+                if state.session is not None:
+                    state.session.close()
+                    state.session = None
+                reset_error = None
+                if rank == 0:
+                    try:
+                        await inference_engine_client.reset_lora_nccl_transport(lora_name)
+                    except Exception as error:
+                        reset_error = str(error)
+                reset_errors = [reset_error]
+                torch.distributed.broadcast_object_list(reset_errors, src=0)
+                state.rendezvous = None
+                reason = next(
+                    (error for error in (*init_errors, errors[0], reset_errors[0]) if error is not None),
+                    "unknown initialization failure",
+                )
+                raise RuntimeError(f"lora_nccl transport initialization failed: {reason}")
+            logger.info(
+                "lora_nccl_publication_stage rank={} generation={} " "phase=transport_initialization seconds={:.6f}",
+                rank,
+                publication.request.generation,
+                time.perf_counter() - rendezvous_started,
+            )
+
+        receiver_task = None
+        producer_ready = None
+        if rank == 0:
+            producer_ready = asyncio.get_running_loop().create_future()
+            receiver_task = asyncio.create_task(
+                inference_engine_client.load_lora_nccl_adapter(
+                    lora_name,
+                    publication.request.to_json_dict(),
+                    producer_ready,
+                )
+            )
+        send_error = None
+        try:
+            send_started = time.perf_counter()
+            receipt = await asyncio.to_thread(
+                state.session.send,
+                publication.request,
+                publication.local_tensors,
+            )
+            logger.info(
+                "lora_nccl_publication_stage rank={} generation={} "
+                "phase=pack_and_send seconds={:.6f} fp32_bytes={} buckets={}",
+                rank,
+                publication.request.generation,
+                time.perf_counter() - send_started,
+                receipt.fp32_bytes,
+                receipt.bucket_count,
+            )
+        except Exception as error:
+            send_error = str(error)
+        send_errors = [None] * world_size
+        torch.distributed.all_gather_object(send_errors, send_error)
+        receiver_error = None
+        if rank == 0:
+            assert receiver_task is not None
+            assert producer_ready is not None
+            producer_error = next(
+                (error for error in send_errors if error is not None),
+                None,
+            )
+            producer_ready.set_result(producer_error)
+            try:
+                await asyncio.wait_for(
+                    receiver_task,
+                    timeout=SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+                )
+            except Exception as error:
+                receiver_error = str(error)
+        errors = [receiver_error]
+        torch.distributed.broadcast_object_list(errors, src=0)
+        if any(send_errors) or errors[0] is not None:
+            if state.session is not None:
+                state.session.close()
+                state.session = None
+            reset_error = None
+            if rank == 0:
+                try:
+                    await inference_engine_client.reset_lora_nccl_transport(lora_name)
+                except Exception as error:
+                    reset_error = str(error)
+            reset_errors = [reset_error]
+            torch.distributed.broadcast_object_list(reset_errors, src=0)
+            state.rendezvous = None
+            reason = next(
+                (error for error in (*send_errors, errors[0], reset_errors[0]) if error is not None),
+                "unknown publication failure",
+            )
+            raise RuntimeError(f"lora_nccl publication failed: {reason}")
+
+        final_sync_started = time.perf_counter()
+        torch.distributed.barrier()
+        logger.info(
+            "lora_nccl_publication_stage rank={} generation={} " "phase=final_synchronization seconds={:.6f}",
+            rank,
+            publication.request.generation,
+            time.perf_counter() - final_sync_started,
+        )
+        logger.info(
+            "lora_nccl_publication_stage rank={} generation={} " "phase=publication_envelope seconds={:.6f}",
+            rank,
+            publication.request.generation,
+            time.perf_counter() - publication_started,
+        )
+
     async def broadcast_to_inference_engines(
         self,
         inference_engine_client: "InferenceEngineInterface",
@@ -1801,7 +2122,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # so sample(model=<model_id>) routes correctly. Single-tenant
             # (model_id=None) keeps the legacy shared path + name.
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
-            await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
+            if inference_engine_cfg.weight_sync_backend == "lora_nccl":
+                await self._publish_lora_nccl_adapter(inference_engine_client, lora_name)
+            else:
+                await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         else:
             # Send with the sender created at init time. Disable expandable_segments
             # around it: under colocate_all the CUDA-IPC path calls
@@ -1878,6 +2202,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def delete_adapter(self, model_id: str) -> None:
         if self.adapter_store is None:
             raise RuntimeError("AdapterStore not initialised (FFT path)")
+        lora_name, _ = self._resolve_lora_sync_target(model_id)
+        nccl_states = getattr(self, "_lora_nccl_publication_states", {})
+        nccl_state = nccl_states.pop(lora_name, None)
+        if nccl_state is not None and nccl_state.session is not None:
+            nccl_state.session.close()
         self.adapter_store.delete(model_id)
         # Drop the per-tenant safetensors subdir written by
         # _save_lora_adapters_and_sync. The writer ranks wrote it (see

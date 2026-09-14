@@ -151,7 +151,7 @@ def resolve_policy_model_name(cfg: SkyRLTrainConfig) -> str:
 def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
     from vllm import AsyncEngineArgs
-    from vllm.config import WeightTransferConfig
+    from vllm.config import ProfilerConfig, WeightTransferConfig
     from vllm.entrypoints.openai.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -238,7 +238,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
             args.max_cpu_loras = lora_cfg.max_cpu_loras
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
 
-        if not cfg.trainer.placement.colocate_all:
+        if not cfg.trainer.placement.colocate_all and ie_cfg.weight_sync_backend != "lora_nccl":
             lora_path = cfg.trainer.policy.model.lora.lora_sync_path
             logger.warning(
                 "LoRA weight sync is enabled but training and inference are not "
@@ -258,6 +258,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    if "profiler_config" in engine_kwargs:
+        engine_kwargs["profiler_config"] = ProfilerConfig(**engine_kwargs["profiler_config"])
     _apply_serialized_fp8_weight_sync_defaults(
         ie_cfg,
         engine_kwargs,
