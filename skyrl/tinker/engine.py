@@ -753,7 +753,11 @@ class TinkerEngine:
         if self._profiling_model_id is not None and self._profiling_model_id == model_id:
             self._profiling_steps += 1
             try:
+                started = time.perf_counter()
                 self._profiling_error = self.backend.profile_step()
+                elapsed = time.perf_counter() - started
+                result.metrics = dict(result.metrics or {})
+                result.metrics["skyrl.ai/profile_processing_seconds"] = elapsed
             except Exception as e:
                 # Never fail a client's optim_step because profiling misbehaved.
                 logger.warning(f"[profiler] step failed: {e}")

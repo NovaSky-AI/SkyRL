@@ -154,6 +154,26 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
     # tests/backends/skyrl_train/mtp/test_build_vllm_cli_args_mtp.py
 
 
+@pytest.mark.vllm
+@pytest.mark.parametrize("profiler", [None, {}, {"profiler": "torch", "torch_profiler_dump_cuda_time_total": False}])
+def test_build_app_accepts_profiler_overrides_without_loading_model(profiler, tmp_path):
+    from vllm.entrypoints.openai.api_server import build_app
+
+    cfg = SkyRLTrainConfig()
+    if profiler is not None:
+        profiler = dict(profiler)
+        if profiler.get("profiler") == "torch":
+            profiler["torch_profiler_dir"] = str(tmp_path)
+        cfg.generator.inference_engine.engine_init_kwargs = {"profiler_config": profiler}
+
+    args = build_vllm_cli_args(cfg)
+    app = build_app(args, supported_tasks=("generate",))
+    paths = app.openapi()["paths"]
+    enabled = profiler is not None and profiler.get("profiler") == "torch"
+    assert ("/start_profile" in paths) == enabled
+    assert ("/stop_profile" in paths) == enabled
+
+
 def test_resolve_policy_model_name_uses_served_model_name():
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = "base-model"

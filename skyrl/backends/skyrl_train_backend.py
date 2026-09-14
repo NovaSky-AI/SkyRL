@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
+from skyrl.backends.skyrl_train.utils.profiler import measure_phase_seconds
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -34,6 +35,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY,
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY,
 )
+from skyrl.backends.utils import log_timing
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
@@ -1136,10 +1138,11 @@ class SkyRLTrainBackend(AbstractBackend):
         adam_params = request_data.adam_params
         self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
-        grad_norm = self._dispatch.optim_step(role, model_id=model_id)
+        metrics: dict[str, float] = {}
+        with measure_phase_seconds(metrics, "skyrl.ai/optimizer_dispatch_seconds"):
+            grad_norm = self._dispatch.optim_step(role, model_id=model_id)
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
 
-        metrics: dict[str, float] = {}
         if grad_norm is not None:
             metrics["skyrl.ai/grad_norm"] = float(grad_norm)
         metrics["skyrl.ai/learning_rate"] = adam_params.learning_rate
@@ -1427,8 +1430,10 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._get_role(model_id) != "policy":
             raise ValueError("save_sampler_checkpoint is only supported for policy models")
 
-        # Lazily create inference engines on first sampling-related call
-        self._ensure_inference_engines()
+        # Initialization is a cold-start cost, separate from adapter publication.
+        cold_inference = not self._inference_engines_initialized
+        with log_timing(f"sampler_inference_init model_id={model_id} cold={cold_inference}"):
+            self._ensure_inference_engines()
 
         # The colocated sync dance (wake weights -> broadcast -> wake KV cache)
         # assumes engines start asleep; a preceding sample leaves them awake.
@@ -1439,7 +1444,8 @@ class SkyRLTrainBackend(AbstractBackend):
         # name. None for the FFT / single-tenant path uses legacy behavior.
         sync_id = model_id if self._base_lora_signature is not None else None
         try:
-            asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
+            with log_timing(f"sampler_weight_sync model_id={model_id} checkpoint={output_path}"):
+                asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
         finally:
             # The colocated sync path wakes the engines (weights + KV cache)
             # even when the broadcast then fails partway; mark them awake so
