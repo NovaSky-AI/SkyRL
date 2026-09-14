@@ -14,6 +14,7 @@ def test_load_checkpoint_restores_requested_training_state(tmp_path, load_optimi
         pass
 
     backend = object.__new__(SkyRLTrainBackend)
+    backend._inference_engines_initialized = False
     backend._model_ids_to_role = {"model_test": "policy"}
     backend._dispatch = MagicMock()
 
