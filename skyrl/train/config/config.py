@@ -1521,7 +1521,9 @@ class TrainerConfig(BaseConfig):
     what forward_backward recomputes, so the PPO ratio (and critic value clipping) is exact at the
     first inner step."""
     update_ref_every_epoch: bool = False
-    """Re-sync the reference model from the policy model at every epoch boundary."""
+    """Re-sync the reference model from the policy model at every epoch boundary.
+    The sync exports the policy to a scratch directory under ``export_path``
+    (``_tmp_ref_sync/``) and removes it afterwards."""
     remove_microbatch_padding: bool = True
     """Pack samples into the THD layout and strip intra-microbatch padding (requires flash attention).
     Common to all models."""
