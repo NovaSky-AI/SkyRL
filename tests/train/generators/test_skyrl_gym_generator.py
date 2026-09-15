@@ -142,6 +142,32 @@ def mock_env_cfg():
     return cfg
 
 
+def test_generator_chat_template_controls_override_kwargs(mock_tokenizer, mock_llm, mock_env_cfg, generator_cfg):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = False
+    generator_cfg.chat_template_kwargs = {
+        "add_generation_prompt": True,
+        "return_dict": True,
+        "tokenize": False,
+        "custom_option": "preserved",
+    }
+
+    SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    kwargs = mock_tokenizer.apply_chat_template.call_args.kwargs
+    assert kwargs == {
+        "add_generation_prompt": False,
+        "return_dict": False,
+        "tokenize": True,
+        "custom_option": "preserved",
+    }
+
+
 def validate_generator_input(input_batch: GeneratorInput) -> bool:
     """Validate that input_batch conforms to GeneratorInput TypedDict interface."""
     # Check that input_batch has the required keys
