@@ -356,4 +356,4 @@ def test_gpu_state_requires_explicit_intent():
     from skyrl.backends.skyrl_train.workers.worker_dispatch import GPUState
 
     with pytest.raises(TypeError):
-        GPUState(model_on_gpu=False, optimizer_on_gpu=False)
+        GPUState()
