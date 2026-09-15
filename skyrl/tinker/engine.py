@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, create_engine, func, select, update
 
 from skyrl.backends.utils import log_timing
+from skyrl.env_vars import SKYRL_TINKER_CONTINUOUS_SAMPLING
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig, TinkerTorchProfilerConfig, add_model
 from skyrl.tinker.db_models import (
@@ -379,7 +380,7 @@ class TinkerEngine:
         # SKYRL_TINKER_CONTINUOUS_SAMPLING=0 falls back to the serial loop.
         self._sampler: Optional[_ContinuousSampler] = None
         self._continuous_sampling: bool = (
-            os.environ.get("SKYRL_TINKER_CONTINUOUS_SAMPLING", "1").lower() not in ("0", "false")
+            SKYRL_TINKER_CONTINUOUS_SAMPLING
             and hasattr(self.backend, "sample_batch_async")
             and hasattr(self.backend, "prepare_for_sampling")
         )
@@ -1103,9 +1104,11 @@ class TinkerEngine:
         adapters, mutate the model registry, or tear the runtime down —
         model passes, single requests, session cleanup — first drains the
         in-flight samples, preserving the serial loop's safety invariant.
-        Pending samples are deferred (left in the DB) while blocking work
-        exists and are admitted on the next iteration instead of being
-        processed as a convoy batch.
+        Samples queued ahead of the earliest blocking request (lower request
+        id) are admitted first so the drain covers them and the blocking
+        request runs after them, as in the serial loop. Later samples are
+        deferred (left in the DB) and admitted on the next iteration instead
+        of being processed as a convoy batch.
         """
         # Converge torch profiling to the control row before picking up work,
         # so a session never starts or stops in the middle of a batch.
@@ -1129,6 +1132,12 @@ class TinkerEngine:
         if self._continuous_sampling:
             blocking_work = bool(forward_backward_requests or forward_requests or other_requests)
             if blocking_work:
+                first_blocking_id = min(
+                    int(rid) for rid in (*forward_backward_requests, *forward_requests, *other_requests)
+                )
+                earlier_samples = {rid: req for rid, req in sample_requests.items() if int(rid) < first_blocking_id}
+                if earlier_samples:
+                    self._admit_samples_continuous(earlier_samples)
                 if self._sampler is not None:
                     blockers = [
                         name
