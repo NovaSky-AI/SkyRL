@@ -1,6 +1,7 @@
 import os
 import shutil
 import tempfile
+from contextlib import contextmanager
 
 import torch
 import torch.distributed
@@ -13,6 +14,27 @@ _ACTIVITY_MAP = {
     "cpu": torch.profiler.ProfilerActivity.CPU,
     "cuda": torch.profiler.ProfilerActivity.CUDA,
 }
+
+
+@contextmanager
+def measure_megatron_schedule(model_config, timers):
+    """Measure rank-local schedule phases without replacing existing timers."""
+    if model_config.timers is not None:
+        raise ValueError("Cannot replace existing Megatron timers")
+    phases = {"forward-compute": 2, "backward-compute": 2, "forward-backward": 1}
+    for name, level in phases.items():
+        timers(name, log_level=level).reset()
+    report = {}
+    barrier_with_l1_time = model_config.barrier_with_L1_time
+    model_config.barrier_with_L1_time = False
+    model_config.timers = timers
+    try:
+        yield report
+        for name in phases:
+            report[name] = timers(name).elapsed(reset=False, barrier=False)
+    finally:
+        model_config.timers = None
+        model_config.barrier_with_L1_time = barrier_with_l1_time
 
 
 def build_profiler_from_policy_cfg(trainer_cfg):
@@ -101,11 +123,12 @@ class Profiler:
             prof.export_chrome_trace(os.path.join(self.save_path, name))
             logger.info(f"[Profiler] rank {self.rank}: exported chrome trace -> {name}")
 
-        try:
-            # Microseconds, self time.
-            self._last_pairs = [(str(e.key), float(e.self_device_time_total)) for e in prof.key_averages()]
-        except Exception as e:
-            logger.warning(f"[Profiler] rank {self.rank}: kernel-summary capture failed: {e}")
+        if self.config.collect_kernel_summary:
+            try:
+                # Microseconds, self time.
+                self._last_pairs = [(str(e.key), float(e.self_device_time_total)) for e in prof.key_averages()]
+            except Exception as e:
+                logger.warning(f"[Profiler] rank {self.rank}: kernel-summary capture failed: {e}")
         self._window_count += 1
 
         if self.remote_dir:
@@ -148,7 +171,7 @@ class Profiler:
 
     def get_kernel_summary(self):
         """Return ``{"window_count": int, "pairs": [(name, self_us), ...]}`` or None."""
-        if not self.enable or self.prof is None:
+        if not self.enable or self.prof is None or not self.config.collect_kernel_summary:
             return None
         return {"window_count": self._window_count, "pairs": list(self._last_pairs)}
 

@@ -1,0 +1,103 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from skyrl.backends import utils as backend_utils
+from skyrl.backends.skyrl_train.utils import profiler
+
+
+def test_optimizer_and_profile_processing_have_disjoint_durations(monkeypatch):
+    monkeypatch.setattr(backend_utils.time, "perf_counter", Mock(side_effect=[10, 12, 12, 72]))
+    metrics = {}
+    with backend_utils.log_timing("optimizer", metrics, "optimizer"):
+        pass
+    with backend_utils.log_timing("profile_processing", metrics, "profile_processing"):
+        pass
+    assert metrics == {"optimizer": 2, "profile_processing": 60}
+
+
+def test_failed_phase_does_not_report_completed_duration(monkeypatch):
+    clock = Mock(side_effect=[10, 12])
+    monkeypatch.setattr(backend_utils.time, "perf_counter", clock)
+    metrics = {}
+    with pytest.raises(RuntimeError, match="optimizer failed"):
+        with backend_utils.log_timing("optimizer", metrics, "optimizer"):
+            raise RuntimeError("optimizer failed")
+    assert metrics == {}
+    assert clock.call_count == 2
+
+
+class FakeTimer:
+    def __init__(self):
+        self.seconds = 100
+
+    def reset(self):
+        self.seconds = 0
+
+    def elapsed(self, reset, barrier):
+        assert not reset and not barrier
+        return self.seconds
+
+
+class FakeTimers:
+    def __init__(self):
+        self.phases = {}
+        self.levels = {}
+
+    def __call__(self, name, log_level=None):
+        if name not in self.phases:
+            self.phases[name] = FakeTimer()
+        if log_level is not None:
+            self.levels[name] = log_level
+        return self.phases[name]
+
+
+def test_schedule_accumulates_two_microbatches_without_reference_subtraction():
+    config, timers = (
+        SimpleNamespace(timers=None, barrier_with_L1_time=True),
+        FakeTimers(),
+    )
+    with profiler.measure_megatron_schedule(config, timers) as report:
+        for forward, backward in ((2, 3), (4, 7)):
+            config.timers("forward-compute").seconds += forward
+            config.timers("backward-compute").seconds += backward
+            config.timers("forward-backward").seconds += forward + backward + 1
+    assert report == {
+        "forward-compute": 6,
+        "backward-compute": 10,
+        "forward-backward": 18,
+    }
+    assert config.timers is None
+    assert config.barrier_with_L1_time is True
+    assert timers.levels == {
+        "forward-compute": 2,
+        "backward-compute": 2,
+        "forward-backward": 1,
+    }
+
+
+def test_failed_schedule_restores_configuration_without_partial_receipt():
+    config = SimpleNamespace(timers=None, barrier_with_L1_time=True)
+    with pytest.raises(RuntimeError, match="backward failed"):
+        with profiler.measure_megatron_schedule(config, FakeTimers()) as report:
+            raise RuntimeError("backward failed")
+    assert config.timers is None and report == {}
+    assert config.barrier_with_L1_time is True
+
+
+def test_existing_schedule_timers_are_not_overwritten():
+    existing = object()
+    config = SimpleNamespace(timers=existing, barrier_with_L1_time=True)
+    with pytest.raises(ValueError, match="existing Megatron timers"):
+        with profiler.measure_megatron_schedule(config, FakeTimers()):
+            pytest.fail("must reject before executing the schedule")
+    assert config.timers is existing
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_schedule_disables_collective_timer_barriers_while_active(initial):
+    config = SimpleNamespace(timers=None, barrier_with_L1_time=initial)
+    with profiler.measure_megatron_schedule(config, FakeTimers()):
+        assert config.barrier_with_L1_time is False
+    assert config.barrier_with_L1_time is initial

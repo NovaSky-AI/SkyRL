@@ -28,6 +28,7 @@ from skyrl.tinker.db_models import (
     SessionDB,
     enable_sqlite_wal,
 )
+from skyrl.tinker.server_timing import server_request_context
 from skyrl.utils.log import logger
 
 _MAX_IDS_PER_QUERY = 500
@@ -753,7 +754,11 @@ class TinkerEngine:
         if self._profiling_model_id is not None and self._profiling_model_id == model_id:
             self._profiling_steps += 1
             try:
+                started = time.perf_counter()
                 self._profiling_error = self.backend.profile_step()
+                elapsed = time.perf_counter() - started
+                result.metrics = dict(result.metrics or {})
+                result.metrics["skyrl.ai/profile_processing_seconds"] = elapsed
             except Exception as e:
                 # Never fail a client's optim_step because profiling misbehaved.
                 logger.warning(f"[profiler] step failed: {e}")
@@ -900,7 +905,10 @@ class TinkerEngine:
             return
         results = {}
         for request_id, (model_id, request_type, request_data) in requests.items():
-            with log_timing(f"process_single_request({request_type.value})"):
+            with (
+                server_request_context(request_id, model_id, request_data),
+                log_timing(f"process_single_request({request_type.value})"),
+            ):
                 try:
                     result = self.process_single_request(request_type, model_id, request_data)
                 except Exception as e:

@@ -1,10 +1,14 @@
 """CPU tests for the config-driven torch.profiler wrapper."""
 
 import glob
+import json
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 from unittest.mock import patch
+
+import pytest
+import torch
 
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 
@@ -27,6 +31,7 @@ class _ProfCfg:
     with_stack: bool = False
     with_flops: bool = False
     with_modules: bool = False
+    collect_kernel_summary: bool = True
     export_type: str = "chrome_trace"
 
 
@@ -88,6 +93,23 @@ def test_save_path_is_taken_verbatim(tmp_path):
     explicit = str(tmp_path / "explicit")
     prof = Profiler(_ProfCfg(save_path=explicit))
     assert prof.save_path == explicit
+
+
+def test_trace_only_exports_memory_without_aggregating_events(tmp_path):
+    profiler = Profiler(_ProfCfg(save_path=str(tmp_path), profile_memory=True, collect_kernel_summary=False))
+    with patch.object(profiler.prof, "key_averages") as summarize:
+        profiler.start()
+        with torch.profiler.record_function("trace_only_work"):
+            torch.ones(8).add_(1)
+        profiler.step()
+        profiler.stop()
+        summarize.assert_not_called()
+    traces = list(tmp_path.glob("*.pt.trace.json"))
+    assert len(traces) == 1
+    events = json.loads(traces[0].read_text())["traceEvents"]
+    assert any(event["name"] == "trace_only_work" for event in events)
+    assert any(event["name"] == "[memory]" for event in events)
+    assert profiler.get_kernel_summary() is None
 
 
 def test_kernel_summary_none_when_disabled(tmp_path):
@@ -366,9 +388,10 @@ class TestPerWindowUpload:
     def _cloud_cfg(**kw):
         return _ProfCfg(save_path="s3://bucket/traces/120", skip_first=0, wait=0, **kw)
 
-    def test_each_window_uploads_then_deletes_local_copy(self):
+    @pytest.mark.parametrize("collect_summary", [False, True])
+    def test_each_window_uploads_then_deletes_local_copy(self, collect_summary):
         # Two cycles -> two windows -> two uploads, and nothing left staged.
-        prof = Profiler(self._cloud_cfg(warmup=1, active=1, repeat=2))
+        prof = Profiler(self._cloud_cfg(warmup=1, active=1, repeat=2, collect_kernel_summary=collect_summary))
         assert prof.remote_dir == "s3://bucket/traces/120"
         assert prof.save_path != prof.remote_dir, "cloud traces must stage to a local dir"
 
@@ -422,23 +445,37 @@ class TestPerWindowUpload:
         up.assert_not_called()
         assert len(glob.glob(os.path.join(str(tmp_path), "*.pt.trace.json*"))) == 1
 
-    def test_window_names_are_deterministic_and_unique(self, tmp_path):
-        prof = Profiler(_ProfCfg(save_path=str(tmp_path), skip_first=0, wait=0, warmup=1, active=1, repeat=2))
+    @pytest.mark.parametrize("collect_summary", [False, True])
+    def test_window_names_are_deterministic_and_unique(self, tmp_path, collect_summary):
+        prof = Profiler(
+            _ProfCfg(
+                save_path=str(tmp_path),
+                skip_first=0,
+                wait=0,
+                warmup=1,
+                active=1,
+                repeat=2,
+                collect_kernel_summary=collect_summary,
+            )
+        )
         _run_loop(prof, 8)
         names = sorted(os.path.basename(f) for f in glob.glob(os.path.join(str(tmp_path), "*")))
         assert names == ["rank0_w0.pt.trace.json", "rank0_w1.pt.trace.json"], names
 
-    def test_gzip_export(self, tmp_path):
+    @pytest.mark.parametrize("collect_summary", [False, True])
+    def test_gzip_export(self, tmp_path, collect_summary):
         import gzip
 
-        cfg = _ProfCfg(save_path=str(tmp_path), skip_first=0, wait=0, warmup=0, active=1)
+        cfg = _ProfCfg(
+            save_path=str(tmp_path), skip_first=0, wait=0, warmup=0, active=1, collect_kernel_summary=collect_summary
+        )
         cfg.use_gzip = True
         prof = Profiler(cfg)
         _run_loop(prof, 3)
         files = glob.glob(os.path.join(str(tmp_path), "*.gz"))
         assert len(files) == 1, files
         with gzip.open(files[0], "rb") as fh:
-            assert fh.read(1), "gzipped trace must be readable"
+            assert json.loads(fh.read())["traceEvents"]
 
 
 class TestDynamicProfilerSession:

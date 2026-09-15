@@ -135,6 +135,25 @@ class TestEngineReconcile:
 
 
 class TestStepScoping:
+    def test_profile_processing_is_timed_on_the_single_owner_step(self, engine, monkeypatch):
+        from skyrl.tinker import engine as engine_module
+        from skyrl.tinker import types
+
+        _claim(engine, model_id="model-a")
+        engine.reconcile_profiler()
+        engine.backend.has_model.return_value = True
+        engine.backend.optim_step.return_value = types.OptimStepOutput(
+            metrics={"skyrl.ai/optimizer_dispatch_seconds": 2.0}
+        )
+        monkeypatch.setattr(engine_module.time, "perf_counter", MagicMock(side_effect=[10.0, 13.0]))
+        result = engine.process_optim_step("model-a", MagicMock())
+        assert result.metrics == {
+            "skyrl.ai/optimizer_dispatch_seconds": 2.0,
+            "skyrl.ai/profile_processing_seconds": 3.0,
+        }
+        assert engine.backend.profile_step.call_count == 1
+        assert engine._profiling_steps == 1
+
     def _optim_step(self, engine, model_id):
         engine.backend.has_model.return_value = True
         engine.process_optim_step(model_id, MagicMock())

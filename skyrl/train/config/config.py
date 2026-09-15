@@ -321,6 +321,8 @@ class TorchProfilerConfig(BaseConfig):
     """Passed to ``torch.profiler.profile``."""
     with_modules: bool = False
     """Passed to ``torch.profiler.profile``."""
+    collect_kernel_summary: bool = True
+    """Aggregate kernel self-time after each trace window."""
     use_gzip: bool = False
     """Gzip chrome traces (``*.pt.trace.json.gz``). Traces are repetitive JSON and
     compress several-fold, which matters most when they are uploaded to cloud storage.

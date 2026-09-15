@@ -9,14 +9,20 @@ from skyrl.utils.log import logger
 
 
 @contextmanager
-def log_timing(request: str):
+def log_timing(request: str, metrics=None, metric_name=None):
     """Context manager to log execution time for a request."""
+    if (metrics is None) != (metric_name is None):
+        raise ValueError("metrics and metric_name must be supplied together")
     start_time = time.perf_counter()
+    completed = False
     try:
         yield
+        completed = True
     finally:
         elapsed = time.perf_counter() - start_time
         logger.info(f"(timing) {request} took {elapsed:.3f}s")
+        if completed and metrics is not None:
+            metrics[metric_name] = elapsed
 
 
 def pad(xs, pad_to: int, *, fill):
