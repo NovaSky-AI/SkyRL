@@ -1180,7 +1180,9 @@ class SkyRLTrainBackend(AbstractBackend):
         not thread-safe) — they only issue data-plane HTTP calls.
         """
         self._ensure_inference_engines()
-        self._wake_inference_engines_for_sampling()
+        wake_error = self._wake_inference_engines_for_sampling()
+        if wake_error:
+            raise RuntimeError(f"Waking up inference engines failed: {wake_error}")
 
     def _validate_sample_models(
         self, prepared_batch: types.PreparedSampleBatch
