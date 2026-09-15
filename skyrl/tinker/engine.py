@@ -1,19 +1,23 @@
 """Background engine for processing training requests."""
 
 import argparse
+import asyncio
 import json
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel
 from sqlmodel import Session, create_engine, func, select, update
 
 from skyrl.backends.utils import log_timing
+from skyrl.env_vars import SKYRL_TINKER_CONTINUOUS_SAMPLING
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig, TinkerTorchProfilerConfig, add_model
 from skyrl.tinker.db_models import (
@@ -212,6 +216,93 @@ def get_backend_classes(backend_name: str, use_ray: bool = False):
         )
 
 
+class _ContinuousSampler:
+    """Background per-request sample executor for continuous sampling.
+
+    Runs an asyncio event loop on a daemon thread. The engine loop admits
+    pending sample requests here individually and each request's future is
+    completed in the DB the moment its own generation finishes — unlike the
+    serial batch path, where every future in a wave waits for the wave's
+    longest generation (with ~64 agentic rollouts in lockstep, a single
+    long turn used to stall all other agents for its full duration).
+
+    Safety contract (owned by the engine loop, see
+    ``process_pending_requests_once``):
+      - engines are up and awake before anything is admitted
+        (``backend.prepare_for_sampling()`` on the main thread), and
+      - the pool is drained before any op that sleeps the engines, swaps or
+        reloads adapters, mutates model registries, or tears the runtime
+        down (training ops, single requests, session cleanup).
+    Coroutines therefore only ever issue data-plane HTTP calls against awake
+    engines; vLLM's continuous batching handles the rest.
+    """
+
+    def __init__(self, engine: "TinkerEngine"):
+        self._engine = engine
+        self._inflight: set[str] = set()
+        self._lock = threading.Lock()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._loop = asyncio.new_event_loop()
+        # Result serialization and the DB write block; they run on this single
+        # worker so completions are written in order without stalling the event
+        # loop's HTTP handling for the other in-flight requests. The default
+        # executor is left to aiohttp (DNS resolution).
+        self._db_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tinker-sampler-db")
+        self._thread = threading.Thread(target=self._loop.run_forever, name="tinker-sampler", daemon=True)
+        self._thread.start()
+
+    @property
+    def inflight_ids(self) -> set[str]:
+        with self._lock:
+            return set(self._inflight)
+
+    def inflight_count(self) -> int:
+        with self._lock:
+            return len(self._inflight)
+
+    def submit(self, request_id: str, model_id: str, request_data: types.SampleInput) -> None:
+        """Schedule one sample request on the background loop (non-blocking)."""
+        with self._lock:
+            self._inflight.add(request_id)
+            self._idle.clear()
+        asyncio.run_coroutine_threadsafe(self._run_one(request_id, model_id, request_data), self._loop)
+
+    async def _run_one(self, request_id: str, model_id: str, request_data: types.SampleInput) -> None:
+        try:
+            prepared = prepare_sample_batch(
+                {request_id: (model_id, request_data)}, self._engine.config.checkpoints_base
+            )
+            results = await self._engine.backend.sample_batch_async(prepared)
+        except Exception as e:  # noqa: BLE001 - any failure must fail the future, not the loop
+            logger.exception(f"Continuous sample request {request_id} failed: {e}")
+            results = {request_id: types.ErrorResponse(error=str(e), status="failed")}
+        try:
+            await self._loop.run_in_executor(self._db_executor, self._engine._complete_futures, results)
+        except Exception:  # noqa: BLE001 - losing a result write must not kill the sampler
+            logger.exception(f"Failed to write result for sample request {request_id}")
+        finally:
+            with self._lock:
+                self._inflight.discard(request_id)
+                if not self._inflight:
+                    self._idle.set()
+
+    def drain(self, reason: str) -> None:
+        """Block until every in-flight sample has completed (its future written).
+
+        In-flight generations keep decoding on the engines while we wait, so
+        the GPUs stay productive; this only delays the blocking op. Admission
+        is naturally paused because the caller (engine loop) is blocked here.
+        """
+        if self._idle.is_set():
+            return
+        n = self.inflight_count()
+        t0 = time.time()
+        logger.info(f"Draining {n} in-flight sample request(s) before {reason} ...")
+        self._idle.wait()
+        logger.info(f"Drained in-flight samples in {time.time() - t0:.1f}s (was {n})")
+
+
 class TinkerEngine:
     """Background engine for processing training requests.
 
@@ -280,6 +371,23 @@ class TinkerEngine:
 
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()
+
+        # Continuous sampling: complete each sample future the moment its own
+        # generation finishes instead of batching futures to the wave's
+        # slowest member. Requires the backend to expose the awaitable
+        # per-request path + main-thread engine wake (skyrl-train backends).
+        # SKYRL_TINKER_CONTINUOUS_SAMPLING=0 falls back to the serial loop.
+        self._sampler: Optional[_ContinuousSampler] = None
+        self._continuous_sampling: bool = (
+            SKYRL_TINKER_CONTINUOUS_SAMPLING
+            and hasattr(self.backend, "sample_batch_async")
+            and hasattr(self.backend, "prepare_for_sampling")
+        )
+        if self._continuous_sampling:
+            logger.info(
+                "Continuous sampling enabled: per-request future completion, "
+                "drain-before-blocking-ops (set SKYRL_TINKER_CONTINUOUS_SAMPLING=0 for the serial loop)"
+            )
 
         # Active torch profiling session, mirrored in memory so the optim_step
         # path never touches the DB. None when no session is running.
@@ -445,6 +553,9 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id to (model_id, request_data) tuples
         """
+        sampler = getattr(self, "_sampler", None)
+        inflight_ids = sampler.inflight_ids if sampler is not None else set()
+
         # checkpoint_id is extracted in the database so prompts stay out of this query
         sample_query = (
             select(FutureDB.request_id, FutureDB.model_id, FutureDB.request_data["checkpoint_id"].as_string())
@@ -457,6 +568,8 @@ class TinkerEngine:
         batchable = []
         model_checkpoints = {}  # Map from model_id to checkpoint_id of first request to that model
         for request_id, model_id, checkpoint_id in sample_ops:
+            if str(request_id) in inflight_ids:
+                continue
             # Base model requests (empty checkpoint_id) are always compatible, otherwise only
             # take only requests with one checkpoint_id for a given model_id
             if not checkpoint_id or model_checkpoints.setdefault(model_id, checkpoint_id) == checkpoint_id:
@@ -583,6 +696,12 @@ class TinkerEngine:
                     ModelDB.status != "unloaded",
                 )
             ).all()
+
+        # Unloading can tear the shared runtime (engines included) down when
+        # the last model goes; in-flight continuous samples must finish first.
+        sampler = getattr(self, "_sampler", None)
+        if models_to_process and sampler is not None:
+            sampler.drain(reason="stale-session model unload")
 
         # Unload models outside DB transactions to minimize lock time.
         sessions_with_failed_unloads: set[str] = set()
@@ -948,41 +1067,115 @@ class TinkerEngine:
                     results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in group}
             self._complete_futures(results)
 
+    def _admit_samples_continuous(self, sample_requests: dict[str, tuple[str, types.SampleInput]]) -> None:
+        """Hand pending sample requests to the background sampler.
+
+        Invalid model_ids are failed up front (same semantics as the serial
+        path's _filter_valid_requests — e.g. stale requests from a previous
+        server must not trigger an engine build). Engines are brought up /
+        woken on this (main) thread so the sampler's coroutines never touch
+        engine lifecycle. If that fails (e.g. engine build error), the
+        candidate futures are failed like a serial batch failure.
+        """
+        error_results, valid_requests = self._filter_valid_requests(sample_requests)
+        if error_results:
+            self._complete_futures(error_results)
+        if not valid_requests:
+            return
+        if self._sampler is None:
+            self._sampler = _ContinuousSampler(self)
+        try:
+            self.backend.prepare_for_sampling()
+        except Exception as e:  # noqa: BLE001 - match serial batch failure semantics
+            logger.exception(f"prepare_for_sampling failed; failing {len(valid_requests)} sample request(s): {e}")
+            self._complete_futures({rid: types.ErrorResponse(error=str(e), status="failed") for rid in valid_requests})
+            return
+        for request_id, (model_id, request_data) in valid_requests.items():
+            self._sampler.submit(request_id, model_id, request_data)
+        logger.debug(f"Admitted {len(valid_requests)} sample request(s); {self._sampler.inflight_count()} in flight")
+
+    def process_pending_requests_once(self) -> None:
+        """One scheduling iteration; see ``process_pending_requests``.
+
+        With continuous sampling, sample requests are admitted to the
+        background sampler (per-request future completion) whenever no
+        blocking work is pending. Anything that may sleep the engines, swap
+        adapters, mutate the model registry, or tear the runtime down —
+        model passes, single requests, session cleanup — first drains the
+        in-flight samples, preserving the serial loop's safety invariant.
+        Samples queued ahead of the earliest blocking request (lower request
+        id) are admitted first so the drain covers them and the blocking
+        request runs after them, as in the serial loop. Later samples are
+        deferred (left in the DB) and admitted on the next iteration instead
+        of being processed as a convoy batch.
+        """
+        # Converge torch profiling to the control row before picking up work,
+        # so a session never starts or stops in the middle of a batch.
+        self.reconcile_profiler()
+
+        # Query for pending requests and extract data within session context
+        with Session(self.db_engine) as session:
+            # Use look-ahead scheduling to find batchable forward_backward and forward model passes
+            forward_backward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD)
+            forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
+            # Find pending sample requests that can be batched
+            sample_requests = self.find_batchable_sample(session)
+            # Get other pending requests (non forward_backward and non sampling)
+            other_requests = self.find_single_requests(session)
+
+        cleanup_enabled = self.config.session_cleanup_interval_sec >= 0 and self.config.session_timeout_sec >= 0
+        cleanup_due = (
+            cleanup_enabled and time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec
+        )
+
+        if self._continuous_sampling:
+            blocking_work = bool(forward_backward_requests or forward_requests or other_requests)
+            if blocking_work:
+                first_blocking_id = min(
+                    int(rid) for rid in (*forward_backward_requests, *forward_requests, *other_requests)
+                )
+                earlier_samples = {rid: req for rid, req in sample_requests.items() if int(rid) < first_blocking_id}
+                if earlier_samples:
+                    self._admit_samples_continuous(earlier_samples)
+                if self._sampler is not None:
+                    blockers = [
+                        name
+                        for name, present in (
+                            ("forward_backward", forward_backward_requests),
+                            ("forward", forward_requests),
+                            ("single requests", other_requests),
+                        )
+                        if present
+                    ]
+                    self._sampler.drain(reason=", ".join(blockers))
+            elif sample_requests:
+                self._admit_samples_continuous(sample_requests)
+            # Samples never go through the serial batch path in this mode:
+            # deferred requests are re-fetched (still PENDING) next iteration.
+            # Session cleanup is not treated as blocking here; it drains
+            # internally only when it actually unloads models (the common
+            # no-op sweep must not stall sampling every interval).
+            sample_requests = {}
+
+        # Process batches outside of session context
+        self.process_batch_requests(
+            forward_backward_requests, self.process_forward_backward, "forward_backward", per_model=True
+        )
+        self.process_batch_requests(forward_requests, self.process_forward, "forward", per_model=True)
+        self.process_batch_requests(sample_requests, self.process_sample, "sample")
+
+        # Process other request types individually (in the future we can also batch independent optim_steps)
+        self.process_single_requests(other_requests)
+
+        # Periodically cleanup stale sessions (disabled if either config is negative)
+        if cleanup_due:
+            _ = self.cleanup_stale_sessions()
+            self._last_cleanup_time = time.time()
+
     def process_pending_requests(self):
         """Main loop to process pending requests."""
         while True:
-            # Converge torch profiling to the control row before picking up work,
-            # so a session never starts or stops in the middle of a batch.
-            self.reconcile_profiler()
-
-            # Query for pending requests and extract data within session context
-            with Session(self.db_engine) as session:
-                # Use look-ahead scheduling to find batchable forward_backward and forward model passes
-                forward_backward_requests = self.find_batchable_model_passes(
-                    session, types.RequestType.FORWARD_BACKWARD
-                )
-                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
-                # Find pending sample requests that can be batched
-                sample_requests = self.find_batchable_sample(session)
-                # Get other pending requests (non forward_backward and non sampling)
-                other_requests = self.find_single_requests(session)
-
-            # Process batches outside of session context
-            self.process_batch_requests(
-                forward_backward_requests, self.process_forward_backward, "forward_backward", per_model=True
-            )
-            self.process_batch_requests(forward_requests, self.process_forward, "forward", per_model=True)
-            self.process_batch_requests(sample_requests, self.process_sample, "sample")
-
-            # Process other request types individually (in the future we can also batch independent optim_steps)
-            self.process_single_requests(other_requests)
-
-            # Periodically cleanup stale sessions (disabled if either config is negative)
-            cleanup_enabled = self.config.session_cleanup_interval_sec >= 0 and self.config.session_timeout_sec >= 0
-            if cleanup_enabled and time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec:
-                _ = self.cleanup_stale_sessions()
-                self._last_cleanup_time = time.time()
-
+            self.process_pending_requests_once()
             # Poll every 100ms
             time.sleep(0.1)
 

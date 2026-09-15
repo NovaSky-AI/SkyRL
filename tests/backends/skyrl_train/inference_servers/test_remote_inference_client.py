@@ -438,8 +438,8 @@ class TestRemoteInferenceClientInit:
         assert restored.proxy_url == client.proxy_url
         assert restored.server_urls == client.server_urls
         assert restored.model_name == client.model_name
-        # Session should be None after unpickling
-        assert restored._session is None
+        # No sessions should survive unpickling
+        assert restored._sessions == {}
 
 
 class TestDataPlane:
@@ -1026,7 +1026,46 @@ class TestContextManager:
             assert len(result) == 2
 
         # Session should be closed after exiting context
-        assert client._session is None or client._session.closed
+        assert all(session.closed for session in client._sessions.values())
+
+
+class TestPerLoopSessions:
+    """HTTP sessions are bound to the event loop that created them."""
+
+    def test_sessions_are_isolated_per_loop(self):
+        client = RemoteInferenceClient(
+            proxy_url="http://localhost:1",
+            server_urls=["http://localhost:1"],
+            data_parallel_size=1,
+        )
+        # A persistent loop on its own thread, like the Tinker engine's continuous sampler.
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+
+        def on_persistent(coro):
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=5)
+
+        try:
+            persistent = on_persistent(client._get_session())
+
+            # A transient loop (asyncio.run) gets its own session and leaves the persistent one open.
+            transient = asyncio.run(client._get_session())
+            assert transient is not persistent
+            assert not persistent.closed
+
+            # The persistent loop keeps reusing its session; the closed loop's entry is evicted.
+            assert on_persistent(client._get_session()) is persistent
+            assert list(client._sessions) == [loop]
+
+            # aclose() on the persistent loop closes only that loop's session.
+            on_persistent(client.aclose())
+            assert persistent.closed
+            assert client._sessions == {}
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=5)
+            loop.close()
 
 
 async def _get_lora_registries(server_urls: List[str]) -> List[Dict[str, str]]:

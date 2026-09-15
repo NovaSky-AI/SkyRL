@@ -64,6 +64,26 @@ Set to 0 to disable throttling (all tasks fire immediately).
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Tinker
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_TINKER_CONTINUOUS_SAMPLING = str(os.environ.get("SKYRL_TINKER_CONTINUOUS_SAMPLING", "True")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+"""
+Whether the Tinker engine completes each sample future as soon as its own
+generation finishes (continuous sampling) instead of batching pending sample
+requests and completing them together once the whole batch is done.
+
+Only takes effect with backends that expose the per-request async sample path
+(the skyrl-train backends); other backends always use the batched loop.
+
+Default: True. Set ``SKYRL_TINKER_CONTINUOUS_SAMPLING=0`` to use the batched loop.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runtime Environment Exports
 # ─────────────────────────────────────────────────────────────────────────────
 
