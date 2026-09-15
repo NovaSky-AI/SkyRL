@@ -55,14 +55,14 @@ def score_sampler(sampler, probes):
     return scores
 
 
-def score_before_update(trainer, sampler, probes, report, atol):
+def score_before_update(trainer, sampler, probes, report, mean_atol, max_atol):
     report.update(
         trainer_zero=score_trainer(trainer, probes),
         zero=score_sampler(sampler, probes),
         trainer_repeat=score_trainer(trainer, probes),
         repeat=score_sampler(sampler, probes),
     )
-    check_policy_snapshot(report, atol)
+    check_policy_snapshot(report, mean_atol, max_atol)
 
 
 def check_withheld_publication(trainer, sampler, probes, report):
@@ -71,6 +71,6 @@ def check_withheld_publication(trainer, sampler, probes, report):
     check_withheld_scores(report)
 
 
-def check_published_update(sampler, probes, report, atol):
+def check_published_update(sampler, probes, report, mean_atol, max_atol):
     report["updated"] = score_sampler(sampler, probes)
-    check_updated_adapter(report, atol)
+    check_updated_adapter(report, mean_atol, max_atol)

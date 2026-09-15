@@ -5,18 +5,18 @@ from itertools import cycle, islice
 import torch
 
 
-def check_initial_adapter(report, atol):
+def check_initial_adapter(report, mean_atol, max_atol):
     report["base_zero"] = compare_logprobs(report["base"], report["zero"])
-    check_policy_snapshot(report, atol)
-    if report["base_zero"]["mean_abs"] >= atol:
+    check_policy_snapshot(report, mean_atol, max_atol)
+    if _exceeds_tolerance(report["base_zero"], mean_atol, max_atol):
         raise AssertionError("zero-initialized adapter differs from the base model")
 
 
-def check_policy_snapshot(report, atol):
+def check_policy_snapshot(report, mean_atol, max_atol):
     report["zero_parity"] = compare_logprobs(report["trainer_zero"], report["zero"])
     report["repeat_noise"] = compare_logprobs(report["zero"], report["repeat"])
     report["trainer_repeat_noise"] = compare_logprobs(report["trainer_zero"], report["trainer_repeat"])
-    if report["zero_parity"]["mean_abs"] >= atol:
+    if _exceeds_tolerance(report["zero_parity"], mean_atol, max_atol):
         raise AssertionError("trainer and inference logprobs exceed the parity tolerance")
 
 
@@ -32,12 +32,16 @@ def build_probe_sequences(tokenizer):
 
 def check_withheld_publication(report):
     report["withheld_publication"] = compare_logprobs(report["repeat"], report["stale"])
-    noise_budget = max(1e-6, 3 * report["repeat_noise"]["mean_abs"])
-    if report["withheld_publication"]["mean_abs"] > noise_budget:
+    mean_budget = max(1e-6, 3 * report["repeat_noise"]["mean_abs"])
+    max_budget = max(1e-6, 3 * report["repeat_noise"]["max_abs"])
+    if (
+        report["withheld_publication"]["mean_abs"] > mean_budget
+        or report["withheld_publication"]["max_abs"] > max_budget
+    ):
         raise AssertionError("unpublished trainer update became visible to inference")
 
 
-def check_updated_adapter(report, atol):
+def check_updated_adapter(report, mean_atol, max_atol):
     report["updated_parity"] = compare_logprobs(report["trainer_updated"], report["updated"])
     report["stale_parity"] = compare_logprobs(report["trainer_updated"], report["stale"])
     report["sampler_change"] = compare_logprobs(report["zero"], report["updated"])
@@ -65,12 +69,16 @@ def check_updated_adapter(report, atol):
         scale=sampler_norm / trainer_norm if trainer_norm else None,
         relative_l2=(trainer_delta - sampler_delta).norm().item() / trainer_norm if trainer_norm else None,
     )
-    if report["updated_parity"]["mean_abs"] >= atol:
+    if _exceeds_tolerance(report["updated_parity"], mean_atol, max_atol):
         raise AssertionError("published adapter exceeds the trainer/inference parity tolerance")
     if report["sampler_change"]["mean_abs"] <= noise_budget:
         raise AssertionError("sampler did not measurably change")
     if report["trainer_change"]["mean_abs"] <= noise_budget:
         raise AssertionError("trainer did not measurably change")
+
+
+def _exceeds_tolerance(comparison, mean_atol, max_atol):
+    return comparison["mean_abs"] >= mean_atol or comparison["max_abs"] >= max_atol
 
 
 def compare_logprobs(reference, actual):

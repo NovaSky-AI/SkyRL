@@ -156,6 +156,7 @@ def make_config(tmp_path, metadata, **changes):
         "steps": 2,
         "lr": 1e-5,
         "mean_atol": 0.05,
+        "max_atol": 0.05,
         "receipt_metadata": metadata,
     }
     values.update(changes)
@@ -245,10 +246,22 @@ def test_public_qualification_owns_sequence_and_exact_artifacts(tmp_path, metada
         "step_0_logprobs.json",
         "step_1_batch.json",
         "step_1_logprobs.json",
+        "token-evidence.json",
     }
     verify_checksum_manifest(config.output_dir / "SHA256SUMS", config.output_dir)
     manifest = json.loads((config.output_dir / "manifest.json").read_text())
     assert manifest["status"] == "passed"
+    assert manifest["tolerances"] == {"mean_atol": 0.05, "max_atol": 0.05}
+    token_evidence = json.loads((config.output_dir / "token-evidence.json").read_text())
+    assert token_evidence["training_datums"][0] == {
+        "input_token_ids": [11, 12, 13, 11, 12, 13, 11],
+        "target_token_ids": [12, 13, 11, 12, 13, 11, 12],
+        "scoring_weights": [1.0] * 7,
+        "scoring_mask": [True] * 7,
+    }
+    assert manifest["token_evidence"] == next(
+        artifact for artifact in manifest["artifacts"] if artifact["path"] == "token-evidence.json"
+    )
     assert not list(config.output_dir.glob("*.tmp"))
     receipts = [
         PhaseReceipt.model_validate_json(line)
@@ -296,6 +309,7 @@ def test_failed_qualification_preserves_primary_error_and_receipts(tmp_path, met
         },
         "passed": False,
         "strong_publication_discrimination": "passed",
+        "tolerances": {"max_atol": 0.05, "mean_atol": 0.05},
         "training_mechanics": "failed",
     }
     receipts = [
@@ -331,3 +345,67 @@ def test_per_token_receipt_failure_does_not_mask_operation_failure(tmp_path, met
         )
     assert caught.value.__notes__ == ["Per-token receipt failed: receipt disk failed"]
     assert json.loads((config.output_dir / "manifest.json").read_text())["status"] == "failed"
+
+
+def test_localized_logprob_corruption_fails_initial_max_gate_below_mean_gate():
+    from skyrl.tinker.logprob_checks import check_initial_adapter
+
+    reference = [0.0] * 200
+    corrupted = reference.copy()
+    corrupted[37] = 0.1
+    report = {
+        "base": reference,
+        "trainer_zero": corrupted,
+        "zero": reference,
+        "trainer_repeat": reference,
+        "repeat": reference,
+    }
+    with pytest.raises(AssertionError, match="parity tolerance"):
+        check_initial_adapter(report, mean_atol=0.01, max_atol=0.05)
+    assert report["zero_parity"]["mean_abs"] < 0.01
+    assert report["zero_parity"]["max_abs"] >= 0.05
+
+
+def test_localized_logprob_corruption_fails_withheld_max_gate_below_mean_gate():
+    from skyrl.tinker.logprob_checks import check_withheld_publication
+
+    reference = [0.0] * 200
+    corrupted = reference.copy()
+    corrupted[37] = 0.1
+    report = {
+        "repeat": reference,
+        "stale": corrupted,
+        "repeat_noise": {"mean_abs": 0.0, "max_abs": 0.0},
+    }
+    with pytest.raises(AssertionError, match="unpublished trainer update"):
+        check_withheld_publication(report)
+    assert report["withheld_publication"]["mean_abs"] < 0.01
+    assert report["withheld_publication"]["max_abs"] >= 0.05
+
+
+def test_localized_logprob_corruption_fails_updated_max_gate_below_mean_gate():
+    from skyrl.tinker.logprob_checks import check_updated_adapter
+
+    zero = [0.0] * 200
+    updated = [0.2] * 200
+    corrupted = updated.copy()
+    corrupted[37] += 0.1
+    report = {
+        "trainer_zero": zero,
+        "zero": zero,
+        "trainer_updated": updated,
+        "updated": corrupted,
+        "stale": zero,
+        "repeat_noise": {"mean_abs": 0.0},
+        "trainer_repeat_noise": {"mean_abs": 0.0},
+    }
+    with pytest.raises(AssertionError, match="published adapter"):
+        check_updated_adapter(report, mean_atol=0.01, max_atol=0.05)
+    assert report["updated_parity"]["mean_abs"] < 0.01
+    assert report["updated_parity"]["max_abs"] >= 0.05
+
+
+@pytest.mark.parametrize("max_atol", [0.0, float("nan"), float("inf")])
+def test_qualification_rejects_invalid_max_tolerance(tmp_path, metadata, max_atol):
+    with pytest.raises(ValueError, match="max_atol"):
+        make_config(tmp_path, metadata, max_atol=max_atol)
