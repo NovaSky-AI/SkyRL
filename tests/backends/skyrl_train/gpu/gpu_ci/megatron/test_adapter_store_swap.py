@@ -13,9 +13,10 @@ The tests fake the Megatron DDP buffers by monkeypatching _iter_buffers, so
 they run on a single GPU with KB-scale allocations and no distributed init.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
-from types import SimpleNamespace
 
 from skyrl.backends.skyrl_train.workers.megatron import adapter_store as astore
 from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
