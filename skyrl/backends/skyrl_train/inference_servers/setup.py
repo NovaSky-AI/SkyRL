@@ -8,7 +8,11 @@ from loguru import logger
 from ray.util.placement_group import placement_group as ray_placement_group
 
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl.train.config import InferenceEngineConfig, SkyRLTrainConfig
+from skyrl.train.config import (
+    InferenceEngineConfig,
+    SkyRLTrainConfig,
+    get_config_as_dict,
+)
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
@@ -22,11 +26,14 @@ from .utils import (
     build_router_args,
     build_vllm_cli_args,
     get_pd_cli_args,
+    get_pd_p2p_connector_name,
 )
 from .vllm_router import VLLMRouter
 
-NIXL_SIDE_CHANNEL_BASE_PORT = 5600
 VLLM_START_PORT = 8000
+# NOTE: We use the same base port for NIXL and Mooncake since they will not be
+# used together
+MOONCAKE_BOOTSTRAP_BASE_PORT = NIXL_SIDE_CHANNEL_BASE_PORT = 20_000
 
 
 @dataclass
@@ -78,7 +85,14 @@ def create_inference_servers(
     is_colocated = placement_group is not None
 
     if ie_cfg.enable_pd:
-        pd_cli_args = get_pd_cli_args(cli_args)
+        # Role-specific engine kwargs (mutually exclusive with engine_init_kwargs;
+        # enforced in validate_inference_engine_cfg).
+        prefill_cli_args = get_pd_cli_args(
+            cli_args, role="prefill", role_init_kwargs=get_config_as_dict(ie_cfg.prefill_init_kwargs)
+        )
+        decode_cli_args = get_pd_cli_args(
+            cli_args, role="decode", role_init_kwargs=get_config_as_dict(ie_cfg.decode_init_kwargs)
+        )
         num_prefill = ie_cfg.num_prefill
         num_decode = ie_cfg.num_engines - num_prefill
         servers_per_group = ie_cfg.data_parallel_size
@@ -103,14 +117,15 @@ def create_inference_servers(
 
         prefill_server_groups = [
             ServerGroup(
-                cli_args=copy.deepcopy(pd_cli_args),
+                cli_args=copy.deepcopy(prefill_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
                 start_port=VLLM_START_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=prefill_pg,
                 placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
-                nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + i * servers_per_group,
+                nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
+                mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
                 use_expandable_segments=ie_cfg.use_expandable_segments,
@@ -123,14 +138,17 @@ def create_inference_servers(
         decode_bundle_offset = num_prefill * gpus_per_server * servers_per_group if is_colocated else 0
         decode_server_groups = [
             ServerGroup(
-                cli_args=copy.deepcopy(pd_cli_args),
+                cli_args=copy.deepcopy(decode_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
                 start_port=VLLM_START_PORT + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=decode_pg,
                 placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
-                nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + (num_prefill + i) * servers_per_group,
+                nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT
+                + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
+                mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT
+                + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 enable_ray_prometheus_stats=ie_cfg.enable_ray_prometheus_stats,
                 use_expandable_segments=ie_cfg.use_expandable_segments,
@@ -155,7 +173,27 @@ def create_inference_servers(
 
         server_urls = prefill_urls + decode_urls
 
-        router_args = build_router_args(ie_cfg, prefill_urls=prefill_urls, decode_urls=decode_urls)
+        # Route according to the P2P transfer flavor. For Mooncake, the router
+        # queries each prefill server's bootstrap server (engine_id discovery)
+        # and injects per-request transfer ids, so it needs the bootstrap port
+        # of every prefill server: group base + server_idx (the same value
+        # VLLMServerActor sets as VLLM_MOONCAKE_BOOTSTRAP_PORT per server).
+        p2p_connector = get_pd_p2p_connector_name(prefill_cli_args.kv_transfer_config)
+        prefill_bootstrap_ports = None
+        pd_kv_connector = None
+        if p2p_connector == "MooncakeConnector":
+            pd_kv_connector = "mooncake"
+            prefill_bootstrap_ports = [
+                info.mooncake_bootstrap_server_port for g in prefill_server_groups for info in g.server_infos
+            ]
+
+        router_args = build_router_args(
+            ie_cfg,
+            prefill_urls=prefill_urls,
+            decode_urls=decode_urls,
+            prefill_bootstrap_ports=prefill_bootstrap_ports,
+            pd_kv_connector=pd_kv_connector,
+        )
         router = VLLMRouter(router_args, log_path=log_path)
         proxy_url = router.start()
         logger.info(

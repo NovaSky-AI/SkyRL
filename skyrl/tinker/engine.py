@@ -1,6 +1,7 @@
 """Background engine for processing training requests."""
 
 import argparse
+import json
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -14,13 +15,15 @@ from sqlmodel import Session, create_engine, func, select, update
 
 from skyrl.backends.utils import log_timing
 from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig, add_model
+from skyrl.tinker.config import EngineConfig, TinkerTorchProfilerConfig, add_model
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
     EngineStateDB,
     FutureDB,
     ModelDB,
+    ProfilerControlDB,
+    ProfilerState,
     RequestStatus,
     SessionDB,
     enable_sqlite_wal,
@@ -277,6 +280,17 @@ class TinkerEngine:
 
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()
+
+        # Active torch profiling session, mirrored in memory so the optim_step
+        # path never touches the DB. None when no session is running.
+        self._profiling_model_id: str | None = None
+        self._profiling_steps: int = 0
+        self._profiling_error: str | None = None
+        self._profiler_cfg = TinkerTorchProfilerConfig(**config.torch_profiler) if config.torch_profiler else None
+        if self._profiler_cfg is not None:
+            # Clear a session left behind by a crashed engine. Skipped when profiling
+            # is off: there is nothing to reset, and the table may not exist yet.
+            self._reset_profiler_row()
 
         logger.info(f"Initialized TinkerEngine with backend={type(self.backend).__name__}")
 
@@ -606,6 +620,124 @@ class TinkerEngine:
 
         return unloaded_count
 
+    # ------------------------------------------------------------------
+    # torch.profiler session control. The API process owns the single
+    # ProfilerControlDB row; the engine reconciles to it once per loop.
+    # ------------------------------------------------------------------
+
+    def _reset_profiler_row(self) -> None:
+        """Clear any session left behind by a crashed engine.
+
+        The row survives in SQLite but the workers and staging dirs do not, so a
+        fresh engine must never inherit a row claiming a session is running.
+        """
+        with Session(self.db_engine) as session:
+            row = session.get(ProfilerControlDB, 1)
+            if row is None:
+                row = ProfilerControlDB(singleton_id=1)
+            row.desired_state = ProfilerState.STOPPED
+            row.owner_model_id = None
+            row.config_json = None
+            row.version = 0
+            row.applied_version = 0
+            row.started_at = None
+            row.step = 0
+            row.error = None
+            session.add(row)
+            session.commit()
+
+    def _write_profiler_row(self, **values) -> None:
+        with Session(self.db_engine) as session:
+            row = session.get(ProfilerControlDB, 1)
+            if row is None:
+                return
+            for key, value in values.items():
+                setattr(row, key, value)
+            session.add(row)
+            session.commit()
+
+    def _stop_profiling(self) -> str | None:
+        """Stop the live session. Returns an error string, or None on success."""
+        self._profiling_model_id = None
+        try:
+            self.backend.stop_profile()
+        except Exception as e:
+            logger.warning(f"[profiler] stop failed: {e}")
+            return f"stop failed: {e}"
+        return None
+
+    def reconcile_profiler(self) -> None:
+        """Converge the workers to the desired state in the control row.
+
+        Runs at the top of the request loop, which is a boundary between request
+        batches, so a session never starts or stops mid-batch.
+        """
+        if self._profiler_cfg is None:
+            return
+        with Session(self.db_engine) as session:
+            row = session.get(ProfilerControlDB, 1)
+            if row is None:
+                return
+            desired, version, applied = row.desired_state, row.version, row.applied_version
+            owner, config_json, started_at = row.owner_model_id, row.config_json, row.started_at
+
+        if applied < version:
+            # A new claim or release to apply.
+            if desired == ProfilerState.RUNNING:
+                try:
+                    try:
+                        worker_config = json.loads(config_json)
+                    except (TypeError, ValueError) as e:
+                        raise ValueError(f"unreadable profiler config in control row: {e}") from e
+                    self.backend.start_profile(worker_config)
+                except Exception as e:
+                    logger.warning(f"[profiler] start failed: {e}")
+                    # Release the slot, but still ack: the API is blocked waiting
+                    # for applied_version and would otherwise hang to its timeout.
+                    self._profiling_model_id = None
+                    self._write_profiler_row(
+                        desired_state=ProfilerState.STOPPED,
+                        owner_model_id=None,
+                        applied_version=version,
+                        error=f"start failed: {e}",
+                    )
+                    return
+                self._profiling_model_id = owner
+                self._profiling_steps = 0
+                self._profiling_error = None
+                self._write_profiler_row(applied_version=version, step=0, error=None)
+                logger.info(f"[profiler] session started for model {owner}")
+            else:
+                error = self._stop_profiling()
+                self._write_profiler_row(applied_version=version, step=self._profiling_steps, error=error)
+                logger.info("[profiler] session stopped")
+            return
+
+        if self._profiling_model_id is None:
+            return
+
+        # Active session: enforce the TTL, else flush progress for /profiling_status.
+        if started_at is not None:
+            # SQLite hands back naive datetimes even for a timezone-aware column,
+            # and everything we store is UTC.
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - started_at).total_seconds()
+            if age > self._profiler_cfg.max_session_duration_sec:
+                logger.warning(
+                    f"[profiler] session exceeded max_session_duration_sec="
+                    f"{self._profiler_cfg.max_session_duration_sec}s; finalizing"
+                )
+                self._stop_profiling()
+                self._write_profiler_row(
+                    desired_state=ProfilerState.STOPPED,
+                    owner_model_id=None,
+                    step=self._profiling_steps,
+                    error="session terminated by max_session_duration_sec",
+                )
+                return
+        self._write_profiler_row(step=self._profiling_steps, error=self._profiling_error)
+
     def process_optim_step(
         self, model_id: str, request_data: types.OptimStepInput
     ) -> types.OptimStepOutput | types.ErrorResponse:
@@ -613,7 +745,21 @@ class TinkerEngine:
         if not self.backend.has_model(model_id):
             return _model_not_found_error(model_id)
 
-        return self.backend.optim_step(model_id, request_data)
+        result = self.backend.optim_step(model_id, request_data)
+
+        # One profiler step per optim_step, for the owning model only. Counters are
+        # kept in memory and flushed by reconcile_profiler, so profiling adds no DB
+        # write to this path.
+        if self._profiling_model_id is not None and self._profiling_model_id == model_id:
+            self._profiling_steps += 1
+            try:
+                self._profiling_error = self.backend.profile_step()
+            except Exception as e:
+                # Never fail a client's optim_step because profiling misbehaved.
+                logger.warning(f"[profiler] step failed: {e}")
+                self._profiling_error = f"step failed: {e}"
+
+        return result
 
     def process_forward_backward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
         """Run forward and backward pass on a batch of requests."""
@@ -641,7 +787,7 @@ class TinkerEngine:
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
         )
 
-        self.backend.load_checkpoint(checkpoint_path, model_id)
+        self.backend.load_checkpoint(checkpoint_path, model_id, load_optimizer=request_data.load_optimizer)
 
         return types.LoadWeightsOutput(type="load_weights")
 
@@ -805,6 +951,10 @@ class TinkerEngine:
     def process_pending_requests(self):
         """Main loop to process pending requests."""
         while True:
+            # Converge torch profiling to the control row before picking up work,
+            # so a session never starts or stops in the middle of a batch.
+            self.reconcile_profiler()
+
             # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
                 # Use look-ahead scheduling to find batchable forward_backward and forward model passes

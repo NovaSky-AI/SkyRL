@@ -11,9 +11,12 @@ SKYRL_REPO_ROOT=$(realpath "$SCRIPT_DIR/../../..")
 LOG_DIR="$HOME/tinker_logs/$RUN_NAME"
 mkdir -p "$LOG_DIR"
 
-# TODO: tighten thresholds after 3-5 nightly runs (5% allowance from min observed),
-# matching the convention in gsm8k_colocate.sh.
-REWARD_MIN_VALUE=0.0
+# Thresholds: 5% allowance from min/max of the 26 finished nightly runs since 20th Jul 2026
+# (as of 31st Aug 2026), matching the convention in gsm8k_colocate.sh (#1664). Observed:
+# reward in [0.532, 0.559]; kl_sample_train_v2 in [6.6e-4, 7.1e-4] (colocated runs are
+# on-policy, so the sample/train KL stays flat and tight).
+REWARD_MIN_VALUE=0.50
+KL_MAX_VALUE=0.00074
 
 # gpu_memory_utilization: 0.7, not 0.8. Unlike the main trainer entrypoint (engines
 # profile on empty GPUs before models are built), the tinker backend starts engines
@@ -96,4 +99,4 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --with-editable "$COOKBOOK_DIR[ma
 cd "$SKYRL_REPO_ROOT"
 uv run --isolated --extra fsdp "$SCRIPT_DIR/get_summary.py" \
   --run_name "$RUN_NAME" --project_name "$PROJECT_NAME" \
-  --asserts "env/all/reward/total >= $REWARD_MIN_VALUE"
+  --asserts "env/all/reward/total >= $REWARD_MIN_VALUE" "optim/kl_sample_train_v2 <= $KL_MAX_VALUE"

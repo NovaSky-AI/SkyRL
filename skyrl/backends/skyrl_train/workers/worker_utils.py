@@ -30,6 +30,16 @@ MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFI
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_std"
 
 
+def get_inference_weight_prefix(is_multimodal_lm_only: bool) -> str:
+    """Return the enclosing inference-model prefix omitted by language-only loading.
+
+    Shared by full-weight and LoRA exports. This preserves the existing assumption
+    that the inference VLM exposes its text model under ``language_model``; it is
+    not a universal naming convention for all VLM architectures.
+    """
+    return "language_model." if is_multimodal_lm_only else ""
+
+
 @torch.no_grad()
 def compute_minibatch_rollout_logprob_diff_metrics(
     action_log_probs: torch.Tensor,
@@ -423,6 +433,18 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         reordered_batch = type(ref_microbatch)(reordered_data)
         reordered_batch.metadata = ref_microbatch.metadata
         return reordered_batch
+
+    def reorder_and_combine_items(self, batches: List[List[dict]]) -> List[dict]:
+        """Restore per-sample microbatch outputs to input order."""
+        ordered = [None] * self.data.batch_size
+        for original_indices, items in zip(self._microbatches, batches):
+            if len(items) < len(original_indices):
+                raise ValueError("Microbatch output has fewer items than input samples")
+            for original_idx, item in zip(original_indices, items):
+                ordered[original_idx] = item
+        if any(item is None for item in ordered):
+            raise ValueError("Microbatch outputs do not cover every input sample")
+        return ordered
 
 
 def get_microbatch_iterator(

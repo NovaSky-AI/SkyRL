@@ -49,10 +49,21 @@ from skyrl.utils.tok import get_tokenizer
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Configuration overrides for the SkyRL-Train backend.
 
-    All keys are applied as overrides to the default SkyRL-Train config.
+    Declared fields configure the backend itself; all extra keys are applied
+    as overrides to the default SkyRL-Train config.
     """
 
-    pass
+    keep_runtime_warm_on_last_unload: bool = True
+    """Keep the shared runtime (Ray, training workers, inference engines, base
+    model) alive when the last LoRA model is unloaded, so the next compatible
+    ``create_model`` registers a fresh adapter against it instead of
+    rebuilding. Only applies to Megatron LoRA policies (the warm path needs
+    the per-tenant adapter machinery, which FSDP does not implement);
+    full-parameter fine-tuning and FSDP always tear down on unload. Set to
+    ``False`` to release all GPUs on the last unload (scale-to-zero) — also
+    the escape hatch for changing the LoRA ``(rank, alpha)`` signature, which
+    is otherwise pinned by the first ``create_model`` for the warm runtime's
+    lifetime."""
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
@@ -78,6 +89,17 @@ def _build_skyrl_train_config(
 
     # Apply user overrides from backend_config
     user_overrides = dict(overrides.model_extra)
+    # The Tinker path drives profiling through /start_profiling, which builds the
+    # profiler at request time. A static config here would fight it over the single
+    # `worker.profiler` slot, so reject it rather than letting both sources win
+    # unpredictably.
+    profiler_keys = [k for k in user_overrides if k.startswith("trainer.policy.torch_profiler_config")]
+    if profiler_keys:
+        raise ValueError(
+            f"`backend_config` may not set {sorted(profiler_keys)}. The Tinker server controls "
+            f"torch profiling at runtime: start the server with --torch-profiler to enable the "
+            f"endpoints, then call /start_profiling and /stop_profiling."
+        )
     # override base model path
     # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
     # that resolves other config derived from the policy model path.
@@ -130,10 +152,16 @@ class SkyRLTrainBackend(AbstractBackend):
         self._model_metadata: dict[str, types.ModelMetadata] = {}
         self._cfg = None
         self._dispatch: WorkerDispatch | None = None
+        # True while a Tinker profiling session is live on the policy workers.
+        self._profiling = False
         self._colocate_pg: ResolvedPlacementGroup | None = None
         self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        # Tenants whose LoRA adapters are currently registered on the
+        # inference engines (populated by save_sampler_checkpoint, drained by
+        # delete_model so vLLM stops serving deleted tenants).
+        self._inference_adapter_ids: set[str] = set()
         self._renderer = None
         # CPU-only render server for multi-modal preprocessing; started
         # lazily on the first image-bearing training batch.
@@ -146,9 +174,11 @@ class SkyRLTrainBackend(AbstractBackend):
         self._server_groups: list = []
         self._inference_router = None
         # Colocated engines are slept after init and around training ops;
-        # sample paths must wake them (tracked here so wakes are not issued
-        # against already-awake engines).
-        self._engines_asleep = False
+        # sample paths must wake them. None = awake; otherwise the vLLM sleep
+        # level in effect: level 1 keeps a CPU backup of the weights (wakeable
+        # as-is), level 2 discards them, so a wake is only valid together with
+        # a weight sync.
+        self._engines_sleep_level: int | None = None
 
         # Optional hook invoked on inference-engine state changes (after
         # _create_new_inference_client, on delete_model teardown). The host
@@ -408,7 +438,9 @@ class SkyRLTrainBackend(AbstractBackend):
         # eager sleep keeps the colocation contract.
         if is_colocated and not self._adapter_only_sync:
             asyncio.run(client.sleep())
-            self._engines_asleep = True
+            # Record the effective level: sleep() defaults to 2 but the client
+            # clamps to 1 when LoRA weight sync keeps a CPU base-model backup.
+            self._engines_sleep_level = 1 if client.uses_lora_weight_sync else 2
 
     def _create_render_client(self) -> RendererClientProtocol:
         """Return a client for vLLM's ``/v1/chat/completions/render``.
@@ -481,12 +513,13 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{model_id}' already exists")
 
         is_lora = lora_config is not None and lora_config.rank > 0
-        is_first_policy = "policy" not in self._model_ids_to_role.values()
 
-        # Multi-LoRA path: allow additional policy adapters when LoRA is active
-        # and the first model has already been built. FFT (rank=0) keeps the
-        # original single-tenant gate.
-        if model_role == "policy" and not is_first_policy:
+        # Multi-LoRA path: register additional policy adapters against the
+        # already-built shared runtime. Gate on the runtime being alive rather
+        # than on a policy model being registered: with
+        # keep_runtime_warm_on_last_unload the runtime outlives the last
+        # registered model. FFT (rank=0) keeps the original single-tenant gate.
+        if model_role == "policy" and self._dispatch is not None:
             if not is_lora:
                 raise ValueError(
                     "SkyRLTrainBackend already has a 'policy' model; multi-tenant "
@@ -574,24 +607,55 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return ResolvedPlacementGroup(pg)
 
+    def _unload_inference_adapter(self, model_id: str) -> None:
+        """Drop a deleted tenant's LoRA adapter from the inference engines.
+
+        Only adapters actually registered on vLLM (via save_sampler_checkpoint)
+        are unloaded. Best-effort: vLLM may have LRU-evicted the adapter
+        already, and an inference-side failure must not block the tenant's
+        removal from the training runtime.
+        """
+        if model_id not in self._inference_adapter_ids:
+            return
+        try:
+            asyncio.run(self._inference_engine_client.unload_lora_adapter(model_id))
+        except Exception as e:
+            logger.warning(f"Failed to unload LoRA adapter '{model_id}' from inference engines: {e}")
+        self._inference_adapter_ids.discard(model_id)
+
     def delete_model(self, model_id: str) -> None:
         role = self._get_role(model_id)
 
-        # Multi-LoRA: if more than one model is currently registered, drop just
-        # this adapter slot rather than tearing down the shared Ray runtime.
-        # The live GPU state may still mirror this adapter; it'll be
+        # Multi-LoRA: if more than one model is currently registered — or the
+        # last one is unloading with keep_runtime_warm_on_last_unload set —
+        # drop just this adapter slot rather than tearing down the shared Ray
+        # runtime. The live GPU state may still mirror this adapter; it'll be
         # overwritten on the next swap_to (no eager swap-away here).
-        if len(self._model_ids_to_role) > 1:
+        # The warm path requires the per-tenant adapter machinery
+        # (delete_adapter on the workers), which only the Megatron backend
+        # implements — FSDP falls through to the teardown below.
+        supports_warm_unload = self._cfg is not None and self._cfg.trainer.strategy == "megatron"
+        if len(self._model_ids_to_role) > 1 or (self.config.keep_runtime_warm_on_last_unload and supports_warm_unload):
             if role == "policy" and self._base_lora_signature is not None:
+                self._unload_inference_adapter(model_id)
                 self._dispatch.delete_adapter("policy", model_id)
                 del self._model_ids_to_role[model_id]
                 self._model_metadata.pop(model_id, None)
-                logger.info(f"Removed LoRA adapter '{model_id}'")
+                logger.info(f"Removed LoRA adapter '{model_id}'; shared runtime stays up")
                 return
             # Fall through to teardown for non-LoRA roles or unexpected mixes.
 
         # Last model (or non-LoRA path): tear down the shared Ray runtime.
         # The Tinker engine will rebuild on the next create_model().
+        # Stop profiling first: teardown destroys the workers holding the profiler,
+        # and stopping flushes and uploads the open window instead of losing it.
+        if getattr(self, "_profiling", False):
+            logger.info("Stopping active profiling session before runtime teardown")
+            try:
+                self.stop_profile()
+            except Exception as e:
+                logger.warning(f"[profiler] auto-stop during delete_model failed: {e}")
+                self._profiling = False
         logger.info(f"Deleting model {model_id}, shutting down shared SkyRL-Train runtime...")
         for group in self._server_groups:
             group.shutdown()
@@ -609,6 +673,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch = None
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._engines_sleep_level = None
+        self._inference_adapter_ids = set()
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
@@ -822,7 +888,7 @@ class SkyRLTrainBackend(AbstractBackend):
     def _sleep_inference_engines(self):
         """Sleep inference engines to free GPU memory for training."""
         if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
-            if self._engines_asleep:
+            if self._engines_sleep_level is not None:
                 return
             lora_cfg = self._cfg.trainer.policy.model.lora
             # TODO(team): remove once vllm fixes this
@@ -838,27 +904,40 @@ class SkyRLTrainBackend(AbstractBackend):
             if _lora_sleep_override in ("1", "2"):
                 sleep_level = int(_lora_sleep_override)
             asyncio.run(self._inference_engine_client.sleep(level=sleep_level))
-            self._engines_asleep = True
+            self._engines_sleep_level = sleep_level
 
-    def _wake_inference_engines_for_sampling(self):
+    def _wake_inference_engines_for_sampling(self) -> str | None:
         """Wake colocated engines before serving sample requests.
 
-        Inverse of :meth:`_sleep_inference_engines`. A cold sample -- base
-        model, or an already-synced adapter, with no interleaved training op
-        -- must not rely on ``save_weights_for_sampler`` having woken the
-        engines: without this, requests queue against sleeping engines and
-        hang. The trainer may be GPU-resident from a preceding forward /
-        optim op, so it is offloaded first to give the engines their VRAM
-        back.
+        Inverse of :meth:`_sleep_inference_engines`. A cold sample -- a
+        request against an already-synced adapter with no
+        ``save_weights_for_sampler`` of its own in between (a training op,
+        this tenant's or another's, slept the engines since the last sync)
+        -- must not rely on the sync having woken the engines: without this,
+        requests queue against sleeping engines and hang. The trainer may be
+        GPU-resident from a preceding forward / optim op, so it is offloaded
+        first to give the engines their VRAM back.
+
+        Returns an error message (and does not wake) when the engines were
+        slept at level 2: that discards the weights, so a plain wake would
+        serve uninitialized memory as samples. Only a weight sync
+        (save_weights_for_sampler) can wake engines out of a level-2 sleep.
         """
         if not (self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all):
-            return
-        if not self._engines_asleep:
-            return
+            return None
+        if self._engines_sleep_level is None:
+            return None
+        if self._engines_sleep_level != 1:
+            return (
+                "inference engines have no synced weights (slept at level 2, which discards them); "
+                "call save_weights_for_sampler before sampling"
+            )
         self._dispatch.offload_for_sampling()
-        asyncio.run(self._inference_engine_client.wake_up(tags=["weights"]))
-        asyncio.run(self._inference_engine_client.wake_up(tags=["kv_cache"]))
-        self._engines_asleep = False
+        try:
+            asyncio.run(self._inference_engine_client.wake_up())
+        finally:
+            self._engines_sleep_level = None
+        return None
 
     def _validate_batch_role_and_loss(self, role: str, loss_fn: str):
         if role == "critic" and loss_fn not in {"ppo", "ppo_critic"}:
@@ -1053,6 +1132,34 @@ class SkyRLTrainBackend(AbstractBackend):
             )
         return results
 
+    # ------------------------------------------------------------------
+    # torch.profiler control for the Tinker /start_profiling endpoints.
+    # Only the policy role is profiled, matching the trainer path.
+    # ------------------------------------------------------------------
+
+    def start_profile(self, config: dict) -> None:
+        """Build and arm a profiler on the policy workers. Raises on failure."""
+        if self._dispatch is None:
+            raise RuntimeError("no training workers yet; create a model before profiling")
+        self._dispatch.start_profile("policy", config=config, raise_on_error=True)
+        self._profiling = True
+
+    def stop_profile(self) -> None:
+        """Stop and tear down the live profiling session, flushing its last window."""
+        if not self._profiling:
+            return
+        self._profiling = False
+        if self._dispatch is None:
+            return
+        self._dispatch.stop_profile("policy", raise_on_error=True)
+
+    def profile_step(self) -> str | None:
+        """Advance the profiler by one step, returning the first worker error seen."""
+        if not self._profiling or self._dispatch is None:
+            return None
+        errors = self._dispatch.profile_step("policy") or []
+        return next((e for e in errors if e), None)
+
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         role = self._get_role(model_id)
 
@@ -1080,9 +1187,14 @@ class SkyRLTrainBackend(AbstractBackend):
         save_weights_for_sampler() explicitly before calling sample() if weights
         have been updated.
         """
-        # 1. Ensure inference engines are initialized and awake
+        # 1. Ensure inference engines are initialized and awake. The wake
+        # refuses when the engines were slept at level 2 (weights discarded):
+        # sampling then needs a weight sync first, not a plain wake.
         self._ensure_inference_engines()
-        self._wake_inference_engines_for_sampling()
+        wake_error = self._wake_inference_engines_for_sampling()
+        if wake_error is not None:
+            error = types.ErrorResponse(error=wake_error, status="error")
+            return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
 
         # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
         # mixes adapters in one batched sample call (the engine batches across
@@ -1125,9 +1237,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # the engines until the first sampler-weight save and (b) would wrongly
         # apply adapter deltas to a base-model request.
         fallback_model_name = resolve_policy_model_name(self._cfg)
-        base_model_name = (
-            self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
-        )
+        base_model_name = self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
         per_request_models = []
         for mid in prepared_batch.all_model_ids:
             if not mid:
@@ -1302,6 +1412,12 @@ class SkyRLTrainBackend(AbstractBackend):
         self._validate_model_state(model_id)
         role = self._get_role(model_id)
 
+        # The dispatch backloads the trainer (masters + optimizer) for the
+        # save; awake colocated engines hold most of the GPU (218GiB/GPU at
+        # gpu_memory_utilization=0.8) and the backload OOMs. Same idiom as
+        # forward/forward_backward: sleep first, the next weight sync wakes.
+        self._sleep_inference_engines()
+
         # Create temp directory for checkpoint on the same (shared) filesystem
         # as output_path so the remote worker that writes the files and the
         # engine that tars them both see the same path.
@@ -1319,10 +1435,14 @@ class SkyRLTrainBackend(AbstractBackend):
 
         logger.info(f"Saved checkpoint for {model_id} to {output_path}")
 
-    def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
-        """Load full training checkpoint (model + optimizer + scheduler) from tar."""
+    def load_checkpoint(self, checkpoint_path, model_id: str, load_optimizer: bool) -> None:
+        """Load model state and optionally optimizer state from a training checkpoint."""
         self._validate_model_state(model_id)
         role = self._get_role(model_id)
+
+        # Same GPU-residency requirement as save_checkpoint: the trainer
+        # backload cannot fit beside awake colocated engines.
+        self._sleep_inference_engines()
 
         # Extract tar to temp directory on the same (shared) filesystem as
         # checkpoint_path so the remote worker that loads the files can see it.
@@ -1331,12 +1451,11 @@ class SkyRLTrainBackend(AbstractBackend):
             with tarfile.open(checkpoint_path, "r") as tar:
                 tar.extractall(temp_dir, filter="data")
 
-            # Load checkpoint (includes optimizer and scheduler states)
             self._dispatch.load_checkpoint(
                 model=role,
                 ckpt_dir=temp_dir,
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
+                load_optimizer_states=load_optimizer,
+                load_lr_scheduler_states=load_optimizer,
                 model_id=model_id,
             )
 
@@ -1370,11 +1489,21 @@ class SkyRLTrainBackend(AbstractBackend):
         # before broadcasting and the worker registers it on vLLM under that
         # name. None for the FFT / single-tenant path uses legacy behavior.
         sync_id = model_id if self._base_lora_signature is not None else None
-        asyncio.run(
-            self._dispatch.save_weights_for_sampler(model_id=sync_id, engines_asleep=self._engines_asleep)
-        )
-        # The colocated sync path leaves the engines awake (weights + KV cache).
-        self._engines_asleep = False
+        try:
+            asyncio.run(
+                self._dispatch.save_weights_for_sampler(
+                    model_id=sync_id, engines_asleep=self._engines_sleep_level is not None
+                )
+            )
+        finally:
+            # The colocated sync path wakes the engines (weights + KV cache)
+            # even when the broadcast then fails partway; mark them awake so
+            # the next sleep is issued for real.
+            self._engines_sleep_level = None
+        if sync_id is not None:
+            # The sync registered this tenant's adapter on vLLM; remember it
+            # so delete_model can unload it.
+            self._inference_adapter_ids.add(model_id)
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:
@@ -1387,9 +1516,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 # via vLLM's load_lora_adapter against the released base.
                 base_sync_path = self._cfg.trainer.policy.model.lora.lora_sync_path
                 adapter_dir = (
-                    os.path.join(base_sync_path, os.path.basename(model_id))
-                    if sync_id is not None
-                    else base_sync_path
+                    os.path.join(base_sync_path, os.path.basename(model_id)) if sync_id is not None else base_sync_path
                 )
                 self._create_tar_from_directory(adapter_dir, output_path)
             else:
