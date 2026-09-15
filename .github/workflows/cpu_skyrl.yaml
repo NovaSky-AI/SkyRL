@@ -29,7 +29,9 @@ concurrency:
 
 jobs:
   skyrl_tests:
-    # Forks inherit these workflows but not the secrets they need -- only run upstream.
+    # CI runs only in the upstream repo. This workflow needs no secrets and would pass
+    # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base
+    # repository's context.
     if: github.repository == 'NovaSky-AI/SkyRL'
     runs-on: ubuntu-latest
     defaults:
