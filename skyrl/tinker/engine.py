@@ -2,9 +2,9 @@
 
 import argparse
 import asyncio
+import json
 import os
 import threading
-import json
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -1110,7 +1110,7 @@ class TinkerEngine:
         # Converge torch profiling to the control row before picking up work,
         # so a session never starts or stops in the middle of a batch.
         self.reconcile_profiler()
-        
+
         # Query for pending requests and extract data within session context
         with Session(self.db_engine) as session:
             # Use look-ahead scheduling to find batchable forward_backward and forward model passes

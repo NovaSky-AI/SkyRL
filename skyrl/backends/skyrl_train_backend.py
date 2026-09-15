@@ -1258,9 +1258,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # the engines until the first sampler-weight save and (b) would wrongly
         # apply adapter deltas to a base-model request.
         fallback_model_name = resolve_policy_model_name(self._cfg)
-        base_model_name = (
-            self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
-        )
+        base_model_name = self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
         per_request_models = []
         for mid in prepared_batch.all_model_ids:
             if not mid:
