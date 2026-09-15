@@ -1698,7 +1698,13 @@ class RayPPOTrainer:
             torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
-        # Atomic tracking - write this last after all saves succeed
+        # Async workers return before shards and completion metadata are written.
+        # Finalize before resuming training, advertising, or pruning checkpoints.
+        self.dispatch.finalize_pending_saves("policy")
+        if self.has_critic:
+            self.dispatch.finalize_pending_saves("critic")
+
+        # Publish only after every model checkpoint has completed successfully.
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
         with io.open_file(latest_checkpoint_file, "w") as f:
             f.write(str(self.global_step))
