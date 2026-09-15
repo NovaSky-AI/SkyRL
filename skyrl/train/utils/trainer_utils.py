@@ -874,3 +874,18 @@ def build_dataloader(
         logger.info(f"Validation set size: {len(dataloader)}")
 
     return dataloader
+
+
+def shutdown_dataloader(dataloader: Optional[StatefulDataLoader]) -> None:
+    """Stop worker processes owned by a ``StatefulDataLoader``."""
+    if dataloader is None:
+        return
+
+    # torchdata 0.11 exposes worker shutdown only on its iterator.
+    iterator = getattr(dataloader, "_iterator", None)
+    shutdown_workers = getattr(iterator, "_shutdown_workers", None)
+    if shutdown_workers is None:
+        return
+
+    shutdown_workers()
+    dataloader._iterator = None
