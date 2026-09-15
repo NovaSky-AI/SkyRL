@@ -32,7 +32,7 @@ def test_small_model_does_not_inherit_glm_attention_or_expert_settings():
         ("glm52-32k-2n", 1, 8, 1, 1, 32768),
         ("glm53-32k-2n", 1, 8, 1, 1, 32768),
         ("glm53-256k-2n", 1, 4, 2, 1, 262144),
-        ("glm53-256k-3n", 2, 8, 1, 2, 262144),
+        ("glm53-256k-3n", 2, 4, 2, 2, 262144),
     ],
 )
 def test_profiles_preserve_nested_common_settings(profile, nodes, tp, cp, pp, context):
