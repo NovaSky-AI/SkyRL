@@ -26,7 +26,7 @@ def stage_values(**updates):
 
 def test_server_stage_schema_is_versioned():
     schema = server_timing.server_stage_json_schema()
-    assert schema["properties"]["schema_version"]["const"] == "1.0.0"
+    assert schema["properties"]["schema_version"]["const"] == "1.1.0"
     assert {"request_id", "publication_id", "adapter_generation", "rank", "node"} <= set(schema["required"])
 
 

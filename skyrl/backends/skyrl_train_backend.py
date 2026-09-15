@@ -1434,7 +1434,7 @@ class SkyRLTrainBackend(AbstractBackend):
         cold_inference = not self._inference_engines_initialized
         if cold_inference:
             with (
-                record_server_stage("inference_engine_construction", model_id, cold=True),
+                record_server_stage("inference_engine_initialization_aggregate", model_id, cold=True),
                 log_timing(f"sampler_inference_init model_id={model_id} cold=True"),
             ):
                 self._ensure_inference_engines()

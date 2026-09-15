@@ -9,7 +9,7 @@ publication and initial sample. The first update is warmup; later updates are
 measured. `adapter_publication` is the complete public
 `save_weights_and_get_sampling_client` transaction, so it includes activation;
 SkyRL does not emit a synthetic activation row. The server emits structured
-`inference_engine_construction` only when lazy inference startup runs, and
+`inference_engine_initialization_aggregate` only when lazy inference startup runs, and
 `sampler_weight_sync` for every publication. Collect and validate those records
 with `skyrl.tinker.server_timing.collect_server_stage_records`; their monotonic
 clocks are rank-local and are never subtracted from client wall time. Base-weight

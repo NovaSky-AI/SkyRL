@@ -55,7 +55,7 @@ def test_first_publication_separates_inference_initialization_from_replacement(t
     assert len(publication) == 2 and all("5.000s" in line for line in publication)
     stages = server_timing.collect_server_stage_records(logs)
     assert [(stage.stage, stage.cold) for stage in stages] == [
-        ("inference_engine_construction", True),
+        ("inference_engine_initialization_aggregate", True),
         ("sampler_weight_sync", True),
         ("sampler_weight_sync", False),
     ]

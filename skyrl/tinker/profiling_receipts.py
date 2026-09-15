@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 DERIVATION_VERSION = "1.0.0"
 
 Arm = Literal["baseline_a", "native_candidate"]
@@ -20,7 +20,7 @@ Operation = Literal[
     "scheduler_allocation",
     "service_connection",
     "model_creation",
-    "inference_engine_construction",
+    "inference_engine_initialization_aggregate",
     "base_weight_loading",
     "compilation",
     "cuda_graph_capture",
@@ -168,7 +168,7 @@ class OperationOutcome(ReceiptModel):
 
 
 class PhaseReceipt(ReceiptModel):
-    schema_version: Literal["1.0.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.1.0"] = SCHEMA_VERSION
     run_id: str = Field(min_length=1)
     operation_id: str = Field(min_length=1)
     operation: Operation
@@ -210,7 +210,7 @@ def classify_phase(operation: Operation, adapter_generation: int, optimizer_step
         "scheduler_allocation",
         "service_connection",
         "model_creation",
-        "inference_engine_construction",
+        "inference_engine_initialization_aggregate",
         "base_weight_loading",
         "compilation",
         "cuda_graph_capture",

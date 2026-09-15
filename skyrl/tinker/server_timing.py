@@ -9,9 +9,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SERVER_STAGE_SCHEMA_VERSION = "1.0.0"
+SERVER_STAGE_SCHEMA_VERSION = "1.1.0"
 SERVER_STAGE_PREFIX = "SKYRL_SERVER_STAGE "
-ServerStage = Literal["inference_engine_construction", "sampler_weight_sync"]
+ServerStage = Literal["inference_engine_initialization_aggregate", "sampler_weight_sync"]
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ _REQUEST_CONTEXT: ContextVar[ServerRequestContext | None] = ContextVar("skyrl_se
 class ServerStageRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["1.0.0"] = SERVER_STAGE_SCHEMA_VERSION
+    schema_version: Literal["1.1.0"] = SERVER_STAGE_SCHEMA_VERSION
     span_id: str = Field(min_length=1)
     request_id: str = Field(min_length=1)
     publication_id: str = Field(min_length=1)
