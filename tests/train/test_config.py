@@ -165,6 +165,13 @@ def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value
         TrainerConfig(**{field_name: value})
 
 
+def test_ref_4bit_rejects_megatron():
+    with pytest.raises(ValueError, match="trainer.ref.model.bitsandbytes_4bit"):
+        SkyRLTrainConfig.from_cli_overrides(
+            ["trainer.strategy=megatron", "trainer.ref.model.bitsandbytes_4bit.enabled=true"]
+        )
+
+
 def test_runtime_env_forwards_te_block_scale_mode(monkeypatch):
     monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1")
     monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
