@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from itertools import cycle, islice
 from pathlib import Path
@@ -73,7 +73,12 @@ def prepare_full_context_inputs(trainer, config: TrainingCheckConfig, report, to
             "advantages": [1.0, -1.0],
             "datums_sha256": hashlib.sha256(fixture.encode()).hexdigest(),
             "profile_mode": config.profile_mode,
-            "cold_phases": ["create_model", "prepare_inputs", "initial/publication", "initial/sample"],
+            "cold_phases": [
+                "create_model",
+                "prepare_inputs",
+                "initial/publication",
+                "initial/sample",
+            ],
             "initial_publication_includes_lazy_inference_init": True,
             "measured_phases": [f"step_{step}" for step in range(1, config.steps)],
         }
@@ -109,18 +114,45 @@ def update_optimizer(trainer, learning_rate: float, report, phase: str) -> None:
         record["metrics"] = result.metrics
 
 
-def publish_and_sample(trainer, prompt, report, phase_prefix: str, inference_profile_url=None):
+def publish_and_sample(
+    trainer,
+    prompt,
+    report,
+    phase_prefix: str,
+    inference_profile_url=None,
+    receipts=None,
+    generation=0,
+    optimizer_step=None,
+):
     with (
-        profile_inference(inference_profile_url, report, f"{phase_prefix}/publication"),
+        profile_inference(
+            inference_profile_url,
+            report,
+            f"{phase_prefix}/publication",
+            receipts,
+            generation,
+            optimizer_step,
+        ),
+        record_operation(receipts, "adapter_publication", generation, optimizer_step),
         measure_phase(report, f"{phase_prefix}/publication"),
     ):
         sampler = trainer.save_weights_and_get_sampling_client()
     with (
-        profile_inference(inference_profile_url, report, f"{phase_prefix}/sample"),
+        profile_inference(
+            inference_profile_url,
+            report,
+            f"{phase_prefix}/sample",
+            receipts,
+            generation,
+            optimizer_step,
+        ),
+        record_operation(receipts, "sample", generation, optimizer_step),
         measure_phase(report, f"{phase_prefix}/sample") as record,
     ):
         result = sampler.sample(
-            prompt, num_samples=1, sampling_params=types.SamplingParams(max_tokens=8, temperature=0)
+            prompt,
+            num_samples=1,
+            sampling_params=types.SamplingParams(max_tokens=8, temperature=0),
         ).result()
         if len(result.sequences) != 1 or not result.sequences[0].tokens:
             raise ValueError("sampling returned no sequence")
@@ -137,7 +169,11 @@ def unload_model(base_url: str, model_id: str) -> None:
         request_id = response.json()["request_id"]
         while (remaining := deadline - time.monotonic()) > 0:
             try:
-                response = client.post("api/v1/retrieve_future", json={"request_id": request_id}, timeout=remaining)
+                response = client.post(
+                    "api/v1/retrieve_future",
+                    json={"request_id": request_id},
+                    timeout=remaining,
+                )
             except httpx.ReadTimeout as error:
                 raise TimeoutError(f"unload did not finish for {model_id} within its polling budget") from error
             if response.status_code == 408:
@@ -159,7 +195,10 @@ def build_full_context_datum(seed_tokens: list[int], context_length: int) -> typ
     target_tokens = sequence[1:]
     return types.Datum(
         model_input=types.ModelInput.from_ints(input_tokens),
-        loss_fn_inputs={"target_tokens": target_tokens, "weights": [1.0] * context_length},
+        loss_fn_inputs={
+            "target_tokens": target_tokens,
+            "weights": [1.0] * context_length,
+        },
     )
 
 
@@ -184,7 +223,11 @@ def serialize_batch(data: list[types.Datum]) -> str:
             {
                 "model_input": datum.model_input.model_dump(mode="json"),
                 "loss_fn_inputs": {
-                    key: {"data": value.data, "dtype": value.dtype, "shape": value.shape}
+                    key: {
+                        "data": value.data,
+                        "dtype": value.dtype,
+                        "shape": value.shape,
+                    }
                     for key, value in datum.loss_fn_inputs.items()
                 },
             }
@@ -229,13 +272,16 @@ def measure_phase(report, phase_name: str):
 
 
 @contextmanager
-def profile_inference(base_url, report, phase):
+def profile_inference(base_url, report, phase, receipts=None, generation=0, optimizer_step=None):
     """Bracket vLLM capture outside model-stage timers; the engine must enable profiling."""
     if base_url is None:
         yield
         return
     with httpx.Client(base_url=base_url.rstrip("/") + "/", timeout=300) as client:
-        with measure_phase(report, f"{phase}/profiler_start"):
+        with (
+            record_operation(receipts, "profiler_start", generation, optimizer_step),
+            measure_phase(report, f"{phase}/profiler_start"),
+        ):
             client.post("start_profile").raise_for_status()
         failure = None
         try:
@@ -245,7 +291,10 @@ def profile_inference(base_url, report, phase):
             raise
         finally:
             try:
-                with measure_phase(report, f"{phase}/profiler_stop"):
+                with (
+                    record_operation(receipts, "profiler_stop", generation, optimizer_step),
+                    measure_phase(report, f"{phase}/profiler_stop"),
+                ):
                     client.post("stop_profile").raise_for_status()
             except Exception as cleanup_error:
                 if failure is None:
@@ -254,7 +303,17 @@ def profile_inference(base_url, report, phase):
 
 
 @contextmanager
-def profile_training(base_url, model_id, report, phase, global_step, tag):
+def profile_training(
+    base_url,
+    model_id,
+    report,
+    phase,
+    global_step,
+    tag,
+    receipts=None,
+    generation=0,
+    optimizer_step=None,
+):
     """Use the server's single acknowledged profiling session for one update."""
     if base_url is None:
         yield
@@ -263,14 +322,23 @@ def profile_training(base_url, model_id, report, phase, global_step, tag):
     claimed = False
     with httpx.Client(base_url=base_url.rstrip("/") + "/", timeout=600) as client:
         try:
-            with measure_phase(report, f"{phase}/trainer_profiler_start") as record:
+            with (
+                record_operation(receipts, "profiler_start", generation, optimizer_step),
+                measure_phase(report, f"{phase}/trainer_profiler_start") as record,
+            ):
                 response = client.post(
                     "start_profiling",
                     json={
                         "model_id": model_id,
                         "global_step": global_step,
                         "export_path_extra": tag,
-                        "schedule_options": {"skip_first": 0, "wait": 0, "warmup": 0, "active": 1, "repeat": 0},
+                        "schedule_options": {
+                            "skip_first": 0,
+                            "wait": 0,
+                            "warmup": 0,
+                            "active": 1,
+                            "repeat": 0,
+                        },
                         "profile_options": {
                             "activities": ["cpu", "cuda"],
                             "record_shapes": True,
@@ -304,7 +372,10 @@ def profile_training(base_url, model_id, report, phase, global_step, tag):
         finally:
             if claimed:
                 try:
-                    with measure_phase(report, f"{phase}/trainer_profiler_stop") as record:
+                    with (
+                        record_operation(receipts, "profiler_stop", generation, optimizer_step),
+                        measure_phase(report, f"{phase}/trainer_profiler_stop") as record,
+                    ):
                         response = client.post("stop_profiling", json={"model_id": model_id})
                         response.raise_for_status()
                         status = response.json()
@@ -315,3 +386,9 @@ def profile_training(base_url, model_id, report, phase, global_step, tag):
                     if failure is None:
                         raise
                     failure.add_note(f"Trainer profiler cleanup failed: {cleanup_error}")
+
+
+def record_operation(receipts, operation, generation, optimizer_step):
+    if receipts is None:
+        return nullcontext({})
+    return receipts.record(operation, generation, optimizer_step)

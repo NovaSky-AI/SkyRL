@@ -15,9 +15,7 @@ DERIVATION_VERSION = "1.0.0"
 Arm = Literal["baseline_a", "native_candidate"]
 ProfilerMode = Literal["none", "trainer", "receiver"]
 Lifecycle = Literal["cold", "warm"]
-PhaseKind = Literal[
-    "cold_start", "generation_zero", "excluded_warmup", "recurring", "housekeeping"
-]
+PhaseKind = Literal["cold_start", "generation_zero", "excluded_warmup", "recurring", "housekeeping"]
 Operation = Literal[
     "scheduler_allocation",
     "service_connection",
@@ -64,6 +62,15 @@ class CodeProvenance(ReceiptModel):
 class TransportIdentity(ReceiptModel):
     implementation: str = Field(min_length=1)
     revision: str = Field(min_length=1)
+
+
+class ReceiptMetadata(ReceiptModel):
+    run_id: str = Field(min_length=1)
+    model: ModelIdentity
+    provenance: CodeProvenance
+    arm: Arm
+    transport: TransportIdentity
+    profiler_mode: ProfilerMode
 
 
 class PhaseClassification(ReceiptModel):
@@ -139,9 +146,7 @@ class TraceArtifact(ReceiptModel):
             self.selected_rank,
             self.window,
         )
-        if any(value not in (None, "") for value in values) and any(
-            value in (None, "") for value in values
-        ):
+        if any(value not in (None, "") for value in values) and any(value in (None, "") for value in values):
             raise ValueError("trace artifact metadata must be complete when supplied")
         return self
 
@@ -186,39 +191,21 @@ class PhaseReceipt(ReceiptModel):
     def validate_receipt(self):
         validate_distributed_spans(self.server_spans)
         if self.unattributed_duration_ns > self.client_timing.duration_ns:
-            raise ValueError(
-                "unattributed duration exceeds the client operation duration"
-            )
-        if any(
-            span.adapter_generation != self.adapter_generation
-            for span in self.server_spans
-        ):
-            raise ValueError(
-                "server span adapter generation does not match its receipt"
-            )
+            raise ValueError("unattributed duration exceeds the client operation duration")
+        if any(span.adapter_generation != self.adapter_generation for span in self.server_spans):
+            raise ValueError("server span adapter generation does not match its receipt")
         if self.profiler_mode == "none" and self.trace.path:
-            raise ValueError(
-                "profiler-disabled operation cannot carry a trace artifact"
-            )
-        if (
-            self.operation in {"adapter_publication", "adapter_activation"}
-            and self.outcome.success
-        ):
+            raise ValueError("profiler-disabled operation cannot carry a trace artifact")
+        if self.operation in {"adapter_publication", "adapter_activation"} and self.outcome.success:
             if self.outcome.active_generation_after != self.adapter_generation:
-                raise ValueError(
-                    "successful publication or activation must report its active generation"
-                )
+                raise ValueError("successful publication or activation must report its active generation")
         if self.operation == "sample" and self.outcome.success:
             if self.outcome.first_sample_generation != self.adapter_generation:
-                raise ValueError(
-                    "successful sample must report the generation it observed"
-                )
+                raise ValueError("successful sample must report the generation it observed")
         return self
 
 
-def classify_phase(
-    operation: Operation, adapter_generation: int, optimizer_step: int | None
-) -> PhaseClassification:
+def classify_phase(operation: Operation, adapter_generation: int, optimizer_step: int | None) -> PhaseClassification:
     if operation in {
         "scheduler_allocation",
         "service_connection",
@@ -230,17 +217,13 @@ def classify_phase(
         "kv_cache_initialization",
         "transport_layout_initialization",
     }:
-        return PhaseClassification(
-            lifecycle="cold", kind="cold_start", optimizer_step=optimizer_step
-        )
+        return PhaseClassification(lifecycle="cold", kind="cold_start", optimizer_step=optimizer_step)
     if adapter_generation == 0 and operation in {
         "adapter_publication",
         "adapter_activation",
         "sample",
     }:
-        return PhaseClassification(
-            lifecycle="cold", kind="generation_zero", optimizer_step=optimizer_step
-        )
+        return PhaseClassification(lifecycle="cold", kind="generation_zero", optimizer_step=optimizer_step)
     if operation in {
         "profiler_start",
         "profiler_stop",
@@ -249,18 +232,12 @@ def classify_phase(
         "checkpoint",
         "unload",
     }:
-        return PhaseClassification(
-            lifecycle="warm", kind="housekeeping", optimizer_step=optimizer_step
-        )
+        return PhaseClassification(lifecycle="warm", kind="housekeeping", optimizer_step=optimizer_step)
     if optimizer_step == 0:
-        return PhaseClassification(
-            lifecycle="warm", kind="excluded_warmup", optimizer_step=optimizer_step
-        )
+        return PhaseClassification(lifecycle="warm", kind="excluded_warmup", optimizer_step=optimizer_step)
     if optimizer_step is None:
         raise ValueError(f"optimizer_step is required for recurring {operation}")
-    return PhaseClassification(
-        lifecycle="warm", kind="recurring", optimizer_step=optimizer_step
-    )
+    return PhaseClassification(lifecycle="warm", kind="recurring", optimizer_step=optimizer_step)
 
 
 @contextmanager
@@ -335,6 +312,102 @@ def derive_receipt_table(receipts, input_paths) -> dict:
     }
 
 
+def load_receipt_metadata(path: Path) -> ReceiptMetadata:
+    return ReceiptMetadata.model_validate_json(path.read_text())
+
+
+class ReceiptRecorder:
+    """Write validated operation receipts while preserving operation failures."""
+
+    def __init__(self, path: Path, metadata: ReceiptMetadata, clock=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._output = path.open("x")
+        self.metadata = metadata
+        self._clock = clock or time.monotonic_ns
+        self._operation_count = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._output.close()
+
+    @contextmanager
+    def record(self, operation: Operation, adapter_generation: int, optimizer_step: int | None):
+        operation_id = f"{self.metadata.run_id}/{self._operation_count:04d}-{operation}"
+        self._operation_count += 1
+        observations = {
+            "server_spans": (),
+            "unattributed_duration_ns": None,
+            "adapter_transfer": AdapterTransfer(),
+            "memory": MemoryObservation(),
+            "trace": TraceArtifact(
+                path="",
+                size_bytes=None,
+                sha256=None,
+                selected_rank=None,
+                window=None,
+            ),
+            "active_generation_after": None,
+            "first_sample_generation": None,
+        }
+        started = self._clock()
+        operation_error = None
+        try:
+            yield observations
+        except Exception as error:
+            operation_error = error
+            raise
+        finally:
+            ended = self._clock()
+            try:
+                if operation in {"adapter_publication", "adapter_activation"} and operation_error is None:
+                    observations["active_generation_after"] = adapter_generation
+                if operation == "sample" and operation_error is None:
+                    observations["first_sample_generation"] = adapter_generation
+                client_timing = ClientTiming(
+                    start_monotonic_ns=started,
+                    end_monotonic_ns=ended,
+                    duration_ns=ended - started,
+                )
+                unattributed = observations["unattributed_duration_ns"]
+                if unattributed is None:
+                    unattributed = client_timing.duration_ns if not observations["server_spans"] else 0
+                outcome = OperationOutcome(
+                    success=operation_error is None,
+                    error_type=type(operation_error).__name__ if operation_error else None,
+                    error=str(operation_error) if operation_error else None,
+                    active_generation_after=observations["active_generation_after"],
+                    first_sample_generation=observations["first_sample_generation"],
+                )
+                receipt = PhaseReceipt(
+                    run_id=self.metadata.run_id,
+                    operation_id=operation_id,
+                    operation=operation,
+                    model=self.metadata.model,
+                    provenance=self.metadata.provenance,
+                    arm=self.metadata.arm,
+                    transport=self.metadata.transport,
+                    profiler_mode=self.metadata.profiler_mode,
+                    classification=classify_phase(operation, adapter_generation, optimizer_step),
+                    adapter_generation=adapter_generation,
+                    client_timing=client_timing,
+                    server_spans=observations["server_spans"],
+                    unattributed_duration_ns=unattributed,
+                    adapter_transfer=observations["adapter_transfer"],
+                    outcome=outcome,
+                    memory=observations["memory"],
+                    trace=observations["trace"],
+                )
+                self._output.write(receipt.model_dump_json() + "\n")
+                self._output.flush()
+                os.fsync(self._output.fileno())
+            except Exception as receipt_error:
+                if operation_error is None:
+                    raise
+                operation_error.add_note(f"Profiling receipt failed: {receipt_error}")
+
+
 def write_receipts(path: Path, receipts) -> None:
     """Create an immutable canonical JSONL receipt file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -376,6 +449,4 @@ def verify_checksum_manifest(path: Path, root: Path) -> None:
             raise ValueError(f"manifest path escapes release directory: {relative}")
         actual = sha256_file(candidate)
         if actual != expected:
-            raise ValueError(
-                f"checksum mismatch for {relative}: expected {expected}, got {actual}"
-            )
+            raise ValueError(f"checksum mismatch for {relative}: expected {expected}, got {actual}")

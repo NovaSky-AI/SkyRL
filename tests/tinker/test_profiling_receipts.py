@@ -8,9 +8,7 @@ from skyrl.tinker import profiling_receipts as receipts
 SHA = "a" * 64
 
 
-def receipt_values(
-    operation="optimizer", generation=2, optimizer_step=1, profiler_mode="none"
-):
+def receipt_values(operation="optimizer", generation=2, optimizer_step=1, profiler_mode="none"):
     return {
         "run_id": "run-test",
         "operation_id": f"run-test/{operation}",
@@ -30,9 +28,7 @@ def receipt_values(
         "arm": "baseline_a",
         "transport": {"implementation": "safetensors", "revision": "baseline-v1"},
         "profiler_mode": profiler_mode,
-        "classification": receipts.classify_phase(
-            operation, generation, optimizer_step
-        ),
+        "classification": receipts.classify_phase(operation, generation, optimizer_step),
         "adapter_generation": generation,
         "client_timing": {
             "start_monotonic_ns": 100,
@@ -192,9 +188,7 @@ def test_trace_artifact_metadata_cannot_be_partial():
         ("sample", 2, "first_sample_generation"),
     ],
 )
-def test_generation_visible_operations_require_the_observed_generation(
-    operation, generation, field
-):
+def test_generation_visible_operations_require_the_observed_generation(operation, generation, field):
     values = receipt_values(operation=operation, generation=generation)
     values["outcome"][field] = generation
     assert receipts.build_phase_receipt(**values).outcome.success
@@ -248,9 +242,66 @@ def test_receipts_and_manifest_are_create_only_and_checksummed(tmp_path):
 def test_derived_table_names_inputs_and_is_reproducible():
     receipt = receipts.build_phase_receipt(**receipt_values())
     first = receipts.derive_receipt_table([receipt], ["raw/receipts.jsonl"])
-    second = receipts.derive_receipt_table(
-        [receipt.model_dump()], ["raw/receipts.jsonl"]
-    )
+    second = receipts.derive_receipt_table([receipt.model_dump()], ["raw/receipts.jsonl"])
     assert first["inputs"] == ["raw/receipts.jsonl"]
     assert first["derivation_version"] == receipts.DERIVATION_VERSION
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def receipt_metadata():
+    values = receipt_values()
+    return receipts.ReceiptMetadata(
+        run_id=values["run_id"],
+        model=values["model"],
+        provenance=values["provenance"],
+        arm=values["arm"],
+        transport=values["transport"],
+        profiler_mode=values["profiler_mode"],
+    )
+
+
+def test_recorder_writes_ordered_validated_operation_receipts(tmp_path):
+    ticks = iter((100, 140, 200, 260))
+    path = tmp_path / "receipts.jsonl"
+    with receipts.ReceiptRecorder(path, receipt_metadata(), lambda: next(ticks)) as recorder:
+        with recorder.record("optimizer", 1, 0):
+            pass
+        with recorder.record("adapter_publication", 2, 1):
+            pass
+    rows = [receipts.PhaseReceipt.model_validate_json(line) for line in path.read_text().splitlines()]
+    assert [row.operation for row in rows] == ["optimizer", "adapter_publication"]
+    assert [row.operation_id for row in rows] == [
+        "run-test/0000-optimizer",
+        "run-test/0001-adapter_publication",
+    ]
+    assert rows[0].classification.kind == "excluded_warmup"
+    assert rows[1].outcome.active_generation_after == 2
+    assert rows[0].unattributed_duration_ns == rows[0].client_timing.duration_ns == 40
+
+
+def test_recorder_retains_operation_error_when_receipt_cleanup_also_fails(tmp_path):
+    ticks = iter((100, 90))
+    failure = RuntimeError("optimizer failed")
+    with receipts.ReceiptRecorder(tmp_path / "receipts.jsonl", receipt_metadata(), lambda: next(ticks)) as recorder:
+        with pytest.raises(RuntimeError) as caught:
+            with recorder.record("optimizer", 2, 1):
+                raise failure
+    assert caught.value is failure
+    assert "Profiling receipt failed" in failure.__notes__[0]
+
+
+def test_recorder_output_is_create_only(tmp_path):
+    path = tmp_path / "receipts.jsonl"
+    path.write_text("preserved\n")
+    with pytest.raises(FileExistsError):
+        receipts.ReceiptRecorder(path, receipt_metadata())
+    assert path.read_text() == "preserved\n"
+
+
+def test_receipt_metadata_load_rejects_unknown_fields(tmp_path):
+    path = tmp_path / "metadata.json"
+    data = receipt_metadata().model_dump(mode="json")
+    data["unexpected"] = True
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        receipts.load_receipt_metadata(path)

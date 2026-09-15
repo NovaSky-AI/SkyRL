@@ -3,28 +3,29 @@ from unittest.mock import Mock
 
 import pytest
 
+from skyrl.backends import utils as backend_utils
 from skyrl.backends.skyrl_train.utils import profiler
 
 
 def test_optimizer_and_profile_processing_have_disjoint_durations(monkeypatch):
-    monkeypatch.setattr(profiler, "perf_counter", Mock(side_effect=[10, 12, 12, 72]))
+    monkeypatch.setattr(backend_utils.time, "perf_counter", Mock(side_effect=[10, 12, 12, 72]))
     metrics = {}
-    with profiler.measure_phase_seconds(metrics, "optimizer"):
+    with backend_utils.log_timing("optimizer", metrics, "optimizer"):
         pass
-    with profiler.measure_phase_seconds(metrics, "profile_processing"):
+    with backend_utils.log_timing("profile_processing", metrics, "profile_processing"):
         pass
     assert metrics == {"optimizer": 2, "profile_processing": 60}
 
 
 def test_failed_phase_does_not_report_completed_duration(monkeypatch):
-    clock = Mock(return_value=10)
-    monkeypatch.setattr(profiler, "perf_counter", clock)
+    clock = Mock(side_effect=[10, 12])
+    monkeypatch.setattr(backend_utils.time, "perf_counter", clock)
     metrics = {}
     with pytest.raises(RuntimeError, match="optimizer failed"):
-        with profiler.measure_phase_seconds(metrics, "optimizer"):
+        with backend_utils.log_timing("optimizer", metrics, "optimizer"):
             raise RuntimeError("optimizer failed")
     assert metrics == {}
-    assert clock.call_count == 1
+    assert clock.call_count == 2
 
 
 class FakeTimer:
@@ -53,7 +54,10 @@ class FakeTimers:
 
 
 def test_schedule_accumulates_two_microbatches_without_reference_subtraction():
-    config, timers = SimpleNamespace(timers=None, barrier_with_L1_time=True), FakeTimers()
+    config, timers = (
+        SimpleNamespace(timers=None, barrier_with_L1_time=True),
+        FakeTimers(),
+    )
     with profiler.measure_megatron_schedule(config, timers) as report:
         for forward, backward in ((2, 3), (4, 7)):
             config.timers("forward-compute").seconds += forward

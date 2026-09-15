@@ -26,7 +26,6 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
-from skyrl.backends.skyrl_train.utils.profiler import measure_phase_seconds
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -1139,7 +1138,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
         metrics: dict[str, float] = {}
-        with measure_phase_seconds(metrics, "skyrl.ai/optimizer_dispatch_seconds"):
+        with log_timing("optimizer_dispatch", metrics, "skyrl.ai/optimizer_dispatch_seconds"):
             grad_norm = self._dispatch.optim_step(role, model_id=model_id)
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
 

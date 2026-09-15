@@ -2,7 +2,6 @@ import os
 import shutil
 import tempfile
 from contextlib import contextmanager
-from time import perf_counter
 
 import torch
 import torch.distributed
@@ -15,13 +14,6 @@ _ACTIVITY_MAP = {
     "cpu": torch.profiler.ProfilerActivity.CPU,
     "cuda": torch.profiler.ProfilerActivity.CUDA,
 }
-
-
-@contextmanager
-def measure_phase_seconds(metrics, name):
-    start = perf_counter()
-    yield
-    metrics[name] = perf_counter() - start
 
 
 @contextmanager

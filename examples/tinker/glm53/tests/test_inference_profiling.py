@@ -42,7 +42,14 @@ def test_profiler_processing_is_outside_publication_and_sample_timers(monkeypatc
     trainer = SimpleNamespace(save_weights_and_get_sampling_client=publish)
     returned = checks.publish_and_sample(trainer, None, report, "step_1", "http://example.com")
     assert returned is sampler
-    assert calls == ["/start_profile", "publish", "/stop_profile", "/start_profile", "sample", "/stop_profile"]
+    assert calls == [
+        "/start_profile",
+        "publish",
+        "/stop_profile",
+        "/start_profile",
+        "sample",
+        "/stop_profile",
+    ]
     completed = {
         row["phase"]: row for row in map(json.loads, report.getvalue().splitlines()) if row["status"] == "completed"
     }
@@ -91,7 +98,11 @@ def test_endpoint_handoff_waits_for_the_atomic_writer(monkeypatch):
         return "http://example.com:9000\n"
 
     monkeypatch.setattr(run_client.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(run_client.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(
+        run_client.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
     assert run_client.wait_for_inference_profile_url(SimpleNamespace(read_text=read_text)) == "http://example.com:9000"
     assert clock[0] == 0.5
 
@@ -103,7 +114,11 @@ def test_missing_endpoint_handoff_stops_after_thirty_seconds(monkeypatch):
         raise FileNotFoundError("writer failed")
 
     monkeypatch.setattr(run_client.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(run_client.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(
+        run_client.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
     with pytest.raises(TimeoutError, match="within 30 seconds"):
         run_client.wait_for_inference_profile_url(SimpleNamespace(read_text=read_text))
     assert clock[0] == 30.0

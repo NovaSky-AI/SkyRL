@@ -23,11 +23,36 @@ use scratch. Start uv-managed Ray with `--block`. For GLM, set
 export RAY_ADDRESS=auto
 uv run --isolated --extra tinker --extra megatron python examples/tinker/glm53/run_server.py glm53-32k-2n \
   --model-path /shared/models/glm53 --state-dir /shared/glm-check \
-  --database-path /local/glm.db --profile-dir /local/glm-traces
+  --database-path /local/glm.db --profile-dir /local/glm-traces --profile-ranks 0
 
 uv run --isolated --extra tinker python examples/tinker/glm53/run_client.py \
   --model-path /shared/models/glm53 --context 32768 --batch-size 2 --steps 4 \
-  --profile-mode none --output-dir /local/glm-results
+  --profile-mode none --receipt-metadata /local/receipt-metadata.json \
+  --output-dir /local/glm-results
+```
+
+`receipt-metadata.json` is validated before the first API call and supplies the
+run ID, model name/revision/config SHA-256, exact SkyRL commit and dirty state,
+immutable image URI/digest, arm, transport implementation/revision, and profiler
+mode. Generate it from the versioned schema published by this branch; do not
+reuse it after any provenance or capture-mode change. A baseline file has this
+shape:
+
+```json
+{
+  "run_id": "unique-run-id",
+  "model": {"name": "model-name", "revision": "immutable-revision", "config_sha256": "<64 hex>"},
+  "provenance": {
+    "repository_url": "https://github.com/NovaSky-AI/SkyRL.git",
+    "commit": "<40 hex>",
+    "dirty": false,
+    "image_uri": "registry.example.com/skyrl:immutable-tag",
+    "image_digest": "sha256:<64 hex>"
+  },
+  "arm": "baseline_a",
+  "transport": {"implementation": "safetensors", "revision": "baseline-v1"},
+  "profiler_mode": "none"
+}
 ```
 
 `--steps 4` means one warmup plus three measured updates. Use new output paths.

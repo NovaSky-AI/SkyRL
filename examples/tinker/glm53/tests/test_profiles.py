@@ -1,5 +1,6 @@
 """CPU checks for profile composition and GPU-free configuration rendering."""
 
+import argparse
 import json
 import subprocess
 import sys
@@ -121,3 +122,20 @@ def test_new_profile_is_discovered_without_inheriting_glm_settings(tmp_path, mon
     inherited = build("new-model")
     assert inherited["glm_only"] is True
     assert "extends" not in inherited
+
+
+@pytest.mark.parametrize("value,expected", [("0", [0]), ("0,7,8", [0, 7, 8])])
+def test_profile_ranks_are_explicit_and_ordered(value, expected):
+    assert module.parse_profile_ranks(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", "-1", "0,0", "rank0"])
+def test_invalid_profile_ranks_are_rejected(value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        module.parse_profile_ranks(value)
+
+
+def test_profile_rank_must_exist_in_trainer_world():
+    module.validate_profile_ranks([0, 7], 8)
+    with pytest.raises(ValueError, match="world size 8"):
+        module.validate_profile_ranks([8], 8)

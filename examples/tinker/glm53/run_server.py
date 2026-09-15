@@ -9,6 +9,21 @@ from pathlib import Path
 CONFIG_DIR = Path(__file__).parent / "configs"
 
 
+def parse_profile_ranks(value: str) -> list[int]:
+    try:
+        ranks = [int(item) for item in value.split(",")]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("profile ranks must be comma-separated integers") from error
+    if not ranks or any(rank < 0 for rank in ranks) or len(ranks) != len(set(ranks)):
+        raise argparse.ArgumentTypeError("profile ranks must be unique nonnegative integers")
+    return ranks
+
+
+def validate_profile_ranks(ranks: list[int], world_size: int) -> None:
+    if any(rank >= world_size for rank in ranks):
+        raise ValueError(f"profile ranks {ranks} exceed trainer world size {world_size}")
+
+
 def get_profiles() -> list[str]:
     return sorted(path.stem for path in CONFIG_DIR.glob("*.json") if path.stem != "common")
 
@@ -44,10 +59,18 @@ def main() -> None:
         help="Operator-owned trainer trace directory; the client controls capture sessions",
     )
     parser.add_argument("--print-config", action="store_true")
+    parser.add_argument(
+        "--profile-ranks",
+        type=parse_profile_ranks,
+        default=[0],
+        help="Comma-separated trainer ranks to capture (default: 0)",
+    )
     args = parser.parse_args()
     if not all(path.is_absolute() for path in (args.model_path, args.state_dir, args.database_path)):
         parser.error("model-path, state-dir and database-path must be absolute")
     config = build_config(args.profile, args.model_path, args.state_dir, args.profile_dir)
+    world_size = config["trainer.placement.policy_num_nodes"] * config["trainer.placement.policy_num_gpus_per_node"]
+    validate_profile_ranks(args.profile_ranks, world_size)
     if args.print_config:
         print(json.dumps(config, indent=2))
         return
@@ -71,12 +94,7 @@ def main() -> None:
         json.dumps(
             {
                 "export_dir": str(args.profile_dir),
-                "ranks": list(
-                    range(
-                        config["trainer.placement.policy_num_nodes"]
-                        * config["trainer.placement.policy_num_gpus_per_node"]
-                    )
-                ),
+                "ranks": args.profile_ranks,
             }
         ),
         "--backend-config",
