@@ -1,71 +1,12 @@
 """Compatibility fixes for vLLM inference workers."""
 
 import logging
-from collections.abc import Iterator, Mapping
 from functools import wraps
 from typing import Any, Callable
 
 import torch
 
 logger = logging.getLogger(__name__)
-
-
-def _iter_kv_cache_tensors(value: object) -> Iterator[torch.Tensor]:
-    """Yield tensor leaves from vLLM's attention and Mamba KV-cache layout."""
-    if isinstance(value, torch.Tensor):
-        yield value
-    elif isinstance(value, Mapping):
-        for child in value.values():
-            yield from _iter_kv_cache_tensors(child)
-    elif isinstance(value, (list, tuple)):
-        for child in value:
-            yield from _iter_kv_cache_tensors(child)
-
-
-def _has_nested_kv_cache_entries(kv_caches: object) -> bool:
-    if isinstance(kv_caches, Mapping):
-        return True
-    if not isinstance(kv_caches, (list, tuple)):
-        return False
-    return any(isinstance(cache, (Mapping, list, tuple)) for cache in kv_caches)
-
-
-def patch_vllm_fp8_kv_cache_sleep_wake(runner_cls: type[Any] | None = None) -> bool:
-    """Patch vLLM 0.23 FP8 cache reset for nested hybrid-model caches.
-
-    Qwen3.5 Mamba cache entries are nested, while upstream expects tensors.
-    Flatten them only during reset; flat layouts remain on the upstream path.
-    """
-    if runner_cls is None:
-        try:
-            from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-        except ImportError:
-            return False
-        runner_cls = GPUModelRunner
-
-    original: Callable[..., Any] | None = getattr(runner_cls, "init_fp8_kv_scales", None)
-    if not callable(original):
-        return False
-    if getattr(original, "_skyrl_handles_nested_kv_caches", False):
-        return False
-
-    @wraps(original)
-    def _patched_init_fp8_kv_scales(self: Any, *args: Any, **kwargs: Any) -> Any:
-        kv_caches = getattr(self, "kv_caches", None)
-        if not _has_nested_kv_cache_entries(kv_caches):
-            return original(self, *args, **kwargs)
-
-        tensor_leaves = list(_iter_kv_cache_tensors(kv_caches))
-        self.kv_caches = tensor_leaves
-        try:
-            return original(self, *args, **kwargs)
-        finally:
-            self.kv_caches = kv_caches
-
-    setattr(_patched_init_fp8_kv_scales, "_skyrl_handles_nested_kv_caches", True)
-    runner_cls.init_fp8_kv_scales = _patched_init_fp8_kv_scales
-    logger.info("Patched vLLM FP8 KV-cache sleep/wake reset for nested cache entries")
-    return True
 
 
 def normalize_serialized_fp8_kv_scales(model_runner: Any) -> int:
@@ -115,13 +56,87 @@ def _normalize_layer_fp8_scales(module: Any) -> int:
     return 1
 
 
+# Per-worker-process latch, set by the model-loader patch below. ``True`` only
+# once this process has loaded a model with ``load_format="dummy"``.
+_BOOTED_WITHOUT_CHECKPOINT_WEIGHTS = False
+
+
+def booted_without_checkpoint_weights() -> bool:
+    """Return whether this worker's weights came from ``load_format="dummy"``.
+
+    Gate for every KV/attention scale normalization below. Forcing those scales
+    to 1.0 is only correct when *nothing* calibrated them: SkyRL's serialized
+    FP8 wire ships no scale calibration, and the engines that receive it boot
+    with ``load_format="dummy"`` (see
+    ``inference_servers/utils._apply_serialized_fp8_weight_sync_defaults``).
+
+    This module is imported by *every* SkyRL vLLM engine, because
+    ``new_inference_worker_wrap`` is the worker-extension class for all of them
+    — including one serving a real FP8 checkpoint whose ``k_scale``/``v_scale``
+    were calibrated offline. Overwriting those with 1.0 silently drifts FP8-KV
+    generation, so the normalization must not fire there. A dummy-weight boot is
+    the exact discriminator: it means no checkpoint scale ever reached the
+    layers, so 1.0 is the only value they can legitimately hold.
+    """
+    return _BOOTED_WITHOUT_CHECKPOINT_WEIGHTS
+
+
+def _load_format_is_dummy(vllm_config: Any) -> bool:
+    load_format = getattr(getattr(vllm_config, "load_config", None), "load_format", None)
+    if load_format is None:
+        return False
+    # vLLM has spelled this as both a plain str and a ``LoadFormat`` enum.
+    return str(getattr(load_format, "value", load_format)).lower() == "dummy"
+
+
+def patch_vllm_dummy_weight_boot_detection(loader_cls: type[Any] | None = None) -> bool:
+    """Latch whether this worker process booted its weights from dummy values.
+
+    ``BaseModelLoader.load_model`` is the one place that sees the resolved
+    ``LoadConfig`` in every worker process, whatever the executor backend, and
+    it runs before ``process_weights_after_loading``, so the latch is live by
+    the time the boot normalization below needs it. Reading an env var instead
+    would not survive the Ray executor, which starts workers from the raylet
+    rather than from the server actor that set it.
+    """
+    if loader_cls is None:
+        try:
+            from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+        except ImportError:
+            return False
+        loader_cls = BaseModelLoader
+
+    original: Callable[..., Any] | None = getattr(loader_cls, "load_model", None)
+    if not callable(original):
+        return False
+    if getattr(original, "_skyrl_latches_dummy_boot", False):
+        return False
+
+    @wraps(original)
+    def _patched_load_model(self: Any, *args: Any, **kwargs: Any) -> Any:
+        global _BOOTED_WITHOUT_CHECKPOINT_WEIGHTS
+        # GPUModelRunner passes vllm_config by keyword; accept the positional
+        # form too. Anything else resolves to None, which latches False — an
+        # upstream signature change must degrade to "leave the scales alone",
+        # never to a reset that overwrites calibrated ones.
+        vllm_config = kwargs.get("vllm_config", args[0] if args else None)
+        _BOOTED_WITHOUT_CHECKPOINT_WEIGHTS = _load_format_is_dummy(vllm_config)
+        if _BOOTED_WITHOUT_CHECKPOINT_WEIGHTS:
+            logger.info("Dummy-weight boot detected: FP8 KV/attention scales will be normalized to 1.0")
+        return original(self, *args, **kwargs)
+
+    setattr(_patched_load_model, "_skyrl_latches_dummy_boot", True)
+    loader_cls.load_model = _patched_load_model
+    return True
+
+
 def patch_vllm_fp8_kv_scale_completion(runner_cls: type[Any] | None = None) -> bool:
     """Complete vLLM's post-wake FP8 KV scale reset for serialized-FP8 engines.
 
     Wraps ``GPUModelRunner.post_kv_cache_wake_up`` to run
-    :func:`normalize_serialized_fp8_kv_scales` after the upstream reset. Only
-    engines booted by SkyRL's serialized FP8 weight sync import this module, and
-    that wire never ships scale calibration, so 1.0 is always correct here.
+    :func:`normalize_serialized_fp8_kv_scales` after the upstream reset, but
+    only on a dummy-weight boot — see :func:`booted_without_checkpoint_weights`
+    for why an engine serving a calibrated FP8 checkpoint must be left alone.
     """
     if runner_cls is None:
         try:
@@ -139,6 +154,8 @@ def patch_vllm_fp8_kv_scale_completion(runner_cls: type[Any] | None = None) -> b
     @wraps(original)
     def _patched_post_kv_cache_wake_up(self: Any, *args: Any, **kwargs: Any) -> Any:
         result = original(self, *args, **kwargs)
+        if not booted_without_checkpoint_weights():
+            return result
         count = normalize_serialized_fp8_kv_scales(self)
         if count:
             logger.info("Normalized FP8 KV/attention scales to 1.0 on %d layers after wake", count)
@@ -164,6 +181,10 @@ def patch_vllm_fp8_kv_scale_boot_normalization() -> bool:
     stack passes, pinning the baked-at-capture mechanism. Wrap both KV-cache
     methods so every layer leaves weight processing with scales == 1.0 — the
     serialized-FP8 wire's contract, since it ships no scale calibration.
+
+    Fires only on a dummy-weight boot (see
+    :func:`booted_without_checkpoint_weights`); a real FP8 checkpoint's
+    calibrated scales are left exactly as loaded.
     """
     try:
         from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -191,7 +212,8 @@ def patch_vllm_fp8_kv_scale_boot_normalization() -> bool:
             @wraps(original)
             def _patched(self: Any, layer: Any, *args: Any, **kwargs: Any) -> Any:
                 result = original(self, layer, *args, **kwargs)
-                _normalize_layer_fp8_scales(layer)
+                if booted_without_checkpoint_weights():
+                    _normalize_layer_fp8_scales(layer)
                 return result
 
             setattr(_patched, "_skyrl_normalizes_fp8_scales", True)

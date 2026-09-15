@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Optional, Sequence
 
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    resolve_text_config,
+)
 from skyrl.backends.skyrl_train.weight_sync.fp8.models.base import (
     BLOCKWISE_FP8,
     MXFP8,
@@ -69,7 +72,7 @@ _MOE_DOWN = MoeProjection(hf_name="down_proj", vllm_param="w2_weight", shard_id=
 def is_qwen35_config(hf_config: Any) -> bool:
     """Return whether an HF config uses the supported Qwen3.5 text layout."""
 
-    text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
+    text_config = resolve_text_config(hf_config)
     model_type = str(getattr(text_config, "model_type", "") or getattr(hf_config, "model_type", ""))
     return model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
 
@@ -91,7 +94,7 @@ def get_qwen35_fp8_ignored_layers(
     definitions above. The blockwise list is a strict subset of the MXFP8 one.
     """
 
-    text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
+    text_config = resolve_text_config(hf_config)
     if not is_qwen35_config(hf_config):
         return []
 

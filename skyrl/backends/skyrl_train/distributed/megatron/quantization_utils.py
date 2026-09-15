@@ -19,6 +19,20 @@ def is_mxfp8_recipe(fp8_recipe: Any) -> bool:
     return isinstance(fp8_recipe, str) and fp8_recipe.strip().lower() == "mxfp8"
 
 
+def resolve_text_config(hf_config: Any) -> Any:
+    """Return the text sub-config of a (possibly multimodal) HF config.
+
+    Multimodal checkpoints nest the language model's dims one level down, under
+    either ``text_config`` or ``language_config`` depending on the architecture
+    — Qwen3.5's conditional-generation configs use both spellings. Every reader
+    of text dims must unwrap the same way; a reader that knows only one spelling
+    silently sees a config with none of the fields it looks for, which turns a
+    validation guard into a no-op. Falls back to ``hf_config`` for text-only
+    checkpoints, which hold the dims at the top level.
+    """
+    return getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
+
+
 def has_visible_cuda_device() -> bool:
     """Return whether this process can see a CUDA device."""
     import torch
@@ -121,7 +135,7 @@ def validate_mxfp8_gdn_tp_alignment(
     kwargs = transformer_config_kwargs or {}
     if not is_fp8_enabled(kwargs.get("fp8")) or not is_mxfp8_recipe(kwargs.get("fp8_recipe")):
         return
-    config = getattr(hf_config, "text_config", None) or hf_config
+    config = resolve_text_config(hf_config)
     dims = [
         getattr(config, name, None)
         for name in (

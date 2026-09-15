@@ -26,7 +26,8 @@ This module wraps the function with a learned row-permutation cache:
   original function for that key. Correctness never depends on this cache
   being right; only speed does.
 
-Install from the worker extension (same pattern as ``patch_numel_loaded``).
+Installed lazily by ``LayerwiseReloadWorkerMixin.skyrl_start_weight_update``,
+so the wrap lands in the worker process that owns the engine.
 ``SKYRL_TRTLLM_MOE_PREPARE_CACHE=0`` disables it.
 """
 

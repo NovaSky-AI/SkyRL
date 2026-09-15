@@ -8,6 +8,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_mxfp8_recipe,
     resolve_auto_fp8_recipe,
     resolve_auto_wire_format,
+    resolve_text_config,
     validate_concrete_fp8_recipe,
     validate_mxfp8_gdn_tp_alignment,
     wire_to_engine_quantization,
@@ -159,14 +160,14 @@ def test_wire_to_engine_quantization():
 _MXFP8_KWARGS = {"fp8": "e4m3", "fp8_recipe": "mxfp8"}
 
 
-def _gdn_hf_config(nested=True):
+def _gdn_hf_config(nested=True, text_attr="text_config"):
     text = SimpleNamespace(
         linear_num_key_heads=16,
         linear_num_value_heads=32,
         linear_key_head_dim=128,
         linear_value_head_dim=128,
     )
-    return SimpleNamespace(text_config=text) if nested else text
+    return SimpleNamespace(**{text_attr: text}) if nested else text
 
 
 @pytest.mark.parametrize("tp", [1, 2])
@@ -183,6 +184,25 @@ def test_mxfp8_gdn_tp_alignment_rejects_misaligned_shards(tp):
 def test_mxfp8_gdn_tp_alignment_reads_flat_text_configs():
     with pytest.raises(ValueError, match="in_proj"):
         validate_mxfp8_gdn_tp_alignment(_MXFP8_KWARGS, _gdn_hf_config(nested=False), 4)
+
+
+def test_mxfp8_gdn_tp_alignment_reads_language_config_nesting():
+    # Conditional-generation checkpoints nest the text dims under
+    # ``language_config``; reading only ``text_config`` made this guard a no-op
+    # and let the misaligned shard die in TE's C++ assert instead.
+    with pytest.raises(ValueError, match="12352"):
+        validate_mxfp8_gdn_tp_alignment(_MXFP8_KWARGS, _gdn_hf_config(text_attr="language_config"), 4)
+
+
+def test_resolve_text_config_unwraps_both_spellings_and_flat_configs():
+    text = SimpleNamespace(hidden_size=4096)
+    assert resolve_text_config(SimpleNamespace(text_config=text)) is text
+    assert resolve_text_config(SimpleNamespace(language_config=text)) is text
+    # ``text_config`` wins when a config carries both.
+    other = SimpleNamespace(hidden_size=8192)
+    assert resolve_text_config(SimpleNamespace(text_config=text, language_config=other)) is text
+    flat = SimpleNamespace(hidden_size=2048)
+    assert resolve_text_config(flat) is flat
 
 
 @pytest.mark.parametrize(

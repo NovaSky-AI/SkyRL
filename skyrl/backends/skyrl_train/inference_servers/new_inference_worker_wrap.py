@@ -33,7 +33,7 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     _empty_cuda_cache_rocm,
 )
 from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
-    patch_vllm_fp8_kv_cache_sleep_wake,
+    patch_vllm_dummy_weight_boot_detection,
     patch_vllm_fp8_kv_scale_boot_normalization,
     patch_vllm_fp8_kv_scale_completion,
 )
@@ -52,8 +52,11 @@ try:
 except ModuleNotFoundError:
     pass
 
-# Apply the compatibility patch before vLLM constructs each worker.
-patch_vllm_fp8_kv_cache_sleep_wake()
+# Apply the compatibility patches before vLLM constructs each worker.
+# Must be installed before the two KV-scale patches run: it is what tells them
+# whether this engine booted from dummy weights (serialized FP8 weight sync) or
+# from a real checkpoint whose calibrated scales they must not touch.
+patch_vllm_dummy_weight_boot_detection()
 patch_vllm_fp8_kv_scale_boot_normalization()
 patch_vllm_fp8_kv_scale_completion()
 
