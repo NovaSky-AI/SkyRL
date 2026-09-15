@@ -54,15 +54,19 @@ def test_hf_model_wrapper_fwd_with_sample_packing(mock_logprobs_from_logits):
         input_without_padding.to("cuda"),
     )
     # forward is with packed sequence length
-    model.model.forward = MagicMock(return_value={"logits": torch.randn(1, 6, 1000).to("cuda")})
+    model.model.forward = MagicMock(return_value={"logits": torch.randn(1, 4, 1000).to("cuda")})
     # just roll the inputs over for return value. This means that the model is correctly predicting the next token.
     # The last token will be the prediction beyond the eos token, just set to pad token id
     mock_return_value = torch.roll(input_without_padding, shifts=-1, dims=-1)
     mock_return_value[:, -1] = tokenizer.pad_token_id
-    mock_logprobs_from_logits.return_value = mock_return_value
+    mock_logprobs_from_logits.return_value = mock_return_value[:, -4:]
 
     action_log_probs = model(input_ids, num_actions, attention_mask)
     expected_log_probs = actual_actions.to("cuda")
+    assert torch.equal(
+        model.model.forward.call_args.kwargs["logits_to_keep"],
+        torch.tensor([2, 3, 4, 5], device="cuda"),
+    )
     assert torch.equal(
         action_log_probs, expected_log_probs
     ), f"Expected log probs to be {expected_log_probs} but got {action_log_probs}"
@@ -89,15 +93,16 @@ def test_hf_model_wrapper_fwd_without_sample_packing(mock_logprobs_from_logits):
         input_without_padding.to("cuda"),
     )
     # forward is with packed sequence length
-    model.model.forward = MagicMock(return_value={"logits": torch.randn(1, 10, 1000).to("cuda")})
+    model.model.forward = MagicMock(return_value={"logits": torch.randn(1, 5, 1000).to("cuda")})
     # just roll the inputs over. This means that the model is correctly predicting the next token.
     mock_return_value = torch.roll(input_ids, shifts=-1, dims=-1)
     # The last token will be the prediction beyond the eos token, just set to pad token id
     mock_return_value[:, -1] = tokenizer.pad_token_id
-    mock_logprobs_from_logits.return_value = mock_return_value
+    mock_logprobs_from_logits.return_value = mock_return_value[:, -5:]
 
     action_log_probs = model(input_ids, num_actions, attention_mask)
     expected_log_probs = actual_actions.to("cuda")
+    assert model.model.forward.call_args.kwargs["logits_to_keep"] == 5
     assert torch.equal(
         action_log_probs, expected_log_probs
     ), f"Expected log probs to be {expected_log_probs} but got {action_log_probs}"
@@ -190,8 +195,9 @@ def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, remove_micr
             logprob_sp, logprobs_no_sp
         ), f"Logprobs with sequence parallelism don't match logprobs without sequence parallelism for rank {i}"
         assert torch.allclose(
-            output_no_sp["entropy"], output_sp["entropy"]
-        ), "Entropy with sequence parallelism doesn't match entropy without sequence parallelism"
+            output_no_sp["entropy"][:, -num_actions - 1 : -1],
+            output_sp["entropy"][:, -num_actions - 1 : -1],
+        ), "Action entropy with sequence parallelism doesn't match action entropy without sequence parallelism"
 
     # Cleanup
     ray.get([actor.cleanup.remote() for actor in actors])
