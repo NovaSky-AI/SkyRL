@@ -136,10 +136,6 @@ def _run_qualification(service, trainer, tokenizer, config, state) -> None:
         datums = sdk_checks.prepare_full_context_inputs(trainer, training, phases, tokenizer)
         probes = sdk_logprobs.prepare_probes(trainer, tokenizer)
         _write_token_evidence(config.output_dir / "token-evidence.json", datums, probes)
-        with sdk_checks.measure_phase(phases, "qualification/base_logprobs"):
-            info = trainer.get_info()
-            base_sampler = service.create_sampling_client(base_model=info.model_data.model_name)
-            base_scores = sdk_logprobs.score_sampler(base_sampler, probes)
         prompt = types.ModelInput.from_ints(datums[0].model_input.to_ints()[:128])
         sampler = sdk_checks.publish_and_sample(
             trainer,
@@ -149,6 +145,12 @@ def _run_qualification(service, trainer, tokenizer, config, state) -> None:
             receipts=receipts,
             generation=0,
         )
+        # Non-colocated inference starts lazily during generation-zero publication.
+        # Base and adapter sampling share that engine, so publish before either score.
+        with sdk_checks.measure_phase(phases, "qualification/base_logprobs"):
+            info = trainer.get_info()
+            base_sampler = service.create_sampling_client(base_model=info.model_data.model_name)
+            base_scores = sdk_logprobs.score_sampler(base_sampler, probes)
         for step in range(config.steps):
             phase = "warmup" if step == 0 else f"step_{step}"
             generation = step + 1

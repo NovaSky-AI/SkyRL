@@ -188,7 +188,7 @@ def metadata():
     )
 
 
-def test_public_qualification_owns_sequence_and_exact_artifacts(tmp_path, metadata):
+def test_public_qualification_publishes_before_base_sampling_and_owns_exact_artifacts(tmp_path, metadata):
     events = []
     config = make_config(tmp_path, metadata)
     summary = run_lora_qualification(FakeService(events), FakeTrainer(events), FakeTokenizer(), config)
@@ -196,11 +196,11 @@ def test_public_qualification_owns_sequence_and_exact_artifacts(tmp_path, metada
     assert summary.discriminating_steps == (0, 1)
     assert summary.checkpoint_path == "tinker://test/full-context-final"
     assert events == [
+        "publish:0",
+        "sample:0",
         "base_sampler",
         "sampler_logprobs:0",
         "sampler_logprobs:0",
-        "publish:0",
-        "sample:0",
         "trainer_logprobs:0",
         "sampler_logprobs:0",
         "sampler_logprobs:0",
