@@ -22,6 +22,16 @@ _QWEN35_FP8_WEIGHT_SUFFIXES = (
     ".linear_attn.in_proj_qkv.weight",
     ".linear_attn.in_proj_z.weight",
     ".linear_attn.out_proj.weight",
+    # Shared-expert linears use FP8 whenever their vLLM TP shard is a valid
+    # 128-column block. The topology-specific fallback is below.
+    ".mlp.shared_expert.gate_proj.weight",
+    ".mlp.shared_expert.up_proj.weight",
+    ".mlp.shared_expert.down_proj.weight",
+)
+_QWEN35_SHARED_EXPERT_WEIGHT_SUFFIXES = (
+    ".mlp.shared_expert.gate_proj.weight",
+    ".mlp.shared_expert.up_proj.weight",
+    ".mlp.shared_expert.down_proj.weight",
 )
 # Megatron Bridge exports routed experts in batched tensors. Keep the expert
 # dimension intact on the wire so the receiver can use vLLM's fused MoE loader.
@@ -73,7 +83,26 @@ def is_qwen35_config(hf_config: Any) -> bool:
     return model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
 
 
-def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -> list[str]:
+def get_qwen35_shared_expert_bf16_suffixes(hf_config: Any, tensor_parallel_size: int) -> tuple[str, ...]:
+    """Return shared-expert suffixes that cannot use vLLM's block-FP8 layout."""
+
+    if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
+        raise ValueError(f"tensor_parallel_size must be a positive integer, got {tensor_parallel_size!r}")
+
+    text_config = getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
+    width = getattr(text_config, "shared_expert_intermediate_size", None)
+    if not isinstance(width, int) or width <= 0:
+        # A TP1 module has no sharded dimension. For TP>1, retain the old
+        # conservative BF16 behavior when a supported checkpoint omits width.
+        return () if tensor_parallel_size == 1 else _QWEN35_SHARED_EXPERT_WEIGHT_SUFFIXES
+    return () if width % (128 * tensor_parallel_size) == 0 else _QWEN35_SHARED_EXPERT_WEIGHT_SUFFIXES
+
+
+def get_qwen35_fp8_ignored_layers(
+    hf_config: Any,
+    model_prefix: str = "model",
+    tensor_parallel_size: int = 1,
+) -> list[str]:
     """Return Qwen3.5 vLLM module prefixes excluded from serialized FP8.
 
     Serialized sync excludes GDN ``in_proj_a`` and ``in_proj_b``. vLLM requires
@@ -99,13 +128,13 @@ def get_qwen35_fp8_ignored_layers(hf_config: Any, model_prefix: str = "model") -
                 for suffix in _QWEN35_UNQUANTIZED_LINEAR_SUFFIXES:
                     ignored.append(f"{layer_prefix}{suffix}")
 
-    # Qwen3.5's shared expert has a smaller intermediate size than the routed
-    # experts. At TP=8 its 512-wide projection becomes 64-wide, which cannot
-    # be represented by vLLM's 128x128 block-FP8 format. Keep it BF16 in both
-    # the serialized payload and the receiver.
-    for layer_idx in range(len(layer_types)):
-        for template in _QWEN35_SHARED_EXPERT_PREFIX_TEMPLATES:
-            ignored.append(template.format(model_prefix=model_prefix, layer_idx=layer_idx))
+    # The shared expert is 512-wide in Qwen3.5-35B-A3B. At TP8 that makes a
+    # 64-wide shard, which cannot use a 128-column FP8 block; TP4 is 128-wide
+    # and retains the original FP8 policy. Match the sender's suffix decision.
+    if get_qwen35_shared_expert_bf16_suffixes(hf_config, tensor_parallel_size):
+        for layer_idx in range(len(layer_types)):
+            for template in _QWEN35_SHARED_EXPERT_PREFIX_TEMPLATES:
+                ignored.append(template.format(model_prefix=model_prefix, layer_idx=layer_idx))
 
     # vLLM instantiates the vision tower even for text-only runs
     # (language_model_only only affects multimodal weight loading), and ignore
@@ -160,6 +189,7 @@ QWEN35_FP8_SPEC = register_fp8_spec(
         should_quantize=is_quantizable_weight_shape,
         ignored_layers=get_qwen35_fp8_ignored_layers,
         moe_expert_spec=batched_moe_expert_spec,
+        unquantized_weight_suffixes=get_qwen35_shared_expert_bf16_suffixes,
         moe_projections=(_MOE_GATE, _MOE_UP, _MOE_DOWN),
     )
 )

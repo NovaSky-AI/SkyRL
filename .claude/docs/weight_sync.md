@@ -130,8 +130,9 @@ is incompatible with the delta and sharded-RDT transfer backends.
 For Qwen3.5-35B-A3B on Hopper, use rollout TP=4. Its routed-expert intermediate
 dimension is 512, and vLLM block-FP8 requires every TP shard to have 128-wide blocks;
 TP=8 produces 64-wide shards. The Hopper example starts four TP=4 rollout engines
-across 16 GPUs. Qwen3.5's shared expert and vision modules stay BF16 when their
-sharded dimensions cannot satisfy the block-FP8 shape requirement.
+across 16 GPUs. Qwen3.5's shared-expert and vision modules stay BF16 only when their
+current TP shard cannot satisfy the block-FP8 shape requirement; TP4 keeps the
+512-wide shared-expert linears in FP8 while TP8 falls back to BF16.
 
 ### Control plane
 

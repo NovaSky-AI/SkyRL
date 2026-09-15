@@ -49,9 +49,13 @@ class ModelFp8Spec:
     # (hf_name, shape) -> serialize this exported weight as FP8?
     should_quantize: Callable[[str, Sequence[int]], bool]
     # hf_config -> vLLM module prefixes that must stay unquantized
-    ignored_layers: Callable[[Any], list[str]]
+    ignored_layers: Callable[..., list[str]]
     # batched expert tensor name -> MoeExpertSpec, or None if not one
     moe_expert_spec: Callable[[str], Optional[MoeExpertSpec]]
+    # (hf_config, inference TP) -> weight suffixes that must stay BF16.  This
+    # lets a model keep an FP8 policy for compatible shard widths while safely
+    # falling back for a topology that cannot represent 128-column FP8 blocks.
+    unquantized_weight_suffixes: Callable[[Any, int], Sequence[str]] = lambda _config, _tp: ()
     # module segment holding routed experts in vLLM parameter names
     moe_module: str = "experts"
     # every projection the model emits, for receiver-side target derivation

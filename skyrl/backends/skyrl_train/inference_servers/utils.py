@@ -35,7 +35,7 @@ from skyrl.train.config import (
 logger = logging.getLogger(__name__)
 
 
-def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
+def _serialized_fp8_ignored_layers(model_path: Optional[str], tensor_parallel_size: int) -> list[str]:
     if not model_path:
         raise ValueError("A model path is required when FP8 weight sync is enabled")
     try:
@@ -53,7 +53,7 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
             "FP8 weight sync has no registered model spec for this checkpoint layout "
             f"(registered specs: {', '.join(registered_fp8_spec_names())}); model_path={model_path!r}"
         )
-    return spec.ignored_layers(hf_config)
+    return spec.ignored_layers(hf_config, tensor_parallel_size=tensor_parallel_size)
 
 
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
@@ -91,8 +91,15 @@ def _apply_serialized_fp8_weight_sync_defaults(
             "engine_init_kwargs.hf_overrides.quantization_config must be a dict when FP8 weight sync is enabled"
         )
 
+    effective_tp = engine_kwargs.get("tensor_parallel_size", ie_cfg.tensor_parallel_size)
+    if effective_tp != ie_cfg.tensor_parallel_size:
+        raise ValueError(
+            "engine_init_kwargs.tensor_parallel_size must match "
+            "generator.inference_engine.tensor_parallel_size when FP8 weight sync is enabled"
+        )
+
     for key, value in get_serialized_fp8_quantization_config(
-        ignored_layers=_serialized_fp8_ignored_layers(model_path),
+        ignored_layers=_serialized_fp8_ignored_layers(model_path, ie_cfg.tensor_parallel_size),
     ).items():
         _set_or_validate(
             qcfg,

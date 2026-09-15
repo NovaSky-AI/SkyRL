@@ -105,9 +105,9 @@ def test_quantizable_weight_filter_keeps_embeddings_in_target_dtype():
     assert should_quantize("model.layers.0.linear_attn.in_proj_qkv.weight", linear)
     assert should_quantize("model.layers.0.linear_attn.in_proj_z.weight", linear)
     assert should_quantize("model.layers.0.linear_attn.out_proj.weight", linear)
-    assert not should_quantize("model.layers.0.mlp.shared_expert.gate_proj.weight", linear)
-    assert not should_quantize("model.layers.0.mlp.shared_expert.up_proj.weight", linear)
-    assert not should_quantize("model.layers.0.mlp.shared_expert.down_proj.weight", linear)
+    assert should_quantize("model.layers.0.mlp.shared_expert.gate_proj.weight", linear)
+    assert should_quantize("model.layers.0.mlp.shared_expert.up_proj.weight", linear)
+    assert should_quantize("model.layers.0.mlp.shared_expert.down_proj.weight", linear)
     assert not should_quantize("model.layers.0.linear_attn.conv1d.weight", linear)
     assert not should_quantize("model.layers.0.linear_attn.in_proj_b.weight", linear)
     assert not should_quantize("model.layers.0.linear_attn.in_proj_a.weight", linear)
@@ -138,9 +138,10 @@ def test_vllm_serialized_fp8_quantization_config():
     }
 
 
-def test_qwen35_fp8_ignored_layers_use_linear_attention_layers():
+def test_qwen35_fp8_ignored_layers_keep_shared_experts_fp8_at_tp4():
     hf_config = SimpleNamespace(
         model_type="qwen3_5_text",
+        shared_expert_intermediate_size=512,
         layer_types=[
             "linear_attention",
             "full_attention",
@@ -157,24 +158,28 @@ def test_qwen35_fp8_ignored_layers_use_linear_attention_layers():
         "model.layers.2.linear_attn.in_proj_a",
         "model.language_model.layers.2.linear_attn.in_proj_b",
         "model.language_model.layers.2.linear_attn.in_proj_a",
+    ]
+
+
+def test_qwen35_fp8_ignored_layers_keep_shared_experts_bf16_at_tp8():
+    hf_config = SimpleNamespace(
+        model_type="qwen3_5_text",
+        shared_expert_intermediate_size=512,
+        layer_types=["full_attention"],
+    )
+
+    assert QWEN35_FP8_SPEC.unquantized_weight_suffixes(hf_config, 8) == (
+        ".mlp.shared_expert.gate_proj.weight",
+        ".mlp.shared_expert.up_proj.weight",
+        ".mlp.shared_expert.down_proj.weight",
+    )
+    assert QWEN35_FP8_SPEC.ignored_layers(hf_config, tensor_parallel_size=8) == [
         "model.layers.0.mlp.shared_expert.gate_proj",
         "model.layers.0.mlp.shared_expert.up_proj",
         "model.layers.0.mlp.shared_expert.down_proj",
         "model.language_model.layers.0.mlp.shared_expert.gate_proj",
         "model.language_model.layers.0.mlp.shared_expert.up_proj",
         "model.language_model.layers.0.mlp.shared_expert.down_proj",
-        "model.layers.1.mlp.shared_expert.gate_proj",
-        "model.layers.1.mlp.shared_expert.up_proj",
-        "model.layers.1.mlp.shared_expert.down_proj",
-        "model.language_model.layers.1.mlp.shared_expert.gate_proj",
-        "model.language_model.layers.1.mlp.shared_expert.up_proj",
-        "model.language_model.layers.1.mlp.shared_expert.down_proj",
-        "model.layers.2.mlp.shared_expert.gate_proj",
-        "model.layers.2.mlp.shared_expert.up_proj",
-        "model.layers.2.mlp.shared_expert.down_proj",
-        "model.language_model.layers.2.mlp.shared_expert.gate_proj",
-        "model.language_model.layers.2.mlp.shared_expert.up_proj",
-        "model.language_model.layers.2.mlp.shared_expert.down_proj",
     ]
 
 
@@ -217,13 +222,38 @@ def test_moe_batched_expert_spec_recognizes_and_splits_gate_up():
     assert QWEN35_FP8_SPEC.moe_expert_spec("model.layers.5.self_attn.q_proj.weight") is None
 
 
-def test_moe_shared_expert_and_router_stay_bf16_at_tp8():
+def test_moe_shared_expert_serialization_follows_topology_exclusions():
     lin = (256, 256)
-    assert not QWEN35_FP8_SPEC.should_quantize("model.layers.3.mlp.shared_expert.gate_proj.weight", lin)
-    assert not QWEN35_FP8_SPEC.should_quantize("model.layers.3.mlp.shared_expert.up_proj.weight", lin)
-    assert not QWEN35_FP8_SPEC.should_quantize("model.layers.3.mlp.shared_expert.down_proj.weight", lin)
+    assert QWEN35_FP8_SPEC.should_quantize("model.layers.3.mlp.shared_expert.gate_proj.weight", lin)
+    assert QWEN35_FP8_SPEC.should_quantize("model.layers.3.mlp.shared_expert.up_proj.weight", lin)
+    assert QWEN35_FP8_SPEC.should_quantize("model.layers.3.mlp.shared_expert.down_proj.weight", lin)
     assert not QWEN35_FP8_SPEC.should_quantize("model.layers.3.mlp.gate.weight", (256, 8))
     assert not QWEN35_FP8_SPEC.should_quantize("model.layers.3.mlp.shared_expert_gate.weight", (256, 1))
+
+    tensor = torch.ones(lin, dtype=torch.bfloat16)
+    tp4 = list(
+        iter_serialized_fp8_tensors(
+            "model.layers.3.mlp.shared_expert.up_proj.weight",
+            tensor,
+            torch.bfloat16,
+            _qwen35_config(),
+        )
+    )
+    tp8 = list(
+        iter_serialized_fp8_tensors(
+            "model.layers.3.mlp.shared_expert.up_proj.weight",
+            tensor,
+            torch.bfloat16,
+            _qwen35_config(
+                unquantized_weight_suffixes=QWEN35_FP8_SPEC.unquantized_weight_suffixes(
+                    SimpleNamespace(model_type="qwen3_5_text", shared_expert_intermediate_size=512),
+                    8,
+                )
+            ),
+        )
+    )
+    assert [tensor.dtype for _, tensor in tp4] == [torch.float8_e4m3fn, torch.float32]
+    assert [tensor.dtype for _, tensor in tp8] == [torch.bfloat16]
 
 
 def test_batched_blockwise_cast_matches_independent_expert_casts():

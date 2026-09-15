@@ -1213,7 +1213,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "FP8 weight sync requires a registered model spec for the configured checkpoint "
                     f"(registered specs: {', '.join(registered_fp8_spec_names())})."
                 )
-            self._serialized_fp8_config = SerializedFp8Config(spec=spec)
+            self._serialized_fp8_config = SerializedFp8Config(
+                spec=spec,
+                unquantized_weight_suffixes=tuple(
+                    spec.unquantized_weight_suffixes(
+                        self.strategy.hf_config,
+                        inference_engine_cfg.tensor_parallel_size,
+                    )
+                ),
+            )
 
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 

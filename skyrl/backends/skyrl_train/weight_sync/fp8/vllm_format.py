@@ -33,11 +33,16 @@ class SerializedFp8Config:
     weight_block_size: tuple[int, int] = (128, 128)
     power_2_scale: bool = field(default_factory=use_power_2_scales_default)
     spec: ModelFp8Spec | None = None
+    unquantized_weight_suffixes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "weight_block_size", normalize_block_size(self.weight_block_size))
         if type(self.power_2_scale) is not bool:
             raise ValueError(f"power_2_scale must be a bool, got {self.power_2_scale!r}")
+        if not isinstance(self.unquantized_weight_suffixes, tuple) or not all(
+            isinstance(suffix, str) for suffix in self.unquantized_weight_suffixes
+        ):
+            raise ValueError("unquantized_weight_suffixes must be a tuple of strings")
 
     def require_spec(self) -> ModelFp8Spec:
         if self.spec is None:
@@ -123,7 +128,11 @@ def iter_serialized_fp8_tensors(
         yield from iter_batched_moe_expert_fp8_tensors(name, tensor, config)
         return
 
-    if tensor.ndim == 2 and spec.should_quantize(name, tuple(tensor.shape)):
+    if (
+        tensor.ndim == 2
+        and spec.should_quantize(name, tuple(tensor.shape))
+        and not name.endswith(config.unquantized_weight_suffixes)
+    ):
         q_weight, scale = blockwise_cast_to_fp8(
             tensor,
             config.weight_block_size,
