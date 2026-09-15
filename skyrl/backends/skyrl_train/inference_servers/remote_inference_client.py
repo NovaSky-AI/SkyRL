@@ -47,7 +47,10 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
@@ -86,6 +89,32 @@ _DATA_PLANE_RETRIES = 30
 
 SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 """Default LoRA adapter name used for single-LoRA training inside SkyRL."""
+
+_LORA_ADAPTER_FILENAMES = ("adapter_model.safetensors", "adapter_config.json")
+_LORA_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_LORA_UPLOAD_SIZE_HEADER = "X-SkyRL-File-Size"
+
+
+def _get_file_sha256(path: str) -> str:
+    with open(path, "rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest()
+
+
+async def _read_response_body(response: aiohttp.ClientResponse) -> Any:
+    payload = await response.read()
+    try:
+        return orjson.loads(payload)
+    except orjson.JSONDecodeError as exc:
+        if response.status < 400:
+            raise RuntimeError(f"Expected JSON response from {response.url}") from exc
+        return {"error": {"message": payload.decode(errors="replace")}}
+
+
+async def _stream_file(path: str):
+    with open(path, "rb") as file:
+        while chunk := await asyncio.to_thread(file.read, _LORA_UPLOAD_CHUNK_BYTES):
+            yield chunk
+
 
 _TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
     "temperature": "temperature",
@@ -1273,6 +1302,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         self,
         lora_name: str,
         lora_path: str,
+        transfer_mode: Literal["shared_filesystem", "remote_upload"] = "shared_filesystem",
     ) -> Dict[str, Any]:
         """
         Load (or reload) a LoRA adapter on all backend servers via the SkyRL
@@ -1300,6 +1330,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Returns:
             Dict mapping server_url to response.
         """
+        if transfer_mode == "remote_upload":
+            return await self._upload_lora_adapter(lora_name, lora_path)
+        if transfer_mode != "shared_filesystem":
+            raise ValueError(f"Unsupported LoRA transfer mode: {transfer_mode}")
+
         session = await self._get_session()
 
         async def _load_on_server(server_url: str):
@@ -1315,6 +1350,82 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         logger.info(f"Loaded LoRA adapter '{lora_name}' from {lora_path}")
 
+        return {url: resp for url, resp in results}
+
+    async def _upload_lora_adapter(self, lora_name: str, lora_path: str) -> Dict[str, Any]:
+        upload_id = str(uuid.uuid4())
+        files = [(filename, os.path.join(lora_path, filename)) for filename in _LORA_ADAPTER_FILENAMES]
+        files = [
+            (filename, path, os.path.getsize(path), await asyncio.to_thread(_get_file_sha256, path))
+            for filename, path in files
+        ]
+        session = await self._get_session()
+
+        async def _upload_to_server(server_url: str):
+            for filename, path, size, sha256 in files:
+                url = f"{server_url}/skyrl/v1/lora-adapters/{upload_id}/{filename}"
+                headers = {"X-SkyRL-SHA256": sha256, _LORA_UPLOAD_SIZE_HEADER: str(size)}
+                async with session.put(url, data=_stream_file(path), headers=headers) as resp:
+                    body = await _read_response_body(resp)
+                    raise_for_status(resp, body)
+                    if body["sha256"] != sha256:
+                        raise RuntimeError(f"LoRA upload checksum mismatch from {server_url} for {filename}")
+            url = f"{server_url}/skyrl/v1/load_lora_adapter"
+            async with session.post(url, json={"lora_name": lora_name, "upload_id": upload_id}) as resp:
+                if resp.status >= 400:
+                    raise_for_status(resp, await _read_response_body(resp))
+                return server_url, {
+                    "status": resp.status,
+                    "body": await resp.text(),
+                    "sha256": {filename: sha256 for filename, _, _, sha256 in files},
+                }
+
+        async def _discard_upload(server_url: str):
+            return await self._call_server(
+                server_url,
+                f"/skyrl/v1/lora-adapters/{upload_id}",
+                method="DELETE",
+            )
+
+        async def _rollback_server(server_url: str):
+            url = f"{server_url}/v1/unload_lora_adapter"
+            async with session.post(url, json={"lora_name": lora_name}) as resp:
+                if resp.status == 404:
+                    return
+                if resp.status >= 400:
+                    raise_for_status(resp, await _read_response_body(resp))
+
+        try:
+            outcomes = await asyncio.gather(
+                *[_upload_to_server(url) for url in self.server_urls],
+                return_exceptions=True,
+            )
+            failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+            if failures:
+                rollback = await asyncio.gather(
+                    *[_rollback_server(url) for url in self.server_urls],
+                    return_exceptions=True,
+                )
+                rollback_failures = [error for error in rollback if isinstance(error, BaseException)]
+                if rollback_failures:
+                    logger.error(
+                        f"LoRA publication failed and rollback failed on {len(rollback_failures)} inference servers"
+                    )
+                raise RuntimeError(f"LoRA publication failed on {len(failures)} inference servers") from failures[0]
+            results = [outcome for outcome in outcomes if not isinstance(outcome, BaseException)]
+        finally:
+            cleanup = await asyncio.gather(
+                *[_discard_upload(url) for url in self.server_urls],
+                return_exceptions=True,
+            )
+            failures = [error for error in cleanup if isinstance(error, BaseException)]
+            if failures:
+                logger.warning(f"Failed to discard LoRA upload {upload_id} on {len(failures)} inference servers")
+
+        logger.info(
+            f"Uploaded LoRA adapter '{lora_name}' to {len(results)} inference servers "
+            f"with sha256={{{', '.join(f'{filename}:{sha256}' for filename, _, _, sha256 in files)}}}"
+        )
         return {url: resp for url, resp in results}
 
     async def unload_lora_adapter(self, lora_name: str) -> Dict[str, Any]:

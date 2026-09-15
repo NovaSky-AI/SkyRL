@@ -105,8 +105,9 @@ class SkyRLLoraConfig(BaseConfig):
     dropout: float = 0.0
     """Dropout probability applied to LoRA layers, to help prevent overfitting."""
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
-    """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
-    Must be accessible to all workers in distributed setups."""
+    """Directory where LoRA adapter weights are saved before inference delivery."""
+    transfer_mode: Literal["shared_filesystem", "remote_upload"] = "shared_filesystem"
+    """How remote vLLM servers receive the saved adapter."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
