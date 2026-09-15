@@ -38,7 +38,7 @@ def check_is_vlm(model_config_or_path) -> bool:
         model_config = AutoConfig.from_pretrained(model_config_or_path, trust_remote_code=True)
     else:
         model_config = model_config_or_path
-    return hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
+    return getattr(model_config, "vision_config", None) is not None
 
 
 def get_processor(model_name_or_path, **tokenizer_kwargs) -> AutoProcessor:
