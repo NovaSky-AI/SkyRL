@@ -33,6 +33,17 @@ class WeightExtractor(ABC):
         """
         ...
 
+    @property
+    def derives_metadata_from_chunks(self) -> bool:
+        """Whether metadata must be derived from the transferred chunks.
+
+        True when metadata depends on chunk contents (e.g. serialized FP8, where
+        each tensor expands into quantized payload + scales), so
+        :meth:`get_weight_metadata` cannot describe the stream ahead of time.
+        Senders consult this to decide whether to precompute metadata.
+        """
+        return False
+
     @abstractmethod
     def get_weight_metadata(self, dtype: torch.dtype) -> Dict[str, List]:
         """Return weight metadata without materializing tensors.

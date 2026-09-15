@@ -27,13 +27,16 @@ permissions:
 jobs:
   
   skyrl_train_tests_megatron_models:
+    # Gate on the label that fired this event. `types: [labeled]` delivers one event
+    # per label added, and `contains(...labels.*.name, ...)` tests the whole label
+    # set, so labelling in bulk launched one identical GPU run per label.
     if: >
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (
         github.event_name == 'pull_request_target' &&
         !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'run_train_megatron_gpu_ci_models')
+        github.event.label.name == 'run_train_megatron_gpu_ci_models'
       )
     runs-on: ubuntu-latest
     defaults:
@@ -54,7 +57,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -75,3 +77,11 @@ jobs:
           JOB_NAME="skyrl-train-gpu-ci-megatron-models-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
           bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_train_megatron_models_envsubst.yaml "$JOB_NAME" 2500
           rm -f ci/anyscale_gpu_ci_skyrl_train_megatron_models_envsubst.yaml
+      # Cancelling the run stops the runner, not the cluster. GitHub still runs
+      # `if: cancelled()` steps, so this is where an orphaned GPU job gets reaped.
+      - name: Terminate Anyscale jobs on cancellation
+        if: cancelled()
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+        run: bash ci/terminate_anyscale_jobs.sh

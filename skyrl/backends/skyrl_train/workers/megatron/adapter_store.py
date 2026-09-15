@@ -41,6 +41,15 @@ def _new_pinned_like(t: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(t, device="cpu").pin_memory()
 
 
+def _is_resident(t: Optional[torch.Tensor]) -> bool:
+    """True when `t` still owns storage we can copy to/from.
+
+    Megatron's offload frees GPU buffers with storage().resize_(0), leaving the
+    tensor object intact but unreadable.
+    """
+    return t is not None and t.untyped_storage().size() > 0
+
+
 def _expected_lora_param_check(model_chunks) -> None:
     """Sanity-check: every trainable param under DDP buffers is a LoRA adapter param.
 
@@ -149,6 +158,13 @@ class AdapterStore:
         self._pristine: Optional[AdapterSlot] = None
         self._current_id: Optional[str] = None
         self._signature: Optional[LoraSignature] = None
+        # Set while grads live only in the CPU slots, i.e. the DDP grad
+        # buffers are offloaded.
+        self._grads_parked: bool = False
+        # True when the live GPU state mirrors a *deleted* adapter (deleting
+        # the current adapter clears current_id without restoring anything).
+        # While set, live state must not be treated as pristine.
+        self._live_stale = False
 
     @property
     def current_id(self) -> Optional[str]:
@@ -222,12 +238,30 @@ class AdapterStore:
             slot.cpu_param_group_state.append(group_state)
         return slot
 
+    @staticmethod
+    def _require_param_residency(buf, mc_idx: int, buf_idx: int) -> None:
+        """Require GPU-resident params for a swap.
+
+        Megatron's `param_data_cpu` mirror is shared across adapters, so swapping
+        while offloaded would hand the next backload the wrong tenant's weights.
+        Offloaded grads are fine, see park_grads.
+        """
+        if not _is_resident(buf.param_data):
+            raise RuntimeError(
+                f"AdapterStore: DDP buffer {mc_idx}/{buf_idx} param_data is offloaded; "
+                f"backload the model before swapping adapters."
+            )
+
     @torch.no_grad()
     def _snapshot(self, slot: AdapterSlot, model_chunks, optimizer) -> None:
         """Copy live GPU state into `slot` (CPU)."""
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            self._require_param_residency(buf, mc_idx, buf_idx)
             slot.cpu_param_data[mc_idx][buf_idx].copy_(buf.param_data, non_blocking=True)
-            slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
+            # Offloaded grads have no GPU storage to read; the slot's copy,
+            # parked just before the offload, is already the current one.
+            if _is_resident(buf.grad_data):
+                slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
             groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
             for g, group in enumerate(groups):
@@ -253,8 +287,12 @@ class AdapterStore:
     def _restore(self, slot: AdapterSlot, model_chunks, optimizer) -> None:
         """Copy `slot` (CPU) into live GPU state."""
         for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            self._require_param_residency(buf, mc_idx, buf_idx)
             buf.param_data.copy_(slot.cpu_param_data[mc_idx][buf_idx], non_blocking=True)
-            buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
+            # Nothing to restore into while offloaded. The incoming adapter's
+            # grads stay in its slot until unpark_grads() on the next backload.
+            if _is_resident(buf.grad_data):
+                buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
             groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
             for g, group in enumerate(groups):
@@ -329,12 +367,15 @@ class AdapterStore:
             raise ValueError(f"AdapterStore: adapter '{model_id}' already registered")
 
         slot = self._allocate_empty_slot(model_chunks, optimizer)
-        if self._current_id is None:
+        if self._current_id is None and not self._live_stale:
             # First adapter: live state IS pristine; slot will be filled on
             # the next snapshot (i.e. swap-away). Treat live as authoritative.
             self._current_id = model_id
         else:
-            # Seed the new slot from pristine.
+            # Seed the new slot from pristine. When live is stale (the
+            # previously-current adapter was deleted), current_id stays None
+            # so the next swap_to restores this pristine copy instead of the
+            # deleted adapter's leftover live state.
             self._copy_slot(self._pristine, slot)
         self._slots[model_id] = slot
 
@@ -371,6 +412,55 @@ class AdapterStore:
                     else:
                         dst_pg[k] = v
 
+    # ------------------------------------------------------------------
+    # Grad parking across CPU offload
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def park_grads(self, model_chunks) -> None:
+        """Copy the live adapter's grads to its slot, just before an offload.
+
+        Megatron frees grad_data on offload and zero-fills it on reload, so
+        grads from a forward_backward whose optim_step hasn't arrived yet are
+        lost. Under colocation another tenant's request offloads in that gap.
+        """
+        if self._current_id is None or self._current_id not in self._slots:
+            return
+        slot = self._slots[self._current_id]
+        parked = False
+        for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            if not _is_resident(buf.grad_data):
+                continue
+            slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
+            parked = True
+        if parked:
+            torch.cuda.current_stream().synchronize()
+            self._grads_parked = True
+
+    @torch.no_grad()
+    def unpark_grads(self, model_chunks) -> None:
+        """Copy grads back from the slot, just after a backload.
+
+        Restores whichever adapter is live now, not necessarily the parked one:
+        a swap during the offload window only moves CPU slots around.
+        """
+        if not self._grads_parked:
+            return
+        if self._current_id is None or self._current_id not in self._slots:
+            # Adapter deleted while offloaded; reloaded buffers are already zeroed.
+            self._grads_parked = False
+            return
+        slot = self._slots[self._current_id]
+        restored = False
+        for mc_idx, buf_idx, buf in _iter_buffers(model_chunks):
+            if not _is_resident(buf.grad_data):
+                continue
+            buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
+            restored = True
+        if restored:
+            torch.cuda.current_stream().synchronize()
+            self._grads_parked = False
+
     @torch.no_grad()
     def delete(self, model_id: str) -> None:
         """Drop the slot for `model_id`.
@@ -384,6 +474,7 @@ class AdapterStore:
         del self._slots[model_id]
         if self._current_id == model_id:
             self._current_id = None
+            self._live_stale = True
 
     @torch.no_grad()
     def swap_to(self, model_id: str, model_chunks, optimizer) -> None:
@@ -401,6 +492,10 @@ class AdapterStore:
         agree on the live adapter before the next collective. TP/PP/EP groups
         do not need barriers because the swap is identical-shape on all
         ranks within those groups (LoRA signature is fixed).
+
+        Params must be on GPU. The grad buffers and optimizer state need not be,
+        since colocation offloads them between requests; offloaded grads stay
+        parked in their slots.
         """
         if model_id not in self._slots:
             raise KeyError(f"AdapterStore: unknown adapter '{model_id}'")
@@ -421,6 +516,7 @@ class AdapterStore:
         torch.cuda.current_stream().synchronize()
 
         self._current_id = model_id
+        self._live_stale = False
 
         if dist.is_available() and dist.is_initialized():
             dist.barrier(group=dp_group)

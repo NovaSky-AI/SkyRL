@@ -37,8 +37,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install uv
-      run: |
-        curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Use the action rather than the curl installer: on GitHub-hosted runners it
+      # also restores/saves ~/.cache/uv between runs, which matters here because
+      # this job resolves several distinct extra sets (tinker/jax/dev).
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Run lint
       run: |
         # Pin to match the ruff rev in .pre-commit-config.yaml. Unpinned `uvx ruff`
@@ -47,7 +51,7 @@ jobs:
     - name: Run pytest
       run: |
         uv run --extra tinker --extra jax --extra dev --with transformers==5.2.0 pytest --forked -s tests/tx/models/test_qwen3_5.py
-        uv run --extra tinker --extra jax --extra dev pytest --forked -s tests --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train --ignore=tests/tx/models/test_qwen3_5.py
+        uv run --extra tinker --extra jax --extra dev pytest --forked -s tests --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train --ignore=tests/tinker/skyrl_train --ignore=tests/tx/models/test_qwen3_5.py
     - name: Run engine benchmarks
       run: |
         uv run --extra tinker --extra dev python skyrl/benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1}' --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16

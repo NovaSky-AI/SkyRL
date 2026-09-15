@@ -160,6 +160,19 @@ class TestTokenBasedBatchIterator:
         for i in range(batch.batch_size):
             assert torch.equal(reordered["sequences"][i], batch["sequences"][i])
 
+    def test_reorder_and_combine_items_drops_padding(self):
+        batch = self._make_batch([10, 3, 8, 5])
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=12)
+        output_batches = [
+            [{"sample": index} for index in indices] + [{"sample": "padding"}] for indices in iterator._microbatches
+        ]
+        iterator._num_padding_microbatches = 1
+        output_batches.append([{"sample": "padding-microbatch"}])
+
+        reordered = iterator.reorder_and_combine_items(output_batches)
+
+        assert [output["sample"] for output in reordered] == list(range(batch.batch_size))
+
     def test_get_microbatch_iterator_factory(self):
         batch = self._make_batch([10, 10, 5, 5])
 

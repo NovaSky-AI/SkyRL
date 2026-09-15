@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from cloudpathlib import AnyPath
@@ -14,6 +16,30 @@ from skyrl.tinker.engine import (
 )
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
+
+
+@pytest.mark.parametrize("load_optimizer", [False, True])
+def test_process_load_weights_forwards_optimizer_choice(load_optimizer):
+    engine = object.__new__(TinkerEngine)
+    engine.config = SimpleNamespace(checkpoints_base=AnyPath("/checkpoints"))
+    engine.backend = MagicMock()
+    engine.backend.has_model.return_value = True
+
+    result = engine.process_load_weights(
+        "target_model",
+        types.LoadWeightsInput(
+            source_model_id="source_model",
+            checkpoint_id="checkpoint",
+            load_optimizer=load_optimizer,
+        ),
+    )
+
+    engine.backend.load_checkpoint.assert_called_once_with(
+        AnyPath("/checkpoints/source_model/checkpoint.tar.gz"),
+        "target_model",
+        load_optimizer=load_optimizer,
+    )
+    assert result.type == "load_weights"
 
 
 def test_process_unload_model():
