@@ -31,13 +31,17 @@ jobs:
     # Gate on the label that fired this event. `types: [labeled]` delivers one event
     # per label added, and `contains(...labels.*.name, ...)` tests the whole label
     # set, so labelling in bulk launched one identical GPU run per label.
+    # Forks inherit these workflows but not the secrets they need -- only run upstream.
     if: >
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
+      github.repository == 'NovaSky-AI/SkyRL' &&
       (
-        github.event_name == 'pull_request_target' &&
-        !github.event.pull_request.draft &&
-        github.event.label.name == 'run_tinker_skyrl_train_backend_gpu_ci'
+        github.event_name == 'push' ||
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request_target' &&
+          !github.event.pull_request.draft &&
+          github.event.label.name == 'run_tinker_skyrl_train_backend_gpu_ci'
+        )
       )
     runs-on: ubuntu-latest
     defaults:

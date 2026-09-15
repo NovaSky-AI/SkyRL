@@ -32,6 +32,8 @@ concurrency:
 
 jobs:
   check_code_quality:
+    # Forks inherit these workflows but not the secrets they need -- only run upstream.
+    if: github.repository == 'NovaSky-AI/SkyRL'
     runs-on: ubuntu-latest
 
     steps:
@@ -50,6 +52,8 @@ jobs:
         run: uv pip install pre-commit; pre-commit run --all-files --config .pre-commit-config.yaml
   
   skyrl_train_tests:
+    # Forks inherit these workflows but not the secrets they need -- only run upstream.
+    if: github.repository == 'NovaSky-AI/SkyRL'
     needs: check_code_quality
     runs-on: ubuntu-latest
     defaults:
@@ -75,6 +79,8 @@ jobs:
         run: uv run --isolated --extra fsdp --extra tinker --extra dev pytest tests/tinker/skyrl_train/
   
   skyrl_gym_tests:
+    # Forks inherit these workflows but not the secrets they need -- only run upstream.
+    if: github.repository == 'NovaSky-AI/SkyRL'
     needs: check_code_quality
     runs-on: ubuntu-latest
     defaults:
