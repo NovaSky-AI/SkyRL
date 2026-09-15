@@ -2,6 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import numpy as np
@@ -17,6 +18,7 @@ from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.eval import EvalResult
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.callbacks import TrainingCallback
+from skyrl.train.utils.trainer_utils import list_checkpoint_dirs
 from skyrl.train.utils.utils import validate_batch_sizes
 from tests.train.util import example_dummy_config
 
@@ -860,3 +862,42 @@ async def test_train_closes_but_does_not_drain_the_dispatcher_when_a_step_crashe
 
     dispatcher.close.assert_awaited_once()
     dispatcher.drain.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Ref sync: update_ref_with_policy must not touch the run's HF exports
+# ---------------------------------------------------------------------------
+
+
+def test_update_ref_with_policy_leaves_the_export_alone(dummy_config, dummy_tokenizer, tmp_path):
+    """The ref sync exports to a scratch tree and removes only that: the HF export ``save_models()``
+    wrote for the same step survives, and nothing is left behind."""
+    dummy_config.trainer.export_path = str(tmp_path)
+    trainer = _bare_trainer(dummy_config, dummy_tokenizer)
+    trainer.global_step = 4
+    hf_export = tmp_path / "global_step_4" / "policy"
+    hf_export.mkdir(parents=True)
+    (hf_export / "config.json").write_text("{}")
+
+    def fake_save_hf_model(model, export_dir, tokenizer):
+        Path(export_dir).mkdir(parents=True)  # the real export creates the directory it is given
+        Path(export_dir, "config.json").write_text("{}")
+
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.save_hf_model.side_effect = fake_save_hf_model
+
+    trainer.update_ref_with_policy()
+
+    scratch = str(tmp_path / "_tmp_ref_sync" / "global_step_4" / "policy")
+    trainer.dispatch.save_hf_model.assert_called_once_with("policy", scratch, dummy_tokenizer)
+    trainer.dispatch.init_model.assert_called_once_with("ref", scratch)
+    assert (hf_export / "config.json").exists()
+    assert not (tmp_path / "_tmp_ref_sync").exists()
+
+
+def test_tmp_ref_sync_scratch_is_not_an_export(tmp_path):
+    """Export enumeration matches ``global_step_*`` only, so the scratch tree is never mistaken for one."""
+    (tmp_path / "_tmp_ref_sync" / "global_step_1").mkdir(parents=True)
+    (tmp_path / "global_step_1").mkdir()
+
+    assert list_checkpoint_dirs(str(tmp_path)) == ["global_step_1"]
