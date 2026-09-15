@@ -37,6 +37,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 from skyrl.backends.utils import log_timing
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
+from skyrl.tinker.server_timing import record_server_stage
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
@@ -1431,8 +1432,15 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Initialization is a cold-start cost, separate from adapter publication.
         cold_inference = not self._inference_engines_initialized
-        with log_timing(f"sampler_inference_init model_id={model_id} cold={cold_inference}"):
-            self._ensure_inference_engines()
+        if cold_inference:
+            with (
+                record_server_stage("inference_engine_construction", model_id, cold=True),
+                log_timing(f"sampler_inference_init model_id={model_id} cold=True"),
+            ):
+                self._ensure_inference_engines()
+        else:
+            with log_timing(f"sampler_inference_init model_id={model_id} cold=False"):
+                self._ensure_inference_engines()
 
         # The colocated sync dance (wake weights -> broadcast -> wake KV cache)
         # assumes engines start asleep; a preceding sample leaves them awake.
@@ -1443,7 +1451,10 @@ class SkyRLTrainBackend(AbstractBackend):
         # name. None for the FFT / single-tenant path uses legacy behavior.
         sync_id = model_id if self._base_lora_signature is not None else None
         try:
-            with log_timing(f"sampler_weight_sync model_id={model_id} checkpoint={output_path}"):
+            with (
+                record_server_stage("sampler_weight_sync", model_id, cold=cold_inference),
+                log_timing(f"sampler_weight_sync model_id={model_id} checkpoint={output_path}"),
+            ):
                 asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
         finally:
             # The colocated sync path wakes the engines (weights + KV cache)

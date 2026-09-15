@@ -279,6 +279,17 @@ def test_recorder_writes_ordered_validated_operation_receipts(tmp_path):
     assert rows[0].unattributed_duration_ns == rows[0].client_timing.duration_ns == 40
 
 
+def test_recorder_with_partial_server_span_retains_full_unattributed_client_time(tmp_path):
+    ticks = iter((100, 150))
+    path = tmp_path / "receipts.jsonl"
+    with receipts.ReceiptRecorder(path, receipt_metadata(), lambda: next(ticks)) as recorder:
+        with recorder.record("optimizer", 2, 1) as observations:
+            observations["server_spans"] = receipt_values()["server_spans"]
+    row = receipts.PhaseReceipt.model_validate_json(path.read_text())
+    assert len(row.server_spans) == 1
+    assert row.unattributed_duration_ns == row.client_timing.duration_ns == 50
+
+
 def test_recorder_retains_operation_error_when_receipt_cleanup_also_fails(tmp_path):
     ticks = iter((100, 90))
     failure = RuntimeError("optimizer failed")

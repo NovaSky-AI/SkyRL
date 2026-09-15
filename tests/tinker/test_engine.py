@@ -6,7 +6,7 @@ import pytest
 from cloudpathlib import AnyPath
 from sqlmodel import Session, SQLModel
 
-from skyrl.tinker import types
+from skyrl.tinker import server_timing, types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import FutureDB, ModelDB, RequestStatus, SessionDB
 from skyrl.tinker.engine import (
@@ -463,3 +463,34 @@ def test_payload_lookup_is_chunked(scheduling_engine):
         batchable = engine.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD)
 
     assert len(batchable) == count
+
+
+def test_single_request_timing_context_uses_durable_request_and_publication_ids(monkeypatch):
+    engine = object.__new__(TinkerEngine)
+    emitted = []
+    monkeypatch.setattr(server_timing, "emit_server_stage", emitted.append)
+    engine._complete_futures = lambda results: None
+
+    def process(request_type, model_id, request_data):
+        assert request_type == types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER
+        with server_timing.record_server_stage(
+            "sampler_weight_sync", model_id, cold=False, clock=iter((10, 20)).__next__
+        ):
+            pass
+        return types.SaveWeightsForSamplerOutput(type="save_weights_for_sampler")
+
+    engine.process_single_request = process
+    engine.process_single_requests(
+        {
+            "request-17": (
+                "model-test",
+                types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
+                {"sampling_session_seq_id": 8, "seq_id": 9},
+            )
+        }
+    )
+
+    assert len(emitted) == 1
+    assert emitted[0].request_id == "request-17"
+    assert emitted[0].publication_id == "model-test/sampling-session-8/sequence-9"
+    assert emitted[0].adapter_generation == 8

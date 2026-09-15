@@ -28,6 +28,7 @@ from skyrl.tinker.db_models import (
     SessionDB,
     enable_sqlite_wal,
 )
+from skyrl.tinker.server_timing import server_request_context
 from skyrl.utils.log import logger
 
 _MAX_IDS_PER_QUERY = 500
@@ -904,7 +905,10 @@ class TinkerEngine:
             return
         results = {}
         for request_id, (model_id, request_type, request_data) in requests.items():
-            with log_timing(f"process_single_request({request_type.value})"):
+            with (
+                server_request_context(request_id, model_id, request_data),
+                log_timing(f"process_single_request({request_type.value})"),
+            ):
                 try:
                     result = self.process_single_request(request_type, model_id, request_data)
                 except Exception as e:

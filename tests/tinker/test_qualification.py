@@ -49,9 +49,10 @@ class FakeSampler:
 class FakeTrainer:
     model_id = "model-test"
 
-    def __init__(self, events, fail_optimizer=None):
+    def __init__(self, events, fail_optimizer=None, fail_publish=None):
         self.events = events
         self.fail_optimizer = fail_optimizer
+        self.fail_publish = fail_publish
         self.optimizer_calls = 0
         self.version = 0
         self.info = types.GetInfoResponse.model_validate(
@@ -126,6 +127,8 @@ class FakeTrainer:
 
     def save_weights_and_get_sampling_client(self):
         self.events.append(f"publish:{self.version}")
+        if self.fail_publish == self.version:
+            raise RuntimeError("publication failed")
         return FakeSampler(self.version, self.events)
 
     def save_state(self, name):
@@ -282,6 +285,22 @@ def test_public_qualification_owns_sequence_and_exact_artifacts(tmp_path, metada
         "sample",
         "checkpoint",
     ]
+
+
+def test_failed_publication_preserves_previous_generation_without_activation_row(tmp_path, metadata):
+    events = []
+    config = make_config(tmp_path, metadata)
+    with pytest.raises(RuntimeError, match="publication failed"):
+        run_lora_qualification(FakeService(events), FakeTrainer(events, fail_publish=1), FakeTokenizer(), config)
+    rows = [
+        PhaseReceipt.model_validate_json(line)
+        for line in (config.output_dir / "receipts.jsonl").read_text().splitlines()
+    ]
+    publication = rows[-1]
+    assert publication.operation == "adapter_publication"
+    assert publication.outcome.success is False
+    assert publication.outcome.active_generation_after == 0
+    assert not any(row.operation == "adapter_activation" for row in rows)
 
 
 def test_failed_qualification_preserves_primary_error_and_receipts(tmp_path, metadata):

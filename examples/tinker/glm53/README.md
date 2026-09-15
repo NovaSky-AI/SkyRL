@@ -6,10 +6,16 @@ It checks mechanics and timing, not learning or LoRA numerical agreement.
 
 Cold work is recorded separately: model creation, input preparation, initial
 publication and initial sample. The first update is warmup; later updates are
-measured. Initial publication includes lazy vLLM startup. Server timing logs
-separate `sampler_inference_init` (with a cold flag) from `sampler_weight_sync`;
-the client publication envelope additionally includes RPC and scheduling overhead.
-Service boot before the client connects is outside these measurements.
+measured. `adapter_publication` is the complete public
+`save_weights_and_get_sampling_client` transaction, so it includes activation;
+SkyRL does not emit a synthetic activation row. The server emits structured
+`inference_engine_construction` only when lazy inference startup runs, and
+`sampler_weight_sync` for every publication. Collect and validate those records
+with `skyrl.tinker.server_timing.collect_server_stage_records`; their monotonic
+clocks are rank-local and are never subtracted from client wall time. Base-weight
+loading, compilation, CUDA graph capture, KV-cache initialization, and transport
+layout initialization remain unavailable as separate boundaries. Service boot
+before the client connects is outside these measurements.
 
 ## Run
 

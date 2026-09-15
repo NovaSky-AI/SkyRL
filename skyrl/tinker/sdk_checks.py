@@ -124,6 +124,7 @@ def publish_and_sample(
     generation=0,
     optimizer_step=None,
 ):
+    """Time the aggregate publication-and-activation API, then the first sample."""
     with (
         profile_inference(
             inference_profile_url,
@@ -133,9 +134,11 @@ def publish_and_sample(
             generation,
             optimizer_step,
         ),
-        record_operation(receipts, "adapter_publication", generation, optimizer_step),
+        record_operation(receipts, "adapter_publication", generation, optimizer_step) as publication_receipt,
         measure_phase(report, f"{phase_prefix}/publication"),
     ):
+        if generation > 0:
+            publication_receipt["active_generation_after"] = generation - 1
         sampler = trainer.save_weights_and_get_sampling_client()
     with (
         profile_inference(

@@ -372,7 +372,8 @@ class ReceiptRecorder:
                 )
                 unattributed = observations["unattributed_duration_ns"]
                 if unattributed is None:
-                    unattributed = client_timing.duration_ns if not observations["server_spans"] else 0
+                    # Server monotonic clocks cannot be subtracted from the client clock.
+                    unattributed = client_timing.duration_ns
                 outcome = OperationOutcome(
                     success=operation_error is None,
                     error_type=type(operation_error).__name__ if operation_error else None,
