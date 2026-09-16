@@ -778,7 +778,11 @@ class MegatronWorker:
                 lora_A_init_method=lora_config.init_method,
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
-                lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
+                lora_dtype=(
+                    str_to_torch_dtype(lora_config.dtype)
+                    if lora_config.dtype is not None
+                    else (torch.bfloat16 if self.cfg.bf16 else torch.float32)
+                ),
                 normalize_moe_lora=self.cfg.policy.megatron_config.lora_config.normalize_moe_lora,
                 share_expert_adapters=lora_config.share_expert_adapters,
             )

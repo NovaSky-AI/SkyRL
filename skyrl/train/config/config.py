@@ -104,6 +104,8 @@ class SkyRLLoraConfig(BaseConfig):
     """Scaling factor for LoRA updates."""
     dropout: float = 0.0
     """Dropout probability applied to LoRA layers, to help prevent overfitting."""
+    dtype: Optional[Literal["float32", "bfloat16"]] = None
+    """Adapter parameter dtype. When unset, uses the model training dtype."""
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
     Must be accessible to all workers in distributed setups."""
