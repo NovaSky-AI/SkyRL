@@ -20,24 +20,39 @@ becomes its own training row.
 
 ## Two hooks
 
-**Inference setup**, once per run, beside the engine:
+**Run it** — `entrypoints/main_harbor_icap.py` is complete, and is the sibling
+generate entrypoint with the generator swapped:
+
+```bash
+python -m examples.train_integrations.harbor.icap.entrypoints.main_harbor_icap \
+    trainer.policy.model.path=Qwen/Qwen3-4B-Instruct-2507 \
+    data.train_data="['/path/to/harbor/tasks']"
+```
+
+**Inference setup**, once per run, beside the engine — `start_capture()` in that
+file, which is the whole of it:
 
 ```python
-from inference_capture.service import CaptureService
-
 service = CaptureService(data_dir="./icap-data", port=8080, num_workers=4)
 service.start()                      # returns once /healthz answers
 asyncio.run(service.ensure_target(
-    name="policy", type="tokens", url=f"{engine_url}/generate",
+    name="policy", type="skyrl", url=router_url,
     model=model_name, tokenizer=tokenizer_name,
     config={"max_model_len": max_seq_len},
 ))
 ```
 
+`type="skyrl"` is capture's upstream kind for this router, pointed at its
+**root**. It knows the `/skyrl/v1/generate` path, the singular request shape,
+the `X-Session-ID` affinity header and vLLM's sampling-parameter rules —
+including that `logprobs` is a *count* here and a boolean in the OpenAI shape
+capture speaks. A `tokens` target gets all five wrong against this router.
+
 Nothing has to exist first. With no `DATABASE_URL`, capture starts its own
 PostgreSQL and keeps the database, the queue and the payloads under
 `./icap-data`. `ensure_target` is idempotent, so a restarted job or a second
-node does not fail on its second call.
+node does not fail on its second call — it is a `PUT`, so the second call
+updates rather than failing on a taken name.
 
 **The agent loop**, once per trial — see `harbor_generator.py`:
 
@@ -46,7 +61,11 @@ trajectory = create_trajectory(project=..., target="policy",
                                trajectory_id=session_id, upstream=upstream)
 try:
     config["agent"]["kwargs"]["api_base"] = trajectory.base_url
-    config["agent"]["kwargs"]["api_key"] = trajectory.api_key
+    # Terminus-2 takes `api_base` as its own parameter but has no `api_key`
+    # one: it forwards `llm_kwargs` to the LiteLLM constructor and swallows
+    # anything else. A key set beside `api_base` is accepted, ignored, and the
+    # route answers 401 with nothing in the config to explain it.
+    config["agent"]["kwargs"].setdefault("llm_kwargs", {})["api_key"] = trajectory.api_key
     await harbor.run(config)
 finally:
     trajectory.finish(annotations={"reward": reward})
