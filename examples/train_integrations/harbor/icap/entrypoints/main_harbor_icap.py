@@ -1,7 +1,7 @@
 """Train on Harbor tasks with inference-capture recording the exact tokens.
 
 The inference setup hook brings capture up beside the engine and registers the
-engine as a ``tokens`` target. Everything after that is the sibling Harbor
+router as a ``skyrl`` target. Everything after that is the sibling Harbor
 entrypoint: the generator is the only thing swapped.
 
 Run it with capture resolved from a checkout, which is what development wants:
@@ -25,36 +25,64 @@ logger = logging.getLogger(__name__)
 DEFAULT_DATA_DIR = Path("./icap-data")
 
 
-def start_capture(cfg: Any, engine_url: str, model_name: str, tokenizer_name: str) -> Any:
-    """Bring capture up and register the engine. Returns the running service.
+def start_capture(
+    *,
+    engine_url: str,
+    model_name: str,
+    tokenizer_name: str,
+    max_model_len: int,
+    data_dir: Any = None,
+    port: int | None = None,
+    num_workers: int = 4,
+    target_name: str = "policy",
+) -> Any:
+    """Bring capture up in this process and register the engine.
 
     Called once per run, beside the inference engine. Nothing has to exist
     first: with no ``DATABASE_URL`` the service starts its own PostgreSQL and
     keeps the database, the queue and the payloads under one directory.
+
+    ``engine_url`` is the **router's root**, not a generate endpoint. The
+    ``skyrl`` target type knows the path, the singular request shape, the
+    ``X-Session-ID`` affinity header and vLLM's sampling-parameter rules -- all
+    of which a `tokens` target gets wrong against this router, which is why a
+    translating proxy used to be needed here.
+
+    In-process is possible because capture's ``transformers<5`` cap, which
+    conflicted with SkyRL's ``>=5.6.1``, turned out to be unnecessary and was
+    lifted. Before that the service had to run in a second environment.
     """
+    import asyncio
+    import os
+
     from inference_capture.service import CaptureService
 
-    proxy_cfg = getattr(getattr(cfg, "inference", None), "proxy", None)
+    # `initdb` refuses an ungenerated locale, which several base images have.
+    os.environ.setdefault("LANG", "C.utf8")
+    os.environ.setdefault("LC_ALL", "C.utf8")
+    # `CaptureService` reads CONTROL_KEY; the SDK reads CAPTURE_CONTROL_KEY.
+    # In one process they have to agree.
+    if "CAPTURE_CONTROL_KEY" in os.environ:
+        os.environ.setdefault("CONTROL_KEY", os.environ["CAPTURE_CONTROL_KEY"])
+
     service = CaptureService(
-        data_dir=getattr(proxy_cfg, "data_dir", DEFAULT_DATA_DIR),
-        port=getattr(proxy_cfg, "port", 8080),
-        num_workers=getattr(proxy_cfg, "num_workers", 4),
+        data_dir=data_dir or os.environ.get("ICAP_DATA_DIR") or DEFAULT_DATA_DIR,
+        port=port if port is not None else int(os.environ.get("ICAP_PORT", 8080)),
+        num_workers=num_workers,
     )
     # Returns once /healthz answers, so trajectory URLs handed out on the next
     # line are usable rather than a race the harness loses.
     base_url = service.start()
     logger.info("inference-capture serving at %s", base_url)
 
-    import asyncio
-
     asyncio.run(
         service.ensure_target(
-            name="policy",
-            type="tokens",
-            url=f"{engine_url.rstrip('/')}/generate",
+            name=target_name,
+            type="skyrl",
+            url=engine_url,
             model=model_name,
             tokenizer=tokenizer_name,
-            config={"max_model_len": cfg.generator.max_input_length},
+            config={"max_model_len": max_model_len},
         )
     )
     return service

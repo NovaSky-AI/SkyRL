@@ -84,7 +84,11 @@ by registering SkyRL's wire as an upstream kind. When that lands, a target is
 `type: "skyrl"` pointed straight at `{router_url}`, and `serve_in_thread`, the
 `SHIM_PORT` plumbing and `get_node_ip()` all go.
 
-### ⬜ 5. In-process `CaptureService` is now possible
+### ✅ 5. In-process `CaptureService` is now possible
+
+> **Done.** `run_icap.py` starts one by default; `ICAP_INPROCESS=0` with
+> `CAPTURE_ENDPOINT` keeps the out-of-process path. Verified in SkyRL's own venv,
+> which now holds capture's `tokens` extra too.
 
 `ICapHarborGenerator` takes a `capture_service` and only uses `.base_url`, so it
 works with either an in-process service or a URL to a separate `icap serve`.
