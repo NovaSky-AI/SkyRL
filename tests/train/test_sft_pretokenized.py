@@ -11,9 +11,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 from datasets import Dataset
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl.train.config.sft_config import SFTConfig, validate_sft_cfg
 from skyrl.train.dataset.pretokenized import load_from_pretokenized
+from skyrl.train.dataset.samplers import StatefulSequentialSampler
 from skyrl.train.sft_trainer import SFTTrainer, collate_sft_batch
 
 
@@ -135,6 +137,50 @@ def test_load_directory_of_arrow_shards(tmp_path):
     rows = load_from_pretokenized(str(data_dir))
     assert len(rows) == 4
     _assert_normalized(rows)
+
+
+@pytest.mark.parametrize("extension", ["parquet", "jsonl", "arrow"])
+def test_nested_shard_order_is_stable_on_resume(tmp_path, monkeypatch, extension):
+    data_dir = tmp_path / "shards"
+    for sample_id, relative_dir in enumerate(["a/a", "a/z", "b"]):
+        directory = data_dir / relative_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        shard = directory / f"data.{extension}"
+        dataset = Dataset.from_list([{"input_ids": [1, sample_id + 2], "loss_mask": [0, 1], "sample_id": sample_id}])
+        if extension == "parquet":
+            dataset.to_parquet(str(shard))
+        elif extension == "jsonl":
+            dataset.to_json(str(shard))
+        else:
+            saved = tmp_path / f"saved-{sample_id}"
+            dataset.save_to_disk(str(saved))
+            shutil.copy(next(saved.glob("*.arrow")), shard)
+
+    real_walk = os.walk
+    reverse = True
+
+    def walk_with_directory_order(*args, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(*args, **kwargs):
+            # Filesystems may enumerate the same directory tree in either order.
+            dirnames[:] = sorted(dirnames, reverse=reverse)
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(os, "walk", walk_with_directory_order)
+    original = load_from_pretokenized(str(data_dir))
+    loader = StatefulDataLoader(original, batch_size=None, sampler=StatefulSequentialSampler(original))
+    iterator = iter(loader)
+    first = next(iterator)["sample_id"]
+    state = loader.state_dict()
+    remaining = [row["sample_id"] for row in iterator]
+
+    reverse = False
+    reloaded = load_from_pretokenized(str(data_dir))
+    resumed = StatefulDataLoader(reloaded, batch_size=None, sampler=StatefulSequentialSampler(reloaded))
+    resumed.load_state_dict(state)
+
+    assert [row["sample_id"] for row in resumed] == remaining
+    assert [first, *remaining] == [0, 1, 2]
+    assert [row["sample_id"] for row in reloaded] == [0, 1, 2]
 
 
 def test_hidden_files_and_dirs_skipped(tmp_path):

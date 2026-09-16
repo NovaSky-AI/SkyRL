@@ -74,7 +74,7 @@ _VALIDATION_CHUNK_ROWS = 200_000
 
 
 def _collect_data_files(root: str) -> dict[str, list[str]]:
-    """Recursively collect data files under ``root``, grouped by format.
+    """Recursively collect data files in deterministic order, grouped by format.
 
     Hidden files and directories (dotfiles) are skipped: `.ipynb_checkpoints/`
     holds stale copies that would silently duplicate rows, and macOS `._*`
@@ -82,7 +82,7 @@ def _collect_data_files(root: str) -> dict[str, list[str]]:
     """
     groups: dict[str, list[str]] = {"parquet": [], "json": [], "arrow": []}
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         for name in sorted(filenames):
             if name.startswith("."):
                 continue
