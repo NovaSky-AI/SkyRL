@@ -152,9 +152,14 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
     from vllm import AsyncEngineArgs
     from vllm.config import WeightTransferConfig
-    from vllm.entrypoints.openai.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    try:
+        from vllm.entrypoints.openai.cli_args import FrontendArgs
+    except ImportError:
+        # vLLM main moved this public CLI surface after SkyRL's supported 0.28 pin.
+        from vllm.entrypoints.launchers.cli_args import FrontendArgs
 
     # This function may run a GPU-less Ray head
     # node, where ``current_platform`` resolves to ``UnspecifiedPlatform`` with
@@ -238,7 +243,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
             args.max_cpu_loras = lora_cfg.max_cpu_loras
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
 
-        if not cfg.trainer.placement.colocate_all:
+        if not cfg.trainer.placement.colocate_all and ie_cfg.weight_sync_backend != "lora_nccl":
             lora_path = cfg.trainer.policy.model.lora.lora_sync_path
             logger.warning(
                 "LoRA weight sync is enabled but training and inference are not "

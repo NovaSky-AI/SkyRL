@@ -4,6 +4,10 @@ from typing import Iterable, Mapping
 
 import torch
 
+from skyrl.backends.skyrl_train.weight_sync.lora_nccl.plan import (
+    LoRANcclBucket,
+    pack_lora_nccl_bucket_into,
+)
 from skyrl.backends.skyrl_train.weight_sync.lora_transport.bridge_sources import (
     LoRABridgeSource,
     get_qkv_lora_head_mapping,
@@ -265,3 +269,26 @@ def assemble_lora_consumer_factors(
             source
         )
     return factors
+
+
+def pack_lora_nccl_bucket(
+    bucket: LoRANcclBucket,
+    source_tensors: Mapping[str, torch.Tensor],
+) -> torch.Tensor:
+    """Copy one bucket's exact source rectangles into contiguous FP32 storage."""
+    device = None
+    for pull in bucket.pulls:
+        source = source_tensors[pull.source_slice.key]
+        if source.dtype is not torch.float32:
+            raise ValueError("LoRA NCCL sources must remain FP32")
+        pull.source_slice.validate_shape(tuple(source.shape))
+        if device is None:
+            device = source.device
+        elif source.device != device:
+            raise ValueError("One LoRA NCCL bucket cannot span source devices")
+    packed = torch.empty(
+        bucket.source_bytes // torch.empty((), dtype=torch.float32).element_size(),
+        dtype=torch.float32,
+        device=device,
+    )
+    return pack_lora_nccl_bucket_into(bucket, source_tensors, packed)
