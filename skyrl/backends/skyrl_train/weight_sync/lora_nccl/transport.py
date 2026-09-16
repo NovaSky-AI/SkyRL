@@ -67,13 +67,9 @@ class LoRANcclSourceSession:
         self.source_layout_digest = source_layout_digest
         self.communicator = communicator
         if set(peer_by_inference_rank) != set(source_group.inference_ranks):
-            raise ValueError(
-                "LoRA NCCL source peers do not match the source-group consumers"
-            )
+            raise ValueError("LoRA NCCL source peers do not match the source-group consumers")
         self._peer_by_inference_rank = dict(peer_by_inference_rank)
-        maximum_elements = (
-            max(bucket.source_bytes for bucket in source_group.buckets) // 4
-        )
+        maximum_elements = max(bucket.source_bytes for bucket in source_group.buckets) // 4
         self._buffer = torch.empty(
             maximum_elements,
             dtype=torch.float32,
@@ -239,21 +235,13 @@ class _LoRAConsumerAssembler:
         self._plan = plan
         self._required = set(plan.pulls)
         self._received: set[LoRAConsumerPull] = set()
-        self._copies: dict[LoRAConsumerPull, list[Any]] = {
-            pull: [] for pull in plan.pulls
-        }
+        self._copies: dict[LoRAConsumerPull, list[Any]] = {pull: [] for pull in plan.pulls}
         for copy in plan.copies:
             self._copies[plan.pulls[copy.pull_index]].append(copy)
         self._factors = {
             module.module_name: (
-                [
-                    torch.zeros(pair[0], dtype=torch.bfloat16, device=device)
-                    for pair in module.factor_shapes
-                ],
-                [
-                    torch.zeros(pair[1], dtype=torch.bfloat16, device=device)
-                    for pair in module.factor_shapes
-                ],
+                [torch.zeros(pair[0], dtype=torch.bfloat16, device=device) for pair in module.factor_shapes],
+                [torch.zeros(pair[1], dtype=torch.bfloat16, device=device) for pair in module.factor_shapes],
             )
             for module in plan.receiver_plan.modules
         }
@@ -275,23 +263,15 @@ class _LoRAConsumerAssembler:
         if tensor.dtype is not torch.float32 or tuple(tensor.shape) != expected_shape:
             raise ValueError("LoRA NCCL source slices must preserve FP32 shape")
         for copy in self._copies[pull]:
-            shape = tuple(
-                stop - start
-                for start, stop in zip(copy.starts, copy.stops, strict=True)
-            )
-            destination = self._factors[copy.module_name][copy.component][
-                copy.factor_index
-            ]
+            shape = tuple(stop - start for start, stop in zip(copy.starts, copy.stops, strict=True))
+            destination = self._factors[copy.module_name][copy.component][copy.factor_index]
             source = tensor.reshape(shape)
             if pull.value_scale != (1, 1):
                 numerator, denominator = pull.value_scale
                 source = source * (numerator / denominator)
-            destination[
-                tuple(
-                    slice(start, stop)
-                    for start, stop in zip(copy.starts, copy.stops, strict=True)
-                )
-            ].copy_(source)
+            destination[tuple(slice(start, stop) for start, stop in zip(copy.starts, copy.stops, strict=True))].copy_(
+                source
+            )
         self._received.add(pull)
 
     def finish(

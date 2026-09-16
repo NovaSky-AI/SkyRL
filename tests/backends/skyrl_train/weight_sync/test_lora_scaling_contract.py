@@ -24,12 +24,8 @@ pytest.importorskip("vllm", reason="LoRA scaling contracts target vLLM LoRA laye
 pytestmark = pytest.mark.vllm
 
 
-def test_bridge_export_to_vllm_activation_preserves_exact_normalized_deltas(
-    monkeypatch, tmp_path
-):
-    pytest.importorskip(
-        "transformer_engine.pytorch", reason="Requires the Megatron runtime extra"
-    )
+def test_bridge_export_to_vllm_activation_preserves_exact_normalized_deltas(monkeypatch, tmp_path):
+    pytest.importorskip("transformer_engine.pytorch", reason="Requires the Megatron runtime extra")
     from megatron.bridge.models.conversion.auto_bridge import AutoBridge
     from megatron.bridge.models.conversion.mapping_registry import (
         MegatronMappingRegistry,
@@ -77,12 +73,8 @@ def test_bridge_export_to_vllm_activation_preserves_exact_normalized_deltas(
             super().__init__()
             self.config = SimpleNamespace(architectures=["ScalingContractModel"])
             self.dense_proj = ReplicatedLinear(8, 6, bias=False, disable_tp=True)
-            self.shared_expert_proj = ReplicatedLinear(
-                8, 6, bias=False, disable_tp=True
-            )
-            self.routed_expert_proj = ReplicatedLinear(
-                8, 6, bias=False, disable_tp=True
-            )
+            self.shared_expert_proj = ReplicatedLinear(8, 6, bias=False, disable_tp=True)
+            self.routed_expert_proj = ReplicatedLinear(8, 6, bias=False, disable_tp=True)
             self.nonintegral_proj = ReplicatedLinear(8, 6, bias=False, disable_tp=True)
 
     alpha = 16
@@ -96,20 +88,8 @@ def test_bridge_export_to_vllm_activation_preserves_exact_normalized_deltas(
     source_factors = {}
     tasks = []
     for index, (name, effective_rank) in enumerate(effective_ranks.items()):
-        a = (
-            torch.arange(effective_rank * 8, dtype=torch.float32).reshape(
-                effective_rank, 8
-            )
-            + 3
-            + index
-        ) / 100
-        b = (
-            torch.arange(6 * effective_rank, dtype=torch.float32).reshape(
-                6, effective_rank
-            )
-            + 7
-            + index
-        ) / 120
+        a = (torch.arange(effective_rank * 8, dtype=torch.float32).reshape(effective_rank, 8) + 3 + index) / 100
+        b = (torch.arange(6 * effective_rank, dtype=torch.float32).reshape(6, effective_rank) + 7 + index) / 120
         source_factors[name] = (a, b)
         mapping = LocalMapping()
         tasks.append(
@@ -146,9 +126,7 @@ def test_bridge_export_to_vllm_activation_preserves_exact_normalized_deltas(
     monkeypatch.setattr(
         bridge,
         "_get_base_hf_param_names_for_adapter",
-        lambda _registry, prefix, _adapter_key, _suffix: [
-            f"base_model.model.{prefix}.weight"
-        ],
+        lambda _registry, prefix, _adapter_key, _suffix: [f"base_model.model.{prefix}.weight"],
     )
     records = list(
         AutoBridge.export_local_adapter_weights(
@@ -156,9 +134,7 @@ def test_bridge_export_to_vllm_activation_preserves_exact_normalized_deltas(
             [SimpleNamespace(config=SimpleNamespace())],
         )
     )
-    source_tensors, sources = extract_lora_bridge_sources(
-        records, configured_rank=configured_rank
-    )
+    source_tensors, sources = extract_lora_bridge_sources(records, configured_rank=configured_rank)
     source_layout = LoRABridgeSourceLayout("adapter", sources)
     source_before = {key: tensor.clone() for key, tensor in source_tensors.items()}
 
@@ -207,23 +183,14 @@ def test_bridge_export_to_vllm_activation_preserves_exact_normalized_deltas(
                 packed = torch.empty(bucket.source_bytes // 4, dtype=torch.float32)
                 pack_lora_nccl_bucket_into(bucket, source_tensors, packed)
                 for pull, received in unpack_lora_nccl_bucket(bucket, packed).items():
-                    exact = source_tensors[pull.source_slice.key][
-                        pull.source_slice.indices
-                    ]
-                    assert torch.equal(
-                        received.view(torch.uint8), exact.contiguous().view(torch.uint8)
-                    )
+                    exact = source_tensors[pull.source_slice.key][pull.source_slice.indices]
+                    assert torch.equal(received.view(torch.uint8), exact.contiguous().view(torch.uint8))
                     received_before = received.clone()
                     assembler.copy(pull, received)
-                    assert torch.equal(
-                        received.view(torch.uint8), received_before.view(torch.uint8)
-                    )
+                    assert torch.equal(received.view(torch.uint8), received_before.view(torch.uint8))
             factors = assembler.finish()
 
-            source_pointers = {
-                tensor.untyped_storage().data_ptr()
-                for tensor in source_tensors.values()
-            }
+            source_pointers = {tensor.untyped_storage().data_ptr() for tensor in source_tensors.values()}
             for name, effective_rank in effective_ranks.items():
                 component_scales = {
                     source.component: source.value_scale
@@ -260,35 +227,22 @@ def test_bridge_export_to_vllm_activation_preserves_exact_normalized_deltas(
             assert manager.activate_adapter(1)
             for name, effective_rank in effective_ranks.items():
                 active_a, active_b = manager.modules[name]._get_lora_shard_buffers(0)[0]
-                actual_delta = (
-                    active_b[:, :configured_rank].float()
-                    @ active_a[:configured_rank].float()
-                )
+                actual_delta = active_b[:, :configured_rank].float() @ active_a[:configured_rank].float()
                 source_a, source_b = source_factors[name]
                 trainer_delta = (alpha / effective_rank) * (source_b @ source_a)
-                torch.testing.assert_close(
-                    actual_delta, trainer_delta, rtol=0.02, atol=0.02
-                )
+                torch.testing.assert_close(actual_delta, trainer_delta, rtol=0.02, atol=0.02)
 
             routed_a, routed_b = source_factors["routed_expert_proj"]
             correction = configured_rank / 4
             trainer_delta = (alpha / 4) * (routed_b @ routed_a)
             omitted = (alpha / configured_rank) * (routed_b @ routed_a)
-            doubled = (alpha / configured_rank) * (
-                (routed_b * correction * correction) @ routed_a
-            )
-            assert torch.linalg.vector_norm(trainer_delta) / torch.linalg.vector_norm(
-                omitted
-            ) == pytest.approx(8)
-            assert torch.linalg.vector_norm(doubled) / torch.linalg.vector_norm(
-                trainer_delta
-            ) == pytest.approx(8)
+            doubled = (alpha / configured_rank) * ((routed_b * correction * correction) @ routed_a)
+            assert torch.linalg.vector_norm(trainer_delta) / torch.linalg.vector_norm(omitted) == pytest.approx(8)
+            assert torch.linalg.vector_norm(doubled) / torch.linalg.vector_norm(trainer_delta) == pytest.approx(8)
         finally:
             destroy_model_parallel()
             destroy_distributed_environment()
 
     for key, tensor in source_tensors.items():
         assert tensor.dtype is torch.float32
-        assert torch.equal(
-            tensor.view(torch.uint8), source_before[key].view(torch.uint8)
-        )
+        assert torch.equal(tensor.view(torch.uint8), source_before[key].view(torch.uint8))

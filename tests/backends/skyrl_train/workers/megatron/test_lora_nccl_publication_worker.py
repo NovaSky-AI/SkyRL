@@ -115,9 +115,7 @@ async def test_non_native_broadcast_preserves_file_sync(monkeypatch):
 
     await worker.broadcast_to_inference_engines(client, inference_config)
 
-    worker._save_lora_adapters_and_sync.assert_awaited_once_with(
-        "/adapter", client, lora_name="adapter"
-    )
+    worker._save_lora_adapters_and_sync.assert_awaited_once_with("/adapter", client, lora_name="adapter")
     worker._publish_lora_nccl_adapter.assert_not_awaited()
 
 
@@ -130,9 +128,7 @@ class _Session:
 
     def send(self, request, tensors):
         self.generations.append(request.generation)
-        assert set(tensors) == {
-            "decoder.layers.0.mlp.linear_fc2.adapter.linear_out.weight"
-        }
+        assert set(tensors) == {"decoder.layers.0.mlp.linear_fc2.adapter.linear_out.weight"}
         self.values.append(next(iter(tensors.values())).flatten()[0].item())
         if request.generation == self.fail_generation:
             raise RuntimeError("injected send failure")
@@ -178,9 +174,7 @@ def publication_environment(monkeypatch):
     from skyrl.backends.skyrl_train.workers.megatron import megatron_worker
 
     worker = object.__new__(MegatronPolicyWorkerBase)
-    worker.actor_module = SimpleNamespace(
-        adapter_weight=torch.ones((2, 1), dtype=torch.float32)
-    )
+    worker.actor_module = SimpleNamespace(adapter_weight=torch.ones((2, 1), dtype=torch.float32))
     exported_weight_refs = []
 
     def export_local_adapter_weights(actor_module):
@@ -189,9 +183,7 @@ def publication_environment(monkeypatch):
         exported_weight_refs.append(weakref.ref(record.weight))
         return [record]
 
-    worker.bridge = SimpleNamespace(
-        export_local_adapter_weights=export_local_adapter_weights
-    )
+    worker.bridge = SimpleNamespace(export_local_adapter_weights=export_local_adapter_weights)
     worker.lora_cls = SimpleNamespace(dim=32)
     worker._logical_model_path = "model"
 
@@ -230,9 +222,7 @@ def publication_environment(monkeypatch):
     monkeypatch.setattr(
         peft_bridge,
         "build_adapter_config_dict",
-        lambda lora_cls, target_modules, base_model_name_or_path: {
-            "target_modules": target_modules
-        },
+        lambda lora_cls, target_modules, base_model_name_or_path: {"target_modules": target_modules},
     )
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
@@ -412,9 +402,7 @@ async def test_delete_adapter_closes_and_removes_native_publication_state(
 ):
     worker, client, sessions, _ = publication_environment
     worker.adapter_store = MagicMock()
-    worker._resolve_lora_sync_target = MagicMock(
-        return_value=("adapter", "/must/not/be/used")
-    )
+    worker._resolve_lora_sync_target = MagicMock(return_value=("adapter", "/must/not/be/used"))
     worker._is_lora_sync_writer_rank = MagicMock(return_value=False)
 
     await worker._publish_lora_nccl_adapter(client, "adapter")

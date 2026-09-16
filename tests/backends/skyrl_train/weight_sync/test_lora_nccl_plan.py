@@ -52,17 +52,12 @@ def test_plan_routes_only_requested_slices_and_has_stable_metadata():
 
     assert plan.plan_digest == repeated.plan_digest
     assert plan.inference_ranks == (0, 1)
-    assert [
-        (bucket.source_rank, bucket.inference_rank, bucket.source_bytes)
-        for bucket in plan.buckets
-    ] == [
+    assert [(bucket.source_rank, bucket.inference_rank, bucket.source_bytes) for bucket in plan.buckets] == [
         (0, 0, 32),
         (1, 0, 16),
         (1, 1, 32),
     ]
-    assert [
-        (group.source_rank, group.inference_ranks) for group in plan.source_groups
-    ] == [
+    assert [(group.source_rank, group.inference_ranks) for group in plan.source_groups] == [
         (0, (0,)),
         (1, (0, 1)),
     ]
@@ -100,17 +95,13 @@ def test_plan_digest_and_buckets_do_not_depend_on_pull_order():
 
 def test_plan_digest_tracks_receiver_value_scale():
     unscaled = build_lora_nccl_plan({0: _consumer_plan(_pull(0, "a", (0,), (2,)))}, 32)
-    scaled = build_lora_nccl_plan(
-        {0: _consumer_plan(_pull(0, "a", (0,), (2,), (8, 1)))}, 32
-    )
+    scaled = build_lora_nccl_plan({0: _consumer_plan(_pull(0, "a", (0,), (2,), (8, 1)))}, 32)
 
     assert unscaled.plan_digest != scaled.plan_digest
 
 
 def test_route_rejects_omitted_or_noncanonical_value_scale():
-    route = LoRANcclConsumerRoute.from_consumer_plan(
-        0, _consumer_plan(_pull(0, "a", (0,), (2,)))
-    )
+    route = LoRANcclConsumerRoute.from_consumer_plan(0, _consumer_plan(_pull(0, "a", (0,), (2,))))
     payload = route.to_json_dict()
     del payload["pulls"][0]["value_scale"]
 
@@ -200,10 +191,7 @@ def test_plan_receipt_counts_replication_and_edges():
     assert receipt.unique_source_bytes == 32
     assert receipt.transmitted_bytes == 64
     assert receipt.replication_bytes == 32
-    assert [
-        (edge.source_rank, edge.inference_rank, edge.transmitted_bytes)
-        for edge in receipt.edges
-    ] == [
+    assert [(edge.source_rank, edge.inference_rank, edge.transmitted_bytes) for edge in receipt.edges] == [
         (0, 0, 32),
         (0, 1, 32),
     ]

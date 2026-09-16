@@ -46,34 +46,22 @@ def reconstruct_lora_bridge_tensors(
             raise ValueError(f"Bridge source {key!r} has inconsistent shard metadata")
         local_by_ep: list[torch.Tensor] = []
         for ep_rank in range(first.expert_parallel_size):
-            ep_sources = [
-                source for source in group if source.expert_parallel_rank == ep_rank
-            ]
+            ep_sources = [source for source in group if source.expert_parallel_rank == ep_rank]
             if not ep_sources:
                 raise ValueError(f"Bridge source {key!r} is missing EP rank {ep_rank}")
             shards = []
             expected_tp_ranks = range(first.tensor_parallel_size)
             for tp_rank in expected_tp_ranks:
-                matching = [
-                    source
-                    for source in ep_sources
-                    if source.tensor_parallel_rank == tp_rank
-                ]
+                matching = [source for source in ep_sources if source.tensor_parallel_rank == tp_rank]
                 if len(matching) != 1:
-                    raise ValueError(
-                        f"Bridge source {key!r} has invalid TP ownership for rank {tp_rank}"
-                    )
+                    raise ValueError(f"Bridge source {key!r} has invalid TP ownership for rank {tp_rank}")
                 source = matching[0]
                 tensor_key = (key, tp_rank, ep_rank)
                 tensor = tensors.get(tensor_key)
                 if tensor is None:
-                    raise ValueError(
-                        f"Bridge source {key!r} is missing pulled tensor {tensor_key!r}"
-                    )
+                    raise ValueError(f"Bridge source {key!r} is missing pulled tensor {tensor_key!r}")
                 if tensor.dtype is not torch.float32:
-                    raise ValueError(
-                        f"lora_transport requires float32 Bridge source {key!r}, got {tensor.dtype}"
-                    )
+                    raise ValueError(f"lora_transport requires float32 Bridge source {key!r}, got {tensor.dtype}")
                 if tuple(tensor.shape) != source.shape:
                     raise ValueError(
                         f"Bridge source {key!r} tensor {tensor_key!r} has shape {tuple(tensor.shape)}, "
@@ -100,9 +88,7 @@ def _emit_reconstructed_lora_tensors(
     """Apply a Bridge-declared post-assembly transform to one source tensor."""
     if source.transform == "identity":
         if len(source.hf_param_names) != 1:
-            raise ValueError(
-                f"Bridge source {source.key!r} identity transform requires one HF name"
-            )
+            raise ValueError(f"Bridge source {source.key!r} identity transform requires one HF name")
         result[source.hf_param_names[0]] = tensor
         return
     if source.transform == "replicate":
@@ -111,18 +97,14 @@ def _emit_reconstructed_lora_tensors(
         return
     if source.transform == "split_gated_mlp":
         if len(source.hf_param_names) != 2:
-            raise ValueError(
-                f"Bridge source {source.key!r} gated transform requires two HF names"
-            )
+            raise ValueError(f"Bridge source {source.key!r} gated transform requires two HF names")
         gate, up = torch.chunk(tensor, 2, dim=0)
         result[source.hf_param_names[0]] = gate
         result[source.hf_param_names[1]] = up
         return
     if source.transform == "split_qkv":
         if len(source.hf_param_names) != 3:
-            raise ValueError(
-                f"Bridge source {source.key!r} QKV transform requires three HF names"
-            )
+            raise ValueError(f"Bridge source {source.key!r} QKV transform requires three HF names")
         q, k, v = _split_qkv_lora_tensor(tensor, dict(source.transform_config))
         result[source.hf_param_names[0]] = q
         result[source.hf_param_names[1]] = k
@@ -130,9 +112,7 @@ def _emit_reconstructed_lora_tensors(
         return
     if source.transform == "split_gdn_in_proj":
         if len(source.hf_param_names) != 4:
-            raise ValueError(
-                f"Bridge source {source.key!r} GDN transform requires four HF names"
-            )
+            raise ValueError(f"Bridge source {source.key!r} GDN transform requires four HF names")
         parts = _split_gdn_lora_tensor(
             tensor,
             dict(source.transform_config),
@@ -141,9 +121,7 @@ def _emit_reconstructed_lora_tensors(
         for name, part in zip(source.hf_param_names, parts, strict=True):
             result[name] = part
         return
-    raise ValueError(
-        f"Bridge source {source.key!r} requires {source.transform!r} conversion with the Megatron config"
-    )
+    raise ValueError(f"Bridge source {source.key!r} requires {source.transform!r} conversion with the Megatron config")
 
 
 def _split_qkv_lora_tensor(
@@ -155,14 +133,11 @@ def _split_qkv_lora_tensor(
     qkv_total_dim = sum(len(output_indices) for output_indices in indices)
     if tensor.ndim != 2 or tensor.shape[0] != qkv_total_dim * head_size:
         raise ValueError(
-            f"QKV LoRA source has shape {tuple(tensor.shape)}, expected first dimension "
-            f"{qkv_total_dim * head_size}"
+            f"QKV LoRA source has shape {tuple(tensor.shape)}, expected first dimension " f"{qkv_total_dim * head_size}"
         )
     feature_dim = tensor.shape[1]
     qkv = tensor.view(qkv_total_dim, head_size, feature_dim)
-    return tuple(
-        qkv[list(output_indices)].reshape(-1, feature_dim) for output_indices in indices
-    )
+    return tuple(qkv[list(output_indices)].reshape(-1, feature_dim) for output_indices in indices)
 
 
 def _split_gdn_lora_tensor(
@@ -184,27 +159,21 @@ def _split_gdn_lora_tensor(
     num_qk_heads = int(config["linear_num_key_heads"])
     num_v_heads = int(config["linear_num_value_heads"])
     if num_qk_heads % tensor_parallel_size or num_v_heads % tensor_parallel_size:
-        raise ValueError(
-            "GDN LoRA source head counts are not divisible by tensor parallel size"
-        )
+        raise ValueError("GDN LoRA source head counts are not divisible by tensor parallel size")
     feature_dim = tensor.shape[-1]
     qk_local = qk_head_dim * (num_qk_heads // tensor_parallel_size)
     v_local = v_head_dim * (num_v_heads // tensor_parallel_size)
     v_heads_local = num_v_heads // tensor_parallel_size
     rows_per_rank = 2 * qk_local + 2 * v_local + 2 * v_heads_local
     if tensor.ndim != 2 or tensor.shape[0] != tensor_parallel_size * rows_per_rank:
-        raise ValueError(
-            "GDN LoRA source shape does not match its Bridge transform config"
-        )
+        raise ValueError("GDN LoRA source shape does not match its Bridge transform config")
     packed = tensor.reshape(tensor_parallel_size, rows_per_rank, feature_dim)
     q, k, v, z, b, a = torch.split(
         packed,
         [qk_local, qk_local, v_local, v_local, v_heads_local, v_heads_local],
         dim=1,
     )
-    q, k, v, z, b, a = [
-        part.reshape(num_qk_heads, -1, feature_dim) for part in (q, k, v, z, b, a)
-    ]
+    q, k, v, z, b, a = [part.reshape(num_qk_heads, -1, feature_dim) for part in (q, k, v, z, b, a)]
     qkvz = torch.cat([q, k, v, z], dim=1)
     ba = torch.cat([b, a], dim=1)
     v_per_group = num_v_heads // num_qk_heads
@@ -239,21 +208,13 @@ def assemble_lora_consumer_factors(
     if set(pulled) != set(plan.pulls):
         raise ValueError("Pulled slices must match the complete consumer plan")
     for pull, tensor in pulled.items():
-        shape = tuple(
-            b - a for a, b in zip(pull.source_slice.starts, pull.source_slice.stops)
-        )
+        shape = tuple(b - a for a, b in zip(pull.source_slice.starts, pull.source_slice.stops))
         if tensor.dtype != torch.float32 or tuple(tensor.shape) != shape:
             raise ValueError("Pulled slices must preserve exact FP32 shape and dtype")
     factors = {
         module.module_name: (
-            [
-                torch.zeros(pair[0], dtype=torch.bfloat16, device=device)
-                for pair in module.factor_shapes
-            ],
-            [
-                torch.zeros(pair[1], dtype=torch.bfloat16, device=device)
-                for pair in module.factor_shapes
-            ],
+            [torch.zeros(pair[0], dtype=torch.bfloat16, device=device) for pair in module.factor_shapes],
+            [torch.zeros(pair[1], dtype=torch.bfloat16, device=device) for pair in module.factor_shapes],
         )
         for module in plan.receiver_plan.modules
     }
@@ -265,9 +226,7 @@ def assemble_lora_consumer_factors(
         if plan.pulls[copy.pull_index].value_scale != (1, 1):
             numerator, denominator = plan.pulls[copy.pull_index].value_scale
             source = source * (numerator / denominator)
-        destination[tuple(slice(a, b) for a, b in zip(copy.starts, copy.stops))].copy_(
-            source
-        )
+        destination[tuple(slice(a, b) for a, b in zip(copy.starts, copy.stops))].copy_(source)
     return factors
 
 

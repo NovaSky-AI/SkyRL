@@ -45,13 +45,8 @@ def test_extract_lora_bridge_sources_separates_fp32_storage_from_stable_metadata
     assert tensors.keys() == {sources[0].key}
     assert tensors[sources[0].key].dtype is torch.float32
     assert sources[0].shape == (2, 4)
-    assert sources[0].hf_param_names == (
-        "base_model.model.layers.0.mlp.gate_proj.lora_A.weight",
-    )
-    assert (
-        validate_lora_bridge_source_layout(sources)[(sources[0].key, 0, 0)]
-        == sources[0]
-    )
+    assert sources[0].hf_param_names == ("base_model.model.layers.0.mlp.gate_proj.lora_A.weight",)
+    assert validate_lora_bridge_source_layout(sources)[(sources[0].key, 0, 0)] == sources[0]
 
 
 def test_extract_lora_bridge_sources_rejects_duplicate_or_non_fp32_sources():
@@ -122,12 +117,8 @@ def test_reconstruct_lora_bridge_tensors_replicates_and_splits_gated_sources():
     result = reconstruct_lora_bridge_tensors((*sources_a, *sources_b), tensors)
 
     assert result["q.lora_A.weight"] is result["k.lora_A.weight"]
-    assert torch.equal(
-        result["gate.lora_B.weight"], torch.tensor([[0.0, 1.0], [2.0, 3.0]])
-    )
-    assert torch.equal(
-        result["up.lora_B.weight"], torch.tensor([[4.0, 5.0], [6.0, 7.0]])
-    )
+    assert torch.equal(result["gate.lora_B.weight"], torch.tensor([[0.0, 1.0], [2.0, 3.0]]))
+    assert torch.equal(result["up.lora_B.weight"], torch.tensor([[4.0, 5.0], [6.0, 7.0]]))
 
 
 def test_reconstruct_lora_bridge_tensors_splits_qkv_with_bridge_layout_config():
@@ -214,15 +205,9 @@ def test_reconstruct_lora_bridge_tensors_splits_gdn_with_bridge_layout_config():
             ]
         ),
     )
-    assert torch.equal(
-        result["z.lora_B.weight"], torch.tensor([[6.0, 7.0], [18.0, 19.0]])
-    )
-    assert torch.equal(
-        result["b.lora_B.weight"], torch.tensor([[8.0, 9.0], [20.0, 21.0]])
-    )
-    assert torch.equal(
-        result["a.lora_B.weight"], torch.tensor([[10.0, 11.0], [22.0, 23.0]])
-    )
+    assert torch.equal(result["z.lora_B.weight"], torch.tensor([[6.0, 7.0], [18.0, 19.0]]))
+    assert torch.equal(result["b.lora_B.weight"], torch.tensor([[8.0, 9.0], [20.0, 21.0]]))
+    assert torch.equal(result["a.lora_B.weight"], torch.tensor([[10.0, 11.0], [22.0, 23.0]]))
 
 
 def test_bridge_source_layout_digest_tracks_rank_ownership_and_rejects_duplicates():
@@ -231,19 +216,9 @@ def test_bridge_source_layout_digest_tracks_rank_ownership_and_rejects_duplicate
     layout = LoRABridgeSourceLayout("adapter", (*first_sources, *second_sources))
 
     _, remapped_sources = _extract([_record(tensor_parallel_rank=1)], source_rank=2)
-    assert (
-        layout.layout_digest
-        != LoRABridgeSourceLayout(
-            "adapter", (*first_sources, *remapped_sources)
-        ).layout_digest
-    )
-    changed_scale = tuple(
-        replace(source, effective_rank=16) for source in layout.sources
-    )
-    assert (
-        layout.layout_digest
-        != LoRABridgeSourceLayout("adapter", changed_scale).layout_digest
-    )
+    assert layout.layout_digest != LoRABridgeSourceLayout("adapter", (*first_sources, *remapped_sources)).layout_digest
+    changed_scale = tuple(replace(source, effective_rank=16) for source in layout.sources)
+    assert layout.layout_digest != LoRABridgeSourceLayout("adapter", changed_scale).layout_digest
     with pytest.raises(ValueError, match="ownership"):
         LoRABridgeSourceLayout(
             "adapter",
@@ -279,6 +254,4 @@ def test_bridge_source_scaling_supports_rational_rank_ratios_and_rejects_rank_ex
     linear_out = replace(layout.sources[0], component="linear_out")
     assert linear_out.value_scale == (32, 7)
     with pytest.raises(ValueError, match="exceeds configured rank"):
-        LoRABridgeSourceLayout(
-            "adapter", (replace(layout.sources[0], effective_rank=33),)
-        )
+        LoRABridgeSourceLayout("adapter", (replace(layout.sources[0], effective_rank=33),))

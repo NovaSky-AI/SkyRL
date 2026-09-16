@@ -26,15 +26,11 @@ def discard_staged_vllm_lora_model(model_runner: Any, adapter_id: int) -> None:
 def _get_vllm_lora_manager(model_runner: Any) -> Any:
     manager = getattr(model_runner, "lora_manager", None)
     if manager is None:
-        raise RuntimeError(
-            "lora_transport requires a vLLM model runner with LoRA enabled"
-        )
+        raise RuntimeError("lora_transport requires a vLLM model runner with LoRA enabled")
     return manager
 
 
-def get_vllm_local_lora_plan(
-    model_runner: Any, adapter_config: Mapping[str, Any]
-) -> Any:
+def get_vllm_local_lora_plan(model_runner: Any, adapter_config: Mapping[str, Any]) -> Any:
     """Bind adapter targets to the actual vLLM rank's local buffers."""
     from vllm.lora.peft_helper import PEFTHelper
 
@@ -47,9 +43,7 @@ def get_vllm_local_lora_plan(
             "activate_adapter",
         )
     ):
-        raise RuntimeError(
-            "lora_transport requires vLLM local-adapter plan and registration APIs"
-        )
+        raise RuntimeError("lora_transport requires vLLM local-adapter plan and registration APIs")
     return manager.get_local_adapter_plan(PEFTHelper.from_dict(dict(adapter_config)))
 
 

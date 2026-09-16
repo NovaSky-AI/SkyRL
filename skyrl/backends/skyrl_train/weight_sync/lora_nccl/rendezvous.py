@@ -19,9 +19,7 @@ from .transport import (
     LoRANcclSourceSession,
 )
 
-LoRANcclCommunicatorFactory = Callable[
-    [str, int, int, int, torch.device | str], LoRANcclCommunicator
-]
+LoRANcclCommunicatorFactory = Callable[[str, int, int, int, torch.device | str], LoRANcclCommunicator]
 
 
 @dataclass(frozen=True)
@@ -53,9 +51,7 @@ class LoRANcclRendezvous:
             (self.inference_ranks, "inference"),
         ):
             if not ranks or ranks != tuple(sorted(set(ranks))):
-                raise ValueError(
-                    f"LoRA NCCL {label} ranks must be sorted, unique, and nonempty"
-                )
+                raise ValueError(f"LoRA NCCL {label} ranks must be sorted, unique, and nonempty")
             if ranks[0] < 0:
                 raise ValueError(f"LoRA NCCL {label} ranks must be non-negative")
         if not self.master_address:
@@ -73,18 +69,14 @@ class LoRANcclRendezvous:
         try:
             return self.source_ranks.index(source_rank)
         except ValueError as error:
-            raise ValueError(
-                f"Trainer rank {source_rank} is not in the LoRA NCCL group"
-            ) from error
+            raise ValueError(f"Trainer rank {source_rank} is not in the LoRA NCCL group") from error
 
     def get_inference_peer_rank(self, inference_rank: int) -> int:
         """Map an inference rank to its dense communicator rank."""
         try:
             return len(self.source_ranks) + self.inference_ranks.index(inference_rank)
         except ValueError as error:
-            raise ValueError(
-                f"Inference rank {inference_rank} is not in the LoRA NCCL group"
-            ) from error
+            raise ValueError(f"Inference rank {inference_rank} is not in the LoRA NCCL group") from error
 
     @classmethod
     def from_plan(
@@ -149,10 +141,7 @@ def open_lora_nccl_source_session(
         rendezvous.plan_digest,
         rendezvous.source_layout_digest,
         communicator,
-        {
-            rank: rendezvous.get_inference_peer_rank(rank)
-            for rank in source_group.inference_ranks
-        },
+        {rank: rendezvous.get_inference_peer_rank(rank) for rank in source_group.inference_ranks},
         device,
     )
 

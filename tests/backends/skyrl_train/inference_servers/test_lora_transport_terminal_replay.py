@@ -7,9 +7,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-pytest.importorskip(
-    "vllm", reason="native LoRA terminal replay is installed on the vLLM server actor"
-)
+pytest.importorskip("vllm", reason="native LoRA terminal replay is installed on the vLLM server actor")
 pytestmark = pytest.mark.vllm
 
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (  # noqa: E402
@@ -78,16 +76,12 @@ async def test_terminal_http_replays_preserve_restored_route_and_newer_transacti
     )
     app.state.openai_serving_models = models
     layout = _create_layout()
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app), base_url="http://example.com"
-    ) as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://example.com") as client:
 
         async def stage(generation):
             body = {
                 "lora_name": "adapter",
-                "request": LoRAUpdateRequest.from_layout(
-                    layout, generation
-                ).to_json_dict(),
+                "request": LoRAUpdateRequest.from_layout(layout, generation).to_json_dict(),
                 "transport": "nccl",
             }
             response = await client.post("/skyrl/v1/stage_lora_nccl_adapter", json=body)
@@ -95,9 +89,7 @@ async def test_terminal_http_replays_preserve_restored_route_and_newer_transacti
             return {**body, "adapter_id": response.json()["lora_int_id"]}
 
         async def phase(name, body):
-            return await client.post(
-                f"/skyrl/v1/{name}_lora_transport_adapter", json=body
-            )
+            return await client.post(f"/skyrl/v1/{name}_lora_transport_adapter", json=body)
 
         initial = await stage(0)
         assert (await phase("activate", initial)).status_code == 200
@@ -133,32 +125,23 @@ async def test_terminal_http_replays_preserve_restored_route_and_newer_transacti
         assert (await phase("rollback", failed)).status_code == 500
         assert models.lora_requests["adapter"] is new_route
         assert app.state.skyrl_lora_transport_previous_requests == previous_requests
-        assert (
-            app.state.skyrl_lora_transport_lifecycle._staged["adapter"][1]
-            == later["adapter_id"]
-        )
+        assert app.state.skyrl_lora_transport_lifecycle._staged["adapter"][1] == later["adapter_id"]
 
         assert (await phase("rollback", later)).status_code == 200
-        response = await client.post(
-            "/skyrl/v1/unload_lora_transport_adapter", json={"lora_name": "adapter"}
-        )
+        response = await client.post("/skyrl/v1/unload_lora_transport_adapter", json={"lora_name": "adapter"})
         assert response.status_code == 200
         assert "adapter" not in models.lora_requests
         assert "adapter" not in app.state.skyrl_lora_transport_previous_requests
         calls_after_unload = list(calls)
         assert (
-            await client.post(
-                "/skyrl/v1/unload_lora_transport_adapter", json={"lora_name": "adapter"}
-            )
+            await client.post("/skyrl/v1/unload_lora_transport_adapter", json={"lora_name": "adapter"})
         ).status_code == 200
         assert calls == calls_after_unload
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["lost_response", "partial_stage_cleanup"])
-async def test_fleet_recovers_unacknowledged_stage_without_losing_previous_route(
-    monkeypatch, failure
-):
+async def test_fleet_recovers_unacknowledged_stage_without_losing_previous_route(monkeypatch, failure):
     layout = _create_layout()
     request = LoRAUpdateRequest.from_layout(layout, 1)
     apps, models_by_url, calls = {}, {}, []
@@ -170,15 +153,10 @@ async def test_fleet_recovers_unacknowledged_stage_without_losing_previous_route
 
         async def collective_rpc(method, kwargs, server=url):
             calls.append((server, method, kwargs))
-            if (
-                failures_enabled
-                and server == "http://server-1.example.com"
-                and failure == "partial_stage_cleanup"
-            ):
+            if failures_enabled and server == "http://server-1.example.com" and failure == "partial_stage_cleanup":
                 if method == "stage_lora_nccl_adapter" or (
                     method == "discard_lora_transport_adapter"
-                    and sum(item[0] == server and item[1] == method for item in calls)
-                    == 1
+                    and sum(item[0] == server and item[1] == method for item in calls) == 1
                 ):
                     raise RuntimeError("injected staging cleanup failure")
 
@@ -187,17 +165,13 @@ async def test_fleet_recovers_unacknowledged_stage_without_losing_previous_route
         models = SimpleNamespace(
             lora_requests={},
             lora_resolver_lock=defaultdict(asyncio.Lock),
-            lora_id_counter=SimpleNamespace(
-                inc=lambda amount, counter=ids: next(counter)
-            ),
+            lora_id_counter=SimpleNamespace(inc=lambda amount, counter=ids: next(counter)),
         )
         app.state.openai_serving_models = models
         apps[url], models_by_url[url] = app, models
 
     async def call_http(url, endpoint, payload):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(apps[url]), base_url=url
-        ) as http:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(apps[url]), base_url=url) as http:
             response = await http.post(endpoint, json=payload)
             response.raise_for_status()
             return url, {"status": response.status_code, "body": response.json()}
@@ -212,9 +186,7 @@ async def test_fleet_recovers_unacknowledged_stage_without_losing_previous_route
         payload = {**initial, "adapter_id": response["body"]["lora_int_id"]}
         for phase in ("activate", "commit"):
             await call_http(url, f"/skyrl/v1/{phase}_lora_transport_adapter", payload)
-    previous = {
-        url: models.lora_requests["adapter"] for url, models in models_by_url.items()
-    }
+    previous = {url: models.lora_requests["adapter"] for url, models in models_by_url.items()}
     failures_enabled = True
 
     async def call_server(url, endpoint, payload):
