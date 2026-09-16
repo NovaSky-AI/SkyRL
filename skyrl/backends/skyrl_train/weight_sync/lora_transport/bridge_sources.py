@@ -17,9 +17,7 @@ class LoRABridgeSource:
     source_rank: int
     hf_param_names: tuple[str, ...]
     component: Literal["linear_in", "linear_out"]
-    transform: Literal[
-        "identity", "replicate", "split_qkv", "split_gated_mlp", "split_gdn_in_proj"
-    ]
+    transform: Literal["identity", "replicate", "split_qkv", "split_gated_mlp", "split_gdn_in_proj"]
     shape: tuple[int, ...]
     tensor_parallel_axis: int | None
     tensor_parallel_rank: int
@@ -79,9 +77,7 @@ class LoRABridgeSourceLayout:
                     expert_parallel_axis=source["expert_parallel_axis"],
                     expert_parallel_rank=source["expert_parallel_rank"],
                     expert_parallel_size=source["expert_parallel_size"],
-                    transform_config=tuple(
-                        (name, value) for name, value in source["transform_config"]
-                    ),
+                    transform_config=tuple((name, value) for name, value in source["transform_config"]),
                     alpha=source["alpha"],
                     configured_rank=source["configured_rank"],
                     effective_rank=source["effective_rank"],
@@ -97,9 +93,7 @@ class LoRABridgeSourceLayout:
         if not self.adapter_name:
             raise ValueError("LoRA Bridge layouts require a non-empty adapter name")
         if self.source_dtype != "float32":
-            raise ValueError(
-                f"lora_transport requires float32 Bridge sources, got {self.source_dtype!r}"
-            )
+            raise ValueError(f"lora_transport requires float32 Bridge sources, got {self.source_dtype!r}")
         sources = tuple(sorted(self.sources, key=_bridge_source_sort_key))
         if sources != self.sources:
             raise ValueError("LoRA Bridge layout sources must be in canonical order")
@@ -128,13 +122,9 @@ def extract_lora_bridge_sources(
     the control plane.
     """
     if source_rank < 0:
-        raise ValueError(
-            f"lora_transport Bridge source rank must be non-negative, got {source_rank}"
-        )
+        raise ValueError(f"lora_transport Bridge source rank must be non-negative, got {source_rank}")
     if configured_rank <= 0:
-        raise ValueError(
-            f"lora_transport configured rank must be positive, got {configured_rank}"
-        )
+        raise ValueError(f"lora_transport configured rank must be positive, got {configured_rank}")
     tensors: dict[str, torch.Tensor] = {}
     sources: list[LoRABridgeSource] = []
     for record in records:
@@ -143,13 +133,9 @@ def extract_lora_bridge_sources(
             raise ValueError(f"Bridge adapter records contain duplicate source {key!r}")
         tensor = record.weight
         if tensor.dtype is not torch.float32:
-            raise ValueError(
-                f"lora_transport requires float32 Bridge source {key!r}, got {tensor.dtype}"
-            )
+            raise ValueError(f"lora_transport requires float32 Bridge source {key!r}, got {tensor.dtype}")
         if not tensor.is_contiguous():
-            raise ValueError(
-                f"lora_transport requires contiguous Bridge source {key!r}"
-            )
+            raise ValueError(f"lora_transport requires contiguous Bridge source {key!r}")
         if not record.hf_param_names:
             raise ValueError(f"Bridge adapter source {key!r} has no HF parameter names")
         tensors[key] = tensor
@@ -186,10 +172,7 @@ def validate_lora_bridge_source_layout(
     source_tuple = tuple(sources)
     if not source_tuple:
         raise ValueError("lora_transport requires at least one Bridge adapter source")
-    layout = {
-        (source.key, source.tensor_parallel_rank, source.expert_parallel_rank): source
-        for source in source_tuple
-    }
+    layout = {(source.key, source.tensor_parallel_rank, source.expert_parallel_rank): source for source in source_tuple}
     if len(layout) != len(source_tuple):
         raise ValueError("lora_transport Bridge source shard ownership must be unique")
     for source in source_tuple:
@@ -202,28 +185,18 @@ def _validate_lora_bridge_source(source: LoRABridgeSource) -> None:
     if source.source_rank < 0:
         raise ValueError(f"Bridge source {source.key!r} has invalid source rank")
     if any(dimension <= 0 for dimension in source.shape):
-        raise ValueError(
-            f"Bridge source {source.key!r} has invalid shape {source.shape!r}"
-        )
+        raise ValueError(f"Bridge source {source.key!r} has invalid shape {source.shape!r}")
     if source.tensor_parallel_size <= 0 or source.expert_parallel_size <= 0:
         raise ValueError(f"Bridge source {source.key!r} has invalid parallel sizes")
     scaling_values = (source.alpha, source.configured_rank, source.effective_rank)
     if any(type(value) is not int or value <= 0 for value in scaling_values):
-        raise ValueError(
-            f"Bridge source {source.key!r} has invalid LoRA scaling metadata"
-        )
+        raise ValueError(f"Bridge source {source.key!r} has invalid LoRA scaling metadata")
     if source.effective_rank > source.configured_rank:
-        raise ValueError(
-            f"Bridge source {source.key!r} effective rank exceeds configured rank"
-        )
+        raise ValueError(f"Bridge source {source.key!r} effective rank exceeds configured rank")
     if not 0 <= source.tensor_parallel_rank < source.tensor_parallel_size:
-        raise ValueError(
-            f"Bridge source {source.key!r} has invalid tensor-parallel rank"
-        )
+        raise ValueError(f"Bridge source {source.key!r} has invalid tensor-parallel rank")
     if not 0 <= source.expert_parallel_rank < source.expert_parallel_size:
-        raise ValueError(
-            f"Bridge source {source.key!r} has invalid expert-parallel rank"
-        )
+        raise ValueError(f"Bridge source {source.key!r} has invalid expert-parallel rank")
 
 
 def _validate_complete_lora_bridge_source_layout(
@@ -255,10 +228,7 @@ def _validate_complete_lora_bridge_source_layout(
             for tensor_parallel_rank in range(first.tensor_parallel_size)
             for expert_parallel_rank in range(first.expert_parallel_size)
         }
-        actual = {
-            (source.tensor_parallel_rank, source.expert_parallel_rank)
-            for source in group
-        }
+        actual = {(source.tensor_parallel_rank, source.expert_parallel_rank) for source in group}
         if actual != expected:
             raise ValueError(f"Bridge source {key!r} is missing shard ownership")
 
@@ -282,37 +252,23 @@ def get_qkv_lora_head_mapping(
     num_heads = int(config["num_attention_heads"])
     num_groups = int(config["num_query_groups"])
     if num_heads <= 0 or num_groups <= 0 or num_heads % num_groups:
-        raise ValueError(
-            "QKV LoRA source requires evenly grouped positive attention heads"
-        )
+        raise ValueError("QKV LoRA source requires evenly grouped positive attention heads")
     head_size = int(config["kv_channels"] or int(config["hidden_size"]) // num_heads)
     if head_size <= 0:
         raise ValueError("QKV LoRA source requires a positive head size")
     heads_per_group = num_heads // num_groups
     attention_output_gate = bool(config.get("attention_output_gate", False))
-    total_heads_per_group = (
-        2 * heads_per_group + 2 if attention_output_gate else heads_per_group + 2
-    )
+    total_heads_per_group = 2 * heads_per_group + 2 if attention_output_gate else heads_per_group + 2
     q_indices = tuple(
-        total_heads_per_group * group + head
-        for group in range(num_groups)
-        for head in range(heads_per_group)
+        total_heads_per_group * group + head for group in range(num_groups) for head in range(heads_per_group)
     )
-    k_indices = tuple(
-        total_heads_per_group * group + total_heads_per_group - 2
-        for group in range(num_groups)
-    )
-    v_indices = tuple(
-        total_heads_per_group * group + total_heads_per_group - 1
-        for group in range(num_groups)
-    )
+    k_indices = tuple(total_heads_per_group * group + total_heads_per_group - 2 for group in range(num_groups))
+    v_indices = tuple(total_heads_per_group * group + total_heads_per_group - 1 for group in range(num_groups))
     if attention_output_gate:
         z_indices = tuple(
             total_heads_per_group * group + heads_per_group + head
             for group in range(num_groups)
             for head in range(heads_per_group)
         )
-        q_indices = tuple(
-            index for pair in zip(q_indices, z_indices, strict=True) for index in pair
-        )
+        q_indices = tuple(index for pair in zip(q_indices, z_indices, strict=True) for index in pair)
     return head_size, (q_indices, k_indices, v_indices)

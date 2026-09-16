@@ -27,8 +27,6 @@ def convert_moe_experts_lora_to_vllm(
             if key.endswith(".lora_A.weight"):
                 tensor = tensor.reshape(-1, tensor.shape[-1]).contiguous()
             elif key.endswith(".lora_B.weight"):
-                tensor = (
-                    tensor.permute(1, 2, 0).contiguous().reshape(tensor.shape[1], -1)
-                )
+                tensor = tensor.permute(1, 2, 0).contiguous().reshape(tensor.shape[1], -1)
         converted[converted_key] = tensor
     return converted
