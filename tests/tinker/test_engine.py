@@ -533,6 +533,13 @@ def continuous_engine(tmp_path):
     engine.backend = _FakeContinuousBackend()
     engine._continuous_sampling = True
     engine._sampler = None
+    # ``process_pending_requests_once`` reconciles profiling before it admits
+    # work.  Real construction initializes this to None when profiling is
+    # disabled; this fixture bypasses ``TinkerEngine.__init__``.
+    engine._profiler_cfg = None
+    engine._profiling_model_id = None
+    engine._profiling_steps = 0
+    engine._profiling_error = None
     engine._last_cleanup_time = time.time()
     return engine
 
