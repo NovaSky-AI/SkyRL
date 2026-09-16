@@ -505,6 +505,15 @@ class MegatronWorker:
                 "generator.inference_engine.language_model_only=true "
                 "(the vision tower stays frozen in the inference engine)."
             )
+        if self.is_vlm and getattr(hf_config_original, "model_type", None) == "qwen4_exp":
+            # Megatron-Bridge's Qwen4ExpBridge (Qwen3.8-Flash-Next) bridges the language model
+            # only: gated-residual streams, QSA, PLE and MoE go to GPTModel, the vision tower
+            # is never built.
+            raise ValueError(
+                "Qwen4-Exp (Qwen3.8-Flash-Next) checkpoints are supported text-only on the "
+                "Megatron backend: set trainer.policy.language_model_only=true and "
+                "generator.inference_engine.language_model_only=true."
+            )
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
