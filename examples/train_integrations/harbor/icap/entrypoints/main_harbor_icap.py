@@ -67,6 +67,11 @@ def start_capture(
 
     from inference_capture.service import CaptureService
 
+    # Registers `type="skyrl"`. capture speaks protocols, not engines, so this
+    # wire is ours; importing is what puts it in capture's registry. A separate
+    # `icap serve` needs ICAP_UPSTREAM_MODULES pointed at the same module.
+    from .. import upstream as _skyrl_upstream  # noqa: F401
+
     # `initdb` refuses an ungenerated locale, which several base images have.
     os.environ.setdefault("LANG", "C.utf8")
     os.environ.setdefault("LC_ALL", "C.utf8")
@@ -134,6 +139,9 @@ def capture_for_run(
         if not endpoint:
             raise RuntimeError("ICAP_INPROCESS=0 needs CAPTURE_ENDPOINT to point at `icap serve`")
         logger.info("inference-capture out-of-process at %s", endpoint)
+        # That process resolves the target type, not this one, so it needs the
+        # `skyrl` wire registered too:
+        #   icap serve -u examples.train_integrations.harbor.icap.upstream
         return RemoteCaptureService(endpoint)
 
     engine_init = cfg.generator.inference_engine.engine_init_kwargs
