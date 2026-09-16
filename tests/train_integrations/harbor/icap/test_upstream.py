@@ -18,7 +18,8 @@ import pytest
 from inference_capture.tokens.types import TokenUpstreamError
 from inference_capture.upstream import registry
 
-from . import upstream as _register  # noqa: F401  -- importing is registering
+# Importing is registering: this is the module under test.
+from examples.train_integrations.harbor.icap import upstream as _register  # noqa: F401
 
 
 @pytest.fixture

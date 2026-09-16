@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from .compose import compose, split_row
+from examples.train_integrations.harbor.icap.compose import compose, split_row
 
 
 def row(input_ids, loss_mask, *, logprobs=None, path_id="p0", **extra):
