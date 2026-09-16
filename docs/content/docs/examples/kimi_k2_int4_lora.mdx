@@ -33,15 +33,32 @@ LoRA, and bit-exact fake-INT4 quantization-aware training.
 - **Text-only training** (`language_model_only=true` on both the trainer and
   the inference engine): the vision tower stays frozen inside vLLM and is
   never built on the Megatron side.
+- **Capacity-normalized expert LoRA**
+  (`trainer.policy.megatron_config.lora_config.normalize_moe_lora=true`): the
+  384 routed experts get rank `rank // moe_router_topk` adapters (non-expert
+  layers keep the full rank) so the per-step PEFT export stays small enough to
+  write and hot-load on every engine.
 
 ## One-time setup
+
+Every node needs the repo checkout, the project venv, the HF cache and the
+BF16 masters at identical paths.
+
+**0) Install the `megatron` stack** into the project venv. The root `uv.lock`
+is CUDA-13 native (torch 2.13 cu130, vLLM 0.28, Transformer Engine 2.16; every
+CUDA library, cuDNN included, comes from pip), which is what Blackwell-Ultra
+(B300 / sm103) requires — NVIDIA driver R580 or newer:
+
+```bash
+uv sync --extra megatron
+```
 
 **1) Dequantize the INT4 release to BF16 masters** on every node (or a shared
 filesystem). This also verifies, tensor by tensor, that re-quantizing the
 masters reproduces the released INT4 grid bit-for-bit:
 
 ```bash
-uv run examples/train/megatron/dequantize_compressed_tensors_int4.py \
+uv run --isolated examples/train/megatron/dequantize_compressed_tensors_int4.py \
     --input <path-to-Kimi-K2.7-Code-snapshot> \
     --output /data/skyrl/models/Kimi-K2.7-Code-BF16
 ```
@@ -50,17 +67,30 @@ uv run examples/train/megatron/dequantize_compressed_tensors_int4.py \
 — use the original BF16 release as masters instead; a dequantized RTN grid is
 not its own fixed point and the script will fail loudly if you try.)
 
-**2) Download the math data** (any dataset/environment works; the reference
-script reuses the standard DAPO prep):
+**2) Download the math data** on the head node (any dataset/environment works;
+the reference script reuses the standard DAPO prep):
 
 ```bash
 bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 ```
 
-**3) Start Ray on both nodes** with the same repo checkout and venv path,
-then run the training script on the head node only. See the environment
-block in the run script for the CUDA-13 / cuDNN library paths that must be
-exported before `ray start` on every node.
+**3) Start Ray on both nodes** from the checkout, then run the training script
+on the head node only. The environment block at the bottom of the run script
+(`LD_LIBRARY_PATH` / `CUDNN_PATH` pointing into the venv's pip CUDA libraries,
+`SKYRL_LD_LIBRARY_PATH_EXPORT=1`, `UV_PROJECT_ENVIRONMENT`) plus any
+site-specific cross-node NCCL settings (`NCCL_SOCKET_IFNAME`, `NCCL_IB_HCA`,
+`GLOO_SOCKET_IFNAME`) must be exported in the shell that runs `ray start` on
+**every** node: Ray workers inherit the raylet's environment, and only
+`LD_LIBRARY_PATH` and the `SKYRL_*` / `UV_*` / `HF_*` variables are re-exported
+through the Ray runtime env.
+
+```bash
+export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+# head
+uv run --no-sync --extra megatron ray start --head --port=6379 --num-gpus=8
+# worker
+uv run --no-sync --extra megatron ray start --address=<head-ip>:6379 --num-gpus=8
+```
 
 ## Running
 
@@ -90,9 +120,21 @@ trainer.policy.model.fake_int4_qat.scale_divisor=7.0   # Kimi QAT convention
 trainer.policy.model.fake_int4_qat.q_min=-7
 trainer.policy.model.fake_int4_qat.bf16_base_path=/data/skyrl/models/Kimi-K2.7-Code-BF16
 trainer.policy.megatron_config.lora_config.merge_lora=false
+trainer.policy.megatron_config.lora_config.normalize_moe_lora=true
 trainer.policy.language_model_only=true
 generator.inference_engine.language_model_only=true
 trainer.flash_attn=false        # MLA + sample packing needs TE cuDNN fused attention
+```
+
+The script reads its scale knobs from the environment, so a quick end-to-end
+check of a fresh cluster is a matter of shrinking them (this is how the
+reference setup is smoke-tested before a real run):
+
+```bash
+LOGGER=console MAX_RESPONSE_LENGTH=2048 TRAIN_BATCH_SIZE=8 MINI_BATCH_SIZE=8 \
+N_SAMPLES_PER_PROMPT=4 \
+bash examples/train/megatron/run_megatron_dapo_kimi_k2.7_code_lora_int4_qat.sh \
+    trainer.max_training_steps=2
 ```
 
 `QAT_MODE=off bash ...` runs the ablation: the INT4 engine stays, but the
@@ -104,11 +146,32 @@ train/infer mismatch (same toggle as the Qwen3.6 INT4 study).
 - **Multi-node adapter sync**: with `merge_lora=false` the adapter files are
   written once per node (each vLLM worker reads `lora_sync_path` from its
   local filesystem), so no shared filesystem is required.
-- **Blackwell-Ultra (B300 / sm103)** needs the CUDA-13 dependency stack (the
-  cu12x vLLM wheels ship no sm103 kernel images): install it with
-  `bash deploy/cuda13/install.sh` (see `deploy/cuda13/README.md`; NVIDIA
-  driver >= R580 and a CUDA >= 13.0 toolkit required), and see the
-  environment block in the run script for the runtime library paths.
+- **Frozen-master offload**: under `colocate_all` the trainer's frozen BF16
+  masters (~1.1 TB per node) are offloaded while the engines generate. They go
+  to file-backed mmaps under `SKYRL_FROZEN_OFFLOAD_DIR` (default
+  `/data/skyrl/frozen-offload`; clean, evictable page cache), so point it at a
+  fast local disk on every node — or set it to `0` to keep the offload in
+  pinned host RAM.
+- **Blackwell-Ultra (B300 / sm103)** runs on the default CUDA-13 lock — no
+  separate dependency set is needed anymore. On hosts that also carry a
+  system CUDA/cuDNN, the venv's pip libraries must come first on
+  `LD_LIBRARY_PATH` and `CUDNN_PATH` must point at the pip cuDNN (the run
+  script exports both), or Transformer Engine mixes the system `libcudnn`
+  core with the pip sublibraries (`CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED`).
+  A system cuDNN 9 of a *different* 9.x than the pip one is still a problem
+  even then: cuDNN's graph library probes optional sublibraries
+  (`libcudnn_engines_tensor_ir`) that the pip wheel pinned by torch may not
+  ship, the dynamic loader falls through to the system copy, and TE's fused
+  attention fails with `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`. Remove the
+  system cuDNN or install a pip `nvidia-cudnn-cu13` of the same version.
+- **Engine bring-up time**: the 595 GB INT4 load plus `FULL_DECODE_ONLY`
+  CUDA-graph capture can exceed SkyRL's default 600 s engine health deadline
+  on a cold page cache; the script raises
+  `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` and
+  `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` accordingly.
+- **MLA prefill backend**: the script pins vLLM's
+  `attention_config.mla_prefill_backend=FLASHINFER`; the default FA4 CuTe-DSL
+  prefill is incompatible with the locked `nvidia-cutlass-dsl`.
 - The LoRA targets deliberately exclude the MLA q/kv projections: mcore names
   them differently (`linear_q_down_proj`, ...) and vLLM's MLA weight
   absorption does not apply adapters to `kv_b_proj`.

@@ -16,7 +16,14 @@ set -x
 # residual off-policy mismatch. The model is trained text-only
 # (language_model_only): the vision tower stays frozen in vLLM.
 #
-# One-time setup:
+# One-time setup (identical paths on every node: checkout, .venv, HF cache,
+# BF16 masters):
+#
+# 0) Install the megatron stack into the project venv. The root uv.lock is
+#    CUDA-13 native (torch 2.13 cu130, vLLM 0.28, TE 2.16; every CUDA library
+#    including cuDNN comes from pip), which is what Blackwell-Ultra (B300 /
+#    sm103) needs -- NVIDIA driver >= R580:
+#    uv sync --extra megatron
 #
 # 1) Dequantize the INT4 release to BF16 masters ON EVERY NODE (or a shared
 #    filesystem). ~595 GB in, ~2.1 TB out; verifies bit-exactness:
@@ -24,14 +31,27 @@ set -x
 #        --input <path-to-Kimi-K2.7-Code-snapshot> \
 #        --output /data/skyrl/models/Kimi-K2.7-Code-BF16
 #
-# 2) Download data:
+# 2) Download data (head node only; the driver reads it):
 #    bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 #
-# 3) Start the Ray cluster (same repo checkout + venv path on both nodes), then
-#    run this script on the head node only:
+# 3) Start the Ray cluster from the checkout, then run this script on the head
+#    node only. Export the runtime-env block below (LD_LIBRARY_PATH, CUDNN_PATH,
+#    SKYRL_LD_LIBRARY_PATH_EXPORT, UV_PROJECT_ENVIRONMENT) plus any site NCCL
+#    settings (NCCL_SOCKET_IFNAME / NCCL_IB_HCA / GLOO_SOCKET_IFNAME for the
+#    cross-node rail) in the shell that runs `ray start` on EVERY node: Ray
+#    workers inherit the raylet's environment, and only LD_LIBRARY_PATH and
+#    SKYRL_*/UV_*/HF_* are re-exported through the Ray runtime env.
 #    export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
-#    head:   ray start --head --port=6379
-#    worker: ray start --address=<head-ip>:6379
+#    head:   uv run --no-sync --extra megatron ray start --head --port=6379 --num-gpus=8
+#    worker: uv run --no-sync --extra megatron ray start --address=<head-ip>:6379 --num-gpus=8
+#    The 595 GB INT4 load + FULL_DECODE_ONLY graph capture can exceed the 600 s
+#    engine health deadline on a cold page cache (see the export below).
+#    If the vLLM TP group dies in ncclCommInitRank with "Failed to bind NVLink
+#    SHARP (NVLS) Multicast memory ... CUDA error 401" (NVSwitch fabric state
+#    out of sync with Fabric Manager -- dmesg shows NV_ERR_FABRIC_STATE_OUT_OF_SYNC
+#    and FM asks for a GPU reset), export NCCL_NVLS_ENABLE=0 before `ray start`
+#    on every node until the GPUs have been reset; only the intra-node TP8
+#    engine all-reduce is NVLS-eligible in this layout.
 #
 # The task here is math (DAPO-17k / AIME) to reuse the standard data prep; swap
 # data.train_data / environment.env_class for long-horizon code tasks to make
@@ -127,16 +147,30 @@ LANGUAGE_MODEL_ONLY=True
 # FlashInfer ragged prefill has sm103 kernels via the cu130 jit-cache.
 ENGINE_INIT_KWARGS="{\"max_model_len\": $MAX_MODEL_LEN, \"compilation_config\": {\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}, \"attention_config\": {\"mla_prefill_backend\": \"FLASHINFER\"}}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.7}"
-# Giant-model wake-up + 262k prefills need generous execute timeouts.
+# Giant-model wake-up + 262k prefills need generous execute timeouts, and the
+# first engine build (595 GB INT4 load + ~100 CUDA graphs) can exceed SkyRL's
+# default 600 s health deadline when the page cache is cold.
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-3600}"
+export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S="${SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S:-2400}"
 
-# CUDA-13 stack (required on Blackwell-Ultra/B300, see pyproject): every CUDA
-# library comes from pip, so run in the project venv (no --isolated -- the env
-# below points into it and must be stable across nodes) and resolve libraries
-# from the pip cu13 set. CUDNN_PATH pins TE's cuDNN search to the pip cuDNN
-# (a system cuDNN core mixed with pip sublibraries fails with
-# CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED). Export these (plus
-# SKYRL_LD_LIBRARY_PATH_EXPORT=1) before `ray start` on every node.
+# Frozen (non-adapter) masters are offloaded to file-backed mmaps under
+# SKYRL_FROZEN_OFFLOAD_DIR while the engines generate (default
+# /data/skyrl/frozen-offload; ~1.1 TB/node of clean page cache instead of
+# pinned RAM). Set it to a fast local disk on every node, or to 0 to keep the
+# offload in pinned host memory.
+export SKYRL_FROZEN_OFFLOAD_DIR="${SKYRL_FROZEN_OFFLOAD_DIR:-/data/skyrl/frozen-offload}"
+
+# Runtime env: every CUDA library comes from pip (cu130 lock), so resolve them
+# from the project venv ahead of any system CUDA, and pin TE's cuDNN search
+# (CUDNN_PATH) to the pip cuDNN -- a system libcudnn core mixed with the pip
+# sublibraries fails with CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED. A system
+# cuDNN 9 of another 9.x version breaks TE fused attention even so
+# (CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH: cuDNN probes optional
+# sublibraries the pip wheel may not ship and the loader falls through to the
+# system copy) -- remove it or match the pip nvidia-cudnn-cu13 to it. Run from
+# the checkout root (no --isolated: the env below points into .venv and must
+# be stable across nodes). Export these (plus SKYRL_LD_LIBRARY_PATH_EXPORT=1)
+# before `ray start` on every node.
 SP="$(pwd)/.venv/lib/python3.12/site-packages"
 export LD_LIBRARY_PATH="$SP/nvidia/cu13/lib:$SP/nvidia/cudnn/lib:$SP/nvidia/cusparselt/lib:$SP/nvidia/nccl/lib:$SP/nvidia/nvshmem/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CUDNN_PATH="$SP/nvidia/cudnn"
