@@ -5,6 +5,7 @@ SkyRL's implementation of the [Tinker API](https://tinker-docs.thinkingmachines.
 ## Code Layout
 
 - **`skyrl/tinker/api.py`** -- FastAPI HTTP server. Receives Tinker SDK requests, writes them to SQLite/Postgres, returns future IDs.
+- **`skyrl/tinker/proto_serialization.py`** -- Proto wire-format conversion. SDK >= 0.25.0 sends `forward_backward` request bodies as protobuf (with forward-only passes routed to `/forward_backward` via a `forward_only` flag instead of `/forward`) and requires proto-serialized `SampleResponse`/`ForwardBackwardOutput` results from `retrieve_future`. Mirrors the SDK's `tinker/proto/{request,response}_conv.py`; round-trip tested in `tests/tinker/test_proto_serialization.py`.
 - **`skyrl/tinker/engine.py`** -- Background subprocess (`TinkerEngine`). Polls DB, batches compatible requests, dispatches to backend.
 - **`skyrl/tinker/types.py`** -- Internal Pydantic models (distinct from API request/response models in `api.py`). `LOSS_TYPES` dict defines valid loss functions.
 - **`skyrl/tinker/config.py`** -- `EngineConfig` Pydantic model. `add_model()` auto-generates argparse flags from Pydantic fields.
@@ -36,7 +37,7 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 | `/asample` | POST | Generate samples from current or base model |
 | `/save_weights` | POST | Save full training checkpoint (weights + optimizer) |
 | `/save_weights_for_sampler` | POST | Sync weights to inference engines |
-| `/load_weights` | POST | Load a previously saved checkpoint |
+| `/load_weights` | POST | Load a previously saved checkpoint. Only permitted as a model's first request (matching the Tinker service); later attempts get a 400 -- load into a freshly created model instead |
 | `/training_runs/{unique_id}/checkpoints/weights/{checkpoint_id}` | DELETE | Delete a saved training checkpoint archive from disk |
 | `/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}` | DELETE | Delete a saved sampler checkpoint archive from disk |
 | `/retrieve_future` | POST | Long-poll for async result (300s timeout) |
@@ -60,6 +61,34 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
   - or `DELETE /training_runs/{unique_id}/checkpoints/{checkpoint_id}?checkpoint_type=training|sampler`
 
   A bare `.../checkpoints/{checkpoint_id}` with no type prefix and no `checkpoint_type` query param is rejected with a `400`. This removes the saved archive from `checkpoints_base`; it does not unload the live model.
+
+## torch.profiler
+
+Not part of the Tinker API -- a SkyRL extension driven with a plain HTTP client.
+Start the server with `--torch-profiler '{"export_dir": ..., "ranks": [0]}'` to
+enable it; without the flag the endpoints return 404. `export_dir` may be a
+cloud URI (traces stage locally and each closed window is uploaded, then deleted).
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /start_profiling` | Claim the single slot; body takes `model_id`, `global_step`, `export_path_extra`, `schedule_options`, `profile_options`, `overwrite` |
+| `POST /stop_profiling` | Stop and flush; body takes `model_id`, which must own the session |
+| `GET /profiling_status` | `active`, `model_id`, `export_path`, `step`, `error` |
+
+- Traces land in `{export_dir}/{global_step}[_{export_path_extra}]`. A non-empty
+  target is a `409` unless `overwrite=true`.
+- Exactly one session server-wide, claimed with a compare-and-swap on
+  `ProfilerControlDB`. Kineto is process-global, so concurrent profilers either
+  raise or silently corrupt each other's traces.
+- The profiler advances one step per `optim_step` **for the owning model only**.
+- `max_session_duration_sec` (default 7200) releases the slot if a client never
+  calls `/stop_profiling`.
+- **FSDP with `colocate_all=true` needs `trainer.policy.fsdp_config.cpu_offload=true`**
+  in `backend_config`: the policy is offloaded between requests and the manual
+  path uses `swap_tensors`, which fails while the profiler holds parameter
+  references. Megatron is unaffected.
+- `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected at
+  startup -- static config would fight the endpoints over `worker.profiler`.
 
 ## Testing
 

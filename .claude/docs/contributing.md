@@ -48,6 +48,52 @@ Start off any modification or debugging with SkyRL using this file as the primar
 - Passing the full `SkyRLTrainConfig` as an argument to a method or a class when only a sub-config is sufficient (example: `InferenceEngineConfig`)
 
 
+## Pull request descriptions
+
+Open with `# What does this PR do?` and a TLDR sentence, then explain the
+mechanism before the fix. A reviewer should be able to reconstruct *why* the
+change is correct without reading the diff first.
+
+Structure for most PRs (drop what does not apply):
+
+- `# What does this PR do?` — one or two sentences, then a `TLDR:` line for
+  anything non-trivial. Link the failing CI job, the issue, or the design doc.
+- `## Why it happens` — for bug fixes, the causal chain, numbered when there are
+  steps. Name the mechanism, not just the symptom.
+- `## Usage` / `## Endpoints` — for a feature, how it is invoked and what the
+  new surface is. This is usually the part reviewers need most.
+- `## Solution` / `## How it works` — what was done, and the alternatives that
+  were considered with the reason each was rejected. Reviewers ask "why not X"
+  anyway; answer it in the description. Keep this to what a reviewer cannot
+  infer: internal structure that is standard for SkyRL belongs in a design doc,
+  not the PR.
+- `## Test plan` — what the new tests assert and why that set is sufficient.
+- `## Validation` — hardware, the exact command run, and results. A before/after
+  table is clearer than a paragraph.
+
+Do:
+
+- Quote the actual error, verbatim and short. `RuntimeError: Expected no
+  weakrefs to t1's Tensor object but got 6` tells a reviewer more than "a
+  tensor-swapping error".
+- Give real numbers: "4 failed / 40 passed" before, "1 failed / 43 passed"
+  after. Say which failures are pre-existing or flaky, and why you believe it.
+- Put stacktraces, long logs and failing-test output in a `<details>` block so
+  the description stays scannable.
+- Call out constraints a reviewer has to know about (a required config flag,
+  an extra a CI job does not install) under their own heading.
+- Link upstream PRs, docs pages and examples that the change depends on or adds.
+
+Don't:
+
+- Narrate the journey ("first I tried X, then discovered Y"). State what is
+  true now.
+- Use mannered prose. Don't reach for metaphor when a literal phrase exists.
+  Write "a parameter worth varying", not "a dial worth turning"; 
+  "this still matters", not "this earns its keep".
+  Metaphors carry connotations you did not choose, and they make the
+  reader work harder so the writer can perform.
+
 ## Comments
 
 Comments should describe what the code is doing, not what instruction the user provided or what learnings-on-the-journey the agent stumbled into.

@@ -12,6 +12,8 @@ permissions:
 jobs:
 
   skyrl_gpu_e2e_test_tinker_fully_async:
+    # Forks inherit these workflows but not the secrets they need -- only run upstream.
+    if: github.repository == 'NovaSky-AI/SkyRL'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -26,7 +28,6 @@ jobs:
         with:
           # Semantic version range syntax or exact version of a Python version
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:

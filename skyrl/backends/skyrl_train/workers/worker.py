@@ -46,6 +46,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     ppo_critic_loss,
 )
+from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -219,11 +220,70 @@ class DistributedTorchRayActor:
             LIBNUMA.numa_run_on_node_mask(bitmask)
             LIBNUMA.numa_set_membind(bitmask)
 
-        numa_nodes = LIBNUMA.numa_num_configured_nodes()
-        if numa_nodes <= 0:
-            numa_nodes = 1
-        num_gpu_pre_numa_node = max(1, 8 // numa_nodes)
-        target_nid = min(numa_nodes - 1, self._local_rank // num_gpu_pre_numa_node)
+        # Only bind to NUMA nodes that actually have CPUs. On Grace-Blackwell (GB200),
+        # GPU HBM is exposed as additional CPU-less NUMA nodes (e.g. 34 nodes total, only
+        # nodes 0-1 have CPUs).
+        cpu_nodes = []
+        node_root = "/sys/devices/system/node"
+        try:
+            node_names = sorted(
+                (n for n in os.listdir(node_root) if n.startswith("node") and n[4:].isdigit()),
+                key=lambda n: int(n[4:]),
+            )
+        except OSError:
+            node_names = []
+        for name in node_names:
+            try:
+                with open(os.path.join(node_root, name, "cpulist")) as f:
+                    if f.read().strip():
+                        cpu_nodes.append(int(name[4:]))
+            except OSError:
+                continue
+        if not cpu_nodes:
+            cpu_nodes = [0]
+
+        def gpu_numa_node():
+            """NUMA node of the GPU this worker owns, or None if it can't be determined.
+
+            Ray masks CUDA_VISIBLE_DEVICES down to this worker's single GPU, so cuda:0 is
+            that GPU and its PCI affinity is the exact answer -- no rank-to-socket heuristic
+            needed (and none works: with one visible device, GPU-count-based sharding sends
+            every rank but 0 to the last node).
+            """
+            try:
+                props = torch.cuda.get_device_properties(0)
+                bdf = f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:{props.pci_device_id:02x}.0"
+            except Exception:
+                return None
+            pci_dev = f"/sys/bus/pci/devices/{bdf}"
+            try:
+                with open(f"{pci_dev}/numa_node") as f:
+                    nid = int(f.read().strip())
+                if nid in cpu_nodes:
+                    return nid
+            except (OSError, ValueError):
+                pass
+            # `numa_node` is -1 on single-socket hosts and can name a CPU-less HBM node on
+            # GB200; `local_cpulist` still points at the CPUs closest to the device.
+            try:
+                with open(f"{pci_dev}/local_cpulist") as f:
+                    cpulist = f.read().strip()
+                if not cpulist:
+                    return None
+                first_cpu = int(cpulist.split(",")[0].split("-")[0])
+                for entry in os.listdir(f"/sys/devices/system/cpu/cpu{first_cpu}"):
+                    if entry.startswith("node") and entry[4:].isdigit():
+                        nid = int(entry[4:])
+                        return nid if nid in cpu_nodes else None
+            except (OSError, ValueError):
+                return None
+            return None
+
+        target_nid = gpu_numa_node()
+        if target_nid is None:
+            # Fall back to spreading local ranks evenly over the CPU-bearing nodes.
+            num_gpu_per_numa_node = max(1, 8 // len(cpu_nodes))
+            target_nid = cpu_nodes[min(len(cpu_nodes) - 1, self._local_rank // num_gpu_per_numa_node)]
         numa_bind(target_nid)
         _SET_AFFINITY = True
 
@@ -233,7 +293,8 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         self._transfer_strategy_cls = None  # Set in init_weight_transfer_communicator
-        # Populated by init_model when torch profiling is enabled.
+        # Populated by init_model when torch profiling is enabled, or by
+        # start_profile(config) on the Tinker path.
         self.profiler = None
 
         if self.cfg.algorithm.temperature is None:
@@ -275,16 +336,34 @@ class Worker(DistributedTorchRayActor):
             logger.warning(f"Failed to set {setting!r}: {e}")
 
     @contextmanager
-    def _expandable_segments_disabled_for_sync(self):
+    def _expandable_segments_disabled_for_sync(self, force: bool = False):
         """Disable expandable_segments for the duration of CUDA-IPC weight sync.
 
-        Only toggles under ``colocate_all`` (the IPC path); under non-colocated runs
-        weight sync uses NCCL broadcast, which has its own buffers and is unaffected.
-        :meth:`_set_expandable_segments` itself no-ops when the feature is disabled.
+        By default only toggles under ``colocate_all`` (the colocated IPC path, which
+        only shares CUDA memory when trainer and inference share GPUs); under
+        non-colocated runs the push backends use NCCL broadcast, which has its own
+        buffers and is unaffected. ``force`` comes from the sender's
+        ``force_disable_expandable_segments``, for backends that CUDA-IPC share
+        regardless of colocation: sharded_rdt shares every gathered group with its
+        sidecar producer over ``reduce_tensor``/CUDA IPC, and expandable-segment
+        (VMM) memory makes that export/rebuild ~5-10x slower per storage
+        (measured: publish rebuild 7.2s/rank/sync at 30B, the dominant
+        weight-sync cost). :meth:`_set_expandable_segments` itself no-ops when
+        the feature is disabled.
         """
-        toggle = self.cfg.placement.colocate_all and self.cfg.use_expandable_segments
+        toggle = (force or self.cfg.placement.colocate_all) and self.cfg.use_expandable_segments
         if toggle:
             self._set_expandable_segments(False)
+            # The setting only affects NEW segment creation; freed blocks inside
+            # existing expandable segments are still eligible for reuse. Release
+            # cached segments so the gather buffers allocated during the sync
+            # land in fresh, IPC-fast classic segments. Once per process: later
+            # syncs re-use the classic blocks the first sync created (identical
+            # allocation sizes), and a per-sync empty_cache costs ~0.5-1s at
+            # 235B allocator scale.
+            if not getattr(self, "_ipc_segment_cache_flushed", False):
+                self._ipc_segment_cache_flushed = True
+                torch.cuda.empty_cache()
         try:
             yield
         finally:
@@ -299,20 +378,44 @@ class Worker(DistributedTorchRayActor):
     # torch.profiler RPCs, dispatched via WorkerDispatch pass_through.
     # ------------------------------------------------------------------
 
-    def start_profile(self) -> None:
-        """Arm the profiler before the training loop (no-op when disabled)."""
+    def start_profile(self, config: Optional[dict] = None) -> None:
+        """Arm the profiler before the training loop (no-op when disabled).
+
+        With ``config``, build a profiler from it first, replacing any live one.
+        This is how the Tinker path starts a session on a running server, where
+        the schedule is not known until the request arrives. Without ``config``,
+        behave exactly as before and just arm whatever ``init_model`` built.
+        """
+        if config is not None:
+            from skyrl.train.config.config import TorchProfilerConfig
+
+            self.profiler = Profiler(TorchProfilerConfig(**config))
         if self.profiler is not None:
             self.profiler.start()
 
-    def profile_step(self) -> None:
-        """Advance the profiler schedule by one global step."""
-        if self.profiler is not None:
-            self.profiler.step()
+    def profile_step(self) -> Optional[str]:
+        """Advance the profiler schedule by one global step.
+
+        Returns the profiler's last error (e.g. a failed trace upload) so the
+        caller can surface it, or None.
+        """
+        if self.profiler is None:
+            return None
+        self.profiler.step()
+        return getattr(self.profiler, "last_error", None)
 
     def stop_profile(self) -> None:
-        """Stop the profiler after the training loop, flushing any open window."""
-        if self.profiler is not None:
-            self.profiler.stop()
+        """Stop the profiler after the training loop, flushing any open window.
+
+        The session is always discarded: a profiler is scoped to one start/stop
+        pair, and keeping it would let the next start_profile(config) silently
+        reuse the previous schedule and save path.
+        """
+        if self.profiler is None:
+            return
+        self.profiler.stop()
+        self.profiler.close()
+        self.profiler = None
 
     def dump_profiler_summary(self):
         """Return this rank's last-window kernel summary, or None."""
@@ -413,15 +516,21 @@ class Worker(DistributedTorchRayActor):
         from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy_cls
 
         assert inference_engine_client is not None
+        # Cache the client so per-sync broadcast_to_inference_engines calls can
+        # pass None instead of re-shipping it: the client carries the HF
+        # tokenizer (~10MB, 0.13s pickle + 0.34s unpickle), which otherwise
+        # rides every sync's RPC fan-out. Workers only use its static parts
+        # (server URLs, cfg flags); the driver's live copy owns weight_version.
+        self._weight_sync_inference_client = inference_engine_client
+
+        # Fetch the total inference world size from the servers.
+        inference_world_size, _ = await inference_engine_client.get_world_size()
 
         # Determine transfer strategy based on inference engine config and placement
         self._transfer_strategy_cls = get_transfer_strategy_cls(
             weight_sync_backend=inference_engine_cfg.weight_sync_backend,
             colocate_all=self.cfg.placement.colocate_all,
         )
-
-        # Fetch the total inference world size from the servers.
-        inference_world_size, _ = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(
@@ -432,18 +541,27 @@ class Worker(DistributedTorchRayActor):
 
         # Create sender on all ranks
         # Strategy implementations may have different logic for different ranks
+        # The extractor is passed to every strategy; only those that rendezvous at
+        # init rather than on the first send use it (sharded_rdt). Both workers build
+        # it before calling super(), so it is available here.
         tasks = [
             asyncio.to_thread(
                 self._transfer_strategy_cls.create_sender,
                 init_info=init_info,
                 inference_client=inference_engine_client,
+                weight_extractor=getattr(self, "weight_extractor", None),
             ),
         ]
 
         # Only rank 0 initializes receivers on inference engines
         # NOTE: For broadcast strategy, sender and receiver init must run concurrently
         # because both need to join the same process group to avoid deadlock
-        if torch.distributed.get_rank() == 0:
+        # NOTE: strategies whose sender drives the inference-side handshake itself
+        # (sharded_rdt) must NOT be initialized from here as well.
+        # TODO (sumanthrh): `sender_initializes_receivers` is currently used as a workaround for
+        # supporting RDT. We can probably move the inference-side init
+        # as a sender method in all the classes to unify this. RDT doesn't call `init_weight_update_communicator` itself
+        if torch.distributed.get_rank() == 0 and not self._transfer_strategy_cls.sender_initializes_receivers:
             tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
 
         results = await asyncio.gather(*tasks)

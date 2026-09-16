@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import DateTime, event
+from sqlalchemy import DateTime, Text, UniqueConstraint, event
 from sqlalchemy.engine import url as sqlalchemy_url
 from sqlmodel import JSON, Field, SQLModel
 
@@ -74,6 +74,13 @@ class CheckpointStatus(str, Enum):
     FAILED = "failed"
 
 
+class ProfilerState(str, Enum):
+    """Whether the torch profiling slot is claimed."""
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+
+
 # SQLModel table definitions
 class ModelDB(SQLModel, table=True):
     __tablename__ = "models"
@@ -90,11 +97,24 @@ class ModelDB(SQLModel, table=True):
 class FutureDB(SQLModel, table=True):
     __tablename__ = "futures"
 
+    # The SDK stamps each training request with a model-global sequence number, so
+    # (model_id, seq_id) identifies one logical request and a retry of it carries the
+    # same pair. The constraint is what makes the dedup in `create_future` safe under
+    # concurrent retries. SQL treats NULLs as distinct, so requests that carry no
+    # seq_id are unconstrained and still get a fresh future each time.
+    __table_args__ = (UniqueConstraint("model_id", "seq_id", name="uq_futures_model_id_seq_id"),)
+
     request_id: int | None = Field(default=None, primary_key=True, sa_column_kwargs={"autoincrement": True})
     request_type: types.RequestType
     model_id: str | None = Field(default=None, index=True)
+    seq_id: int | None = Field(default=None)
     request_data: dict = Field(sa_type=JSON)  # this is of type types.{request_type}Input
-    result_data: dict | None = Field(default=None, sa_type=JSON)  # this is of type types.{request_type}Output
+    # Pre-serialized JSON text for a types.{request_type}Output. Deliberately not a
+    # JSON column: results may carry big numeric payloads (top-k logprobs for
+    # every prompt token, a few MB per request) that are written straight from
+    # `model_dump_json()` and handed to the client verbatim, so a JSON column's
+    # decode-on-read/encode-on-write would only be undone at both ends.
+    result_data: str | None = Field(default=None, sa_type=Text)
     status: RequestStatus = Field(default=RequestStatus.PENDING, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
     completed_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
@@ -153,3 +173,41 @@ class EngineStateDB(SQLModel, table=True):
     inference_proxy_url: str | None = None
 
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
+
+
+class ProfilerControlDB(SQLModel, table=True):
+    """API<->engine handoff for the single torch-profiler slot. Singleton row.
+
+    Exactly one profiling session may be active server-wide, because Kineto is a
+    process-global singleton: two concurrent ``torch.profiler.profile`` objects in
+    one worker either raise ``RuntimeError: Can't disable Kineto profiler when
+    it's not running`` or, depending on schedule phase, silently share one global
+    session and produce corrupt traces.
+
+    The API claims and releases the slot with a compare-and-swap UPDATE against
+    ``desired_state`` (and ``owner_model_id`` on release), so two simultaneous
+    requests cannot both win. The engine, which is a serial loop, reconciles to
+    the row and acks by advancing ``applied_version``.
+    """
+
+    __tablename__ = "profiler_control"
+
+    singleton_id: int = Field(default=1, primary_key=True)
+
+    # The CAS predicate.
+    desired_state: ProfilerState = Field(default=ProfilerState.STOPPED)
+    # Model whose optim_steps advance the profiler, and the only one allowed to
+    # stop the session. A column rather than a key inside config_json so the stop
+    # CAS can match it in SQL.
+    owner_model_id: str | None = None
+    # Resolved session config handed to the workers (JSON).
+    config_json: str | None = Field(default=None, sa_type=Text)
+    # Bumped by the API on every start/stop; echoed by the engine once applied.
+    version: int = Field(default=0)
+    applied_version: int = Field(default=0)
+    # Session start, for max_session_duration_sec.
+    started_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+    # Profiler steps taken this session, flushed by the engine's reconcile pass.
+    step: int = Field(default=0)
+    # Why a start failed, an upload failed, or a session was terminated by the TTL.
+    error: str | None = Field(default=None, sa_type=Text)

@@ -53,6 +53,8 @@ Calls `trainer.dispatch.forward_backward("policy", batch, loss_fn=loss_fn)` whic
 - `loss_fn_outputs`: Per-example dicts containing `logprobs` and `elementwise_loss`
 - Aggregate metrics: `loss`, `policy_loss`, `policy_entropy`, `response_length`
 
+Each call adds to the model's pending gradients. The client may split one logical batch into several requests, so those gradients remain accumulated until the corresponding `optim_step()` applies and clears them.
+
 ### `forward()`
 
 Calls `trainer.dispatch.forward("policy", batch)` for a gradient-free forward pass. Returns only `logprobs` per example (no loss computation). 

@@ -92,7 +92,7 @@ def _run_render_server(model_path: str, port: int, log_file: Optional[str]) -> N
             ["--model", model_path, "--host", _RENDER_HOST, "--port", str(port), "--trust-remote-code"]
         )
 
-        listen_address, sock = setup_server(args)
+        listen_address, sock = setup_server(args, reuse_port=False)
         engine_args = AsyncEngineArgs.from_cli_args(args)
         model_config = engine_args.create_model_config()
         # Render servers preprocess data only -- no inference, no quantized
