@@ -152,6 +152,40 @@ def test_token_level_rewards():
     assert result["rewards"] == per_token_rewards
 
 
+def test_reward_variance_filtering_with_token_level_rewards():
+    """Token rewards are filtered by their sequence sums without changing reward tensors."""
+    config = create_config(4)
+    config.trainer.algorithm.reward_variance_filtering.enabled = True
+    config.trainer.algorithm.reward_variance_filtering.top_p = 0.8
+    config.trainer.algorithm.reward_variance_filtering.selection_eps = 0.0
+    trainer = RayPPOTrainer(
+        cfg=config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+
+    per_token_rewards = [[-3.0, 0.0], [3.0, 0.0], [-1.0, 0.0], [1.0, 0.0]]
+    generator_output: GeneratorOutput = {
+        "prompt_token_ids": [[1], [1], [2], [2]],
+        "response_ids": [[3, 4], [5, 6], [7, 8], [9, 10]],
+        "rewards": per_token_rewards,
+        "loss_masks": [[1, 1], [1, 1], [1, 1], [1, 1]],
+        "stop_reasons": ["stop", "stop", "stop", "stop"],
+        "rollout_metrics": None,
+    }
+
+    result, result_uids = trainer.postprocess_generator_output(generator_output, ["high", "high", "low", "low"])
+
+    assert result_uids == ["high", "high", "low", "low"]
+    assert result["rewards"] == per_token_rewards
+    assert result["loss_masks"] == [[1, 1], [1, 1], [0, 0], [0, 0]]
+    assert trainer.all_metrics["reward/variance_filter_num_kept_groups"] == 1.0
+
+
 def test_postprocess_metrics_over_superset():
     """Reward metrics are computed over metrics_generator_output (a superset), while the per-token /
     conversion applies only to the training generator_output. This backs the fully-async
