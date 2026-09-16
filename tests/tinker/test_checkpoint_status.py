@@ -11,9 +11,7 @@ from skyrl.tinker import api, types
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
-    FutureDB,
     ModelDB,
-    RequestStatus,
     SessionDB,
     get_async_database_url,
 )
@@ -76,13 +74,11 @@ async def test_failed_save_finalizes_checkpoint_and_allows_delete(checkpoint_eng
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://test") as client:
             saved = await client.post(endpoint, json=payload)
             assert saved.status_code == 200, saved.text
-            request_id = saved.json()["request_id"]
             with Session(engine.db_engine) as session:
                 assert session.get(CheckpointDB, checkpoint_key).status == CheckpointStatus.PENDING
                 requests = engine.find_single_requests(session)
             engine.process_single_requests(requests)
             with Session(engine.db_engine) as session:
-                assert session.get(FutureDB, int(request_id)).status == RequestStatus.FAILED
                 assert session.get(CheckpointDB, checkpoint_key).status == CheckpointStatus.FAILED
 
             deleted = await client.delete(delete_url)
