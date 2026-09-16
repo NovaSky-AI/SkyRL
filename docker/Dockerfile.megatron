@@ -37,17 +37,6 @@ RUN sudo apt-get update && sudo apt-get install -y --allow-change-held-packages 
     libnccl2=2.28.9-1+cuda13.0 \
     && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
 
-# ---------- PyTorch + cuDNN (setup for transformer-engine) ----------
-# PyTorch + cuDNN
-RUN uv pip install --system --no-cache-dir "torch==2.13.0" "nvidia-cudnn-cu13==9.20.0.48" && \
-    CUDNN_PATH="$(python -c 'import nvidia.cudnn as c; print(c.__path__[0])')" && \
-    sudo mkdir -p /opt && sudo ln -sfn "$CUDNN_PATH" /opt/cudnn && \
-    echo "/opt/cudnn/lib" | sudo tee /etc/ld.so.conf.d/cudnn.conf >/dev/null && sudo ldconfig
-
-ENV CUDNN_PATH=/opt/cudnn
-ENV CPATH=${CUDNN_PATH}/include:${CPATH}
-ENV LD_LIBRARY_PATH=${CUDNN_PATH}/lib:${LD_LIBRARY_PATH}
-
 RUN uv pip install  --system --no-cache-dir \
     nvidia-mathdx \
     pybind11 \
