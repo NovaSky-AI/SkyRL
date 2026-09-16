@@ -1697,27 +1697,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 )
         return cached
 
-    def _is_lora_sync_writer_rank(self) -> bool:
-        """True on the first rank of each node (by hostname).
-
-        With ``merge_lora=False`` every vLLM worker reads ``lora_sync_path``
-        from its *local* filesystem when hot-loading the adapter, and in
-        multi-node colocated runs inference engines live on every node -- so
-        writing on global rank 0 alone only works with a shared filesystem.
-        Writing once per node (identical content, atomic renames) makes the
-        disk sync work on plain node-local paths and stays correct on shared
-        ones.
-        """
-        cached = getattr(self, "_lora_sync_writer_cache", None)
-        if cached is None:
-            import socket
-
-            hostnames = [None] * torch.distributed.get_world_size()
-            torch.distributed.all_gather_object(hostnames, socket.gethostname())
-            cached = hostnames.index(hostnames[torch.distributed.get_rank()]) == torch.distributed.get_rank()
-            self._lora_sync_writer_cache = cached
-        return cached
-
     async def save_lora_adapters(self, model_id: Optional[str] = None) -> tuple[str, str]:
         """Collectively export + write the live LoRA adapter; no engine calls.
 
