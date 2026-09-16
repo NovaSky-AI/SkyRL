@@ -153,18 +153,52 @@ def get_moe_metrics(
     return metrics
 
 
+def _resolve_transformer_decoder(model: nn.Module) -> Optional[nn.Module]:
+    """Return the ``TransformerBlock`` holding the decoder layers, or None.
+
+    Text-only Megatron-Core models expose it as ``model.decoder``. Multimodal
+    models (``LLaVAModel`` and the per-architecture VLM classes derived from it)
+    nest the language tower one level down, as ``model.language_model.decoder``,
+    and have no ``decoder`` attribute of their own. Vision-only or embedding-only
+    stages have neither.
+    """
+    decoder = getattr(model, "decoder", None)
+    if decoder is not None:
+        return decoder
+    language_model = getattr(model, "language_model", None)
+    if language_model is not None:
+        return getattr(language_model, "decoder", None)
+    return None
+
+
 def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
     models = model_or_models
     if not isinstance(model_or_models, list):
         models = [model_or_models]
 
+    froze_any = False
     for model in models:
-        for layer in model.decoder.layers:
+        decoder = _resolve_transformer_decoder(model)
+        if decoder is None:
+            logger.warning(
+                f"freeze_moe_router: no transformer decoder found on {type(model).__name__}; "
+                "skipping this model chunk. Router params on it stay trainable."
+            )
+            continue
+        for layer in decoder.layers:
             if hasattr(layer, "mlp") and hasattr(layer.mlp, "router"):
                 if getattr(layer.mlp.router, "weight", None) is not None:
                     layer.mlp.router.weight.requires_grad = False
+                    froze_any = True
                 if getattr(layer.mlp.router, "bias", None) is not None:
                     layer.mlp.router.bias.requires_grad = False
+                    froze_any = True
+
+    if not froze_any:
+        logger.warning(
+            "freeze_moe_router: froze no router parameters. Either the model has no MoE "
+            "layers, or this rank holds only non-MoE pipeline stages."
+        )
     # modified in-place
     return model_or_models
 

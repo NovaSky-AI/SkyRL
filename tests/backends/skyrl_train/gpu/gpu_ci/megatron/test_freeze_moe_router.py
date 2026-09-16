@@ -148,3 +148,48 @@ def test_freeze_moe_router_list():
     for layer in m.decoder.layers:
         assert layer.mlp.router.weight.requires_grad is False
         assert layer.mlp.router.bias.requires_grad is False
+
+
+@pytest.mark.megatron
+def test_freeze_moe_router_multimodal_language_model_nesting():
+    """
+    Multimodal models (``LLaVAModel`` and the VLM classes derived from it) hold the
+    decoder at ``model.language_model.decoder`` and have no ``decoder`` of their own.
+    """
+
+    class _MultimodalModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = _Model(n_layers=2)
+            self.vision_model = nn.Linear(8, 8)
+
+    m = _MultimodalModel()
+    assert not hasattr(m, "decoder")
+
+    freeze_moe_router(m)
+
+    for layer in m.language_model.decoder.layers:
+        assert layer.mlp.router.weight.requires_grad is False
+        assert layer.mlp.router.bias.requires_grad is False
+    # The vision tower is untouched.
+    assert m.vision_model.weight.requires_grad is True
+
+
+@pytest.mark.megatron
+def test_freeze_moe_router_skips_chunk_without_decoder():
+    """A pipeline stage holding no decoder layers -- e.g. a vision-only or
+    embedding-only chunk -- is skipped rather than raising ``AttributeError``."""
+
+    class _EmbeddingOnlyChunk(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = nn.Embedding(16, 8)
+
+    chunk = _EmbeddingOnlyChunk()
+    moe_chunk = _Model()
+
+    freeze_moe_router([chunk, moe_chunk])
+
+    assert chunk.embedding.weight.requires_grad is True
+    for layer in moe_chunk.decoder.layers:
+        assert layer.mlp.router.weight.requires_grad is False
