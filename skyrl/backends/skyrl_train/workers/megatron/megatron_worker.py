@@ -31,6 +31,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     _clear_mtp_hybrid_pattern,
     _convert_moe_experts_lora_to_vllm,
+    freeze_dsa_indexer,
     freeze_moe_router,
     gdn_in_proj_lora_is_safe,
     get_model_config,
@@ -849,6 +850,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if self._rank == 0:
                 logger.info("freeze_moe_router=True: freezing MoE router params")
             self.provider.register_pre_wrap_hook(freeze_moe_router)
+
+        # Freeze DSA indexer params before DDP buckets them: DDP decides bucket
+        # membership from requires_grad in its constructor, and overlap_grad_reduce
+        # asserts that every bucketed param's backward hook fired.
+        if self.cfg.policy.megatron_config.freeze_dsa_indexer:
+            if self._rank == 0:
+                logger.info("freeze_dsa_indexer=True: freezing DSA indexer params")
+            self.provider.register_pre_wrap_hook(freeze_dsa_indexer)
 
         # wrap with DDP for training
         wrap_with_ddp = not self.cfg.policy.inference_only_init

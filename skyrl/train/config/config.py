@@ -582,6 +582,12 @@ class MegatronConfig(BaseConfig):
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+    freeze_dsa_indexer: bool = False
+    """If True, freeze the dynamic-sparse-attention indexer parameters. The indexer emits top-k
+    *indices*, which are not differentiable, and this backend wires no auxiliary indexer loss, so
+    these parameters cannot receive a gradient; leaving them trainable trips Megatron's
+    ``overlap_grad_reduce`` assert that every bucketed parameter's backward hook fired. No-op on
+    models without a DSA indexer."""
     mtp_num_layers: Optional[int] = None
     """Number of Multi-Token Prediction (MTP) heads to build. ``None`` honors the model's HF config
     (``num_nextn_predict_layers``); an int overrides it (``0`` force-disables MTP). Active heads are
