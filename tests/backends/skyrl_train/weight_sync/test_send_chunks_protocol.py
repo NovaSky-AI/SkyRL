@@ -35,6 +35,7 @@ def test_send_chunks_accepts_protocol_arguments(sender_cls):
         chunks=[],
         weight_metadata=None,
         derive_metadata_from_chunks=False,
+        receive_target=None,
     )
 
 

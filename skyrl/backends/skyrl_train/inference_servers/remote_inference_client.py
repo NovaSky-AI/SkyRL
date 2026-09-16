@@ -1176,6 +1176,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
     async def start_weight_update(
         self,
         is_checkpoint_format: bool = True,
+        receive_target: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Start a new chunked weight update via /collective_rpc.
@@ -1187,16 +1188,19 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Args:
             is_checkpoint_format: True if weights are in checkpoint format
                 (need layerwise processing), False for kernel format.
+            receive_target: ``WeightExtractor.receive_target``. ``None`` means
+                the base model; a LoRA target dict makes the workers stage the
+                chunks for vLLM's LoRA manager (see ``weight_sync.lora_target``).
 
         Returns:
             Dict mapping server_url to response.
         """
+        kwargs: Dict[str, Any] = {"is_checkpoint_format": is_checkpoint_format}
+        if receive_target is not None:
+            kwargs["receive_target"] = receive_target
         return await self._call_all_servers(
             "/collective_rpc",
-            {
-                "method": "skyrl_start_weight_update",
-                "kwargs": {"is_checkpoint_format": is_checkpoint_format},
-            },
+            {"method": "skyrl_start_weight_update", "kwargs": kwargs},
         )
 
     async def update_weights_ipc(
@@ -1272,7 +1276,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
     async def load_lora_adapter(
         self,
         lora_name: str,
-        lora_path: str,
+        lora_path: Optional[str] = None,
+        *,
+        in_memory: bool = False,
     ) -> Dict[str, Any]:
         """
         Load (or reload) a LoRA adapter on all backend servers via the SkyRL
@@ -1296,15 +1302,24 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Args:
             lora_name: Name to register the adapter under on each server.
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
+            in_memory: Build the adapter from tensors already staged in every
+                worker by a weight update with a LoRA ``receive_target``; no
+                path is read. Mutually exclusive with ``lora_path``.
 
         Returns:
             Dict mapping server_url to response.
         """
+        if in_memory == (lora_path is not None):
+            raise ValueError("load_lora_adapter takes exactly one of lora_path or in_memory=True")
         session = await self._get_session()
 
         async def _load_on_server(server_url: str):
             url = f"{server_url}/skyrl/v1/load_lora_adapter"
-            payload = {"lora_name": lora_name, "lora_path": lora_path}
+            payload = (
+                {"lora_name": lora_name, "in_memory": True}
+                if in_memory
+                else {"lora_name": lora_name, "lora_path": lora_path}
+            )
             async with session.post(url, json=payload) as resp:
                 if resp.status >= 400:
                     body = await resp.json()
@@ -1313,7 +1328,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         results = await asyncio.gather(*[_load_on_server(url) for url in self.server_urls])
 
-        logger.info(f"Loaded LoRA adapter '{lora_name}' from {lora_path}")
+        logger.info(f"Loaded LoRA adapter '{lora_name}' from {'staged GPU tensors' if in_memory else lora_path}")
 
         return {url: resp for url, resp in results}
 
@@ -1346,6 +1361,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 return server_url, {"status": resp.status, "body": await resp.text()}
 
         results = await asyncio.gather(*[_unload_on_server(url) for url in self.server_urls])
+
+        # An adapter published with lora.sync_mode=memory also holds staged GPU
+        # tensors in every worker (kept after the load so vLLM can rebuild it
+        # after LRU eviction). Best-effort, like the unload itself.
+        try:
+            await self._call_all_servers(
+                "/collective_rpc",
+                {"method": "skyrl_discard_in_memory_lora", "kwargs": {"lora_name": lora_name}},
+            )
+        except Exception as e:
+            logger.debug(f"Could not discard staged in-memory LoRA tensors for '{lora_name}': {e}")
 
         logger.info(f"Unloaded LoRA adapter '{lora_name}'")
 

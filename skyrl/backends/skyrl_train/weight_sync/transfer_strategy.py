@@ -55,6 +55,18 @@ class WeightTransferSender(ABC):
     the physical memory regardless, so the worker still empties under
     ``colocate_all``."""
 
+    # Set by send_chunks for the duration of one send; read by
+    # _start_weight_update. Kept off the private method signatures so
+    # the chunk-stream helpers stay positional-compatible.
+    _receive_target: Optional[Dict[str, Any]] = None
+
+    async def _start_weight_update(self, inference_client: Any) -> None:
+        """``start_weight_update`` on the receivers, naming the target when it is not the model."""
+        if self._receive_target is None:
+            await inference_client.start_weight_update(is_checkpoint_format=True)
+        else:
+            await inference_client.start_weight_update(is_checkpoint_format=True, receive_target=self._receive_target)
+
     async def send(
         self,
         weight_extractor: Any,
@@ -79,10 +91,15 @@ class WeightTransferSender(ABC):
             **kwargs: Forwarded to :meth:`send_chunks`.
         """
         derive_metadata_from_chunks = weight_extractor.derives_metadata_from_chunks
+        # Read before extract_weights: a LoRA extractor's target (aliases,
+        # adapter config) is only known once its collective export has run,
+        # and the receiver needs it at skyrl_start_weight_update.
+        receive_target = weight_extractor.receive_target
         await self.send_chunks(
             weight_extractor.extract_weights(dtype),
             weight_metadata=(None if derive_metadata_from_chunks else weight_extractor.get_weight_metadata(dtype)),
             derive_metadata_from_chunks=derive_metadata_from_chunks,
+            receive_target=receive_target,
             **kwargs,
         )
 
@@ -92,6 +109,7 @@ class WeightTransferSender(ABC):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
         derive_metadata_from_chunks: bool = False,
+        receive_target: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> None:
         """Send chunks using this transfer strategy.
@@ -103,6 +121,9 @@ class WeightTransferSender(ABC):
             chunks: Iterable of WeightChunk objects to send.
             weight_metadata: Optional pre-computed metadata (names, dtype_names, shapes).
             derive_metadata_from_chunks: Derive metadata from each transferred chunk.
+            receive_target: ``WeightExtractor.receive_target``; passed through to
+                ``start_weight_update`` so the receiver applies the stream to the
+                right target (base model or a LoRA adapter).
         """
         ...
 
