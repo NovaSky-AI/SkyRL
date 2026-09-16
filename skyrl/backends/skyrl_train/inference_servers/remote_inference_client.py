@@ -1447,6 +1447,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 pass
             self._session = None
 
+    async def is_sleeping(self):
+        ret = await self._call_all_servers("/is_sleeping", method="GET")
+        return all(response["body"]["is_sleeping"] for response in ret.values())
+
 
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:
     """Modified version of resp.raise_for_status() that reads the body for the error message.

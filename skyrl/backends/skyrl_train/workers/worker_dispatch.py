@@ -691,7 +691,10 @@ class WorkerDispatch:
             self.empty_cache("policy")
             return
 
-        await self._inference_engine_client.sleep()
+        is_sleeping = await self._inference_engine_client.is_sleeping()
+        if not is_sleeping:
+            await self._inference_engine_client.sleep()
+
         offload_optimizer = self.cfg.trainer.policy.optimizer_config.offload_after_step
         self._ensure_on_gpu(
             "policy",

@@ -246,6 +246,10 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         # Mock always returns not paused for basic tests
         return {"is_paused": False}
 
+    @app.get("/is_sleeping")
+    async def is_sleeping():
+        return {"is_sleeping": False}
+
     @app.post("/sleep")
     async def sleep(level: int = 2, tags: Optional[List[str]] = Query(None)):
         return {"status": "sleeping", "server_id": server_id, "level": level, "tags": tags}
@@ -620,6 +624,11 @@ class TestControlPlane:
         for url, response in result.items():
             assert response["body"]["level"] == 1
             assert response["body"]["tags"] == ["weights", "kv_cache"]
+
+    @pytest.mark.asyncio
+    async def test_is_sleeping(self, client):
+        """Test is_sleeping fans out to all servers and unwraps response bodies."""
+        assert await client.is_sleeping() is False
 
     @pytest.mark.asyncio
     async def test_wake_up(self, client):

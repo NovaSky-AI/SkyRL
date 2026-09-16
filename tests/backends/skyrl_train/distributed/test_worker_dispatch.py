@@ -254,6 +254,7 @@ def _prepare_sync_dispatch(initial_state, *, offload_after_step=True):
     dispatch.colocate_policy_ref = False
     dispatch.cfg = cfg
     dispatch._inference_engine_client = AsyncMock()
+    dispatch._inference_engine_client.is_sleeping.return_value = False
     dispatch.empty_cache = MagicMock()
     dispatch._gpu_state = {
         name: SimpleNamespace(model_on_gpu=model_on_gpu, optimizer_on_gpu=optimizer_on_gpu)
@@ -411,6 +412,7 @@ async def test_weight_sync_honors_optimizer_offload_policy(offload_after_step):
     dispatch.colocate_all = True
     dispatch.cfg = cfg
     dispatch._inference_engine_client = AsyncMock()
+    dispatch._inference_engine_client.is_sleeping.return_value = False
     dispatch.empty_cache = MagicMock()
 
     dispatch._gpu_state = {
