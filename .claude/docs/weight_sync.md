@@ -121,6 +121,16 @@ Memory and lifecycle, per inference GPU:
   experts, so a MoE adapter costs roughly its *local un-deduplicated* size per registered
   adapter (about 1/EP of the public size). With multi-tenant `max_loras` / `max_cpu_loras`
   above 1, budget that per resident adapter.
+  Measured on GLM-5.3 (`glm_moe_dsa`, 256 routed experts, Megatron EP8 -> vLLM TP8, B300
+  268 GiB): **~22.4 GiB per resident adapter per inference GPU** -- vLLM's weight-load
+  memory fell from 220.94 to 198.56 GiB going `max_loras` 2 -> 1. On a 1.4 TB base model
+  that is the binding constraint: with `max_loras=2` and `gpu_memory_utilization=0.8` the
+  weights alone exceeded vLLM's budget (no KV cache), and raising utilization only let the KV
+  cache grow into the freed space, because the staged tensors are received into the worker
+  process outside what `gpu_memory_utilization`'s profiling accounts for. For a single tenant
+  on many-expert models use `max_loras=1` (the adapter is replaced in place; register stage
+  stayed 0.4-0.5 s across syncs) and size utilization so `total * util - weights - activations`
+  leaves both a KV cache and headroom for the stage.
 - **Debugging.** The trainer logs `LoRA sync (memory): adapter ... exported+sent in Xs,
   registered on vLLM in Ys` on rank 0. Worker-side failures (`no tensors are staged`,
   `expected target modules ... but received`) surface through `/skyrl/v1/load_lora_adapter`
