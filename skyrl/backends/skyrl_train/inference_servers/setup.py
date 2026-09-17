@@ -59,6 +59,7 @@ def create_inference_servers(
     cli_args: Namespace,
     log_path: str,
     placement_group=None,
+    start_port: int = VLLM_START_PORT,
 ) -> InferenceServerSetup:
     """Build server groups and router from config.
 
@@ -73,6 +74,11 @@ def create_inference_servers(
         log_path: Log path for SkyRL logs
         placement_group: Optional resolved placement group for colocated
             training.  ``None`` when not colocated.
+        start_port: Base of the port range the server groups are laid out
+            from, one ``SERVER_PORT_STRIDE`` per server.  A second set of
+            engines in the same cluster (the reserved eval group) passes a
+            base past the first set's span: the DP master port is derived
+            from the base, so two groups sharing one would collide.
 
     Returns:
         An :class:`InferenceServerSetup` with the router, URLs, and
@@ -119,7 +125,7 @@ def create_inference_servers(
             ServerGroup(
                 cli_args=copy.deepcopy(prefill_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
-                start_port=VLLM_START_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
+                start_port=start_port + i * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=prefill_pg,
                 placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -140,7 +146,7 @@ def create_inference_servers(
             ServerGroup(
                 cli_args=copy.deepcopy(decode_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
-                start_port=VLLM_START_PORT + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
+                start_port=start_port + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=decode_pg,
                 placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -223,7 +229,7 @@ def create_inference_servers(
                 cli_args=cli_args,
                 num_servers=ie_cfg.data_parallel_size,
                 placement_group=placement_group,
-                start_port=VLLM_START_PORT + i * ie_cfg.data_parallel_size * SERVER_PORT_STRIDE,
+                start_port=start_port + i * ie_cfg.data_parallel_size * SERVER_PORT_STRIDE,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,

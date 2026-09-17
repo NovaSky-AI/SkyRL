@@ -614,31 +614,40 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                     pbar.update(1)
 
-                    # 6. Eval. At interval and at the last step.
-                    # NOTE(Charlie): eval does not overlap with training, but overlaps with generation.
-                    if self.cfg.trainer.eval_interval > 0 and (
-                        self.global_step % self.cfg.trainer.eval_interval == 0
-                        or self.global_step == self.total_training_steps
-                    ):
-                        with self._phase_gauge.timed_phase("eval", self.all_timings):
-                            await self._eval_dispatcher.submit(self.global_step)
-                    # Write every settled eval at the step it evaluated, before this step's own row.
-                    self._log_eval_results(self._eval_dispatcher.get_completed())
-
-                    # Log metrics for this step after evaluation
-                    self.tracker.log(self.all_metrics, step=self.global_step)
-                    self.all_metrics = {}
-
-                    # 7. Checkpointing. At interval and at the last step of each epoch.
+                    # 6. Checkpointing. At interval and at the last step of each epoch. Before the eval
+                    # site: an asynchronous eval dispatcher loads this step's HF export, so the export
+                    # must exist -- and the save must have returned -- before the eval is submitted.
                     is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
                     if self.cfg.trainer.ckpt_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
                             with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
                                 await asyncio.to_thread(self.save_checkpoints)
                     if self.cfg.trainer.hf_save_interval > 0:
-                        if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                        if (
+                            is_epoch_end
+                            or self.global_step % self.cfg.trainer.hf_save_interval == 0
+                            or self.global_step == self.total_training_steps  # the final-step eval needs it
+                        ):
                             with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
                                 await asyncio.to_thread(self.save_models)
+
+                    # 7. Eval. At interval and at the last step.
+                    # NOTE(Charlie): eval does not overlap with training, but overlaps with generation.
+                    # NOTE(kyuds): Evals may also overlap when using async evals.
+                    if self.cfg.trainer.eval_interval > 0 and (
+                        self.global_step % self.cfg.trainer.eval_interval == 0
+                        or self.global_step == self.total_training_steps
+                    ):
+                        with self._phase_gauge.timed_phase("eval", self.all_timings):
+                            await self._eval_dispatcher.submit(
+                                self.global_step, force=self.global_step == self.total_training_steps
+                            )
+                    # Write every settled eval at the step it evaluated, before this step's own row.
+                    self._log_eval_results(self._eval_dispatcher.get_completed())
+
+                    # Log metrics for this step after evaluation
+                    self.tracker.log(self.all_metrics, step=self.global_step)
+                    self.all_metrics = {}
 
                     timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
                     if self._ray_gpu_monitor is not None:
@@ -727,6 +736,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.epoch = self.cfg.trainer.epochs
 
         # safety net: always save final checkpoint at end of training.
+        #
+        # TODO (kyuds): these safety nets run with global_step == last + 1 -- the loop advances it at
+        # the end of every iteration and never decrements it afterwards (the sync trainer does) -- so
+        # they write checkpoint / export directories named global_step_{last+1} holding the weights
+        # of step `last`. The in-loop HF save now always runs at the last step (the forced final eval
+        # loads that export), so the export written here is a duplicate of global_step_{last}. Fix in
+        # a follow-up PR by mirroring the sync trainer: decrement global_step after the loop and skip
+        # each safety net when the loop already saved at that step -- checkpoint and export together,
+        # since resume reads the checkpoint's step. Left alone here because renaming the final export
+        # of every fully-async run is out of scope for eval dispatch.
+        # TODO (kyuds): we should probably integrate this into the loop instead.
         if self.cfg.trainer.ckpt_interval > 0:
             with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
                 await asyncio.to_thread(self.save_checkpoints)

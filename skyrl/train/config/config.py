@@ -1410,6 +1410,76 @@ class MTPConfig(BaseConfig):
 
 
 # ---------------------------------------------------------------------------
+# Eval dispatch
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EvalDispatchConfig(BaseConfig):
+    """Configure where and how evaluations are run: inline on the training engines,
+    or on a reserved eval-only engine group that does not block the training loop.
+    """
+
+    mode: str = "blocking"
+    """``blocking`` (default): training is stopped when evaluations are running.
+    ``reserved``: on ``num_engines`` eval-only vLLM engines load each evaluated step from the
+    HF export ``trainer.hf_save_interval`` writes; training continues during evaluation.
+    Requires ``eval_interval`` to be a multiple of ``hf_save_interval``. An eval forced at a step
+    without an export (a callback, or ``eval_before_train`` on a resumed run) is skipped as
+    ``eval/skipped_ckpt_missing``."""
+    max_queue_size: int = 2
+    """Evals admitted and not yet collected, the running one included, before ``overflow_policy``
+    applies. A reserved group runs one eval at a time; ``2`` absorbs one straggler without stalling."""
+    overflow_policy: str = "backpressure"
+    """When the queue is full and another eval is due. ``backpressure``: block the training loop
+    until the oldest eval finishes (bounded stall, unbroken curve). ``skip``: drop the point and log
+    ``eval/skipped_busy`` at that step (never stalls, holes in the curve). The final-step eval is
+    never skipped."""
+
+    # --- the reserved group ---
+    num_engines: int = 1
+    """Eval-only engines. These are separate GPUs in addition to the training fleet."""
+    engine_overrides: Dict[str, Any] = field(default_factory=dict)
+    """Applied on top of a copy of ``generator.inference_engine`` for the reserved group, e.g.
+    ``{"tensor_parallel_size": 1, "gpu_memory_utilization": 0.9}``. Keys must be
+    ``InferenceEngineConfig`` fields; ``num_engines``, the PD / external-server / KV-offload fields
+    and ``speculative_config`` are set by SkyRL and cannot be overridden."""
+    local_cache_dir: Optional[str] = None
+    """Per-node directory the reserved engines fetch exports into when ``trainer.export_path`` is a
+    cloud URI: one download per node, shared by TP ranks and co-located engines. Unset: an
+    ``export_path``-derived path under ``/tmp/skyrl_eval_exports``, like
+    ``DeltaWeightSyncConfig.local_checkpoint_dir``. Unused for a shared-filesystem ``export_path``."""
+
+    MODES = ("blocking", "reserved")
+    OVERFLOW_POLICIES = ("backpressure", "skip")
+    FIXED_OVERRIDES = frozenset(
+        {
+            "num_engines",
+            "enable_pd",
+            "num_prefill",
+            "external_proxy_url",
+            "external_server_urls",
+            "run_engines_locally",
+            "offload_kv_for_weight_sync",
+            "speculative_config",
+        }
+    )
+
+    def __post_init__(self) -> None:
+        if self.mode not in self.MODES:
+            raise ValueError(f"trainer.eval_dispatch.mode must be one of {self.MODES}, got {self.mode!r}")
+        if self.overflow_policy not in self.OVERFLOW_POLICIES:
+            raise ValueError(
+                f"trainer.eval_dispatch.overflow_policy must be one of {self.OVERFLOW_POLICIES}, "
+                f"got {self.overflow_policy!r}"
+            )
+        for name in ("max_queue_size", "num_engines"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"trainer.eval_dispatch.{name} must be a positive int, got {value!r}")
+
+
+# ---------------------------------------------------------------------------
 # Trainer (top-level)
 # ---------------------------------------------------------------------------
 
@@ -1458,6 +1528,11 @@ class TrainerConfig(BaseConfig):
     Accepts a local directory path or a cloud storage path (S3, GCS)."""
     max_ckpts_to_keep: int = -1
     """``-1`` to keep all checkpoints, ``N`` to keep only the last N."""
+    max_hf_exports_to_keep: int = -1
+    """``-1`` (default) to keep every HF export under ``export_path``, ``N`` to keep only the newest N.
+    An export a queued or running eval still needs is never deleted; it is reconsidered at the next
+    export. Reserved eval (``eval_dispatch.mode``) forces exports at eval cadence, which is why this
+    exists."""
     ckpt_interval: int = 10
     """Save a full training checkpoint every N steps."""
     hf_save_interval: int = -1
@@ -1527,6 +1602,8 @@ class TrainerConfig(BaseConfig):
     """Evaluate the model once before training starts."""
     eval_interval: int = 5
     """Evaluate against the validation dataset every N steps. ``-1`` to disable evaluation."""
+    eval_dispatch: EvalDispatchConfig = field(default_factory=EvalDispatchConfig)
+    """Where evaluation runs and how many evals may be queued; see ``EvalDispatchConfig``."""
     max_prompt_length: int = 512
     """Maximum prompt length during training.
     Prompts longer than this are filtered out of the train/eval datasets at load time, not

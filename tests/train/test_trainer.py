@@ -15,10 +15,18 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.eval import EvalResult
+from skyrl.train.eval import (
+    BlockingEvalDispatcher,
+    EvalBackend,
+    EvalResult,
+    SingleAsyncEvalDispatcher,
+)
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.callbacks import TrainingCallback
-from skyrl.train.utils.trainer_utils import list_checkpoint_dirs
+from skyrl.train.utils.trainer_utils import (
+    cleanup_old_checkpoints,
+    list_checkpoint_dirs,
+)
 from skyrl.train.utils.utils import validate_batch_sizes
 from tests.train.util import example_dummy_config
 
@@ -707,7 +715,7 @@ def test_validate_batch_sizes_lcm_dp_requirement():
 # ---------------------------------------------------------------------------
 
 
-def _bare_trainer(cfg, tokenizer) -> RayPPOTrainer:
+def _bare_trainer(cfg, tokenizer, **kwargs) -> RayPPOTrainer:
     return RayPPOTrainer(
         cfg=cfg,
         tracker=None,
@@ -716,6 +724,7 @@ def _bare_trainer(cfg, tokenizer) -> RayPPOTrainer:
         eval_dataset=DummyDataset(),
         inference_engine_client=None,
         generator=MagicMock(),
+        **kwargs,
     )
 
 
@@ -901,3 +910,92 @@ def test_tmp_ref_sync_scratch_is_not_an_export(tmp_path):
     (tmp_path / "global_step_1").mkdir()
 
     assert list_checkpoint_dirs(str(tmp_path)) == ["global_step_1"]
+
+
+# ---------------------------------------------------------------------------
+# Eval dispatcher selection and HF export retention
+# ---------------------------------------------------------------------------
+
+
+class _NoopBackend(EvalBackend):
+    """An EvalBackend whose methods are never exercised here."""
+
+    async def sync(self, req):
+        raise NotImplementedError
+
+    async def release(self, lease):
+        pass
+
+    async def close(self):
+        pass
+
+
+def test_build_eval_dispatcher_follows_mode(dummy_config, dummy_tokenizer, tmp_path):
+    """Blocking by default; ``reserved`` needs a backend handed to the constructor -- an object that is
+    not one is rejected too -- and binds the dispatcher to the run's export layout."""
+    assert isinstance(_bare_trainer(dummy_config, dummy_tokenizer)._eval_dispatcher, BlockingEvalDispatcher)
+
+    dummy_config.trainer.eval_dispatch.mode = "reserved"  # validate_cfg runs in the entrypoint, not here
+    dummy_config.trainer.export_path = str(tmp_path)
+    with pytest.raises(ValueError, match="eval_backend"):
+        _bare_trainer(dummy_config, dummy_tokenizer)
+    with pytest.raises(TypeError, match="EvalBackend"):
+        _bare_trainer(dummy_config, dummy_tokenizer, eval_backend=object())  # not a subclass, whatever its methods
+
+    backend = _NoopBackend()
+    trainer = _bare_trainer(dummy_config, dummy_tokenizer, eval_backend=backend)
+
+    assert isinstance(trainer._eval_dispatcher, SingleAsyncEvalDispatcher)
+    assert trainer.eval_backend is backend
+    assert trainer._eval_dispatcher._backend is backend
+    assert trainer._eval_dispatcher._trainer_cfg is dummy_config.trainer  # export dirs are derived from it
+
+
+def _exports(root):
+    return sorted(p.name for p in root.iterdir() if p.name.startswith("global_step_"))
+
+
+def test_save_models_retention_spares_pending_evals(dummy_config, dummy_tokenizer, tmp_path, monkeypatch):
+    """After each export the oldest ones beyond ``max_hf_exports_to_keep`` go, except those an eval
+    still needs; the veto is read from the dispatcher at deletion time. The scratch tree of the ref
+    sync is neither counted nor touched."""
+    dummy_config.trainer.export_path = str(tmp_path)
+    dummy_config.trainer.max_hf_exports_to_keep = 1
+    trainer = _bare_trainer(dummy_config, dummy_tokenizer)
+    trainer.dispatch = MagicMock()
+
+    def fake_save_hf_model(model, export_dir, tokenizer):
+        Path(export_dir).mkdir(parents=True)
+        Path(export_dir, "config.json").write_text("{}")
+
+    trainer.dispatch.save_hf_model.side_effect = fake_save_hf_model
+    monkeypatch.setattr("skyrl.train.trainer.run_on_each_node", lambda node_ids, fn, *args, **kwargs: None)
+    trainer._eval_dispatcher = _fake_dispatcher()
+    trainer._eval_dispatcher.pending_steps = MagicMock(return_value={2})
+    for step in (1, 2, 3):
+        (tmp_path / f"global_step_{step}" / "policy").mkdir(parents=True)
+    (tmp_path / "_tmp_ref_sync" / "global_step_1").mkdir(parents=True)
+
+    trainer.global_step = 4
+    trainer.save_models()
+    assert _exports(tmp_path) == ["global_step_2", "global_step_4"]  # 2 is pending; 4 is the newest
+
+    trainer._eval_dispatcher.pending_steps.return_value = set()  # the eval of 2 settled
+    trainer.global_step = 5
+    trainer.save_models()
+    assert _exports(tmp_path) == ["global_step_5"]
+
+    dummy_config.trainer.max_hf_exports_to_keep = -1
+    trainer.global_step = 6
+    trainer.save_models()
+    assert _exports(tmp_path) == ["global_step_5", "global_step_6"]
+    assert (tmp_path / "_tmp_ref_sync" / "global_step_1").exists()
+
+
+def test_cleanup_old_checkpoints_keeps_protected_steps(tmp_path):
+    for step in (1, 2, 3, 4):
+        (tmp_path / f"global_step_{step}").mkdir()
+
+    cleanup_old_checkpoints(str(tmp_path), 1, protected={2})
+
+    assert _exports(tmp_path) == ["global_step_2", "global_step_4"]

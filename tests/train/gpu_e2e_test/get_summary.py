@@ -25,6 +25,14 @@ OPERATORS = {
     ">=": operator.ge,
 }
 
+parser.add_argument(
+    "--absent",
+    nargs="*",
+    type=str,
+    default=[],
+    help="Metric names that must NOT appear in the run summary (e.g. eval/skipped_busy).",
+)
+
 args = parser.parse_args()
 
 api = wandb.Api()
@@ -47,4 +55,9 @@ for assertion in args.asserts:
         sys.exit(1)
     else:
         print(f"Metric {metric_name} is {operator_str} threshold {threshold}: {metric_value}")
+for metric_name in args.absent:
+    if metric_name in matched_run.summary_metrics:
+        print(f"Metric {metric_name} should be absent but is {matched_run.summary_metrics[metric_name]}")
+        sys.exit(1)
+    print(f"Metric {metric_name} is absent")
 print("All assertions passed!")

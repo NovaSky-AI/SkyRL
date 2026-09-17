@@ -15,6 +15,7 @@ from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.train.config.config import (
     BaseConfig,
     DeltaWeightSyncConfig,
+    EvalDispatchConfig,
     SkyRLTrainConfig,
     TrainerConfig,
     _resolve_class_type,
@@ -25,6 +26,7 @@ from skyrl.train.utils import utils as train_utils
 from skyrl.train.utils.utils import (
     prepare_runtime_environment,
     validate_cfg,
+    validate_eval_dispatch_cfg,
     validate_inference_engine_cfg,
 )
 from tests.train.util import example_dummy_config
@@ -1194,3 +1196,128 @@ class TestDeltaWeightSyncConfig:
         # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
         assert "my_sync_dir" in cfg.publish_staging_dir
         assert "my_sync_dir" in cfg.local_checkpoint_dir
+
+
+# ---------------------------------------------------------------------------
+# Eval dispatch config
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("mode", "quarantine"),
+        ("overflow_policy", "drop"),
+        ("max_queue_size", 0),
+        ("max_queue_size", True),
+        ("num_engines", 0),
+        ("num_engines", True),
+    ],
+)
+def test_eval_dispatch_config_rejects_bad_values(field_name, value):
+    with pytest.raises(ValueError, match=field_name):
+        EvalDispatchConfig(**{field_name: value})
+
+
+def _reserved_cfg():
+    """A config whose only reserved-mode requirement left to satisfy is the one a test breaks."""
+    cfg = example_dummy_config()
+    cfg.trainer.eval_dispatch.mode = "reserved"
+    cfg.trainer.eval_interval = 10
+    cfg.trainer.hf_save_interval = 5
+    return cfg
+
+
+def _validate_dispatch(cfg):
+    validate_eval_dispatch_cfg(cfg)
+
+
+def _set(cfg, dotted_path, value):
+    node = cfg
+    parts = dotted_path.split(".")
+    for part in parts[:-1]:
+        node = getattr(node, part)
+    setattr(node, parts[-1], value)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"generator.inference_engine.run_engines_locally": False}, "run_engines_locally"),
+        ({"generator.inference_engine.backend": "sglang"}, "backend"),
+        ({"trainer.eval_interval": -1}, "eval_interval"),
+        ({"trainer.hf_save_interval": -1}, "hf_save_interval"),
+        ({"trainer.eval_interval": 6, "trainer.hf_save_interval": 4}, "multiple"),
+        ({"trainer.policy.model.lora.rank": 8}, "LoRA"),
+        ({"trainer.eval_dispatch.engine_overrides": {"num_engines": 2}}, "may not set"),
+        ({"trainer.eval_dispatch.engine_overrides": {"nonexistent_field": 1}}, "Invalid fields"),
+    ],
+)
+def test_eval_dispatch_validate_rejects_reserved_rule_breaks(overrides, match):
+    cfg = _reserved_cfg()
+    for path, value in overrides.items():
+        _set(cfg, path, value)
+
+    with pytest.raises(ValueError, match=match):
+        _validate_dispatch(cfg)
+
+
+def test_eval_dispatch_validate_accepts_a_reserved_config_colocated_or_not():
+    cfg = _reserved_cfg()
+    cfg.trainer.eval_dispatch.engine_overrides = {"tensor_parallel_size": 1}
+    _validate_dispatch(cfg)
+    cfg.trainer.placement.colocate_all = True  # the reserved group sits outside the colocated placement group
+    _validate_dispatch(cfg)
+    cfg.trainer.placement.colocate_all = False
+    _validate_dispatch(cfg)
+
+
+def test_eval_dispatch_validate_ignores_the_reserved_rules_under_blocking():
+    cfg = example_dummy_config()
+    cfg.trainer.eval_interval = -1
+    cfg.trainer.hf_save_interval = -1
+    cfg.trainer.eval_dispatch.engine_overrides = {"nonexistent_field": 1}
+
+    _validate_dispatch(cfg)  # blocking never reads them
+
+
+def test_validate_cfg_rejects_zero_hf_exports_to_keep():
+    # The default config passes validate_cfg (the dummy one fails its batch-size checks first).
+    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.logger=console", "trainer.max_hf_exports_to_keep=0"])
+
+    with pytest.raises(ValueError, match="max_hf_exports_to_keep"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_runs_the_engine_validator_over_the_reserved_group():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.logger=console",
+            "trainer.eval_dispatch.mode=reserved",
+            "trainer.hf_save_interval=5",
+            "trainer.eval_dispatch.engine_overrides.distributed_executor_backend=bogus",
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="distributed executor backend"):
+        validate_cfg(cfg)
+
+
+def test_eval_dispatch_cli_override_round_trips():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.eval_dispatch.mode=reserved",
+            "trainer.eval_dispatch.max_queue_size=3",
+            "trainer.eval_dispatch.overflow_policy=skip",
+            "trainer.eval_dispatch.engine_overrides.tensor_parallel_size=1",
+            "trainer.max_hf_exports_to_keep=2",
+        ]
+    )
+
+    assert cfg.trainer.eval_dispatch.mode == "reserved"
+    assert cfg.trainer.eval_dispatch.max_queue_size == 3
+    assert cfg.trainer.eval_dispatch.overflow_policy == "skip"
+    assert cfg.trainer.eval_dispatch.engine_overrides == {"tensor_parallel_size": 1}
+    assert cfg.trainer.max_hf_exports_to_keep == 2
+    with pytest.raises(ValueError, match="Invalid fields"):
+        SkyRLTrainConfig.from_cli_overrides(["trainer.eval_dispatch.max_queue_sizee=3"])

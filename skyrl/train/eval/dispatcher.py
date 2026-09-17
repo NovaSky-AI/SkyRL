@@ -4,33 +4,20 @@ The loops make three calls -- submit an eval of the current step, collect the re
 settled, drain everything outstanding at a join point -- and write each returned result to the
 tracker at the step it evaluated. The dispatcher runs the eval and fires the eval callbacks; it
 never touches the tracker. ``BlockingEvalDispatcher`` completes the eval inside ``submit``; it is
-the pre-dispatcher behaviour, inline on the training engines.
+the pre-dispatcher behaviour, inline on the training engines. ``SingleAsyncEvalDispatcher``
+(``async_dispatcher.py``) runs evals on a reserved engine group without blocking the loop.
 """
 
 import abc
 import time
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Set
+
+from skyrl.train.eval.types import EvalResult
 
 RunEval = Callable[..., Awaitable[Dict[str, float]]]
 """``RayPPOTrainer.eval``'s signature. Dispatchers pass keyword arguments only."""
 OnEvent = Callable[..., None]
 """``RayPPOTrainer._fire``: ``(event_name, **callback_input_fields)``."""
-
-
-@dataclass
-class EvalResult:
-    """One settled eval point.
-
-    ``global_step`` is the step whose weights were evaluated -- under an asynchronous dispatcher,
-    older than the step it is collected on. ``metrics`` is ``evaluate()``'s dict, namespaced
-    ``eval/*``; empty when ``skipped_reason`` is set.
-    """
-
-    global_step: int
-    metrics: Dict[str, float] = field(default_factory=dict)
-    skipped_reason: Optional[str] = None
-    duration_seconds: float = 0.0
 
 
 class BaseEvalDispatcher(abc.ABC):
@@ -50,13 +37,27 @@ class BaseEvalDispatcher(abc.ABC):
     carry the evaluated step, not the loop's current one.
     """
 
+    runs_inline: ClassVar[bool] = True
+    """Whether the eval runs on the training engines, inside ``submit``. The sync loop opens its
+    vLLM metrics scraper's ``vllm/eval`` window around ``submit`` only when this is true; an
+    asynchronous dispatcher runs the eval elsewhere, later, and leaves that window shut."""
+
     def __init__(self, run_eval: RunEval, *, on_event: OnEvent):
         self._run_eval = run_eval
         self._on_event = on_event
 
     @abc.abstractmethod
-    async def submit(self, global_step: int, **kwargs: Any) -> None:
-        """Request an eval of the weights as of ``global_step``. ``kwargs`` go to the unit of work."""
+    async def submit(self, global_step: int, *, force: bool = False, **kwargs: Any) -> None:
+        """Request an eval of the weights as of ``global_step``. ``kwargs`` go to the unit of work.
+
+        ``force`` marks an eval that must not be dropped (the final-step eval); a dispatcher whose
+        overflow policy would skip it applies backpressure instead. Ignored by the blocking one.
+        """
+
+    def pending_steps(self) -> Set[int]:
+        """Steps whose HF export must not be deleted yet: evals admitted and not yet collected.
+        Empty unless a dispatcher loads exports asynchronously."""
+        return set()
 
     @abc.abstractmethod
     def get_completed(self) -> List[EvalResult]:
@@ -84,7 +85,8 @@ class BlockingEvalDispatcher(BaseEvalDispatcher):
         super().__init__(run_eval, on_event=on_event)
         self._done: List[EvalResult] = []
 
-    async def submit(self, global_step: int, **kwargs: Any) -> None:
+    async def submit(self, global_step: int, *, force: bool = False, **kwargs: Any) -> None:
+        del force  # unused
         self._on_event("on_eval_start", global_step=global_step)
         started = time.monotonic()
         metrics = await self._run_eval(**kwargs)

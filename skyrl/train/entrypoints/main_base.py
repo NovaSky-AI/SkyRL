@@ -18,6 +18,7 @@ from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_mo
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.dataset import PromptDataset
+from skyrl.train.eval import EvalBackend
 from skyrl.train.generators.base import GeneratorInterface
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import validate_cfg
@@ -162,6 +163,7 @@ class BasePPOExp:
         inference_engine_client,
         generator: GeneratorInterface,
         colocate_pg,
+        eval_backend: Optional[EvalBackend] = None,
     ) -> RayPPOTrainer:
         """Initializes the trainer.
 
@@ -177,6 +179,29 @@ class BasePPOExp:
             inference_engine_client=inference_engine_client,
             generator=generator,
             colocate_pg=colocate_pg,
+            eval_backend=eval_backend,
+        )
+
+    def get_eval_backend(self) -> Optional[EvalBackend]:
+        """Initializes the backend the asynchronous eval dispatcher runs evals on.
+
+        ``None`` for ``trainer.eval_dispatch.mode='blocking'``. Overridable like
+        ``get_inference_client``. Built after the training fleet, so its placement group comes from
+        the GPUs that fleet left; the generator comes from ``get_generator``, so an entrypoint's own
+        generator class carries over to the reserved engine group.
+
+        Returns:
+            The eval backend, or None.
+        """
+        if self.cfg.trainer.eval_dispatch.mode != "reserved":
+            return None
+        from skyrl.train.eval.reserved import ReservedEvalBackend
+
+        return ReservedEvalBackend.create(
+            self.cfg,
+            self.tokenizer,
+            log_path=self.cfg.trainer.log_path,
+            make_generator=lambda client: self.get_generator(self.cfg, self.tokenizer, client),
         )
 
     def get_tracker(self) -> Tracking:
@@ -281,6 +306,7 @@ class BasePPOExp:
         inference_engine_client = self.get_inference_client()
 
         generator: GeneratorInterface = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
+        eval_backend = self.get_eval_backend()
 
         trainer = self.get_trainer(
             cfg=self.cfg,
@@ -291,6 +317,7 @@ class BasePPOExp:
             inference_engine_client=inference_engine_client,
             generator=generator,
             colocate_pg=self.colocate_pg,
+            eval_backend=eval_backend,
         )
         # Install the trajectory logger after construction
         trainer.trajectory_logger = self.get_trajectory_logger()

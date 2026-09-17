@@ -58,7 +58,13 @@ from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
-from skyrl.train.eval import BaseEvalDispatcher, BlockingEvalDispatcher, EvalResult
+from skyrl.train.eval import (
+    BaseEvalDispatcher,
+    BlockingEvalDispatcher,
+    EvalBackend,
+    EvalResult,
+    SingleAsyncEvalDispatcher,
+)
 from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -113,6 +119,7 @@ class RayPPOTrainer:
         colocate_pg: Optional[ResolvedPlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
         callbacks: Optional[List[TrainingCallback]] = None,
+        eval_backend: Optional[EvalBackend] = None,
     ):
         self.cfg = cfg
         self.colocate_all = cfg.trainer.placement.colocate_all
@@ -162,6 +169,7 @@ class RayPPOTrainer:
         self._training_control = TrainingControl()
         self._current_epoch: int = 0
 
+        self.eval_backend = eval_backend
         self._eval_dispatcher: BaseEvalDispatcher = self._build_eval_dispatcher()
 
         configure_ray_worker_logging()
@@ -195,18 +203,33 @@ class RayPPOTrainer:
         getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
 
     def _build_eval_dispatcher(self) -> BaseEvalDispatcher:
-        """The eval dispatcher for this run: blocking (inline on the training engines) for now; a
-        later PR selects an asynchronous one from config here.
+        """The eval dispatcher for this run, from ``trainer.eval_dispatch.mode``.
 
-        Both collaborators are looked up at call time rather than captured: ``eval`` so subclass
+        ``eval`` and ``_fire`` are looked up at call time rather than captured: ``eval`` so subclass
         overrides and the post-construction ``trajectory_logger`` are honoured (and the trainer
         tests can monkeypatch it); ``_fire`` for uniformity -- a bound method would already read
         its state at call time, but a reader should not have to work out why one of the two is
-        different.
+        different. The backend is the constructor argument, resolved here and now: a reserved run
+        without one is a configuration error best raised before any GPU is touched.
         """
-        return BlockingEvalDispatcher(
-            run_eval=lambda *args, **kwargs: self.eval(*args, **kwargs),
-            on_event=lambda event_name, **fields: self._fire(event_name, **fields),
+        run_eval = lambda *args, **kwargs: self.eval(*args, **kwargs)  # noqa: E731
+        on_event = lambda event_name, **fields: self._fire(event_name, **fields)  # noqa: E731
+        dispatch_cfg = self.cfg.trainer.eval_dispatch
+        if dispatch_cfg.mode == "blocking":
+            return BlockingEvalDispatcher(run_eval, on_event=on_event)
+        if self.eval_backend is None:
+            raise ValueError(
+                "trainer.eval_dispatch.mode='reserved' needs an eval backend: pass eval_backend=... to "
+                "RayPPOTrainer (BasePPOExp.get_trainer does; an overriding get_trainer must forward it)"
+            )
+        if not isinstance(self.eval_backend, EvalBackend):
+            raise TypeError(f"eval_backend must be an EvalBackend, got {type(self.eval_backend).__name__}")
+        return SingleAsyncEvalDispatcher(
+            self.cfg.trainer,
+            backend=self.eval_backend,
+            run_eval=run_eval,
+            on_event=on_event,
+            current_step=lambda: self.global_step,
         )
 
     def _log_eval_results(self, results: List[EvalResult]) -> None:
@@ -494,7 +517,11 @@ class RayPPOTrainer:
                         # 8. conditionally save checkpoints and hf model
                         is_epoch_end = self.global_step % len(self.train_dataloader) == 0
                         hf_model_save = self.cfg.trainer.hf_save_interval > 0 and (
-                            is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0
+                            is_epoch_end
+                            or self.global_step % self.cfg.trainer.hf_save_interval == 0
+                            # The final-step eval below needs this step's export; the safety-net
+                            # export after the loop would come too late for it.
+                            or self.global_step == self.total_training_steps
                         )
                         ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
                             is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
@@ -544,15 +571,21 @@ class RayPPOTrainer:
                     )
                     if force_eval or interval_eval:
                         # Open the eval-rollout window; the scraper itself measures
-                        # the generation spans via resume()/pause() inside eval().
-                        if self._vllm_metrics_scraper is not None:
+                        # the generation spans via resume()/pause() inside eval(). The scraper
+                        # watches the TRAINING engines: under an asynchronous dispatcher the eval
+                        # runs elsewhere, later, so that window stays shut.
+                        scrape = self._vllm_metrics_scraper is not None and self._eval_dispatcher.runs_inline
+                        if scrape:
                             await self._vllm_metrics_scraper.start("vllm/eval")
                             self._vllm_metrics_scraper.pause()
+                        # Admission time; under backpressure, also the stall on the oldest eval.
                         with Timer("eval", self.all_timings):
                             await self._eval_dispatcher.submit(
-                                self.global_step, vllm_metrics_scraper=self._vllm_metrics_scraper
+                                self.global_step,
+                                force=self.global_step == self.total_training_steps,  # never skip the last point
+                                vllm_metrics_scraper=self._vllm_metrics_scraper,
                             )
-                        if self._vllm_metrics_scraper is not None:
+                        if scrape:
                             vllm_metrics.update(await self._vllm_metrics_scraper.stop())
                     # Write every settled eval at the step it evaluated: blocking, the one just run;
                     # asynchronous, evals of earlier steps. Every step, before this step's own row.
@@ -619,6 +652,7 @@ class RayPPOTrainer:
 
         # Safety net: always save final checkpoint at end of training.
         # Skip if we already saved at the last step
+        # TODO (kyuds): we should probably integrate this into the loop instead.
         if self.cfg.trainer.ckpt_interval > 0 and not will_save_ckpts:
             with Timer("save_checkpoints", self.all_timings):
                 ckpt_path = self.save_checkpoints()
@@ -1764,6 +1798,23 @@ class RayPPOTrainer:
         # NOTE (sumanthrh): the function will get called twice on the node with driver process, but it's ok because it's idempotent
         cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep)
 
+    def _cleanup_old_exports(self) -> None:
+        """Delete the oldest ``global_step_*`` HF exports beyond ``max_hf_exports_to_keep``, except those
+        a queued or running eval still needs; a protected export is reconsidered at the next export.
+        Runs on every node and the driver like ``_cleanup_old_checkpoints``: the export lives on rank
+        0's node, which need not be the driver's."""
+        protected = self._eval_dispatcher.pending_steps()  # empty under the blocking dispatcher
+        if not self._node_ids:
+            self._node_ids = self.dispatch.get_node_ids()
+        run_on_each_node(
+            self._node_ids,
+            cleanup_old_checkpoints,
+            self.cfg.trainer.export_path,
+            self.cfg.trainer.max_hf_exports_to_keep,
+            protected,
+        )
+        cleanup_old_checkpoints(self.cfg.trainer.export_path, self.cfg.trainer.max_hf_exports_to_keep, protected)
+
     def load_checkpoints(self) -> Tuple[int, str]:
         """
         Load complete checkpoint state and return the global_step to resume from.
@@ -1891,6 +1942,8 @@ class RayPPOTrainer:
             self.dispatch.save_hf_model("critic", critic_export_dir, self.tokenizer)
 
         logger.info("Successfully saved model weights.")
+        if self.cfg.trainer.max_hf_exports_to_keep > 0:
+            self._cleanup_old_exports()
 
     def update_ref_with_policy(self):
         """
