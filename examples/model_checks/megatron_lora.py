@@ -16,10 +16,7 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
     MegatronPolicyWorkerBase,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.train.dataset.preprocess import (
-    convert_prompts_responses_to_batch_tensors,
-    make_router_padding_mask,
-)
+from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl.train.utils.utils import initialize_ray
 
 
@@ -73,16 +70,11 @@ class LoRALogprobWorker(MegatronPolicyWorkerBase):
         return perturb_adapters(parameters, multiplier=multiplier)
 
 
-def build_batch(sequences, pad_token_id, routes=None):
+def build_batch(sequences, pad_token_id):
     responses = [tokens[1:] for tokens in sequences]
     masks = [[1] * len(tokens) for tokens in responses]
-    tokens, attention, response, rewards, loss_mask, _, route_tensor = convert_prompts_responses_to_batch_tensors(
-        pad_token_id,
-        [[tokens[0]] for tokens in sequences],
-        responses,
-        masks,
-        masks,
-        rollout_expert_indices=routes,
+    tokens, attention, response, rewards, loss_mask, _, _ = convert_prompts_responses_to_batch_tensors(
+        pad_token_id, [[tokens[0]] for tokens in sequences], responses, masks, masks
     )
     batch = TrainingInputBatch(
         {
@@ -91,10 +83,7 @@ def build_batch(sequences, pad_token_id, routes=None):
             "response_mask": response,
             "rewards": rewards,
             "loss_mask": loss_mask,
-            "rollout_expert_indices": route_tensor,
-            "router_padding_mask": (
-                make_router_padding_mask(attention, [len(route) for route in routes]) if routes is not None else None
-            ),
+            "rollout_expert_indices": None,
             "rollout_logprobs": torch.zeros_like(loss_mask),
             "action_log_probs": torch.zeros_like(loss_mask),
             "base_action_log_probs": torch.zeros_like(loss_mask),
@@ -115,42 +104,6 @@ def score_trainer(policy, batch):
     if not all(map(math.isfinite, scores)):
         raise ValueError("nonfinite trainer logprobs")
     return scores
-
-
-async def score_routed_sampler(client, sequences, model):
-    await client.reset_prefix_cache()
-    result = await client.generate(
-        {
-            "prompt_token_ids": sequences,
-            "sampling_params": {
-                "max_tokens": 1,
-                "temperature": 1.0,
-                "routed_experts_prompt_start": 0,
-                "prompt_logprobs": 0,
-            },
-            "session_ids": None,
-            "mm_features": None,
-            "cache_salt": None,
-        },
-        model=model,
-    )
-    routes = result["rollout_expert_indices"]
-    if routes is None or len(routes) != len(sequences):
-        raise ValueError("Missing captured routes for fixed probe sequences")
-    for tokens, route in zip(sequences, routes, strict=True):
-        if route.ndim != 3 or len(route) != len(tokens):
-            raise ValueError("Captured routes must cover every fixed probe token")
-    scores = []
-    prompt_scores = result["prompt_logprobs"]
-    if prompt_scores is None or len(prompt_scores) != len(sequences):
-        raise ValueError("Missing prompt scores paired with captured routes")
-    for tokens, values in zip(sequences, prompt_scores, strict=True):
-        if len(values) != len(tokens) or values[0] is not None:
-            raise ValueError("Prompt scores must cover every fixed probe token")
-        if any(value is None or not math.isfinite(value) for value in values[1:]):
-            raise ValueError("Missing or nonfinite paired prompt score")
-        scores.extend(values[1:])
-    return scores, routes
 
 
 async def score_sampler(client, sequences, model):
