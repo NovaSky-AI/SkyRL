@@ -1803,19 +1803,20 @@ class RayPPOTrainer:
     def _cleanup_old_exports(self) -> None:
         """Delete the oldest ``global_step_*`` HF exports beyond ``max_hf_exports_to_keep``, except those
         a queued or running eval still needs; a protected export is reconsidered at the next export.
-        Runs on every node and the driver like ``_cleanup_old_checkpoints``: the export lives on rank
-        0's node, which need not be the driver's."""
+
+        A local ``export_path`` is cleaned on every node and the driver, like
+        ``_cleanup_old_checkpoints``: the export lives on rank 0's node, which need not be the
+        driver's. A cloud ``export_path`` is one shared bucket, so the driver alone deletes from it;
+        fanning out would have every node list and delete the same objects."""
         protected = self._eval_dispatcher.pending_steps()  # empty under the blocking dispatcher
-        if not self._node_ids:
-            self._node_ids = self.dispatch.get_node_ids()
-        run_on_each_node(
-            self._node_ids,
-            cleanup_old_checkpoints,
-            self.cfg.trainer.export_path,
-            self.cfg.trainer.max_hf_exports_to_keep,
-            protected,
-        )
-        cleanup_old_checkpoints(self.cfg.trainer.export_path, self.cfg.trainer.max_hf_exports_to_keep, protected)
+        export_path = self.cfg.trainer.export_path
+        max_to_keep = self.cfg.trainer.max_hf_exports_to_keep
+        if not io.is_cloud_path(export_path):
+            # If export is on a cloud path, we only need to delete from the driver.
+            if not self._node_ids:
+                self._node_ids = self.dispatch.get_node_ids()
+            run_on_each_node(self._node_ids, cleanup_old_checkpoints, export_path, max_to_keep, protected)
+        cleanup_old_checkpoints(export_path, max_to_keep, protected)
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """

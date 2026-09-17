@@ -1426,7 +1426,7 @@ def fetch_export_once(uri: str, cache_dir: Path) -> Path:
                 shutil.rmtree(other, ignore_errors=True)
         if not marker.exists():
             shutil.rmtree(cache_dir, ignore_errors=True)  # a half-finished earlier attempt
-            cache_dir.mkdir(parents=True)
+            cache_dir.mkdir(parents=True, exist_ok=True)
             # Same call shape as io.local_read_dir: the export's files land directly in cache_dir.
             io.download_directory(uri, str(cache_dir))
             marker.touch()

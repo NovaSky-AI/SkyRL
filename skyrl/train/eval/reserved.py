@@ -149,7 +149,12 @@ class ReservedEvalBackend(EvalBackend):
         try:
             seen = await self._client.paths_exist(sentinel)
         finally:
-            io.remove(sentinel)
+            # Best effort: a leftover sentinel is harmless, and a failed delete (a transient cloud
+            # error, a permission problem) must not skip closing the session below.
+            try:
+                io.remove(sentinel)
+            except Exception:
+                logger.warning(f"could not remove the export-root probe sentinel {sentinel}", exc_info=True)
             await self._client.aclose()  # the session bound to this throwaway loop
         if not seen or not all(seen):
             raise RuntimeError(

@@ -1001,3 +1001,32 @@ def test_cleanup_old_checkpoints_keeps_protected_steps(tmp_path):
     cleanup_old_checkpoints(str(tmp_path), 1, protected={2})
 
     assert _exports(tmp_path) == ["global_step_2", "global_step_4"]
+
+
+def test_cleanup_old_exports_runs_on_the_driver_only_for_a_cloud_export_path(
+    dummy_config, dummy_tokenizer, tmp_path, monkeypatch
+):
+    """A cloud ``export_path`` is one shared bucket: only the driver lists and deletes it. A local one
+    is still cleaned on every node and the driver, since the export lives on rank 0's node."""
+    fan_out, cleanup = MagicMock(), MagicMock()
+    monkeypatch.setattr("skyrl.train.trainer.run_on_each_node", fan_out)
+    monkeypatch.setattr("skyrl.train.trainer.cleanup_old_checkpoints", cleanup)
+    dummy_config.trainer.max_hf_exports_to_keep = 2
+    trainer = _bare_trainer(dummy_config, dummy_tokenizer)
+    trainer.dispatch = MagicMock()
+    trainer._eval_dispatcher = _fake_dispatcher()
+    trainer._eval_dispatcher.pending_steps = MagicMock(return_value={3})
+
+    dummy_config.trainer.export_path = "s3://bucket/exports"
+    trainer._cleanup_old_exports()
+
+    fan_out.assert_not_called()
+    trainer.dispatch.get_node_ids.assert_not_called()
+    cleanup.assert_called_once_with("s3://bucket/exports", 2, {3})  # the bucket is still cleaned, once
+
+    cleanup.reset_mock()
+    dummy_config.trainer.export_path = str(tmp_path)
+    trainer._cleanup_old_exports()
+
+    fan_out.assert_called_once_with(trainer._node_ids, cleanup, str(tmp_path), 2, {3})
+    cleanup.assert_called_once_with(str(tmp_path), 2, {3})

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from skyrl.train.eval import EvalRequest, EvalSkip
+from skyrl.train.eval import EvalRequest, EvalSkip, reserved
 from skyrl.train.eval.reserved import (
     ReservedEvalBackend,
     _default_export_cache_dir,
@@ -25,6 +25,8 @@ def _backend(tmp_path, *, versions=("5",)):
     client.load_weights_from_path = AsyncMock(return_value=list(versions))
     client.reset_prefix_cache = AsyncMock()
     client.teardown = AsyncMock()
+    client.paths_exist = AsyncMock(return_value=[True, True])
+    client.aclose = AsyncMock()
     generator = MagicMock(name="generator")
     setup = MagicMock()
     setup.server_groups = [MagicMock(), MagicMock()]
@@ -142,3 +144,44 @@ def test_reserved_train_cfg_describes_the_group_and_leaves_the_run_config_alone(
     )
     assert cfg_r.trainer.placement.colocate_all is False  # never colocated, whatever training does
     assert cfg.trainer.placement.colocate_all is True and cfg.generator.inference_engine.num_engines == 4
+
+
+def _sentinels(root):
+    return [p.name for p in root.iterdir() if p.name.startswith(".reserved_eval_probe_")]
+
+
+@pytest.mark.asyncio
+async def test_probe_passes_when_every_worker_sees_the_export_root(tmp_path):
+    backend, client, _, _ = _backend(tmp_path)
+
+    await backend._probe_export_root(str(tmp_path))
+
+    assert client.paths_exist.await_args.args[0].startswith(str(tmp_path))
+    assert _sentinels(tmp_path) == []  # cleaned up
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_probe_fails_fast_when_a_worker_cannot_see_the_export_root(tmp_path):
+    backend, client, _, _ = _backend(tmp_path)
+    client.paths_exist.return_value = [True, False]
+
+    with pytest.raises(RuntimeError, match="export_path"):
+        await backend._probe_export_root(str(tmp_path))
+
+    assert _sentinels(tmp_path) == []
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_probe_closes_the_session_even_when_the_sentinel_cannot_be_removed(tmp_path, monkeypatch):
+    backend, client, _, _ = _backend(tmp_path)
+
+    def failing_remove(path):
+        raise OSError("transient storage error")
+
+    monkeypatch.setattr(reserved.io, "remove", failing_remove)
+
+    await backend._probe_export_root(str(tmp_path))  # the probe itself passed; the delete is best effort
+
+    client.aclose.assert_awaited_once()
