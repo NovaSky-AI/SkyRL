@@ -43,13 +43,18 @@ def _build_ray_env_vars():
     if SKYRL_PYTHONPATH_EXPORT:
         pythonpath = os.environ.get("PYTHONPATH")
         if pythonpath is None:
-            raise RuntimeError("SKYRL_PYTHONPATH_EXPORT is set but PYTHONPATH is not defined in environment")
+            raise RuntimeError(
+                "SKYRL_PYTHONPATH_EXPORT is set but PYTHONPATH is not defined in environment"
+            )
         env_vars["PYTHONPATH"] = pythonpath
 
     return env_vars
 
 
-def _ray_init(extra_env_vars: dict[str, str] | None = None):
+def _ray_init(
+    extra_env_vars: dict[str, str] | None = None,
+    address: str | None = None,
+):
     if ray.is_initialized():
         ray.shutdown()
 
@@ -59,12 +64,15 @@ def _ray_init(extra_env_vars: dict[str, str] | None = None):
         env_vars.update(extra_env_vars)
 
     logger.info(f"Initializing Ray with environment variables: {env_vars}")
-    ray.init(runtime_env={"env_vars": env_vars})
+    ray.init(address=address, runtime_env={"env_vars": env_vars})
 
 
 @contextlib.contextmanager
-def ray_init(extra_env_vars: dict[str, str] | None = None):
-    _ray_init(extra_env_vars)
+def ray_init(
+    extra_env_vars: dict[str, str] | None = None,
+    address: str | None = None,
+):
+    _ray_init(extra_env_vars, address)
     try:
         yield
     finally:
