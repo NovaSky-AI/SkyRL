@@ -68,8 +68,8 @@ def check_updated_adapter(report, mean_atol, max_atol):
 
 
 def check_agreement(result, mean_atol, max_atol):
-    assert result["mean_abs"] < mean_atol
-    assert result["max_abs"] < max_atol
+    assert result["mean_abs"] <= mean_atol
+    assert result["max_abs"] <= max_atol
 
 
 def compare_logprobs(reference, actual):

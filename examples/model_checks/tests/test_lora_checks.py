@@ -3,6 +3,7 @@ import torch
 
 from examples.model_checks.lora_logprobs import perturb_adapters
 from skyrl.tinker.logprob_checks import (
+    check_agreement,
     check_initial_adapter,
     check_update_stimulus,
     check_updated_adapter,
@@ -202,3 +203,13 @@ def test_perturbation_rejects_full_weight_training():
 def test_perturbation_rejects_missing_trainable_adapters():
     with pytest.raises(AssertionError):
         perturb_adapters([("adapter.weight", torch.nn.Parameter(torch.ones(4), requires_grad=False))])
+
+
+@pytest.mark.parametrize("mean_error,max_error", [(0.05, 0.5), (0.050001, 0.5), (0.05, 0.500001)])
+def test_agreement_accepts_inclusive_limits_and_rejects_excess(mean_error, max_error):
+    result = {"mean_abs": mean_error, "max_abs": max_error}
+    if mean_error == 0.05 and max_error == 0.5:
+        check_agreement(result, 0.05, 0.5)
+    else:
+        with pytest.raises(AssertionError):
+            check_agreement(result, 0.05, 0.5)
