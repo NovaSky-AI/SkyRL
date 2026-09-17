@@ -69,6 +69,18 @@ def _default_export_cache_dir(export_path: str) -> str:
     return os.path.join(tempfile.gettempdir(), "skyrl_eval_exports", digest)
 
 
+def _shutdown_group(setup: "InferenceServerSetup") -> None:
+    """Shut down what ``create_inference_servers`` launched: the router process, then the server
+    groups with their actors and placement group. Each step is attempted even if an earlier one fails."""
+    steps = [setup.router.shutdown] if setup.router is not None else []
+    steps += [group.shutdown for group in setup.server_groups]
+    for step in steps:
+        try:
+            step()
+        except Exception:
+            logger.warning("reserved eval engine group teardown step failed", exc_info=True)
+
+
 class ReservedEvalBackend(EvalBackend):
     """``EvalBackend`` over a reserved vLLM engine group. Build with ``create``."""
 
@@ -118,20 +130,29 @@ class ReservedEvalBackend(EvalBackend):
         training_ie = cfg.generator.inference_engine
         start_port = VLLM_START_PORT + training_ie.num_engines * training_ie.data_parallel_size * SERVER_PORT_STRIDE
         setup = create_inference_servers(ie, cli_args, log_path, placement_group=None, start_port=start_port)
-        client = RemoteInferenceClient(
-            proxy_url=setup.proxy_url,
-            server_urls=setup.server_urls,
-            model_name=ie.served_model_name or cfg.trainer.policy.model.path,
-            enable_return_routed_experts=ie.enable_return_routed_experts,
-            uses_lora_weight_sync=False,
-            data_parallel_size=ie.data_parallel_size,
-            tokenizer=tokenizer,
-        )
-        cache_root = cfg.trainer.eval_dispatch.local_cache_dir or _default_export_cache_dir(cfg.trainer.export_path)
-        backend = cls(setup=setup, client=client, generator=make_generator(client), cache_root=cache_root)
-        # Setup runs outside a loop (the entrypoint already does the same to sleep the training
-        # engines); the client keeps one session per loop and drops this one's when the loop closes.
-        asyncio.run(backend._probe_export_root(cfg.trainer.export_path))
+        # From here on the engines are up and hold their GPUs. The training entrypoint leaves a failed
+        # setup to the end of the Ray job, which reclaims actors and placement groups; a caller that
+        # outlives the failure (a notebook, a retrying entrypoint, a long-lived service) would keep them.
+        # So this factory gives back what it acquired.
+        try:
+            client = RemoteInferenceClient(
+                proxy_url=setup.proxy_url,
+                server_urls=setup.server_urls,
+                model_name=ie.served_model_name or cfg.trainer.policy.model.path,
+                enable_return_routed_experts=ie.enable_return_routed_experts,
+                uses_lora_weight_sync=False,
+                data_parallel_size=ie.data_parallel_size,
+                tokenizer=tokenizer,
+            )
+            cache_root = cfg.trainer.eval_dispatch.local_cache_dir or _default_export_cache_dir(cfg.trainer.export_path)
+            backend = cls(setup=setup, client=client, generator=make_generator(client), cache_root=cache_root)
+            # Setup runs outside a loop (the entrypoint already does the same to sleep the training
+            # engines); the client keeps one session per loop and drops this one's when the loop closes.
+            asyncio.run(backend._probe_export_root(cfg.trainer.export_path))
+        except Exception:
+            logger.error("reserved eval backend setup failed after its engines came up; shutting them down")
+            _shutdown_group(setup)
+            raise
         logger.info(
             f"Reserved eval engine group up: {ie.num_engines} engine(s) at {setup.server_urls}, "
             f"router {setup.proxy_url}, export cache {cache_root}"
@@ -194,13 +215,8 @@ class ReservedEvalBackend(EvalBackend):
     async def close(self) -> None:
         """Tear the group down: router, server groups (and their placement group), client session.
         Each step is attempted even if an earlier one fails."""
-        steps = [self._setup.router.shutdown] if self._setup.router is not None else []
-        steps += [group.shutdown for group in self._setup.server_groups]
-        steps.append(self._client.teardown)
-        for step in steps:
-            try:
-                result = step()
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                logger.warning("reserved eval engine group teardown step failed", exc_info=True)
+        _shutdown_group(self._setup)
+        try:
+            await self._client.teardown()
+        except Exception:
+            logger.warning("closing the reserved eval client session failed", exc_info=True)

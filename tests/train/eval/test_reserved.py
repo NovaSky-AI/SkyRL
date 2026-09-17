@@ -7,6 +7,8 @@ mocked client. Launching the engine group (``create``) and the load itself need 
 """
 
 import os
+import sys
+import types
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -185,3 +187,85 @@ async def test_probe_closes_the_session_even_when_the_sentinel_cannot_be_removed
     await backend._probe_export_root(str(tmp_path))  # the probe itself passed; the delete is best effort
 
     client.aclose.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# create(): the engines it launched are given back when the rest of setup fails
+# ---------------------------------------------------------------------------
+
+_IS = "skyrl.backends.skyrl_train.inference_servers"
+
+
+def _stub_engine_launch(monkeypatch, *, seen):
+    """Stand-ins for what ``create`` imports lazily. ``setup.py`` needs ``vllm_router`` and
+    ``build_vllm_cli_args`` needs vLLM, neither of which is installed on a CPU box."""
+    from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+        RemoteInferenceClient,
+    )
+
+    setup = MagicMock()
+    setup.proxy_url = "http://127.0.0.1:9000"
+    setup.server_urls = ["http://127.0.0.1:9001"]
+    setup.server_groups = [MagicMock(), MagicMock()]
+    fake_setup_module = types.ModuleType(f"{_IS}.setup")
+    fake_setup_module.VLLM_START_PORT = 8000
+    fake_setup_module.create_inference_servers = MagicMock(return_value=setup)
+    monkeypatch.setitem(sys.modules, f"{_IS}.setup", fake_setup_module)
+    monkeypatch.setattr(f"{_IS}.utils.build_vllm_cli_args", MagicMock())
+    monkeypatch.setattr(RemoteInferenceClient, "paths_exist", AsyncMock(return_value=seen))
+    monkeypatch.setattr(RemoteInferenceClient, "aclose", AsyncMock())
+    return setup, fake_setup_module.create_inference_servers
+
+
+def _create(tmp_path, *, make_generator=None):
+    cfg = example_dummy_config()
+    cfg.trainer.export_path = str(tmp_path)
+    make_generator = make_generator or (lambda client: MagicMock(name="generator"))
+    return cfg, lambda: ReservedEvalBackend.create(
+        cfg, MagicMock(name="tokenizer"), log_path=str(tmp_path / "logs"), make_generator=make_generator
+    )
+
+
+def _assert_shut_down(setup):
+    setup.router.shutdown.assert_called_once()
+    for group in setup.server_groups:
+        group.shutdown.assert_called_once()
+
+
+def test_create_leaves_the_engines_up_when_setup_succeeds(tmp_path, monkeypatch):
+    setup, launch = _stub_engine_launch(monkeypatch, seen=[True])
+    cfg, create = _create(tmp_path)
+
+    backend = create()
+
+    assert isinstance(backend, ReservedEvalBackend)
+    training = cfg.generator.inference_engine
+    assert launch.call_args.kwargs["placement_group"] is None  # its own placement group
+    assert launch.call_args.kwargs["start_port"] == 8000 + training.num_engines * training.data_parallel_size * 100
+    setup.router.shutdown.assert_not_called()
+    for group in setup.server_groups:
+        group.shutdown.assert_not_called()
+
+
+def test_create_shuts_the_engines_down_when_the_probe_fails(tmp_path, monkeypatch):
+    setup, _ = _stub_engine_launch(monkeypatch, seen=[False])  # an engine node cannot read export_path
+    _, create = _create(tmp_path)
+
+    with pytest.raises(RuntimeError, match="export_path"):
+        create()
+
+    _assert_shut_down(setup)
+
+
+def test_create_shuts_the_engines_down_when_the_generator_factory_raises(tmp_path, monkeypatch):
+    setup, _ = _stub_engine_launch(monkeypatch, seen=[True])
+
+    def broken_factory(client):
+        raise ValueError("custom generator needs a config this run does not have")
+
+    _, create = _create(tmp_path, make_generator=broken_factory)
+
+    with pytest.raises(ValueError, match="custom generator"):
+        create()
+
+    _assert_shut_down(setup)
