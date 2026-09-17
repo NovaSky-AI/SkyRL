@@ -561,6 +561,22 @@ class RayPPOTrainer:
 
                     del training_input, generator_output
 
+                # The epoch's dataloader is exhausted. Dynamic sampling may have left a
+                # logical step in flight: its ``keep_sampling`` branch ``continue``s
+                # without closing the step, so both the partial accumulation and the
+                # ``vllm/train`` metrics window are still open here.
+                #
+                # Such a step cannot be resumed from the next epoch. ``uid`` is a stable
+                # per-row dataset field, so the next epoch re-draws the same uids and the
+                # merged batch would hold one uid in two non-contiguous places -- which
+                # ``compute_prompt_mini_batch_boundaries`` rejects. Abandon the partial
+                # accumulation and close its window, so the next epoch starts clean.
+                if step_started:
+                    if self._vllm_metrics_scraper is not None:
+                        await self._vllm_metrics_scraper.stop()
+                    self.dynamic_sampling_state = None
+                    step_started = False
+
                 self._fire("on_epoch_end")
 
                 if stop_training:
