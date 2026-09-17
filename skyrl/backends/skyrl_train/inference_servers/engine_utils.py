@@ -74,6 +74,9 @@ def build_engine_runtime_env(
     through as ``runtime_env``.
     """
     env_vars: Dict[str, str] = {}
+    # Ray clears CUDA_VISIBLE_DEVICES on num_gpus=0 actors unless this is set.
+    # Required for colocated VLLMServerActor (PG-scheduled, num_gpus=0) on ROCm.
+    env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
     if use_expandable_segments:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = _alloc_conf_with_expandable_segments()
     if extra_env_vars:

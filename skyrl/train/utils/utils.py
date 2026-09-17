@@ -1175,6 +1175,10 @@ def initialize_ray(cfg: SkyRLTrainConfig):
 
     env_vars = prepare_runtime_environment(cfg)
 
+    # Prevent Ray from blanking CUDA_VISIBLE_DEVICES on num_gpus=0 workers before
+    # vLLM inference actors apply per-engine HIP/CUDA masks (ROCm colocated GRPO).
+    os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
+
     # Set up log file for infrastructure logs (skip when dumping to stdout)
     if not verbose_logging:
         log_path = Path(cfg.trainer.log_path).resolve()

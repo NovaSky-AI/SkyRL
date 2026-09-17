@@ -13,22 +13,13 @@ from typing import List, Optional, Tuple
 import httpx
 import orjson
 import uvicorn
-import vllm.envs as envs
 from fastapi import HTTPException, Request, Response
 from ray.util.placement_group import PlacementGroup
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.api_server import (
-    build_app,
-    create_server_socket,
-    init_app_state,
-)
-from vllm.inputs import TokensPrompt
-from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams as VLLMSamplingParams
-from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid
-from vllm.utils.system_utils import set_ulimit
+
+# vLLM imports torch/transformers at import time. Colocated inference actors use
+# num_gpus=0 with PG scheduling; Ray may clear CUDA_VISIBLE_DEVICES unless
+# RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0. Defer vLLM imports until __init__/serve
+# after HIP/CUDA masks are set via runtime_env and _setup_mp_gpu_visibility.
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
     ServerInfo,
@@ -145,6 +136,11 @@ class VLLMServerActor(ServerActorProtocol):
 
         redirect_actor_output_to_file()
 
+        # Pin GPU visibility before any vLLM/torch import on ROCm colocated actors.
+        if distributed_executor_backend == "mp":
+            self._server_idx = server_idx
+            self._setup_mp_gpu_visibility(mp_cuda_visible_devices)
+
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
         self._port, self._port_reservation = find_and_reserve_port(start_port)
@@ -246,7 +242,7 @@ class VLLMServerActor(ServerActorProtocol):
 
         # Configure GPU visibility for this server's TP/PP workers
         if self._use_mp_backend:
-            self._setup_mp_gpu_visibility(mp_cuda_visible_devices)
+            pass  # applied at start of __init__ before vLLM imports
         else:
             os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
             # Set bundle indices for this server's TP/PP workers in the placement group.
@@ -345,6 +341,7 @@ class VLLMServerActor(ServerActorProtocol):
 
     async def start(self) -> ServerInfo:
         """Start the vLLM server. Blocks until server is healthy."""
+        from vllm.utils.system_utils import set_ulimit
 
         set_ulimit()
         logger.info(f"Starting server on {self._ip}:{self._port}...")
@@ -412,6 +409,11 @@ class VLLMServerActor(ServerActorProtocol):
         entrypoint, so it takes the engine and CLI args explicitly rather than
         reading them off ``self``.
         """
+        from vllm.inputs import TokensPrompt
+        from vllm.lora.request import LoRARequest
+        from vllm.sampling_params import SamplingParams as VLLMSamplingParams
+        from vllm.utils import random_uuid
+
         # Most weight-sync endpoints are registered by vLLM dev mode. SkyRL
         # adds /fetch_weights because checkpoint-delta pulls and applies
         # payloads before the paused /update_weights reload.
@@ -599,6 +601,16 @@ async def _build_and_serve_vllm_server(
     Shared by ``VLLMServerActor._run_server`` (Ray-actor deployment) and the
     standalone ``python -m`` entrypoint below.
     """
+    import vllm.envs as envs
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.engine.async_llm_engine import AsyncLLMEngine
+    from vllm.entrypoints.openai.api_server import (
+        build_app,
+        create_server_socket,
+        init_app_state,
+    )
+    from vllm.usage.usage_lib import UsageContext
+
     _seed_dp_master_port(cli_args.port)
 
     sock_addr = (cli_args.host, cli_args.port)
@@ -697,6 +709,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     cli_args = _build_standalone_cli_args(argv)
     if not cli_args.host:
         cli_args.host = default_bind_host(get_node_ip())
+    from vllm.utils.system_utils import set_ulimit
+
     set_ulimit()
     logger.info(f"Starting standalone SkyRL vLLM server on {cli_args.host}:{cli_args.port}")
     asyncio.run(_build_and_serve_vllm_server(cli_args, enable_ray_prometheus_stats=False))

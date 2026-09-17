@@ -32,6 +32,7 @@ python3 examples/train/gsm8k/gsm8k_dataset.py \
   --output_dir "$DATA_DIR" \
   --max_train_dataset_length 64
 
+export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
 export RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
 export RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
