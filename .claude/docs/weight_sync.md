@@ -127,12 +127,14 @@ MoE FP8 tensors before forwarding ordinary weights to `model.load_weights`; this
 the compact expert representation intact for both NCCL and IPC reloads. FP8 serialization
 is incompatible with the delta and sharded-RDT transfer backends.
 
-For Qwen3.5-35B-A3B on Hopper, use rollout TP=4. Its routed-expert intermediate
-dimension is 512, and vLLM block-FP8 requires every TP shard to have 128-wide blocks;
-TP=8 produces 64-wide shards. The Hopper example starts four TP=4 rollout engines
-across 16 GPUs. Qwen3.5's shared-expert and vision modules stay BF16 only when their
-current TP shard cannot satisfy the block-FP8 shape requirement; TP4 keeps the
-512-wide shared-expert linears in FP8 while TP8 falls back to BF16.
+For Qwen3.5-35B-A3B on Hopper, use rollout TP=4. vLLM block-FP8 requires compatible
+128-wide partition shapes; TP=8 is rejected by vLLM for this model's incompatible
+FP8 partition shapes. The Hopper example starts four TP=4 rollout engines across
+16 GPUs. SkyRL preserves main's
+checkpoint-format policy: shared-expert linears remain FP8, and only the existing
+checkpoint-format vision-block exclusions remain BF16. The path does not silently
+change that policy for a topology or add a VLM-specific merger fallback; a configuration
+that vLLM cannot instantiate fails at startup.
 
 ### Control plane
 

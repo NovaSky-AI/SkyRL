@@ -8,8 +8,7 @@ Serialized FP8 weight sync needs four model-specific answers, grouped in a
 | --- | --- |
 | `matches(hf_config)` | Does this spec support the checkpoint layout? |
 | `should_quantize(name, shape)` | Should this exported HF weight be FP8 on the wire? (Linear weights yes; embeddings, norms, conv, router gates no.) |
-| `ignored_layers(hf_config, tensor_parallel_size=1)` | Which vLLM module prefixes must stay unquantized for this inference TP? (Modules whose shards can't share a 128-block FP8 scheme.) |
-| `unquantized_weight_suffixes(hf_config, tensor_parallel_size)` | Which otherwise-eligible source weights must stay BF16 for the same inference TP? |
+| `ignored_layers(hf_config)` | Which vLLM module prefixes must stay unquantized to match the checkpoint-format stream? |
 | `moe_expert_spec(name)` | Is this a Megatron-Bridge *batched* expert tensor, and how does it map onto per-projection wire tensors? `None` for ordinary tensors. |
 
 Everything else — blockwise casting, wire naming, the vLLM quantization

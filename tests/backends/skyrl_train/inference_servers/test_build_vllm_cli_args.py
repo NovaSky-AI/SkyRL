@@ -18,7 +18,7 @@ from skyrl.train.config import SkyRLTrainConfig
 def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _tp: [])
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path: [])
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
     ie_cfg.fp8_weight_sync_mode = "blockwise"
@@ -47,7 +47,7 @@ def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monke
 def test_serialized_fp8_weight_sync_rejects_conflicting_vllm_settings(engine_kwargs, monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _tp: [])
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path: [])
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
 
@@ -55,23 +55,6 @@ def test_serialized_fp8_weight_sync_rejects_conflicting_vllm_settings(engine_kwa
         _apply_serialized_fp8_weight_sync_defaults(
             cfg.generator.inference_engine,
             engine_kwargs,
-            model_path="qwen35-test",
-        )
-
-
-def test_serialized_fp8_rejects_engine_tp_that_differs_from_weight_sync_tp(monkeypatch):
-    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
-
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _tp: [])
-    cfg = SkyRLTrainConfig()
-    ie_cfg = cfg.generator.inference_engine
-    ie_cfg.fp8_weight_sync_mode = "blockwise"
-    ie_cfg.tensor_parallel_size = 4
-
-    with pytest.raises(ValueError, match="tensor_parallel_size must match"):
-        _apply_serialized_fp8_weight_sync_defaults(
-            ie_cfg,
-            {"tensor_parallel_size": 8},
             model_path="qwen35-test",
         )
 
