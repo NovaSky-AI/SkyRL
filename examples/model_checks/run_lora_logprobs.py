@@ -15,6 +15,7 @@ from examples.model_checks.megatron_lora import (
     score_sampler,
     score_trainer,
 )
+from examples.model_checks.paired_completion import score_with_routes
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.tinker.logprob_checks import build_probe_sequences as build_sequences
 from skyrl.tinker.logprob_checks import (
@@ -22,6 +23,7 @@ from skyrl.tinker.logprob_checks import (
     check_update_stimulus,
     check_updated_adapter,
     check_withheld_publication,
+    compare_logprobs,
 )
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.utils.tok import get_tokenizer
@@ -45,6 +47,10 @@ async def run(args, report):
 
     async with open_runtime(cfg, tokenizer) as (policy, client):
         try:
+            replay = cfg.trainer.policy.megatron_config.moe_enable_routing_replay
+            if replay:
+                await check_replayed_policy(policy, client, cfg, batch, sequences, pad_token_id, report, args)
+                return
             await check_zero_initialized_policy(
                 policy,
                 client,
@@ -63,6 +69,41 @@ async def run(args, report):
         finally:
             # Preserve failed assertions even if subsequent runtime cleanup hangs.
             write_report(args.output_dir, report)
+
+
+async def check_replayed_policy(policy, client, cfg, unreplayed_batch, sequences, pad_token_id, report, args):
+    async def score_phase(phase, model):
+        scores, routes = await score_with_routes(client, sequences, model)
+        report[phase] = scores
+        report[f"{phase}_routes"] = [route.tolist() for route in routes]
+        return build_batch(sequences, pad_token_id, routes)
+
+    await score_phase("base", client.model_name)
+    await publish(policy, client, cfg)
+    adapter = resolve_policy_model_name(cfg)
+    zero_batch = await score_phase("zero", adapter)
+    report["trainer_zero_unreplayed"] = score_trainer(policy, unreplayed_batch)
+    report["zero_parity_unreplayed"] = compare_logprobs(report["trainer_zero_unreplayed"], report["zero"])
+    report["trainer_zero"] = score_trainer(policy, zero_batch)
+    repeat_batch = await score_phase("repeat", adapter)
+    report["trainer_repeat"] = score_trainer(policy, repeat_batch)
+    report["repeat_noise"] = compare_logprobs(report["zero"], report["repeat"])
+    report["trainer_repeat_noise"] = compare_logprobs(report["trainer_zero"], report["trainer_repeat"])
+    for field in ("repeat_noise", "trainer_repeat_noise"):
+        if report[field]["max_abs"] > 1e-6:
+            raise AssertionError(f"{field} exceeds 1e-6: {report[field]}")
+    check_initial_adapter(report, args.mean_atol, args.max_atol)
+
+    apply_trainer_update(policy, zero_batch, report, args.lora_b_multiplier)
+    report["trainer_updated_before_publication"] = report["trainer_updated"]
+    await score_phase("stale", adapter)
+    check_withheld_publication(report)
+    check_update_stimulus(report, args.mean_atol)
+    report["stale_parity_before_publication"] = report["stale_parity"]
+    await publish(policy, client, cfg)
+    updated_batch = await score_phase("updated", adapter)
+    report["trainer_updated"] = score_trainer(policy, updated_batch)
+    check_updated_adapter(report, args.mean_atol, args.max_atol)
 
 
 def write_report(output_dir, report):
@@ -98,6 +139,10 @@ async def check_published_update(client, sequences, adapter, report, mean_atol, 
 
 
 def validate_config(overrides):
+    replay = overrides.get("trainer.policy.megatron_config.moe_enable_routing_replay", False)
+    capture = overrides.get("generator.inference_engine.enable_return_routed_experts", False)
+    if replay != capture:
+        raise ValueError("Route replay and inference route capture must be enabled together")
     if overrides["strategy"] != "megatron":
         raise ValueError("This diagnostic requires Megatron")
     if overrides["trainer.placement.colocate_all"]:

@@ -16,7 +16,10 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
     MegatronPolicyWorkerBase,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+from skyrl.train.dataset.preprocess import (
+    convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
+)
 from skyrl.train.utils.utils import initialize_ray
 
 
@@ -70,11 +73,11 @@ class LoRALogprobWorker(MegatronPolicyWorkerBase):
         return perturb_adapters(parameters, multiplier=multiplier)
 
 
-def build_batch(sequences, pad_token_id):
+def build_batch(sequences, pad_token_id, routes=None):
     responses = [tokens[1:] for tokens in sequences]
     masks = [[1] * len(tokens) for tokens in responses]
-    tokens, attention, response, rewards, loss_mask, _, _ = convert_prompts_responses_to_batch_tensors(
-        pad_token_id, [[tokens[0]] for tokens in sequences], responses, masks, masks
+    tokens, attention, response, rewards, loss_mask, _, replay_routes = convert_prompts_responses_to_batch_tensors(
+        pad_token_id, [[tokens[0]] for tokens in sequences], responses, masks, masks, rollout_expert_indices=routes
     )
     batch = TrainingInputBatch(
         {
@@ -83,13 +86,15 @@ def build_batch(sequences, pad_token_id):
             "response_mask": response,
             "rewards": rewards,
             "loss_mask": loss_mask,
-            "rollout_expert_indices": None,
+            "rollout_expert_indices": replay_routes,
             "rollout_logprobs": torch.zeros_like(loss_mask),
             "action_log_probs": torch.zeros_like(loss_mask),
             "base_action_log_probs": torch.zeros_like(loss_mask),
             "advantages": torch.zeros_like(loss_mask),
         }
     )
+    if routes is not None:
+        batch["router_padding_mask"] = make_router_padding_mask(attention, [len(route) for route in routes])
     batch.metadata = {"response_length": response.shape[1]}
     return batch
 

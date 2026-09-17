@@ -164,7 +164,13 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
     calls = []
     changed = False
     publications = 0
-    cfg = SimpleNamespace(trainer=SimpleNamespace(policy=SimpleNamespace(model=SimpleNamespace(path="model"))))
+    cfg = SimpleNamespace(
+        trainer=SimpleNamespace(
+            policy=SimpleNamespace(
+                model=SimpleNamespace(path="model"), megatron_config=SimpleNamespace(moe_enable_routing_replay=False)
+            )
+        )
+    )
     client = SimpleNamespace(model_name="base")
     monkeypatch.setattr(run_lora_logprobs, "load_config", lambda *args: cfg)
     monkeypatch.setattr(
