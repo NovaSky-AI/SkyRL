@@ -271,8 +271,19 @@ class VLLMServerActor(ServerActorProtocol):
         """
         if mp_cuda_visible_devices is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
-            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
-            os.environ.pop("HIP_VISIBLE_DEVICES", None)
+            # Keep HIP/ROCR aligned with CUDA mask on ROCm (vLLM platform detection).
+            try:
+                import torch
+
+                if getattr(torch.version, "hip", None) is not None:
+                    os.environ["HIP_VISIBLE_DEVICES"] = mp_cuda_visible_devices
+                    os.environ["ROCR_VISIBLE_DEVICES"] = mp_cuda_visible_devices
+                else:
+                    os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+                    os.environ.pop("HIP_VISIBLE_DEVICES", None)
+            except ImportError:
+                os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+                os.environ.pop("HIP_VISIBLE_DEVICES", None)
             logger.info(f"Server {self._server_idx}: mp backend, " f"CUDA_VISIBLE_DEVICES={mp_cuda_visible_devices}")
         else:
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)

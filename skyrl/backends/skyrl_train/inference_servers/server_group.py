@@ -16,6 +16,8 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
 )
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     build_engine_runtime_env,
+    rocm_extra_engine_env_vars,
+    rocm_visible_device_env,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.inference_servers.server_pool import ServerActorPool
@@ -143,12 +145,23 @@ class ServerGroup:
             self._internal_pg = self._create_placement_group()
         return self._internal_pg
 
-    def _create_actor_class(self, pg: PlacementGroup, start_bundle_idx: int) -> Any:
+    def _create_actor_class(
+        self,
+        pg: PlacementGroup,
+        start_bundle_idx: int,
+        gpu_ids: Optional[List[int]] = None,
+    ) -> Any:
         """Create actor class with scheduling constraints for a specific bundle."""
-        # Engine-actor runtime_env (env vars applied before CUDA init and inherited by the
+        # Engine-actor runtime_env (env vars applied before CUDA/HIP init and inherited by the
         # child vLLM workers). Currently just the expandable_segments allocator, which is
         # safe with sleep mode on vLLM >= 0.20.1.
-        runtime_env = build_engine_runtime_env(use_expandable_segments=self._use_expandable_segments)
+        extra_env_vars = rocm_extra_engine_env_vars()
+        if gpu_ids is not None:
+            extra_env_vars = {**extra_env_vars, **rocm_visible_device_env(gpu_ids)}
+        runtime_env = build_engine_runtime_env(
+            use_expandable_segments=self._use_expandable_segments,
+            extra_env_vars=extra_env_vars or None,
+        )
         return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
             num_cpus=COLOCATED_ACTOR_CPU_FRACTION,
@@ -187,9 +200,8 @@ class ServerGroup:
             bundle_indices = self._get_bundle_indices_for_server(server_idx)
             start_bundle_idx = bundle_indices[0]
 
-            ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
-
             gpu_ids = self._get_gpu_ids_for_server(server_idx)
+            ServerActorClass = self._create_actor_class(pg, start_bundle_idx, gpu_ids=gpu_ids)
             server_kwargs = self._server_actor_cls.prepare_server_kwargs(
                 pg,
                 start_bundle_idx,

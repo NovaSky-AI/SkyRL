@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from omegaconf import DictConfig, ListConfig
 
@@ -20,6 +20,37 @@ def _alloc_conf_with_expandable_segments() -> str:
     if "expandable_segments" in existing:
         return existing
     return f"{existing},expandable_segments:True"
+
+
+def is_rocm_platform() -> bool:
+    """Return True when PyTorch was built with HIP/ROCm."""
+    try:
+        import torch
+
+        return getattr(torch.version, "hip", None) is not None
+    except ImportError:
+        return False
+
+
+def rocm_extra_engine_env_vars() -> Dict[str, str]:
+    """Default vLLM env vars for ROCm colocated inference."""
+    if not is_rocm_platform():
+        return {}
+    return {
+        "VLLM_USE_V1": os.environ.get("VLLM_USE_V1", "0"),
+        "VLLM_TARGET_DEVICE": "rocm",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+    }
+
+
+def rocm_visible_device_env(gpu_ids: List[int]) -> Dict[str, str]:
+    """Pin HIP/ROCR/CUDA masks before the engine actor imports torch/vLLM."""
+    vis = ",".join(str(g) for g in gpu_ids)
+    return {
+        "HIP_VISIBLE_DEVICES": vis,
+        "ROCR_VISIBLE_DEVICES": vis,
+        "CUDA_VISIBLE_DEVICES": vis,
+    }
 
 
 def build_engine_runtime_env(

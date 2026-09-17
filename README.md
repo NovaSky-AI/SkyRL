@@ -34,6 +34,8 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 
 For a list of supported models, see our [Supported Models](https://docs.skyrl.ai/docs/getting-started/supported_models) docs.
 
+For AMD Instinct (MI300X/MI325X/MI355X) Megatron + vLLM GRPO on ROCm, see [integrations/rocm_amd](integrations/rocm_amd/README.md).
+
 # News
 - **[2026/09/01]** 🎉 We released an E2E recipe for long horizon knowledge work on SkyRL on the APEX-Agents dataset in collaboration with Mercor [[tweet](https://x.com/edwardjhu/status/2094897903290757588)] [[blog](https://www.mercor.com/blog/training-frontier-knowledge-work-agents-a-397b-rl-training-guide-with-skyrl/)]
 - **[2026/08/18]** 🎉 SkyRL is hosting it's first meetup at the Anyscale SF office! [[Link](https://luma.com/y4ahouh6)]
