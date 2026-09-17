@@ -21,6 +21,7 @@ pytestmark = pytest.mark.vllm
 from skyrl.backends.skyrl_train.weight_sync import sources as sources_mod  # noqa: E402
 from skyrl.backends.skyrl_train.weight_sync.sources import (  # noqa: E402
     FsdpWeightSource,
+    LoraAdapterWeightSource,
     MegatronWeightSource,
 )
 
@@ -177,3 +178,125 @@ class TestMegatronWeightSource:
         bridge = _FakeBridge(self._tensors(), expect_module=module)
         list(MegatronWeightSource(bridge, module, torch.bfloat16))
         assert bridge.export_calls == 1
+
+
+def _expert_key(expert: int, which: str) -> str:
+    return f"base_model.model.model.layers.0.mlp.experts.{expert}.down_proj.lora_{which}.weight"
+
+
+class _FakeLoraSource(LoraAdapterWeightSource):
+    """A LoRA source whose export and finalize are scripted."""
+
+    def __init__(self, state, adapter_config=None, **kwargs):
+        super().__init__(**kwargs)
+        self._state = state
+        self._config = adapter_config or {}
+        self.exports = 0
+        self.finalized_keys = None
+
+    def export_adapter_stream(self):
+        self.exports += 1
+        yield from self._state.items()
+
+    def finalize_adapter(self, adapter_state):
+        self.finalized_keys = list(adapter_state)
+        return adapter_state, dict(self._config)
+
+
+def _shared_expert_state(num_experts=4, experts_per_shared_adapter=2):
+    """Per-expert keys where every expert in a group carries the same values."""
+    state = {}
+    for group in range(num_experts // experts_per_shared_adapter):
+        a = torch.randn(2, 3, dtype=torch.float32)
+        for e in range(group * experts_per_shared_adapter, (group + 1) * experts_per_shared_adapter):
+            state[_expert_key(e, "A")] = a.clone()
+    state["base_model.model.model.layers.0.self_attn.o_proj.lora_A.weight"] = torch.randn(2, 3, dtype=torch.float32)
+    return state
+
+
+class TestLoraAdapterWeightSource:
+    """The adapter source. Same two properties as the model sources, plus the
+    ``receive_target``, which the model sources have no equivalent of."""
+
+    def _source(self, **kwargs):
+        state = kwargs.pop("state", None) or _shared_expert_state()
+        source = _FakeLoraSource(state, dtype=torch.bfloat16, experts_per_shared_adapter=2, **kwargs)
+        source.set_lora_name("tenant")
+        return source
+
+    def test_channels_agree(self):
+        source = self._source()
+        source.prepare()
+        _assert_channels_agree(source)
+
+    def test_one_export_serves_both_channels_and_the_target(self):
+        source = self._source()
+        source.prepare()
+        assert source.receive_target["lora_name"] == "tenant"
+        names = [m.name for m in source.metadata()]
+        sent = [n for n, _ in source]
+        assert source.exports == 1
+        assert names == sent
+        # finalize only ever sees the canonical keys.
+        assert source.finalized_keys == sent
+
+    def test_only_unique_tensors_are_sent_and_the_rest_are_aliased(self):
+        state = _shared_expert_state(num_experts=4, experts_per_shared_adapter=2)
+        source = self._source(state=state)
+        source.prepare()
+        target = source.receive_target
+        sent = {m.name for m in source.metadata()}
+        # 2 groups of 2 experts -> 2 expert tensors sent, 2 aliased, plus 1 dense.
+        assert len(sent) == 3
+        assert set(target["aliases"]) | sent == set(state)
+        assert all(v in sent for v in target["aliases"].values())
+
+    def test_casts_to_the_wire_dtype_on_both_channels(self):
+        source = self._source()
+        source.prepare()
+        assert {m.dtype for m in source.metadata()} == {torch.bfloat16}
+        assert {t.dtype for _, t in source} == {torch.bfloat16}
+
+    def test_yields_contiguous_tensors(self):
+        source = self._source()
+        source.prepare()
+        assert all(t.is_contiguous() for _, t in source)
+
+    def test_the_target_carries_the_name_and_adapter_config(self):
+        source = self._source(adapter_config={"r": 4, "lora_alpha": 8})
+        source.prepare()
+        target = source.receive_target
+        assert target["kind"] == "lora"
+        assert target["lora_name"] == "tenant"
+        assert target["adapter_config"] == {"r": 4, "lora_alpha": 8}
+
+    def test_consuming_the_stream_re_exports_next_round(self):
+        source = self._source()
+        source.prepare()
+        list(source)
+        assert source.exports == 1
+        source.set_lora_name("next")
+        source.prepare()
+        assert source.exports == 2
+        assert source.receive_target["lora_name"] == "next"
+
+    def test_prepare_is_idempotent_within_a_round(self):
+        source = self._source()
+        source.prepare()
+        source.prepare()
+        assert source.exports == 1
+
+    def test_name_required_before_publishing(self):
+        source = _FakeLoraSource({"k": torch.ones(2)}, dtype=torch.bfloat16, experts_per_shared_adapter=1)
+        with pytest.raises(RuntimeError, match="set_lora_name"):
+            _ = source.receive_target
+
+    def test_finalize_must_keep_aliased_keys(self):
+        class _Dropper(_FakeLoraSource):
+            def finalize_adapter(self, adapter_state):
+                return {k: v for k, v in adapter_state.items() if ".experts." not in k}, {}
+
+        source = _Dropper(_shared_expert_state(), dtype=torch.bfloat16, experts_per_shared_adapter=2)
+        source.set_lora_name("tenant")
+        with pytest.raises(RuntimeError, match="dropped aliased keys"):
+            source.prepare()

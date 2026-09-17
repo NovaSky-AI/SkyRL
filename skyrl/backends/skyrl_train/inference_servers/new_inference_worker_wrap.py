@@ -6,7 +6,7 @@ subclass (``weight_sync/weight_receivers.py``, ``weight_sync/delta/engine.py``,
 routes, which wrap ``set_current_vllm_config`` themselves and give each engine
 its own layerwise-reload lifecycle.
 
-What remains are two limits of *dispatch*:
+What remains are limits of *dispatch*:
 
 ``fetch_weights``
     ``/collective_rpc`` dispatches to worker methods by name and refuses
@@ -15,6 +15,13 @@ What remains are two limits of *dispatch*:
     (``vllm_server_actor``) collective-RPCs into this method. It is called
     *before* ``pause_generation`` so the checkpoint-delta download overlaps live
     generation.
+
+the LoRA receive target
+    ``lora.sync_mode=memory`` sends a PEFT adapter down the ordinary transport,
+    and the receiving engine needs the adapter's name, config and alias map to
+    apply it. The native round trip carries only names, dtypes and shapes, so
+    the target is armed out of band, one round at a time, through
+    ``skyrl_set_lora_receive_target`` (see ``weight_sync/lora_target.py``).
 
 sleep / wake
     ``EngineCore.sleep`` hardcodes ``clear_prefix_cache = level >= 1``
@@ -55,6 +62,17 @@ try:
     )
 
     apply_model_runner_registry_patch()
+except ModuleNotFoundError:
+    pass
+
+try:
+    # Lets WorkerLoRAManager build an adapter from tensors staged by the
+    # receive engine (lora.sync_mode=memory) instead of from a directory.
+    from skyrl.backends.skyrl_train.patches.vllm.patch_lora_in_memory import (
+        apply_lora_in_memory_patch,
+    )
+
+    apply_lora_in_memory_patch()
 except ModuleNotFoundError:
     pass
 
@@ -212,6 +230,38 @@ class NewInferenceWorkerWrap:
         if fetch is None:
             raise RuntimeError(f"{type(self.weight_transfer_engine).__name__} does not support fetch_weights")
         return fetch(target_version=target_version, sync_dir=sync_dir, uri=uri)
+
+    def skyrl_set_lora_receive_target(self, receive_target: dict) -> None:
+        """Arm the next weight update to build a LoRA adapter, not the base model.
+
+        Called on every worker over ``/collective_rpc`` just before the trainer
+        runs ``send_weights()``. The arming lasts exactly one round; the engine
+        disarms itself at ``finish_weight_update``.
+        """
+        engine = self.weight_transfer_engine
+        if engine is None:
+            raise RuntimeError("Weight transfer not configured: set weight_transfer_config on the engine.")
+        arm = getattr(engine, "skyrl_set_lora_receive_target", None)
+        if arm is None:
+            raise RuntimeError(
+                f"{type(engine).__name__} cannot receive a LoRA adapter. "
+                "lora.sync_mode='memory' requires the skyrl_nccl or skyrl_ipc backend."
+            )
+        arm(receive_target)
+
+    def skyrl_discard_in_memory_lora(self, lora_name: str) -> bool:
+        """Free the staged tensors of an unloaded in-memory adapter.
+
+        Not routed through the engine: the staging registry is per worker
+        *process* (it outlives any one update round, so vLLM can rebuild the
+        adapter after an LRU eviction), and an unload can arrive when no weight
+        transfer is configured at all.
+        """
+        from skyrl.backends.skyrl_train.patches.vllm.patch_lora_in_memory import (
+            discard_in_memory_adapter,
+        )
+
+        return discard_in_memory_adapter(lora_name)
 
     # Suspend / resume for non-colocated weight sync.
     #
