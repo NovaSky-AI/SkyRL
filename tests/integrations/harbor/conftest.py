@@ -1,16 +1,15 @@
-"""Stand-ins for inference-capture, so this suite runs without it installed.
+"""A stand-in for skyrl-capture, so this suite runs without it installed.
 
 `examples/train_integrations/harbor/icap/upstream.py` subclasses capture's
-`TokensServer` and registers itself at module scope, so it cannot be imported
-unless capture is present. capture is an optional dependency of that example,
-not of SkyRL, and the CPU pipeline does not install it.
+`VLLMTokensServer` and registers itself at module scope, so it cannot be
+imported unless capture is present. capture is an optional dependency of one
+example, not of SkyRL, and the CPU pipeline does not install it.
 
-Stubbing rather than skipping is deliberate. What the wire does -- build a
-request, read a response back -- is pure data transformation that never touches
-the base class, so the coverage is the same and it runs everywhere. The one
-thing a stub cannot prove is that the subclass still fits capture's real
-interface; a Harbor run is what shows that, and the fields asserted here are
-the contract it has to keep.
+The stub carries only what the subclass touches: `generate_path` and the
+`token_url` built from it. The wire itself -- the request shape, the response
+shape, the session header -- belongs to capture and is tested there, in
+`tests/test_upstream_vllm.py`. What is left to check here is that this fork
+declares the right name and path and overrides nothing else.
 """
 
 from __future__ import annotations
@@ -23,31 +22,41 @@ import pytest
 
 UPSTREAM_MODULE = "examples.train_integrations.harbor.icap.upstream"
 
+#: Returned by the stub's `token_request`, so a test can tell "inherited" from
+#: "overridden" without reimplementing the wire.
+INHERITED = ({"inherited": True}, {"X-Session-ID": "from-the-base"})
 
-class _StubTokensServer:
-    """The parts of capture's `TokensServer` the wire inherits or overrides."""
 
-    name = "tokens"
+class _StubVLLMTokensServer:
+    """The parts of capture's `VLLMTokensServer` a fork inherits or overrides."""
+
+    name = "vllm"
     mode = "tokens"
     client_suffix = "/v1"
     requires_tokenizer = True
+    generate_path = "/inference/v1/generate"
 
     def token_url(self, url: str) -> str:
-        return url
+        root = url.rstrip("/")
+        return root if root.endswith(self.generate_path) else f"{root}{self.generate_path}"
+
+    def token_request(self, **_kwargs):
+        return INHERITED
 
     def describe(self) -> dict:
         return {"name": self.name, "mode": self.mode}
 
 
-class _StubTokenUpstreamError(Exception):
-    def __init__(self, message: str, *, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
+@pytest.fixture
+def inherited():
+    """What the stub's `token_request` returns, so a test can tell "inherited"
+    from "overridden" without reimplementing the wire."""
+    return INHERITED
 
 
 @pytest.fixture
 def registered():
-    """Whatever the module registered on import, and the class itself."""
+    """Whatever the module registered on import."""
     recorded: list = []
 
     def register(server):
@@ -55,27 +64,20 @@ def registered():
         return server
 
     modules = {
-        "inference_capture": types.ModuleType("inference_capture"),
-        "inference_capture.tokens": types.ModuleType("inference_capture.tokens"),
-        "inference_capture.tokens.types": types.ModuleType("inference_capture.tokens.types"),
-        "inference_capture.upstream": types.ModuleType("inference_capture.upstream"),
-        "inference_capture.upstream.registry": types.ModuleType(
-            "inference_capture.upstream.registry"
-        ),
-        "inference_capture.upstream.servers": types.ModuleType(
-            "inference_capture.upstream.servers"
-        ),
+        "skyrl_capture": types.ModuleType("skyrl_capture"),
+        "skyrl_capture.upstream": types.ModuleType("skyrl_capture.upstream"),
+        "skyrl_capture.upstream.registry": types.ModuleType("skyrl_capture.upstream.registry"),
+        "skyrl_capture.upstream.servers": types.ModuleType("skyrl_capture.upstream.servers"),
     }
-    modules["inference_capture.tokens.types"].TokenUpstreamError = _StubTokenUpstreamError
-    modules["inference_capture.upstream.registry"].register = register
-    modules["inference_capture.upstream.servers"].TokensServer = _StubTokensServer
+    modules["skyrl_capture.upstream.registry"].register = register
+    modules["skyrl_capture.upstream.servers"].VLLMTokensServer = _StubVLLMTokensServer
 
     saved = {name: sys.modules.get(name) for name in modules}
     saved[UPSTREAM_MODULE] = sys.modules.get(UPSTREAM_MODULE)
     sys.modules.update(modules)
     sys.modules.pop(UPSTREAM_MODULE, None)
     try:
-        module = importlib.import_module(UPSTREAM_MODULE)
+        importlib.import_module(UPSTREAM_MODULE)
         # Importing is what registers; that is the contract with capture.
         assert recorded, "the module did not register anything on import"
         yield recorded[0]
@@ -85,8 +87,3 @@ def registered():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = previous
-
-
-@pytest.fixture
-def wire_error():
-    return _StubTokenUpstreamError
