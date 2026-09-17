@@ -1,0 +1,277 @@
+
+diff -ruN a/vllm/lora/lora_model.py b/vllm/lora/lora_model.py
+--- a/vllm/lora/lora_model.py	2026-09-15 21:50:36.537646759 +0000
++++ b/vllm/lora/lora_model.py	2026-09-15 21:50:36.562647383 +0000
+@@ -164,6 +164,47 @@
+         return cls(lora_model_id, peft_helper.r, loras)
+ 
+     @classmethod
++    def check_unexpected_modules(
++        cls,
++        modules,
++        expected_lora_modules: set[str],
++        *,
++        weights_mapper: WeightsMapper | None = None,
++        skip_prefixes: list[str] | None = None,
++        source: str = "<tensors>",
++    ) -> None:
++        """Raise if ``modules`` (tensor names) target a module the model
++        does not LoRA-wrap. Shared by the checkpoint and in-memory loaders."""
++        unexpected_modules: list[str] = []
++        for lora_module in modules.keys() if hasattr(modules, "keys") else modules:
++            if is_base_embedding_weights(lora_module):
++                continue
++            # Handle PEFT file format where experts.base_layer is the
++            # gate_up_proj and experts is the down_proj
++            if "base_layer" in lora_module:
++                continue
++            # Skip modules based on model-defined prefixes
++            if skip_prefixes and cls._should_skip_module(lora_module, skip_prefixes):
++                continue
++            module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
++            # Case for expert lora weights
++            if ".experts" in module_name:
++                expert_idx = module_name.find(".experts")
++                expert_suffix = module_name[expert_idx + 1 :]
++                if expert_suffix not in expected_lora_modules:
++                    unexpected_modules.append(module_name)
++            elif module_name.rsplit(".", 1)[-1] not in expected_lora_modules:
++                unexpected_modules.append(module_name)
++
++        if unexpected_modules:
++            raise ValueError(
++                f"While loading {source}, expected"
++                f" target modules in {expected_lora_modules}"
++                f" but received {unexpected_modules}."
++                f" Please verify that the loaded LoRA module is correct"
++            )
++
++    @classmethod
+     def from_local_checkpoint(
+         cls,
+         lora_dir: str,
+@@ -207,39 +248,15 @@
+         lora_pt_file_path = os.path.join(lora_dir, "adapter_model.pt")
+ 
+         tensors: dict[str, torch.Tensor] = {}
+-        unexpected_modules: list[list[str] | str] = []
+ 
+         def check_unexpected_modules(modules: dict):
+-            for lora_module in modules.keys():  # noqa
+-                if is_base_embedding_weights(lora_module):
+-                    continue
+-                # Handle PEFT file format where experts.base_layer is the
+-                # gate_up_proj and experts is the down_proj
+-                if "base_layer" in lora_module:
+-                    continue
+-                # Skip modules based on model-defined prefixes
+-                if skip_prefixes and cls._should_skip_module(
+-                    lora_module, skip_prefixes
+-                ):
+-                    continue
+-                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+-                # Case for expert lora weights
+-                if ".experts" in module_name:
+-                    expert_idx = module_name.find(".experts")
+-                    expert_suffix = module_name[expert_idx + 1 :]
+-                    if expert_suffix not in expected_lora_modules:
+-                        unexpected_modules.append(module_name)
+-
+-                elif module_name.rsplit(".", 1)[-1] not in expected_lora_modules:
+-                    unexpected_modules.append(module_name)
+-
+-            if unexpected_modules:
+-                raise ValueError(
+-                    f"While loading {lora_dir}, expected"
+-                    f" target modules in {expected_lora_modules}"
+-                    f" but received {unexpected_modules}."
+-                    f" Please verify that the loaded LoRA module is correct"
+-                )
++            cls.check_unexpected_modules(
++                modules,
++                expected_lora_modules,
++                weights_mapper=weights_mapper,
++                skip_prefixes=skip_prefixes,
++                source=lora_dir,
++            )
+ 
+         if tensorizer_config_dict:
+             from tensorizer import TensorDeserializer
+diff -ruN a/vllm/lora/request.py b/vllm/lora/request.py
+--- a/vllm/lora/request.py	2026-09-15 21:50:01.020757109 +0000
++++ b/vllm/lora/request.py	2026-09-15 21:50:01.045757735 +0000
+@@ -4,6 +4,16 @@
+ 
+ import msgspec
+ 
++# ``lora_path`` values with this prefix name an adapter whose tensors were
++# staged in the worker process with ``WorkerLoRAManager.stage_adapter_tensors``
++# instead of a directory on disk. Used by RL trainers that ship adapter
++# updates over NCCL / CUDA IPC and must not round-trip them through files.
++IN_MEMORY_LORA_PATH_PREFIX = "memory://"
++
++
++def in_memory_lora_path(lora_name: str) -> str:
++    return f"{IN_MEMORY_LORA_PATH_PREFIX}{lora_name}"
++
+ 
+ class LoRARequest(
+     msgspec.Struct,
+@@ -20,6 +30,9 @@
+         with the same lora_int_id already exists in the cache. This replaces
+         the existing adapter in-place. If False (default), only loads if the
+         adapter is not already loaded.
++    lora_path: A local directory / HF repo, or ``memory://<lora_name>`` to
++        build the adapter from tensors previously staged on every worker
++        with ``WorkerLoRAManager.stage_adapter_tensors``.
+     """
+ 
+     lora_name: str
+@@ -55,6 +68,13 @@
+     def path(self):
+         return self.lora_path
+ 
++    @property
++    def in_memory_name(self) -> str | None:
++        """Adapter name for a ``memory://`` request, else None."""
++        if self.lora_path.startswith(IN_MEMORY_LORA_PATH_PREFIX):
++            return self.lora_path[len(IN_MEMORY_LORA_PATH_PREFIX):]
++        return None
++
+     def __eq__(self, value: object) -> bool:
+         """
+         Overrides the equality method to compare LoRARequest
+diff -ruN a/vllm/lora/worker_manager.py b/vllm/lora/worker_manager.py
+--- a/vllm/lora/worker_manager.py	2026-09-15 21:50:01.020757109 +0000
++++ b/vllm/lora/worker_manager.py	2026-09-15 21:57:11.258793027 +0000
+@@ -10,7 +10,7 @@
+ from vllm.config.lora import LoRAConfig
+ from vllm.exceptions import LoRAAdapterNotFoundError
+ from vllm.logger import init_logger
+-from vllm.lora.lora_model import LoRAModel
++from vllm.lora.lora_model import LoRAModel, _is_remote_expert_key
+ from vllm.lora.model_manager import (
+     LoRAModelManager,
+     LRUCacheLoRAModelManager,
+@@ -68,6 +68,9 @@
+                 text_config, "max_position_embeddings", None
+             )
+         self.device = device
++        # Adapters staged from memory, by name; consumed by the first
++        # ``memory://<name>`` load. See ``stage_adapter_tensors``.
++        self._staged_adapters: dict[str, tuple[dict[str, torch.Tensor], dict]] = {}
+         # Lazily initialized by create_lora_manager.
+         self._adapter_manager: LoRAModelManager
+ 
+@@ -103,19 +106,100 @@
+         self._adapter_manager = lora_manager
+         return lora_manager.model
+ 
++    def stage_adapter_tensors(
++        self,
++        lora_name: str,
++        tensors: dict[str, torch.Tensor],
++        peft_config: dict,
++    ) -> None:
++        """Stage an adapter's tensors for a later ``memory://<lora_name>`` load.
++
++        ``tensors`` are PEFT-format adapter weights (the contents of
++        ``adapter_model.safetensors``) already on this worker, typically on
++        ``self.device`` after an in-process weight transfer; they are kept by
++        reference. ``peft_config`` is the ``adapter_config.json`` dict. The
++        next ``add_adapter`` for a request whose ``lora_path`` is
++        ``memory://<lora_name>`` builds the ``LoRAModel`` from them.
++        """
++        if not lora_name:
++            raise ValueError("lora_name cannot be empty")
++        if not tensors:
++            raise ValueError(f"no tensors staged for LoRA adapter {lora_name!r}")
++        self._staged_adapters[lora_name] = (dict(tensors), dict(peft_config))
++
++    def discard_staged_adapter(self, lora_name: str) -> bool:
++        return self._staged_adapters.pop(lora_name, None) is not None
++
++    def _expected_lora_modules(self) -> set[str]:
++        supported_lora_modules = self._adapter_manager.supported_lora_modules
++        packed_modules_mapping = self._adapter_manager.packed_modules_mapping
++        expected_lora_lst: list[str] = []
++        for module in supported_lora_modules:
++            if module in packed_modules_mapping:
++                expected_lora_lst.extend(packed_modules_mapping[module])
++            else:
++                expected_lora_lst.append(module)
++            if module == "experts":
++                expected_lora_lst.append(module)
++        return set(expected_lora_lst)
++
++    def _load_staged_adapter(
++        self, lora_request: LoRARequest, lora_name: str
++    ) -> LoRAModel:
++        # Kept after the load: the LoRAModel shares the staged storage when
++        # device and dtype match, and an LRU-evicted adapter can be rebuilt
++        # from it the way a directory adapter is re-read.
++        staged = self._staged_adapters.get(lora_name)
++        if staged is None:
++            raise LoRAAdapterNotFoundError(
++                lora_request.lora_name, lora_request.lora_path
++            )
++        tensors, peft_config = staged
++        peft_helper = PEFTHelper.from_dict(peft_config)
++        peft_helper.validate_legal(self.lora_config)
++
++        model = self._adapter_manager.model
++        hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
++        if hf_to_vllm_mapper is not None:
++            hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
++        lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
++
++        self._lora_model_cls.check_unexpected_modules(
++            tensors,
++            self._expected_lora_modules(),
++            weights_mapper=hf_to_vllm_mapper,
++            skip_prefixes=lora_skip_prefixes,
++            source=lora_request.lora_path,
++        )
++        moe_ep_spec = self._adapter_manager.moe_ep_load_spec
++        if moe_ep_spec is not None:
++            tensors = {
++                k: v
++                for k, v in tensors.items()
++                if not _is_remote_expert_key(k, moe_ep_spec)
++            }
++        # Built where the tensors already are. When they match
++        # ``lora_dtype`` the per-tensor ``.to()`` is a no-op, so keys that
++        # alias one storage (shared expert adapters) keep sharing it.
++        lora = self._lora_model_cls.from_lora_tensors(
++            lora_model_id=lora_request.lora_int_id,
++            tensors=tensors,
++            peft_helper=peft_helper,
++            device=self.device,
++            dtype=self.lora_config.lora_dtype,
++            model_vocab_size=self.vocab_size,
++            weights_mapper=hf_to_vllm_mapper,
++            skip_prefixes=lora_skip_prefixes,
++        )
++        lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
++        return lora
++
+     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
++        in_memory_name = lora_request.in_memory_name
++        if in_memory_name is not None:
++            return self._load_staged_adapter(lora_request, in_memory_name)
+         try:
+-            supported_lora_modules = self._adapter_manager.supported_lora_modules
+-            packed_modules_mapping = self._adapter_manager.packed_modules_mapping
+-            expected_lora_lst: list[str] = []
+-            for module in supported_lora_modules:
+-                if module in packed_modules_mapping:
+-                    expected_lora_lst.extend(packed_modules_mapping[module])
+-                else:
+-                    expected_lora_lst.append(module)
+-                if module == "experts":
+-                    expected_lora_lst.append(module)
+-            expected_lora_modules = set(expected_lora_lst)
++            expected_lora_modules = self._expected_lora_modules()
+             lora_path = get_adapter_absolute_path(lora_request.lora_path)
+ 
+             peft_helper = PEFTHelper.from_local_dir(

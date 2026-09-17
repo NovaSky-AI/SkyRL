@@ -135,6 +135,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
         derive_metadata_from_chunks: bool = False,
+        receive_target: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> None:
         """Send chunks via broadcast or vLLM native NCCL.
@@ -144,12 +145,16 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             weight_metadata: Complete metadata for the batched update path.
             derive_metadata_from_chunks: Send each chunk with derived metadata.
         """
-        if derive_metadata_from_chunks:
-            if weight_metadata is not None:
-                raise ValueError("weight_metadata must be omitted when deriving metadata from chunks")
-            await self._send_serialized_fp8_chunks_vllm_native(chunks)
-        else:
-            await self._send_chunks_vllm_native(chunks, weight_metadata)
+        self._receive_target = receive_target
+        try:
+            if derive_metadata_from_chunks:
+                if weight_metadata is not None:
+                    raise ValueError("weight_metadata must be omitted when deriving metadata from chunks")
+                await self._send_serialized_fp8_chunks_vllm_native(chunks)
+            else:
+                await self._send_chunks_vllm_native(chunks, weight_metadata)
+        finally:
+            self._receive_target = None
 
     async def _send_chunks_vllm_native(
         self,
@@ -177,7 +182,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         # patch lands (vllm-project/vllm weight-sync-fix).
         # https://github.com/vllm-project/vllm/pull/42577
         if torch.distributed.get_rank() == 0:
-            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+            await self._start_weight_update(self._inference_client)
 
             # vLLM 0.28.0 dropped `packed` (and the buffer geometry) from
             # NCCLWeightTransferUpdateInfo -- it is agreed once at init instead,
@@ -206,9 +211,10 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         self,
         chunks: Iterable[WeightChunk],
     ) -> None:
-        """Send lazy mixed-dtype serialized-FP8 chunks through vLLM NCCL."""
+        """Send chunks whose metadata is only known per chunk (serialized FP8,
+        LoRA adapters) through vLLM NCCL, one update round each."""
         if torch.distributed.get_rank() == 0:
-            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+            await self._start_weight_update(self._inference_client)
 
         for chunk in chunks:
             if torch.distributed.get_rank() == 0:

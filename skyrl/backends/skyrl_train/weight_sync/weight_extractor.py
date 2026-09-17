@@ -1,7 +1,7 @@
 """Weight extractor interface for extracting weights from training backends."""
 
 from abc import ABC, abstractmethod
-from typing import Dict, Iterator, List
+from typing import Any, Dict, Iterator, List, Optional
 
 import torch
 
@@ -32,6 +32,18 @@ class WeightExtractor(ABC):
             WeightChunk objects containing model parameters ready for transfer
         """
         ...
+
+    @property
+    def receive_target(self) -> Optional[Dict[str, Any]]:
+        """What the receiver applies the chunk stream to.
+
+        ``None`` is the base model: the worker feeds chunks to
+        ``model.load_weights``. A LoRA adapter extractor returns the dict built
+        by ``lora_target.build_lora_receive_target`` and the worker stages the
+        tensors for vLLM's LoRA manager instead. Forwarded once per sync as the
+        ``receive_target`` argument of ``skyrl_start_weight_update``.
+        """
+        return None
 
     @property
     def derives_metadata_from_chunks(self) -> bool:

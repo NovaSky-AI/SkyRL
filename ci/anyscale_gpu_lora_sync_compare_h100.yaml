@@ -1,0 +1,15 @@
+name: skyrl-lora-sync-compare-h100
+entrypoint: bash tests/train/gpu_e2e_test/lora_sync_mode_compare.sh
+image_uri: novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron
+ray_version: "2.57.0"
+compute_config: k8s-single-node-4h100
+cloud: sky-anyscale-aws-us-east-1
+working_dir: .
+excludes:
+  - .git
+  - .venv
+  - "**/__pycache__"
+  - docs/public
+env_vars:
+  RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
+max_retries: 0

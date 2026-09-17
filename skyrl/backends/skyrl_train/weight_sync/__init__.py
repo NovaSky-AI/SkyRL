@@ -20,6 +20,14 @@ from .delta_strategy import (
     DeltaTransferStrategy,
     DeltaWeightTransferSender,
 )
+from .lora_target import (
+    LoraAdapterExtractor,
+    build_lora_receive_target,
+    dedupe_shared_expert_adapters,
+    expand_lora_aliases,
+    in_memory_lora_path,
+    is_lora_receive_target,
+)
 from .sharded_rdt.sharded_rdt_strategy import (
     ShardedRdtInitInfo,
     ShardedRdtTransferStrategy,
@@ -75,6 +83,12 @@ __all__ = [
     "WeightExtractor",
     "WeightUpdateRequest",
     "LoraLoadRequest",
+    "LoraAdapterExtractor",
+    "build_lora_receive_target",
+    "dedupe_shared_expert_adapters",
+    "expand_lora_aliases",
+    "in_memory_lora_path",
+    "is_lora_receive_target",
     "BroadcastWeightUpdateRequest",
     "CudaIpcWeightUpdateRequest",
     "WeightTransferStrategy",

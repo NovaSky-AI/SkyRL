@@ -80,6 +80,7 @@ from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     registered_fp8_spec_names,
     resolve_fp8_spec,
 )
+from skyrl.backends.skyrl_train.weight_sync.lora_target import LoraAdapterExtractor
 from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     AdapterStore,
     LoraSignature,
@@ -416,6 +417,67 @@ class MegatronWeightExtractor(WeightExtractor):
                     )
 
 
+class MegatronLoraAdapterExtractor(LoraAdapterExtractor):
+    """LoRA adapter target for the Megatron backend.
+
+    The same pipeline ``_save_lora_adapters_and_sync`` runs before writing
+    files (bridge adapter export, rank-scale fold for vLLM's uniform
+    ``alpha / r``, fused-expert 3D -> flat PEFT rewrite, ``adapter_config``),
+    minus the file: tensors stay on GPU and go to the transport. The export is
+    collective on every rank; the base class dedupes it as it streams.
+    """
+
+    def __init__(
+        self,
+        *,
+        bridge,
+        actor_module,
+        lora_cls,
+        base_model_name_or_path: str,
+        experts_per_shared_adapter: int,
+        bucket_size_threshold_GB: float,
+    ):
+        super().__init__(
+            experts_per_shared_adapter=experts_per_shared_adapter, bucket_size_threshold_GB=bucket_size_threshold_GB
+        )
+        self.bridge = bridge
+        self.actor_module = actor_module
+        self.lora_cls = lora_cls
+        self.base_model_name_or_path = base_model_name_or_path
+
+    def export_adapter_stream(self):
+        for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=False, show_progress=False):
+            yield f"base_model.model.{name}", tensor
+
+    def finalize_adapter(self, adapter_state):
+        from megatron.bridge.models.conversion.peft_bridge import (
+            build_adapter_config_dict,
+            infer_target_modules_from_adapter_weights,
+        )
+
+        config_rank = self.lora_cls.dim
+        # Both helpers return new tensors; the bridge's exports may alias live
+        # adapter parameters, which must not be modified. The 3D -> flat rewrite
+        # renames only fused ``experts.gate_up_proj`` / ``experts.down_proj``
+        # keys, which carry no expert index and so are never aliased.
+        adapter_state, rescaled = fold_lora_rank_scale_for_vllm(adapter_state, config_rank=config_rank)
+        if rescaled and torch.distributed.get_rank() == 0:
+            logger.info(
+                "LoRA sync (memory): folded rank scale into lora_B for vLLM (config r={}): {}",
+                config_rank,
+                ", ".join(f"{n} tensors at rank {r} x{config_rank / r:g}" for r, n in sorted(rescaled.items())),
+            )
+        adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
+
+        target_modules = sorted(set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"})
+        adapter_config = build_adapter_config_dict(
+            self.lora_cls,
+            target_modules=target_modules,
+            base_model_name_or_path=self.base_model_name_or_path,
+        )
+        return adapter_state, adapter_config
+
+
 class MegatronWorker:
     def _maybe_setup_fake_int4_qat(self):
         """Wire up INT4-served training and return the BF16 bridge-weights path.
@@ -621,6 +683,22 @@ class MegatronWorker:
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
+
+        # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
+        # the residual it would re-materialize is the n-stream tensor consumed by the mHC
+        # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
+        # needs the mHC recompute managers, which SkyRL's mHC layer does not implement, so
+        # downgrade to selective recompute of the remaining modules instead of failing.
+        if getattr(provider, "enable_mhc_connections", False) and provider.recompute_granularity == "full":
+            provider.recompute_granularity = "selective"
+            provider.recompute_modules = [m for m in (provider.recompute_modules or ["core_attn"]) if m != "mhc"]
+            provider.recompute_method = None
+            provider.recompute_num_layers = None
+            logger.info(
+                "Hyper-connection model: activation recompute downgraded from full to selective "
+                f"(recompute_modules={provider.recompute_modules}); mHC is not compatible with "
+                "full recompute."
+            )
 
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
@@ -1641,10 +1719,90 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             fp8_weight_sync_mode=inference_engine_cfg.fp8_weight_sync_mode,
             hf_config=self.strategy.hf_config,
         )
+        self.lora_weight_extractor = None
+        if (
+            self._is_lora
+            and not self.cfg.policy.megatron_config.lora_config.merge_lora
+            and self.cfg.policy.model.lora.sync_mode == "memory"
+        ):
+            self.lora_weight_extractor = self._build_lora_weight_extractor(inference_engine_cfg)
         # super picks the strategy and creates the sender (for sharded_rdt that
         # includes the eager rendezvous + bake, which is why the extractor is
         # built first).
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
+
+    def _build_lora_weight_extractor(
+        self, inference_engine_cfg: "InferenceEngineConfig"
+    ) -> "MegatronLoraAdapterExtractor":
+        lora_cfg = self.cfg.policy.model.lora
+        megatron_lora_cfg = self.cfg.policy.megatron_config.lora_config
+        # How many consecutive expert keys carry one identical adapter tensor.
+        # Under share_expert_adapters one adapter serves every expert an EP rank
+        # owns, so that span is num_experts / ep_size; the extractor sends each
+        # span once. Any other layout sends every key. The span is verified
+        # tensor-by-tensor, so it is only a hint.
+        experts_per_shared_adapter = 1
+        num_moe_experts = getattr(self.provider, "num_moe_experts", None)
+        if lora_cfg.share_expert_adapters and megatron_lora_cfg.lora_type == "lora" and num_moe_experts:
+            ep_size = max(1, int(self.cfg.policy.megatron_config.expert_model_parallel_size))
+            experts_per_shared_adapter = max(1, num_moe_experts // ep_size)
+        return MegatronLoraAdapterExtractor(
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            lora_cls=self.lora_cls,
+            base_model_name_or_path=str(
+                getattr(self, "_logical_model_path", "")
+                or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
+                or getattr(self.bridge.hf_pretrained, "name_or_path", "")
+            ),
+            experts_per_shared_adapter=experts_per_shared_adapter,
+            bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
+        )
+
+    async def _publish_lora_adapter_in_memory(
+        self,
+        lora_name: str,
+        inference_engine_client,
+        generator_dtype: torch.dtype,
+        send_chunks_kwargs: dict,
+    ) -> None:
+        """Adapter-only sync over the base-model transport; no files.
+
+        Every rank joins the bridge's collective adapter export inside the
+        extractor; the sender (NCCL broadcast or CUDA IPC, chosen at init)
+        carries the unique adapter tensors to every vLLM worker, which stages
+        them. Rank 0 then asks the servers to register the adapter from the
+        staged tensors under ``lora_name``.
+        """
+        import time
+
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            RemoteInferenceClient,
+        )
+
+        if not isinstance(inference_engine_client, RemoteInferenceClient):
+            raise TypeError("lora.sync_mode='memory' requires the RemoteInferenceClient (new inference path)")
+        rank = torch.distributed.get_rank()
+        started = time.perf_counter()
+        self.lora_weight_extractor.set_lora_name(lora_name)
+        with self._expandable_segments_disabled_for_sync(
+            force=self._weight_transfer_sender.force_disable_expandable_segments
+        ):
+            await self._weight_transfer_sender.send(
+                self.lora_weight_extractor,
+                generator_dtype,
+                **send_chunks_kwargs,
+            )
+        sent = time.perf_counter()
+        if rank == 0:
+            await inference_engine_client.load_lora_adapter(lora_name, in_memory=True)
+            logger.info(
+                "LoRA sync (memory): adapter {!r} exported+sent in {:.2f}s, registered on vLLM in {:.2f}s",
+                lora_name,
+                sent - started,
+                time.perf_counter() - sent,
+            )
+        torch.distributed.barrier()
 
     def _is_lora_sync_writer_rank(self) -> bool:
         """True on the ranks that write the LoRA adapter files to ``lora_sync_path``.
@@ -1830,7 +1988,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # so sample(model=<model_id>) routes correctly. Single-tenant
             # (model_id=None) keeps the legacy shared path + name.
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
-            await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
+            if self.lora_weight_extractor is not None:
+                await self._publish_lora_adapter_in_memory(
+                    lora_name, inference_engine_client, generator_dtype, send_chunks_kwargs
+                )
+            else:
+                await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
         else:
             # Send with the sender created at init time. Disable expandable_segments
             # around it: under colocate_all the CUDA-IPC path calls
