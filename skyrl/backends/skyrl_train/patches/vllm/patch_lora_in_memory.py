@@ -142,7 +142,7 @@ def _load_in_memory_adapter(manager, lora_request, staged: StagedLoRAAdapter):
 
     model = adapter_manager.model
     weights_mapper = getattr(model, "hf_to_vllm_mapper", None)
-    if weights_mapper is not None:
+    if weights_mapper is not None and hasattr(weights_mapper, "get_unstacked_mapper"):
         weights_mapper = weights_mapper.get_unstacked_mapper()
     skip_prefixes = getattr(model, "lora_skip_prefixes", None)
 
