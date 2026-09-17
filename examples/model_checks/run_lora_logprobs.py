@@ -12,6 +12,7 @@ from examples.model_checks.megatron_lora import (
     open_runtime,
     perturb_trainer,
     publish,
+    score_routed_sampler,
     score_sampler,
     score_trainer,
 )
@@ -32,7 +33,6 @@ async def run(args, report):
     tokenizer = get_tokenizer(cfg.trainer.policy.model.path)
     sequences = build_sequences(tokenizer)
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    batch = build_batch(sequences, pad_token_id)
     report.update(
         tokens=sequences,
         scored_positions=[len(tokens) - 1 for tokens in sequences],
@@ -45,21 +45,28 @@ async def run(args, report):
 
     async with open_runtime(cfg, tokenizer) as (policy, client):
         try:
-            await check_zero_initialized_policy(
+            batch = await check_zero_initialized_policy(
                 policy,
                 client,
                 cfg,
-                batch,
+                pad_token_id,
                 sequences,
                 report,
                 args.mean_atol,
                 args.max_atol,
             )
             apply_trainer_update(policy, batch, report, args.lora_b_multiplier)
-            await check_unpublished_sampler(client, sequences, adapter, report)
+            replay = cfg.trainer.policy.megatron_config.moe_enable_routing_replay
+            await check_unpublished_sampler(client, sequences, adapter, report, replay)
             check_update_stimulus(report, args.mean_atol)
             await publish(policy, client, cfg)
-            await check_published_update(client, sequences, adapter, report, args.mean_atol, args.max_atol)
+            routes = await score_snapshot(client, sequences, adapter, report, "updated", replay)
+            if replay:
+                report["trainer_prepublication"] = report["trainer_updated"]
+                report["prepublication_stale_parity"] = report["stale_parity"]
+                batch = build_batch(sequences, pad_token_id, routes)
+                report["trainer_updated"] = score_trainer(policy, batch)
+            check_updated_adapter(report, args.mean_atol, args.max_atol)
         finally:
             # Preserve failed assertions even if subsequent runtime cleanup hangs.
             write_report(args.output_dir, report)
@@ -71,15 +78,27 @@ def write_report(output_dir, report):
     temporary.replace(output_dir / "logprobs.json")
 
 
-async def check_zero_initialized_policy(policy, client, cfg, batch, sequences, report, mean_atol, max_atol):
-    report["base"] = await score_sampler(client, sequences, client.model_name)
+async def score_snapshot(client, sequences, model, report, key, replay):
+    if replay:
+        report[key], routes = await score_routed_sampler(client, sequences, model)
+        report[f"{key}_routes"] = [route.tolist() for route in routes]
+        return routes
+    report[key] = await score_sampler(client, sequences, model)
+    return None
+
+
+async def check_zero_initialized_policy(policy, client, cfg, pad_token_id, sequences, report, mean_atol, max_atol):
+    replay = cfg.trainer.policy.megatron_config.moe_enable_routing_replay
+    await score_snapshot(client, sequences, client.model_name, report, "base", replay)
     await publish(policy, client, cfg)
     adapter = resolve_policy_model_name(cfg)
-    report["zero"] = await score_sampler(client, sequences, adapter)
+    routes = await score_snapshot(client, sequences, adapter, report, "zero", replay)
+    batch = build_batch(sequences, pad_token_id, routes)
     report["trainer_zero"] = score_trainer(policy, batch)
-    report["repeat"] = await score_sampler(client, sequences, adapter)
-    report["trainer_repeat"] = score_trainer(policy, batch)
+    repeat_routes = await score_snapshot(client, sequences, adapter, report, "repeat", replay)
+    report["trainer_repeat"] = score_trainer(policy, build_batch(sequences, pad_token_id, repeat_routes))
     check_initial_adapter(report, mean_atol, max_atol)
+    return batch
 
 
 def apply_trainer_update(policy, batch, report, multiplier=10):
@@ -87,17 +106,16 @@ def apply_trainer_update(policy, batch, report, multiplier=10):
     report["trainer_updated"] = score_trainer(policy, batch)
 
 
-async def check_unpublished_sampler(client, sequences, adapter, report):
-    report["stale"] = await score_sampler(client, sequences, adapter)
+async def check_unpublished_sampler(client, sequences, adapter, report, replay):
+    await score_snapshot(client, sequences, adapter, report, "stale", replay)
     check_withheld_publication(report)
 
 
-async def check_published_update(client, sequences, adapter, report, mean_atol, max_atol):
-    report["updated"] = await score_sampler(client, sequences, adapter)
-    check_updated_adapter(report, mean_atol, max_atol)
-
-
 def validate_config(overrides):
+    replay = overrides.get("trainer.policy.megatron_config.moe_enable_routing_replay", False)
+    capture = overrides.get("generator.inference_engine.enable_return_routed_experts", False)
+    if replay != capture:
+        raise ValueError("Routing replay and inference route capture must be enabled together")
     if overrides["strategy"] != "megatron":
         raise ValueError("This diagnostic requires Megatron")
     if overrides["trainer.placement.colocate_all"]:
