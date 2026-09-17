@@ -699,6 +699,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "loss_masks",
             "rewards",
             "rollout_logprobs",
+            "rollout_full_logprobs",
             "stop_reasons",
             "trajectory_ids",
             "rollout_expert_indices",

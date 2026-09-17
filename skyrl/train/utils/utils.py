@@ -311,6 +311,7 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
 
 
 def validate_cfg(cfg: SkyRLTrainConfig):
+    validate_logprob_comparison(cfg)
     if cfg.trainer.strategy == "fsdp2":
         import warnings
 
@@ -332,6 +333,17 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
     # side (vLLM MTP speculative decoding) so both stay consistent.
     _apply_mtp_config(cfg)
+
+    if cfg.trainer.enable_isoexec:
+        try:
+            from isoexec.integrations.skyrl.config import resolve as resolve_isoexec
+        except ModuleNotFoundError as exc:
+            if exc.name == "isoexec":
+                raise RuntimeError(
+                    "trainer.enable_isoexec=true requires the local IsoExec package in the runtime environment"
+                ) from exc
+            raise
+        resolve_isoexec(cfg)
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
@@ -514,6 +526,64 @@ def validate_cfg(cfg: SkyRLTrainConfig):
                 f"ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same "
                 f"when colocate policy and ref model."
             )
+
+
+def validate_logprob_comparison(cfg: SkyRLTrainConfig):
+    trainer, generator = cfg.trainer, cfg.generator
+    engine = generator.inference_engine
+    mode = trainer.rollout_logprob_comparison
+    if mode not in ("action", "full") or engine.logprob_output != mode:
+        raise ValueError(
+            "trainer.rollout_logprob_comparison and inference_engine.logprob_output must agree: action or full"
+        )
+    if mode == "action":
+        return
+    megatron = trainer.policy.megatron_config
+    supported = (
+        trainer.strategy == "megatron"
+        and trainer.enable_isoexec
+        and engine.backend == "vllm"
+        and not trainer.fully_async.enabled
+        and not trainer.mtp.enabled
+        and not trainer.fused_lm_head_logprob
+        and trainer.remove_microbatch_padding
+        and generator.batched
+        and not generator.vision_language_generator
+        and generator.max_turns == 1
+        and not generator.step_wise_trajectories
+        and trainer.algorithm.dynamic_sampling.type is None
+        and trainer.policy.model.lora.rank == 0
+        and trainer.placement.colocate_all
+        and trainer.placement.policy_num_nodes * trainer.placement.policy_num_gpus_per_node == 1
+        and all(
+            getattr(megatron, name) == 1
+            for name in (
+                "tensor_model_parallel_size",
+                "pipeline_model_parallel_size",
+                "context_parallel_size",
+                "expert_model_parallel_size",
+            )
+        )
+        and megatron.expert_tensor_parallel_size in (None, 1)
+        and megatron.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size") is None
+        and engine.run_engines_locally
+        and engine.num_engines == 1
+        and not engine.enable_pd
+        and engine.tensor_parallel_size == engine.pipeline_parallel_size == engine.data_parallel_size == 1
+        and engine.expert_parallel_size == 1
+        and engine.speculative_config is None
+        and engine.fp8_weight_sync_mode is None
+        and generator.sampling_params.temperature == trainer.algorithm.temperature == 1.0
+        and generator.sampling_params.logprobs is not None
+    )
+    if not supported:
+        raise ValueError(
+            "full logprob comparison requires enable_isoexec=true with synchronous, packed, text-only, "
+            "single-turn batched colocated Megatron/vLLM on one GPU per side, temperature=1, without fused "
+            "LM head, LoRA, MTP, speculation or dynamic sampling"
+        )
+    if generator.eval_sampling_params is not None:
+        generator.eval_sampling_params.logprobs = None
 
 
 def validate_generator_cfg(cfg: SkyRLTrainConfig):
@@ -794,6 +864,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
+
+    if cfg.trainer.enable_isoexec:
+        # IsoExec's communicator plan identifies physical GPUs across colocated
+        # trainer/engine actors. Preserve the full device namespace and let each
+        # worker select the ordinal Ray assigned through ``ray.get_gpu_ids()``.
+        env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 
     # NOTE (erictang000): This should no longer be required since this has been removed in vllm
     # and fixed in NCCL (https://github.com/vllm-project/vllm/pull/24141, https://github.com/NVIDIA/nccl/issues/1234), but empirically seeing OOMs for

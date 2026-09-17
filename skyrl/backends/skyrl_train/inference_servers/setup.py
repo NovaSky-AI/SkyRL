@@ -326,11 +326,22 @@ def build_new_inference_client(
             placement_group=placement_group,
         )
 
+    preserve_weights_on_sleep = False
+    if cfg.trainer.enable_isoexec:
+        from isoexec.integrations.skyrl.config import (
+            preserve_weights_on_sleep as isoexec_preserve_weights,
+        )
+
+        preserve_weights_on_sleep = isoexec_preserve_weights(cfg)
+
     client = RemoteInferenceClient(
         proxy_url=server_setup.proxy_url,
         server_urls=server_setup.server_urls,
         model_name=ie_cfg.served_model_name or cfg.trainer.policy.model.path,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
+        logprob_output=ie_cfg.logprob_output,
+        uses_isoexec=cfg.trainer.enable_isoexec,
+        preserve_weights_on_sleep=preserve_weights_on_sleep,
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,

@@ -29,6 +29,7 @@ def test_generator_output_concatenation():
         "stop_reasons",
         "rollout_metrics",
         "rollout_logprobs",
+        "rollout_full_logprobs",
         "rollout_expert_indices",
         # optional but present in the signature
         "trajectory_ids",
@@ -93,6 +94,46 @@ def test_generator_output_concatenation():
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():
         np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
+
+
+def test_generator_output_concatenation_preserves_full_logprob_rows():
+    def make_output(token: int, rows: np.ndarray) -> GeneratorOutput:
+        return {
+            "prompt_token_ids": [[token]],
+            "response_ids": [[token, token + 1]],
+            "rewards": [1.0],
+            "loss_masks": [[1, 1]],
+            "stop_reasons": ["stop"],
+            "rollout_logprobs": [[-0.1, -0.2]],
+            "rollout_full_logprobs": [rows],
+        }
+
+    first = np.arange(6, dtype=np.float32).reshape(2, 3)
+    second = first + 10
+
+    concatenated = concatenate_generator_outputs([make_output(1, first), make_output(3, second)])
+
+    assert len(concatenated["rollout_full_logprobs"]) == 2
+    np.testing.assert_array_equal(concatenated["rollout_full_logprobs"][0], first)
+    np.testing.assert_array_equal(concatenated["rollout_full_logprobs"][1], second)
+
+
+def test_generator_output_concatenation_rejects_partial_full_logprobs():
+    base: GeneratorOutput = {
+        "prompt_token_ids": [[1]],
+        "response_ids": [[2]],
+        "rewards": [1.0],
+        "loss_masks": [[1]],
+        "stop_reasons": ["stop"],
+        "rollout_logprobs": [[-0.1]],
+    }
+    with_rows: GeneratorOutput = {
+        **base,
+        "rollout_full_logprobs": [np.array([[-0.1, -1.0]], dtype=np.float32)],
+    }
+
+    with pytest.raises(ValueError, match="consistently include"):
+        concatenate_generator_outputs([base, with_rows])
 
 
 def test_time_split_rollout_metrics():

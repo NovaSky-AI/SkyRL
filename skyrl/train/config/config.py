@@ -1168,6 +1168,11 @@ SUPPORTED_SPECULATIVE_DECODING_METHODS = ("mtp",)
 class InferenceEngineConfig(BaseConfig):
     """Configuration for inference engine instantiation and management."""
 
+    logprob_output: Literal["action", "full"] = "action"
+    """Logprob evidence returned for training rollouts.
+    ``"action"`` preserves the sampled-token output. ``"full"`` additionally returns one raw
+    float32 vocabulary-logprob row per response token for the pre-update comparison gate. Full mode
+    has ``O(response_tokens * vocabulary_size)`` host and wire cost and is intended for diagnostics."""
     model_dtype: str = "bfloat16"
     """Should match the dtype used by the inference engine.
     Also used during full-weight sync, where policy weights are cast to this dtype before being sent
@@ -1416,6 +1421,15 @@ class MTPConfig(BaseConfig):
 
 @dataclass
 class TrainerConfig(BaseConfig):
+    enable_isoexec: bool = False
+    """Build trainer and rollout models through the installed IsoExec package.
+    IsoExec remains opt-in and must be installed in every driver, trainer, and inference-worker environment."""
+    rollout_logprob_comparison: Literal["action", "full"] = "action"
+    """Rollout-versus-trainer logprob comparison mode.
+    ``"action"`` preserves the sampled-token diagnostic. ``"full"`` requires matching
+    ``generator.inference_engine.logprob_output`` and compares every float32 vocabulary entry
+    bitwise through IsoExec before optimizer mutation. Full mode requires
+    ``enable_isoexec=True`` and disables evaluation logprobs."""
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     use_expandable_segments: bool = True
     """Enable PyTorch's CUDA ``expandable_segments`` allocator on the training workers.

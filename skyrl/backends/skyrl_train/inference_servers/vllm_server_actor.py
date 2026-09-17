@@ -41,6 +41,7 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
     build_logprobs_content,
+    pack_full_logprobs,
     pack_routed_experts,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
@@ -474,11 +475,11 @@ class VLLMServerActor(ServerActorProtocol):
             }
 
         # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
-        # endpoint /inference/v1/generate does not support returning routed expert IDs.
+        # endpoint /inference/v1/generate does not support SkyRL's packed diagnostic payloads.
         # TODO (sumanthrh): Migrate back to /inference/v1/generate once this is fixed on the vllm side
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
-            """SkyRL generate endpoint that returns routed_experts alongside token output."""
+            """Return token output with optional routed-expert or full-logprob evidence."""
             if getattr(cli_args, "enable_lora", False):
                 raise HTTPException(status_code=400, detail="/skyrl/v1/generate does not support LoRA.")
 
@@ -488,6 +489,18 @@ class VLLMServerActor(ServerActorProtocol):
             cache_salt = body.get("cache_salt")
 
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
+            full_logprobs = body.get("return_full_logprobs", False)
+            if not isinstance(full_logprobs, bool):
+                raise HTTPException(status_code=400, detail="return_full_logprobs must be a boolean")
+            if full_logprobs and (
+                sampling_params.logprobs != -1
+                or sampling_params.n != 1
+                or engine.model_config.logprobs_mode != "raw_logprobs"
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="full logprobs require logprobs=-1, n=1 and raw_logprobs mode",
+                )
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
             if cache_salt is not None:
                 prompt = TokensPrompt(prompt_token_ids=token_ids, cache_salt=cache_salt)
@@ -501,6 +514,8 @@ class VLLMServerActor(ServerActorProtocol):
 
             if final_res is None:
                 raise HTTPException(status_code=500, detail="vLLM returned no output")
+            if full_logprobs and len(final_res.outputs) != 1:
+                raise HTTPException(status_code=500, detail="full logprobs require exactly one output")
             resp = final_res.outputs[0]
 
             token_ids_out = list(resp.token_ids)
@@ -530,6 +545,10 @@ class VLLMServerActor(ServerActorProtocol):
                     }
                 ]
             }
+            if full_logprobs:
+                payload["choices"][0]["full_logprobs"] = pack_full_logprobs(
+                    token_ids_out, resp.logprobs, engine.model_config.get_vocab_size()
+                )
             return Response(content=orjson.dumps(payload), media_type="application/json")
 
     async def shutdown(self) -> None:

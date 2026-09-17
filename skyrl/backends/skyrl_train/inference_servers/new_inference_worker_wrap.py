@@ -313,7 +313,10 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
 
         model = self.model_runner.model
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            if self._skyrl_is_checkpoint_format:
+            host_loader = getattr(self, "_skyrl_load_kernel_weights", None)
+            if callable(host_loader):
+                host_loader(weights)
+            elif self._skyrl_is_checkpoint_format:
                 _load_checkpoint_weights(model, weights)
                 # vLLM's load only updates the main model; the spec-decode (MTP/Eagle)
                 # drafter is a separate module and must be reloaded from the same

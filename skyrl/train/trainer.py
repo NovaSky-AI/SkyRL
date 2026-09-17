@@ -942,6 +942,31 @@ class RayPPOTrainer:
                 "image_grid_thw": image_grid_thw,
             },
         )
+        if self.cfg.trainer.rollout_logprob_comparison == "full":
+            full_rows = generator_output.get("rollout_full_logprobs")
+            if full_rows is None or len(full_rows) != len(response_ids):
+                raise ValueError("Missing rollout full logprobs")
+            if any(
+                not isinstance(rows, np.ndarray)
+                or rows.dtype != np.float32
+                or rows.ndim != 2
+                or len(rows) != len(ids)
+                or rows.shape[1] == 0
+                or not np.isfinite(rows).all()
+                for rows, ids in zip(full_rows, response_ids, strict=True)
+            ):
+                raise ValueError("Full logprobs must be finite float32 rows aligned with response tokens")
+            vocab_size = full_rows[0].shape[1]
+            if any(rows.shape[1] != vocab_size for rows in full_rows):
+                raise ValueError("Full logprob rows must use one vocabulary size")
+            width = response_masks_tensor.shape[1]
+            training_input["rollout_full_logprobs"] = torch.stack(
+                [
+                    torch.nn.functional.pad(torch.from_numpy(rows.copy()), (0, 0, width - len(rows), 0))
+                    for rows in full_rows
+                ]
+            )
+            generator_output.pop("rollout_full_logprobs")
         training_input.metadata = {"uids": uids}
         if generator_output.get("is_last_step", None) is not None:
             training_input.metadata["is_last_step"] = generator_output["is_last_step"]
@@ -1294,6 +1319,10 @@ class RayPPOTrainer:
         is anchor-aware here rather than a static membership in LOSSES_WITHOUT_OLD_LOGPROBS, which is
         keyed by policy_loss_type and cannot distinguish the two CISPO anchors.
         """
+        if getattr(self.cfg.trainer, "enable_isoexec", False):
+            return False
+        if getattr(self.cfg.trainer, "rollout_logprob_comparison", "action") == "full":
+            return False
         algorithm = self.cfg.trainer.algorithm
         if algorithm.policy_loss_type == PolicyLossType.CISPO:
             # CISPO reads old logprobs only with the default "old" anchor; "rollout" optimizes against
@@ -1362,6 +1391,11 @@ class RayPPOTrainer:
 
         # Policy forward. Skipped for losses that optimize against rollout logprobs (see
         # `_skip_policy_forward`), where the resulting logprobs are never read.
+        if self.cfg.trainer.rollout_logprob_comparison == "full":
+            if training_input.get("rollout_full_logprobs") is None or not bool(training_input["loss_mask"].any()):
+                raise ValueError("Full comparison requires rollout rows and trainable tokens")
+            for key in ("rollout_full_logprobs", "loss_mask", "rollout_logprobs"):
+                data_fwd_pass[key] = training_input[key]
         if self._skip_policy_forward(training_input):
             action_log_probs = None
         else:
@@ -1371,6 +1405,16 @@ class RayPPOTrainer:
                 key="logprobs",
                 mini_batch_boundaries=training_input.metadata.get("policy_mini_batch_boundaries"),
             )
+
+        if self.cfg.trainer.enable_isoexec:
+            from isoexec.integrations.skyrl.audit import require_comparison
+
+            require_comparison(training_input, action_log_probs)
+
+        if self.cfg.trainer.rollout_logprob_comparison == "full":
+            training_input.pop("rollout_full_logprobs")
+            data_fwd_pass.pop("rollout_full_logprobs")
+            self.all_metrics["policy/full_logprobs_verified_rows"] = int(training_input["loss_mask"].count_nonzero())
 
         # Empty cache after all forward passes
         self.dispatch.empty_cache()
@@ -1392,6 +1436,11 @@ class RayPPOTrainer:
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]
             ).abs()
+
+            if self.cfg.trainer.enable_isoexec:
+                from isoexec.integrations.skyrl.audit import check_difference
+
+                check_difference(logprobs_diff)
 
             # Guard: a batch with no trainable response tokens (loss_mask all zero, e.g. every
             # response dropped by overlong filtering) leaves logprobs_diff empty, and .max()/.min()

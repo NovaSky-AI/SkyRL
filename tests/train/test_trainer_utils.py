@@ -845,6 +845,24 @@ def test_validate_generator_output_mismatched_list_lengths():
         validate_generator_output(len(input_batch["prompts"]), generator_output)
 
 
+def test_validate_generator_output_rejects_mismatched_full_logprob_batch():
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1], [2]],
+        response_ids=[[3], [4]],
+        rewards=[0.5, 0.7],
+        loss_masks=[[1], [1]],
+        stop_reasons=["eos", "eos"],
+        rollout_logprobs=[[0.1], [0.2]],
+        rollout_full_logprobs=[np.zeros((1, 5), dtype=np.float32)],
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="Generator output rollout_full_logprobs length must be equal to response_ids length",
+    ):
+        validate_generator_output(2, generator_output)
+
+
 def test_validate_generator_output_element_length_mismatch():
     """Test validate_generator_output with element length mismatch."""
     input_batch = GeneratorInput(

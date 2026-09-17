@@ -126,6 +126,30 @@ def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
     return True
 
 
+def _apply_full_logprob_engine_defaults(
+    ie_cfg: InferenceEngineConfig,
+    engine_kwargs: Dict[str, Any],
+) -> None:
+    """Configure vLLM to return every raw vocabulary logprob when requested."""
+    if ie_cfg.logprob_output != "full":
+        return
+    for key, value in {"max_logprobs": -1, "logprobs_mode": "raw_logprobs"}.items():
+        if key in engine_kwargs and engine_kwargs[key] != value:
+            raise ValueError(f"engine_init_kwargs.{key} must be {value!r} for full logprobs")
+        engine_kwargs[key] = value
+
+
+def _apply_isoexec_engine_args(cfg: SkyRLTrainConfig, args: Namespace) -> None:
+    """Apply the installed IsoExec engine contract only for the opt-in path."""
+    if not cfg.trainer.enable_isoexec:
+        return
+    from isoexec.integrations.skyrl.config import (
+        engine_args as apply_isoexec_engine_args,
+    )
+
+    apply_isoexec_engine_args(cfg, args)
+
+
 def resolve_policy_model_name(cfg: SkyRLTrainConfig) -> str:
     """Return the model identifier the inference engine knows the policy by.
 
@@ -258,6 +282,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    _apply_full_logprob_engine_defaults(ie_cfg, engine_kwargs)
     _apply_serialized_fp8_weight_sync_defaults(
         ie_cfg,
         engine_kwargs,
@@ -265,6 +290,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     )
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
+
+    _apply_isoexec_engine_args(cfg, args)
 
     return args
 

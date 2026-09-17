@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+import numpy as np
 import torch
 from loguru import logger
 from tqdm.asyncio import tqdm
@@ -757,6 +758,23 @@ class SkyRLGymGenerator(GeneratorInterface):
         responses = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
         logprobs = engine_output.get("response_logprobs", None)
+        full_logprobs = engine_output.get("response_full_logprobs")
+        if self.generator_cfg.inference_engine.logprob_output == "full":
+            requested_logprobs = (
+                self.generator_cfg.sampling_params.logprobs
+                if sampling_params is None
+                else sampling_params.get("logprobs")
+            )
+            if requested_logprobs is not None and full_logprobs is None:
+                raise ValueError("Full logprob output is missing from the inference engine response")
+        if full_logprobs is not None:
+            if len(full_logprobs) != len(responses) or any(
+                not isinstance(rows, np.ndarray) or rows.ndim != 2 or rows.shape[0] != len(response)
+                for rows, response in zip(full_logprobs, responses)
+            ):
+                raise ValueError(
+                    "Full logprob output must contain one [response_length, vocab_size] array per response"
+                )
         raw_rollout_expert_indices = engine_output.get("rollout_expert_indices", None)
 
         truncated_responses = []
@@ -805,6 +823,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_logprobs": truncated_logprobs,
             "rollout_expert_indices": truncated_indices,
         }
+        if full_logprobs is not None:
+            generator_output["rollout_full_logprobs"] = [
+                rows[: len(response)] for rows, response in zip(full_logprobs, truncated_responses, strict=True)
+            ]
 
         return generator_output
 

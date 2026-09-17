@@ -283,6 +283,9 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         raise ValueError(
             "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
         )
+    has_full_logprobs = [output.get("rollout_full_logprobs") is not None for output in generator_outputs]
+    if any(has_full_logprobs) and not all(has_full_logprobs):
+        raise ValueError("generator outputs must consistently include rollout_full_logprobs")
     first = generator_outputs[0]
     result: GeneratorOutput = {
         "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),

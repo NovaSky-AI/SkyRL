@@ -114,3 +114,30 @@ def test_streamed_backward_matches_non_chunked_for_targeted_cases(tp_group, case
     assert grad_chunk.shape == grad_ref.shape == logits.shape
     assert grad_chunk.dtype == torch.float32
     assert torch.equal(grad_chunk, grad_ref), "streamed chunked grad must be bit-identical to non-chunked grad"
+
+
+def test_full_logprobs_materialize_only_selected_rows_in_float32(tp_group):
+    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
+        from_parallel_logits_to_full_logprobs,
+    )
+
+    torch.manual_seed(2)
+    logits = torch.randn(2, 3, 7, dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        chunked = from_parallel_logits_to_full_logprobs(logits, tp_group, chunk_size=2)
+        unchunked = from_parallel_logits_to_full_logprobs(logits, tp_group)
+
+    assert chunked.shape == logits.shape
+    assert chunked.dtype == torch.float32
+    assert torch.equal(chunked, unchunked)
+    torch.testing.assert_close(chunked, torch.log_softmax(logits.float(), dim=-1))
+
+
+def test_full_logprobs_reject_grad_enabled_forward(tp_group):
+    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
+        from_parallel_logits_to_full_logprobs,
+    )
+
+    with pytest.raises(ValueError, match="no-grad"):
+        from_parallel_logits_to_full_logprobs(torch.randn(1, 2, 3), tp_group)

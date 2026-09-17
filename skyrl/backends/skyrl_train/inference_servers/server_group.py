@@ -148,7 +148,15 @@ class ServerGroup:
         # Engine-actor runtime_env (env vars applied before CUDA init and inherited by the
         # child vLLM workers). Currently just the expandable_segments allocator, which is
         # safe with sleep mode on vLLM >= 0.20.1.
-        runtime_env = build_engine_runtime_env(use_expandable_segments=self._use_expandable_segments)
+        extra_env_vars = None
+        if getattr(self._cli_args, "worker_extension_cls", None) == "isoexec.integrations.skyrl.vllm.WorkerExtension":
+            from isoexec.integrations.skyrl.config import engine_runtime_env
+
+            extra_env_vars = engine_runtime_env(self._cli_args)
+        runtime_env = build_engine_runtime_env(
+            use_expandable_segments=self._use_expandable_segments,
+            extra_env_vars=extra_env_vars,
+        )
         return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
             num_cpus=COLOCATED_ACTOR_CPU_FRACTION,

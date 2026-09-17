@@ -310,6 +310,12 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
         model_update_group = None
 
         if rank == 0:
+            if weight_extractor is not None and type(weight_extractor).__module__.startswith("isoexec."):
+                from isoexec.runtimes.vllm.nccl_channels import (
+                    install_pynccl_channel_policy,
+                )
+
+                install_pynccl_channel_policy()
             model_update_group = nccl_trainer_init(
                 dict(
                     master_address=init_info.master_addr,

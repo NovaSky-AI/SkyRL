@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
+import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
@@ -42,6 +43,7 @@ class GeneratorOutput(TypedDict):
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
+    rollout_full_logprobs: NotRequired[List[np.ndarray]]
     trajectory_ids: Optional[List[TrajectoryID]]
     # Wall-clock generation time (seconds) for each trajectory, with one entry per
     # trajectory in the input batch (i.e. per ``agent_loop`` call). Used by the fully
