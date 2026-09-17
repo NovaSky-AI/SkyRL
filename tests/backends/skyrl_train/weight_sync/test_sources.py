@@ -280,6 +280,27 @@ class TestLoraAdapterWeightSource:
         assert source.exports == 2
         assert source.receive_target["lora_name"] == "next"
 
+    def test_reading_an_unprepared_source_raises_instead_of_exporting(self):
+        """The export is a collective. A source that ran it implicitly would have
+        whichever rank asked run it alone, hanging the job in an EP all-gather
+        for the full NCCL watchdog timeout instead of failing."""
+        source = self._source()
+        with pytest.raises(RuntimeError, match="no prepared adapter"):
+            source.metadata()
+        with pytest.raises(RuntimeError, match="no prepared adapter"):
+            list(source)
+        assert source.exports == 0
+
+    def test_reading_after_the_stream_is_consumed_raises(self):
+        """The trap the trainer fell into: the round is over, the cache is gone,
+        and a stray metadata() would re-export on one rank only."""
+        source = self._source()
+        source.prepare()
+        list(source)
+        with pytest.raises(RuntimeError, match="no prepared adapter"):
+            source.metadata()
+        assert source.exports == 1
+
     def test_prepare_is_idempotent_within_a_round(self):
         source = self._source()
         source.prepare()

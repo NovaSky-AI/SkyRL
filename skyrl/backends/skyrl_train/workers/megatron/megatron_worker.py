@@ -1435,8 +1435,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         await self._weight_sync_thread(source.prepare)
         exported = time.perf_counter()
 
+        unique = aliased = 0
         if rank == 0:
-            await inference_engine_client.set_lora_receive_target(source.receive_target)
+            receive_target = source.receive_target
+            # Read while the export is still prepared: the send consumes the
+            # stream and drops it, and re-reading afterwards would be a
+            # collective this rank would run alone.
+            unique = len(source.metadata())
+            aliased = len(receive_target["aliases"])
+            await inference_engine_client.set_lora_receive_target(receive_target)
         # No rank may enter the transfer before every worker is armed: rank 0
         # opens the round trip, the others only join its collectives.
         torch.distributed.barrier()
@@ -1448,9 +1455,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if rank == 0:
             await inference_engine_client.load_lora_adapter(lora_name, in_memory=True)
             logger.info(
-                "LoRA sync (memory): adapter {!r} exported in {:.2f}s, sent in {:.2f}s, "
-                "registered on vLLM in {:.2f}s",
+                "LoRA sync (memory): adapter {!r} {} unique tensors (+{} aliased, {:.1f}x dedupe), "
+                "exported in {:.2f}s, sent in {:.2f}s, registered on vLLM in {:.2f}s",
                 lora_name,
+                unique,
+                aliased,
+                (unique + aliased) / max(unique, 1),
                 exported - started,
                 sent - exported,
                 time.perf_counter() - sent,

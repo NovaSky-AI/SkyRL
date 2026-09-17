@@ -221,23 +221,39 @@ class LoraAdapterWeightSource(WeightSource):
         return adapter_state, {}
 
     def prepare(self) -> None:
-        """Run the export, dedupe and finalize. Collective; call on every rank."""
-        self._prepare()
+        """Run the export, dedupe and finalize. Collective; call on every rank.
 
-    def _prepare(self) -> Tuple[Dict[str, torch.Tensor], Dict[str, str], Dict[str, Any]]:
+        Idempotent within a round. Iteration drops the result, so the next round
+        needs its own call.
+        """
         from skyrl.backends.skyrl_train.weight_sync.lora_target import (
             dedupe_shared_expert_adapters,
         )
 
+        if self._prepared is not None:
+            return
+        to_send, aliases = dedupe_shared_expert_adapters(self.export_adapter_stream(), self._experts_per_shared_adapter)
+        to_send, adapter_config = self.finalize_adapter(to_send)
+        missing = set(aliases.values()) - set(to_send)
+        if missing:
+            raise RuntimeError(f"finalize_adapter dropped aliased keys: {sorted(missing)[:5]}")
+        self._prepared = (to_send, aliases, adapter_config)
+
+    def _prepared_state(self) -> Tuple[Dict[str, torch.Tensor], Dict[str, str], Dict[str, Any]]:
+        """The current round's export. Raises rather than exporting implicitly.
+
+        An implicit export here would be a *collective* run by whichever rank
+        happened to ask -- so a stray read after the stream has been consumed
+        (the round is over and the cache is dropped) would hang the job in an
+        EP all-gather that the other ranks never join, for the full NCCL
+        watchdog timeout. Failing immediately, by name, is the whole point.
+        """
         if self._prepared is None:
-            to_send, aliases = dedupe_shared_expert_adapters(
-                self.export_adapter_stream(), self._experts_per_shared_adapter
+            raise RuntimeError(
+                f"{type(self).__name__} has no prepared adapter: call prepare() on every rank "
+                "before reading the source, and do not read it again after the stream has been "
+                "consumed (each round re-exports)."
             )
-            to_send, adapter_config = self.finalize_adapter(to_send)
-            missing = set(aliases.values()) - set(to_send)
-            if missing:
-                raise RuntimeError(f"finalize_adapter dropped aliased keys: {sorted(missing)[:5]}")
-            self._prepared = (to_send, aliases, adapter_config)
         return self._prepared
 
     @property
@@ -249,15 +265,15 @@ class LoraAdapterWeightSource(WeightSource):
 
         if self._lora_name is None:
             raise RuntimeError("set_lora_name must be called before publishing a LoRA adapter")
-        _, aliases, adapter_config = self._prepare()
+        _, aliases, adapter_config = self._prepared_state()
         return build_lora_receive_target(self._lora_name, adapter_config, aliases)
 
     def metadata(self) -> List[ParamMeta]:
-        to_send, _, _ = self._prepare()
+        to_send, _, _ = self._prepared_state()
         return [ParamMeta(name, self._dtype, tuple(t.shape)) for name, t in to_send.items()]
 
     def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
-        to_send, _, _ = self._prepare()
+        to_send, _, _ = self._prepared_state()
         # See FsdpWeightSource.__iter__ on the device.
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
         try:

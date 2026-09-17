@@ -12,6 +12,10 @@
 #
 # Usage: bash tests/train/gpu_e2e_test/lora_sync_mode_compare.sh
 #   MODES="memory"  bash ...      # one mode only
+#   MODEL_NAME=Qwen/Qwen3-0.6B MEGATRON_EP=1 INFERENCE_TP=1 bash ...   # smaller smoke run
+#
+# NUM_POLICY_GPUS / MEGATRON_EP / INFERENCE_TP / LORA_RANK / LORA_ALPHA are
+# overridable the same way; the defaults are sized for the 4xH100 CI node.
 set -euo pipefail
 
 export CI=true
@@ -20,11 +24,11 @@ MODEL_NAME="${MODEL_NAME:-zai-org/GLM-4.7-Flash}"
 MODES="${MODES:-disk memory}"
 DATA_DIR="$HOME/data/gsm8k"
 LOG_DIR="${LOG_DIR:-$HOME/lora_sync_compare}"
-NUM_POLICY_GPUS=2
-MEGATRON_EP=2
-INFERENCE_TP=2
-LORA_RANK=32
-LORA_ALPHA=64
+NUM_POLICY_GPUS="${NUM_POLICY_GPUS:-2}"
+MEGATRON_EP="${MEGATRON_EP:-2}"
+INFERENCE_TP="${INFERENCE_TP:-2}"
+LORA_RANK="${LORA_RANK:-32}"
+LORA_ALPHA="${LORA_ALPHA:-64}"
 # 48 prompts / batch 16 = 3 optimizer steps, so 3 measured syncs after the initial one.
 NUM_TRAIN_PROMPTS=48
 TRAIN_BATCH_SIZE=16

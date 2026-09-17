@@ -204,12 +204,10 @@ class SkyrlLoraStagingMixin:
             raise RuntimeError(f"LoRA weight update for {target['lora_name']!r} finished without receiving any tensors")
         tensors = expand_lora_aliases(staged, target.get("aliases") or {})
         stage_in_memory_adapter(target["lora_name"], tensors, target["adapter_config"])
-        logger.info(
-            "Staged %d LoRA tensors (%d incl. aliases) for adapter %r",
-            len(staged),
-            len(tensors),
-            target["lora_name"],
-        )
+        # Deliberately not logged here. Only loggers under vLLM's own namespace
+        # are configured in a worker process, so an INFO line from this module
+        # would be dropped without a trace; the trainer logs the same counts
+        # (it has them before the send) where the output is captured.
 
 
 class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlDrafterReloadMixin):
