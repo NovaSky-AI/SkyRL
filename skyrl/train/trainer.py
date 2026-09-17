@@ -1437,11 +1437,6 @@ class RayPPOTrainer:
                 - action_log_probs[training_input["loss_mask"] > 0]
             ).abs()
 
-            if self.cfg.trainer.enable_isoexec:
-                from isoexec.integrations.skyrl.audit import check_difference
-
-                check_difference(logprobs_diff)
-
             # Guard: a batch with no trainable response tokens (loss_mask all zero, e.g. every
             # response dropped by overlong filtering) leaves logprobs_diff empty, and .max()/.min()
             # on a 0-element tensor raises. Skip the diagnostic metrics in that case.
