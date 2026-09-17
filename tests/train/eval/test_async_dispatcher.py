@@ -10,6 +10,9 @@ import pytest
 from skyrl.train.config.config import EvalDispatchConfig, TrainerConfig
 from skyrl.train.eval import EvalBackend, EvalLease, EvalSkip, SingleAsyncEvalDispatcher
 
+NOW = 20
+"""The loop's step at collection time. Only the lag assertions care about its value."""
+
 
 class FakeBackend(EvalBackend):
     """``sync`` blocks on a per-step gate the test opens; records entries, outstanding leases, releases."""
@@ -63,7 +66,6 @@ def _dispatcher(*, max_queue_size=2, overflow_policy="backpressure", run_eval=No
     trainer_cfg.policy.model.path = "org/launch-model"
     backend = FakeBackend()
     events = []  # (event_name, fields, the task the callback ran on)
-    step = {"value": 0}
     if run_eval is None:
         run_eval = AsyncMock(side_effect=lambda **kw: {"eval/x": float(kw["global_step"])})
     dispatcher = SingleAsyncEvalDispatcher(
@@ -71,9 +73,8 @@ def _dispatcher(*, max_queue_size=2, overflow_policy="backpressure", run_eval=No
         backend=backend,
         run_eval=run_eval,
         on_event=lambda name, **fields: events.append((name, fields, asyncio.current_task())),
-        current_step=lambda: step["value"],
     )
-    return dispatcher, backend, run_eval, events, step
+    return dispatcher, backend, run_eval, events
 
 
 async def _let_run(rounds: int = 20):
@@ -84,7 +85,7 @@ async def _let_run(rounds: int = 20):
 
 @pytest.mark.asyncio
 async def test_submit_returns_before_the_eval_runs():
-    dispatcher, backend, run_eval, events, _ = _dispatcher()
+    dispatcher, backend, run_eval, events = _dispatcher()
 
     await dispatcher.submit(5)
     await _let_run()
@@ -92,35 +93,34 @@ async def test_submit_returns_before_the_eval_runs():
     assert backend.entered == [(5, "/exports/global_step_5/policy")]
     assert backend.released == []
     run_eval.assert_not_awaited()
-    assert dispatcher.get_completed() == []
+    assert dispatcher.get_completed(NOW) == []
     assert dispatcher.pending_steps() == {5}
     assert [name for name, _, _ in events] == ["on_eval_start"]
 
     backend.open(5)
-    await dispatcher.drain()
+    await dispatcher.drain(NOW)
 
 
 @pytest.mark.asyncio
 async def test_step_zero_loads_the_launch_weights_and_other_steps_the_run_export():
-    dispatcher, backend, _, _, _ = _dispatcher()
+    dispatcher, backend, _, _ = _dispatcher()
 
     await dispatcher.submit(0)  # eval_before_train on a fresh run: no export exists, none is needed
     await dispatcher.submit(7)
     backend.open(0, 7)
-    await dispatcher.drain()
+    await dispatcher.drain(NOW)
 
     assert backend.entered == [(0, "org/launch-model"), (7, "/exports/global_step_7/policy")]
 
 
 @pytest.mark.asyncio
 async def test_results_are_collected_at_the_evaluated_step_with_lag():
-    dispatcher, backend, run_eval, events, step = _dispatcher()
+    dispatcher, backend, run_eval, events = _dispatcher()
     await dispatcher.submit(5)
-    step["value"] = 8  # the loop moved on while the eval ran
     backend.open(5)
     await _let_run()
 
-    results = dispatcher.get_completed()
+    results = dispatcher.get_completed(8)  # collected while the loop is at step 8
 
     assert [(r.global_step, r.skipped_reason) for r in results] == [(5, None)]
     assert results[0].metrics["eval/x"] == 5.0
@@ -136,7 +136,7 @@ async def test_results_are_collected_at_the_evaluated_step_with_lag():
 
 @pytest.mark.asyncio
 async def test_backpressure_settles_exactly_the_oldest():
-    dispatcher, backend, _, events, _ = _dispatcher(max_queue_size=2)
+    dispatcher, backend, _, events = _dispatcher(max_queue_size=2)
     await dispatcher.submit(5)
     await dispatcher.submit(10)
     await _let_run()
@@ -150,34 +150,36 @@ async def test_backpressure_settles_exactly_the_oldest():
     backend.open(5)
     await submit_15
 
-    assert [r.global_step for r in dispatcher.get_completed()] == [5]  # settled inside submit(15)
+    results = dispatcher.get_completed(NOW)
+    assert [r.global_step for r in results] == [5]  # settled inside submit(15) ...
+    assert results[0].metrics["eval/lag_steps"] == 10  # ... so its lag is measured against step 15, not NOW
     assert dispatcher.pending_steps() == {10, 15}  # nobody waited on 10
     assert [name for name, _, _ in events] == ["on_eval_start", "on_eval_start", "on_eval_end", "on_eval_start"]
 
     backend.open(10, 15)
-    await dispatcher.drain()
+    await dispatcher.drain(NOW)
 
 
 @pytest.mark.asyncio
 async def test_skip_drops_the_point_without_stalling():
-    dispatcher, backend, _, events, _ = _dispatcher(max_queue_size=2, overflow_policy="skip")
+    dispatcher, backend, _, events = _dispatcher(max_queue_size=2, overflow_policy="skip")
     await dispatcher.submit(5)
     await dispatcher.submit(10)
 
     await dispatcher.submit(15)  # returns at once
 
-    results = dispatcher.get_completed()
+    results = dispatcher.get_completed(NOW)
     assert [(r.global_step, r.skipped_reason, r.metrics) for r in results] == [(15, "busy", {})]
     assert dispatcher.pending_steps() == {5, 10}
     assert [fields["global_step"] for name, fields, _ in events if name == "on_eval_start"] == [5, 10]
 
     backend.open(5, 10)
-    await dispatcher.drain()
+    await dispatcher.drain(NOW)
 
 
 @pytest.mark.asyncio
 async def test_force_bypasses_skip():
-    dispatcher, backend, _, _, _ = _dispatcher(max_queue_size=2, overflow_policy="skip")
+    dispatcher, backend, _, _ = _dispatcher(max_queue_size=2, overflow_policy="skip")
     await dispatcher.submit(5)
     await dispatcher.submit(10)
 
@@ -189,15 +191,15 @@ async def test_force_bypasses_skip():
     await submit_15
 
     assert dispatcher.pending_steps() == {10, 15}
-    assert [r.global_step for r in dispatcher.get_completed()] == [5]
+    assert [r.global_step for r in dispatcher.get_completed(NOW)] == [5]
 
     backend.open(10, 15)
-    await dispatcher.drain()
+    await dispatcher.drain(NOW)
 
 
 @pytest.mark.asyncio
 async def test_one_synced_version_at_a_time_in_fifo_order():
-    dispatcher, backend, _, _, _ = _dispatcher(max_queue_size=3)
+    dispatcher, backend, _, _ = _dispatcher(max_queue_size=3)
     await dispatcher.submit(5)
     await dispatcher.submit(10)
     await _let_run()
@@ -209,7 +211,7 @@ async def test_one_synced_version_at_a_time_in_fifo_order():
     assert backend.released == [5]
 
     backend.open(10)
-    results = await dispatcher.drain()
+    results = await dispatcher.drain(NOW)
 
     assert [r.global_step for r in results] == [5, 10]
     assert backend.max_leases_out == 1
@@ -217,14 +219,14 @@ async def test_one_synced_version_at_a_time_in_fifo_order():
 
 @pytest.mark.asyncio
 async def test_callbacks_fire_on_the_caller_side_only():
-    dispatcher, backend, _, events, _ = _dispatcher()
+    dispatcher, backend, _, events = _dispatcher()
     caller = asyncio.current_task()
     await dispatcher.submit(5)
     backend.open(5)
     await _let_run()
     assert [name for name, _, _ in events] == ["on_eval_start"]  # the finished eval has not been collected
 
-    dispatcher.get_completed()
+    dispatcher.get_completed(NOW)
 
     assert [name for name, _, _ in events] == ["on_eval_start", "on_eval_end"]
     assert all(task is caller for _, _, task in events)
@@ -239,14 +241,14 @@ async def test_eval_skip_and_crash_settle_as_skipped_points_and_release_the_leas
             raise crash
         return {"eval/x": float(kw["global_step"])}
 
-    dispatcher, backend, _, _, _ = _dispatcher(max_queue_size=4, run_eval=run_eval)
+    dispatcher, backend, _, _ = _dispatcher(max_queue_size=4, run_eval=run_eval)
     backend.skip[5] = "sync_mismatch"
     backend.skip[10] = "ckpt_missing"
     for step in (5, 10, 15, 20):
         await dispatcher.submit(step)
     backend.open(5, 10, 15, 20)
 
-    results = await dispatcher.drain()
+    results = await dispatcher.drain(NOW)
 
     assert [(r.global_step, r.skipped_reason) for r in results] == [
         (5, "sync_mismatch"),
@@ -260,12 +262,12 @@ async def test_eval_skip_and_crash_settle_as_skipped_points_and_release_the_leas
 
 @pytest.mark.asyncio
 async def test_a_raising_release_is_logged_and_the_point_still_settles():
-    dispatcher, backend, _, _, _ = _dispatcher()
+    dispatcher, backend, _, _ = _dispatcher()
     backend.release_error = RuntimeError("release failed")
     await dispatcher.submit(5)
     backend.open(5)
 
-    results = await dispatcher.drain()
+    results = await dispatcher.drain(NOW)
 
     assert [(r.global_step, r.skipped_reason) for r in results] == [(5, None)]
     assert results[0].metrics["eval/x"] == 5.0
@@ -274,17 +276,17 @@ async def test_a_raising_release_is_logged_and_the_point_still_settles():
 
 @pytest.mark.asyncio
 async def test_drain_returns_everything_and_get_completed_never_blocks():
-    dispatcher, backend, _, _, _ = _dispatcher()
+    dispatcher, backend, _, _ = _dispatcher()
     await dispatcher.submit(5)
     await dispatcher.submit(10)
 
-    assert dispatcher.get_completed() == []  # nothing settled, nothing waited for
+    assert dispatcher.get_completed(NOW) == []  # nothing settled, nothing waited for
 
     backend.open(5, 10)
-    results = await dispatcher.drain()
+    results = await dispatcher.drain(NOW)
 
     assert [r.global_step for r in results] == [5, 10]
-    assert dispatcher.get_completed() == []
+    assert dispatcher.get_completed(NOW) == []
     assert dispatcher.pending_steps() == set()
 
 
@@ -296,7 +298,7 @@ async def test_close_cancels_in_flight_evals_and_releases_the_backend():
         body_started.set()
         await asyncio.Event().wait()  # parked forever: only cancellation ends it
 
-    dispatcher, backend, _, _, _ = _dispatcher(run_eval=run_eval)
+    dispatcher, backend, _, _ = _dispatcher(run_eval=run_eval)
     await dispatcher.submit(5)
     await dispatcher.submit(10)
     backend.open(5)
@@ -307,12 +309,12 @@ async def test_close_cancels_in_flight_evals_and_releases_the_backend():
     assert backend.released == [5]  # the lease held at cancellation is given back; 10 never had one
     assert backend.closed
     assert dispatcher.pending_steps() == set()
-    assert dispatcher.get_completed() == []  # cancelled evals are not reported
+    assert dispatcher.get_completed(NOW) == []  # cancelled evals are not reported
 
 
 @pytest.mark.asyncio
 async def test_close_lets_a_backend_error_propagate():
-    dispatcher, backend, _, _, _ = _dispatcher()
+    dispatcher, backend, _, _ = _dispatcher()
     backend.close_error = RuntimeError("teardown failed")
 
     with pytest.raises(RuntimeError, match="teardown failed"):
@@ -321,10 +323,10 @@ async def test_close_lets_a_backend_error_propagate():
 
 @pytest.mark.asyncio
 async def test_caller_kwargs_are_not_forwarded():
-    dispatcher, backend, run_eval, _, _ = _dispatcher()
+    dispatcher, backend, run_eval, _ = _dispatcher()
 
     await dispatcher.submit(5, vllm_metrics_scraper=object())
     backend.open(5)
-    await dispatcher.drain()
+    await dispatcher.drain(NOW)
 
     run_eval.assert_awaited_once_with(generator=ANY, global_step=5)

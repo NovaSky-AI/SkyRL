@@ -486,7 +486,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with self._phase_gauge.timed_phase("eval", self.all_timings):
                 await self._eval_dispatcher.submit(self.global_step)
-                results = await self._eval_dispatcher.drain()
+                results = await self._eval_dispatcher.drain(self.global_step)
             self._log_eval_results(results)
 
         # main training loop
@@ -643,7 +643,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 self.global_step, force=self.global_step == self.total_training_steps
                             )
                     # Write every settled eval at the step it evaluated, before this step's own row.
-                    self._log_eval_results(self._eval_dispatcher.get_completed())
+                    self._log_eval_results(self._eval_dispatcher.get_completed(self.global_step))
 
                     # Log metrics for this step after evaluation
                     self.tracker.log(self.all_metrics, step=self.global_step)
@@ -715,8 +715,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # End of an epoch.
 
-            # Drain remaining evals.
-            self._log_eval_results(await self._eval_dispatcher.drain())
+            # Drain remaining evals. The loop has already advanced global_step past the last
+            # completed step, which is what the results' lag is measured against.
+            self._log_eval_results(await self._eval_dispatcher.drain(self.global_step - 1))
         finally:
             self._profiler_stop()
             if self._ray_gpu_monitor is not None:

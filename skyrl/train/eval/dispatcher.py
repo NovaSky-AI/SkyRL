@@ -26,7 +26,10 @@ class BaseEvalDispatcher(abc.ABC):
     Contract: ``submit`` may return before the eval has run; ``get_completed`` never blocks and
     returns the results that have settled since the last call; ``drain`` blocks until every
     submitted eval has settled and returns those results. Every result is returned exactly once;
-    the caller writes it to the tracker at ``EvalResult.global_step``.
+    the caller writes it to the tracker at ``EvalResult.global_step``. The collecting calls take the
+    loop's step at collection time (``current_step``; inside ``submit`` it is the submitted step), so
+    an asynchronous dispatcher can report how far the loop had moved past each result without
+    holding a reference to the trainer.
 
     Callbacks are the dispatcher's to fire, through ``on_event``, and always on the caller's
     thread -- never from a background task, where a callback would run at whatever point the loop
@@ -60,12 +63,14 @@ class BaseEvalDispatcher(abc.ABC):
         return set()
 
     @abc.abstractmethod
-    def get_completed(self) -> List[EvalResult]:
-        """Return the results that have settled since the last call. Never blocks."""
+    def get_completed(self, current_step: int) -> List[EvalResult]:
+        """Return the results that have settled since the last call. Never blocks.
+        ``current_step`` is the loop's step at the time of this call."""
 
     @abc.abstractmethod
-    async def drain(self) -> List[EvalResult]:
-        """Block until every outstanding eval settles; return those results."""
+    async def drain(self, current_step: int) -> List[EvalResult]:
+        """Block until every outstanding eval settles; return those results.
+        ``current_step`` is the last step the loop completed."""
 
     async def close(self) -> None:
         """Release anything the dispatcher owns. Called once, from the loop's ``finally``: after the
@@ -94,9 +99,10 @@ class BlockingEvalDispatcher(BaseEvalDispatcher):
         self._on_event("on_eval_end", global_step=global_step, metrics=metrics)
         self._done.append(EvalResult(global_step=global_step, metrics=metrics, duration_seconds=duration))
 
-    def get_completed(self) -> List[EvalResult]:
+    def get_completed(self, current_step: int) -> List[EvalResult]:
+        del current_step  # unused
         done, self._done = self._done, []
         return done
 
-    async def drain(self) -> List[EvalResult]:
-        return self.get_completed()
+    async def drain(self, current_step: int) -> List[EvalResult]:
+        return self.get_completed(current_step)

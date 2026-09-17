@@ -8,6 +8,9 @@ import pytest
 
 from skyrl.train.eval import BlockingEvalDispatcher
 
+NOW = 9
+"""The loop's step at collection time. The blocking dispatcher ignores it."""
+
 
 def _dispatcher(run_eval=None):
     """A blocking dispatcher over mocks."""
@@ -48,13 +51,13 @@ async def test_get_completed_returns_each_result_once_at_the_evaluated_step():
     dispatcher, _, on_event = _dispatcher()
     await dispatcher.submit(7)
 
-    results = dispatcher.get_completed()
+    results = dispatcher.get_completed(NOW)
 
     assert [(r.global_step, r.metrics, r.skipped_reason) for r in results] == [(7, {"eval/x": 1.0}, None)]
     assert results[0].duration_seconds >= 0.0
     # Exactly once: nothing is handed back twice, and collecting fires no further callbacks.
-    assert dispatcher.get_completed() == []
-    assert await dispatcher.drain() == []
+    assert dispatcher.get_completed(NOW) == []
+    assert await dispatcher.drain(NOW) == []
     assert on_event.call_count == 2
 
 
@@ -64,8 +67,8 @@ async def test_drain_returns_the_settled_results_in_submission_order():
     await dispatcher.submit(2)
     await dispatcher.submit(3)
 
-    assert [r.global_step for r in await dispatcher.drain()] == [2, 3]
-    assert dispatcher.get_completed() == []
+    assert [r.global_step for r in await dispatcher.drain(NOW)] == [2, 3]
+    assert dispatcher.get_completed(NOW) == []
 
 
 @pytest.mark.asyncio
@@ -75,7 +78,7 @@ async def test_blocking_submit_propagates_exceptions():
     with pytest.raises(RuntimeError, match="boom"):
         await dispatcher.submit(1)
 
-    assert dispatcher.get_completed() == []
+    assert dispatcher.get_completed(NOW) == []
     assert on_event.call_args_list == [call("on_eval_start", global_step=1)]
 
 
@@ -92,4 +95,4 @@ async def test_callback_exception_propagates_from_submit():
     with pytest.raises(ValueError, match="callback failed"):
         await dispatcher.submit(3)
 
-    assert dispatcher.get_completed() == []
+    assert dispatcher.get_completed(NOW) == []

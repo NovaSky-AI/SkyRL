@@ -229,7 +229,6 @@ class RayPPOTrainer:
             backend=self.eval_backend,
             run_eval=run_eval,
             on_event=on_event,
-            current_step=lambda: self.global_step,
         )
 
     def _log_eval_results(self, results: List[EvalResult]) -> None:
@@ -355,7 +354,7 @@ class RayPPOTrainer:
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
                 await self._eval_dispatcher.submit(self.global_step)
-                results = await self._eval_dispatcher.drain()
+                results = await self._eval_dispatcher.drain(self.global_step)
             self._log_eval_results(results)
 
         # initialize kl controller
@@ -589,7 +588,7 @@ class RayPPOTrainer:
                             vllm_metrics.update(await self._vllm_metrics_scraper.stop())
                     # Write every settled eval at the step it evaluated: blocking, the one just run;
                     # asynchronous, evals of earlier steps. Every step, before this step's own row.
-                    self._log_eval_results(self._eval_dispatcher.get_completed())
+                    self._log_eval_results(self._eval_dispatcher.get_completed(self.global_step))
 
                     log_payload = {
                         **self.all_metrics,
@@ -630,8 +629,11 @@ class RayPPOTrainer:
                 if stop_training:
                     break
 
-            # Drain remaining evals.
-            self._log_eval_results(await self._eval_dispatcher.drain())
+            # Drain remaining evals. The loop has already advanced global_step past the last
+            # completed step. Do not decrement `global_step` here because the training loop
+            # may error and not trigger the decrement within the try-finally block.
+            current_global_step = self.global_step - 1
+            self._log_eval_results(await self._eval_dispatcher.drain(current_global_step))
         finally:
             self._profiler_stop()
             try:

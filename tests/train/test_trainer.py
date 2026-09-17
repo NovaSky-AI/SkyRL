@@ -753,7 +753,7 @@ async def test_default_dispatcher_late_binds_eval_and_fire(dummy_config, dummy_t
     trainer.global_step = 7
 
     await trainer._eval_dispatcher.submit(trainer.global_step, vllm_metrics_scraper=None)
-    results = trainer._eval_dispatcher.get_completed()
+    results = trainer._eval_dispatcher.get_completed(trainer.global_step)
 
     trainer.eval.assert_awaited_once_with(vllm_metrics_scraper=None)
     assert [(r.global_step, r.metrics) for r in results] == [(7, {"eval/score": 0.5})]
@@ -854,6 +854,8 @@ async def test_train_drains_then_closes_the_dispatcher_on_a_healthy_exit(dummy_c
 
     teardown = [name for name, _, _ in dispatcher.mock_calls if name in ("drain", "close")]
     assert teardown == ["drain", "close"]
+    # The final drain is told the last completed step, not the counter the loop has already advanced.
+    dispatcher.drain.assert_awaited_once_with(trainer.total_training_steps)
 
 
 @pytest.mark.asyncio

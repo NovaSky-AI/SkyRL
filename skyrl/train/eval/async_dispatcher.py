@@ -10,7 +10,7 @@ import asyncio
 import os
 import time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Deque, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -52,7 +52,6 @@ class SingleAsyncEvalDispatcher(BaseEvalDispatcher):
         backend: EvalBackend,
         run_eval: RunEval,
         on_event: OnEvent,
-        current_step: Callable[[], int],
     ):
         super().__init__(run_eval, on_event=on_event)
         # The whole trainer config, not just ``eval_dispatch``: the export an eval loads is derived
@@ -60,8 +59,6 @@ class SingleAsyncEvalDispatcher(BaseEvalDispatcher):
         self._trainer_cfg = trainer_cfg
         self._cfg = trainer_cfg.eval_dispatch
         self._backend = backend
-        # Late-bound: the loop's global_step at collection time, for eval/lag_steps.
-        self._current_step = current_step
         # One synced version at a time. asyncio.Lock binds to its loop on first use, so building it
         # here, outside the loop, is fine. Waiters are woken FIFO.
         self._run_lock = asyncio.Lock()
@@ -74,14 +71,15 @@ class SingleAsyncEvalDispatcher(BaseEvalDispatcher):
         # Caller kwargs are deliberately not forwarded. The sync loop passes its vllm_metrics_scraper,
         # which measures the TRAINING engines' eval window; that window is empty under this dispatcher.
         # TODO (kyuds): figure out good way to propagate caller kwargs.
-        self._collect_finished()
+        # Anything collected inside this call is collected at the step being submitted.
+        self._collect_finished(global_step)
         if len(self._pending) >= self._cfg.max_queue_size:
             if self._cfg.overflow_policy == "skip" and not force:
                 logger.warning(f"eval at step {global_step} skipped: {len(self._pending)} evals already queued")
                 self._done.append(EvalResult(global_step=global_step, skipped_reason="busy"))
                 return
             # Backpressure: block on the oldest queued eval, exactly one, then admit.
-            await self._settle(self._pending.popleft()[1])
+            await self._settle(self._pending.popleft()[1], global_step)
         # The HF checkpoint this eval loads. Step 0 is the launch weights (a local directory or a hub
         # id): ``eval_before_train`` on a fresh run needs no export. Any other step is the run's own
         # export, the directory ``save_models()`` writes at that step -- which relies on both training
@@ -135,33 +133,35 @@ class SingleAsyncEvalDispatcher(BaseEvalDispatcher):
             duration_seconds=duration,
         )
 
-    def _collect_finished(self) -> None:
+    def _collect_finished(self, current_step: int) -> None:
         # Head only: with one eval running at a time, completion order is submission order, and
         # reaping from the head keeps results in that order.
         while self._pending and self._pending[0][1].done():
-            self._finish(self._pending.popleft()[1])
+            self._finish(self._pending.popleft()[1], current_step)
 
-    async def _settle(self, task: asyncio.Task) -> None:
+    async def _settle(self, task: asyncio.Task, current_step: int) -> None:
         await task  # _run_one never raises
-        self._finish(task)
+        self._finish(task, current_step)
 
-    def _finish(self, task: asyncio.Task) -> None:
+    def _finish(self, task: asyncio.Task, current_step: int) -> None:
+        """Turn a settled task into a collected result: ``current_step`` is the loop's step at
+        collection time, against which the result's lag is measured."""
         res = task.result()
         if res.skipped_reason is None:
-            res.metrics["eval/lag_steps"] = self._current_step() - res.global_step
+            res.metrics["eval/lag_steps"] = current_step - res.global_step
             res.metrics["eval/duration_seconds"] = res.duration_seconds
         self._on_event("on_eval_end", global_step=res.global_step, metrics=res.metrics)
         self._done.append(res)
 
-    def get_completed(self) -> List[EvalResult]:
-        self._collect_finished()
+    def get_completed(self, current_step: int) -> List[EvalResult]:
+        self._collect_finished(current_step)
         done, self._done = self._done, []
         return done
 
-    async def drain(self) -> List[EvalResult]:
+    async def drain(self, current_step: int) -> List[EvalResult]:
         while self._pending:
-            await self._settle(self._pending.popleft()[1])
-        return self.get_completed()
+            await self._settle(self._pending.popleft()[1], current_step)
+        return self.get_completed(current_step)
 
     async def close(self) -> None:
         """Cancel what is in flight and release the backend.
