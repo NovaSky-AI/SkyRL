@@ -152,7 +152,11 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
     from vllm import AsyncEngineArgs
     from vllm.config import WeightTransferConfig
-    from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+    try:  # vLLM >= 0.28.1 (entrypoints.launchers); the openai.cli_args path is the pre-0.28.1 location
+        from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    except ImportError:
+        from vllm.entrypoints.openai.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
