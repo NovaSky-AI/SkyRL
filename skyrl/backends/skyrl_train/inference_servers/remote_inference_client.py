@@ -474,6 +474,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
             response_ids=[r["response_ids"] for r in raw_results],
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
             rollout_expert_indices=rollout_expert_indices,
+            prompt_logprobs=(
+                [result["prompt_logprobs"] for result in raw_results]
+                if self.enable_return_routed_experts and sampling_params.get("prompt_logprobs") is not None
+                else None
+            ),
         )
 
     async def _generate_single(
@@ -542,6 +547,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "response_ids": token_ids,
             "response_logprobs": response_logprobs,
             "routed_experts": routed_experts,
+            "prompt_logprobs": response.get("prompt_logprobs") if self.enable_return_routed_experts else None,
         }
 
     async def _render_for_sample(

@@ -48,7 +48,7 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
-    prompt_logprobs: Optional[List[List[float]]]  # per-prompt-token logprobs under the current model
+    prompt_logprobs: Optional[List[List[Optional[float]]]]  # per-prompt-token logprobs under the current model
     rollout_expert_indices: Optional[List[RoutedExpertIndices]]
 
 

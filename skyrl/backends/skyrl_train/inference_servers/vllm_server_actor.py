@@ -5,6 +5,7 @@ vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from argparse import Namespace
@@ -479,10 +480,12 @@ class VLLMServerActor(ServerActorProtocol):
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
             """SkyRL generate endpoint that returns routed_experts alongside token output."""
-            if getattr(cli_args, "enable_lora", False):
-                raise HTTPException(status_code=400, detail="/skyrl/v1/generate does not support LoRA.")
-
             body = await request.json()
+            models = request.app.state.openai_serving_models
+            model = body["model"]
+            lora_request = models.lora_requests.get(model)
+            if lora_request is None and not models.is_base_model(model):
+                raise HTTPException(status_code=404, detail=f"Model {model!r} is not loaded")
             token_ids = body["token_ids"]
             sampling_params_dict = body.get("sampling_params", {})
             cache_salt = body.get("cache_salt")
@@ -496,7 +499,7 @@ class VLLMServerActor(ServerActorProtocol):
             request_id = random_uuid()
 
             final_res = None
-            async for res in engine.generate(prompt, sampling_params, request_id=request_id):
+            async for res in engine.generate(prompt, sampling_params, request_id=request_id, lora_request=lora_request):
                 final_res = res
 
             if final_res is None:
@@ -520,7 +523,19 @@ class VLLMServerActor(ServerActorProtocol):
             if resp.routed_experts is not None:
                 routed_experts = pack_routed_experts(resp.routed_experts)
 
+            prompt_logprobs = None
+            if sampling_params.prompt_logprobs is not None:
+                values = final_res.prompt_logprobs
+                if values is None or len(values) != len(token_ids) or values[0] is not None:
+                    raise HTTPException(status_code=500, detail="Incomplete prompt logprobs")
+                prompt_logprobs = [None]
+                for token, value in zip(token_ids[1:], values[1:], strict=True):
+                    if value is None or token not in value or not math.isfinite(value[token].logprob):
+                        raise HTTPException(status_code=500, detail="Missing or nonfinite prompt logprob")
+                    prompt_logprobs.append(value[token].logprob)
+
             payload = {
+                "prompt_logprobs": prompt_logprobs,
                 "choices": [
                     {
                         "token_ids": token_ids_out,
@@ -528,7 +543,7 @@ class VLLMServerActor(ServerActorProtocol):
                         "logprobs": logprobs,
                         "routed_experts": routed_experts,
                     }
-                ]
+                ],
             }
             return Response(content=orjson.dumps(payload), media_type="application/json")
 
