@@ -72,3 +72,4 @@ install_skyrl_rocm() (
 install_skyrl_rocm "${SKYRL_ROOT}"
 
 python3 -c "from megatron.bridge import AutoBridge; import megatron.core as mc; print('OK bridge+mcore', mc.__version__)"
+python3 "${SCRIPT_DIR}/probe_megatron_compat.py"

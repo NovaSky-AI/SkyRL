@@ -9,9 +9,9 @@ Megatron training (`trainer.strategy=megatron`) and vLLM inference on AMD Instin
 | [REPRODUCE.md](REPRODUCE.md) | Reviewer steps, pins, and pass criteria |
 | [WORKFLOW.md](WORKFLOW.md) | GRPO loop, stack, and SkyRL/vLLM integration |
 
-This README covers **how the colocated path works**, **which parallelisms are validated**, and **Megatron-Bridge / core compatibility** (arbitrary SHAs are not supported).
+This README covers **how the colocated path works**, **which parallelisms are validated**, and **Megatron-Bridge / core compatibility**.
 
-**Status:** End-to-end Megatron GRPO + vLLM rollout validated on MI355X (see `reports/grpo_amd_20260901T234529Z.log` — 4 training steps, exit 0). Upstream branch: `feat/rocm-amd-upstream`.
+**Status:** End-to-end Megatron GRPO + vLLM rollout validated on MI355X. Parallelism sweep results: [reports/PARALLELISM_MATRIX.md](reports/PARALLELISM_MATRIX.md). Upstream branch: `feat/rocm-amd-upstream`.
 
 ## Supported GPUs
 
@@ -76,7 +76,7 @@ Also required, independent of those git SHAs:
 - No stale `Megatron-LM` tree on `PYTHONPATH` (some ROCm images ship one).
 - The vLLM wheel built against **this** image’s torch/HIP/ISA (cache key includes those).
 
-`MCORE_REV` and `BRIDGE_REV` can be overridden for experiments. Treat that as untested: Bridge and core must stay API-compatible with each other and with SkyRL’s Megatron worker, and the pair must still run on the image’s ROCm TE.
+`MCORE_REV` and `BRIDGE_REV` can be set to any git commit, tag, or branch of megatron-core / Megatron-Bridge. Install with `install_megatron_flexible.sh` (Bridge `--no-deps`, CUDA extras skipped). SkyRL loads Bridge through `bridge_compat.py`, which accepts `from_hf_pretrained`, `from_hf`, or `from_pretrained` and ignores kwargs a given revision does not support. Run `probe_megatron_compat.py` after install. The pair still has to provide AutoBridge + a working ROCm Transformer Engine.
 
 vLLM is the same story: use the pinned ROCm source build, not PyPI `vllm` and not an untested vLLM SHA.
 
@@ -108,7 +108,10 @@ Optional single-GPU Megatron check: `bash integrations/rocm_amd/validate_megatro
 | `run_on_cluster.sh` | Slurm wrapper (`verify` or `grpo` mode) |
 | `gpu_cleanup.sh` | Free Ray/PyTorch VRAM between verify steps |
 | `install_full_stack.sh` | Megatron-Bridge + vLLM ROCm wheel + verification |
-| `install_megatron_bridge.sh` | megatron-core + Megatron-Bridge + SkyRL extra |
+| `install_megatron_bridge.sh` | Default-pinned megatron-core + Megatron-Bridge + SkyRL extra |
+| `install_megatron_flexible.sh` | Same stack for any `MCORE_REV` / `BRIDGE_REV` |
+| `probe_megatron_compat.py` | Report AutoBridge / core APIs SkyRL can use |
+| `run_parallelism_matrix.sh` | Sweep TP/PP/CP and vLLM engine layouts |
 | `build_vllm_rocm.sh` | Build vLLM from source against container torch |
 | `verify_vllm_skyrl_compat.py` | vLLM 0.20 APIs used by SkyRL |
 | `validate_megatron_rocm.sh` | Single-GPU Megatron-Bridge check |

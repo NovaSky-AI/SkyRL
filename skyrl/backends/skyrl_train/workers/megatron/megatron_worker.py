@@ -12,9 +12,6 @@ import torch.distributed
 import torch.nn as nn
 from huggingface_hub import snapshot_download
 from loguru import logger
-from megatron.bridge import AutoBridge
-from megatron.bridge.peft.canonical_lora import CanonicalLoRA
-from megatron.bridge.peft.lora import LoRA
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from omegaconf import OmegaConf
@@ -85,6 +82,10 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     LoraSignature,
     iter_opts,
 )
+from skyrl.backends.skyrl_train.workers.megatron.bridge_compat import (
+    import_lora_classes,
+    load_auto_bridge,
+)
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
@@ -112,6 +113,8 @@ from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
+
+CanonicalLoRA, LoRA = import_lora_classes()
 
 patch_mla_thd_v_pad()
 
@@ -537,7 +540,7 @@ class MegatronWorker:
                 f"fake-INT4 QAT: loading BF16 master weights from {bridge_source} "
                 f"(logical model / inference checkpoint: {model_path})"
             )
-        bridge = AutoBridge.from_hf_pretrained(bridge_source, trust_remote_code=True)
+        bridge = load_auto_bridge(bridge_source, trust_remote_code=True)
 
         # For Qwen3.5, language_model_only routes to the native GPTModel + GDN
         # path (which supports sample packing) instead of the VL Qwen3VLModel
@@ -770,6 +773,11 @@ class MegatronWorker:
             target_modules = lora_config.target_modules
 
         if lora_type == "lora":
+            if LoRA is None:
+                raise RuntimeError(
+                    "This Megatron-Bridge build does not provide LoRA. "
+                    "Install a Bridge revision that ships megatron.bridge.peft.lora."
+                )
             self.lora_cls = LoRA(
                 target_modules=target_modules,
                 dim=lora_config.rank,
@@ -783,6 +791,11 @@ class MegatronWorker:
                 share_expert_adapters=lora_config.share_expert_adapters,
             )
         elif lora_type == "canonical_lora":
+            if CanonicalLoRA is None:
+                raise RuntimeError(
+                    "This Megatron-Bridge build does not provide CanonicalLoRA. "
+                    "Use trainer.policy.model.lora.type=lora or a Bridge revision that ships canonical LoRA."
+                )
             # TODO (sumanthrh): Why is share_expert_adapters not passed here?
             self.lora_cls = CanonicalLoRA(
                 target_modules=target_modules,

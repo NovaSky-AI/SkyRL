@@ -34,8 +34,11 @@ case "${MODE}" in
     GPUS="${SLURM_GPUS:-2}"
     GPU_DEVS="$(python3 -c "print(','.join(str(i) for i in range(${GPUS})))")"
     ;;
+  matrix)
+    INNER='bash integrations/rocm_amd/run_parallelism_matrix.sh'
+    ;;
   *)
-    echo "Usage: $0 {verify|grpo|e2e} [extra args passed to srun]" >&2
+    echo "Usage: $0 {verify|grpo|e2e|matrix} [extra args passed to srun]" >&2
     exit 1
     ;;
 esac
@@ -53,6 +56,9 @@ set -euo pipefail
 export HIP_VISIBLE_DEVICES=${GPU_DEVS}
 export ROCR_VISIBLE_DEVICES=${GPU_DEVS}
 export NUM_GPUS=${GPUS}
+export MATRIX_GPUS=${GPUS}
+export MATRIX_NODES=\${MATRIX_NODES:-1}
+export SKIP_INSTALL=\${SKIP_INSTALL:-1}
 export MAX_JOBS=\${MAX_JOBS:-16}
 export RUN_GRPO_SMOKE=\${RUN_GRPO_SMOKE:-0}
 
@@ -64,6 +70,7 @@ docker run --rm --network host --ipc=host \
   -e RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1 \
   -e RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1 \
   -e NUM_GPUS -e MAX_JOBS=16 -e RUN_GRPO_SMOKE -e FORCE_VLLM_REBUILD \
+  -e MATRIX_GPUS -e MATRIX_NODES -e MATRIX_FILTER -e SKIP_INSTALL \
   -e HF_HUB_ENABLE_HF_TRANSFER=1 \
   -v '${ROOT}:/workspace/SkyRL' \
   -w /workspace/SkyRL \
