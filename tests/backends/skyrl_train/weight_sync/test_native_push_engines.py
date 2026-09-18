@@ -20,8 +20,12 @@ from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource  # noq
 from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk  # noqa: E402
 
 from skyrl.backends.skyrl_train.weight_sync.fp8 import SerializedFp8Config  # noqa: E402
-from skyrl.backends.skyrl_train.weight_sync.fp8.models import QWEN35_FP8_SPEC  # noqa: E402
-from skyrl.backends.skyrl_train.weight_sync.sources import SerializedFp8WeightSource  # noqa: E402
+from skyrl.backends.skyrl_train.weight_sync.fp8.models import (  # noqa: E402
+    QWEN35_FP8_SPEC,
+)
+from skyrl.backends.skyrl_train.weight_sync.sources import (  # noqa: E402
+    SerializedFp8WeightSource,
+)
 from skyrl.backends.skyrl_train.weight_sync.weight_senders import (  # noqa: E402
     get_skyrl_ipc_trainer,
     get_skyrl_nccl_trainer,
@@ -114,9 +118,7 @@ def test_native_nccl_trainer_preserves_serialized_fp8_mixed_stream(monkeypatch):
         observed["src"] = src
         observed["buffer_size_bytes"] = buffer_size_bytes
         observed["num_buffers"] = num_buffers
-        observed["stream"] = [
-            (name, post_iter_func((name, tensor))) for name, tensor in iterator
-        ]
+        observed["stream"] = [(name, post_iter_func((name, tensor))) for name, tensor in iterator]
 
     monkeypatch.setattr(nccl_engine, "packed_nccl_broadcast_producer", record_packed_producer)
 
@@ -145,9 +147,7 @@ def test_native_nccl_trainer_agrees_packing_during_initialization(monkeypatch):
 
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine
 
-    source = _StaticWeightSource(
-        [("model.norm.weight", torch.ones(4, dtype=torch.bfloat16))]
-    )
+    source = _StaticWeightSource([("model.norm.weight", torch.ones(4, dtype=torch.bfloat16))])
     client = _RecordingClient()
 
     monkeypatch.setattr(nccl_engine, "open_trainer_endpoint", lambda _init_info: object())

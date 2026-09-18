@@ -154,16 +154,19 @@ def _load_batched_moe_fp8_tensor(
 
     loaded_any = False
     for expert_id, expert_weight in enumerate(loaded_weight.unbind(0)):
-        loaded_any = bool(
-            weight_loader(
-                param,
-                expert_weight,
-                target_name,
-                shard_id=shard_id,
-                expert_id=expert_id,
-                return_success=True,
+        loaded_any = (
+            bool(
+                weight_loader(
+                    param,
+                    expert_weight,
+                    target_name,
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                    return_success=True,
+                )
             )
-        ) or loaded_any
+            or loaded_any
+        )
     if not loaded_any:
         raise ValueError(f"No local expert accepted batched MoE tensor {wire_name!r}")
     return True

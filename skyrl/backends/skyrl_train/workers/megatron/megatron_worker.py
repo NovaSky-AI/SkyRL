@@ -55,7 +55,10 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
-from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest, get_transfer_strategy
+from skyrl.backends.skyrl_train.weight_sync import (
+    LoraLoadRequest,
+    get_transfer_strategy,
+)
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     BLOCKWISE_FP8,
     SerializedFp8Config,
@@ -1286,7 +1289,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         source = MegatronWeightSource(self.bridge, self.actor_module, dtype)
         if self._serialized_fp8_config is not None:
-            from skyrl.backends.skyrl_train.weight_sync.sources import SerializedFp8WeightSource
+            from skyrl.backends.skyrl_train.weight_sync.sources import (
+                SerializedFp8WeightSource,
+            )
 
             return SerializedFp8WeightSource(source, self._serialized_fp8_config)
         return source
@@ -1341,7 +1346,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     base_sync_path,
                 )
         return cached
-    
+
     async def _save_lora_adapters_and_sync(
         self, lora_sync_path, inference_engine_client, lora_name: str = SKYRL_LORA_ADAPTER_NAME
     ):

@@ -44,8 +44,7 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     except Exception as exc:
         raise RuntimeError(
-            "Could not inspect the model config required to derive FP8 ignored layers: "
-            f"model_path={model_path!r}"
+            "Could not inspect the model config required to derive FP8 ignored layers: " f"model_path={model_path!r}"
         ) from exc
     spec = resolve_fp8_spec(hf_config)
     if spec is None:
@@ -58,9 +57,7 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
 
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
     if key in mapping and mapping[key] != expected:
-        raise ValueError(
-            f"{context}.{key} must be {expected!r} when FP8 weight sync is enabled, got {mapping[key]!r}"
-        )
+        raise ValueError(f"{context}.{key} must be {expected!r} when FP8 weight sync is enabled, got {mapping[key]!r}")
     mapping[key] = copy.deepcopy(expected)
 
 

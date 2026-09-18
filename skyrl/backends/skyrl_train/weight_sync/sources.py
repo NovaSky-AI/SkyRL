@@ -136,7 +136,9 @@ class SerializedFp8WeightSource(WeightSource):
         self._meta: Optional[List[ParamMeta]] = None
 
     def _serialized(self) -> Iterator[Tuple[str, torch.Tensor]]:
-        from skyrl.backends.skyrl_train.weight_sync.fp8 import iter_serialized_fp8_tensors
+        from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+            iter_serialized_fp8_tensors,
+        )
 
         for name, tensor in self._source:
             for serialized_name, serialized_tensor in iter_serialized_fp8_tensors(
@@ -149,10 +151,7 @@ class SerializedFp8WeightSource(WeightSource):
 
     def metadata(self) -> List[ParamMeta]:
         if self._meta is None:
-            self._meta = [
-                ParamMeta(name, tensor.dtype, tuple(tensor.shape))
-                for name, tensor in self._serialized()
-            ]
+            self._meta = [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self._serialized()]
         return self._meta
 
     def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:

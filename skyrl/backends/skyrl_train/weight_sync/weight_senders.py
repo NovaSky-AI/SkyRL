@@ -168,10 +168,7 @@ def build_trainer_engine(
 
     backend = get_transfer_strategy(ie_cfg.weight_sync_backend, colocate_all)
     if getattr(ie_cfg, "fp8_weight_sync_mode", None) is not None and backend not in {"nccl", "ipc"}:
-        raise ValueError(
-            "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
-            f"got {backend!r}."
-        )
+        raise ValueError("Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, " f"got {backend!r}.")
     dtype = str_to_torch_dtype(ie_cfg.model_dtype)
     source = source_factory(dtype, backend)
 

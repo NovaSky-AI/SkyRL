@@ -55,10 +55,11 @@ class _PackedNcclProducer:
 
     def send(self, host, port):
         import torch
-
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.utils import StatelessProcessGroup
-        from vllm.distributed.weight_transfer.packed_tensor import packed_nccl_broadcast_producer
+        from vllm.distributed.weight_transfer.packed_tensor import (
+            packed_nccl_broadcast_producer,
+        )
 
         torch.cuda.set_device(0)
         device = torch.device("cuda:0")
@@ -83,10 +84,11 @@ class _PackedNcclProducer:
 @ray.remote(num_gpus=1)
 def _consume_packed_serialized_stream(host, port):
     import torch
-
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
-    from vllm.distributed.weight_transfer.packed_tensor import packed_nccl_broadcast_consumer
+    from vllm.distributed.weight_transfer.packed_tensor import (
+        packed_nccl_broadcast_consumer,
+    )
 
     torch.cuda.set_device(0)
     device = torch.device("cuda:0")

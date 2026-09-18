@@ -1857,8 +1857,7 @@ class SkyRLTrainConfig(BaseConfig):
             backend = get_transfer_strategy(ie_cfg.weight_sync_backend, self.trainer.placement.colocate_all)
             if backend not in {"nccl", "ipc"}:
                 raise ValueError(
-                    "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
-                    f"got {backend!r}."
+                    "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, " f"got {backend!r}."
                 )
         if _uses_lora_weight_sync(self) and ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
             import warnings

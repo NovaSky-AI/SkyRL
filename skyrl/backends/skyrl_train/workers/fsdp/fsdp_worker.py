@@ -1,6 +1,6 @@
 import io
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import ray
 import torch
@@ -30,6 +30,9 @@ from skyrl.backends.skyrl_train.workers.worker import (
     RefWorkerBase,
 )
 from skyrl.backends.skyrl_train.workers.worker_utils import get_inference_weight_prefix
+
+if TYPE_CHECKING:
+    from skyrl.train.config import InferenceEngineConfig
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
