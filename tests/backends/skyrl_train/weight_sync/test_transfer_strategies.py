@@ -956,6 +956,9 @@ def test_broadcast_send_chunk_uses_vendored_send_and_init_time_packed(monkeypatc
     send must go through the vendored ``nccl_trainer_send_weights`` with the
     ``packed`` agreed at init, and the update payload must carry only metadata.
     """
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
     import skyrl.backends.skyrl_train.weight_sync.broadcast_strategy as broadcast_module
 
     class FakeInferenceClient:
@@ -966,7 +969,8 @@ def test_broadcast_send_chunk_uses_vendored_send_and_init_time_packed(monkeypatc
             self.update_infos.append(update_info)
 
     client = FakeInferenceClient()
-    group = object()
+    group = SimpleNamespace(device=2)
+    monkeypatch.setattr(torch.cuda, "device", lambda device: nullcontext())
     sender = BroadcastWeightTransferSender(
         init_info=BroadcastInitInfo(
             master_addr="127.0.0.1",

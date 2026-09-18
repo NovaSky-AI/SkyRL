@@ -1417,6 +1417,18 @@ class RemoteInferenceClient(InferenceEngineInterface):
     # Info
     # ---------------------------
 
+    async def get_gpu_uuids(self) -> Dict[str, List[str]]:
+        """Query each DP server's TP/PP workers for their current physical GPU UUIDs."""
+        results = await self._call_all_servers("/collective_rpc", {"method": "skyrl_get_gpu_uuid"})
+        gpu_uuids = {}
+        for server_url in self.server_urls:
+            response = results.get(server_url) or {}
+            uuids = (response.get("body") or {}).get("results")
+            if not isinstance(uuids, list) or not uuids or any(not isinstance(uuid, str) or not uuid for uuid in uuids):
+                raise RuntimeError(f"Missing or invalid GPU UUIDs from {server_url}: {uuids!r}")
+            gpu_uuids[server_url] = uuids
+        return gpu_uuids
+
     async def get_world_size(self) -> Tuple[int, int]:
         """
         Get total and per-server world size across all inference workers.

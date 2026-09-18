@@ -5,6 +5,7 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 """
 
 import asyncio
+import os
 import socket
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -21,6 +22,7 @@ import torch
 from skyrl.backends.skyrl_train.weight_sync.base import (
     WeightChunk,
     WeightUpdateRequest,
+    cuda_uuid_to_str,
     get_weight_chunk_metadata,
 )
 from skyrl.backends.skyrl_train.weight_sync.nccl_trainer_send import (
@@ -187,10 +189,8 @@ class BroadcastWeightTransferSender(WeightTransferSender):
 
             # Run in a thread so the HTTP update task can progress concurrently.
             await asyncio.to_thread(
-                nccl_trainer_send_weights,
+                self._send_weights,
                 weight_iterator(),
-                self._model_update_group,
-                packed=self._init_info.packed,
             )
             await update_task
 
@@ -235,12 +235,15 @@ class BroadcastWeightTransferSender(WeightTransferSender):
 
         # Let the receiver enter its collective while the trainer broadcasts.
         await asyncio.to_thread(
-            nccl_trainer_send_weights,
+            self._send_weights,
             iter(zip(chunk.names, chunk.tensors)),
-            self._model_update_group,
-            packed=self._init_info.packed,
         )
         await update_task
+
+    def _send_weights(self, weights: Iterator[Tuple[str, torch.Tensor]]) -> None:
+        # Executor threads may differ between sends; CUDA device selection is thread-local.
+        with torch.cuda.device(self._model_update_group.device):
+            nccl_trainer_send_weights(weights, self._model_update_group, packed=self._init_info.packed)
 
     def teardown(self) -> None:
         """Destroy the process group used for weight transfer."""
@@ -259,6 +262,45 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
 
     All methods are static - no instance state needed.
     """
+
+    @staticmethod
+    async def validate_placement(inference_client: "RemoteInferenceClient", inference_world_size: int) -> None:
+        """Check physical GPU ownership on all trainer ranks before either side joins NCCL."""
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        gpu_uuid = cuda_uuid_to_str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+        trainer_uuids = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(trainer_uuids, gpu_uuid)
+
+        error = [None]
+        if torch.distributed.get_rank() == 0:
+            try:
+                inference_uuids = await inference_client.get_gpu_uuids()
+                reported_world_size = sum(len(uuids) for uuids in inference_uuids.values())
+                if reported_world_size != inference_world_size:
+                    raise RuntimeError(
+                        f"Expected {inference_world_size} inference GPU UUIDs, got {reported_world_size}"
+                    )
+                participants = [(f"trainer rank {rank}", uuid) for rank, uuid in enumerate(trainer_uuids)]
+                participants.extend(
+                    (f"inference worker {rank} on {url}", uuid)
+                    for url, uuids in inference_uuids.items()
+                    for rank, uuid in enumerate(uuids)
+                )
+                owners = {}
+                for participant, uuid in participants:
+                    if uuid in owners:
+                        raise RuntimeError(
+                            f"Duplicate physical GPU UUID {uuid!r}: {owners[uuid]} and {participant}. "
+                            "Non-colocated NCCL weight transfer requires disjoint GPUs."
+                        )
+                    owners[uuid] = participant
+            except Exception as exc:
+                error[0] = f"Cannot initialize NCCL weight transfer: {exc}"
+
+        # Propagate failures before any trainer rank starts sender/receiver initialization.
+        torch.distributed.broadcast_object_list(error, src=0)
+        if error[0] is not None:
+            raise RuntimeError(error[0])
 
     @staticmethod
     def create_init_info(
@@ -310,6 +352,8 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
         model_update_group = None
 
         if rank == 0:
+            # create_sender runs in asyncio.to_thread; it does not inherit the actor's CUDA device.
+            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
             if weight_extractor is not None and type(weight_extractor).__module__.startswith("isoexec."):
                 from isoexec.runtimes.vllm.nccl_channels import (
                     install_pynccl_channel_policy,

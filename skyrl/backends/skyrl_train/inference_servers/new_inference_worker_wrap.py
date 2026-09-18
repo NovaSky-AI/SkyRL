@@ -243,6 +243,10 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         self.device
     """
 
+    def skyrl_get_gpu_uuid(self) -> str:
+        """Report the device used by NCCL, before creating the weight-transfer communicator."""
+        return cuda_uuid_to_str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+
     def fetch_weights(self, target_version: int, sync_dir: str | None = None, uri: str | None = None):
         """Fetch/apply a checkpoint delta before the paused reload phase."""
         if self.weight_transfer_engine is None:

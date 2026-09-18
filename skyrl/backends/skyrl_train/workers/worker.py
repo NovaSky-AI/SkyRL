@@ -513,7 +513,10 @@ class Worker(DistributedTorchRayActor):
         .. note::
             This function should be called on all the ranks in the worker group simultaneously.
         """
-        from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy_cls
+        from skyrl.backends.skyrl_train.weight_sync import (
+            BroadcastTransferStrategy,
+            get_transfer_strategy_cls,
+        )
 
         assert inference_engine_client is not None
         # Cache the client so per-sync broadcast_to_inference_engines calls can
@@ -531,6 +534,9 @@ class Worker(DistributedTorchRayActor):
             weight_sync_backend=inference_engine_cfg.weight_sync_backend,
             colocate_all=self.cfg.placement.colocate_all,
         )
+
+        if not self.cfg.placement.colocate_all and self._transfer_strategy_cls is BroadcastTransferStrategy:
+            await self._transfer_strategy_cls.validate_placement(inference_engine_client, inference_world_size)
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(
