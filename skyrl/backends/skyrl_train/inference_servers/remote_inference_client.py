@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
@@ -233,6 +234,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
     # Monotonic counter of weight syncs (see `increment_weight_version`); source of the prefix-cache salt.
     _weight_version: int = field(default=0, repr=False)
+    _lora_nccl_pending_retirements: Dict[str, Tuple[Dict[str, Any], Dict[str, int]]] = field(
+        default_factory=dict,
+        repr=False,
+    )
 
     @property
     def weight_version(self) -> int:
@@ -1282,6 +1287,205 @@ class RemoteInferenceClient(InferenceEngineInterface):
             {"method": "skyrl_finish_weight_update"},
         )
 
+    async def inspect_lora_transport_routes(
+        self,
+        layout: Dict[str, Any],
+        adapter_config: Dict[str, Any],
+    ) -> list[Dict[str, Any]]:
+        """Collect the immutable rank-local consumer routes once per adapter."""
+        if len(self.server_urls) != 1:
+            raise NotImplementedError("LoRA native transport initially supports one inference TP group")
+        responses = await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "inspect_lora_transport_route",
+                "kwargs": {
+                    "layout": layout,
+                    "adapter_config": adapter_config,
+                },
+            },
+        )
+        response = next(iter(responses.values()))
+        routes = response["body"]["results"]
+        if not isinstance(routes, list):
+            raise RuntimeError("LoRA route inspection returned an invalid result")
+        return routes
+
+    async def init_lora_nccl_transport(
+        self,
+        rendezvous: Dict[str, Any],
+        layout: Dict[str, Any],
+        adapter_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Join every inference worker to its persistent source groups."""
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "init_lora_nccl_transport",
+                "kwargs": {
+                    "rendezvous": rendezvous,
+                    "layout": layout,
+                    "adapter_config": adapter_config,
+                },
+            },
+        )
+
+    async def _replace_lora_nccl_adapter(
+        self,
+        lora_name: str,
+        request: Dict[str, Any],
+        producer_ready: asyncio.Future[str | None] | None = None,
+    ) -> Dict[str, Any]:
+        """Stage and atomically activate one packed-NCCL LoRA generation."""
+        from skyrl.backends.skyrl_train.weight_sync.lora_transport.fleet_control import (
+            LoRATransportFleetTransaction,
+            LoRATransportRetirementError,
+        )
+
+        await self._finish_pending_lora_nccl_retirement(lora_name)
+        transaction_started = time.perf_counter()
+        generation = int(request["generation"])
+        adapter_ids: Dict[str, int] = {}
+        common = {
+            "lora_name": lora_name,
+            "request": request,
+            "transport": "nccl",
+        }
+
+        async def stage(server_url: str):
+            stage_started = time.perf_counter()
+            _, response = await self._call_server(
+                server_url,
+                "/skyrl/v1/stage_lora_nccl_adapter",
+                common,
+            )
+            adapter_ids[server_url] = int(response["body"]["lora_int_id"])
+            logger.info(
+                "lora_nccl_fleet_stage generation=%s server=%s phase=stage seconds=%.6f",
+                generation,
+                server_url,
+                time.perf_counter() - stage_started,
+            )
+            return response
+
+        async def call_phase(endpoint: str, server_url: str):
+            phase_started = time.perf_counter()
+            payload = dict(common)
+            if endpoint == "/skyrl/v1/rollback_lora_transport_adapter":
+                if server_url in adapter_ids:
+                    payload["adapter_id"] = adapter_ids[server_url]
+            else:
+                payload["adapter_id"] = adapter_ids[server_url]
+            _, response = await self._call_server(server_url, endpoint, payload)
+            phase = endpoint.removeprefix("/skyrl/v1/").removesuffix("_lora_transport_adapter")
+            logger.info(
+                "lora_nccl_fleet_stage generation=%s server=%s phase=%s seconds=%.6f",
+                generation,
+                server_url,
+                phase,
+                time.perf_counter() - phase_started,
+            )
+            return response
+
+        async def pause(server_url: str):
+            phase_started = time.perf_counter()
+            _, response = await self._call_server(server_url, "/skyrl/v1/pause_lora_transport")
+            logger.info(
+                "lora_nccl_fleet_stage generation=%s phase=pause seconds=%.6f",
+                generation,
+                time.perf_counter() - phase_started,
+            )
+            return response
+
+        async def resume(server_url: str):
+            phase_started = time.perf_counter()
+            _, response = await self._call_server(server_url, "/skyrl/v1/resume_lora_transport")
+            logger.info(
+                "lora_nccl_fleet_stage generation=%s phase=resume seconds=%.6f",
+                generation,
+                time.perf_counter() - phase_started,
+            )
+            return response
+
+        async def wait_for_producer():
+            assert producer_ready is not None
+            producer_error = await producer_ready
+            if producer_error is not None:
+                raise RuntimeError(f"LoRA NCCL producer failed: {producer_error}")
+
+        try:
+            result = dict(
+                await LoRATransportFleetTransaction(self.server_urls).replace(
+                    stage=stage,
+                    pause=pause,
+                    activate=lambda url: call_phase("/skyrl/v1/activate_lora_transport_adapter", url),
+                    rollback=lambda url: call_phase("/skyrl/v1/rollback_lora_transport_adapter", url),
+                    commit=lambda url: call_phase("/skyrl/v1/commit_lora_transport_adapter", url),
+                    resume=resume,
+                    prepare_activation=(wait_for_producer if producer_ready is not None else None),
+                )
+            )
+        except LoRATransportRetirementError:
+            self._lora_nccl_pending_retirements[lora_name] = (
+                dict(request),
+                dict(adapter_ids),
+            )
+            raise
+        logger.info(
+            "lora_nccl_fleet_stage generation=%s phase=transaction_envelope seconds=%.6f",
+            generation,
+            time.perf_counter() - transaction_started,
+        )
+        return result
+
+    async def _finish_pending_lora_nccl_retirement(self, lora_name: str) -> None:
+        """Replay an interrupted idempotent commit before staging a newer generation."""
+        pending = self._lora_nccl_pending_retirements.get(lora_name)
+        if pending is None:
+            return
+        request, adapter_ids = pending
+        payload = {
+            "lora_name": lora_name,
+            "request": request,
+            "transport": "nccl",
+        }
+
+        async def commit(server_url: str):
+            server_payload = {**payload, "adapter_id": adapter_ids[server_url]}
+            return await self._call_server(
+                server_url,
+                "/skyrl/v1/commit_lora_transport_adapter",
+                server_payload,
+            )
+
+        results = await asyncio.gather(
+            *(commit(server_url) for server_url in self.server_urls),
+            return_exceptions=True,
+        )
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            from skyrl.backends.skyrl_train.weight_sync.lora_transport.fleet_control import (
+                LoRATransportRetirementError,
+            )
+
+            raise LoRATransportRetirementError(
+                f"LoRA adapter {lora_name!r} still has an incomplete retirement"
+            ) from errors[0]
+        del self._lora_nccl_pending_retirements[lora_name]
+
+    async def load_lora_nccl_adapter(
+        self,
+        lora_name: str,
+        request: Dict[str, Any],
+        producer_ready: asyncio.Future[str | None] | None = None,
+    ) -> Dict[str, Any]:
+        """Receive and atomically activate one packed-NCCL LoRA generation."""
+        return await self._replace_lora_nccl_adapter(
+            lora_name,
+            request,
+            producer_ready,
+        )
+
     async def load_lora_adapter(
         self,
         lora_name: str,
@@ -1329,6 +1533,36 @@ class RemoteInferenceClient(InferenceEngineInterface):
         logger.info(f"Loaded LoRA adapter '{lora_name}' from {lora_path}")
 
         return {url: resp for url, resp in results}
+
+    async def unload_lora_nccl_adapter(self, lora_name: str) -> Dict[str, Any]:
+        """Unload the adapter before destroying its persistent NCCL groups."""
+        await self._finish_pending_lora_nccl_retirement(lora_name)
+        await self._call_all_servers("/skyrl/v1/pause_lora_transport")
+        try:
+            result = await self._call_all_servers(
+                "/skyrl/v1/unload_lora_transport_adapter",
+                {"lora_name": lora_name},
+            )
+            await self._call_all_servers(
+                "/collective_rpc",
+                {
+                    "method": "close_lora_nccl_transport",
+                    "kwargs": {"adapter_name": lora_name},
+                },
+            )
+            return result
+        finally:
+            await self._call_all_servers("/skyrl/v1/resume_lora_transport")
+
+    async def reset_lora_nccl_transport(self, lora_name: str) -> Dict[str, Any]:
+        """Collectively discard poisoned groups without unloading the adapter."""
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "reset_lora_nccl_transport",
+                "kwargs": {"adapter_name": lora_name},
+            },
+        )
 
     async def unload_lora_adapter(self, lora_name: str) -> Dict[str, Any]:
         """
