@@ -157,9 +157,10 @@ def test_cli_rejects_invalid_stimulus_before_creating_output(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrong_publication", [False, True])
+@pytest.mark.parametrize("updated_repeat_shift", [0.0, 2e-6])
 @pytest.mark.parametrize("update_size", [0.2, 0.01])
 async def test_run_checks_the_actual_published_update_and_cleans_up(
-    monkeypatch, tmp_path, wrong_publication, update_size
+    monkeypatch, tmp_path, wrong_publication, update_size, updated_repeat_shift
 ):
     calls = []
     changed = False
@@ -212,7 +213,10 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
         calls.append(f"score_{model}")
         if publications < 2:
             return [-2.0, -3.0]
-        return [-2.2, -3.2] if wrong_publication else [-1.8, -2.8]
+        if wrong_publication:
+            return [-2.2, -3.2]
+        shift = updated_repeat_shift if calls.count("score_adapter") == 5 else 0
+        return [-1.8 + shift, -2.8]
 
     for name, function in [
         ("open_runtime", open_runtime),
@@ -237,6 +241,11 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
     elif wrong_publication:
         with pytest.raises(AssertionError):
             await run_lora_logprobs.run(args, report)
+    elif updated_repeat_shift:
+        with pytest.raises(AssertionError, match="updated_repeat_noise exceeds"):
+            await run_lora_logprobs.run(args, report)
+        saved = json.loads((tmp_path / "logprobs.json").read_text())
+        assert saved["updated_repeat_noise"]["max_abs"] > 1e-6
     else:
         await run_lora_logprobs.run(args, report)
         assert report["update_delta"]["mean_abs"] < 1e-12
@@ -253,6 +262,8 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
     ]
     if update_size >= 0.05:
         expected += ["publish", "score_adapter"]
+        if not wrong_publication:
+            expected += ["score_adapter"]
     assert calls == expected + ["cleanup"]
 
 

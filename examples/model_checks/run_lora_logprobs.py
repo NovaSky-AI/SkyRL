@@ -104,6 +104,8 @@ async def check_replayed_policy(policy, client, cfg, unreplayed_batch, sequences
     updated_batch = await score_phase("updated", adapter)
     report["trainer_updated"] = score_trainer(policy, updated_batch)
     check_updated_adapter(report, args.mean_atol, args.max_atol)
+    await score_phase("updated_repeat", adapter)
+    check_updated_repeat(report)
 
 
 def write_report(output_dir, report):
@@ -136,6 +138,14 @@ async def check_unpublished_sampler(client, sequences, adapter, report):
 async def check_published_update(client, sequences, adapter, report, mean_atol, max_atol):
     report["updated"] = await score_sampler(client, sequences, adapter)
     check_updated_adapter(report, mean_atol, max_atol)
+    report["updated_repeat"] = await score_sampler(client, sequences, adapter)
+    check_updated_repeat(report)
+
+
+def check_updated_repeat(report):
+    report["updated_repeat_noise"] = compare_logprobs(report["updated"], report["updated_repeat"])
+    if report["updated_repeat_noise"]["max_abs"] > 1e-6:
+        raise AssertionError(f"updated_repeat_noise exceeds 1e-6: {report['updated_repeat_noise']}")
 
 
 def validate_config(overrides):

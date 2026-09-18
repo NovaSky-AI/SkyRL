@@ -121,15 +121,19 @@ def test_replay_batch_keeps_full_prompt_routes_and_masks_only_padding():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("repeat_shift", [0.0, 2e-6])
-async def test_replayed_phases_preserve_prepublication_evidence_and_use_fresh_routes(monkeypatch, repeat_shift):
+@pytest.mark.parametrize("repeat_shift,updated_repeat_shift", [(0.0, 0.0), (2e-6, 0.0), (0.0, 2e-6)])
+async def test_replayed_phases_preserve_prepublication_evidence_and_use_fresh_routes(
+    monkeypatch, repeat_shift, updated_repeat_shift
+):
     calls = []
-    route_ids = iter(range(5))
+    route_ids = iter(range(6))
 
     async def paired(client, sequences, model):
         phase = next(route_ids)
         calls.append(("score", phase, model))
         scores = [-2.0 + (repeat_shift if phase == 2 else 0.0)] if phase < 4 else [-1.8]
+        if phase == 5:
+            scores[0] += updated_repeat_shift
         return scores, [np.full((2, 78, 8), phase, dtype=np.int32)]
 
     def build(sequences, pad, routes):
@@ -160,14 +164,20 @@ async def test_replayed_phases_preserve_prepublication_evidence_and_use_fresh_ro
             await coroutine
         assert calls.count(("publish",)) == 1
         return
+    if updated_repeat_shift:
+        with pytest.raises(AssertionError, match="updated_repeat_noise exceeds"):
+            await coroutine
+        assert report["updated_repeat_routes"][0][0][0][0] == 5
+        return
     await coroutine
+    assert report["updated_repeat_noise"]["max_abs"] == 0
     assert trainer_calls == ["unreplayed", 1, 2, 1, 4]
     assert report["trainer_updated_before_publication"] == [-1.7]
     assert report["trainer_updated"] == [-1.8]
     assert report["stale_parity_before_publication"]["mean_abs"] == pytest.approx(0.3)
     assert report["zero_parity_unreplayed"]["mean_abs"] == pytest.approx(0.3)
     assert report["updated_parity"]["max_abs"] == 0
-    assert [call[0] for call in calls] == ["score", "publish", "score", "score", "score", "publish", "score"]
+    assert [call[0] for call in calls] == ["score", "publish", "score", "score", "score", "publish", "score", "score"]
 
 
 @pytest.mark.parametrize(
