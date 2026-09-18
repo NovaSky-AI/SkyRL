@@ -612,8 +612,14 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
         # batch). The model-dependent half is refused by IsoExec at build, where the rows are known.
         (cp in (1, 2), "context_parallel_size in (1, 2)"),
         (cp == 1 or ep == 1, "expert_model_parallel_size=1 under context parallelism"),
-        # IsoExec's expert mesh: EP = TP x dense DP with expert TP 1 (expert DP stays 1).
-        (ep in (1, tp * dense_dp), f"expert_model_parallel_size in (1, TP x dense DP = {tp * dense_dp})"),
+        # IsoExec's expert mesh at expert TP 1: every TP rank owns experts, so an EP group is a union of
+        # WHOLE TP groups that tile TP x dense DP. EP = TP x dense DP is one replica per expert shard;
+        # a smaller such EP leaves TP x DP / EP replicas (expert data parallelism), which IsoExec
+        # admits only inside its own qualification run.
+        (
+            ep == 1 or (tp >= 1 and ep % tp == 0 and dense_dp >= 1 and (tp * dense_dp) % ep == 0),
+            f"expert_model_parallel_size 1, or a multiple of TP={tp} that divides TP x dense DP = {tp * dense_dp}",
+        ),
         (megatron.expert_tensor_parallel_size in (None, 1), "expert_tensor_parallel_size unset or 1"),
         (
             megatron.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size") is None,

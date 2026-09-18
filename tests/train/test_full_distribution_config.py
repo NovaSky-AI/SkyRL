@@ -255,8 +255,10 @@ def test_full_mode_admits_trainer_compositions_that_tile_the_policy_gpus():
     mc.pipeline_model_parallel_size = 1  # TP x DP (+SP), and EP = TP x dense DP = 4
     mc.expert_model_parallel_size = 4
     validate_logprob_comparison(cfg)
-    mc.expert_model_parallel_size = 2  # expert DP 2 is not IsoExec's mesh
-    with pytest.raises(ValueError, match="expert_model_parallel_size in"):
+    mc.expert_model_parallel_size = 2  # EP = TP: two replicas of each expert shard (expert DP 2)
+    validate_logprob_comparison(cfg)
+    mc.expert_model_parallel_size = 3  # neither a multiple of TP nor a divisor of TP x dense DP
+    with pytest.raises(ValueError, match="expert_model_parallel_size 1, or a multiple of TP"):
         validate_logprob_comparison(cfg)
     mc.expert_model_parallel_size = 1
     mc.tensor_model_parallel_size = 1  # SP without TP
