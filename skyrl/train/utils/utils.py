@@ -620,7 +620,13 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
         # -- engines
         (engine.run_engines_locally, "inference_engine.run_engines_locally=true"),
         (not engine.enable_pd, "no prefill/decode disaggregation"),
-        (engine.pipeline_parallel_size == 1, "inference_engine.pipeline_parallel_size=1"),
+        # Engine pipeline stages are admitted by the IsoExec engine host itself (a stage is a contiguous
+        # slice of the model; the stream crosses the boundary as bytes and only the last stage serves
+        # rows). Every engine worker -- any TP rank of any stage -- still receives the weight stream.
+        (
+            isinstance(engine.pipeline_parallel_size, int) and engine.pipeline_parallel_size >= 1,
+            "inference_engine.pipeline_parallel_size >= 1",
+        ),
         (engine.expert_parallel_size == 1, "inference_engine.expert_parallel_size=1"),
         (engine.speculative_config is None, "no speculative decoding"),
         (engine.fp8_weight_sync_mode is None, "no fp8 weight sync"),

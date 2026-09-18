@@ -105,8 +105,10 @@ def test_logprob_modes_must_match():
         ),
         lambda cfg: setattr(cfg.generator, "vision_language_generator", True),
         lambda cfg: setattr(cfg.trainer.policy.megatron_config, "expert_tensor_parallel_size", 2),
-        # Engine tensor parallelism is admitted only non-colocated (see the dedicated test below).
+        # A colocated engine cannot outgrow the policy GPUs, whichever degree multiplies it (pipeline
+        # stages included); a degree that is not a positive integer refuses on its own.
         lambda cfg: setattr(cfg.generator.inference_engine, "pipeline_parallel_size", 2),
+        lambda cfg: setattr(cfg.generator.inference_engine, "pipeline_parallel_size", 0),
         lambda cfg: setattr(cfg.generator.inference_engine, "expert_parallel_size", 2),
         lambda cfg: setattr(cfg.generator.sampling_params, "temperature", 0.5),
         lambda cfg: setattr(cfg.generator.sampling_params, "logprobs", None),
@@ -265,9 +267,28 @@ def test_full_mode_admits_tensor_parallel_engine_only_when_non_colocated():
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
     validate_logprob_comparison(cfg)
 
-    # Pipeline parallelism on the engine stays refused in either placement.
+    # Engine pipeline stages compose with it: every worker of every stage receives the weight stream.
     cfg.generator.inference_engine.pipeline_parallel_size = 2
-    with pytest.raises(ValueError, match="full logprob comparison requires"):
+    validate_logprob_comparison(cfg)
+
+
+def test_full_mode_admits_engine_pipeline_stages_inside_the_policy_gpus():
+    # Colocated: TP2 x PP2 engine on the four GPUs of a TP2 x PP2 trainer.
+    cfg = _full_mode_config()
+    cfg.trainer.placement.policy_num_gpus_per_node = 4
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+    cfg.generator.inference_engine.tensor_parallel_size = 2
+    cfg.generator.inference_engine.pipeline_parallel_size = 2
+    validate_logprob_comparison(cfg)
+
+    # One more stage than GPUs is refused by the colocation rule, not by a pipeline rule.
+    cfg.generator.inference_engine.pipeline_parallel_size = 4
+    with pytest.raises(ValueError, match="colocated engines \\(8 GPUs\\) fitting the 4 policy GPUs"):
+        validate_logprob_comparison(cfg)
+
+    cfg.generator.inference_engine.pipeline_parallel_size = 0
+    with pytest.raises(ValueError, match="pipeline_parallel_size >= 1"):
         validate_logprob_comparison(cfg)
 
 
