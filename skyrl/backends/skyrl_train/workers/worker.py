@@ -51,6 +51,7 @@ from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
     BatchIterator,
+    TokenBasedBatchIterator,
     all_reduce_metrics,
     compute_minibatch_rollout_logprob_diff_metrics,
     get_microbatch_iterator,
@@ -931,7 +932,7 @@ class PolicyWorkerBase(Worker):
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
         )
         all_metrics = defaultdict(list)
-        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        loss_fn_output_batches = []  # per-microbatch; restored to input order below
 
         for microbatch in microbatch_iterator:
             experience = BaseBatchIterator.batch_to_experience(microbatch)
@@ -945,11 +946,20 @@ class PolicyWorkerBase(Worker):
             )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
 
             for k, v in metrics.items():
                 all_metrics[k].append(v)
+
+        # Token-based batching packs samples into microbatches out of input order and
+        # appends padding microbatches, so per-sample outputs must be mapped back to
+        # their input positions (and padding entries dropped) before returning.
+        if not any(loss_fn_output_batches):
+            all_loss_fn_outputs = []
+        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
+            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
+        else:
+            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
 
         # Reduce across microbatches and all-reduce metrics across DP ranks.
         # Loss metrics are pre-scaled sums, so keep the same sum-reduction
