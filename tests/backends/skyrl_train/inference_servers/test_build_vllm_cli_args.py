@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from skyrl.backends.skyrl_train.inference_servers.utils import (
+    _apply_full_logprob_engine_defaults,
+    _apply_isoexec_engine_args,
     _apply_serialized_fp8_weight_sync_defaults,
     build_vllm_cli_args,
     get_pd_cli_args,
@@ -13,6 +15,56 @@ from skyrl.backends.skyrl_train.inference_servers.utils import (
     resolve_policy_model_name,
 )
 from skyrl.train.config import SkyRLTrainConfig
+
+
+def test_action_logprob_mode_preserves_engine_kwargs():
+    cfg = SkyRLTrainConfig()
+    engine_kwargs = {"max_logprobs": 7, "logprobs_mode": "processed_logprobs"}
+
+    _apply_full_logprob_engine_defaults(cfg.generator.inference_engine, engine_kwargs)
+
+    assert engine_kwargs == {"max_logprobs": 7, "logprobs_mode": "processed_logprobs"}
+
+
+def test_isoexec_engine_args_are_strictly_opt_in(monkeypatch):
+    isoexec_config = pytest.importorskip("isoexec.integrations.skyrl.config")
+
+    calls = []
+    monkeypatch.setattr(isoexec_config, "engine_args", lambda cfg, args: calls.append((cfg, args)))
+    cfg = SkyRLTrainConfig()
+    args = Namespace(model="model")
+
+    _apply_isoexec_engine_args(cfg, args)
+    assert calls == []
+
+    cfg.trainer.enable_isoexec = True
+    _apply_isoexec_engine_args(cfg, args)
+    assert calls == [(cfg, args)]
+
+
+def test_full_logprob_engine_defaults_request_uncapped_raw_rows():
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.logprob_output = "full"
+    engine_kwargs = {}
+
+    _apply_full_logprob_engine_defaults(cfg.generator.inference_engine, engine_kwargs)
+
+    assert engine_kwargs == {"max_logprobs": -1, "logprobs_mode": "raw_logprobs"}
+
+
+@pytest.mark.parametrize(
+    "engine_kwargs",
+    [
+        {"max_logprobs": 20},
+        {"logprobs_mode": "processed_logprobs"},
+    ],
+)
+def test_full_logprob_engine_defaults_reject_conflicts(engine_kwargs):
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.logprob_output = "full"
+
+    with pytest.raises(ValueError, match="for full logprobs"):
+        _apply_full_logprob_engine_defaults(cfg.generator.inference_engine, engine_kwargs)
 
 
 def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monkeypatch):

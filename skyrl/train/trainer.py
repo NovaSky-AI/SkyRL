@@ -96,7 +96,11 @@ from skyrl.train.utils.trainer_utils import (
     zero_variance_filter,
 )
 from skyrl.train.utils.trajectory_logging import TrajectoryLogger, pretty_print_example
-from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    configure_ray_worker_logging,
+    validate_colocated_gpu_counts,
+)
 from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
 
 
@@ -661,16 +665,7 @@ class RayPPOTrainer:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
             num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes
             num_ref_gpus = cfg.trainer.placement.ref_num_gpus_per_node * cfg.trainer.placement.ref_num_nodes
-            ie_cfg = cfg.generator.inference_engine
-            num_rollout_gpus = (
-                ie_cfg.num_engines
-                * ie_cfg.tensor_parallel_size
-                * ie_cfg.pipeline_parallel_size
-                * ie_cfg.data_parallel_size
-            )
-            assert (
-                num_policy_gpus == num_rollout_gpus
-            ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
+            validate_colocated_gpu_counts(cfg)
             pg = self.colocate_pg
 
             policy_model = PPORayActorGroup(
@@ -942,7 +937,37 @@ class RayPPOTrainer:
                 "image_grid_thw": image_grid_thw,
             },
         )
+        if self.cfg.trainer.rollout_logprob_comparison == "full":
+            full_rows = generator_output.get("rollout_full_logprobs")
+            if full_rows is None or len(full_rows) != len(response_ids):
+                raise ValueError("Missing rollout full logprobs")
+            if any(
+                not isinstance(rows, np.ndarray)
+                or rows.dtype != np.float32
+                or rows.ndim != 2
+                or len(rows) != len(ids)
+                or rows.shape[1] == 0
+                or not np.isfinite(rows).all()
+                for rows, ids in zip(full_rows, response_ids, strict=True)
+            ):
+                raise ValueError("Full logprobs must be finite float32 rows aligned with response tokens")
+            vocab_size = full_rows[0].shape[1]
+            if any(rows.shape[1] != vocab_size for rows in full_rows):
+                raise ValueError("Full logprob rows must use one vocabulary size")
+            width = response_masks_tensor.shape[1]
+            training_input["rollout_full_logprobs"] = torch.stack(
+                [
+                    torch.nn.functional.pad(torch.from_numpy(rows.copy()), (0, 0, width - len(rows), 0))
+                    for rows in full_rows
+                ]
+            )
+            generator_output.pop("rollout_full_logprobs")
+            # Global sample identity for the trainer-side full-row receipts: the worker forwards
+            # it beside each micro-batch so verified rows can be reconciled with this batch.
+            training_input["sample_indices"] = torch.arange(len(response_ids), dtype=torch.long)
         training_input.metadata = {"uids": uids}
+        if self.cfg.trainer.rollout_logprob_comparison == "full":
+            training_input.metadata["global_step"] = int(self.global_step)
         if generator_output.get("is_last_step", None) is not None:
             training_input.metadata["is_last_step"] = generator_output["is_last_step"]
 
@@ -1294,6 +1319,10 @@ class RayPPOTrainer:
         is anchor-aware here rather than a static membership in LOSSES_WITHOUT_OLD_LOGPROBS, which is
         keyed by policy_loss_type and cannot distinguish the two CISPO anchors.
         """
+        if getattr(self.cfg.trainer, "enable_isoexec", False):
+            return False
+        if getattr(self.cfg.trainer, "rollout_logprob_comparison", "action") == "full":
+            return False
         algorithm = self.cfg.trainer.algorithm
         if algorithm.policy_loss_type == PolicyLossType.CISPO:
             # CISPO reads old logprobs only with the default "old" anchor; "rollout" optimizes against
@@ -1362,6 +1391,14 @@ class RayPPOTrainer:
 
         # Policy forward. Skipped for losses that optimize against rollout logprobs (see
         # `_skip_policy_forward`), where the resulting logprobs are never read.
+        if self.cfg.trainer.rollout_logprob_comparison == "full":
+            if training_input.get("rollout_full_logprobs") is None or not bool(training_input["loss_mask"].any()):
+                raise ValueError("Full comparison requires rollout rows and trainable tokens")
+            for key in ("rollout_full_logprobs", "loss_mask", "rollout_logprobs"):
+                data_fwd_pass[key] = training_input[key]
+            if training_input.get("sample_indices") is not None:
+                data_fwd_pass["sample_indices"] = training_input["sample_indices"]
+            data_fwd_pass.metadata["global_step"] = training_input.metadata.get("global_step")
         if self._skip_policy_forward(training_input):
             action_log_probs = None
         else:
@@ -1371,6 +1408,17 @@ class RayPPOTrainer:
                 key="logprobs",
                 mini_batch_boundaries=training_input.metadata.get("policy_mini_batch_boundaries"),
             )
+
+        if self.cfg.trainer.enable_isoexec:
+            from isoexec.integrations.skyrl.audit import require_comparison
+
+            require_comparison(training_input, action_log_probs)
+
+        if self.cfg.trainer.rollout_logprob_comparison == "full":
+            training_input.pop("rollout_full_logprobs")
+            data_fwd_pass.pop("rollout_full_logprobs")
+            training_input.pop("sample_indices", None)
+            self.all_metrics["policy/full_logprobs_verified_rows"] = int(training_input["loss_mask"].count_nonzero())
 
         # Empty cache after all forward passes
         self.dispatch.empty_cache()

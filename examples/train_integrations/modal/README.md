@@ -18,6 +18,9 @@ The Modal integration:
 2. Set up Modal authentication: `modal setup`
 3. Ensure you have the SkyRL repository cloned locally
 
+For the IsoExec smoke, also clone the local IsoExec repository as a sibling of
+SkyRL (for example, `NovaSky-AI/SkyRL` and `NovaSky-AI/IsoExec`).
+
 ## Usage
 
 ### Basic Command
@@ -48,6 +51,24 @@ Be sure to override config variables such as `data.train_data`, `data.val_data`,
 and `trainer.export_path` so they point to the correct persistence location inside the container, which
 defaults to `/root/data`
 
+#### 5. Combined local SkyRL + IsoExec full-distribution smoke
+
+This mode mounts both local checkouts, installs the local IsoExec checkout into
+the isolated SkyRL Megatron environment, pins CUTLASS DSL 4.5.2 only in that
+temporary combined environment, builds the official FlashAttention FA3 Hopper
+package from pinned commit `e81a70ce` (which supports CUDA 13), and runs one
+Qwen3.5-0.8B update. The normal SkyRL environment stays unchanged. Success
+requires IsoExec engagement, exact full-distribution verified rows, and
+`Training done!`.
+
+```bash
+MODAL_ISOEXEC_ONLY=1 MODAL_ISOEXEC_GPU='H100!' \
+modal run main.py --isoexec-full-distribution
+```
+
+The dedicated function has a 30-minute hard timeout and the training subprocess
+has a 25-minute timeout. It does not run unless the flag is supplied.
+
 ## Configuration
 
 ### Command Parameters
@@ -62,6 +83,8 @@ Configure the integration using environment variables:
 |----------|-------------|---------|
 | `MODAL_APP_NAME` | Name of your Modal app (useful for team collaboration) | `"my_skyrl_app"` |
 | `MODAL_GPU` | GPU configuration. See [Modal docs](https://modal.com/docs/guide/gpu). Defaults to L4:1 if not specified | `"A100:4"` |
+| `MODAL_ISOEXEC_GPU` | GPU for the combined IsoExec smoke | `"H100!"` |
+| `MODAL_ISOEXEC_ONLY` | Required selector for the combined smoke; keeps its image and function out of normal Modal runs when unset | unset |
 
 ### Example with Environment Variables
 
@@ -129,4 +152,3 @@ Data stored in `/root/data` persists across Modal runs. This is useful for:
 For issues with:
 - **Modal platform**: See [Modal documentation](https://modal.com/docs)
 - **SkyRL integration**: Check SkyRL repository issues or documentation
-

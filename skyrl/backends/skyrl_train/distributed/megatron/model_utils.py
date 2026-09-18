@@ -484,6 +484,23 @@ def _fused_lm_head_logprob_apply(
     )
 
 
+def from_parallel_logits_to_full_logprobs(
+    logits: torch.Tensor,
+    group: torch.distributed.ProcessGroup,
+    chunk_size: Optional[int] = None,
+) -> torch.Tensor:
+    """Return complete float32 logprob rows for a no-grad, TP=1 diagnostic."""
+    if logits.ndim != 3 or logits.shape[1] == 0 or logits.shape[2] == 0:
+        raise ValueError(f"Full logprobs require non-empty [batch, sequence, vocab] logits, got {logits.shape}")
+    if torch.is_grad_enabled() or dist.get_world_size(group) != 1:
+        raise ValueError("Full logprobs require a no-grad forward with TP=1")
+    sequence_chunk_size = chunk_size or logits.shape[1]
+    return torch.cat(
+        [_compute_distributed_log_softmax(chunk.float(), group) for chunk in logits.split(sequence_chunk_size, dim=1)],
+        dim=1,
+    )
+
+
 def from_parallel_logits_to_logprobs(
     vocab_parallel_logits: torch.Tensor,
     target: torch.Tensor,

@@ -480,6 +480,46 @@ async def test_generate_batched_metrics_use_truncated_responses(
 
 
 @pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_batched_preserves_aligned_full_logprob_rows(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.inference_engine.logprob_output = "full"
+    generator_cfg.sampling_params.logprobs = 1
+    generator_cfg.sampling_params.max_generate_length = 2
+    full_rows = np.arange(12, dtype=np.float32).reshape(4, 3)
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["mocked output"],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[0.1] * 4],
+            "response_full_logprobs": [full_rows],
+            "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()],
+        }
+    )
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    output = await generator.generate(
+        {
+            "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
+            "env_extras": [{"answer": "8"}],
+            "env_classes": ["gsm8k"],
+            "sampling_params": {"logprobs": 1},
+        }
+    )
+
+    assert output["response_ids"] == [MOCK_LLM_OUTPUT_IDS[:2]]
+    np.testing.assert_array_equal(output["rollout_full_logprobs"][0], full_rows[:2])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [True, False])
 @patch("skyrl_gym.make")
 async def test_generate_interface_compliance(

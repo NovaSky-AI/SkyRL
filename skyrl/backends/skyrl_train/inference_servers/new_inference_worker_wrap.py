@@ -243,6 +243,10 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         self.device
     """
 
+    def skyrl_get_gpu_uuid(self) -> str:
+        """Report the device used by NCCL, before creating the weight-transfer communicator."""
+        return cuda_uuid_to_str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+
     def fetch_weights(self, target_version: int, sync_dir: str | None = None, uri: str | None = None):
         """Fetch/apply a checkpoint delta before the paused reload phase."""
         if self.weight_transfer_engine is None:
@@ -313,7 +317,10 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
 
         model = self.model_runner.model
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            if self._skyrl_is_checkpoint_format:
+            host_loader = getattr(self, "_skyrl_load_kernel_weights", None)
+            if callable(host_loader):
+                host_loader(weights)
+            elif self._skyrl_is_checkpoint_format:
                 _load_checkpoint_weights(model, weights)
                 # vLLM's load only updates the main model; the spec-decode (MTP/Eagle)
                 # drafter is a separate module and must be reloaded from the same
@@ -372,9 +379,15 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         engine = self.weight_transfer_engine
         typed_update_info = engine.parse_update_info(update_info)
         model = self.model_runner.model
+        # A host loader (e.g. IsoExec's applied-byte receiver) owns the received
+        # tensors when present, exactly as update_weights_ipc dispatches; it also
+        # consumes the sender's handshake/version/digest sentinels.
+        host_loader = getattr(self, "_skyrl_load_kernel_weights", None)
 
         def _load_weights(weights):
             weights = list(weights)
+            if callable(host_loader):
+                return host_loader(weights)
             loaded = _load_checkpoint_weights(model, weights)
             _reload_spec_decode_drafter(self.model_runner, weights)
             return loaded

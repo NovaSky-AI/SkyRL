@@ -550,6 +550,7 @@ EXPECTED_TRAINING_INPUT_FIELDS = {
     "kl",
     "rewards",
     "rollout_logprobs",
+    "rollout_full_logprobs",
     "rollout_expert_indices",
     "router_padding_mask",
     "pixel_values",
@@ -576,6 +577,7 @@ def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> Training
         "kl": torch.randn(batch_size, seq_len),
         "rewards": torch.randn(batch_size, seq_len),
         "rollout_logprobs": torch.randn(batch_size, seq_len),
+        "rollout_full_logprobs": torch.randn(batch_size, seq_len, 7),
         "rollout_expert_indices": torch.randint(0, 8, (batch_size, seq_len, 2, 3), dtype=torch.long),
         "router_padding_mask": torch.zeros((batch_size, seq_len), dtype=torch.bool),
         "pixel_values": TensorList([torch.randn(i + 1, 3) for i in range(batch_size)]),  # batch_size * (i + 1) * 3

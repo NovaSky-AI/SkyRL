@@ -889,18 +889,26 @@ class MegatronWorker:
             if micro.get("image_grid_thw") is not None:
                 vlm_inputs["image_grid_thw"] = micro.get("image_grid_thw")
 
-            micro_dicts.append(
-                {
-                    "sequences": micro["sequences"],
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": micro.metadata["response_length"],
-                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
-                    "router_padding_mask": micro.get("router_padding_mask") if self.enable_router_replay else None,
-                    "sub_seq_lengths": micro.get("sub_seq_lengths"),
-                    **vlm_inputs,
-                }
-            )
+            micro_dict = {
+                "sequences": micro["sequences"],
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "num_actions": micro.metadata["response_length"],
+                "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
+                "router_padding_mask": micro.get("router_padding_mask") if self.enable_router_replay else None,
+                "sub_seq_lengths": micro.get("sub_seq_lengths"),
+                **vlm_inputs,
+            }
+            if micro.get("rollout_full_logprobs") is not None:
+                micro_dict.update(
+                    rollout_full_logprobs=micro["rollout_full_logprobs"],
+                    full_logprob_mask=micro["loss_mask"],
+                    rollout_logprobs=micro["rollout_logprobs"],
+                    # Identity for IsoExec's trainer-side full-row receipts (evidence only).
+                    sample_indices=micro.get("sample_indices"),
+                    global_step=(micro.metadata or {}).get("global_step"),
+                )
+            micro_dicts.append(micro_dict)
 
         if use_token_batching:
             # Pad microbatches to uniform batch size for Megatron compatibility
@@ -1031,6 +1039,10 @@ class MegatronWorker:
         return padded
 
     def save_hf_model(self, export_dir: str, tokenizer):
+        if getattr(self.cfg, "enable_isoexec", False):
+            from isoexec.integrations.skyrl.megatron import save_hf_model
+
+            return save_hf_model(self, export_dir, tokenizer)
         # Save model in HuggingFace safetensors format
         hf_export = self.megatron_config.hf_export_config
         self.strategy.save_hf_model(
@@ -1104,6 +1116,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             is_lora=self._is_lora,
             node_local_rank=self._local_rank,
         )
+        if self.cfg.enable_isoexec:
+            from isoexec.integrations.skyrl.megatron import channel_config
+
+            channel_config(self.cfg.policy.megatron_config)
         self.strategy.setup_distributed()
 
         self.mesh_rank = MeshRank(
@@ -1120,6 +1136,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Initialize the model, optimizer, and scheduler for the policy worker.
         """
+        if self.cfg.enable_isoexec:
+            from isoexec.integrations.skyrl.megatron import init_model
+
+            return init_model(self, model_path, num_training_steps, section="policy")
+
         # Fake-INT4 QAT: install the MoE expert fake-quant hook and (when the
         # served checkpoint is INT4) redirect the trainer's BF16 master weights.
         bridge_weights_path = self._maybe_setup_fake_int4_qat()
@@ -1574,6 +1595,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.model.run_pending_grad_sync()
 
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        if self.cfg.enable_isoexec:
+            from isoexec.integrations.skyrl.megatron import finish_optimizer_step
+
+            finish_optimizer_step(self)
 
         # Clear the DDP grad buffers for the next window. `optimizer.zero_grad()` inside
         # `optimizer_step` only drops `param.grad` / the fp32 main-param grads -- the
@@ -1632,15 +1657,20 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # rendezvouses at init (sharded_rdt) is handed this extractor by
         # create_sender. It only depends on
         # the already-built bridge/actor_module, not on super().
-        self.weight_extractor = MegatronWeightExtractor(
-            bridge=self.bridge,
-            actor_module=self.actor_module,
-            enable_bucketing=True,
-            bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
-            training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
-            fp8_weight_sync_mode=inference_engine_cfg.fp8_weight_sync_mode,
-            hf_config=self.strategy.hf_config,
-        )
+        if self.cfg.enable_isoexec:
+            from isoexec.integrations.skyrl.weights import LogicalWeightExtractor
+
+            self.weight_extractor = LogicalWeightExtractor(self, inference_engine_cfg)
+        else:
+            self.weight_extractor = MegatronWeightExtractor(
+                bridge=self.bridge,
+                actor_module=self.actor_module,
+                enable_bucketing=True,
+                bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
+                training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
+                fp8_weight_sync_mode=inference_engine_cfg.fp8_weight_sync_mode,
+                hf_config=self.strategy.hf_config,
+            )
         # super picks the strategy and creates the sender (for sharded_rdt that
         # includes the eager rendezvous + bake, which is why the extractor is
         # built first).
@@ -2005,6 +2035,10 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             seed=self.cfg.seed,
             node_local_rank=self._local_rank,
         )
+        if self.cfg.enable_isoexec:
+            from isoexec.integrations.skyrl.megatron import channel_config
+
+            channel_config(self.cfg.ref.megatron_config)
         self.strategy.setup_distributed()
 
         self.mesh_rank = MeshRank(
@@ -2021,6 +2055,11 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         """
         Initialize the model for the ref worker.
         """
+        if self.cfg.enable_isoexec:
+            from isoexec.integrations.skyrl.megatron import init_model
+
+            return init_model(self, model_path, num_training_steps, section="ref")
+
         # Fake-INT4 QAT: the ref shares the policy's base model. Mirror the
         # BF16-master redirect so it can load an INT4-served checkpoint, and the
         # (global) fake-quant hook keeps the KL anchor in the same weight space.

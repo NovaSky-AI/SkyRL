@@ -1194,3 +1194,47 @@ class TestDeltaWeightSyncConfig:
         # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
         assert "my_sync_dir" in cfg.publish_staging_dir
         assert "my_sync_dir" in cfg.local_checkpoint_dir
+
+
+def test_colocated_gpu_counts_require_equality_by_default():
+    from skyrl.train.utils.utils import (
+        colocated_gpu_slots,
+        validate_colocated_gpu_counts,
+    )
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = True
+    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.generator.inference_engine.num_engines = 1
+    cfg.generator.inference_engine.tensor_parallel_size = 1
+    with pytest.raises(AssertionError, match="must be the same when colocating"):
+        validate_colocated_gpu_counts(cfg)
+
+    cfg.generator.inference_engine.tensor_parallel_size = 2
+    validate_colocated_gpu_counts(cfg)
+    assert colocated_gpu_slots(cfg) == 2
+
+
+def test_asymmetric_colocation_admits_an_engine_subset_of_the_policy_gpus():
+    from skyrl.train.utils.utils import (
+        colocated_gpu_slots,
+        validate_colocated_gpu_counts,
+    )
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = True
+    cfg.trainer.placement.asymmetric_colocation = True
+    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.generator.inference_engine.num_engines = 1
+    cfg.generator.inference_engine.tensor_parallel_size = 1
+    validate_colocated_gpu_counts(cfg)
+    assert colocated_gpu_slots(cfg) == 2
+
+    cfg.generator.inference_engine.tensor_parallel_size = 4
+    with pytest.raises(AssertionError, match="must not exceed num_policy_gpus"):
+        validate_colocated_gpu_counts(cfg)
+
+    cfg.generator.inference_engine.tensor_parallel_size = 1
+    cfg.trainer.placement.policy_num_nodes = 2
+    with pytest.raises(AssertionError, match="single node only"):
+        validate_colocated_gpu_counts(cfg)

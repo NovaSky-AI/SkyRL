@@ -3,8 +3,8 @@
 ``VLLMServerActor`` writes these payloads and ``RemoteInferenceClient`` reads
 them; nothing else depends on the encoding. Both sides serialize with orjson,
 which rejects non-finite floats and has no notion of NumPy arrays, so the
-helpers here exist to get sampled logprobs and routed-expert IDs across that
-boundary intact.
+helpers here exist to get sampled/full logprobs and routed-expert IDs across
+that boundary intact.
 """
 
 import math
@@ -54,6 +54,51 @@ def build_logprobs_content(
             logprob = CLAMPED_LOGPROB
         content.append({"logprob": logprob})
     return content, num_clamped
+
+
+def pack_full_logprobs(token_ids: list[int], resp_logprobs: Any, vocab_size: int) -> dict[str, Any]:
+    """Pack complete per-token vocabulary logprobs as little-endian float32."""
+    if resp_logprobs is None or len(resp_logprobs) != len(token_ids):
+        raise ValueError("full logprobs must contain one row per response token")
+    if vocab_size <= 0 or any(tid < 0 or tid >= vocab_size for tid in token_ids):
+        raise ValueError("invalid vocabulary or response token IDs for full logprobs")
+    rows = np.empty((len(token_ids), vocab_size), dtype="<f4")
+    for index, row in enumerate(resp_logprobs):
+        if row is None or len(row) != vocab_size:
+            raise ValueError("full logprobs must contain every vocabulary token")
+        try:
+            rows[index] = [row[tid].logprob for tid in range(vocab_size)]
+        except (KeyError, AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("invalid full logprob row") from exc
+    if not np.isfinite(rows).all():
+        raise ValueError("full logprobs must be finite")
+    return {
+        "data": pybase64.b64encode(memoryview(rows)).decode("ascii"),
+        "shape": list(rows.shape),
+        "dtype": "float32",
+    }
+
+
+def decode_packed_full_logprobs(payload: dict[str, Any]) -> np.ndarray:
+    """Decode and validate a packed full-logprob matrix."""
+    if not isinstance(payload, dict):
+        raise ValueError("full_logprobs must be a packed object")
+    try:
+        shape = tuple(payload["shape"])
+        dtype = payload["dtype"]
+        data = pybase64.b64decode_as_bytearray(payload["data"], validate=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("invalid packed full_logprobs payload") from exc
+    if dtype != "float32":
+        raise ValueError(f"invalid packed full_logprobs dtype: {dtype!r}")
+    if len(shape) != 2 or any(type(dim) is not int or dim < 0 for dim in shape) or shape[1] == 0:
+        raise ValueError(f"invalid packed full_logprobs shape: {shape}")
+    if len(data) != math.prod(shape) * 4:
+        raise ValueError("packed full_logprobs byte count does not match shape")
+    rows = np.frombuffer(data, dtype="<f4").reshape(shape)
+    if not np.isfinite(rows).all():
+        raise ValueError("full logprobs must be finite")
+    return rows
 
 
 def _to_host_array(routed_experts: Any) -> Any:

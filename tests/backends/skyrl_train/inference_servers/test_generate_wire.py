@@ -12,7 +12,9 @@ import torch
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
     build_logprobs_content,
+    decode_packed_full_logprobs,
     decode_packed_routed_experts,
+    pack_full_logprobs,
     pack_routed_experts,
 )
 
@@ -61,6 +63,49 @@ def test_empty_logprobs_input():
 def test_null_logprob_entry_is_clamped_not_raised():
     # An entry present but None must take the floor rather than raise AttributeError.
     assert build_logprobs_content([7], [{7: None}]) == ([{"logprob": CLAMPED_LOGPROB}], 1)
+
+
+def test_packed_full_logprobs_round_trip_float32():
+    rows = [
+        {token_id: _Logprob(-0.25 * (token_id + 1)) for token_id in range(3)},
+        {token_id: _Logprob(-1.5 - token_id) for token_id in range(3)},
+    ]
+
+    payload = pack_full_logprobs([1, 2], rows, vocab_size=3)
+    decoded = decode_packed_full_logprobs(payload)
+
+    assert payload["dtype"] == "float32"
+    assert decoded.dtype == np.dtype("<f4")
+    assert decoded.flags.c_contiguous
+    np.testing.assert_array_equal(
+        decoded,
+        np.array([[-0.25, -0.5, -0.75], [-1.5, -2.5, -3.5]], dtype=np.float32),
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"data": "", "shape": [0, 3]},
+        {"data": "", "shape": [0, 3], "dtype": "float64"},
+        {"data": "!", "shape": [1, 1], "dtype": "float32"},
+        {"data": "AAAAAAAA", "shape": [1, 1], "dtype": "float32"},
+        {"data": "AAAAAA==", "shape": [True, 1], "dtype": "float32"},
+        {"data": "AAAAAA==", "shape": [1, 0], "dtype": "float32"},
+    ],
+)
+def test_decode_rejects_malformed_full_logprobs(payload):
+    with pytest.raises(ValueError):
+        decode_packed_full_logprobs(payload)
+
+
+def test_pack_rejects_incomplete_or_nonfinite_full_logprobs():
+    with pytest.raises(ValueError, match="every vocabulary token"):
+        pack_full_logprobs([1], [{0: _Logprob(-1.0), 1: _Logprob(-2.0)}], vocab_size=3)
+
+    row = {0: _Logprob(-1.0), 1: _Logprob(float("nan")), 2: _Logprob(-3.0)}
+    with pytest.raises(ValueError, match="finite"):
+        pack_full_logprobs([1], [row], vocab_size=3)
 
 
 @pytest.mark.parametrize(

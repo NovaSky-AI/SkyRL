@@ -25,6 +25,7 @@ from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trajectory_logging import TrajectoryLogger
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
+    colocated_gpu_slots,
     get_ray_pg_ready_with_timeout,
     initialize_ray,
 )
@@ -118,9 +119,9 @@ class BasePPOExp:
         if not self.cfg.trainer.placement.colocate_all:
             return None
 
-        ie_cfg = self.cfg.generator.inference_engine
-        per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
-        total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+        # One bundle per GPU. Sized by the inference GPUs, or by the larger side under
+        # placement.asymmetric_colocation (engines then occupy the first bundles).
+        total_gpu_slots = colocated_gpu_slots(self.cfg)
 
         pg = placement_group(
             [{"GPU": 1, "CPU": 1}] * total_gpu_slots,

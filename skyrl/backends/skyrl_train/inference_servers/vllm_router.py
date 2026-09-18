@@ -23,7 +23,10 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     format_http_url,
     get_node_ip,
 )
-from skyrl.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
+from skyrl.env_vars import (
+    SKYRL_VLLM_ROUTER_PROMETHEUS_PORT,
+    SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,7 @@ class VLLMRouter:
         router.shutdown()
     """
 
-    _DEFAULT_PROMETHEUS_PORT = 29000
+    _DEFAULT_PROMETHEUS_PORT = SKYRL_VLLM_ROUTER_PROMETHEUS_PORT  # 29000 unless the job says otherwise
 
     def __init__(self, router_args: RouterArgs, log_path: Optional[str] = None):
         """

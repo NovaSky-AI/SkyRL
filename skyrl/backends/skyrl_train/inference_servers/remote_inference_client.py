@@ -74,6 +74,7 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     MultiModalFeatures,
 )
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
+    decode_packed_full_logprobs,
     decode_packed_routed_experts,
 )
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
@@ -223,6 +224,14 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
     tokenizer: Optional[Any] = None
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
+
+    logprob_output: Literal["action", "full"] = "action"
+
+    uses_isoexec: bool = False
+    """Whether inference workers are running the local IsoExec host integration."""
+
+    preserve_weights_on_sleep: bool = False
+    """Force level-1 sleep when IsoExec owns derived model state that level 2 would discard."""
 
     # Private fields excluded from repr for cleaner output
     # aiohttp.ClientSession is bound to the event loop that created it, so one session is kept per loop.
@@ -468,13 +477,16 @@ class RemoteInferenceClient(InferenceEngineInterface):
             [result["routed_experts"] for result in raw_results] if self.enable_return_routed_experts else None
         )
 
-        return InferenceEngineOutput(
+        result = InferenceEngineOutput(
             responses=responses,
             stop_reasons=[r["stop_reason"] for r in raw_results],
             response_ids=[r["response_ids"] for r in raw_results],
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
             rollout_expert_indices=rollout_expert_indices,
         )
+        if self.logprob_output == "full" and get_logprobs:
+            result["response_full_logprobs"] = [r["response_full_logprobs"] for r in raw_results]
+        return result
 
     async def _generate_single(
         self,
@@ -495,9 +507,14 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Returns:
             Dict with keys: stop_reason, response_ids, response_logprobs
         """
+        full_logprobs = self.logprob_output == "full" and sampling_params.get("logprobs") is not None
+        if full_logprobs:
+            if mm_features or self.uses_lora_weight_sync:
+                raise ValueError("full logprobs require text-only generation without LoRA")
+            sampling_params = {**sampling_params, "logprobs": -1}
         url = (
             f"{self.proxy_url}/skyrl/v1/generate"
-            if self.enable_return_routed_experts
+            if self.enable_return_routed_experts or full_logprobs
             else f"{self.proxy_url}/inference/v1/generate"
         )
 
@@ -506,6 +523,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "model": model,
             "token_ids": prompt_token_ids,
         }
+        if full_logprobs:
+            payload["return_full_logprobs"] = True
         if mm_features:
             payload["features"] = mm_features
         # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
@@ -519,6 +538,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         response = await self._post(url, json=payload, headers=headers)
 
+        if full_logprobs and len(response["choices"]) != 1:
+            raise ValueError("full logprobs require exactly one output")
         choice = response["choices"][0]
         token_ids = choice["token_ids"]
         stop_reason = choice["finish_reason"]
@@ -527,7 +548,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         logprobs = choice.get("logprobs")
         if logprobs is not None:
             logprobs_content = logprobs.get("content", [])
-            if logprobs_content:
+            if logprobs_content or full_logprobs:
                 response_logprobs = [logprob_info["logprob"] for logprob_info in logprobs_content]
 
         routed_experts = None
@@ -537,12 +558,18 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 raise ValueError("/skyrl/v1/generate must return packed routed_experts")
             routed_experts = decode_packed_routed_experts(packed_routed_experts)
 
-        return {
+        result = {
             "stop_reason": stop_reason,
             "response_ids": token_ids,
             "response_logprobs": response_logprobs,
             "routed_experts": routed_experts,
         }
+        if full_logprobs:
+            rows = decode_packed_full_logprobs(choice.get("full_logprobs"))
+            if rows.shape[0] != len(token_ids) or response_logprobs is None or len(response_logprobs) != len(token_ids):
+                raise ValueError("full and sampled logprobs must match response token count")
+            result["response_full_logprobs"] = rows
+        return result
 
     async def _render_for_sample(
         self,
@@ -1054,6 +1081,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 level,
             )
             level = 1
+        if self.preserve_weights_on_sleep and level != 1:
+            logger.info(
+                "Forcing sleep level=1 (preserve_weights_on_sleep=True); requested level=%d.",
+                level,
+            )
+            level = 1
         params: Dict[str, Any] = {"level": str(level)}
         if tags:
             params["tags"] = tags
@@ -1068,7 +1101,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 Common tags: ["weights"], ["kv_cache"], or None for all.
         """
         params = {"tags": tags} if tags else {}
-        return await self._call_all_servers("/wake_up", params=params)
+        result = await self._call_all_servers("/wake_up", params=params)
+        # A weights-only wake is the first phase of a level-2 weight sync: the
+        # allocator has recreated discarded storage, but the new payload has not
+        # arrived yet. Verify after the broadcast when KV is woken (or on any
+        # ordinary all-resource wake), never against the previous receipt here.
+        if self.uses_isoexec and tags != ["weights"]:
+            await self._call_all_servers(
+                "/collective_rpc",
+                {"method": "isoexec_verify_after_wake"},
+            )
+        return result
 
     async def sleep_for_weight_sync(self, offload_kv: bool = True) -> Dict[str, Any]:
         """Free GPU memory for weight sync while keeping in-flight requests frozen.
@@ -1091,10 +1134,16 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Wake ``["weights"]`` before the broadcast and ``["kv_cache"]`` after. Does
         not resume generation -- call :meth:`resume_generation` once KV is back.
         """
-        return await self._call_all_servers(
+        result = await self._call_all_servers(
             "/collective_rpc",
             {"method": "skyrl_wake_for_weight_sync", "kwargs": {"tags": tags}},
         )
+        if self.uses_isoexec and tags != ["weights"]:
+            await self._call_all_servers(
+                "/collective_rpc",
+                {"method": "isoexec_verify_after_wake"},
+            )
+        return result
 
     async def reset_prefix_cache(
         self,
@@ -1367,6 +1416,18 @@ class RemoteInferenceClient(InferenceEngineInterface):
     # ---------------------------
     # Info
     # ---------------------------
+
+    async def get_gpu_uuids(self) -> Dict[str, List[str]]:
+        """Query each DP server's TP/PP workers for their current physical GPU UUIDs."""
+        results = await self._call_all_servers("/collective_rpc", {"method": "skyrl_get_gpu_uuid"})
+        gpu_uuids = {}
+        for server_url in self.server_urls:
+            response = results.get(server_url) or {}
+            uuids = (response.get("body") or {}).get("results")
+            if not isinstance(uuids, list) or not uuids or any(not isinstance(uuid, str) or not uuid for uuid in uuids):
+                raise RuntimeError(f"Missing or invalid GPU UUIDs from {server_url}: {uuids!r}")
+            gpu_uuids[server_url] = uuids
+        return gpu_uuids
 
     async def get_world_size(self) -> Tuple[int, int]:
         """
