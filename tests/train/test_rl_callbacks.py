@@ -417,3 +417,5 @@ def test_step_in_flight_at_epoch_boundary_is_abandoned_cleanly(monkeypatch):
     # accumulation to be merged into the next epoch's batch.
     assert trainer._vllm_metrics_scraper._label is None
     assert trainer.dynamic_sampling_state is None
+    assert not trainer.all_metrics
+    assert not trainer.all_timings
