@@ -158,6 +158,24 @@ def test_full_mode_admits_non_colocated_data_parallel_engines_with_nccl_broadcas
         validate_logprob_comparison(cfg)
 
 
+def test_full_mode_admits_engine_expert_parallelism_only_across_non_colocated_data_parallel_ranks():
+    cfg = _full_mode_config()
+    engine = cfg.generator.inference_engine
+    cfg.trainer.placement.colocate_all = False
+    engine.weight_sync_backend = "nccl"
+    engine.data_parallel_size = 2
+    engine.expert_parallel_size = 2  # = data_parallel_size x tensor_parallel_size: IsoExec's own dispatch
+    validate_logprob_comparison(cfg)
+
+    engine.expert_parallel_size = 4  # not DP x TP
+    with pytest.raises(ValueError, match="expert_parallel_size=1, or = data_parallel_size x tensor_parallel_size"):
+        validate_logprob_comparison(cfg)
+    engine.expert_parallel_size = 2
+    engine.data_parallel_size = 1  # EP without the DP ranks it spans
+    with pytest.raises(ValueError, match="expert_parallel_size=1, or = data_parallel_size x tensor_parallel_size"):
+        validate_logprob_comparison(cfg)
+
+
 def test_full_mode_admits_independent_engine_replicas_only_when_non_colocated():
     cfg = _full_mode_config()
     cfg.generator.inference_engine.num_engines = 2

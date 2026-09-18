@@ -639,7 +639,19 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
             isinstance(engine.pipeline_parallel_size, int) and engine.pipeline_parallel_size >= 1,
             "inference_engine.pipeline_parallel_size >= 1",
         ),
-        (engine.expert_parallel_size == 1, "inference_engine.expert_parallel_size=1"),
+        # Engine expert parallelism is IsoExec's own dispatch over the engine's data-parallel ranks (vLLM's
+        # all2all stays off; IsoExec forces enable_expert_parallel=False and carries the degree itself): the
+        # only shape it hosts is EP = data_parallel_size x tensor_parallel_size, non-colocated.
+        (
+            engine.expert_parallel_size == 1
+            or (
+                not placement.colocate_all
+                and engine.data_parallel_size > 1
+                and engine.expert_parallel_size == engine.data_parallel_size * engine.tensor_parallel_size
+            ),
+            "inference_engine.expert_parallel_size=1, or = data_parallel_size x tensor_parallel_size with "
+            "data_parallel_size > 1 and non-colocated engines",
+        ),
         (engine.speculative_config is None, "no speculative decoding"),
         (engine.fp8_weight_sync_mode is None, "no fp8 weight sync"),
         (
