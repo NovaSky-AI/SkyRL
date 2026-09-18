@@ -92,20 +92,21 @@ class WorkerDispatch:
     # Multi-LoRA: per-model adapter swap orchestration.
     # ------------------------------------------------------------------
 
-    def ensure_active_adapter(self, role: str, model_id: Optional[str]) -> None:
+    def ensure_active_adapter(self, role: str, model_id: Optional[str], require_model_resident: bool = True) -> None:
         """Make ``model_id`` the live LoRA adapter for ``role`` workers.
 
         No-op when ``model_id is None`` (single-tenant / FFT path) or when
         the workers don't have an AdapterStore (non-LoRA strategies).
 
-        The swap copies the DDP param buffers, so the model has to be resident.
-        Most callers just ran _ensure_on_gpu; repeating it here is a no-op for
-        them and covers the paths that only need the optimizer, like set_lr.
-        Grad buffers and optimizer state may stay offloaded.
+        By default the swap ensures the model is GPU-resident because
+        AdapterStore copies DDP param buffers. The Megatron adapter-only sync
+        path can skip that backload: Megatron LoRA offload keeps the LoRA DDP
+        buffers resident even when frozen base weights are offloaded.
         """
         if model_id is None or role not in self._actor_groups:
             return
-        self._ensure_on_gpu(role, need_optimizer=False, need_model=True)
+        if require_model_resident:
+            self._ensure_on_gpu(role, need_optimizer=False, need_model=True)
         ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
 
     def register_adapter(self, role: str, model_id: str) -> None:
@@ -207,6 +208,20 @@ class WorkerDispatch:
             self._gpu_state[model].model_on_gpu = False
         if offload_optimizer:
             self._gpu_state[model].optimizer_on_gpu = False
+
+    def offload_for_sampling(self) -> None:
+        """Fully offload every colocated trainer model so inference engines can reclaim VRAM.
+
+        Used by cold sample paths (no preceding weight sync): the engines are
+        woken directly, so any model left GPU-resident by a forward/optim op
+        (policy, critic, ...) must first move to CPU. No-op when nothing is on
+        the GPU.
+        """
+        if not self.colocate_all:
+            return
+        for model, state in self._gpu_state.items():
+            if state.model_on_gpu or state.optimizer_on_gpu:
+                self._offload(model, offload_optimizer=True, offload_model=True)
 
     def mark_all_offloaded(self) -> None:
         """Mark all models as offloaded (call after build_models when colocate_all)."""
@@ -664,10 +679,22 @@ class WorkerDispatch:
             return {}
         return {"sync_weights_only_transfer": self.last_weight_sync_seconds}
 
-    def _prepare_for_weight_sync(self) -> None:
-        """Load policy weights and apply the configured optimizer offload policy."""
+    async def _prepare_for_weight_sync(self, adapter_only_sync: bool = False) -> None:
+        """Prepare colocated trainer/engine residency for sampler weight sync."""
         if not self.colocate_all:
             return
+
+        if adapter_only_sync:
+            for model, state in self._gpu_state.items():
+                if state.model_on_gpu or state.optimizer_on_gpu:
+                    self._offload(model, offload_optimizer=True, offload_model=True)
+            self.empty_cache("policy")
+            return
+
+        is_sleeping = await self._inference_engine_client.is_sleeping()
+        if not is_sleeping:
+            await self._inference_engine_client.sleep()
+
         offload_optimizer = self.cfg.trainer.policy.optimizer_config.offload_after_step
         self._ensure_on_gpu(
             "policy",
@@ -676,15 +703,31 @@ class WorkerDispatch:
         )
         if offload_optimizer and self._gpu_state["policy"].optimizer_on_gpu:
             self._offload("policy", offload_optimizer=True, offload_model=False)
+        # Release cached allocator blocks before the engines wake their
+        # weights: a preceding forward/optim step can leave tens of GB of
+        # freed-but-cached CUDA blocks in the trainer processes, and for
+        # TB-scale models (trainer masters + vLLM weights near the GPU
+        # capacity) that hoard is the difference between the colocated
+        # wake_up(tags=["weights"]) fitting and OOMing.
+        self.empty_cache("policy")
 
-    def _finish_weight_sync(self) -> None:
+    def _finish_weight_sync(self, adapter_only_sync: bool = False) -> None:
         """Offload policy weights and conditionally offload optimizer state."""
-        if not self.colocate_all:
+        if not self.colocate_all or adapter_only_sync:
             return
         self._offload(
             "policy",
             offload_optimizer=self.cfg.trainer.policy.optimizer_config.offload_after_step,
             offload_model=True,
+        )
+
+    def _is_lora_no_merge(self) -> bool:
+        """True for the megatron LoRA path that ships standalone adapters to vLLM."""
+        policy_cfg = self.cfg.trainer.policy
+        return (
+            self.cfg.trainer.strategy == "megatron"
+            and policy_cfg.model.lora.rank > 0
+            and not policy_cfg.megatron_config.lora_config.merge_lora
         )
 
     async def save_weights_for_sampler(self, model_id: Optional[str] = None) -> None:
@@ -695,12 +738,15 @@ class WorkerDispatch:
         provided we ensure the corresponding LoRA adapter is the live one
         before broadcasting, and tell the worker to register the adapter on
         vLLM under ``model_id``.
+
         """
         if self._inference_engine_client is None:
             raise RuntimeError(
                 "Cannot save_weights_for_sampler: no inference_engine_client configured. "
                 "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
             )
+
+        adapter_only_sync = self.colocate_all and self._is_lora_no_merge()
 
         def _broadcast_and_finish() -> None:
             """The weight transfer proper, timed on its own.
@@ -712,14 +758,14 @@ class WorkerDispatch:
             """
             start = time.perf_counter()
             self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-            self._finish_weight_sync()
+            self._finish_weight_sync(adapter_only_sync=adapter_only_sync)
             self.last_weight_sync_seconds = time.perf_counter() - start
 
         # Sync weights to inference engine
-        self._prepare_for_weight_sync()
+        await self._prepare_for_weight_sync(adapter_only_sync=adapter_only_sync)
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
-        self.ensure_active_adapter("policy", model_id)
+        self.ensure_active_adapter("policy", model_id, require_model_resident=not adapter_only_sync)
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
             _broadcast_and_finish()

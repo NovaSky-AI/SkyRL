@@ -123,19 +123,28 @@ def test_pending_grads_survive_other_tenant_sample(service_client):
     c.optim_step(lr).result()
     post_c = _loss(c.forward_backward(data, "cross_entropy").result())
 
-    improvement_c = pre_c - post_c
+    step_c = abs(post_c - pre_c)
     print(
         f"\n[pending_grads] A: pre={pre_a!r} post={post_a!r} Δ={post_a - pre_a:.6e}\n"
         f"[pending_grads] C: pre={pre_c!r} post={post_c!r} Δ={post_c - pre_c:.6e}"
     )
 
     assert pre_a == pre_c, f"A and C were not equally pristine: {pre_a!r} vs {pre_c!r}"
-    assert improvement_c > 0, f"control adapter C did not learn (pre={pre_c!r}, post={post_c!r}); test is inconclusive"
+    # Magnitude, not sign: the control only has to prove a real gradient was
+    # applied. BASE_MODEL is an unpinned, randomly-initialised HF fixture, so
+    # whether one Adam step at this lr descends or overshoots is a property of
+    # whatever weights upstream last uploaded — but a dropped-grad step is a
+    # no-op either way (~1e-6 of weight-decay drift against ~1e-2 for a real
+    # step), which this threshold sits two orders of magnitude above.
+    assert step_c > 1e-4, (
+        f"control adapter C's step was a no-op (pre={pre_c!r}, post={post_c!r}, |Δ|={step_c:.6e}); "
+        "test is inconclusive"
+    )
     # Tolerance scales with the control's own step, so the bound stays
     # meaningful whatever the tiny model happens to do.
-    assert abs(post_a - post_c) <= 0.05 * improvement_c, (
+    assert abs(post_a - post_c) <= 0.05 * step_c, (
         f"A's step diverged from the undisturbed control: A post={post_a!r}, C post={post_c!r} "
-        f"(C improved by {improvement_c:.6e}). A's pending grads were dropped by the grad-buffer "
+        f"(C moved by {step_c:.6e}). A's pending grads were dropped by the grad-buffer "
         "offload that B's sample triggered."
     )
 
