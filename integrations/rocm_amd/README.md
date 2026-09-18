@@ -50,8 +50,6 @@ Validated end-to-end on 2 Instinct GPUs (MI355X; same recipe is intended for MI3
 | Megatron policy/ref | DP = number of GPUs, `TP=1`, `PP=1` | Recipe knobs: `MEGATRON_TP`, `MEGATRON_PP` (default `1`) |
 | vLLM rollout | 1 engine, `TP = NUM_GPUS` | Recipe knobs: `NUM_ENGINES=1`, `VLLM_TP=${NUM_GPUS}` |
 
-That vLLM layout is required on ROCm today: two isolated 1-GPU engines (DP=2, TP=1) fail CUDA IPC handle open under a single-GPU ROCr mask. One mp engine with both GPUs visible is the working colocated path.
-
 What is **wired but not AMD-validated**:
 
 - Megatron `TP>1` or `PP>1` (SkyRL config accepts them; the smoke keeps both at 1).
@@ -62,8 +60,6 @@ What is **wired but not AMD-validated**:
 Override the smoke layout with env vars, for example `NUM_GPUS=2 MEGATRON_TP=1 VLLM_TP=2`. If you change it, keep every vLLM engine's `TP*PP` on one node when using the mp backend.
 
 ## Compatibility (Megatron-Bridge / megatron-core)
-
-A user **cannot** drop in an arbitrary Megatron-Bridge or megatron-core commit and expect AMD GRPO to work.
 
 The installer pins both and installs Bridge with `--no-deps` so CUDA-only extras (FlashInfer, `nvidia-resiliency-ext`, and similar) are not pulled onto ROCm:
 
@@ -80,7 +76,7 @@ Also required, independent of those git SHAs:
 - No stale `Megatron-LM` tree on `PYTHONPATH` (some ROCm images ship one).
 - The vLLM wheel built against **this** image’s torch/HIP/ISA (cache key includes those).
 
-`MCORE_REV` and `BRIDGE_REV` can be overridden for experiments. Treat that as untested: Bridge and core must stay API-compatible with each other and with SkyRL’s Megatron worker, and the pair must still run on the image’s ROCm TE. Newer NVIDIA-only Bridge extras will not install cleanly on AMD.
+`MCORE_REV` and `BRIDGE_REV` can be overridden for experiments. Treat that as untested: Bridge and core must stay API-compatible with each other and with SkyRL’s Megatron worker, and the pair must still run on the image’s ROCm TE.
 
 vLLM is the same story: use the pinned ROCm source build, not PyPI `vllm` and not an untested vLLM SHA.
 
