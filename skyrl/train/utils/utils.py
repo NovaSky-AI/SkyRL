@@ -604,15 +604,22 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
             )
         )
         # Tensor parallelism may span the policy GPUs under asymmetric colocation (each TP rank then
-        # compares its own vocabulary slice); pipeline, context and expert parallelism stay 1.
+        # compares its own vocabulary slice); pipeline and context parallelism stay 1.
         and megatron.tensor_model_parallel_size in (1, trainer.placement.policy_num_gpus_per_node)
         and (megatron.tensor_model_parallel_size == 1 or trainer.placement.asymmetric_colocation)
+        # Expert parallelism may span the policy GPUs the same way, with TP=1: IsoExec's mesh rule is
+        # EP = TP x dense DP with expert TP 1, so every policy GPU is one dense-DP replica and one
+        # expert owner (expert DP stays 1). Each rank still scores its own samples' full rows.
+        and megatron.expert_model_parallel_size in (1, trainer.placement.policy_num_gpus_per_node)
+        and (
+            megatron.expert_model_parallel_size == 1
+            or (trainer.placement.asymmetric_colocation and megatron.tensor_model_parallel_size == 1)
+        )
         and all(
             getattr(megatron, name) == 1
             for name in (
                 "pipeline_model_parallel_size",
                 "context_parallel_size",
-                "expert_model_parallel_size",
             )
         )
         and megatron.expert_tensor_parallel_size in (None, 1)
