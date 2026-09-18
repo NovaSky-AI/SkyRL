@@ -3,10 +3,14 @@ vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
+import uuid
 from argparse import Namespace
 from typing import List, Optional, Tuple
 
@@ -51,6 +55,20 @@ from skyrl.env_vars import (
 )
 
 logger = logging.getLogger(__name__)
+
+_LORA_ADAPTER_FILENAMES = frozenset(("adapter_model.safetensors", "adapter_config.json"))
+_LORA_UPLOAD_MAX_BYTES = 128 * 1024**3
+_LORA_UPLOAD_SIZE_HEADER = "X-SkyRL-File-Size"
+
+
+def _get_uploaded_lora_path(upload_id: str, filename: str) -> str:
+    try:
+        uuid.UUID(upload_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid LoRA upload id.") from exc
+    if filename not in _LORA_ADAPTER_FILENAMES:
+        raise HTTPException(status_code=400, detail="Unsupported LoRA adapter file.")
+    return os.path.join(tempfile.gettempdir(), "skyrl_lora_uploads", upload_id, filename)
 
 
 class VLLMServerActor(ServerActorProtocol):
@@ -444,6 +462,13 @@ class VLLMServerActor(ServerActorProtocol):
             body = await request.json()
             lora_name = body.get("lora_name")
             lora_path = body.get("lora_path")
+            upload_id = body.get("upload_id")
+            if upload_id is not None:
+                if lora_path is not None:
+                    raise HTTPException(status_code=400, detail="Provide either lora_path or upload_id.")
+                lora_path = os.path.dirname(_get_uploaded_lora_path(upload_id, "adapter_model.safetensors"))
+                if not all(os.path.isfile(os.path.join(lora_path, filename)) for filename in _LORA_ADAPTER_FILENAMES):
+                    raise HTTPException(status_code=400, detail="LoRA upload is incomplete.")
             if not lora_name or not lora_path:
                 raise HTTPException(
                     status_code=400,
@@ -467,11 +492,64 @@ class VLLMServerActor(ServerActorProtocol):
                 lora_request.load_inplace = False
                 models.lora_requests[lora_name] = lora_request
 
+            if upload_id is not None:
+                await asyncio.to_thread(shutil.rmtree, lora_path, True)
+
             return {
                 "status": "ok",
                 "lora_name": lora_name,
                 "lora_int_id": lora_int_id,
             }
+
+        @app.delete("/skyrl/v1/lora-adapters/{upload_id}")
+        async def _discard_lora_upload(upload_id: str):
+            upload_path = os.path.dirname(_get_uploaded_lora_path(upload_id, "adapter_model.safetensors"))
+            await asyncio.to_thread(shutil.rmtree, upload_path, True)
+            return {"status": "ok"}
+
+        @app.put("/skyrl/v1/lora-adapters/{upload_id}/{filename}")
+        async def _upload_lora_adapter_file(upload_id: str, filename: str, request: Request):
+            expected_sha256 = request.headers.get("X-SkyRL-SHA256")
+            expected_size_header = request.headers.get(_LORA_UPLOAD_SIZE_HEADER)
+            if expected_sha256 is None or expected_size_header is None:
+                raise HTTPException(status_code=400, detail="Missing LoRA upload integrity headers.")
+            try:
+                expected_size = int(expected_size_header)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid LoRA upload size.") from exc
+            if expected_size < 0 or expected_size > _LORA_UPLOAD_MAX_BYTES:
+                raise HTTPException(status_code=413, detail="LoRA upload exceeds the size limit.")
+
+            destination = _get_uploaded_lora_path(upload_id, filename)
+            upload_path = os.path.dirname(destination)
+            os.makedirs(upload_path, exist_ok=True)
+            temporary = f"{destination}.partial"
+            digest = hashlib.sha256()
+            received = 0
+            try:
+                with open(temporary, "wb") as file:
+                    async for chunk in request.stream():
+                        received += len(chunk)
+                        if received > expected_size:
+                            raise HTTPException(status_code=400, detail="LoRA upload exceeds its declared size.")
+                        digest.update(chunk)
+                        await asyncio.to_thread(file.write, chunk)
+                if received != expected_size:
+                    raise HTTPException(status_code=400, detail="LoRA upload size mismatch.")
+                actual_sha256 = digest.hexdigest()
+                if actual_sha256 != expected_sha256:
+                    raise HTTPException(status_code=400, detail="LoRA upload checksum mismatch.")
+                os.replace(temporary, destination)
+                logger.info(f"Received LoRA adapter file {filename} with sha256={actual_sha256}")
+            except BaseException:
+                await asyncio.to_thread(shutil.rmtree, upload_path, True)
+                raise
+            finally:
+                try:
+                    await asyncio.to_thread(os.remove, temporary)
+                except FileNotFoundError:
+                    pass
+            return {"filename": filename, "sha256": actual_sha256}
 
         # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
         # endpoint /inference/v1/generate does not support returning routed expert IDs.
@@ -479,13 +557,16 @@ class VLLMServerActor(ServerActorProtocol):
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
             """SkyRL generate endpoint that returns routed_experts alongside token output."""
-            if getattr(cli_args, "enable_lora", False):
-                raise HTTPException(status_code=400, detail="/skyrl/v1/generate does not support LoRA.")
-
             body = await request.json()
             token_ids = body["token_ids"]
             sampling_params_dict = body.get("sampling_params", {})
             cache_salt = body.get("cache_salt")
+            model = body.get("model")
+            lora_request = request.app.state.openai_serving_models.lora_requests.get(model)
+            served_model_names = getattr(cli_args, "served_model_name", None) or []
+            base_model_names = {cli_args.model, *served_model_names}
+            if model is not None and lora_request is None and model not in base_model_names:
+                raise HTTPException(status_code=404, detail=f"LoRA adapter '{model}' is not loaded.")
 
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
@@ -496,7 +577,12 @@ class VLLMServerActor(ServerActorProtocol):
             request_id = random_uuid()
 
             final_res = None
-            async for res in engine.generate(prompt, sampling_params, request_id=request_id):
+            async for res in engine.generate(
+                prompt,
+                sampling_params,
+                request_id=request_id,
+                lora_request=lora_request,
+            ):
                 final_res = res
 
             if final_res is None:
