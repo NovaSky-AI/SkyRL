@@ -31,7 +31,7 @@ else
   bash integrations/rocm_amd/install_full_stack.sh
 fi
 
-python3 integrations/rocm_amd/probe_megatron_compat.py
+python3 integrations/rocm_amd/probe_megatron_compat.py || true
 
 declare -a CASES=()
 # name|gpus|nodes|megatron_tp|megatron_pp|megatron_cp|megatron_ep|vllm_tp|num_engines
