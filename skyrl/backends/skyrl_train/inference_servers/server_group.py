@@ -16,6 +16,7 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
 )
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     build_engine_runtime_env,
+    is_rocm_platform,
     rocm_extra_engine_env_vars,
     rocm_visible_device_env,
 )
@@ -156,7 +157,7 @@ class ServerGroup:
         # child vLLM workers). Currently just the expandable_segments allocator, which is
         # safe with sleep mode on vLLM >= 0.20.1.
         extra_env_vars = rocm_extra_engine_env_vars()
-        if gpu_ids is not None:
+        if gpu_ids is not None and is_rocm_platform():
             extra_env_vars = {**extra_env_vars, **rocm_visible_device_env(gpu_ids)}
         runtime_env = build_engine_runtime_env(
             use_expandable_segments=self._use_expandable_segments,
