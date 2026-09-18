@@ -646,9 +646,14 @@ class MegatronModelWrapper:
                 _v_local = int(lm_head_weight.shape[0])
                 fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
 
-            # temperature normalization (the fused path applies it inside the op)
+            # temperature normalization (the fused path applies it inside the op). A bound
+            # scaler (IsoExec) divides by a float32 tensor exactly as the rollout sampler does;
+            # x / 1.0 is bit-preserving either way, so the copy is only made when it matters.
             if temperature != 1.0 and not fused_lm_head:
-                logits.div_(temperature)
+                if self._scale_logits is not None:
+                    logits = self._scale_logits(logits, temperature)
+                else:
+                    logits.div_(temperature)
 
             if fused_lm_head and packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
@@ -683,7 +688,11 @@ class MegatronModelWrapper:
                     fused_backend=self._fused_lm_head_backend,
                 )
             elif packed_seq_params is not None and packed_targets is not None:
-                token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
+                # The same bound per-token chain the scoring forward uses (IsoExec's row-invariant
+                # logprob with its autograd backward), so the loss sees the logprobs the
+                # pre-update comparison certified; stock vocab-parallel logprobs otherwise.
+                packed_logprobs = self._packed_logprobs or from_parallel_logits_to_logprobs_packed_sequences
+                token_logprobs = packed_logprobs(
                     logits,
                     packed_targets,
                     packed_seq_params.cu_seqlens_q_padded,
