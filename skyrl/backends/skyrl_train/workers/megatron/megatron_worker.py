@@ -904,6 +904,9 @@ class MegatronWorker:
                     rollout_full_logprobs=micro["rollout_full_logprobs"],
                     full_logprob_mask=micro["loss_mask"],
                     rollout_logprobs=micro["rollout_logprobs"],
+                    # Identity for IsoExec's trainer-side full-row receipts (evidence only).
+                    sample_indices=micro.get("sample_indices"),
+                    global_step=(micro.metadata or {}).get("global_step"),
                 )
             micro_dicts.append(micro_dict)
 

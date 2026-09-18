@@ -99,6 +99,8 @@ def test_convert_to_training_input_right_aligns_full_logprob_rows(dummy_config, 
     torch.testing.assert_close(training_input["rollout_full_logprobs"][0, 1:], torch.from_numpy(full_short))
     torch.testing.assert_close(training_input["rollout_full_logprobs"][1], torch.from_numpy(full_long))
     assert "rollout_full_logprobs" not in generator_output
+    assert training_input["sample_indices"].tolist() == [0, 1]
+    assert training_input.metadata["global_step"] == 0
 
 
 def test_full_logprob_rows_are_forwarded_only_to_policy_prescore(dummy_config, dummy_tokenizer, dummy_generator):
@@ -121,6 +123,8 @@ def test_full_logprob_rows_are_forwarded_only_to_policy_prescore(dummy_config, d
         observed["has_full_rows"] = "rollout_full_logprobs" in data
         observed["has_mask"] = "loss_mask" in data
         observed["has_rollout_logprobs"] = "rollout_logprobs" in data
+        observed["sample_indices"] = data["sample_indices"].tolist()
+        observed["global_step"] = data.metadata.get("global_step")
         return data["rollout_logprobs"].clone()
 
     trainer._execute_forward_pass = MagicMock(side_effect=policy_forward)
@@ -131,9 +135,10 @@ def test_full_logprob_rows_are_forwarded_only_to_policy_prescore(dummy_config, d
             "loss_mask": torch.ones((1, 2)),
             "rollout_logprobs": torch.tensor([[-1.0, -2.0]]),
             "rollout_full_logprobs": torch.tensor([[[-1.0, -2.0], [-3.0, -4.0]]]),
+            "sample_indices": torch.tensor([5]),
         }
     )
-    training_input.metadata = {"response_length": 2}
+    training_input.metadata = {"response_length": 2, "global_step": 3}
 
     trainer.fwd_logprobs_values_reward(training_input)
 
@@ -143,8 +148,11 @@ def test_full_logprob_rows_are_forwarded_only_to_policy_prescore(dummy_config, d
         "has_full_rows": True,
         "has_mask": True,
         "has_rollout_logprobs": True,
+        "sample_indices": [5],
+        "global_step": 3,
     }
     assert "rollout_full_logprobs" not in training_input
+    assert "sample_indices" not in training_input
     assert training_input["action_log_probs"].tolist() == [[-1.0, -2.0]]
     assert trainer.all_metrics["policy/full_logprobs_verified_rows"] == 2
     trainer.dispatch.empty_cache.assert_called_once_with()

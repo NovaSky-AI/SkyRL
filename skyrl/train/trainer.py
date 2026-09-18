@@ -967,7 +967,12 @@ class RayPPOTrainer:
                 ]
             )
             generator_output.pop("rollout_full_logprobs")
+            # Global sample identity for the trainer-side full-row receipts: the worker forwards
+            # it beside each micro-batch so verified rows can be reconciled with this batch.
+            training_input["sample_indices"] = torch.arange(len(response_ids), dtype=torch.long)
         training_input.metadata = {"uids": uids}
+        if self.cfg.trainer.rollout_logprob_comparison == "full":
+            training_input.metadata["global_step"] = int(self.global_step)
         if generator_output.get("is_last_step", None) is not None:
             training_input.metadata["is_last_step"] = generator_output["is_last_step"]
 
@@ -1396,6 +1401,9 @@ class RayPPOTrainer:
                 raise ValueError("Full comparison requires rollout rows and trainable tokens")
             for key in ("rollout_full_logprobs", "loss_mask", "rollout_logprobs"):
                 data_fwd_pass[key] = training_input[key]
+            if training_input.get("sample_indices") is not None:
+                data_fwd_pass["sample_indices"] = training_input["sample_indices"]
+            data_fwd_pass.metadata["global_step"] = training_input.metadata.get("global_step")
         if self._skip_policy_forward(training_input):
             action_log_probs = None
         else:
@@ -1414,6 +1422,7 @@ class RayPPOTrainer:
         if self.cfg.trainer.rollout_logprob_comparison == "full":
             training_input.pop("rollout_full_logprobs")
             data_fwd_pass.pop("rollout_full_logprobs")
+            training_input.pop("sample_indices", None)
             self.all_metrics["policy/full_logprobs_verified_rows"] = int(training_input["loss_mask"].count_nonzero())
 
         # Empty cache after all forward passes
