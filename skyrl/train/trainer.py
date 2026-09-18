@@ -96,7 +96,11 @@ from skyrl.train.utils.trainer_utils import (
     zero_variance_filter,
 )
 from skyrl.train.utils.trajectory_logging import TrajectoryLogger, pretty_print_example
-from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    configure_ray_worker_logging,
+    validate_colocated_gpu_counts,
+)
 from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
 
 
@@ -661,16 +665,7 @@ class RayPPOTrainer:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
             num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes
             num_ref_gpus = cfg.trainer.placement.ref_num_gpus_per_node * cfg.trainer.placement.ref_num_nodes
-            ie_cfg = cfg.generator.inference_engine
-            num_rollout_gpus = (
-                ie_cfg.num_engines
-                * ie_cfg.tensor_parallel_size
-                * ie_cfg.pipeline_parallel_size
-                * ie_cfg.data_parallel_size
-            )
-            assert (
-                num_policy_gpus == num_rollout_gpus
-            ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
+            validate_colocated_gpu_counts(cfg)
             pg = self.colocate_pg
 
             policy_model = PPORayActorGroup(

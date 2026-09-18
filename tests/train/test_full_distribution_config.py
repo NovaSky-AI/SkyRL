@@ -113,3 +113,18 @@ def test_full_mode_rejects_unsupported_profiles(mutate):
 
     with pytest.raises(ValueError, match="full logprob comparison requires"):
         validate_logprob_comparison(cfg)
+
+
+def test_full_mode_admits_data_parallel_trainer_only_with_asymmetric_colocation():
+    cfg = _full_mode_config()
+    cfg.trainer.placement.policy_num_gpus_per_node = 2
+
+    with pytest.raises(ValueError, match="asymmetric_colocation"):
+        validate_logprob_comparison(cfg)
+
+    cfg.trainer.placement.asymmetric_colocation = True
+    validate_logprob_comparison(cfg)
+
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+    with pytest.raises(ValueError, match="one GPU per side"):
+        validate_logprob_comparison(cfg)

@@ -506,15 +506,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
-        num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
-        ie_cfg = cfg.generator.inference_engine
-        num_rollout_gpus = (
-            ie_cfg.num_engines * ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
-        )
-        assert num_policy_gpus == num_rollout_gpus, (
-            f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) "
-            "must be the same when colocating all models"
-        )
+        validate_colocated_gpu_counts(cfg)
     else:
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
             assert cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes, (
@@ -526,6 +518,46 @@ def validate_cfg(cfg: SkyRLTrainConfig):
                 f"ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same "
                 f"when colocate policy and ref model."
             )
+
+
+def colocated_policy_gpus(cfg: SkyRLTrainConfig) -> int:
+    return cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+
+
+def colocated_rollout_gpus(cfg: SkyRLTrainConfig) -> int:
+    ie_cfg = cfg.generator.inference_engine
+    return ie_cfg.num_engines * ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+
+
+def validate_colocated_gpu_counts(cfg: SkyRLTrainConfig) -> None:
+    """Check the trainer/inference GPU counts for ``colocate_all``.
+
+    By default both sides must use exactly the same GPUs. With
+    ``placement.asymmetric_colocation`` the engines may occupy a prefix subset of the policy
+    GPUs (single node); the shared placement group is then sized by the policy GPU count.
+    """
+    placement = cfg.trainer.placement
+    num_policy_gpus = colocated_policy_gpus(cfg)
+    num_rollout_gpus = colocated_rollout_gpus(cfg)
+    if placement.asymmetric_colocation:
+        assert placement.policy_num_nodes == 1, "placement.asymmetric_colocation supports a single node only"
+        assert num_rollout_gpus <= num_policy_gpus, (
+            f"num_rollout_gpus ({num_rollout_gpus}) must not exceed num_policy_gpus ({num_policy_gpus}) "
+            "with placement.asymmetric_colocation"
+        )
+        return
+    assert num_policy_gpus == num_rollout_gpus, (
+        f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) "
+        "must be the same when colocating all models"
+    )
+
+
+def colocated_gpu_slots(cfg: SkyRLTrainConfig) -> int:
+    """Bundle count of the shared colocation placement group (one bundle per GPU)."""
+    validate_colocated_gpu_counts(cfg)
+    if cfg.trainer.placement.asymmetric_colocation:
+        return max(colocated_policy_gpus(cfg), colocated_rollout_gpus(cfg))
+    return colocated_rollout_gpus(cfg)
 
 
 def validate_logprob_comparison(cfg: SkyRLTrainConfig):
@@ -554,7 +586,10 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
         and trainer.algorithm.dynamic_sampling.type is None
         and trainer.policy.model.lora.rank == 0
         and trainer.placement.colocate_all
-        and trainer.placement.policy_num_nodes * trainer.placement.policy_num_gpus_per_node == 1
+        and trainer.placement.policy_num_nodes == 1
+        # Extra trainer GPUs are pure data parallelism here (every Megatron dimension below is 1);
+        # they are admitted only under the explicit asymmetric colocation contract.
+        and (trainer.placement.policy_num_gpus_per_node == 1 or trainer.placement.asymmetric_colocation)
         and all(
             getattr(megatron, name) == 1
             for name in (
@@ -579,8 +614,9 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
     if not supported:
         raise ValueError(
             "full logprob comparison requires enable_isoexec=true with synchronous, packed, text-only, "
-            "single-turn batched colocated Megatron/vLLM on one GPU per side, temperature=1, without fused "
-            "LM head, LoRA, MTP, speculation or dynamic sampling"
+            "single-turn batched colocated Megatron/vLLM on one GPU per side (or data-parallel-only trainer "
+            "GPUs with placement.asymmetric_colocation), temperature=1, without fused LM head, LoRA, MTP, "
+            "speculation or dynamic sampling"
         )
     if generator.eval_sampling_params is not None:
         generator.eval_sampling_params.logprobs = None

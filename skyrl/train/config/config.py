@@ -660,6 +660,12 @@ class PlacementConfig(BaseConfig):
     critic_num_gpus_per_node: int = 1
     ref_num_nodes: int = 1
     ref_num_gpus_per_node: int = 1
+    asymmetric_colocation: bool = False
+    """When colocate_all is True, allow the inference engines to occupy a prefix subset of the
+    policy GPUs instead of exactly the same count. The shared placement group is then sized by
+    the policy GPU count and the engine bundles start at bundle 0, so a 2-GPU trainer can share
+    GPU 0 with a 1-GPU engine. Single node only. Intended for qualifying one trainer parallelism
+    dimension against a serial inference reference without a second allocation."""
 
 
 # ---------------------------------------------------------------------------
