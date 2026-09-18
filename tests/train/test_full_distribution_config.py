@@ -167,6 +167,30 @@ def test_full_mode_admits_independent_engine_replicas_only_when_non_colocated():
     validate_logprob_comparison(cfg)
 
 
+def test_full_mode_admits_pipeline_parallel_trainer_only_with_asymmetric_colocation():
+    cfg = _full_mode_config()
+    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+    with pytest.raises(ValueError, match="full logprob comparison requires"):
+        validate_logprob_comparison(cfg)
+
+    cfg.trainer.placement.asymmetric_colocation = True
+    validate_logprob_comparison(cfg)
+
+    # PP spans exactly the policy GPUs, with TP=1 and EP=1.
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 4
+    with pytest.raises(ValueError, match="full logprob comparison requires"):
+        validate_logprob_comparison(cfg)
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+    with pytest.raises(ValueError, match="full logprob comparison requires"):
+        validate_logprob_comparison(cfg)
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.context_parallel_size = 2
+    with pytest.raises(ValueError, match="full logprob comparison requires"):
+        validate_logprob_comparison(cfg)
+
+
 def test_full_mode_admits_expert_parallel_trainer_only_with_asymmetric_colocation():
     cfg = _full_mode_config()
     cfg.trainer.placement.policy_num_gpus_per_node = 2

@@ -615,13 +615,19 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
             megatron.expert_model_parallel_size == 1
             or (trainer.placement.asymmetric_colocation and megatron.tensor_model_parallel_size == 1)
         )
-        and all(
-            getattr(megatron, name) == 1
-            for name in (
-                "pipeline_model_parallel_size",
-                "context_parallel_size",
+        # Pipeline parallelism may span the policy GPUs under asymmetric colocation with TP=EP=1:
+        # only the last stage scores rows, and IsoExec completes the weight stream across stages
+        # for the single sender. Context parallelism stays 1.
+        and megatron.pipeline_model_parallel_size in (1, trainer.placement.policy_num_gpus_per_node)
+        and (
+            megatron.pipeline_model_parallel_size == 1
+            or (
+                trainer.placement.asymmetric_colocation
+                and megatron.tensor_model_parallel_size == 1
+                and megatron.expert_model_parallel_size == 1
             )
         )
+        and megatron.context_parallel_size == 1
         and megatron.expert_tensor_parallel_size in (None, 1)
         and megatron.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size") is None
         and engine.run_engines_locally
