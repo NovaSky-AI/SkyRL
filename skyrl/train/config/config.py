@@ -95,6 +95,12 @@ class SkyRLLoraConfig(BaseConfig):
     """LoRA configuration for parameter-efficient fine-tuning.
 
     Trains a small number of additional low-rank matrices instead of the full model weights.
+
+    On Megatron with ``trainer.placement.colocate_all=True`` the adapter parameters stay resident on
+    the GPU for the whole run, including while the colocated inference engines generate; only the
+    frozen base weights, gradients, and optimizer state are offloaded. Leave room for the resident
+    adapter in ``generator.inference_engine.gpu_memory_utilization``. See
+    https://docs.skyrl.ai/docs/examples/lora#gpu-memory-under-colocation-megatron.
     """
 
     rank: int = 0

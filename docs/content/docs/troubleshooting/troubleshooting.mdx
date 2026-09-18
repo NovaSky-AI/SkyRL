@@ -68,6 +68,25 @@ inference engine are separate processes with separate allocators:
 
 See [`TrainerConfig.use_expandable_segments`](/docs/api-ref/skyrl/config) for details.
 
+## CUDA OOM during generation with LoRA and `colocate_all=true` (Megatron)
+
+If a Megatron LoRA run with `trainer.placement.colocate_all=true` OOMs when the inference engines
+wake up or while they generate, at a `generator.inference_engine.gpu_memory_utilization` that worked
+for full-parameter training, the trainer is still holding GPU memory. With LoRA on Megatron the
+adapter parameters are never offloaded: they stay on the GPU next to the trainer's CUDA context while
+the engines run. vLLM reserves `gpu_memory_utilization` of the device for itself at startup and
+reclaims it on every `wake_up`, so the remaining share has to fit both.
+
+Fixes, in order of preference:
+
+- Lower `generator.inference_engine.gpu_memory_utilization` until the trainer process's usage during
+  generation (visible in `nvidia-smi` on a training GPU) fits in the remainder.
+- Shrink the resident adapter with a smaller `trainer.policy.model.lora.rank` or a narrower
+  `trainer.policy.model.lora.target_modules` list.
+
+See [GPU memory under colocation](/docs/examples/lora#gpu-memory-under-colocation-megatron) in the
+LoRA guide for the full offload/backload behavior.
+
 ## Memory leaks during training with code that uses `multiprocessing`
 
 One of the most common issues during training is unexplained memory leaks that lead to CPU RAM OOMs. The root cause can be varied, but typically you can get to the problematic piece of code by just inspecting memory usage: 

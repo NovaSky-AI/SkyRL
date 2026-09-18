@@ -136,6 +136,33 @@ We recommend looking at the blog [LoRA Without Regret](https://thinkingmachines.
 
 3. **Layer coverage:** Apply LoRA to *all* layers, particularly MLP/MoE layers — attention-only LoRA tends to underperform.
 
+## GPU memory under colocation (Megatron)
+
+With `trainer.strategy=megatron` and `trainer.placement.colocate_all=true`, SkyRL offloads the
+trainer's state to CPU while the inference engines generate and backloads it for the next training
+step (see [CPU Offloading vs. Colocation Offloading](../tutorials/placement#cpu-offloading-vs-colocation-offloading)).
+A LoRA run does not offload everything a full-parameter run does:
+
+- **LoRA adapter parameters stay on the GPU for the whole run.** Megatron packs every trainable
+  parameter into fused param/grad buffers. With LoRA those buffers hold only the adapters, and SkyRL
+  keeps them resident instead of offloading them. Adapter-only weight sync
+  (`trainer.policy.megatron_config.lora_config.merge_lora=false`) exports directly from these
+  resident tensors.
+- **Frozen base weights are offloaded.** Because they never change, their CPU copies are file-backed
+  `mmap` tensors written once under `SKYRL_FROZEN_OFFLOAD_DIR` (default `/data/skyrl/frozen-offload`)
+  instead of pinned RAM. Set `SKYRL_FROZEN_OFFLOAD_DIR=0` to use pinned RAM instead.
+- **Gradients and optimizer state are offloaded** as in full-parameter runs, following
+  `trainer.policy.optimizer_config.offload_after_step`.
+- **Weight sync depends on `merge_lora`.** With the default
+  `trainer.policy.megatron_config.lora_config.merge_lora=true`, the sync backloads the whole
+  policy, frozen base weights included, merges the adapters in, broadcasts the merged weights, and
+  offloads the base weights again. With `merge_lora=false`, the sync is adapter-only: it exports
+  from the resident adapter tensors, so the frozen base weights are never backloaded. If a preceding
+  training phase left base weights or optimizer state on the GPU, they are offloaded first so the
+  engines fit.
+
+FSDP is not affected: it offloads the whole wrapped module, adapters included.
+
 ## Current Limitations
 
 SkyRL's LoRA implementation has the following current limitations:

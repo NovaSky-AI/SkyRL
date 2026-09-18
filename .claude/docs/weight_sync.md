@@ -313,6 +313,7 @@ when those wheels publish torch 2.13 builds.
 
 ## Gotchas
 
+- Megatron LoRA under `colocate_all`: adapter params are never offloaded (they live in the fused DDP buffers, which `offload_megatron_model_to_cpu(is_lora=True)` skips). With `merge_lora=False` the sync is adapter-only and never backloads the frozen masters (#2064); with `merge_lora=True` the full policy is backloaded to merge.
 - After `update_weights_chunk` runs, call `torch.accelerator.synchronize()` before returning so the sender doesn't drop its packed buffer mid-copy on the next barrier.
 - Delta: `DeltaWeightTransferEngine` is registered as an **import side effect** of `new_inference_worker_wrap.py`, which is the module vLLM loads via `--worker-extension-cls`. Registering anywhere else (e.g. while building CLI args in the driver) is a no-op — it has to happen in the process that owns the engine.
 - Delta: the receive-side `delta checkpoint fetch:` / `receive reload-only:` log lines are emitted inside the nested vLLM worker process and do **not** reach the driver log, even with `SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`. Find them with `grep -rhE "delta checkpoint (fetch|receive)" /tmp/ray/session_latest/logs/`. Filter by mtime — that directory accumulates lines from earlier runs.
