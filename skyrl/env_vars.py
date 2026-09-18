@@ -42,6 +42,14 @@ Two SkyRL jobs that share one node (a GPU-shared Slurm node, for example) MUST u
 with the same base both engines probe the same TCPStore window, and the probe-then-bind race between
 them ends in ``DistNetworkError: ... EADDRINUSE`` for whichever binds second.
 """
+SKYRL_VLLM_ROUTER_PROMETHEUS_PORT = int(os.environ.get("SKYRL_VLLM_ROUTER_PROMETHEUS_PORT", 29000))
+"""
+First port probed for the vLLM router's Prometheus endpoint when the router args do not name one.
+
+The reservation is released just before the router process rebinds it, so two jobs that start on one
+node at the same moment can both settle on the default and the second router exits with code 1. Jobs
+that share a node should start their probe from different ports.
+"""
 SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S = int(
     os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", 600)
 )
