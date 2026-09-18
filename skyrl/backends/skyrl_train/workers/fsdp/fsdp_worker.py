@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
 )
+from skyrl.backends.skyrl_train.workers.worker_utils import get_inference_weight_prefix
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
@@ -115,7 +116,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         ``weight_prefix`` covers the one case where they still differ: syncing a
         CausalLM backbone into a vLLM multimodal namespace.
         """
-        weight_prefix = "language_model." if self._is_multimodal_lm_only else ""
+        weight_prefix = get_inference_weight_prefix(self._is_multimodal_lm_only)
         if backend == "sharded_rdt":
             # RDT pulls, so it needs the ownership + group channels its own
             # source subclass adds (see sharded_rdt/sharded_rdt_base.py).
@@ -136,7 +137,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         inference_engine_client,
         lora_name: str = SKYRL_LORA_ADAPTER_NAME,
     ):
-        """Collect LoRA parameters, save and call inference engine to load."""
+        """Collect, namespace, and hot-load FSDP LoRA adapter weights.
+
+        A language-only VLM trains its text backbone without the inference
+        model's ``language_model.`` namespace. Preserve PEFT's outer wrapper
+        and insert that namespace inside it before vLLM loads the adapter.
+        """
         import json
         from dataclasses import asdict
 
@@ -147,6 +153,17 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
 
         lora_params = collect_lora_params(module=self.model.model)
+        weight_prefix = get_inference_weight_prefix(self._is_multimodal_lm_only)
+        if weight_prefix:
+            peft_wrapper_prefix = "base_model.model."
+            lora_params = {
+                (
+                    f"{peft_wrapper_prefix}{weight_prefix}{name.removeprefix(peft_wrapper_prefix)}"
+                    if name.startswith(peft_wrapper_prefix)
+                    else name
+                ): tensor
+                for name, tensor in lora_params.items()
+            }
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)

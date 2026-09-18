@@ -6,15 +6,15 @@ owns: pick the init info, build the control-plane client, and hand both to
 engine whose ``send_weights()`` owns the round trip.
 
 ===============  ==================================================
-``nccl``         vLLM's ``NCCLTrainerWeightTransferEngine``
-``ipc``          vLLM's ``IPCTrainerWeightTransferEngine``
+``nccl``         ``SkyrlNCCLTrainerWeightTransferEngine`` (``skyrl_nccl``)
+``ipc``          ``SkyrlIPCTrainerWeightTransferEngine`` (``skyrl_ipc``)
 ``delta``        ``weight_sync/delta/trainer.py``
 ``sharded_rdt``  ``weight_sync/sharded_rdt/sharded_rdt_trainer.py``
 ===============  ==================================================
 
-The trainer- and worker-side factories keep separate registries, so the trainer
-engines use vLLM's ``nccl`` / ``ipc`` keys even though the receive side registers
-under ``skyrl_nccl`` / ``skyrl_ipc`` (see ``weight_receivers.py``).
+The trainer- and worker-side factories keep separate registries. Both use
+``skyrl_nccl`` / ``skyrl_ipc`` because SkyRL subclasses vLLM's engines on each
+side (see ``weight_receivers.py``).
 """
 
 from __future__ import annotations

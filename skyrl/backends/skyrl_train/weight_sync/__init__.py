@@ -23,9 +23,9 @@ from .base import LoraLoadRequest
 #: Logical backend name -> the name its *receive*-side engine is registered
 #: under in vLLM's ``WeightTransferEngineFactory``.
 #:
-#: NCCL and IPC take new names because SkyRL subclasses vLLM's engines and
-#: ``register_engine`` refuses an already-registered name. The trainer-side
-#: factory has a separate registry, so the send side keeps vLLM's own names.
+#: NCCL and IPC take new names on both sides because SkyRL subclasses vLLM's
+#: engines and ``register_engine`` refuses an already-registered name. The
+#: trainer factory is separate, but its subclasses use the same SkyRL keys.
 _VLLM_RECEIVE_BACKENDS = {
     "nccl": "skyrl_nccl",
     "ipc": "skyrl_ipc",
