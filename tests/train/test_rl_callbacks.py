@@ -335,18 +335,13 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
 
 
 def test_step_in_flight_at_epoch_boundary_is_abandoned_cleanly(monkeypatch):
-    """Regression: a dynamic-sampling resample still in flight when an epoch ends.
+    """Regression: dynamic sampling is still resampling when the epoch's last batch ends.
 
-    ``handle_dynamic_sampling`` returning ``keep_sampling=True`` leaves the logical
-    step in flight -- its partial accumulation and its open ``vllm/train`` metrics
-    window both outlive the iteration. When that happens on an epoch's last batch the
-    step must be abandoned at the boundary: the window closed and the dynamic-sampling
-    state cleared. Otherwise the next epoch calls ``start()`` on an open window
-    (ValueError), and resuming the accumulation would merge duplicate uids across
-    epochs (``compute_prompt_mini_batch_boundaries`` AssertionError).
+    The step is left in flight with its `vllm/train` window open. The trainer must
+    close the window and drop the partial batch at the epoch boundary; otherwise the
+    next epoch's `start('vllm/train')` raises ValueError.
     """
     cfg = _build_test_cfg()
-    # 2 epochs x 2 batches, so epoch 0 can end mid-resample.
     cfg.trainer.epochs = 2
     cfg.trainer.eval_interval = 0
     cfg.trainer.algorithm.dynamic_sampling.type = "filter"
@@ -398,6 +393,7 @@ def test_step_in_flight_at_epoch_boundary_is_abandoned_cleanly(monkeypatch):
     # epoch boundary. Every other batch completes its step normally.
     sampling_calls = {"n": 0}
 
+    # epoch 0, batch 2 will return keep_sampling == True, trigger the mid-sampling data-exhaust
     def _fake_dynamic_sampling(generator_output, uids):
         sampling_calls["n"] += 1
         keep_sampling = sampling_calls["n"] == 2
