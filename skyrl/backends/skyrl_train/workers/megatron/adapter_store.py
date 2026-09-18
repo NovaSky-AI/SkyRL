@@ -26,6 +26,17 @@ def iter_opts(opt) -> List[Any]:
     return [opt]
 
 
+def _iter_main_param_groups(opt) -> Iterable[List[torch.Tensor]]:
+    """Yield both mixed-precision masters and native FP32 optimizer shards.
+
+    Native FP32 shards alias DDP parameter buffers, but their optimizer state
+    still needs to travel with the adapter when the live buffers are swapped.
+    Keep the same group order for slot allocation, snapshot, and restore.
+    """
+    yield from getattr(opt, "shard_fp32_from_float16_groups", None) or []
+    yield from getattr(opt, "shard_fp32_groups", None) or []
+
+
 def _iter_buffers(model_chunks) -> Iterable[Tuple[int, int, Any]]:
     """Yield (mc_idx, buf_idx, buffer) for every LoRA-trainable DDP buffer."""
     for mc_idx, mc in enumerate(model_chunks):
@@ -124,7 +135,8 @@ class AdapterSlot:
           forward_backward aren't lost when another tenant runs before
           this adapter's optim_step.
       cpu_main_param[opt_idx][g] -> list[Tensor], shapes matching
-          opt.shard_fp32_from_float16_groups[g].
+          groups in opt.shard_fp32_from_float16_groups followed by
+          opt.shard_fp32_groups.
       cpu_opt_state[opt_idx][g][i] -> dict[str, Tensor], mirroring
           opt.optimizer.state[main_param] for every tensor-valued entry
           (exp_avg, exp_avg_sq, step, ...).
@@ -196,7 +208,7 @@ class AdapterStore:
 
     def _allocate_empty_slot(self, model_chunks, optimizer) -> AdapterSlot:
         slot = AdapterSlot()
-        # Param data + grad data: one pinned bf16 tensor each per (mc, buffer).
+        # Param data + grad data: one pinned tensor each per (mc, buffer).
         # Grads must travel with the slot so forward_backward calls accumulate
         # into the correct adapter even when requests from tenants interleave.
         for mc_idx, _buf_idx, buf in _iter_buffers(model_chunks):
@@ -209,8 +221,7 @@ class AdapterStore:
         for _opt in iter_opts(optimizer):
             opt_main: List[List[torch.Tensor]] = []
             opt_state: List[List[dict]] = []
-            groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
-            for g, group in enumerate(groups):
+            for group in _iter_main_param_groups(_opt):
                 main_g: List[torch.Tensor] = []
                 state_g: List[dict] = []
                 for main_param in group:
@@ -263,8 +274,7 @@ class AdapterStore:
             if _is_resident(buf.grad_data):
                 slot.cpu_grad_data[mc_idx][buf_idx].copy_(buf.grad_data, non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
-            groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
-            for g, group in enumerate(groups):
+            for g, group in enumerate(_iter_main_param_groups(_opt)):
                 for i, main_param in enumerate(group):
                     slot.cpu_main_param[opt_idx][g][i].copy_(main_param, non_blocking=True)
                     state = _opt.optimizer.state.get(main_param, {})
@@ -294,8 +304,7 @@ class AdapterStore:
             if _is_resident(buf.grad_data):
                 buf.grad_data.copy_(slot.cpu_grad_data[mc_idx][buf_idx], non_blocking=True)
         for opt_idx, _opt in enumerate(iter_opts(optimizer)):
-            groups = getattr(_opt, "shard_fp32_from_float16_groups", None) or []
-            for g, group in enumerate(groups):
+            for g, group in enumerate(_iter_main_param_groups(_opt)):
                 for i, main_param in enumerate(group):
                     main_param.copy_(slot.cpu_main_param[opt_idx][g][i], non_blocking=True)
                     state = _opt.optimizer.state.get(main_param, {})
