@@ -623,7 +623,14 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
         # is MoE-only), so num_engines may exceed 1 there.
         and (engine.num_engines == 1 or not trainer.placement.colocate_all)
         and not engine.enable_pd
-        and engine.tensor_parallel_size == engine.pipeline_parallel_size == 1
+        # Engine tensor parallelism: vLLM all-gathers the vocab-parallel logits on every TP rank
+        # before the sampler, so each rank serves the complete full row; the TP=1 trainer sends
+        # full logical tensors over the NCCL broadcast and every engine rank slices its own shard.
+        # Colocated TP would need the engine's extra GPU to host a trainer rank (CUDA-IPC handles
+        # are keyed by GPU), which the colocation contract does not provide, so TP>1 is
+        # non-colocated only. Pipeline parallelism stays 1 on both sides.
+        and (engine.tensor_parallel_size == 1 or not trainer.placement.colocate_all)
+        and engine.pipeline_parallel_size == 1
         and engine.expert_parallel_size == 1
         and engine.speculative_config is None
         and engine.fp8_weight_sync_mode is None
@@ -635,8 +642,8 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
             "full logprob comparison requires enable_isoexec=true with synchronous, packed, text-only, "
             "single-turn batched Megatron/vLLM with a one-GPU trainer: colocated on one GPU per side (or "
             "data-parallel-only trainer GPUs with placement.asymmetric_colocation), or non-colocated with "
-            "NCCL broadcast weight sync and data-parallel engine replicas; temperature=1, without fused LM "
-            "head, LoRA, MTP, speculation or dynamic sampling"
+            "NCCL broadcast weight sync and tensor-parallel or replicated engines; temperature=1, without "
+            "fused LM head, LoRA, MTP, speculation or dynamic sampling"
         )
     if generator.eval_sampling_params is not None:
         generator.eval_sampling_params.logprobs = None
