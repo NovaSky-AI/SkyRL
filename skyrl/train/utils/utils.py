@@ -654,6 +654,24 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
 
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
+    # vLLM's Ray executor spawns nested GPU workers that lose HIP/CUDA visibility on
+    # ROCm during colocated Megatron GRPO (Ray TemporaryActor import failures).
+    pp_size = ie_cfg.pipeline_parallel_size
+    tp_pp_size = tp_size * pp_size
+    num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
+    if (
+        ie_cfg.distributed_executor_backend == "ray"
+        and cfg.trainer.placement.colocate_all
+        and ie_cfg.backend == "vllm"
+        and tp_pp_size <= num_gpus_per_node
+        and getattr(torch.version, "hip", None) is not None
+    ):
+        logger.info(
+            "ROCm colocated vLLM: switching distributed_executor_backend from ray to mp "
+            "(vLLM Ray executor is incompatible with ROCm GPU visibility in colocated GRPO)."
+        )
+        ie_cfg.distributed_executor_backend = "mp"
+
     if ie_cfg.enable_return_routed_experts:
         assert (
             ie_cfg.distributed_executor_backend == "mp"
@@ -665,9 +683,6 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             cfg.trainer.policy.megatron_config.moe_enable_routing_replay
         ), "moe_enable_routing_replay must be True to consume rollout expert indices"
 
-    pp_size = ie_cfg.pipeline_parallel_size
-    tp_pp_size = tp_size * pp_size
-    num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
     if (
         cfg.trainer.placement.colocate_all
         and tp_pp_size > num_gpus_per_node
@@ -811,11 +826,22 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # TileLang default (works on Hopper); export FLA_TILELANG=0 on Blackwell (B200),
         # where the TileLang packed backward aborts, to fall back to the Triton kernels.
         env_vars["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "1")
-        if cfg.trainer.flash_attn:
+        # CUDA-only: disabling fused TE attention. On ROCm/HIP this breaks Megatron-Bridge
+        # model materialize (NVTE_FLASH_ATTN assertion). Skip on AMD.
+        _on_rocm = getattr(torch.version, "hip", None) is not None
+        if cfg.trainer.flash_attn and not _on_rocm:
             # disable fused attention for megatron with flash_attn
             # (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
             # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
             env_vars["NVTE_FUSED_ATTN"] = "0"
+        if _on_rocm:
+            env_vars.setdefault("NVTE_USE_ROCM", "1")
+            env_vars.setdefault("NVTE_USE_HIPBLASLT", "1")
+            # Keep PyTorch's CUDA-compatible mask aligned with HIP when Ray NOSET is enabled.
+            if os.environ.get("RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"):
+                env_vars.setdefault("RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES", "1")
+                env_vars.setdefault("RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES", "1")
+                env_vars.setdefault("RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES", "1")
 
         # Forward TransformerEngine attention-backend debug logging to workers when
         # set on the driver. Workers are re-exec'd through the runtime env (e.g. the
@@ -823,6 +849,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         for nvte_var in ("NVTE_DEBUG", "NVTE_DEBUG_LEVEL"):
             if os.environ.get(nvte_var):
                 env_vars[nvte_var] = os.environ[nvte_var]
+
+    if getattr(torch.version, "hip", None) is not None:
+        env_vars.setdefault("VLLM_TARGET_DEVICE", "rocm")
+        env_vars.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
@@ -842,12 +872,23 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             )
             env_vars["VLLM_DISABLE_COMPILE_CACHE"] = os.environ["VLLM_DISABLE_COMPILE_CACHE"]
 
-        if not os.environ.get("VLLM_USE_V1", False):
-            logger.info(
-                "`VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 1. To override, set `VLLM_USE_V1` explicitly"
-            )
-            env_vars["VLLM_USE_V1"] = "1"
-            env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        configured_vllm_use_v1 = os.environ.get("VLLM_USE_V1")
+        if configured_vllm_use_v1 is not None:
+            env_vars["VLLM_USE_V1"] = configured_vllm_use_v1
+        else:
+            _on_rocm_vllm = getattr(torch.version, "hip", None) is not None
+            if _on_rocm_vllm:
+                logger.info(
+                    "ROCm: `VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 0 "
+                    "(v1 multiprocess engine core is unstable on ROCm in colocated GRPO)."
+                )
+                env_vars["VLLM_USE_V1"] = "0"
+            else:
+                logger.info(
+                    "`VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 1. To override, set `VLLM_USE_V1` explicitly"
+                )
+                env_vars["VLLM_USE_V1"] = "1"
+                env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
         if os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"):
             logger.info(
@@ -1081,6 +1122,19 @@ def configure_ray_worker_logging() -> None:
     logging.root.setLevel(level)
 
 
+def get_ray_init_num_gpus(cfg: SkyRLTrainConfig) -> int:
+    """Return GPUs to advertise on the local Ray node."""
+    if os.environ.get("NUM_GPUS"):
+        return int(os.environ["NUM_GPUS"])
+    placement = cfg.trainer.placement
+    return max(
+        placement.policy_num_gpus_per_node,
+        placement.ref_num_gpus_per_node,
+        placement.critic_num_gpus_per_node,
+        1,
+    )
+
+
 def initialize_ray(cfg: SkyRLTrainConfig):
     """
     Initialize Ray cluster with prepared runtime environment.
@@ -1099,6 +1153,10 @@ def initialize_ray(cfg: SkyRLTrainConfig):
 
     env_vars = prepare_runtime_environment(cfg)
 
+    # Prevent Ray from blanking CUDA_VISIBLE_DEVICES on num_gpus=0 workers before
+    # vLLM inference actors apply per-engine HIP/CUDA masks (ROCm colocated GRPO).
+    os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
+
     # Set up log file for infrastructure logs (skip when dumping to stdout)
     if not verbose_logging:
         log_path = Path(cfg.trainer.log_path).resolve()
@@ -1111,7 +1169,18 @@ def initialize_ray(cfg: SkyRLTrainConfig):
 
     # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
     # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.
-    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
+    ray_init_kwargs: dict = {
+        "runtime_env": {"env_vars": env_vars},
+        "log_to_driver": True,
+    }
+    _on_rocm_ray = getattr(torch.version, "hip", None) is not None
+    if _on_rocm_ray:
+        ray_init_kwargs["num_gpus"] = get_ray_init_num_gpus(cfg)
+        # Ray's default object store is a large fraction of host RAM and can starve colocated vLLM.
+        ray_init_kwargs["object_store_memory"] = int(os.environ.get("RAY_OBJECT_STORE_MEMORY", 8 * 1024**3))
+    ray.init(**ray_init_kwargs)
+    if _on_rocm_ray:
+        logger.info(f"Ray initialized with resources={ray.cluster_resources()}")
 
     if not verbose_logging:
         logger.info(f"Infrastructure logs will be written to: {log_file}")

@@ -1,0 +1,69 @@
+# SkyRL + Megatron-Bridge on AMD ROCm GPUs.
+#
+# Build:
+#   docker build -f docker/Dockerfile.rocm-megatron -t skyrl-rocm-megatron .
+#
+# Run (bind-mount this repo for development):
+#   docker run --rm -it --network host --ipc=host \
+#     --device=/dev/kfd --device=/dev/dri --group-add video \
+#     -v "$(pwd):/workspace/SkyRL" -w /workspace/SkyRL \
+#     skyrl-rocm-megatron
+
+ARG ROCM_BASE_IMAGE=rocm/primus:v26.4
+FROM ${ROCM_BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG RAY_VERSION=2.57.0
+ARG UV_VERSION=0.11.11
+ARG UV_INSTALLER_SHA256=3a020f8d69019caca567c9038999d130b0ea85866483caf2042c386cb685aef4
+ARG MCORE_REV=71e418ea7d7b3a6c9a53238c543c3e0b43e11026
+ARG BRIDGE_REV=91a15142a4b4442a8d46ab539d1b923bd08570d0
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV HF_HUB_ENABLE_HF_TRANSFER=1 \
+    PATH=/root/.local/bin:${PATH} \
+    RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook \
+    UV_PROJECT_ENVIRONMENT=/usr \
+    NVTE_USE_ROCM=1 \
+    NVTE_USE_HIPBLASLT=1 \
+    MCORE_REV=${MCORE_REV} \
+    BRIDGE_REV=${BRIDGE_REV}
+
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        iproute2 \
+        kmod \
+        libnuma-dev \
+        libxml2 \
+        netcat-openbsd \
+        tzdata \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN if ! command -v uv >/dev/null 2>&1; then \
+        curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv-installer.sh; \
+        echo "${UV_INSTALLER_SHA256}  /tmp/uv-installer.sh" | sha256sum -c -; \
+        sh /tmp/uv-installer.sh; \
+        rm -f /tmp/uv-installer.sh; \
+    fi \
+    && uv --version
+
+RUN python -m pip install --no-cache-dir "ray[default]==${RAY_VERSION}" \
+    && python -m pip install --no-cache-dir orjson torchdata \
+    && python -m pip install --no-cache-dir boto3==1.43.0 botocore==1.43.0 s3transfer==0.17.1 \
+    && python -m pip install --no-cache-dir "pyOpenSSL<26" "cryptography<49,>=2.5" \
+    && python -m pip install --no-cache-dir --upgrade "importlib-metadata>=6.0,<8.8.0"
+
+WORKDIR /workspace/SkyRL
+COPY . /workspace/SkyRL
+
+RUN cp docker/pyproject.rocm.toml pyproject.toml \
+    && bash integrations/rocm_amd/install_megatron_bridge.sh \
+    && python3 -c "import torch; from megatron.bridge import AutoBridge; import megatron.core as mc; print('torch', torch.__version__, 'hip', getattr(torch.version,'hip',None)); print('mcore', mc.__version__); print('AutoBridge', AutoBridge)"
+
+ENTRYPOINT []
+CMD ["/bin/bash"]

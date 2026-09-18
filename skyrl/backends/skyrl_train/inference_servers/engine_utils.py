@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from omegaconf import DictConfig, ListConfig
 
@@ -20,6 +20,44 @@ def _alloc_conf_with_expandable_segments() -> str:
     if "expandable_segments" in existing:
         return existing
     return f"{existing},expandable_segments:True"
+
+
+def is_rocm_platform() -> bool:
+    """Return True when PyTorch was built with HIP/ROCm."""
+    try:
+        import torch
+
+        return getattr(torch.version, "hip", None) is not None
+    except ImportError:
+        return False
+
+
+def rocm_extra_engine_env_vars() -> Dict[str, str]:
+    """Default vLLM env vars for ROCm colocated inference."""
+    if not is_rocm_platform():
+        return {}
+    return {
+        "VLLM_USE_V1": os.environ.get("VLLM_USE_V1", "0"),
+        "VLLM_TARGET_DEVICE": "rocm",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+    }
+
+
+def rocm_visible_device_env(gpu_ids: List[int]) -> Dict[str, str]:
+    """Pin physical ROCr IDs and process-local HIP/CUDA IDs.
+
+    ROCr applies its mask before HIP.  Setting all three masks to a physical
+    ID such as ``1`` first leaves one device via ROCr and then asks HIP for
+    index 1 of that one-device set, producing zero visible GPUs.  HIP and
+    CUDA therefore use logical indices within the ROCr-filtered set.
+    """
+    physical = ",".join(str(g) for g in gpu_ids)
+    logical = ",".join(str(i) for i in range(len(gpu_ids)))
+    return {
+        "HIP_VISIBLE_DEVICES": logical,
+        "ROCR_VISIBLE_DEVICES": physical,
+        "CUDA_VISIBLE_DEVICES": logical,
+    }
 
 
 def build_engine_runtime_env(
@@ -43,6 +81,9 @@ def build_engine_runtime_env(
     through as ``runtime_env``.
     """
     env_vars: Dict[str, str] = {}
+    # Ray clears CUDA_VISIBLE_DEVICES on num_gpus=0 actors unless this is set.
+    # Required for colocated VLLMServerActor (PG-scheduled, num_gpus=0) on ROCm.
+    env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
     if use_expandable_segments:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = _alloc_conf_with_expandable_segments()
     if extra_env_vars:
