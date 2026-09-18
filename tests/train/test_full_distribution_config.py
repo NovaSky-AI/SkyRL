@@ -135,7 +135,7 @@ def test_full_mode_admits_data_parallel_trainer_only_with_asymmetric_colocation(
     validate_logprob_comparison(cfg)
 
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
-    with pytest.raises(ValueError, match="one GPU per side"):
+    with pytest.raises(ValueError, match="dividing the 2 policy GPUs"):
         validate_logprob_comparison(cfg)
 
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
@@ -152,7 +152,7 @@ def test_full_mode_admits_non_colocated_data_parallel_engines_with_nccl_broadcas
     validate_logprob_comparison(cfg)
 
     cfg.generator.inference_engine.weight_sync_backend = "delta"
-    with pytest.raises(ValueError, match="NCCL broadcast"):
+    with pytest.raises(ValueError, match="weight_sync_backend=nccl when not colocated"):
         validate_logprob_comparison(cfg)
 
 
@@ -215,6 +215,46 @@ def test_full_mode_admits_expert_parallel_trainer_only_with_asymmetric_colocatio
         validate_logprob_comparison(cfg)
 
 
+def test_full_mode_admits_trainer_compositions_that_tile_the_policy_gpus():
+    cfg = _full_mode_config()
+    mc = cfg.trainer.policy.megatron_config
+    cfg.trainer.placement.policy_num_gpus_per_node = 4
+    cfg.trainer.placement.asymmetric_colocation = True
+    mc.tensor_model_parallel_size, mc.pipeline_model_parallel_size = 2, 2  # TP x PP, dense DP 1
+    validate_logprob_comparison(cfg)
+    mc.transformer_config_kwargs["sequence_parallel"] = True  # + SP on the TP axis
+    validate_logprob_comparison(cfg)
+    mc.pipeline_model_parallel_size = 1  # TP x DP (+SP), and EP = TP x dense DP = 4
+    mc.expert_model_parallel_size = 4
+    validate_logprob_comparison(cfg)
+    mc.expert_model_parallel_size = 2  # expert DP 2 is not IsoExec's mesh
+    with pytest.raises(ValueError, match="expert_model_parallel_size in"):
+        validate_logprob_comparison(cfg)
+    mc.expert_model_parallel_size = 1
+    mc.tensor_model_parallel_size = 1  # SP without TP
+    with pytest.raises(ValueError, match="sequence_parallel"):
+        validate_logprob_comparison(cfg)
+
+
+def test_full_mode_admits_colocated_engines_on_a_prefix_of_the_policy_gpus():
+    cfg = _full_mode_config()
+    engine = cfg.generator.inference_engine
+    cfg.trainer.placement.policy_num_gpus_per_node = 4
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+    engine.tensor_parallel_size = 2  # one TP=2 engine on policy GPUs 0-1
+    with pytest.raises(ValueError, match="asymmetric_colocation=true"):
+        validate_logprob_comparison(cfg)
+    cfg.trainer.placement.asymmetric_colocation = True
+    validate_logprob_comparison(cfg)
+    engine.num_engines = 2  # two TP=2 replicas tile all four GPUs: no asymmetry needed
+    cfg.trainer.placement.asymmetric_colocation = False
+    validate_logprob_comparison(cfg)
+    engine.num_engines = 3
+    with pytest.raises(ValueError, match="fitting the 4 policy GPUs"):
+        validate_logprob_comparison(cfg)
+
+
 def test_full_mode_admits_tensor_parallel_engine_only_when_non_colocated():
     cfg = _full_mode_config()
     cfg.generator.inference_engine.tensor_parallel_size = 2
@@ -234,5 +274,5 @@ def test_full_mode_admits_tensor_parallel_engine_only_when_non_colocated():
 def test_full_mode_rejects_data_parallel_engines_when_colocated():
     cfg = _full_mode_config()
     cfg.generator.inference_engine.data_parallel_size = 2
-    with pytest.raises(ValueError, match="tensor-parallel or replicated engines"):
+    with pytest.raises(ValueError, match="data_parallel_size=1 when colocated"):
         validate_logprob_comparison(cfg)

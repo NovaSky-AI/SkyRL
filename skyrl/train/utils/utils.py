@@ -571,91 +571,94 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
     if mode == "action":
         return
     megatron = trainer.policy.megatron_config
-    supported = (
-        trainer.strategy == "megatron"
-        and trainer.enable_isoexec
-        and engine.backend == "vllm"
-        and not trainer.fully_async.enabled
-        and not trainer.mtp.enabled
-        and not trainer.fused_lm_head_logprob
-        and trainer.remove_microbatch_padding
-        and generator.batched
-        and not generator.vision_language_generator
-        and generator.max_turns == 1
-        and not generator.step_wise_trajectories
-        and trainer.algorithm.dynamic_sampling.type is None
-        and trainer.policy.model.lora.rank == 0
-        and trainer.placement.policy_num_nodes == 1
-        and (
-            # Colocated: one GPU per side, or extra trainer GPUs as pure data parallelism (every
-            # Megatron dimension below is 1) under the explicit asymmetric colocation contract.
-            (
-                trainer.placement.colocate_all
-                and (trainer.placement.policy_num_gpus_per_node == 1 or trainer.placement.asymmetric_colocation)
-                and engine.data_parallel_size == 1
-            )
-            # Non-colocated: a one-GPU trainer with NCCL broadcast weight sync may serve one or
-            # more data-parallel engine replicas (each replica returns its own full rows).
-            or (
-                not trainer.placement.colocate_all
-                and trainer.placement.policy_num_gpus_per_node == 1
-                and engine.weight_sync_backend == "nccl"
-                and engine.data_parallel_size >= 1
-            )
-        )
-        # Tensor parallelism may span the policy GPUs under asymmetric colocation (each TP rank then
-        # compares its own vocabulary slice); pipeline and context parallelism stay 1.
-        and megatron.tensor_model_parallel_size in (1, trainer.placement.policy_num_gpus_per_node)
-        and (megatron.tensor_model_parallel_size == 1 or trainer.placement.asymmetric_colocation)
-        # Expert parallelism may span the policy GPUs the same way. IsoExec's mesh rule is
-        # EP = TP x dense DP with expert TP 1, so with EP = policy GPUs every policy GPU is one
-        # expert owner (expert DP stays 1): at TP=1 the GPUs are dense-DP replicas that each score
-        # their own samples' full rows, and at TP = policy GPUs they are the TP ranks of one replica
-        # that each compare their own vocabulary slice. (TP is already limited to those two values.)
-        and megatron.expert_model_parallel_size in (1, trainer.placement.policy_num_gpus_per_node)
-        and (megatron.expert_model_parallel_size == 1 or trainer.placement.asymmetric_colocation)
-        # Pipeline parallelism may span the policy GPUs under asymmetric colocation with TP=EP=1:
-        # only the last stage scores rows, and IsoExec completes the weight stream across stages
-        # for the single sender. Context parallelism stays 1.
-        and megatron.pipeline_model_parallel_size in (1, trainer.placement.policy_num_gpus_per_node)
-        and (
-            megatron.pipeline_model_parallel_size == 1
-            or (
-                trainer.placement.asymmetric_colocation
-                and megatron.tensor_model_parallel_size == 1
-                and megatron.expert_model_parallel_size == 1
-            )
-        )
-        and megatron.context_parallel_size == 1
-        and megatron.expert_tensor_parallel_size in (None, 1)
-        and megatron.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size") is None
-        and engine.run_engines_locally
-        # Colocated: one engine. Non-colocated: independent engine replicas behind the router are
-        # the way vLLM serves a dense model with external load balancing (its per-server DP mode
-        # is MoE-only), so num_engines may exceed 1 there.
-        and (engine.num_engines == 1 or not trainer.placement.colocate_all)
-        and not engine.enable_pd
-        # Engine tensor parallelism: vLLM all-gathers the vocab-parallel logits on every TP rank
-        # before the sampler, so each rank serves the complete full row; the TP=1 trainer sends
-        # full logical tensors over the NCCL broadcast and every engine rank slices its own shard.
-        # Colocated TP would need the engine's extra GPU to host a trainer rank (CUDA-IPC handles
-        # are keyed by GPU), which the colocation contract does not provide, so TP>1 is
-        # non-colocated only. Pipeline parallelism stays 1 on both sides.
-        and (engine.tensor_parallel_size == 1 or not trainer.placement.colocate_all)
-        and engine.pipeline_parallel_size == 1
-        and engine.expert_parallel_size == 1
-        and engine.speculative_config is None
-        and engine.fp8_weight_sync_mode is None
-        and generator.sampling_params.temperature == trainer.algorithm.temperature == 1.0
-        and generator.sampling_params.logprobs is not None
+    placement = trainer.placement
+    policy_gpus = placement.policy_num_gpus_per_node
+    tp, pp = megatron.tensor_model_parallel_size, megatron.pipeline_model_parallel_size
+    cp, ep = megatron.context_parallel_size, megatron.expert_model_parallel_size
+    model_parallel = tp * pp
+    dense_dp = policy_gpus // model_parallel if model_parallel and policy_gpus % model_parallel == 0 else 0
+    engine_gpus = (
+        engine.num_engines * engine.tensor_parallel_size * engine.pipeline_parallel_size * engine.data_parallel_size
     )
-    if not supported:
+    sequence_parallel = megatron.transformer_config_kwargs.get("sequence_parallel", False)
+
+    # Every requirement is named, so a refusal says which one failed instead of reciting the whole profile.
+    requirements = [
+        (trainer.strategy == "megatron", "trainer.strategy=megatron"),
+        (trainer.enable_isoexec, "trainer.enable_isoexec=true"),
+        (engine.backend == "vllm", "inference_engine.backend=vllm"),
+        (not trainer.fully_async.enabled, "synchronous training (fully_async disabled)"),
+        (not trainer.mtp.enabled, "trainer.mtp disabled"),
+        (not trainer.fused_lm_head_logprob, "trainer.fused_lm_head_logprob=false (the full row needs the logits)"),
+        (trainer.remove_microbatch_padding, "trainer.remove_microbatch_padding=true (packed sequences)"),
+        (generator.batched, "generator.batched=true"),
+        (not generator.vision_language_generator, "text-only generator"),
+        (generator.max_turns == 1, "single-turn generation"),
+        (not generator.step_wise_trajectories, "no step-wise trajectories"),
+        (trainer.algorithm.dynamic_sampling.type is None, "no dynamic sampling"),
+        (trainer.policy.model.lora.rank == 0, "no LoRA"),
+        (placement.policy_num_nodes == 1, "a single policy node"),
+        # -- trainer mesh: TP x PP divides the policy GPUs and the rest is dense data parallelism. Every
+        # last-stage rank scores rows: DP replicas their own samples, TP ranks their own vocabulary slice;
+        # pipeline stages other than the last hold no head and compare nothing.
+        (
+            dense_dp >= 1,
+            f"tensor_model_parallel_size x pipeline_model_parallel_size ({tp} x {pp}) dividing the {policy_gpus} policy GPUs",
+        ),
+        (cp == 1, "context_parallel_size=1"),
+        # IsoExec's expert mesh: EP = TP x dense DP with expert TP 1 (expert DP stays 1).
+        (ep in (1, tp * dense_dp), f"expert_model_parallel_size in (1, TP x dense DP = {tp * dense_dp})"),
+        (megatron.expert_tensor_parallel_size in (None, 1), "expert_tensor_parallel_size unset or 1"),
+        (
+            megatron.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size") is None,
+            "no virtual pipeline parallelism",
+        ),
+        (
+            isinstance(sequence_parallel, bool) and (not sequence_parallel or tp > 1),
+            "transformer_config_kwargs.sequence_parallel is a bool and needs tensor_model_parallel_size > 1",
+        ),
+        # -- engines
+        (engine.run_engines_locally, "inference_engine.run_engines_locally=true"),
+        (not engine.enable_pd, "no prefill/decode disaggregation"),
+        (engine.pipeline_parallel_size == 1, "inference_engine.pipeline_parallel_size=1"),
+        (engine.expert_parallel_size == 1, "inference_engine.expert_parallel_size=1"),
+        (engine.speculative_config is None, "no speculative decoding"),
+        (engine.fp8_weight_sync_mode is None, "no fp8 weight sync"),
+        (
+            generator.sampling_params.temperature == trainer.algorithm.temperature == 1.0,
+            "temperature=1 on both sides",
+        ),
+        (generator.sampling_params.logprobs is not None, "generator.sampling_params.logprobs set"),
+    ]
+    if placement.colocate_all:
+        # Colocated weight sync is CUDA IPC keyed by GPU: every engine worker opens the buffer of the
+        # trainer rank that shares its GPU, and every trainer rank publishes the whole model (TP gathers,
+        # pipeline stages are completed, DP replicas are whole), resharded for the engine TP rank its GPU
+        # hosts. So the engines -- one or several, tensor-parallel or not -- may occupy any PREFIX of the
+        # policy GPUs; a strict subset needs placement.asymmetric_colocation.
+        requirements += [
+            (
+                engine_gpus <= policy_gpus,
+                f"colocated engines ({engine_gpus} GPUs) fitting the {policy_gpus} policy GPUs",
+            ),
+            (
+                engine_gpus >= policy_gpus or placement.asymmetric_colocation,
+                "placement.asymmetric_colocation=true when the engines use fewer GPUs than the policy",
+            ),
+            (engine.data_parallel_size == 1, "inference_engine.data_parallel_size=1 when colocated"),
+        ]
+    else:
+        # Non-colocated: trainer rank 0 broadcasts full logical tensors over NCCL; every engine rank
+        # slices its own shard, so tensor-parallel or replicated engines are served by any trainer mesh.
+        requirements += [
+            (engine.weight_sync_backend == "nccl", "inference_engine.weight_sync_backend=nccl when not colocated"),
+            (engine.data_parallel_size >= 1, "inference_engine.data_parallel_size >= 1"),
+        ]
+    failed = [reason for ok, reason in requirements if not ok]
+    if failed:
         raise ValueError(
             "full logprob comparison requires enable_isoexec=true with synchronous, packed, text-only, "
-            "single-turn batched Megatron/vLLM with a one-GPU trainer: colocated on one GPU per side (or "
-            "data-parallel-only trainer GPUs with placement.asymmetric_colocation), or non-colocated with "
-            "NCCL broadcast weight sync and tensor-parallel or replicated engines; temperature=1, without "
-            "fused LM head, LoRA, MTP, speculation or dynamic sampling"
+            "single-turn batched Megatron/vLLM at temperature=1; unmet: " + "; ".join(failed)
         )
     if generator.eval_sampling_params is not None:
         generator.eval_sampling_params.logprobs = None
