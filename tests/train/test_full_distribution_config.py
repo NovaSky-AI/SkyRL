@@ -201,10 +201,10 @@ def test_full_mode_admits_expert_parallel_trainer_only_with_asymmetric_colocatio
     cfg.trainer.placement.asymmetric_colocation = True
     validate_logprob_comparison(cfg)
 
-    # EP must span exactly the policy GPUs, with TP=1 (IsoExec: EP = TP x dense DP, expert TP 1).
+    # EP spans exactly the policy GPUs (IsoExec: EP = TP x dense DP, expert TP 1); TP may be 1
+    # (dense-DP replicas) or the policy GPUs (one TP group whose ranks are also the expert owners).
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-    with pytest.raises(ValueError, match="full logprob comparison requires"):
-        validate_logprob_comparison(cfg)
+    validate_logprob_comparison(cfg)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 4
     with pytest.raises(ValueError, match="full logprob comparison requires"):
