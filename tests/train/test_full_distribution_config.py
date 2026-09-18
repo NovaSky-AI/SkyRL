@@ -129,8 +129,17 @@ def test_full_mode_admits_data_parallel_trainer_only_with_asymmetric_colocation(
     cfg.trainer.placement.asymmetric_colocation = True
     validate_logprob_comparison(cfg)
 
+    # Tensor parallelism over the two policy GPUs is admitted under the same contract.
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+    validate_logprob_comparison(cfg)
+
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
     with pytest.raises(ValueError, match="one GPU per side"):
+        validate_logprob_comparison(cfg)
+
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+    cfg.trainer.placement.asymmetric_colocation = False
+    with pytest.raises(ValueError, match="asymmetric_colocation"):
         validate_logprob_comparison(cfg)
 
 

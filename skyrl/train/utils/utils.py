@@ -603,10 +603,13 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
                 and engine.data_parallel_size >= 1
             )
         )
+        # Tensor parallelism may span the policy GPUs under asymmetric colocation (each TP rank then
+        # compares its own vocabulary slice); pipeline, context and expert parallelism stay 1.
+        and megatron.tensor_model_parallel_size in (1, trainer.placement.policy_num_gpus_per_node)
+        and (megatron.tensor_model_parallel_size == 1 or trainer.placement.asymmetric_colocation)
         and all(
             getattr(megatron, name) == 1
             for name in (
-                "tensor_model_parallel_size",
                 "pipeline_model_parallel_size",
                 "context_parallel_size",
                 "expert_model_parallel_size",
