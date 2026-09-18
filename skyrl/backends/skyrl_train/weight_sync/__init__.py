@@ -20,6 +20,11 @@ from .delta_strategy import (
     DeltaTransferStrategy,
     DeltaWeightTransferSender,
 )
+from .draft_weights import (
+    WEIGHT_UPDATE_TARGET_DRAFT,
+    WEIGHT_UPDATE_TARGET_MODEL,
+    needs_draft_weight_sync,
+)
 from .sharded_rdt.sharded_rdt_strategy import (
     ShardedRdtInitInfo,
     ShardedRdtTransferStrategy,
@@ -71,6 +76,9 @@ def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
 
 
 __all__ = [
+    "WEIGHT_UPDATE_TARGET_DRAFT",
+    "WEIGHT_UPDATE_TARGET_MODEL",
+    "needs_draft_weight_sync",
     "WeightChunk",
     "WeightExtractor",
     "WeightUpdateRequest",
