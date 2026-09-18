@@ -2,7 +2,7 @@
 File I/O utilities for handling both local filesystem and cloud storage (S3/GCS).
 
 This module provides a unified interface for file operations that works with:
-- Local filesystem paths
+- Local filesystem paths (str or os.PathLike[str])
 - S3 paths (s3://bucket/path)
 - Google Cloud Storage paths (gs://bucket/path or gcs://bucket/path)
 
@@ -19,9 +19,9 @@ from loguru import logger
 from .s3fs import ClientError, call_with_s3_retry, get_s3_fs, s3_refresh_if_expiring
 
 
-def is_cloud_path(path: str) -> bool:
+def is_cloud_path(path: str | os.PathLike[str]) -> bool:
     """Check if the given path is a cloud storage path."""
-    return path.startswith(("s3://", "gs://", "gcs://"))
+    return os.fspath(path).startswith(("s3://", "gs://", "gcs://"))
 
 
 def _get_filesystem(path: str):
@@ -37,8 +37,9 @@ def _get_filesystem(path: str):
     return fsspec.filesystem(proto)
 
 
-def open_file(path: str, mode: str = "rb"):
+def open_file(path: str | os.PathLike[str], mode: str = "rb"):
     """Open a file using fsspec, works with both local and cloud paths."""
+    path = os.fspath(path)
     if not is_cloud_path(path):
         return fsspec.open(path, mode)
 
@@ -57,38 +58,43 @@ def open_file(path: str, mode: str = "rb"):
         raise
 
 
-def makedirs(path: str, exist_ok: bool = True) -> None:
+def makedirs(path: str | os.PathLike[str], exist_ok: bool = True) -> None:
     """Create directories. Only applies to local filesystem paths."""
+    path = os.fspath(path)
     if not is_cloud_path(path):
         os.makedirs(path, exist_ok=exist_ok)
 
 
-def exists(path: str) -> bool:
+def exists(path: str | os.PathLike[str]) -> bool:
     """Check if a file or directory exists."""
+    path = os.fspath(path)
     fs = _get_filesystem(path)
     if is_cloud_path(path) and path.startswith("s3://"):
         return call_with_s3_retry(fs, fs.exists, path)
     return fs.exists(path)
 
 
-def isdir(path: str) -> bool:
+def isdir(path: str | os.PathLike[str]) -> bool:
     """Check if path is a directory."""
+    path = os.fspath(path)
     fs = _get_filesystem(path)
     if is_cloud_path(path) and path.startswith("s3://"):
         return call_with_s3_retry(fs, fs.isdir, path)
     return fs.isdir(path)
 
 
-def list_dir(path: str) -> list[str]:
+def list_dir(path: str | os.PathLike[str]) -> list[str]:
     """List contents of a directory."""
+    path = os.fspath(path)
     fs = _get_filesystem(path)
     if is_cloud_path(path) and path.startswith("s3://"):
         return call_with_s3_retry(fs, fs.ls, path, detail=False)
     return fs.ls(path, detail=False)
 
 
-def remove(path: str) -> None:
+def remove(path: str | os.PathLike[str]) -> None:
     """Remove a file or directory."""
+    path = os.fspath(path)
     fs = _get_filesystem(path)
     if is_cloud_path(path) and path.startswith("s3://"):
         if call_with_s3_retry(fs, fs.isdir, path):
@@ -102,7 +108,7 @@ def remove(path: str) -> None:
         fs.rm(path)
 
 
-def download_file(cloud_path: str, local_path: str) -> None:
+def download_file(cloud_path: str, local_path: str | os.PathLike[str]) -> None:
     """Download a single file from cloud storage to local storage.
 
     Args:
@@ -112,6 +118,7 @@ def download_file(cloud_path: str, local_path: str) -> None:
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
 
+    local_path = os.fspath(local_path)
     parent = os.path.dirname(os.path.abspath(local_path))
     os.makedirs(parent, exist_ok=True)
 
@@ -123,7 +130,7 @@ def download_file(cloud_path: str, local_path: str) -> None:
         fs.get_file(cloud_path, local_path)
 
 
-def upload_directory(local_path: str, cloud_path: str) -> None:
+def upload_directory(local_path: str | os.PathLike[str], cloud_path: str) -> None:
     """Upload a local directory to cloud storage."""
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
@@ -132,7 +139,7 @@ def upload_directory(local_path: str, cloud_path: str) -> None:
     # NOTE (sumanthrh): While uploading files in a directory `src` to an existing directory `dst` with fsspec,
     # we need to ensure that the file path ends in a trailing slash. otherwise, fsspec will create a subdirectory
     # `dst/src` instead of directly syncing contents of `src` into the root `dst` directory
-    local_path = os.path.join(local_path, "")
+    local_path = os.path.join(os.fspath(local_path), "")
     if cloud_path.startswith("s3://"):
         call_with_s3_retry(fs, fs.put, local_path, fs._strip_protocol(cloud_path), recursive=True)
     else:
@@ -140,11 +147,12 @@ def upload_directory(local_path: str, cloud_path: str) -> None:
     logger.info(f"Uploaded {local_path} to {cloud_path}")
 
 
-def download_directory(cloud_path: str, local_path: str) -> None:
+def download_directory(cloud_path: str, local_path: str | os.PathLike[str]) -> None:
     """Download a cloud directory to local storage."""
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
 
+    local_path = os.fspath(local_path)
     fs = _get_filesystem(cloud_path)
     if cloud_path.startswith("s3://"):
         call_with_s3_retry(fs, fs.get, fs._strip_protocol(cloud_path), local_path, recursive=True)
@@ -154,7 +162,7 @@ def download_directory(cloud_path: str, local_path: str) -> None:
 
 
 @contextmanager
-def local_work_dir(output_path: str):
+def local_work_dir(output_path: str | os.PathLike[str]):
     """
     Context manager that provides a local working directory.
 
@@ -173,6 +181,7 @@ def local_work_dir(output_path: str):
             model.save_pretrained(work_dir)
             # Files are automatically uploaded to s3://bucket/model at context exit
     """
+    output_path = os.fspath(output_path)
     if is_cloud_path(output_path):
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
@@ -188,7 +197,7 @@ def local_work_dir(output_path: str):
 
 
 @contextmanager
-def local_read_dir(input_path: str):
+def local_read_dir(input_path: str | os.PathLike[str]):
     """
     Context manager that provides a local directory with content from input_path.
 
@@ -206,6 +215,7 @@ def local_read_dir(input_path: str):
             # Load files from read_dir
             model = AutoModel.from_pretrained(read_dir)
     """
+    input_path = os.fspath(input_path)
     if is_cloud_path(input_path):
         with tempfile.TemporaryDirectory() as temp_dir:
             # Download everything from cloud path to temp_dir
@@ -220,7 +230,7 @@ def local_read_dir(input_path: str):
 
 
 @contextmanager
-def local_read_files(input_dir, filenames):
+def local_read_files(input_dir: str | os.PathLike[str], filenames):
     """
     Context manager that provides a local directory with specific files from input_dir.
 
@@ -240,6 +250,7 @@ def local_read_files(input_dir, filenames):
             config_path = os.path.join(read_dir, "config.json")
             model_path = os.path.join(read_dir, "pytorch_model.bin")
     """
+    input_dir = os.fspath(input_dir)
     if is_cloud_path(input_dir):
         with tempfile.TemporaryDirectory() as temp_dir:
             for name in filenames:
