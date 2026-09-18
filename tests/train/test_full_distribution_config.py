@@ -155,6 +155,17 @@ def test_full_mode_admits_non_colocated_data_parallel_engines_with_nccl_broadcas
         validate_logprob_comparison(cfg)
 
 
+def test_full_mode_admits_independent_engine_replicas_only_when_non_colocated():
+    cfg = _full_mode_config()
+    cfg.generator.inference_engine.num_engines = 2
+    with pytest.raises(ValueError, match="full logprob comparison requires"):
+        validate_logprob_comparison(cfg)
+
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    validate_logprob_comparison(cfg)
+
+
 def test_full_mode_rejects_data_parallel_engines_when_colocated():
     cfg = _full_mode_config()
     cfg.generator.inference_engine.data_parallel_size = 2

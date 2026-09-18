@@ -618,7 +618,10 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
         and megatron.expert_tensor_parallel_size in (None, 1)
         and megatron.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size") is None
         and engine.run_engines_locally
-        and engine.num_engines == 1
+        # Colocated: one engine. Non-colocated: independent engine replicas behind the router are
+        # the way vLLM serves a dense model with external load balancing (its per-server DP mode
+        # is MoE-only), so num_engines may exceed 1 there.
+        and (engine.num_engines == 1 or not trainer.placement.colocate_all)
         and not engine.enable_pd
         and engine.tensor_parallel_size == engine.pipeline_parallel_size == 1
         and engine.expert_parallel_size == 1
