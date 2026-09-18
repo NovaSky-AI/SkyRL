@@ -1181,6 +1181,30 @@ class RemoteInferenceClient(InferenceEngineInterface):
             kwargs["uri"] = uri
         return await self._call_all_servers("/fetch_weights", kwargs)
 
+    async def load_weights_from_path(self, path: str, weight_version: str, cache_dir: str) -> List[str]:
+        """Reload the full model on every worker from an HF checkpoint and stamp ``weight_version``.
+
+        ``NewInferenceWorkerWrap.skyrl_load_weights_from_path`` over ``/collective_rpc``. ``path``
+        may be a local directory, a hub id, or a cloud URI fetched once per node into ``cache_dir``.
+        Returns the version each worker reports, flattened across servers, so the caller can check
+        that every worker loaded it. Used by the reserved eval engine group, which is outside
+        weight sync.
+        """
+        ret = await self._call_all_servers(
+            "/collective_rpc",
+            {
+                "method": "skyrl_load_weights_from_path",
+                "kwargs": {"path": path, "weight_version": weight_version, "cache_dir": cache_dir},
+            },
+        )
+        return [str(v) for v in _collective_rpc_results(ret)]
+
+    async def paths_exist(self, path: str) -> List[bool]:
+        """Whether each worker's node can read ``path`` (``skyrl_path_exists`` over ``/collective_rpc``),
+        flattened across servers."""
+        ret = await self._call_all_servers("/collective_rpc", {"method": "skyrl_path_exists", "kwargs": {"path": path}})
+        return [v is True or str(v).lower() == "true" for v in _collective_rpc_results(ret)]
+
     # TODO: Once https://github.com/vllm-project/vllm/pull/39212 lands, switch
     # these three methods from /collective_rpc to the native vLLM endpoints
     # (/start_weight_update, /update_weights, /finish_weight_update) and remove
@@ -1466,6 +1490,19 @@ class RemoteInferenceClient(InferenceEngineInterface):
     async def is_sleeping(self):
         ret = await self._call_all_servers("/is_sleeping", method="GET")
         return all(response["body"]["is_sleeping"] for response in ret.values())
+
+
+def _collective_rpc_results(responses: Dict[str, Any]) -> List[Any]:
+    """Flatten the per-worker results of a ``/collective_rpc`` fan-out across servers.
+
+    vLLM's dev-mode route answers ``{"results": [one entry per worker]}`` and stringifies results
+    that are not dicts or lists; an empty 200 (a ``None`` result on every worker) has no body.
+    """
+    out: List[Any] = []
+    for resp in responses.values():
+        body = resp.get("body") or {}
+        out.extend(body.get("results") or [])
+    return out
 
 
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:

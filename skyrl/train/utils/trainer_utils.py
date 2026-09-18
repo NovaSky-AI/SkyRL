@@ -4,7 +4,17 @@ import os
 from collections import defaultdict
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict, Union
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
 import numpy as np
 import ray
@@ -151,13 +161,18 @@ def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
         return []
 
 
-def cleanup_old_checkpoints(checkpoint_base_path: str, max_checkpoints: int) -> None:
+def cleanup_old_checkpoints(checkpoint_base_path: str, max_checkpoints: int, protected: Collection[int] = ()) -> None:
     """
     Clean up old checkpoints, keeping only the most recent `max_checkpoints` checkpoints.
+
+    Also used for the ``global_step_*`` HF exports under ``export_path``.
 
     Args:
         checkpoint_base_path: Base path where checkpoints are stored
         max_checkpoints: Maximum number of checkpoints to keep
+        protected: Steps that are never removed even when they fall outside the newest
+            `max_checkpoints` (an HF export a queued eval still needs). They still count toward the
+            total, so the number kept can exceed `max_checkpoints` by the number protected.
     """
     if max_checkpoints < 0:
         return
@@ -181,6 +196,9 @@ def cleanup_old_checkpoints(checkpoint_base_path: str, max_checkpoints: int) -> 
 
     for dir_name in dirs_to_remove:
         full_path = os.path.join(checkpoint_base_path, dir_name)
+        if extract_step(dir_name) in protected:
+            logger.info(f"Keeping {full_path}: step {extract_step(dir_name)} is protected")
+            continue
         try:
             io.remove(full_path)
             step_num = extract_step(dir_name)

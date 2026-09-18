@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.weight_sync.delta_payload import (
     decompress_bytes,
     uint8_tensor_to_bytes,
 )
+from skyrl.train.utils import FileLock
 
 
 def _chunk_from_tensors(tensors):
@@ -346,7 +347,7 @@ def test_local_checkpoint_store_fetch_is_single_writer_with_concurrent_ray_actor
             counter = Path(counter_file)
 
             def counted_fetch(delta_uri, cache_dir, cloud_download_workers=4):
-                with delta_checkpoint.FileLock(Path(f"{counter_file}.lock")):
+                with FileLock(Path(f"{counter_file}.lock")):
                     data = json.loads(counter.read_text(encoding="utf-8"))
                     data["count"] += 1
                     counter.write_text(json.dumps(data), encoding="utf-8")

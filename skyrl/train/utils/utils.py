@@ -3,6 +3,7 @@ import ipaddress
 import logging
 import math
 import os
+import shutil
 import socket
 import sys
 import time
@@ -27,6 +28,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
 )
+from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     BLOCKWISE_FP8,
 )
@@ -38,9 +40,12 @@ from skyrl.env_vars import (
 )
 from skyrl.train.config.config import (
     SUPPORTED_SPECULATIVE_DECODING_METHODS,
+    InferenceEngineConfig,
     SkyRLTrainConfig,
     get_config_as_dict,
+    validate_dict_keys_against_dataclass,
 )
+from skyrl.train.utils.file_lock import FileLock
 
 
 class Timer:
@@ -310,6 +315,48 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
         }
 
 
+def validate_eval_dispatch_cfg(cfg: SkyRLTrainConfig):
+    """Validates ``trainer.eval_dispatch`` against the rest of the config.
+
+    Own-field checks live in ``EvalDispatchConfig.__post_init__``. The rules here read the training
+    intervals, the inference-engine config and the LoRA setting alongside it, and apply only to
+    ``mode='reserved'``: the reserved group evaluates the HF export ``hf_save_interval`` writes, and
+    launches vLLM engines of its own.
+    """
+    dispatch = cfg.trainer.eval_dispatch
+    trainer = cfg.trainer
+    ie_cfg = cfg.generator.inference_engine
+    if dispatch.mode == "blocking":
+        return
+    if trainer.eval_interval <= 0:
+        raise ValueError("trainer.eval_dispatch.mode='reserved' needs trainer.eval_interval > 0")
+    if not (trainer.hf_save_interval > 0 and trainer.eval_interval % trainer.hf_save_interval == 0):
+        raise ValueError(
+            "trainer.eval_dispatch.mode='reserved' evaluates the HF export trainer.hf_save_interval writes, "
+            f"so trainer.eval_interval ({trainer.eval_interval}) must be a positive multiple of "
+            f"trainer.hf_save_interval ({trainer.hf_save_interval})."
+        )
+    if not ie_cfg.run_engines_locally or ie_cfg.backend != "vllm":
+        raise ValueError(
+            "trainer.eval_dispatch.mode='reserved' launches vLLM eval engines itself; it needs "
+            "generator.inference_engine.run_engines_locally=true and backend='vllm'"
+        )
+    if trainer.policy.model.lora.rank > 0:
+        # TODO(kyuds): verify that save_hf_model writes a merged full model under LoRA (FSDP syncs
+        # adapters, Megatron merges by default), then lift this.
+        raise ValueError("trainer.eval_dispatch.mode='reserved' does not support LoRA yet")
+    validate_dict_keys_against_dataclass(InferenceEngineConfig, dispatch.engine_overrides)
+    if fixed := dispatch.FIXED_OVERRIDES & dispatch.engine_overrides.keys():
+        raise ValueError(f"trainer.eval_dispatch.engine_overrides may not set {sorted(fixed)}")
+    # The reserved group's own engine config through the engine validator, so an override that
+    # breaks a vLLM invariant fails at startup with the message that validator already has.
+    from skyrl.train.eval.reserved import (
+        reserved_train_cfg,  # lazy: the eval package is not a dependency here
+    )
+
+    validate_inference_engine_cfg(reserved_train_cfg(cfg))
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -367,6 +414,11 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints "
             "or negative to keep all checkpoints"
         )
+    if cfg.trainer.max_hf_exports_to_keep == 0:
+        raise ValueError(
+            "`max_hf_exports_to_keep` must be greater than 0 to keep the newest N exports "
+            "or negative to keep all exports"
+        )
 
     cfg.trainer.policy.torch_profiler_config.validate(
         strategy=cfg.trainer.strategy,
@@ -374,6 +426,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         colocate_policy_ref=cfg.trainer.placement.colocate_policy_ref,
         fsdp_cpu_offload=cfg.trainer.policy.fsdp_config.cpu_offload,
     )
+
+    validate_eval_dispatch_cfg(cfg)
 
     # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
     repopulate_all_registries()
@@ -1353,3 +1407,27 @@ def get_free_port():
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+def fetch_export_once(uri: str, cache_dir: Path) -> Path:
+    """Download a cloud HF export into ``cache_dir`` once per node and return it.
+
+    Called by every vLLM worker process of the reserved eval engine group (TP ranks, co-located
+    engines) before it loads the export: they serialize on a file lock, the first downloads, the rest
+    find the completion marker. Sibling ``global_step_*`` entries under the parent are evicted first:
+    one eval runs at a time, so nothing on the node still reads them.
+    """
+    cache_dir = Path(cache_dir)
+    marker = cache_dir / ".complete"
+    cache_dir.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(cache_dir.parent / ".fetch.lock"):
+        for other in cache_dir.parent.glob("global_step_*"):
+            if other != cache_dir:
+                shutil.rmtree(other, ignore_errors=True)
+        if not marker.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)  # a half-finished earlier attempt
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            # Same call shape as io.local_read_dir: the export's files land directly in cache_dir.
+            io.download_directory(uri, str(cache_dir))
+            marker.touch()
+    return cache_dir

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import logging
@@ -31,6 +30,9 @@ from skyrl.backends.skyrl_train.weight_sync.delta_payload import (
     compress_bytes,
     decompress_bytes,
     uint8_tensor_to_bytes,
+)
+from skyrl.train.utils.file_lock import (
+    FileLock,  # the leaf itself: the package re-export is not built yet when this module loads first
 )
 
 logger = logging.getLogger(__name__)
@@ -282,42 +284,6 @@ def resolve_checkpoint_path(model_path: str) -> Path:
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(model_path, allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt"]))
-
-
-class FileLock:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._fd: Optional[int] = None
-
-    def acquire(self, blocking: bool = True) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
-        flags = fcntl.LOCK_EX
-        if not blocking:
-            flags |= fcntl.LOCK_NB
-        try:
-            fcntl.flock(fd, flags)
-        except BlockingIOError:
-            os.close(fd)
-            return False
-        except Exception:
-            os.close(fd)
-            raise
-        self._fd = fd
-        return True
-
-    def release(self) -> None:
-        if self._fd is not None:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
-            os.close(self._fd)
-            self._fd = None
-
-    def __enter__(self) -> "FileLock":
-        self.acquire(blocking=True)
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.release()
 
 
 def _read_safetensors_header(path: Path) -> tuple[int, dict]:

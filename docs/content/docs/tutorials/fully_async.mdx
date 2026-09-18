@@ -123,6 +123,24 @@ Other restrictions (will be validated by the trainer):
 - `generator.batched`: Must be set to `false` to use non-batched vLLM engines.
 - `trainer.algorithm.dynamic_sampling.type`: Must be set to `"none"` to disable dynamic sampling (not supported yet).
 
+### Evaluation without stalling the loop
+
+By default an eval runs inline on the training engines, and the loop waits for it (`trainer.eval_dispatch.mode=blocking`).
+With `trainer.eval_dispatch.mode=reserved`, evals run on `trainer.eval_dispatch.num_engines` eval-only engines that
+never join weight sync: at an eval step the loop admits the eval and moves on, the reserved engines load the HF export
+written at that step, and the result is logged at the step it measured together with `eval/lag_steps` (how far the loop
+had moved by then) and `eval/duration_seconds`. Two things to set alongside it:
+
+- `trainer.eval_interval` must be a multiple of `trainer.hf_save_interval`: the HF export is the snapshot the eval loads,
+  so every eval step must also be an export step (the final step always exports).
+- `trainer.max_hf_exports_to_keep` bounds the disk those exports take (the default keeps all of them). An export a queued
+  or running eval still needs is never deleted.
+
+`trainer.eval_dispatch.max_queue_size` (default 2) bounds the evals in flight; when it is full,
+`trainer.eval_dispatch.overflow_policy=backpressure` (default) makes the loop wait for the oldest eval, while `skip` drops
+the point and logs `eval/skipped_busy` instead. The reserved engines take `num_engines` GPUs in addition to the training
+fleet's, colocated or not. See `examples/train/gsm8k/run_gsm8k_reserved_eval.sh`.
+
 ### Benchmarking generation with a simulated trainer
 
 To benchmark the generation/inference side alone — e.g. router load-balancing policies on a large

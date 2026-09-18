@@ -92,6 +92,10 @@ VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 # lives in exactly one place (weight_sync/fp8/models).
 _BATCHED_MOE_TARGETS = batched_moe_wire_targets()
 
+# Host-memory bound per chunk when a full checkpoint is streamed into the model from disk
+# (``skyrl_load_weights_from_path``); TP ranks on one node each hold a chunk at a time.
+_LOAD_CHUNK_BYTES = 1 << 30
+
 
 def _map_hf_weight_name(model: torch.nn.Module, name: str) -> str:
     """Apply a top-level vLLM model's HF-to-runtime prefix mapping."""
@@ -253,6 +257,65 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         if fetch is None:
             raise RuntimeError(f"{type(self.weight_transfer_engine).__name__} does not support fetch_weights")
         return fetch(target_version=target_version, sync_dir=sync_dir, uri=uri)
+
+    def skyrl_load_weights_from_path(self, path: str, weight_version: str, cache_dir: str) -> str:
+        """Reload the full model from an HF checkpoint and stamp its weight version.
+
+        ``path`` is a local directory, a hub id, or a cloud URI (fetched once per node into
+        ``cache_dir``). Used by the reserved eval engine group, which never joins weight sync:
+        this is its only way to receive a new version. Returns ``weight_version`` so the caller
+        can verify that every worker on every server loaded it -- the router mixes versions
+        otherwise.
+        """
+        from pathlib import Path
+
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader.weight_utils import (
+            multi_thread_safetensors_weights_iterator,
+        )
+
+        from skyrl.backends.skyrl_train.utils.io import io
+        from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
+            _checkpoint_safetensors_files,
+            resolve_checkpoint_path,
+        )
+        from skyrl.train.utils.utils import fetch_export_once
+
+        local = fetch_export_once(path, Path(cache_dir)) if io.is_cloud_path(path) else resolve_checkpoint_path(path)
+        files = _checkpoint_safetensors_files(Path(local))
+        weights = multi_thread_safetensors_weights_iterator(files, use_tqdm_on_load=False, max_workers=8)
+        model = self.model_runner.model
+
+        self.skyrl_start_weight_update(is_checkpoint_format=True)
+        try:
+            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+                # Stream in bounded chunks: materializing the whole export on the host would cost one
+                # model's worth of RAM per worker process. The layerwise reload started above defers
+                # each layer's post-processing until all of its weights have arrived, whatever the
+                # chunking (the IPC weight-sync path relies on the same property).
+                chunk: list[tuple[str, torch.Tensor]] = []
+                chunk_bytes = 0
+                for name, tensor in weights:
+                    chunk.append((name, tensor))
+                    chunk_bytes += tensor.numel() * tensor.element_size()
+                    if chunk_bytes >= _LOAD_CHUNK_BYTES:
+                        _load_checkpoint_weights(model, chunk)
+                        chunk, chunk_bytes = [], 0
+                if chunk:
+                    _load_checkpoint_weights(model, chunk)
+        finally:
+            self.skyrl_finish_weight_update()
+        torch.accelerator.synchronize()
+        _empty_cuda_cache_rocm()
+        self._skyrl_weight_version = weight_version
+        return weight_version
+
+    def skyrl_path_exists(self, path: str) -> bool:
+        """Whether this worker's node can read ``path``. Cloud-aware, so probing a cloud
+        ``export_path`` also proves the node has credentials for it."""
+        from skyrl.backends.skyrl_train.utils.io import io
+
+        return io.exists(path)
 
     def update_weights_ipc(self, update_info: dict) -> None:
         """
