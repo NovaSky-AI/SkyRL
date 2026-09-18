@@ -35,6 +35,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.optimizer_state import (
+    reload_optimizer_model_params,
+)
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl.backends.skyrl_train.utils.io import io
@@ -501,6 +504,10 @@ class MegatronStrategy(DistributedStrategy):
             ), f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             optimizer.load_state_dict(state_dict["optimizer"])
             self.print("Loaded optimizer state dict.")
+        elif optimizer is not None:
+            # The next optimizer step copies masters back to the model. Seed
+            # those masters from the newly loaded full-model or LoRA weights.
+            reload_optimizer_model_params(optimizer)
 
         if scheduler and load_lr_scheduler_states:
             assert (
