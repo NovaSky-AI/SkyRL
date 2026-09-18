@@ -266,21 +266,31 @@ class VLLMServerActor(ServerActorProtocol):
         from a placement group.
         """
         if mp_cuda_visible_devices is not None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
             # Keep HIP/ROCR aligned with CUDA mask on ROCm (vLLM platform detection).
             try:
                 import torch
 
                 if getattr(torch.version, "hip", None) is not None:
-                    os.environ["HIP_VISIBLE_DEVICES"] = mp_cuda_visible_devices
                     os.environ["ROCR_VISIBLE_DEVICES"] = mp_cuda_visible_devices
+                    logical_devices = ",".join(
+                        str(i) for i, _ in enumerate(mp_cuda_visible_devices.split(","))
+                    )
+                    os.environ["HIP_VISIBLE_DEVICES"] = logical_devices
+                    os.environ["CUDA_VISIBLE_DEVICES"] = logical_devices
                 else:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
                     os.environ.pop("ROCR_VISIBLE_DEVICES", None)
                     os.environ.pop("HIP_VISIBLE_DEVICES", None)
             except ImportError:
+                os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
                 os.environ.pop("ROCR_VISIBLE_DEVICES", None)
                 os.environ.pop("HIP_VISIBLE_DEVICES", None)
-            logger.info(f"Server {self._server_idx}: mp backend, " f"CUDA_VISIBLE_DEVICES={mp_cuda_visible_devices}")
+            logger.info(
+                f"Server {self._server_idx}: mp backend, "
+                f"ROCR_VISIBLE_DEVICES={os.environ.get('ROCR_VISIBLE_DEVICES')}, "
+                f"HIP_VISIBLE_DEVICES={os.environ.get('HIP_VISIBLE_DEVICES')}, "
+                f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}"
+            )
         else:
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
             os.environ.pop("ROCR_VISIBLE_DEVICES", None)
@@ -616,7 +626,15 @@ async def _build_and_serve_vllm_server(
     sock_addr = (cli_args.host, cli_args.port)
     # One uvicorn per port (no api_server_count fan-out), matching vLLM's own
     # single-server path, so SO_REUSEPORT stays off.
-    sock = create_server_socket(sock_addr, reuse_port=False)
+    # vLLM 0.20.2 exposes create_server_socket(addr); newer revisions add a
+    # reuse_port keyword.  The pinned ROCm revision always enables SO_REUSEPORT
+    # internally and each SkyRL actor already owns a distinct port.
+    try:
+        sock = create_server_socket(sock_addr, reuse_port=False)
+    except TypeError as exc:
+        if "reuse_port" not in str(exc):
+            raise
+        sock = create_server_socket(sock_addr)
     app = build_app(cli_args)
 
     # Initialize the engine (this loads the model - takes time)

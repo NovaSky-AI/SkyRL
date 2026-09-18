@@ -17,7 +17,8 @@ cd "$ROOT"
 : "${LOGGER:=console}"
 : "${MEGATRON_TP:=1}"
 : "${MEGATRON_PP:=1}"
-: "${NUM_ENGINES:=${NUM_GPUS}}"
+: "${VLLM_TP:=${NUM_GPUS}}"
+: "${NUM_ENGINES:=1}"
 : "${LOG_DIR:=/tmp/skyrl-logs-rocm}"
 : "${CKPT_DIR:=$HOME/ckpts/gsm8k_megatron_rocm}"
 
@@ -55,6 +56,7 @@ echo "=== Starting Megatron GRPO on ROCm (${NUM_GPUS} GPUs) ==="
 python3 -m skyrl.train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
+  data.dataloader.num_workers=0 \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.policy.model.path="${MODEL_NAME}" \
   trainer.placement.colocate_all=true \
@@ -63,7 +65,7 @@ python3 -m skyrl.train.entrypoints.main_base \
   trainer.placement.ref_num_gpus_per_node="${NUM_GPUS}" \
   trainer.placement.critic_num_gpus_per_node=0 \
   generator.inference_engine.num_engines="${NUM_ENGINES}" \
-  generator.inference_engine.tensor_parallel_size=1 \
+  generator.inference_engine.tensor_parallel_size="${VLLM_TP}" \
   trainer.policy.megatron_config.tensor_model_parallel_size="${MEGATRON_TP}" \
   trainer.policy.megatron_config.pipeline_model_parallel_size="${MEGATRON_PP}" \
   trainer.ref.megatron_config.tensor_model_parallel_size="${MEGATRON_TP}" \
@@ -81,6 +83,7 @@ python3 -m skyrl.train.entrypoints.main_base \
   trainer.max_prompt_length=256 \
   generator.sampling_params.max_generate_length=128 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
+  trainer.use_expandable_segments=false \
   trainer.algorithm.use_kl_loss=true \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \

@@ -44,12 +44,19 @@ def rocm_extra_engine_env_vars() -> Dict[str, str]:
 
 
 def rocm_visible_device_env(gpu_ids: List[int]) -> Dict[str, str]:
-    """Pin HIP/ROCR/CUDA masks before the engine actor imports torch/vLLM."""
-    vis = ",".join(str(g) for g in gpu_ids)
+    """Pin physical ROCr IDs and process-local HIP/CUDA IDs.
+
+    ROCr applies its mask before HIP.  Setting all three masks to a physical
+    ID such as ``1`` first leaves one device via ROCr and then asks HIP for
+    index 1 of that one-device set, producing zero visible GPUs.  HIP and
+    CUDA therefore use logical indices within the ROCr-filtered set.
+    """
+    physical = ",".join(str(g) for g in gpu_ids)
+    logical = ",".join(str(i) for i in range(len(gpu_ids)))
     return {
-        "HIP_VISIBLE_DEVICES": vis,
-        "ROCR_VISIBLE_DEVICES": vis,
-        "CUDA_VISIBLE_DEVICES": vis,
+        "HIP_VISIBLE_DEVICES": logical,
+        "ROCR_VISIBLE_DEVICES": physical,
+        "CUDA_VISIBLE_DEVICES": logical,
     }
 
 

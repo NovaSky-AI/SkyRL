@@ -8,9 +8,9 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
 
 def test_rocm_visible_device_env():
     assert rocm_visible_device_env([0, 2]) == {
-        "HIP_VISIBLE_DEVICES": "0,2",
+        "HIP_VISIBLE_DEVICES": "0,1",
         "ROCR_VISIBLE_DEVICES": "0,2",
-        "CUDA_VISIBLE_DEVICES": "0,2",
+        "CUDA_VISIBLE_DEVICES": "0,1",
     }
 
 

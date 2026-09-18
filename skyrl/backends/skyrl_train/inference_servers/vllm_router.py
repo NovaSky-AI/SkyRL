@@ -125,7 +125,13 @@ class VLLMRouter:
         router_url = format_http_url(ip, self._router_args.port)
         self._wait_until_healthy(router_url)
 
-        is_pd = self._router_args.vllm_pd_disaggregation or self._router_args.pd_disaggregation
+        # RouterArgs renamed the PD flag across vllm-router releases.  Support
+        # both without eagerly accessing a field absent from the pinned ROCm
+        # stack.
+        is_pd = bool(
+            getattr(self._router_args, "vllm_pd_disaggregation", False)
+            or getattr(self._router_args, "pd_disaggregation", False)
+        )
         if is_pd:
             logger.info(
                 f"VLLMRouter (PD) started at {router_url}: "
