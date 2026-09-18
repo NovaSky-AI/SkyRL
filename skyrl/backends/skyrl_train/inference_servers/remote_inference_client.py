@@ -332,10 +332,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     try:
                         body = orjson.loads(await resp.read())
                     except orjson.JSONDecodeError as e:
+                        # The bare JSONDecodeError says only "line 1 column 1 (char 0)", which
+                        # gives no hint whether the body was empty, an HTML error page, or a
+                        # plain-text 5xx. Capture the status and a snippet so a failure here is
+                        # diagnosable from the log alone.
+                        try:
+                            text = await resp.text()
+                        except Exception:  # noqa: BLE001 - body may be unreadable
+                            text = "<unreadable>"
                         if 400 <= resp.status < 500:
                             # Non-JSON client error (e.g. plain text 422 from vllm-router).
                             # Raise immediately — client errors won't succeed on retry.
-                            text = await resp.text()
                             raise aiohttp.ClientResponseError(
                                 resp.request_info,
                                 resp.history,
@@ -344,7 +351,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
                                 headers=resp.headers,
                             )
                         last_exc = e
-                        logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
+                        logger.warning(
+                            f"non-JSON response from {url} on attempt "
+                            f"{attempt + 1}/{_DATA_PLANE_RETRIES}: status={resp.status} "
+                            f"len={len(text)} body={text[:500]!r}"
+                        )
                         await asyncio.sleep(1)
                         continue
                     raise_for_status(resp, body)

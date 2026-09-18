@@ -155,7 +155,14 @@ def init_worker_with_type(
     num_nodes=1,
     cfg=None,
     num_gpus_per_actor=None,
+    worker_cls=None,
 ) -> PPORayActorGroup:
+    """Build a worker actor group for a test.
+
+    ``worker_cls`` overrides the production worker class (already
+    ``ray.remote``-decorated) with a test-only subclass carrying extra methods --
+    see ``delta_weight_sync_utils`` for the construction pattern.
+    """
     if cfg is None:
         cfg = get_test_actor_config()
 
@@ -171,7 +178,7 @@ def init_worker_with_type(
         if num_gpus_per_actor is None:
             num_gpus_per_actor = 0.75
 
-    worker_cls = import_worker(cfg.trainer.strategy, worker_type)
+    worker_cls = worker_cls or import_worker(cfg.trainer.strategy, worker_type)
     model = PPORayActorGroup(
         cfg.trainer,
         num_nodes=num_nodes,

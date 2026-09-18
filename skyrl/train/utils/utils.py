@@ -795,6 +795,16 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
+    # TileLang JITs kernels by shelling out to nvcc, and picks its toolkit from CUDA_HOME,
+    # defaulting to the pip wheel tree (site-packages/nvidia/cu13). That tree can be internally
+    # inconsistent -- e.g. nvidia-cuda-nvcc==13.3 next to nvidia-cuda-runtime==13.0 -- and
+    # nvidia-cuda-cccl then rejects the pair at compile time with "CUDA compiler and CUDA toolkit
+    # headers are incompatible". Pointing CUDA_HOME at a self-consistent system toolkit
+    # (e.g. /usr/local/cuda-13.3) fixes it. Workers are re-exec'd through the runtime env, so a
+    # plain driver export does not reach them; forward it here for both trainer and engine actors.
+    if os.environ.get("CUDA_HOME"):
+        env_vars["CUDA_HOME"] = os.environ["CUDA_HOME"]
+
     # NOTE (erictang000): This should no longer be required since this has been removed in vllm
     # and fixed in NCCL (https://github.com/vllm-project/vllm/pull/24141, https://github.com/NVIDIA/nccl/issues/1234), but empirically seeing OOMs for
     # that previously ran successfully, so keeping this to maintain backwards compatibility.

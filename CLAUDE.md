@@ -49,6 +49,7 @@ When working on these areas, read the corresponding doc first:
 | FSDP backend | `.claude/docs/backends/fsdp.md` |
 | JAX/TPU backend | `.claude/docs/backends/jax.md` |
 | Weight sync | `.claude/docs/weight_sync.md` |
+| GLM-5.3-Flash LoRA weight sync (`merge_lora`) | `.claude/docs/glm5_3_flash_lora.md` |
 
 
 ## Troubleshooting
