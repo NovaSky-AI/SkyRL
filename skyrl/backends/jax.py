@@ -24,6 +24,7 @@ import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, get_type_hints
 
 import jax
@@ -826,6 +827,10 @@ class JaxBackendImpl(AbstractBackend):
                 jnp.int32(adapter_index),
             )
 
+        # Training mutates the same LoRA weights used for sampling. Force a
+        # saved sampler snapshot to be reloaded before it is sampled again.
+        self.models[model_id].loaded_checkpoint_id = None
+
         output_metrics = jax.device_get(optim_metrics).to_output_metrics()
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), metrics={output_metrics}")
         return types.OptimStepOutput(metrics=output_metrics)
@@ -966,6 +971,7 @@ class JaxBackendImpl(AbstractBackend):
             )
 
         insert_adapter_state(adapter_index, self.lora_params, checkpoint_data["lora_weights"], rank)
+        self.models[model_id].loaded_checkpoint_id = None
         if load_optimizer:
             insert_adapter_state(
                 adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
@@ -986,17 +992,26 @@ class JaxBackendImpl(AbstractBackend):
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
-        """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
+        """Make the current LoRA weights available to the sampler."""
         lora_model = self.models[model_id]
-        save_lora_checkpoint(
-            self.model,
-            self.base_model,
-            lora_model.lora_config,
-            lora_model.adapter_index,
-            output_path,
-            self.process_id,
-        )
-        logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
+        if persist:
+            save_lora_checkpoint(
+                self.model,
+                self.base_model,
+                lora_model.lora_config,
+                lora_model.adapter_index,
+                output_path,
+                self.process_id,
+            )
+            logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
+
+        # Training and sampling share one in-memory model in this backend. Marking
+        # these weights as loaded avoids a redundant archive round trip on the
+        # next sample request, and lets ephemeral RL syncs skip disk entirely.
+        checkpoint_id = Path(str(output_path)).name.removesuffix(".tar.gz")
+        lora_model.loaded_checkpoint_id = checkpoint_id
+        if not persist:
+            logger.info(f"Updated in-memory LoRA sampler weights for model {model_id}")
 
     def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path: AnyPath) -> None:
         """Insert sampler weights from checkpoint file."""
