@@ -193,6 +193,32 @@ def test_full_mode_admits_pipeline_parallel_trainer_only_with_asymmetric_colocat
         validate_logprob_comparison(cfg)
 
 
+def test_full_mode_admits_context_parallel_at_degree_two_only():
+    # CP=2 on two policy GPUs: one replica's tokens are cut over the pair, the engine keeps GPU 0.
+    cfg = _full_mode_config()
+    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.placement.asymmetric_colocation = True
+    cfg.trainer.policy.megatron_config.context_parallel_size = 2
+    validate_logprob_comparison(cfg)
+
+    # It composes with TP and PP as one more model-parallel factor of the policy GPUs.
+    cfg.trainer.placement.policy_num_gpus_per_node = 8
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+    validate_logprob_comparison(cfg)
+
+    # Any other degree is refused by name, and so is expert parallelism under a CP cut.
+    cfg.trainer.policy.megatron_config.context_parallel_size = 4
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+    with pytest.raises(ValueError, match="context_parallel_size in \\(1, 2\\)"):
+        validate_logprob_comparison(cfg)
+    cfg.trainer.policy.megatron_config.context_parallel_size = 2
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = 2
+    with pytest.raises(ValueError, match="expert_model_parallel_size=1 under context parallelism"):
+        validate_logprob_comparison(cfg)
+
+
 def test_full_mode_admits_expert_parallel_trainer_only_with_asymmetric_colocation():
     cfg = _full_mode_config()
     cfg.trainer.placement.policy_num_gpus_per_node = 2

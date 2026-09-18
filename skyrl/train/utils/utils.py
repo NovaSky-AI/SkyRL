@@ -575,7 +575,9 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
     policy_gpus = placement.policy_num_gpus_per_node
     tp, pp = megatron.tensor_model_parallel_size, megatron.pipeline_model_parallel_size
     cp, ep = megatron.context_parallel_size, megatron.expert_model_parallel_size
-    model_parallel = tp * pp
+    # Context parallelism multiplies the model-parallel footprint like TP and PP do: a CP group of 2
+    # holds ONE replica's tokens, so dense DP is what is left after TP x PP x CP.
+    model_parallel = tp * pp * cp if isinstance(cp, int) and cp >= 1 else 0
     dense_dp = policy_gpus // model_parallel if model_parallel and policy_gpus % model_parallel == 0 else 0
     engine_gpus = (
         engine.num_engines * engine.tensor_parallel_size * engine.pipeline_parallel_size * engine.data_parallel_size
@@ -603,9 +605,13 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
         # pipeline stages other than the last hold no head and compare nothing.
         (
             dense_dp >= 1,
-            f"tensor_model_parallel_size x pipeline_model_parallel_size ({tp} x {pp}) dividing the {policy_gpus} policy GPUs",
+            f"tensor x pipeline x context parallel size ({tp} x {pp} x {cp}) dividing the {policy_gpus} policy GPUs",
         ),
-        (cp == 1, "context_parallel_size=1"),
+        # IsoExec runs context parallelism at degree 2 on dense softmax-attention models (every CP rank
+        # scores the rows whose predictor token it holds; the ranks' rows are disjoint and tile the
+        # batch). The model-dependent half is refused by IsoExec at build, where the rows are known.
+        (cp in (1, 2), "context_parallel_size in (1, 2)"),
+        (cp == 1 or ep == 1, "expert_model_parallel_size=1 under context parallelism"),
         # IsoExec's expert mesh: EP = TP x dense DP with expert TP 1 (expert DP stays 1).
         (ep in (1, tp * dense_dp), f"expert_model_parallel_size in (1, TP x dense DP = {tp * dense_dp})"),
         (megatron.expert_tensor_parallel_size in (None, 1), "expert_tensor_parallel_size unset or 1"),
