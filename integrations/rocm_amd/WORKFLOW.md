@@ -8,7 +8,7 @@ How SkyRL runs Megatron training and vLLM inference on AMD Instinct through `tra
 ┌─────────────────────────────────────────────────────────────────┐
 │  Ray (skyrl_entrypoint on AMD GPU)                              │
 │                                                                 │
-│  1. ROLLOUT          vLLM HTTP servers (VLLMServerActor, 1/GPU)   │
+│  1. ROLLOUT          vLLM HTTP (1 mp engine, TP across GPUs)    │
 │     prompts → completions                                       │
 │                                                                 │
 │  2. FORWARD          Megatron policy + ref workers              │
@@ -47,7 +47,7 @@ Supported GPUs: **MI300X**, **MI325X** (`gfx942`) and **MI355X** (`gfx950`). `ro
 2. `install_full_stack.sh` — megatron-core, Megatron-Bridge, SkyRL `[rocm-megatron]`, ROCm vLLM, Ray 2.57.
 3. `run_gsm8k_megatron_rocm.sh` — Ray/vLLM preflight, tiny GSM8K parquet, then `python -m skyrl.train.entrypoints.main_base`.
 
-Inside `main_base`: Ray init with explicit `num_gpus` → `ServerGroup` vLLM HTTP actors (one per GPU) → Megatron policy + ref on the same placement group → GRPO loop (generate → reward → forward → advantage → weight sync → train step).
+Inside `main_base`: Ray init with explicit `num_gpus` → `ServerGroup` vLLM HTTP actors (smoke: one engine, TP = GPU count) → Megatron policy + ref on the same placement group → GRPO loop (generate → reward → forward → advantage → weight sync → train step). See the README for supported parallelism and Megatron pin compatibility.
 
 ## vLLM build and SkyRL integration
 

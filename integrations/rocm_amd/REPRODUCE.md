@@ -16,6 +16,8 @@ Same recipe on MI300X, MI325X, and MI355X. **2 GPUs**. Do **not** `pip install v
 
 Need Docker or Podman, `/dev/kfd`, `/dev/dri`, and two supported GPUs.
 
+These pins are required together. Arbitrary megatron-core / Megatron-Bridge commits are not supported on AMD; see [README.md](README.md#compatibility-megatron-bridge--megatron-core).
+
 ## Commands
 
 ```bash
