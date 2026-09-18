@@ -33,6 +33,20 @@ def test_isoexec_runtime_uses_physical_gpu_namespace():
     assert prepare_runtime_environment(cfg)["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] == "1"
 
 
+def test_isoexec_runtime_forwards_isoexec_overrides_only_when_enabled(monkeypatch):
+    monkeypatch.setenv("ISOEXEC_FULL_DISTRIBUTION_EVIDENCE_DIR", "/evidence/rows")
+    monkeypatch.setenv("ISOEXEC", "1")
+    cfg = example_dummy_config()
+
+    assert "ISOEXEC_FULL_DISTRIBUTION_EVIDENCE_DIR" not in prepare_runtime_environment(cfg)
+
+    cfg.trainer.enable_isoexec = True
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert env_vars["ISOEXEC_FULL_DISTRIBUTION_EVIDENCE_DIR"] == "/evidence/rows"
+    assert env_vars["ISOEXEC"] == "1"
+
+
 def test_full_mode_fields_are_cli_overridable():
     cfg = SkyRLTrainConfig.from_cli_overrides(
         [
