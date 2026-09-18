@@ -32,6 +32,11 @@ from skyrl.backends.skyrl_train.inference_servers.layerwise_reload import (
     LayerwiseReloadWorkerMixin,
     _empty_cuda_cache_rocm,
 )
+from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+    patch_vllm_dummy_weight_boot_detection,
+    patch_vllm_fp8_kv_scale_boot_normalization,
+    patch_vllm_fp8_kv_scale_completion,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import cuda_uuid_to_str
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
@@ -46,6 +51,14 @@ try:
     register_delta_weight_transfer_engine()
 except ModuleNotFoundError:
     pass
+
+# Apply the compatibility patches before vLLM constructs each worker.
+# Must be installed before the two KV-scale patches run: it is what tells them
+# whether this engine booted from dummy weights (serialized FP8 weight sync) or
+# from a real checkpoint whose calibrated scales they must not touch.
+patch_vllm_dummy_weight_boot_detection()
+patch_vllm_fp8_kv_scale_boot_normalization()
+patch_vllm_fp8_kv_scale_completion()
 
 # Registering the sharded_rdt engine into vLLM's WeightTransferEngineFactory must
 # happen inside every worker process (GPUWorker.load_model builds the engine via

@@ -5,8 +5,6 @@ Provides `LayerwiseReloadWorkerMixin`, the start/finish bracket that
 reload once per weight sync rather than once per chunk.
 """
 
-import inspect
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -14,55 +12,6 @@ import torch
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
-
-def get_numel_loaded(weight_loader: Callable, args: inspect.BoundArguments) -> tuple[int, object]:
-    """
-    Determine how many elements would be loaded by a weight loader call.
-
-    Args:
-        weight_loader: used to load weights
-        args: bound arguments to weight loader
-
-    Returns:
-        number of elements loaded by the weight loader, the return value of the
-        weight loader
-    """
-    # Lazy import: vllm is a Linux-only optional dependency, so this module stays importable on macOS / CI.
-    from vllm.model_executor.model_loader.reload.meta import CopyCounter
-
-    with CopyCounter() as counter:
-        return_value = weight_loader(*args.args, **args.kwargs)
-
-    # A weight loader fills a single destination parameter, so the number of
-    # loaded elements is at most that parameter's size. Some loaders copy into
-    # the parameter more than once -- e.g. ``composed_weight_loader`` runs an
-    # in-place post-load transform (``param.copy_(fn(param))``) on top of the
-    # initial copy -- which would make CopyCounter report twice the parameter
-    # size. Over-counting inflates the layer's loaded-element total and can
-    # finalize the layer before every parameter is loaded, silently dropping
-    # the trailing parameter(s) (e.g. Mamba ``mixer.D``). Cap the count at the
-    # destination size to keep the per-layer accounting correct.
-    numel = counter.copied_numel
-    param = args.arguments.get("param", None)
-    if isinstance(param, torch.Tensor):
-        numel = min(numel, param.numel())
-    return numel, return_value
-
-
-def patch_numel_loaded():
-    # vLLM's layerwise reload binds get_numel_loaded at import time
-    # (`from .meta import get_numel_loaded`), so its call site at
-    # layerwise.py uses the `layerwise` module's own binding. Rebind that
-    # attribute to our patched version to substitute the symbol.
-    from vllm.model_executor.model_loader.reload import layerwise as _layerwise
-    from vllm.model_executor.model_loader.reload import meta as _meta
-
-    _layerwise.get_numel_loaded = get_numel_loaded
-    _meta.get_numel_loaded = get_numel_loaded
-
-
-_PATCHED_LAYERWISE_NUMEL_LOADED = False
 
 
 def _empty_cuda_cache_rocm() -> None:
@@ -121,13 +70,15 @@ class LayerwiseReloadWorkerMixin:
         if getattr(self, "_weight_update_active", False):
             raise RuntimeError("vLLM native weight update is already active. Call finish_weight_update first.")
 
-        # Ensure the get_numel_loaded patch is in effect before layerwise
-        # reload runs.
-        global _PATCHED_LAYERWISE_NUMEL_LOADED
-        if not _PATCHED_LAYERWISE_NUMEL_LOADED:
-            # use patched version, based on https://github.com/vllm-project/vllm/pull/44814
-            patch_numel_loaded()
-            _PATCHED_LAYERWISE_NUMEL_LOADED = True
+        # MXFP8 TRT-LLM MoE prepare re-derives a fixed per-layer weight/scale
+        # relocation on every sync. Replace it with a learned,
+        # bitwise-validated permutation cache; falls back to the original on
+        # any mismatch. No-op for non-MXFP8 wires.
+        from skyrl.backends.skyrl_train.inference_servers.trtllm_moe_prepare_cache import (
+            install as install_trtllm_moe_prepare_cache,
+        )
+
+        install_trtllm_moe_prepare_cache()
 
         if is_checkpoint_format:
             # Lazy import: vllm is a Linux-only optional dependency, so this module stays importable on macOS / CI.
@@ -180,6 +131,24 @@ class LayerwiseReloadWorkerMixin:
             model = self.model_runner.model
             with set_current_vllm_config(self.vllm_config), torch.device(self.device):
                 finalize_layerwise_reload(model, self.model_config)
+
+        # Serialized FP8 sync ships no KV/attention scale calibration, so scales
+        # are 1.0 by contract. Re-assert it after every sync: vLLM 0.26 corrupts
+        # them at boot (compressed-tensors copies dummy-load placeholders
+        # verbatim) and after level-2 wake (init_fp8_kv_scales resets only the
+        # k/v tensors — q wakes as 0.0 and the float mirrors keep garbage),
+        # which serves NaN (quantized-Q path) or silently wrong logprobs
+        # (bf16-Q path) under kv_cache_dtype=fp8_*.
+        # Gated on a dummy-weight boot: this mixin also serves engines started
+        # from a real FP8 checkpoint, whose calibrated k/v scales must survive
+        # a sync that does not carry replacements for them.
+        from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+            booted_without_checkpoint_weights,
+            normalize_serialized_fp8_kv_scales,
+        )
+
+        if booted_without_checkpoint_weights():
+            normalize_serialized_fp8_kv_scales(self.model_runner)
 
         self._skyrl_weight_update_active = False
         self._skyrl_is_checkpoint_format = True
