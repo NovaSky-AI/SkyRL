@@ -585,11 +585,24 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
         and not generator.step_wise_trajectories
         and trainer.algorithm.dynamic_sampling.type is None
         and trainer.policy.model.lora.rank == 0
-        and trainer.placement.colocate_all
         and trainer.placement.policy_num_nodes == 1
-        # Extra trainer GPUs are pure data parallelism here (every Megatron dimension below is 1);
-        # they are admitted only under the explicit asymmetric colocation contract.
-        and (trainer.placement.policy_num_gpus_per_node == 1 or trainer.placement.asymmetric_colocation)
+        and (
+            # Colocated: one GPU per side, or extra trainer GPUs as pure data parallelism (every
+            # Megatron dimension below is 1) under the explicit asymmetric colocation contract.
+            (
+                trainer.placement.colocate_all
+                and (trainer.placement.policy_num_gpus_per_node == 1 or trainer.placement.asymmetric_colocation)
+                and engine.data_parallel_size == 1
+            )
+            # Non-colocated: a one-GPU trainer with NCCL broadcast weight sync may serve one or
+            # more data-parallel engine replicas (each replica returns its own full rows).
+            or (
+                not trainer.placement.colocate_all
+                and trainer.placement.policy_num_gpus_per_node == 1
+                and engine.weight_sync_backend == "nccl"
+                and engine.data_parallel_size >= 1
+            )
+        )
         and all(
             getattr(megatron, name) == 1
             for name in (
@@ -604,7 +617,7 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
         and engine.run_engines_locally
         and engine.num_engines == 1
         and not engine.enable_pd
-        and engine.tensor_parallel_size == engine.pipeline_parallel_size == engine.data_parallel_size == 1
+        and engine.tensor_parallel_size == engine.pipeline_parallel_size == 1
         and engine.expert_parallel_size == 1
         and engine.speculative_config is None
         and engine.fp8_weight_sync_mode is None
@@ -614,9 +627,10 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
     if not supported:
         raise ValueError(
             "full logprob comparison requires enable_isoexec=true with synchronous, packed, text-only, "
-            "single-turn batched colocated Megatron/vLLM on one GPU per side (or data-parallel-only trainer "
-            "GPUs with placement.asymmetric_colocation), temperature=1, without fused LM head, LoRA, MTP, "
-            "speculation or dynamic sampling"
+            "single-turn batched Megatron/vLLM with a one-GPU trainer: colocated on one GPU per side (or "
+            "data-parallel-only trainer GPUs with placement.asymmetric_colocation), or non-colocated with "
+            "NCCL broadcast weight sync and data-parallel engine replicas; temperature=1, without fused LM "
+            "head, LoRA, MTP, speculation or dynamic sampling"
         )
     if generator.eval_sampling_params is not None:
         generator.eval_sampling_params.logprobs = None

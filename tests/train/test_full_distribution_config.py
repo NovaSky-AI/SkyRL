@@ -98,7 +98,11 @@ def test_logprob_modes_must_match():
         lambda cfg: setattr(cfg.trainer, "fused_lm_head_logprob", True),
         lambda cfg: setattr(cfg.trainer, "enable_isoexec", False),
         lambda cfg: setattr(cfg.trainer, "remove_microbatch_padding", False),
-        lambda cfg: setattr(cfg.trainer.placement, "colocate_all", False),
+        # Non-colocated is supported only with NCCL broadcast weight sync.
+        lambda cfg: (
+            setattr(cfg.trainer.placement, "colocate_all", False),
+            setattr(cfg.generator.inference_engine, "weight_sync_backend", "delta"),
+        ),
         lambda cfg: setattr(cfg.generator, "vision_language_generator", True),
         lambda cfg: setattr(cfg.trainer.policy.megatron_config, "expert_tensor_parallel_size", 2),
         lambda cfg: setattr(cfg.generator.inference_engine, "tensor_parallel_size", 2),
@@ -127,4 +131,23 @@ def test_full_mode_admits_data_parallel_trainer_only_with_asymmetric_colocation(
 
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
     with pytest.raises(ValueError, match="one GPU per side"):
+        validate_logprob_comparison(cfg)
+
+
+def test_full_mode_admits_non_colocated_data_parallel_engines_with_nccl_broadcast():
+    cfg = _full_mode_config()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    cfg.generator.inference_engine.data_parallel_size = 2
+    validate_logprob_comparison(cfg)
+
+    cfg.generator.inference_engine.weight_sync_backend = "delta"
+    with pytest.raises(ValueError, match="NCCL broadcast"):
+        validate_logprob_comparison(cfg)
+
+
+def test_full_mode_rejects_data_parallel_engines_when_colocated():
+    cfg = _full_mode_config()
+    cfg.generator.inference_engine.data_parallel_size = 2
+    with pytest.raises(ValueError, match="data-parallel engine replicas"):
         validate_logprob_comparison(cfg)

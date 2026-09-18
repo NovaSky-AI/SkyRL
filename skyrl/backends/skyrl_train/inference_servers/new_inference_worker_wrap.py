@@ -375,9 +375,15 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         engine = self.weight_transfer_engine
         typed_update_info = engine.parse_update_info(update_info)
         model = self.model_runner.model
+        # A host loader (e.g. IsoExec's applied-byte receiver) owns the received
+        # tensors when present, exactly as update_weights_ipc dispatches; it also
+        # consumes the sender's handshake/version/digest sentinels.
+        host_loader = getattr(self, "_skyrl_load_kernel_weights", None)
 
         def _load_weights(weights):
             weights = list(weights)
+            if callable(host_loader):
+                return host_loader(weights)
             loaded = _load_checkpoint_weights(model, weights)
             _reload_spec_decode_drafter(self.model_runner, weights)
             return loaded
