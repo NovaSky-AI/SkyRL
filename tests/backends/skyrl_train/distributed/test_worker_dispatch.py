@@ -38,6 +38,43 @@ class TestSaveWeights:
     """Tests for `WorkerDispatch.save_weights_for_sampler`"""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("clear_kv_cache", [False, True])
+    @pytest.mark.parametrize("enable_prefix_caching", [False, True])
+    async def test_async_kv_offload_lifecycle(self, clear_kv_cache, enable_prefix_caching):
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        dispatch = WorkerDispatch.__new__(WorkerDispatch)
+        dispatch.colocate_all = False
+        dispatch.cfg = _fft_dispatch_cfg()
+        dispatch.cfg.trainer.fully_async = SimpleNamespace(enabled=True, clear_kv_cache_on_weight_sync=clear_kv_cache)
+        ie_cfg = dispatch.cfg.generator.inference_engine
+        ie_cfg.offload_kv_for_weight_sync = True
+        ie_cfg.enable_prefix_caching = enable_prefix_caching
+        dispatch._prepare_for_weight_sync = MagicMock()
+        dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
+        events = []
+        client = AsyncMock()
+        client.increment_weight_version = MagicMock()
+        client.pause_generation.side_effect = lambda: events.append("pause")
+        client.sleep_for_weight_sync.side_effect = lambda **kwargs: events.append(("sleep", kwargs["offload_kv"]))
+        client.wake_for_weight_sync.side_effect = lambda **kwargs: events.append(("wake", kwargs["tags"]))
+        client.resume_generation.side_effect = lambda: events.append("resume")
+        dispatch._inference_engine_client = client
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=lambda *a, **kw: events.append("broadcast"))
+
+        await dispatch.save_weights_for_sampler()
+
+        assert events == [
+            "pause",
+            ("sleep", not clear_kv_cache),
+            ("wake", ["weights"]),
+            "broadcast",
+            ("wake", ["kv_cache"]),
+            "resume",
+        ]
+
+    @pytest.mark.asyncio
     async def test_non_colocated_calls_pause_and_resume(self):
         from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 
