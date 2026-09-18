@@ -32,3 +32,17 @@ def test_rocm_colocate_switches_vllm_executor_to_mp():
         validate_inference_engine_cfg(cfg)
 
     assert cfg.generator.inference_engine.distributed_executor_backend == "mp"
+
+
+def test_rocm_colocate_keeps_ray_for_multinode_vllm():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.placement.colocate_all = True
+    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.placement.policy_num_nodes = 2
+    cfg.generator.inference_engine.tensor_parallel_size = 4
+    cfg.generator.inference_engine.distributed_executor_backend = "ray"
+
+    with patch.object(torch.version, "hip", "6.4.43484", create=True):
+        validate_inference_engine_cfg(cfg)
+
+    assert cfg.generator.inference_engine.distributed_executor_backend == "ray"

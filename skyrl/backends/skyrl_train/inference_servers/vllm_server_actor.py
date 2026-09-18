@@ -20,7 +20,6 @@ from ray.util.placement_group import PlacementGroup
 # num_gpus=0 with PG scheduling; Ray may clear CUDA_VISIBLE_DEVICES unless
 # RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0. Defer vLLM imports until __init__/serve
 # after HIP/CUDA masks are set via runtime_env and _setup_mp_gpu_visibility.
-
 from skyrl.backends.skyrl_train.inference_servers.common import (
     ServerInfo,
     compute_dp_master_port,
@@ -241,9 +240,7 @@ class VLLMServerActor(ServerActorProtocol):
             )
 
         # Configure GPU visibility for this server's TP/PP workers
-        if self._use_mp_backend:
-            pass  # applied at start of __init__ before vLLM imports
-        else:
+        if not self._use_mp_backend:
             os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
             # Set bundle indices for this server's TP/PP workers in the placement group.
             # NOTE: This assumes single-GPU-per-bundle placement groups.
@@ -272,9 +269,7 @@ class VLLMServerActor(ServerActorProtocol):
 
                 if getattr(torch.version, "hip", None) is not None:
                     os.environ["ROCR_VISIBLE_DEVICES"] = mp_cuda_visible_devices
-                    logical_devices = ",".join(
-                        str(i) for i, _ in enumerate(mp_cuda_visible_devices.split(","))
-                    )
+                    logical_devices = ",".join(str(i) for i, _ in enumerate(mp_cuda_visible_devices.split(",")))
                     os.environ["HIP_VISIBLE_DEVICES"] = logical_devices
                     os.environ["CUDA_VISIBLE_DEVICES"] = logical_devices
                 else:

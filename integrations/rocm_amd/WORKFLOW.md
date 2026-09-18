@@ -51,7 +51,7 @@ Inside `main_base`: Ray init with explicit `num_gpus` → `ServerGroup` vLLM HTT
 
 ## vLLM build and SkyRL integration
 
-Never `pip install vllm` from PyPI. Build the pinned revision against the container torch and cache the wheel under `.vllm_rocm_cache/wheels/`. Run `verify_vllm_skyrl_compat.py` before GRPO.
+Never `pip install vllm` from PyPI. Build the pinned revision against the container torch and cache the wheel under `.vllm_rocm_cache/wheels/`. The cache is keyed by the vLLM revision, PyTorch and ROCm versions, Python ABI, and target GPU architectures so native wheels are never reused across incompatible environments. Run `verify_vllm_skyrl_compat.py` before GRPO.
 
 | Area | Change |
 |------|--------|

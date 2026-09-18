@@ -35,7 +35,9 @@ def main() -> int:
             return 1
 
     try:
-        from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+        from skyrl.backends.skyrl_train.inference_servers.utils import (
+            build_vllm_cli_args,
+        )
         from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
             VLLMServerActor,
         )

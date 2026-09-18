@@ -60,7 +60,8 @@ log_status "Branch=$(cd "${ROOT}" && git rev-parse --short HEAD 2>/dev/null) mai
 attempt=0
 if [ -n "${FORCE_VLLM_REBUILD:-}" ]; then
   force_rebuild="${FORCE_VLLM_REBUILD}"
-elif compgen -G "${ROOT}/integrations/rocm_amd/.vllm_rocm_cache/wheels/vllm-0.20*.whl" >/dev/null 2>&1; then
+elif find "${ROOT}/integrations/rocm_amd/.vllm_rocm_cache/wheels" \
+  -mindepth 2 -name 'vllm-0.20*.whl' -print -quit 2>/dev/null | grep -q .; then
   force_rebuild=0
 else
   force_rebuild=1

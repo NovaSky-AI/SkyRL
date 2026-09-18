@@ -72,6 +72,12 @@ Optional single-GPU Megatron check: `bash integrations/rocm_amd/validate_megatro
 
 Do **not** `pip install vllm` from PyPI (it pulls CUDA PyTorch). Build with `build_vllm_rocm.sh` and cache under `.vllm_rocm_cache/`.
 
+The installer scripts bootstrap the active container environment intentionally: Megatron and
+the source-built vLLM extensions must use the ROCm PyTorch shipped by the base image.
+Running these bootstrap steps in an isolated `uv` environment would install a second PyTorch
+and can produce ABI-incompatible native extensions. Use the repository's isolated `uv`
+commands for development and tests outside this image-building workflow.
+
 ## Troubleshooting
 
 | Symptom | Likely fix |

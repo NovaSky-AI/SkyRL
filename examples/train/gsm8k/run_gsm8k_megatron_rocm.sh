@@ -44,10 +44,15 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export VLLM_USE_V1=0
 export VLLM_USE_TRITON_FLASH_ATTN=0
 export FLA_TILELANG=0
-# Keep PyTorch's CUDA-compatible device mask aligned with ROCm masks.
+# ROCr filters physical devices first; HIP/CUDA then address that filtered set
+# with process-local indices.
 if [[ -n "${HIP_VISIBLE_DEVICES:-}" ]]; then
-  export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
-  export ROCR_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
+  physical_devices="${HIP_VISIBLE_DEVICES}"
+  num_visible_devices="$(awk -F, '{print NF}' <<<"${physical_devices}")"
+  logical_devices="$(seq -s, 0 "$((num_visible_devices - 1))")"
+  export ROCR_VISIBLE_DEVICES="${physical_devices}"
+  export HIP_VISIBLE_DEVICES="${logical_devices}"
+  export CUDA_VISIBLE_DEVICES="${logical_devices}"
 else
   unset CUDA_VISIBLE_DEVICES
 fi

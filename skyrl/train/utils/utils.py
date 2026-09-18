@@ -656,23 +656,21 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
 
     # vLLM's Ray executor spawns nested GPU workers that lose HIP/CUDA visibility on
     # ROCm during colocated Megatron GRPO (Ray TemporaryActor import failures).
+    pp_size = ie_cfg.pipeline_parallel_size
+    tp_pp_size = tp_size * pp_size
+    num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
     if (
         ie_cfg.distributed_executor_backend == "ray"
         and cfg.trainer.placement.colocate_all
         and ie_cfg.backend == "vllm"
+        and tp_pp_size <= num_gpus_per_node
+        and getattr(torch.version, "hip", None) is not None
     ):
-        try:
-            import torch as _torch_ie
-
-            _on_rocm_ie = getattr(_torch_ie.version, "hip", None) is not None
-        except ImportError:
-            _on_rocm_ie = False
-        if _on_rocm_ie:
-            logger.info(
-                "ROCm colocated vLLM: switching distributed_executor_backend from ray to mp "
-                "(vLLM Ray executor is incompatible with ROCm GPU visibility in colocated GRPO)."
-            )
-            ie_cfg.distributed_executor_backend = "mp"
+        logger.info(
+            "ROCm colocated vLLM: switching distributed_executor_backend from ray to mp "
+            "(vLLM Ray executor is incompatible with ROCm GPU visibility in colocated GRPO)."
+        )
+        ie_cfg.distributed_executor_backend = "mp"
 
     if ie_cfg.enable_return_routed_experts:
         assert (
@@ -685,9 +683,6 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             cfg.trainer.policy.megatron_config.moe_enable_routing_replay
         ), "moe_enable_routing_replay must be True to consume rollout expert indices"
 
-    pp_size = ie_cfg.pipeline_parallel_size
-    tp_pp_size = tp_size * pp_size
-    num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
     if (
         cfg.trainer.placement.colocate_all
         and tp_pp_size > num_gpus_per_node
@@ -833,13 +828,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         env_vars["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "1")
         # CUDA-only: disabling fused TE attention. On ROCm/HIP this breaks Megatron-Bridge
         # model materialize (NVTE_FLASH_ATTN assertion). Skip on AMD.
-        _on_rocm = False
-        try:
-            import torch
-
-            _on_rocm = getattr(torch.version, "hip", None) is not None
-        except ImportError:
-            pass
+        _on_rocm = getattr(torch.version, "hip", None) is not None
         if cfg.trainer.flash_attn and not _on_rocm:
             # disable fused attention for megatron with flash_attn
             # (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
@@ -861,14 +850,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             if os.environ.get(nvte_var):
                 env_vars[nvte_var] = os.environ[nvte_var]
 
-    try:
-        import torch as _torch
-
-        if getattr(_torch.version, "hip", None) is not None:
-            env_vars.setdefault("VLLM_TARGET_DEVICE", "rocm")
-            env_vars.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    except ImportError:
-        pass
+    if getattr(torch.version, "hip", None) is not None:
+        env_vars.setdefault("VLLM_TARGET_DEVICE", "rocm")
+        env_vars.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
@@ -892,13 +876,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         if configured_vllm_use_v1 is not None:
             env_vars["VLLM_USE_V1"] = configured_vllm_use_v1
         else:
-            _on_rocm_vllm = False
-            try:
-                import torch as _torch_vllm
-
-                _on_rocm_vllm = getattr(_torch_vllm.version, "hip", None) is not None
-            except ImportError:
-                pass
+            _on_rocm_vllm = getattr(torch.version, "hip", None) is not None
             if _on_rocm_vllm:
                 logger.info(
                     "ROCm: `VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 0 "
@@ -1195,13 +1173,7 @@ def initialize_ray(cfg: SkyRLTrainConfig):
         "runtime_env": {"env_vars": env_vars},
         "log_to_driver": True,
     }
-    _on_rocm_ray = False
-    try:
-        import torch as _torch_ray
-
-        _on_rocm_ray = getattr(_torch_ray.version, "hip", None) is not None
-    except ImportError:
-        pass
+    _on_rocm_ray = getattr(torch.version, "hip", None) is not None
     if _on_rocm_ray:
         ray_init_kwargs["num_gpus"] = get_ray_init_num_gpus(cfg)
         # Ray's default object store is a large fraction of host RAM and can starve colocated vLLM.

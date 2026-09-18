@@ -10,11 +10,19 @@ VLLM_REV="${VLLM_REV:-bc150f50299199599673614f80d12a196f377655}"
 VLLM_SRC="${VLLM_SRC:-/tmp/vllm-rocm-build-${VLLM_REV:0:12}}"
 SKYRL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 VERIFY_PY="${SKYRL_ROOT}/integrations/rocm_amd/verify_vllm_skyrl_compat.py"
-CACHE_WHEEL_DIR="${SKYRL_ROOT}/integrations/rocm_amd/.vllm_rocm_cache/wheels"
 
 TORCH_VER="$(python3 -c 'import torch; print(torch.__version__)')"
+# MI300X/MI325X use gfx942 (CDNA3); MI355X uses gfx950 (CDNA4).
+export PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx942;gfx950}"
+HIP_VER="$(python3 -c 'import torch; print(torch.version.hip or \"none\")')"
+PYTHON_SOABI="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var(\"SOABI\"))')"
+CACHE_KEY_INPUT="vllm=${VLLM_REV}|torch=${TORCH_VER}|hip=${HIP_VER}|arch=${PYTORCH_ROCM_ARCH}|python=${PYTHON_SOABI}"
+CACHE_KEY="$(printf '%s' "${CACHE_KEY_INPUT}" | sha256sum | cut -d' ' -f1)"
+CACHE_WHEEL_DIR="${SKYRL_ROOT}/integrations/rocm_amd/.vllm_rocm_cache/wheels/${CACHE_KEY}"
+
 echo "Building vLLM ${VLLM_REV} for torch ${TORCH_VER}"
 mkdir -p "${CACHE_WHEEL_DIR}"
+printf '%s\n' "${CACHE_KEY_INPUT}" >"${CACHE_WHEEL_DIR}/build-environment.txt"
 
 wheel_is_skyrl_compatible() {
   local wheel="$1"
@@ -46,9 +54,7 @@ if [ "${FORCE_VLLM_REBUILD:-0}" = "1" ]; then
 fi
 
 export VLLM_TARGET_DEVICE=rocm
-# MI300X/MI325X use gfx942 (CDNA3); MI355X uses gfx950 (CDNA4).
 # Build both targets by default so one wheel covers every supported GPU.
-export PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx942;gfx950}"
 echo "PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}"
 export MAX_JOBS="${MAX_JOBS:-16}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}"

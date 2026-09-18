@@ -4,15 +4,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WHEEL_CACHE="${SCRIPT_DIR}/.vllm_rocm_cache/wheels"
 VERIFY_PY="${SCRIPT_DIR}/verify_vllm_skyrl_compat.py"
-
-mkdir -p "${WHEEL_CACHE}"
-# Drop legacy ROCm wheels (<0.20) that predate SkyRL's HTTP inference server APIs.
-find "${WHEEL_CACHE}" -maxdepth 1 -name 'vllm-*.whl' ! -name 'vllm-0.20*.whl' -delete 2>/dev/null || true
+VLLM_REV="${VLLM_REV:-bc150f50299199599673614f80d12a196f377655}"
+PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx942;gfx950}"
 
 TORCH_VER="$(python3 -c 'import torch; print(torch.__version__)')"
+HIP_VER="$(python3 -c 'import torch; print(torch.version.hip or "none")')"
+PYTHON_SOABI="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("SOABI"))')"
+CACHE_KEY_INPUT="vllm=${VLLM_REV}|torch=${TORCH_VER}|hip=${HIP_VER}|arch=${PYTORCH_ROCM_ARCH}|python=${PYTHON_SOABI}"
+CACHE_KEY="$(printf '%s' "${CACHE_KEY_INPUT}" | sha256sum | cut -d' ' -f1)"
+WHEEL_CACHE="${SCRIPT_DIR}/.vllm_rocm_cache/wheels/${CACHE_KEY}"
+
+mkdir -p "${WHEEL_CACHE}"
 echo "Current torch ${TORCH_VER}"
+echo "vLLM wheel cache key: ${CACHE_KEY_INPUT}"
 
 install_runtime_deps() {
   python3 -m pip install --no-cache-dir -q \

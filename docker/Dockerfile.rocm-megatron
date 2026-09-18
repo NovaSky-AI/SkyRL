@@ -15,6 +15,7 @@ FROM ${ROCM_BASE_IMAGE}
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RAY_VERSION=2.57.0
 ARG UV_VERSION=0.11.11
+ARG UV_INSTALLER_SHA256=3a020f8d69019caca567c9038999d130b0ea85866483caf2042c386cb685aef4
 ARG MCORE_REV=71e418ea7d7b3a6c9a53238c543c3e0b43e11026
 ARG BRIDGE_REV=91a15142a4b4442a8d46ab539d1b923bd08570d0
 
@@ -44,7 +45,10 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN if ! command -v uv >/dev/null 2>&1; then \
-        curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh; \
+        curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv-installer.sh; \
+        echo "${UV_INSTALLER_SHA256}  /tmp/uv-installer.sh" | sha256sum -c -; \
+        sh /tmp/uv-installer.sh; \
+        rm -f /tmp/uv-installer.sh; \
     fi \
     && uv --version
 
