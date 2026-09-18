@@ -69,7 +69,6 @@ from skyrl.train.generators.utils import (
     merge_stepwise_output,
     prepare_generator_input,
 )
-from skyrl.train.reward_variance_filter import reward_variance_filter
 from skyrl.train.utils import (
     Timer,
     get_ray_pg_ready_with_timeout,
@@ -91,6 +90,7 @@ from skyrl.train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     extract_step_from_path,
     finalize_minibatch_rollout_logprob_diff_std,
+    reward_variance_filter,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
@@ -1091,10 +1091,18 @@ class RayPPOTrainer:
 
         rv_filter_config = self.cfg.trainer.algorithm.reward_variance_filtering
         if rv_filter_config.enabled:
+            filter_indices = list(range(len(sequence_rewards)))
+            if self.cfg.generator.step_wise_trajectories and not self.cfg.generator.merge_stepwise_output:
+                # Advantages are computed from final-step rewards and then broadcast to every
+                # step in a trajectory, so RV selection must use the same final-step signal.
+                filter_indices = [i for i, is_last_step in enumerate(generator_output["is_last_step"]) if is_last_step]
+            filter_rewards = [sequence_rewards[i] for i in filter_indices]
+            filter_uids = [uids[i] for i in filter_indices]
+            filter_loss_masks = [generator_output["loss_masks"][i] for i in filter_indices]
             kept_indices, filter_metrics = reward_variance_filter(
-                sequence_rewards,
-                uids,
-                loss_masks=generator_output["loss_masks"],
+                filter_rewards,
+                filter_uids,
+                loss_masks=filter_loss_masks,
                 strategy=rv_filter_config.strategy,
                 top_p=rv_filter_config.top_p,
                 top_k=rv_filter_config.top_k,
@@ -1102,10 +1110,9 @@ class RayPPOTrainer:
                 variance_ddof=rv_filter_config.variance_ddof,
                 selection_eps=rv_filter_config.selection_eps,
             )
-            kept_indices_set = set(kept_indices)
+            kept_uids = {filter_uids[i] for i in kept_indices}
             generator_output["loss_masks"] = [
-                mask if i in kept_indices_set else [0] * len(mask)
-                for i, mask in enumerate(generator_output["loss_masks"])
+                mask if uid in kept_uids else [0] * len(mask) for uid, mask in zip(uids, generator_output["loss_masks"])
             ]
             self.all_metrics.update({f"reward/variance_filter_{name}": value for name, value in filter_metrics.items()})
 

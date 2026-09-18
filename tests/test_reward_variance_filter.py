@@ -1,6 +1,6 @@
 import pytest
 
-from skyrl.train.reward_variance_filter import reward_variance_filter
+from skyrl.train.utils.trainer_utils import reward_variance_filter
 
 
 def test_selects_smallest_stable_variance_mass_prefix():
