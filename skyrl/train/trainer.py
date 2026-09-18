@@ -1,6 +1,5 @@
 import math
 import os
-import shutil
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -1901,7 +1900,12 @@ class RayPPOTrainer:
         After this method, save_weights_for_sampler() should be called to sync weights.
         """
         # TODO(tgriggs): Make policy-to-ref sync faster.
-        policy_export_dir = os.path.join(self.cfg.trainer.export_path, f"global_step_{self.global_step}", "policy")
+        # Export the temporary files to a scratch path to prevent path overlap with HF export
+        # in `save_models` function above.
+        # Temporary export: `{export_path}/_tmp_ref_sync/global_step_{N}/policy`
+        # HF export: `{export_path}/global_step_{N}/policy`
+        scratch_root = os.path.join(self.cfg.trainer.export_path, "_tmp_ref_sync")
+        policy_export_dir = os.path.join(scratch_root, f"global_step_{self.global_step}", "policy")
 
         # Save policy model (dispatch handles GPU state)
         self.dispatch.save_hf_model("policy", policy_export_dir, self.tokenizer)
@@ -1909,11 +1913,11 @@ class RayPPOTrainer:
         # Re-initialize ref model from saved policy (dispatch handles offloading policy first)
         self.dispatch.init_model("ref", policy_export_dir)
 
-        # Clean up temporary saved model files
+        # Remove the whole scratch tree, so a cleanup that failed earlier is retried.
         try:
-            shutil.rmtree(policy_export_dir)
-            logger.info(f"Cleaned up temporary policy export directory: {policy_export_dir}")
+            io.remove(scratch_root)
+            logger.info(f"Cleaned up ref-sync scratch directory: {scratch_root}")
         except Exception as e:
-            logger.warning(f"Failed to clean up temporary policy export directory {policy_export_dir}: {e}")
+            logger.warning(f"Failed to clean up ref-sync scratch directory {scratch_root}: {e}")
 
         logger.info("Successfully updated ref model with policy model, training continues.")
