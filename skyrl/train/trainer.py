@@ -569,6 +569,8 @@ class RayPPOTrainer:
                     if self._vllm_metrics_scraper is not None:
                         await self._vllm_metrics_scraper.stop()
                     self.dynamic_sampling_state = None
+                    self.all_metrics = {}
+                    self.all_timings = {}
                     step_started = False
 
                 self._fire("on_epoch_end")
