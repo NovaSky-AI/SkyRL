@@ -260,7 +260,7 @@ class TestBuildTrainerEngineResolvesTheBackend:
     source. A mismatch here means the trainer and receive engines disagree,
     which the driver has no way to catch."""
 
-    def _build(self, monkeypatch, weight_sync_backend, colocate_all):
+    def _build(self, monkeypatch, weight_sync_backend, colocate_all, fp8_weight_sync_mode=None):
         from vllm.distributed.weight_transfer.factory import (
             WeightTransferTrainerFactory,
         )
@@ -287,6 +287,7 @@ class TestBuildTrainerEngineResolvesTheBackend:
                 weight_sync_backend=weight_sync_backend,
                 model_dtype="bfloat16",
                 weight_transfer_threshold_cuda_ipc_GB=1.0,
+                fp8_weight_sync_mode=fp8_weight_sync_mode,
             ),
             colocate_all=colocate_all,
             rank=0,
@@ -327,6 +328,13 @@ class TestBuildTrainerEngineResolvesTheBackend:
     def test_the_built_source_is_handed_to_the_engine(self, monkeypatch):
         seen = self._build(monkeypatch, "nccl", False)
         assert seen["source"] is not None
+
+    @pytest.mark.parametrize("backend", ["delta", "sharded_rdt"])
+    def test_serialized_fp8_rejects_backends_without_native_push_support(self, monkeypatch, backend):
+        """FP8 wire tensors and scales require vLLM's NCCL or IPC trainer engine."""
+
+        with pytest.raises(ValueError, match="Serialized FP8 weight sync requires"):
+            self._build(monkeypatch, backend, False, fp8_weight_sync_mode="blockwise")
 
 
 class _Bare:

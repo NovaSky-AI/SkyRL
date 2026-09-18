@@ -7,6 +7,7 @@ two deployments' consumer id blocks.
 """
 
 import base64
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
@@ -127,6 +128,15 @@ class TestRdtInitPayloads:
 
 
 class TestClientFanout:
+    def test_connection_close_header_set(self):
+        """Each sync opens a fresh connection after the inference idle period."""
+
+        client = SkyrlWeightSyncClient(["http://a"])
+        try:
+            assert client._session.headers["Connection"] == "close"
+        finally:
+            client.close()
+
     def test_init_uses_the_rewrite_and_hits_every_server(self, make_client):
         client = make_client(["http://a", "http://b"], dp=1, init_payload_fn=rdt_init_payloads)
         client.init_weight_transfer_engine({"num_consumers": 4})
@@ -160,6 +170,26 @@ class TestClientFanout:
         assert bodies[1] == {"update_info": {"names": ["w"]}}
         # weight_version is omitted entirely when unset, so the route's default applies.
         assert bodies[2] is None
+
+    def test_fanout_posts_concurrently(self, make_client):
+        """RDT needs every worker's update RPC in flight together to make progress."""
+
+        urls = ["http://a", "http://b", "http://c"]
+        barrier = threading.Barrier(len(urls))
+
+        class BarrierSession(_FakeSession):
+            def post(self, url, json=None, timeout=None):
+                barrier.wait(timeout=2)
+                return super().post(url, json=json, timeout=timeout)
+
+        client = make_client(urls)
+        client._session = BarrierSession()
+        try:
+            client.update_weights({"names": []})
+        finally:
+            client.close()
+
+        assert len(client._session.calls) == len(urls)
 
     def test_ipc_handles_are_pickled_for_http(self, make_client):
         """``IPCTrainerWeightTransferEngine`` emits raw ipc_handles, which are not
