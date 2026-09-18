@@ -37,6 +37,10 @@ from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
     batched_moe_wire_targets,
 )
+from skyrl.backends.skyrl_train.weight_sync.lora_target import (
+    expand_lora_aliases,
+    is_lora_receive_target,
+)
 
 try:
     from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
@@ -82,6 +86,16 @@ from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E40
 )
 
 apply_kimi_k25_lora_patch()
+
+# Lets WorkerLoRAManager build an adapter from tensors staged by
+# skyrl_finish_weight_update (LoRA receive_target) instead of a directory.
+from skyrl.backends.skyrl_train.patches.vllm.patch_lora_in_memory import (  # noqa: E402
+    apply_lora_in_memory_patch,
+    discard_in_memory_adapter,
+    stage_in_memory_adapter,
+)
+
+apply_lora_in_memory_patch()
 
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
@@ -243,6 +257,79 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         self.device
     """
 
+    # ------------------------------------------------------------------
+    # Receive target: base model (default) or a LoRA adapter.
+    #
+    # The transport is the same either way; only the sink differs. For the
+    # base model, chunks go to model.load_weights under layerwise reload. For
+    # a LoRA adapter, chunks are cloned out of the transport buffer into a
+    # staging dict and handed to vLLM's LoRA manager at finish, so the
+    # following /skyrl/v1/load_lora_adapter (in_memory=true) builds the
+    # LoRAModel from GPU tensors and never touches a file.
+    # ------------------------------------------------------------------
+
+    def skyrl_start_weight_update(self, is_checkpoint_format: bool = True, receive_target: dict | None = None) -> None:
+        if not is_lora_receive_target(receive_target):
+            self._skyrl_lora_target = None
+            super().skyrl_start_weight_update(is_checkpoint_format=is_checkpoint_format)
+            return
+        if getattr(self, "_skyrl_weight_update_active", False):
+            raise RuntimeError(
+                "skyrl_start_weight_update called while a weight update is "
+                "already active. Call skyrl_finish_weight_update first."
+            )
+        if getattr(self.model_runner, "lora_manager", None) is None:
+            raise RuntimeError(
+                "Received a LoRA weight update but this engine was started without --enable-lora "
+                "(trainer.policy.model.lora.rank > 0 with merge_lora=false sets it)."
+            )
+        # No layerwise reload: the base model is untouched by an adapter update.
+        self._skyrl_lora_target = dict(receive_target)
+        self._skyrl_lora_staged: dict[str, torch.Tensor] = {}
+        self._skyrl_is_checkpoint_format = False
+        self._skyrl_weight_update_active = True
+        self._is_checkpoint_format = False
+        self._weight_update_active = True
+
+    def skyrl_finish_weight_update(self) -> None:
+        target = getattr(self, "_skyrl_lora_target", None)
+        if target is None:
+            super().skyrl_finish_weight_update()
+            return
+        if not getattr(self, "_skyrl_weight_update_active", False):
+            raise RuntimeError("skyrl_start_weight_update must be called before skyrl_finish_weight_update.")
+        staged = self._skyrl_lora_staged
+        self._skyrl_lora_staged = {}
+        self._skyrl_lora_target = None
+        self._skyrl_weight_update_active = False
+        self._skyrl_is_checkpoint_format = True
+        self._weight_update_active = False
+        self._is_checkpoint_format = True
+        if not staged:
+            raise RuntimeError(f"LoRA weight update for {target['lora_name']!r} finished without receiving any tensors")
+        tensors = expand_lora_aliases(staged, target.get("aliases") or {})
+        stage_in_memory_adapter(target["lora_name"], tensors, target["adapter_config"])
+
+    def skyrl_discard_in_memory_lora(self, lora_name: str) -> bool:
+        """Free the staged tensors of an unloaded in-memory adapter (collective_rpc)."""
+        return discard_in_memory_adapter(lora_name)
+
+    def _skyrl_stage_lora_weights(self, weights) -> set[str]:
+        """Sink for a LoRA receive_target: keep a private GPU copy of each chunk tensor.
+
+        Transport buffers (the IPC view, the NCCL packed buffer) are reused or
+        freed by the sender right after the chunk, so the copy is required.
+        Duplicate names across chunks are a protocol error.
+        """
+        staged = self._skyrl_lora_staged
+        loaded: set[str] = set()
+        for name, tensor in weights:
+            if name in staged:
+                raise ValueError(f"LoRA tensor {name!r} received twice in one weight update")
+            staged[name] = tensor.detach().clone()
+            loaded.add(name)
+        return loaded
+
     def fetch_weights(self, target_version: int, sync_dir: str | None = None, uri: str | None = None):
         """Fetch/apply a checkpoint delta before the paused reload phase."""
         if self.weight_transfer_engine is None:
@@ -313,7 +400,9 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
 
         model = self.model_runner.model
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            if self._skyrl_is_checkpoint_format:
+            if getattr(self, "_skyrl_lora_target", None) is not None:
+                self._skyrl_stage_lora_weights(weights)
+            elif self._skyrl_is_checkpoint_format:
                 _load_checkpoint_weights(model, weights)
                 # vLLM's load only updates the main model; the spec-decode (MTP/Eagle)
                 # drafter is a separate module and must be reloaded from the same
@@ -373,8 +462,12 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         typed_update_info = engine.parse_update_info(update_info)
         model = self.model_runner.model
 
+        lora_target = getattr(self, "_skyrl_lora_target", None)
+
         def _load_weights(weights):
             weights = list(weights)
+            if lora_target is not None:
+                return self._skyrl_stage_lora_weights(weights)
             loaded = _load_checkpoint_weights(model, weights)
             _reload_spec_decode_drafter(self.model_runner, weights)
             return loaded

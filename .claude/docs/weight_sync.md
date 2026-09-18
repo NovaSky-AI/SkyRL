@@ -18,6 +18,7 @@ skyrl/backends/skyrl_train/weight_sync/
 ├── delta_engine.py         # DeltaWeightTransferEngine (receive side, runs in the vLLM worker)
 ├── delta_payload.py        # zstd compress/decompress + uint8 tensor <-> bytes helpers
 ├── weight_extractor.py     # Sharded-param -> dense tensor extraction
+├── lora_target.py          # LoRA adapter as a receive target: dedupe, aliases, LoraAdapterExtractor
 ├── weight_extractor_utils.py
 └── sharded_rdt/            # the sharded_rdt (NIXL pull) backend; __init__ is import-free
     ├── sharded_rdt_strategy.py # sharded_rdt as a WeightTransferStrategy (thin adapter)
@@ -60,6 +61,80 @@ The weight sync implementation relies on the native vLLM weight sync APIs - `Wei
   for the capabilities it declares.
 
 Strategy choice is decided by the sender (`get_transfer_strategy_cls`). The init info is expanded per server via `for_servers()` / `to_api_payload()` and pushed to the servers through the HTTP control plane (`init_weight_update_communicator` → vLLM's native `/init_weight_transfer_engine`); the receive side is vLLM's native weight-transfer engine, driven by `NewInferenceWorkerWrap`.
+
+## Targets: base model vs LoRA adapter
+
+The transport (above) says *how* tensors move. The **target** says what they are and
+how the receiver applies them. Sender side it is the `WeightExtractor`; receiver side it
+is the sink `NewInferenceWorkerWrap` routes chunks to. `WeightExtractor.receive_target`
+travels once per sync as the `receive_target` argument of `skyrl_start_weight_update`.
+
+| target | extractor | receiver sink | selected by |
+|---|---|---|---|
+| base model (default) | `MegatronWeightExtractor` / FSDP extractor | layerwise reload + `model.load_weights` | `receive_target=None` |
+| LoRA adapter | `MegatronLoraAdapterExtractor` (`LoraAdapterExtractor` in `weight_sync/lora_target.py`) | clone chunks into a staging dict; at finish, `stage_in_memory_adapter` for vLLM's LoRA manager | `trainer.policy.model.lora.sync_mode=memory` with Megatron `merge_lora=false` |
+
+**LoRA adapter over the transport (`sync_mode=memory`).** Same NCCL broadcast / CUDA IPC
+sender as the base model; nothing is written to `lora_sync_path`.
+
+```
+trainer (all ranks)  bridge.export_adapter_weights(cpu=False)   collective, tensors stay on GPU
+                     fold_lora_rank_scale_for_vllm, 3D->flat MoE rewrite, adapter_config
+                     dedupe_shared_expert_adapters              one tensor per EP-rank expert group,
+                                                                 verified with torch.equal; rest -> aliases
+sender               start_weight_update(receive_target={kind: lora, lora_name, adapter_config, aliases})
+                     chunks (cast to inference dtype)           update_weights_ipc / update_weights_nccl
+worker               _skyrl_stage_lora_weights                  private GPU clone per tensor
+                     finish: expand_lora_aliases -> stage_in_memory_adapter(lora_name, tensors, config)
+trainer (rank 0)     POST /skyrl/v1/load_lora_adapter {lora_name, in_memory: true}
+API server           add_lora(LoRARequest(lora_path="skyrl-memory://<name>", load_inplace=True))
+worker (patched)     WorkerLoRAManager._load_adapter -> from_lora_tensors(device=GPU) from the staged dict
+```
+
+The vLLM side is a runtime patch, `patches/vllm/patch_lora_in_memory.py`, applied by the
+worker-extension import like the other vLLM patches: stock vLLM 0.28 can only load an
+adapter from a directory. The equivalent upstream diff is
+`patches/vllm/lora_in_memory_upstream.patch`. The adapter is built on the GPU so the
+sender's dtype cast makes vLLM's per-key `.to()` a no-op and aliases keep sharing storage;
+building on CPU would pin a private copy per key and re-inflate a deduplicated adapter to
+its public size (30.77 GB vs 0.62 GB on GLM-5.3 rank 32).
+
+Not supported with `delta` or `sharded_rdt` (no chunk stream to carry the adapter), nor
+with FSDP yet; `validate_inference_engine_cfg` rejects those. `sync_mode=disk` is the
+existing PEFT-files path and remains the default.
+
+Memory and lifecycle, per inference GPU:
+
+- **Trainer export.** The bridge yields the *public* adapter (one key per expert); the
+  extractor dedupes while streaming, so peak GPU memory is the unique adapter plus one
+  tensor, not the public size. Duplicate groups are per `(module, EP-rank expert group,
+  lora_A|lora_B)`, verified with `torch.equal`, so a wrong group size costs bandwidth only.
+- **Staged tensors** (`patch_lora_in_memory._STAGED`, keyed by adapter name) are the unique
+  tensors in the inference dtype. They are kept after the load because the `LoRAModel`
+  built from them shares their storage (same device, same dtype), and because vLLM rebuilds
+  an LRU-evicted adapter by calling `_load_adapter` again: with a directory it re-reads the
+  files, here it re-reads the stage. A resync for the same name replaces the stage;
+  `RemoteInferenceClient.unload_lora_adapter` also issues `skyrl_discard_in_memory_lora` so
+  an unloaded tenant frees its tensors.
+- **The registered `LoRAModel` lives on the GPU**, unlike the directory path where it lives
+  on pinned CPU memory. vLLM packs per-expert LoRA into stacked tensors sized to the local
+  experts, so a MoE adapter costs roughly its *local un-deduplicated* size per registered
+  adapter (about 1/EP of the public size). With multi-tenant `max_loras` / `max_cpu_loras`
+  above 1, budget that per resident adapter.
+  Measured on GLM-5.3 (`glm_moe_dsa`, 256 routed experts, Megatron EP8 -> vLLM TP8, B300
+  268 GiB): **~22.4 GiB per resident adapter per inference GPU** -- vLLM's weight-load
+  memory fell from 220.94 to 198.56 GiB going `max_loras` 2 -> 1. On a 1.4 TB base model
+  that is the binding constraint: with `max_loras=2` and `gpu_memory_utilization=0.8` the
+  weights alone exceeded vLLM's budget (no KV cache), and raising utilization only let the KV
+  cache grow into the freed space, because the staged tensors are received into the worker
+  process outside what `gpu_memory_utilization`'s profiling accounts for. For a single tenant
+  on many-expert models use `max_loras=1` (the adapter is replaced in place; register stage
+  stayed 0.4-0.5 s across syncs) and size utilization so `total * util - weights - activations`
+  leaves both a KV cache and headroom for the stage.
+- **Debugging.** The trainer logs `LoRA sync (memory): adapter ... exported+sent in Xs,
+  registered on vLLM in Ys` on rank 0. Worker-side failures (`no tensors are staged`,
+  `expected target modules ... but received`) surface through `/skyrl/v1/load_lora_adapter`
+  as 500s.
 
 ## Delta backend
 

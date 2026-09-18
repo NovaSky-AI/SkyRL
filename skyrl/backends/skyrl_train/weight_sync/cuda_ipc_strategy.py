@@ -154,6 +154,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         chunks: Iterable[WeightChunk],
         weight_metadata: Optional[Dict[str, list]] = None,
         derive_metadata_from_chunks: bool = False,
+        receive_target: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> None:
         """Send chunks via CUDA IPC.
@@ -162,8 +163,13 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             chunks: Iterable of WeightChunk objects to send.
             weight_metadata: Unused; IPC derives metadata from each tensor.
             derive_metadata_from_chunks: Accepted for sender interface compatibility.
+            receive_target: Forwarded to ``start_weight_update``.
         """
-        await self._send_chunks_vllm_native(chunks, weight_metadata)
+        self._receive_target = receive_target
+        try:
+            await self._send_chunks_vllm_native(chunks, weight_metadata)
+        finally:
+            self._receive_target = None
 
     async def _send_chunks_vllm_native(
         self,
@@ -193,7 +199,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         device = torch.cuda.current_device()
         gpu_uuid = cuda_uuid_to_str(torch.cuda.get_device_properties(device).uuid)
         if rank == 0:
-            await self._inference_client.start_weight_update(is_checkpoint_format=True)
+            await self._start_weight_update(self._inference_client)
         torch.distributed.barrier()
 
         for logical_chunk in chunks:
