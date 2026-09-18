@@ -7,7 +7,7 @@ import ray
 from loguru import logger
 from ray.util.placement_group import placement_group as ray_placement_group
 
-from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_VLLM_START_PORT
 from skyrl.train.config import (
     InferenceEngineConfig,
     SkyRLTrainConfig,
@@ -30,7 +30,8 @@ from .utils import (
 )
 from .vllm_router import VLLMRouter
 
-VLLM_START_PORT = 8000
+# Overridable per job (``SKYRL_VLLM_START_PORT``): jobs sharing a node need disjoint port blocks.
+VLLM_START_PORT = SKYRL_VLLM_START_PORT
 # NOTE: We use the same base port for NIXL and Mooncake since they will not be
 # used together
 MOONCAKE_BOOTSTRAP_BASE_PORT = NIXL_SIDE_CHANNEL_BASE_PORT = 20_000
