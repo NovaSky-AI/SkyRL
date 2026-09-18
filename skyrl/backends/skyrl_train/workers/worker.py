@@ -46,6 +46,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     ppo_critic_loss,
 )
+from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -59,7 +60,7 @@ from skyrl.env_vars import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )
-from skyrl.train.config import TrainerConfig
+from skyrl.train.config import TorchProfilerConfig, TrainerConfig
 from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
@@ -375,20 +376,34 @@ class Worker(DistributedTorchRayActor):
     # torch.profiler RPCs, dispatched via WorkerDispatch pass_through.
     # ------------------------------------------------------------------
 
-    def start_profile(self) -> None:
-        """Arm the profiler before the training loop (no-op when disabled)."""
+    def start_profile(self, config: Optional[dict] = None) -> None:
+        """Arm the configured profiler, or build a one-off profiling session.
+
+        The normal trainer path initializes ``self.profiler`` with the worker
+        model. Tinker's runtime endpoint instead sends a serialized
+        ``TorchProfilerConfig`` here, so each requested session gets a fresh
+        profiler and cannot inherit a previous schedule.
+        """
+        if config is not None:
+            self.profiler = Profiler(TorchProfilerConfig(**config))
         if self.profiler is not None:
             self.profiler.start()
 
-    def profile_step(self) -> None:
-        """Advance the profiler schedule by one global step."""
+    def profile_step(self) -> Optional[str]:
+        """Advance the profiler schedule and return a recoverable worker error."""
         if self.profiler is not None:
             self.profiler.step()
+            return getattr(self.profiler, "last_error", None)
+        return None
 
     def stop_profile(self) -> None:
-        """Stop the profiler after the training loop, flushing any open window."""
-        if self.profiler is not None:
-            self.profiler.stop()
+        """Stop and release the profiler after the training loop."""
+        profiler = self.profiler
+        if profiler is None:
+            return
+        profiler.stop()
+        profiler.close()
+        self.profiler = None
 
     def dump_profiler_summary(self):
         """Return this rank's last-window kernel summary, or None."""

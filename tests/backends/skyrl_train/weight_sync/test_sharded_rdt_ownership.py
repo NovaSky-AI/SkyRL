@@ -10,12 +10,16 @@ groups derived from it. The default (hold everything) is correct at pp=1/ep=1 an
 wrong above it, which is exactly the kind of bug that shows up as a hang rather
 than an error.
 
-Every test imports inside the method, so this module needs no vLLM or Megatron at
-collection time.
+The sources under test implement vLLM's trainer-side ``WeightSource`` contract,
+so this module runs in the vLLM test environment.
 """
 
 import pytest
-import torch
+
+pytestmark = pytest.mark.vllm
+pytest.importorskip("vllm", reason="sharded-RDT ownership tests require the vLLM weight-transfer abstractions")
+
+import torch  # noqa: E402
 
 # Import skyrl before anything can reach megatron-bridge: ``skyrl/__init__.py``
 # runs ``disable_flash_attn_cute()``, which poisons ``sys.modules["flash_attn.cute"]``
@@ -24,7 +28,7 @@ import torch
 # lazily inside the method, so without this the shim would not have run by the time
 # ``_fake_modules`` imports ``param_mapping`` -- and ``pytest.importorskip`` only
 # catches ImportError.
-import skyrl  # noqa: F401
+import skyrl  # noqa: E402, F401
 
 
 class TestPpLocalOwnership:
@@ -407,7 +411,6 @@ class TestHeldNamesComposition:
         assert self._source(1, 0, names).held_names() is None
 
 
-@pytest.mark.vllm
 class TestStampedYieldValidation:
     """The gather loop checks stamps against yields per group — the ABC's
     truthfulness invariant, enforced where both sit side by side. Without it a
