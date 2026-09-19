@@ -44,11 +44,11 @@ CASES+=(
 )
 
 if [ "${MATRIX_GPUS}" -ge 4 ]; then
-  # Qwen2.5-0.5B has 14 heads; TP must divide 14 (1 or 2, not 4).
   CASES+=(
-    "sn4_megatron_dp4_vllm_tp2x2|4|1|1|1|1|1|2|2"
-    "sn4_megatron_dp4_vllm_tp2|4|1|1|1|1|1|2|1"
-    "sn4_megatron_tp2_dp2_vllm_tp2|4|1|2|1|1|1|2|1"
+    "sn4_megatron_tp2_dp2_vllm_tp4|4|1|2|1|1|1|4|1"
+    "sn4_megatron_tp2_pp2_vllm_tp4|4|1|2|2|1|1|4|1"
+    "sn4_megatron_tp4_vllm_tp4|4|1|4|1|1|1|4|1"
+    "sn4_megatron_pp4_vllm_tp4|4|1|1|4|1|1|4|1"
   )
 fi
 
