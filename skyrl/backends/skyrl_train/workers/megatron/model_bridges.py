@@ -10,6 +10,8 @@ the rest of the codebase still works in CPU-only (no megatron-bridge) environmen
 
 import logging
 
+import torch
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -17,7 +19,11 @@ try:
         MegatronMappingRegistry,
     )
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
-    from megatron.bridge.models.conversion.param_mapping import AutoMapping
+    from megatron.bridge.models.conversion.param_mapping import (
+        AutoMapping,
+        GatedMLPMapping,
+        QKVMapping,
+    )
     from megatron.bridge.models.conversion.utils import moe_experts_stored_packed
     from megatron.bridge.models.deepseek.common import get_common_mapping_list
     from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
@@ -25,6 +31,89 @@ try:
     from megatron.bridge.models.qwen.qwen35_bridge import Qwen35Bridge, Qwen35MoEBridge
     from megatron.core.models.gpt.gpt_model import GPTModel
     from megatron.core.utils import unwrap_model
+
+    from skyrl.backends.skyrl_train.workers.megatron.iquest_loopcoder import (
+        LoopCoderProvider,
+        loopcoder_layer_spec,
+    )
+
+    @MegatronModelBridge.register_bridge(
+        source="IQuestLoopCoderForCausalLM",
+        target=GPTModel,
+        provider=LoopCoderProvider,
+        model_type="iquestloopcoder",
+    )
+    class IQuestLoopCoderBridge(MegatronModelBridge):
+        """LoRA-only bridge for the released two-pass IQuest LoopCoder."""
+
+        MODEL_CONFIG_CLASS = None
+
+        def provider_bridge(self, hf_pretrained):
+            provider = super().provider_bridge(hf_pretrained)
+            hf_config = hf_pretrained.config
+            provider.normalization = "RMSNorm"
+            provider.gated_linear_unit = True
+            provider.add_bias_linear = False
+            provider.add_qkv_bias = False
+            provider.hidden_dropout = 0.0
+            provider.attention_dropout = hf_config.attention_dropout
+            provider.autocast_dtype = torch.bfloat16
+            provider.share_embeddings_and_output_weights = hf_config.tie_word_embeddings
+            provider.loop_num = hf_config.loop_num
+            provider.loop_window_size = hf_config.loop_window_size
+            provider.transformer_layer_spec = loopcoder_layer_spec
+            return provider
+
+        def mapping_registry(self) -> MegatronMappingRegistry:
+            mappings = [
+                AutoMapping(
+                    megatron_param="embedding.word_embeddings.weight",
+                    hf_param="model.embed_tokens.weight",
+                ),
+                AutoMapping(megatron_param="output_layer.weight", hf_param="lm_head.weight"),
+                AutoMapping(
+                    megatron_param="decoder.final_layernorm.weight",
+                    hf_param="model.norm.weight",
+                ),
+                AutoMapping(
+                    megatron_param="decoder.layers.*.self_attention.linear_qkv.layer_norm_weight",
+                    hf_param="model.layers.*.input_layernorm.weight",
+                ),
+                AutoMapping(
+                    megatron_param="decoder.layers.*.mlp.linear_fc1.layer_norm_weight",
+                    hf_param="model.layers.*.post_attention_layernorm.weight",
+                ),
+                AutoMapping(
+                    megatron_param="decoder.layers.*.self_attention.linear_proj.weight",
+                    hf_param="model.layers.*.self_attn.o_proj.weight",
+                ),
+                AutoMapping(
+                    megatron_param="decoder.layers.*.mlp.linear_fc2.weight",
+                    hf_param="model.layers.*.mlp.down_proj.weight",
+                ),
+                AutoMapping(
+                    megatron_param=(
+                        "decoder.layers.*.self_attention.core_attention." "gate_projection.gate_proj.weight"
+                    ),
+                    hf_param="model.gate_projections.*.weight",
+                ),
+                AutoMapping(
+                    megatron_param=("decoder.layers.*.self_attention.core_attention." "gate_projection.gate_proj.bias"),
+                    hf_param="model.gate_projections.*.bias",
+                ),
+                QKVMapping(
+                    megatron_param="decoder.layers.*.self_attention.linear_qkv.weight",
+                    q="model.layers.*.self_attn.q_proj.weight",
+                    k="model.layers.*.self_attn.k_proj.weight",
+                    v="model.layers.*.self_attn.v_proj.weight",
+                ),
+                GatedMLPMapping(
+                    megatron_param="decoder.layers.*.mlp.linear_fc1.weight",
+                    gate="model.layers.*.mlp.gate_proj.weight",
+                    up="model.layers.*.mlp.up_proj.weight",
+                ),
+            ]
+            return MegatronMappingRegistry(*mappings)
 
     @MegatronModelBridge.register_bridge(
         source="Glm4MoeLiteForCausalLM",
