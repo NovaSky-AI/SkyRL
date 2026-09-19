@@ -1417,6 +1417,18 @@ class RemoteInferenceClient(InferenceEngineInterface):
     # Info
     # ---------------------------
 
+    async def get_weight_sync_destinations(self) -> Dict[str, List[dict]]:
+        """Query IsoExec's live TP/EP placement together with each worker's physical GPU UUID."""
+        results = await self._call_all_servers("/collective_rpc", {"method": "isoexec_weight_sync_destination"})
+        reports = {}
+        for server_url in self.server_urls:
+            response = results.get(server_url) or {}
+            workers = (response.get("body") or {}).get("results")
+            if not isinstance(workers, list) or not workers:
+                raise RuntimeError(f"weight_sync.destination: missing worker reports from {server_url}")
+            reports[server_url] = workers
+        return reports
+
     async def get_gpu_uuids(self) -> Dict[str, List[str]]:
         """Query each DP server's TP/PP workers for their current physical GPU UUIDs."""
         results = await self._call_all_servers("/collective_rpc", {"method": "skyrl_get_gpu_uuid"})

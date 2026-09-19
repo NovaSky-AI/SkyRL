@@ -641,16 +641,15 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
         ),
         # Engine expert parallelism is IsoExec's own dispatch over the engine's data-parallel ranks (vLLM's
         # all2all stays off; IsoExec forces enable_expert_parallel=False and carries the degree itself): the
-        # only shape it hosts is EP = data_parallel_size x tensor_parallel_size, non-colocated.
+        # only shape it hosts is EP = data_parallel_size x tensor_parallel_size with DP > 1.
         (
             engine.expert_parallel_size == 1
             or (
-                not placement.colocate_all
-                and engine.data_parallel_size > 1
+                engine.data_parallel_size > 1
                 and engine.expert_parallel_size == engine.data_parallel_size * engine.tensor_parallel_size
             ),
             "inference_engine.expert_parallel_size=1, or = data_parallel_size x tensor_parallel_size with "
-            "data_parallel_size > 1 and non-colocated engines",
+            "data_parallel_size > 1",
         ),
         (engine.speculative_config is None, "no speculative decoding"),
         (engine.fp8_weight_sync_mode is None, "no fp8 weight sync"),
@@ -663,8 +662,8 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
     if placement.colocate_all:
         # Colocated weight sync is CUDA IPC keyed by GPU: every engine worker opens the buffer of the
         # trainer rank that shares its GPU, and every trainer rank publishes the whole model (TP gathers,
-        # pipeline stages are completed, DP replicas are whole), resharded for the engine TP rank its GPU
-        # hosts. So the engines -- one or several, tensor-parallel or not -- may occupy any PREFIX of the
+        # pipeline stages are completed, DP replicas are whole), resharded for the engine TP/EP ranks
+        # verified on its GPU. The engines may occupy any PREFIX of the
         # policy GPUs; a strict subset needs placement.asymmetric_colocation.
         requirements += [
             (
@@ -675,7 +674,14 @@ def validate_logprob_comparison(cfg: SkyRLTrainConfig):
                 engine_gpus >= policy_gpus or placement.asymmetric_colocation,
                 "placement.asymmetric_colocation=true when the engines use fewer GPUs than the policy",
             ),
-            (engine.data_parallel_size == 1, "inference_engine.data_parallel_size=1 when colocated"),
+            (
+                engine.data_parallel_size == 1
+                or (
+                    engine.data_parallel_size > 1
+                    and engine.expert_parallel_size == engine.data_parallel_size * engine.tensor_parallel_size
+                ),
+                "inference_engine.data_parallel_size=1 when colocated, or IsoExec engine EP = DP x TP with DP > 1",
+            ),
         ]
     else:
         # Non-colocated: trainer rank 0 broadcasts full logical tensors over NCCL; every engine rank

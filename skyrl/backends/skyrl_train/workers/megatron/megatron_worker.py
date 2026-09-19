@@ -1661,6 +1661,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             from isoexec.integrations.skyrl.weights import LogicalWeightExtractor
 
             self.weight_extractor = LogicalWeightExtractor(self, inference_engine_cfg)
+            await self.weight_extractor.validate_placement(inference_engine_client)
         else:
             self.weight_extractor = MegatronWeightExtractor(
                 bridge=self.bridge,

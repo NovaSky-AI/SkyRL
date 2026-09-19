@@ -37,6 +37,7 @@ from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
     batched_moe_wire_targets,
 )
+from skyrl.backends.skyrl_train.weight_sync.ipc_metadata import ipc_chunk_metadata
 
 try:
     from skyrl.backends.skyrl_train.weight_sync.delta_engine import (
@@ -275,6 +276,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
                 - shapes: list[list[int]]
                 - sizes: list[int]  (element count per param; used for slicing)
                 - ipc_handles_pickled: b64(pickle({gpu_uuid: (func, args)}))
+                - metadata_by_gpu: optional GPU UUID -> names/dtype_names/shapes/sizes
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
             raise RuntimeError("skyrl_start_weight_update must be called before update_weights_ipc.")
@@ -288,14 +290,13 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         import base64
         import pickle
 
-        names = update_info["names"]
-        shapes = update_info["shapes"]
-        sizes = update_info["sizes"]
         pickled = update_info["ipc_handles_pickled"]
         handles = pickle.loads(base64.b64decode(pickled))
 
         device_index = torch.cuda.current_device()
         physical_gpu_id = cuda_uuid_to_str(torch.cuda.get_device_properties(device_index).uuid)
+        metadata = ipc_chunk_metadata(update_info, physical_gpu_id)
+        names, shapes, sizes = (metadata[key] for key in ("names", "shapes", "sizes"))
         if physical_gpu_id not in handles:
             raise ValueError(f"IPC handle not found for GPU UUID {physical_gpu_id}. " f"Available: {list(handles)}")
         func, args = handles[physical_gpu_id]
@@ -303,11 +304,18 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         list_args = list(args)
         list_args[6] = device_index
         packed_tensor = func(*list_args)
+        if sum(sizes) != packed_tensor.numel():
+            raise ValueError("weight_sync.ipc: metadata does not cover the packed buffer")
+        if any(
+            dtype.removeprefix("torch.") != str(packed_tensor.dtype).removeprefix("torch.")
+            for dtype in metadata.get("dtype_names", [])
+        ):
+            raise ValueError("weight_sync.ipc: metadata dtype differs from the packed buffer")
 
         weights: list[tuple[str, torch.Tensor]] = []
         offset = 0
         for name, shape, size in zip(names, shapes, sizes):
-            weights.append((name, packed_tensor[offset : offset + size].view(*shape)))
+            weights.append((name, packed_tensor[offset : offset + size].view(shape)))
             offset += size
 
         # process_weights_after_loading reads get_current_vllm_config() (e.g.

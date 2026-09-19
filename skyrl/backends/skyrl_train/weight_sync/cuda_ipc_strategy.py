@@ -35,6 +35,7 @@ from skyrl.backends.skyrl_train.weight_sync.base import (
     iter_single_dtype_chunks,
     torch_dtype_name,
 )
+from skyrl.backends.skyrl_train.weight_sync.ipc_metadata import merge_ipc_metadata
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferSender,
@@ -248,19 +249,17 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             sizes.append(size)
 
         ipc_handle: IpcHandle = reduce_tensor(packed_tensor)
-        local_handle_dict: Dict[str, IpcHandle] = {gpu_uuid: ipc_handle}
-        gathered: List[Optional[Dict[str, IpcHandle]]] = [None] * world_size
-        torch.distributed.all_gather_object(gathered, local_handle_dict)
+        metadata = {"names": names, "dtype_names": dtype_names, "shapes": shapes, "sizes": sizes}
+        gathered = [None] * world_size
+        torch.distributed.all_gather_object(gathered, (gpu_uuid, ipc_handle, metadata))
+        # EP cuts change expert names; header lengths can change too. Decode each handle using the
+        # metadata from that same GPU. Validate on every rank before rank 0 contacts the receivers.
+        merged_handles, metadata_by_gpu = merge_ipc_metadata(gathered)
 
         torch.distributed.barrier()
         torch.cuda.synchronize()
 
         if rank == 0:
-            merged_handles: Dict[str, IpcHandle] = {}
-            for d in gathered:
-                if d is not None:
-                    merged_handles.update(d)
-
             pickled = base64.b64encode(pickle.dumps(merged_handles)).decode("utf-8")
             chunk_update_info: Dict[str, Any] = {
                 "names": names,
@@ -268,6 +267,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
                 "shapes": shapes,
                 "sizes": sizes,
                 "ipc_handles_pickled": pickled,
+                "metadata_by_gpu": metadata_by_gpu,
             }
             await self._inference_client.update_weights_ipc(chunk_update_info)
 

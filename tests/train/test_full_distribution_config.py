@@ -158,19 +158,23 @@ def test_full_mode_admits_non_colocated_data_parallel_engines_with_nccl_broadcas
         validate_logprob_comparison(cfg)
 
 
-def test_full_mode_admits_engine_expert_parallelism_only_across_non_colocated_data_parallel_ranks():
+@pytest.mark.parametrize("colocated", [False, True])
+@pytest.mark.parametrize("tp", [1, 2])
+def test_full_mode_admits_engine_expert_parallelism_only_across_data_parallel_ranks(colocated, tp):
     cfg = _full_mode_config()
     engine = cfg.generator.inference_engine
-    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.placement.colocate_all = colocated
+    cfg.trainer.placement.policy_num_gpus_per_node = 2 * tp
     engine.weight_sync_backend = "nccl"
+    engine.tensor_parallel_size = tp
     engine.data_parallel_size = 2
-    engine.expert_parallel_size = 2  # = data_parallel_size x tensor_parallel_size: IsoExec's own dispatch
+    engine.expert_parallel_size = 2 * tp  # IsoExec owns dispatch on the DP x TP group.
     validate_logprob_comparison(cfg)
 
-    engine.expert_parallel_size = 4  # not DP x TP
+    engine.expert_parallel_size = 4 * tp  # not DP x TP
     with pytest.raises(ValueError, match="expert_parallel_size=1, or = data_parallel_size x tensor_parallel_size"):
         validate_logprob_comparison(cfg)
-    engine.expert_parallel_size = 2
+    engine.expert_parallel_size = 2 * tp
     engine.data_parallel_size = 1  # EP without the DP ranks it spans
     with pytest.raises(ValueError, match="expert_parallel_size=1, or = data_parallel_size x tensor_parallel_size"):
         validate_logprob_comparison(cfg)
@@ -342,4 +346,13 @@ def test_full_mode_rejects_data_parallel_engines_when_colocated():
     cfg = _full_mode_config()
     cfg.generator.inference_engine.data_parallel_size = 2
     with pytest.raises(ValueError, match="data_parallel_size=1 when colocated"):
+        validate_logprob_comparison(cfg)
+
+
+def test_colocated_engine_ep_still_requires_enough_policy_gpus():
+    cfg = _full_mode_config()
+    cfg.trainer.placement.policy_num_gpus_per_node = 1
+    cfg.generator.inference_engine.data_parallel_size = 2
+    cfg.generator.inference_engine.expert_parallel_size = 2
+    with pytest.raises(ValueError, match="colocated engines.*fitting"):
         validate_logprob_comparison(cfg)
