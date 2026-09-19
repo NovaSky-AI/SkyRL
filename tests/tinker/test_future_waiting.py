@@ -50,12 +50,14 @@ async def async_engine(db_url):
     await engine.dispose()
 
 
-def insert_pending(sync_engine, count: int = 1) -> list[int]:
+def insert_pending(
+    sync_engine, count: int = 1, request_type: types.RequestType = types.RequestType.SAMPLE
+) -> list[int]:
     """Insert ``count`` pending futures, returning their request_ids."""
     with Session(sync_engine) as session:
         rows = [
             FutureDB(
-                request_type=types.RequestType.SAMPLE,
+                request_type=request_type,
                 model_id="model_a",
                 request_data={"checkpoint_id": ""},
                 status=RequestStatus.PENDING,
@@ -211,11 +213,13 @@ async def test_wait_raises_for_unknown_request(waiters):
 
 
 @pytest.mark.asyncio
-async def test_retrieve_future_returns_completed_result(waiters, async_engine, sync_engine):
+async def test_retrieve_future_returns_completed_result_as_json(waiters, async_engine, sync_engine):
+    """Result types without a proto wire format are served as the stored JSON text."""
     from skyrl.tinker import api
 
-    request_id = insert_pending(sync_engine)[0]
-    mark_completed(sync_engine, request_id, SAMPLE_RESULT)
+    request_id = insert_pending(sync_engine, request_type=types.RequestType.OPTIM_STEP)[0]
+    result = types.OptimStepOutput()
+    mark_completed(sync_engine, request_id, result)
 
     response = await api.retrieve_future(
         api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiters)
@@ -223,7 +227,7 @@ async def test_retrieve_future_returns_completed_result(waiters, async_engine, s
 
     # The stored JSON text is returned as-is rather than re-encoded by FastAPI.
     assert response.media_type == "application/json"
-    assert response.body == SAMPLE_RESULT.model_dump_json().encode()
+    assert response.body == result.model_dump_json().encode()
 
 
 @pytest.mark.asyncio
@@ -247,9 +251,9 @@ async def test_retrieve_future_400s_with_the_stored_error(waiters, async_engine,
 
 
 @pytest.mark.asyncio
-async def test_retrieve_future_serves_proto_when_accepted(waiters, async_engine, sync_engine):
-    """A completed sample future is served as proto bytes when the client's
-    Accept header asks for it (the JSON test above covers the default path)."""
+async def test_retrieve_future_serves_sample_result_as_proto(waiters, async_engine, sync_engine):
+    """A completed sample future is served as proto bytes regardless of the
+    Accept header: the SDK rejects JSON for sample and forward_backward results."""
     from tinker import SampleResponse
     from tinker.proto.response_conv import deserialize_proto_response
 
@@ -265,8 +269,7 @@ async def test_retrieve_future_serves_proto_when_accepted(waiters, async_engine,
     )
 
     result = await api.retrieve_future(
-        api.RetrieveFutureRequest(request_id=str(request_id)),
-        _stub_request(async_engine, waiters, headers={"accept": "application/x-protobuf, application/json"}),
+        api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiters)
     )
 
     assert result.media_type == "application/x-protobuf"

@@ -9310,7 +9310,7 @@ requires-dist = [
     { name = "sqlmodel", marker = "extra == 'tinker'" },
     { name = "tensorboard", marker = "extra == 'skyrl-train'" },
     { name = "tensordict", marker = "extra == 'skyrl-train'" },
-    { name = "tinker", marker = "extra == 'tinker'", specifier = ">=0.3.0,<=0.24.1" },
+    { name = "tinker", marker = "extra == 'tinker'", specifier = ">=0.25.0,<0.26.0" },
     { name = "tokenizers", specifier = ">=0.23.1" },
     { name = "torch", marker = "sys_platform == 'darwin' and extra == 'dev'", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'dev'" },
@@ -9831,7 +9831,7 @@ wheels = [
 
 [[package]]
 name = "tinker"
-version = "0.24.1"
+version = "0.25.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -9850,9 +9850,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/29/45/b1a30a92b17b237e3661eeab3812546f11fd1ff58c3b05915b07cb09fbc7/tinker-0.24.1.tar.gz", hash = "sha256:1cc8e052155b624d13c6e3ae5e17b3c1b91c36f31722e5d75b38bdd3621a11c8", size = 260945, upload-time = "2026-08-06T21:07:18.945Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9e/4f/567cca8d9b87ac507f128bddc3a720ca7df5bf7bbe522be8da6670f73657/tinker-0.25.0.tar.gz", hash = "sha256:6c53009d3fb94d0f84ee9d0387882bb422a39a1c2a095878a8a3678333099b9f", size = 259638, upload-time = "2026-08-08T03:36:41.114Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/64/6bc22116fd1f7afd57153ce88849db711c85d1244585eca8abe5e6b772f5/tinker-0.24.1-py3-none-any.whl", hash = "sha256:67a6564b2563f970e36f870292eabbbe698b539e84c04ee96cec0ac6af2206a5", size = 250296, upload-time = "2026-08-06T21:07:17.512Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/b0/7792f0e3a4308aabb3badf4c068b92eb07672c470ad885d8126e31bf161c/tinker-0.25.0-py3-none-any.whl", hash = "sha256:edc452500592fe78ae9d2928540737e3700765c6658032caa68705c5188e2d69", size = 247660, upload-time = "2026-08-08T03:36:39.677Z" },
 ]
 
 [[package]]
