@@ -11,6 +11,7 @@ on:
       - 'skyrl/train/config/**'
       - 'skyrl/train/trainer.py'
       - 'tests/backends/skyrl_train/gpu/gpu_ci/**'
+      - 'tests/backends/skyrl_train/distributed/test_scheduler_restore.py'
       - 'pyproject.toml'
       - '!docs/**'
       - '!examples/**'
