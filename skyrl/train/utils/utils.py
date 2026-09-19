@@ -257,6 +257,13 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
                 f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
                 "moe_router_fusion=True -- the fused router bypasses replay. Set moe_router_fusion=False."
             )
+            # Interleaved chunks desynchronise each RouterReplay instance's backward FIFO.
+            vpp_size = config.megatron_config.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size")
+            assert vpp_size is None or vpp_size <= 1, (
+                f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
+                "virtual_pipeline_model_parallel_size -- interleaved chunks desync the replay FIFO. "
+                "Unset virtual_pipeline_model_parallel_size."
+            )
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert (
