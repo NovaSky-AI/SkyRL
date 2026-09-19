@@ -20,22 +20,21 @@ class TensorFormat(StrEnum):
     """How one serialized batch field is encoded in the pickle stream."""
 
     NUMPY = "numpy"
+    NUMPY_VIEW = "numpy_view"
     TORCH = "torch"
     TENSOR_LIST = "tensor_list"
     PACKED_TENSOR = "packed_tensor"
 
 
-def _serialize_tensor(value: torch.Tensor) -> dict:
-    """Serialize a single tensor for pickle protocol."""
+def _serialize_tensor(value: torch.Tensor, *, zero_copy: bool = False) -> dict:
+    """Serialize a single tensor for pickle protocol.
+
+    With ``zero_copy``, preserve the numpy array so pickle protocol 5 can send its
+    buffer out of band. The deserialized view may be read-only.
+    """
     try:
         # Fast path: direct memory copy via numpy (works for most dtypes)
         arr = value.numpy()
-        return {
-            "format": TensorFormat.NUMPY,
-            "data": arr.tobytes(),
-            "shape": arr.shape,
-            "dtype": str(arr.dtype),
-        }
     except TypeError:
         # Fallback for dtypes not supported by numpy (e.g., bfloat16)
         buffer = io.BytesIO()
@@ -45,13 +44,30 @@ def _serialize_tensor(value: torch.Tensor) -> dict:
             "data": buffer.getvalue(),
         }
 
+    if zero_copy:
+        # Shape and dtype travel with the array.
+        return {
+            "format": TensorFormat.NUMPY_VIEW,
+            "data": arr,
+        }
+    return {
+        "format": TensorFormat.NUMPY,
+        "data": arr.tobytes(),
+        "shape": arr.shape,
+        "dtype": str(arr.dtype),
+    }
+
 
 def _deserialize_tensor(value: dict) -> torch.Tensor:
     """Deserialize a single tensor from pickle format."""
-    if value.get("format") == TensorFormat.TORCH:
+    tensor_format = value.get("format")
+    if tensor_format == TensorFormat.TORCH:
         # Fallback path: torch.load for unsupported dtypes
         buffer = io.BytesIO(value["data"])
         return torch.load(buffer, weights_only=True)
+    elif tensor_format == TensorFormat.NUMPY_VIEW:
+        # Under Ray, this array views a read-only plasma buffer.
+        return torch.from_numpy(value["data"])
     else:
         # Fast path: reconstruct from numpy bytes
         # Also handles legacy format without "format" key
@@ -144,6 +160,9 @@ class TensorBatch(dict, Generic[DictType]):
     """
 
     metadata: Optional[Dict[str, Any]] = None
+
+    # These fields may be backed by read-only shared memory after deserialization.
+    ZERO_COPY_KEYS: frozenset[str] = frozenset({"rollout_expert_indices"})
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -270,13 +289,15 @@ class TensorBatch(dict, Generic[DictType]):
         """Serialize the `TensorBatch` object for pickle protocol.
 
         Uses fast numpy-based serialization when possible, with fallback to torch.save
-        for dtypes not supported by numpy (e.g., bfloat16).
+        for dtypes not supported by numpy (e.g., bfloat16). Fields in `ZERO_COPY_KEYS`
+        skip the intermediate `bytes` copy entirely.
         """
         self.contiguous()
         if self._device is not None:
             assert self._device == torch.device("cpu"), "Tensors must be on CPU before serialization"
         batch_dict = {}
         for key, value in self.items():
+            zero_copy = key in self.ZERO_COPY_KEYS
             if value is None:
                 batch_dict[key] = None
             elif isinstance(value, TensorList):
@@ -287,11 +308,12 @@ class TensorBatch(dict, Generic[DictType]):
             elif isinstance(value, PackedTensor):
                 batch_dict[key] = {
                     "format": TensorFormat.PACKED_TENSOR,
-                    "values": _serialize_tensor(value.values),
+                    "values": _serialize_tensor(value.values, zero_copy=zero_copy),
+                    # Offsets are too small to benefit from an out-of-band buffer.
                     "cu_seqlens": _serialize_tensor(value.cu_seqlens),
                 }
             else:
-                batch_dict[key] = _serialize_tensor(value)
+                batch_dict[key] = _serialize_tensor(value, zero_copy=zero_copy)
 
         return {
             "batch_dict": batch_dict,
