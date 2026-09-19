@@ -16,7 +16,6 @@ class RoutedExpertTrace:
 
     def __init__(self) -> None:
         self._metadata = TokenMetadataTrace()
-        self._schema: tuple[int, int, np.dtype] | None = None
 
     @property
     def prompt_start(self) -> int:
@@ -36,8 +35,6 @@ class RoutedExpertTrace:
 
         expected_rows = prompt_token_count - self.prompt_start + generated_token_count - 1
         compact = compact_routed_expert_indices(routed_experts)
-        if self._schema is None:
-            self._schema = (*compact.shape[1:], compact.dtype)
         self._metadata.append(compact, expected_rows=expected_rows)
 
     def finalize(self, *, token_count: int, loss_mask: Sequence[int]) -> RoutedExpertIndices:
@@ -53,10 +50,10 @@ class RoutedExpertTrace:
 
         padding_count = token_count - self.prompt_start
         if padding_count:
-            if self._schema is None:
+            if self._metadata.row_shape is None:
                 raise ValueError("cannot pad routed-expert trace before any routes are captured")
-            num_layers, topk, dtype = self._schema
-            padding_row = np.arange(topk, dtype=dtype)
+            num_layers, topk = self._metadata.row_shape
+            padding_row = np.arange(topk, dtype=self._metadata.dtype)
             padding = np.broadcast_to(padding_row, (padding_count, num_layers, topk)).copy()
             self._metadata.append(padding, expected_rows=padding_count)
 

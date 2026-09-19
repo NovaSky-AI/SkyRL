@@ -440,6 +440,10 @@ async def test_agent_loop_uses_incremental_routed_expert_trace(
         output_ids = [10, 11]
         num_route_rows = len(prompt_tokens) - prompt_start + len(output_ids) - 1
         routes = np.arange(num_route_rows * 4, dtype=np.int32).reshape(num_route_rows, 2, 2) % 8
+        if prompt_start > 0:
+            # The second turn routes to an expert id above the uint8 range so the
+            # trace must widen the first turn's compacted rows.
+            routes[0, 0, 0] = 300
         return {
             "responses": ["mocked output"],
             "response_ids": [output_ids],
@@ -456,7 +460,7 @@ async def test_agent_loop_uses_incremental_routed_expert_trace(
     )
     generator.base_conversation_token_ids = []
 
-    await generator.agent_loop(
+    output = await generator.agent_loop(
         [{"role": "user", "content": "Start"}],
         mock_env_cfg.env_class,
         {},
@@ -465,6 +469,9 @@ async def test_agent_loop_uses_incremental_routed_expert_trace(
     )
 
     assert prompt_starts == [0, 5]
+    routed = output.rollout_expert_indices
+    assert routed is not None and routed.dtype == np.int16
+    assert routed[5, 0, 0] == 300
 
 
 @pytest.mark.asyncio
