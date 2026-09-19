@@ -8,6 +8,7 @@ import torch
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_PADDING
 from skyrl.train.config import ChatTemplateConfig
 from skyrl.train.generators.base import (
     BatchMetadata,
@@ -278,11 +279,14 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
             (e.g. `is_last_step`, `trajectory_ids`, contiguous trajectory ordering).
     """
     assert len(generator_outputs) > 0
-    has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
-    if any(has_rollout_logprobs) and not all(has_rollout_logprobs):
-        raise ValueError(
-            "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
-        )
+    # Per-token side channels must be populated consistently across batches.
+    for all_or_nothing_field in ("rollout_logprobs", "rollout_expert_indices", "rollout_sample_support"):
+        present = [output.get(all_or_nothing_field) is not None for output in generator_outputs]
+        if any(present) and not all(present):
+            raise ValueError(
+                f"generator outputs are expected to all have null {all_or_nothing_field} or all non-null, "
+                "but received a mix"
+            )
     first = generator_outputs[0]
     result: GeneratorOutput = {
         "prompt_token_ids": _flatten_field(generator_outputs, "prompt_token_ids"),
@@ -291,6 +295,8 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         "loss_masks": _flatten_field(generator_outputs, "loss_masks"),
         "stop_reasons": _concat_optional_field(generator_outputs, "stop_reasons"),
         "rollout_logprobs": _concat_optional_field(generator_outputs, "rollout_logprobs"),
+        "rollout_expert_indices": _concat_optional_field(generator_outputs, "rollout_expert_indices"),
+        "rollout_sample_support": _concat_optional_field(generator_outputs, "rollout_sample_support"),
         "trajectory_generation_times": _concat_optional_field(generator_outputs, "trajectory_generation_times"),
         "trajectory_time_splits": _concat_optional_field(generator_outputs, "trajectory_time_splits"),
     }
@@ -783,14 +789,9 @@ def _is_prefix(maybe_prefix: List[int], candidate: List[int]) -> bool:
 def slice_generator_output(
     generator_output: GeneratorOutput, indices: List[int], *, preserve_metrics: bool = True
 ) -> GeneratorOutput:
-    """Slice a GeneratorOutput to keep only the entries at the given indices.
-
-    Generator-specific per-trajectory fields are sliced without naming them here.
-    Prefix-aware merging passes entries that all share one ``TrajectoryID``;
-    dynamic sampling may intentionally select entries from different trajectories.
-    """
+    """Slice list and dict-of-list fields at the given indices."""
     assert len(indices) > 0, "indices must be non-empty"
-    # Every key except `rollout_metrics` is either a per-entry list to slice, or None.
+    # Every key except `rollout_metrics` is None, a dict of per-entry lists, or a per-entry list.
     sliced: GeneratorOutput = {}
     for key, value in generator_output.items():
         if key == "rollout_metrics":
@@ -798,6 +799,8 @@ def slice_generator_output(
                 sliced[key] = value
         elif value is None:
             sliced[key] = None
+        elif isinstance(value, dict):
+            sliced[key] = {name: [component[i] for i in indices] for name, component in value.items()}
         else:
             sliced[key] = [value[i] for i in indices]
     return sliced
@@ -822,6 +825,11 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     is_token_level_rewards = isinstance(gen_out["rewards"][0], list)
     has_logprobs = gen_out.get("rollout_logprobs") is not None
     has_stop_reasons = gen_out.get("stop_reasons") is not None
+    has_sample_support = gen_out.get("rollout_sample_support") is not None
+    # Support rows are dense, so an observation delta contributes full-width padding rows.
+    sample_support_width = (
+        next((len(row) for rows in gen_out["rollout_sample_support"] for row in rows), 0) if has_sample_support else 0
+    )
 
     # Per-field output accumulators.
     # Fields that we take from all the entries in the merge group
@@ -829,6 +837,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     out_response_ids: List[List[int]] = []
     out_loss_masks: List[List[int]] = []
     out_logprobs: Optional[List[List[float]]] = [] if has_logprobs else None
+    out_sample_support: Optional[List[List[List[int]]]] = [] if has_sample_support else None
     # If per-token rewards, we keep appending. If per-turn rewards, we only take from the last turn.
     out_rewards: list = []
 
@@ -842,16 +851,21 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
     acc_response: List[int] = list(gen_out["response_ids"][0])
     acc_loss_mask: List[int] = list(gen_out["loss_masks"][0])
     acc_logprobs: Optional[List[float]] = list(gen_out["rollout_logprobs"][0]) if has_logprobs else None
+    acc_sample_support: Optional[List[List[int]]] = (
+        [list(row) for row in gen_out["rollout_sample_support"][0]] if has_sample_support else None
+    )
     acc_rewards_tokens: Optional[List[float]] = list(gen_out["rewards"][0]) if is_token_level_rewards else None
     last = 0
 
     def flush():
-        nonlocal acc_prompt, acc_response, acc_loss_mask, acc_logprobs, acc_rewards_tokens, last
+        nonlocal acc_prompt, acc_response, acc_loss_mask, acc_logprobs, acc_sample_support, acc_rewards_tokens, last
         out_prompt_ids.append(acc_prompt)
         out_response_ids.append(acc_response)
         out_loss_masks.append(acc_loss_mask)
         if has_logprobs:
             out_logprobs.append(acc_logprobs)
+        if has_sample_support:
+            out_sample_support.append(acc_sample_support)
         out_rewards.append(acc_rewards_tokens if is_token_level_rewards else gen_out["rewards"][last])
         if has_stop_reasons:
             out_stop_reasons.append(gen_out["stop_reasons"][last])
@@ -869,6 +883,9 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
             acc_response = list(gen_out["response_ids"][i])
             acc_loss_mask = list(gen_out["loss_masks"][i])
             acc_logprobs = list(gen_out["rollout_logprobs"][i]) if has_logprobs else None
+            acc_sample_support = (
+                [list(row) for row in gen_out["rollout_sample_support"][i]] if has_sample_support else None
+            )
             acc_rewards_tokens = list(gen_out["rewards"][i]) if is_token_level_rewards else None
             last = i
             continue
@@ -883,6 +900,8 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         acc_loss_mask.extend([0] * len(obs_delta))
         if acc_logprobs is not None:
             acc_logprobs.extend([0.0] * len(obs_delta))
+        if acc_sample_support is not None:
+            acc_sample_support.extend([SAMPLE_SUPPORT_PADDING] * sample_support_width for _ in obs_delta)
         if acc_rewards_tokens is not None:
             acc_rewards_tokens.extend([0.0] * len(obs_delta))
 
@@ -891,6 +910,8 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         acc_loss_mask.extend(gen_out["loss_masks"][i])
         if acc_logprobs is not None:
             acc_logprobs.extend(gen_out["rollout_logprobs"][i])
+        if acc_sample_support is not None:
+            acc_sample_support.extend(gen_out["rollout_sample_support"][i])
         if acc_rewards_tokens is not None:
             acc_rewards_tokens.extend(gen_out["rewards"][i])
 
@@ -905,6 +926,7 @@ def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
         "loss_masks": out_loss_masks,
         "stop_reasons": out_stop_reasons,
         "rollout_logprobs": out_logprobs,
+        "rollout_sample_support": out_sample_support,
         "trajectory_ids": out_trajectory_ids,
         "rollout_expert_indices": None,
         "is_last_step": out_is_last_step,

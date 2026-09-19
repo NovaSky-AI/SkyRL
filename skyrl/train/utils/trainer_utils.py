@@ -702,6 +702,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "stop_reasons",
             "trajectory_ids",
             "rollout_expert_indices",
+            "rollout_sample_support",
             "is_last_step",
             "pixel_values",
             "image_grid_thw",
