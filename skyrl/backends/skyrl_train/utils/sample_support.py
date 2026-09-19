@@ -24,6 +24,8 @@ SAMPLE_SUPPORT_PADDING = -1
 SAMPLE_SUPPORT_FIELD = "rollout_sample_support"
 # Sentinel outside the valid packed-row range.
 SAMPLE_SUPPORT_NO_ROW = -1
+# Forward-output mask for positions with support-conditioned entropy.
+SAMPLE_SUPPORT_ENTROPY_MASK_KEY = "entropy_mask"
 
 
 def validate_sample_support(sample_support: SampleSupport) -> SampleSupport:
