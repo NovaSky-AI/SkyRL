@@ -16,7 +16,6 @@ class RoutedExpertTrace:
 
     def __init__(self) -> None:
         self._metadata = TokenMetadataTrace()
-        self._schema: tuple[int, int, np.dtype] | None = None
 
     @property
     def prompt_start(self) -> int:
@@ -35,12 +34,10 @@ class RoutedExpertTrace:
             raise ValueError("routed-expert generation must produce at least one token")
 
         expected_rows = prompt_token_count - self.prompt_start + generated_token_count - 1
-        compact = compact_routed_expert_indices(routed_experts)
-        if self._schema is None:
-            self._schema = (*compact.shape[1:], compact.dtype)
-        self._metadata.append(compact, expected_rows=expected_rows)
+        self._metadata.append(compact_routed_expert_indices(routed_experts), expected_rows=expected_rows)
 
     def finalize(self, *, token_count: int, loss_mask: Sequence[int]) -> RoutedExpertIndices:
+        """Return the captured route prefix without fabricating rows for its uncovered tail."""
         if len(loss_mask) != token_count:
             raise ValueError(f"loss mask has {len(loss_mask)} entries, expected {token_count}")
         if self.prompt_start > token_count:
@@ -51,16 +48,7 @@ class RoutedExpertTrace:
                 if loss_mask[source_index + 1] != 0:
                     raise ValueError(f"missing routed-expert row for loss-active target at token {source_index + 1}")
 
-        padding_count = token_count - self.prompt_start
-        if padding_count:
-            if self._schema is None:
-                raise ValueError("cannot pad routed-expert trace before any routes are captured")
-            num_layers, topk, dtype = self._schema
-            padding_row = np.arange(topk, dtype=dtype)
-            padding = np.broadcast_to(padding_row, (padding_count, num_layers, topk)).copy()
-            self._metadata.append(padding, expected_rows=padding_count)
-
-        return self._metadata.finalize(expected_rows=token_count)
+        return self._metadata.finalize(expected_rows=self.prompt_start)
 
 
 def compact_routed_expert_indices(routed_experts: RoutedExpertIndices) -> RoutedExpertIndices:
