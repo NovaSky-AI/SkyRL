@@ -1230,11 +1230,13 @@ class TestScoreCenteringValidation:
         with pytest.raises(ValueError, match="conflicts"):
             validate_cfg(cfg)
 
-    def test_requires_rollout_is(self):
+    def test_requires_rollout_is_or_reinforce(self):
         cfg = self._cfg()
         cfg.trainer.algorithm.policy_loss_type = "regular"
-        with pytest.raises(ValueError, match="rollout_is"):
+        with pytest.raises(ValueError, match="reinforce"):
             validate_cfg(cfg)
+        cfg.trainer.algorithm.policy_loss_type = "reinforce"
+        validate_cfg(cfg)
 
     def test_rejects_tis_ratio(self):
         cfg = self._cfg()

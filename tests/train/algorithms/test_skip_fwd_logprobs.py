@@ -35,6 +35,7 @@ def test_losses_without_old_logprobs():
     """rollout_is and dppo optimize against rollout logprobs and do not need old logprobs."""
     assert "rollout_is" in LOSSES_WITHOUT_OLD_LOGPROBS
     assert "dppo" in LOSSES_WITHOUT_OLD_LOGPROBS
+    assert "reinforce" in LOSSES_WITHOUT_OLD_LOGPROBS
     assert "regular" not in LOSSES_WITHOUT_OLD_LOGPROBS
     assert "gspo" not in LOSSES_WITHOUT_OLD_LOGPROBS
 

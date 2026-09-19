@@ -451,6 +451,9 @@ def compute_score_centering_loss(
         "score_centering_trainer_head_mass": masked_mean(trainer_head_mass, loss_mask).detach().item(),
         "score_centering_tail_mass_ratio": masked_mean(tail_mass_ratio, loss_mask).detach().item(),
         "score_centering_residual_abs_sum": masked_mean(residual.abs().sum(dim=-1), loss_mask).detach().item(),
+        # `centering_loss` carries the advantage scaling (e.g. 1/num_tokens under token-mean
+        # reduction); `score_centering_term_abs_mean` is the raw per-token correction magnitude.
+        "score_centering_term_abs_mean": masked_mean(centering_term.detach().abs(), loss_mask).detach().item(),
         "score_centering_loss_abs_mean": masked_mean(centering_loss.detach().abs(), loss_mask).detach().item(),
     }
     return centering_loss, metrics

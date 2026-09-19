@@ -889,8 +889,10 @@ class ScoreCenteringConfig(BaseConfig):
     enabled: bool = False
     """Add the score-centering correction (https://arxiv.org/abs/2609.20807) to the policy loss.
     Subtracts the sampler-expected score at every prefix so the update carries no drift toward
-    the (stale or numerically mismatched) sampler. Requires ``policy_loss_type="rollout_is"`` and
-    the ``fsdp`` backend; sets ``generator.sampling_params.logprobs`` to ``top_k``."""
+    the (stale or numerically mismatched) sampler. Requires ``policy_loss_type="reinforce"`` (the
+    paper's SC arm) or ``"rollout_is"`` (centering of the calibrated score, which is nonzero only
+    for tokens outside the calibration band) and the ``fsdp`` backend; sets
+    ``generator.sampling_params.logprobs`` to ``top_k``."""
     top_k: int = 32
     """Number of sampler top-k next-token logprobs used to build the centering term.
     The remaining sampler mass is modeled with the trainer's distribution. The paper reports
@@ -955,6 +957,9 @@ class AlgorithmConfig(BaseConfig):
     - ``"rollout_is"``: the agentic loss from section 4.1.2 of the GLM-5 tech report
       (https://arxiv.org/pdf/2602.15763). Uses rollout logprobs and Icepop-style clipping with an
       additional stop gradient for masked tokens.
+    - ``"reinforce"``: plain policy gradient ``-A * log pi`` on the sampled rollouts with no
+      importance ratio; the base objective of the score-centering paper
+      (https://arxiv.org/abs/2609.20807), usually paired with ``score_centering.enabled``.
     - ``"cross_entropy"`` and ``"importance_sampling"``: also registered; see ``PolicyLossRegistry``.
     - ``"dppo"``: DPPO, from Rethinking the Trust Region in LLM Reinforcement Learning
       (https://arxiv.org/pdf/2602.04879). Uses rollout logprobs and absolute probability

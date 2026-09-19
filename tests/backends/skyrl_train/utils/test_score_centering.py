@@ -89,6 +89,7 @@ def test_matches_paper_reference_implementation(weight_fn):
         "score_centering_trainer_head_mass",
         "score_centering_tail_mass_ratio",
         "score_centering_residual_abs_sum",
+        "score_centering_term_abs_mean",
         "score_centering_loss_abs_mean",
     }
 
@@ -224,3 +225,55 @@ def test_logprobs_and_topk_logprobs_from_logits_matches_log_softmax(inplace_back
     torch.testing.assert_close(topk_logp, ref_topk, **tol)
     (grad,) = torch.autograd.grad((label_logp * g_label).sum() + (topk_logp * g_topk).sum(), logits_test)
     torch.testing.assert_close(grad.float(), ref_grad, **tol)
+
+
+def test_reinforce_loss_is_plain_policy_gradient_plus_centering():
+    torch.manual_seed(5)
+    batch, num_actions, vocab, k = 2, 3, 7, 3
+    train_logits = torch.randn(batch, num_actions, vocab, requires_grad=True)
+    train_logp = torch.log_softmax(train_logits, dim=-1)
+    samp_logp = torch.log_softmax(train_logits.detach() + 0.3 * torch.randn_like(train_logits), dim=-1)
+    sampled = torch.randint(0, vocab, (batch, num_actions))
+    log_probs = train_logp.gather(-1, sampled[..., None]).squeeze(-1)
+    rollout_logprobs = samp_logp.gather(-1, sampled[..., None]).squeeze(-1)
+    topk_logp, topk_ids = samp_logp.topk(k, dim=-1)
+    topk_log_probs = train_logp.gather(-1, topk_ids)
+    advantages = torch.randn(batch, num_actions)
+    loss_mask = torch.ones(batch, num_actions)
+
+    loss_fn = PolicyLossRegistry.get("reinforce")
+    cfg = AlgorithmConfig(policy_loss_type="reinforce")
+    base, _ = loss_fn(log_probs, log_probs.detach(), advantages, cfg, loss_mask, rollout_logprobs)
+    torch.testing.assert_close(base, -(advantages * log_probs).sum())
+
+    cfg.score_centering.enabled = True
+    centered, metrics = loss_fn(
+        log_probs,
+        log_probs.detach(),
+        advantages,
+        cfg,
+        loss_mask,
+        rollout_logprobs,
+        rollout_topk_logprobs=topk_logp,
+        topk_log_probs=topk_log_probs,
+    )
+    expected_term, _ = compute_score_centering_loss(advantages, topk_log_probs, topk_logp, loss_mask, torch.ones_like)
+    torch.testing.assert_close(centered, base + expected_term.sum(), atol=1e-6, rtol=1e-5)
+    assert metrics["score_centering_term_abs_mean"] > 0
+
+
+def test_rollout_is_centering_vanishes_inside_the_calibration_band():
+    """With f(r) = r on the band, q_v f(p_v/q_v) = p_v and alpha = 1, so the centering coefficient is
+    exactly zero for in-band head tokens: composed with `rollout_is`, score centering only acts on
+    out-of-band tokens."""
+    torch.manual_seed(6)
+    vocab, k = 20, 5
+    train_logp = torch.log_softmax(torch.randn(1, 4, vocab), dim=-1)
+    samp_logp = torch.log_softmax(train_logp + 0.05 * torch.randn(1, 4, vocab), dim=-1)  # all ratios in band
+    topk_logp, topk_ids = samp_logp.topk(k, dim=-1)
+    calibrate = lambda r: torch.where((r > 0.5) & (r < 5.0), r, torch.zeros_like(r))  # noqa: E731
+    loss, metrics = compute_score_centering_loss(
+        torch.ones(1, 4), train_logp.gather(-1, topk_ids).requires_grad_(True), topk_logp, None, calibrate
+    )
+    assert metrics["score_centering_residual_abs_sum"] < 1e-5
+    torch.testing.assert_close(loss, torch.zeros_like(loss), atol=1e-5, rtol=0)

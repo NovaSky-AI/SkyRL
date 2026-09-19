@@ -325,10 +325,10 @@ def validate_score_centering_cfg(cfg: SkyRLTrainConfig) -> None:
             f"`trainer.algorithm.score_centering` is only supported with `trainer.strategy=fsdp`, got "
             f"{cfg.trainer.strategy}."
         )
-    if algorithm.policy_loss_type != "rollout_is":
+    if algorithm.policy_loss_type not in ("rollout_is", "reinforce"):
         raise ValueError(
-            "`trainer.algorithm.score_centering` requires `trainer.algorithm.policy_loss_type=rollout_is`, got "
-            f"{algorithm.policy_loss_type}."
+            "`trainer.algorithm.score_centering` requires `trainer.algorithm.policy_loss_type` to be "
+            f"`reinforce` or `rollout_is`, got {algorithm.policy_loss_type}."
         )
     if algorithm.off_policy_correction.tis_ratio_type is not None:
         raise ValueError(
