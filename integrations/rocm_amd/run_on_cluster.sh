@@ -50,18 +50,18 @@ srun -p "${PARTITION}" \
   -c "${CPUS}" \
   --mem="${MEM}" \
   -t "${TIME}" \
+  --export=ALL \
   "$@" \
-  bash -lc "
+  bash -c "
 set -euo pipefail
 export HIP_VISIBLE_DEVICES=${GPU_DEVS}
 export ROCR_VISIBLE_DEVICES=${GPU_DEVS}
 export NUM_GPUS=${GPUS}
 export MATRIX_GPUS=${GPUS}
-export MATRIX_NODES=\${MATRIX_NODES:-1}
-export MATRIX_FILTER='${MATRIX_FILTER:-}'
-export SKIP_INSTALL=\${SKIP_INSTALL:-0}
-export MAX_JOBS=\${MAX_JOBS:-16}
-export RUN_GRPO_SMOKE=\${RUN_GRPO_SMOKE:-0}
+export MATRIX_NODES=\"\${MATRIX_NODES:-1}\"
+export SKIP_INSTALL=\"\${SKIP_INSTALL:-0}\"
+export MAX_JOBS=\"\${MAX_JOBS:-16}\"
+export RUN_GRPO_SMOKE=\"\${RUN_GRPO_SMOKE:-0}\"
 
 docker run --rm --network host --ipc=host \
   --device=/dev/kfd --device=/dev/dri --group-add video \
@@ -73,10 +73,10 @@ docker run --rm --network host --ipc=host \
   -e NUM_GPUS -e MAX_JOBS=16 -e RUN_GRPO_SMOKE -e FORCE_VLLM_REBUILD \
   -e MATRIX_GPUS -e MATRIX_NODES -e MATRIX_FILTER -e SKIP_INSTALL \
   -e HF_HUB_ENABLE_HF_TRANSFER=1 \
-  -v '${ROOT}:/workspace/SkyRL' \
+  -v ${ROOT}:/workspace/SkyRL \
   -w /workspace/SkyRL \
-  '${IMAGE}' \
-  bash -lc '${INNER}'
+  ${IMAGE} \
+  bash -c $(printf %q "${INNER}")
 " 2>&1 | tee "${LOG}"
 
 echo "Done. Log: ${LOG}"
