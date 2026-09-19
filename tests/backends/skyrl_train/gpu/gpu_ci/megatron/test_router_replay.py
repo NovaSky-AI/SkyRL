@@ -487,7 +487,7 @@ def test_forward_backward_variable_length_full_recompute(tp, pp, cp, ep, etp, ex
 
         sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = (
             convert_prompts_responses_to_batch_tensors(
-                tokenizer=tokenizer,
+                pad_token_id=tokenizer.pad_token_id,
                 prompts=prompts,
                 responses=responses,
                 rewards=rewards,
