@@ -9,6 +9,7 @@ from skyrl.backends.skyrl_train.distributed.megatron import token_metadata
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     TokenMetadataTrace,
 )
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertTrace
 
 
@@ -151,3 +152,73 @@ def test_routed_expert_trace_only_pads_masked_suffix(active: bool) -> None:
     else:
         result = trace.finalize(token_count=5, loss_mask=mask)
         assert np.array_equal(result[-2:, 0], [[0, 1], [0, 1]])
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_align_token_rows_places_each_trajectory_from_its_own_row_source(monkeypatch, parallel_state, packed):
+    """``_align_token_rows`` is the one placement loop both alignment entry points share."""
+    monkeypatch.setattr(token_metadata, "get_packed_seq_align_size", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
+    attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
+    rows = [torch.tensor([10, 11, 12], dtype=torch.int32), torch.tensor([20, 21], dtype=torch.int32)]
+    layout = token_metadata.build_token_metadata_layout(
+        attention_mask,
+        rows[0].device,
+        packed=packed,
+        fp8_enabled=False,
+    )
+
+    aligned = token_metadata._align_token_rows(
+        rows.__getitem__,
+        rows[0],
+        (),
+        layout,
+        -1,
+    )
+
+    if packed:
+        assert aligned.tolist() == [[10, 11, 12, -1, 20, 21, -1, -1]]
+    else:
+        assert aligned.tolist() == [[10, 11, 12, -1], [20, 21, -1, -1]]
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_align_packed_token_metadata_honours_per_segment_starts(monkeypatch, parallel_state, packed):
+    """A response-suffix channel covers part of a trajectory and needs its own start."""
+    monkeypatch.setattr(token_metadata, "get_packed_seq_align_size", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
+    attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
+    # Trajectory 0 keeps its last 2 of 3 real tokens; trajectory 1 keeps its last 1 of 2.
+    suffix = PackedTensor.from_segments(
+        [torch.tensor([11, 12], dtype=torch.int32), torch.tensor([21], dtype=torch.int32)]
+    )
+    layout = token_metadata.build_token_metadata_layout(
+        attention_mask,
+        suffix.device,
+        packed=packed,
+        fp8_enabled=False,
+    )
+
+    aligned = token_metadata.align_packed_token_metadata(suffix, layout, -1, segment_starts=[1, 1])
+
+    if packed:
+        assert aligned.tolist() == [[-1, 11, 12, -1, -1, 21, -1, -1]]
+    else:
+        assert aligned.tolist() == [[-1, 11, 12, -1], [-1, 21, -1, -1]]
+
+
+def test_align_packed_token_metadata_rejects_segments_that_leave_the_trajectory(monkeypatch, parallel_state):
+    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
+    attention_mask = torch.tensor([[0, 1, 1, 1]])
+    suffix = PackedTensor.from_segments([torch.tensor([11, 12], dtype=torch.int32)])
+    layout = token_metadata.build_token_metadata_layout(
+        attention_mask,
+        suffix.device,
+        packed=False,
+        fp8_enabled=False,
+    )
+
+    with pytest.raises(ValueError, match="spans real tokens"):
+        token_metadata.align_packed_token_metadata(suffix, layout, -1, segment_starts=[2])
+    with pytest.raises(ValueError, match="do not match"):
+        token_metadata.align_packed_token_metadata(suffix, layout, -1)
