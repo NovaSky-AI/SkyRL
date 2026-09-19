@@ -2,7 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -65,6 +65,7 @@ def dummy_generator():
 def test_convert_to_training_input_right_aligns_full_logprob_rows(dummy_config, dummy_tokenizer, dummy_generator):
     dummy_config.trainer.rollout_logprob_comparison = "full"
     dummy_config.trainer.policy_mini_batch_size = 2
+    dummy_config.generator.inference_engine.enable_ray_prometheus_stats = False
     full_short = np.array([[-1.0, -2.0, -3.0], [-4.0, -5.0, -6.0]], dtype=np.float32)
     full_long = np.array(
         [[-7.0, -8.0, -9.0], [-10.0, -11.0, -12.0], [-13.0, -14.0, -15.0]],
@@ -105,6 +106,8 @@ def test_convert_to_training_input_right_aligns_full_logprob_rows(dummy_config, 
 
 def test_full_logprob_rows_are_forwarded_only_to_policy_prescore(dummy_config, dummy_tokenizer, dummy_generator):
     dummy_config.trainer.rollout_logprob_comparison = "full"
+    dummy_config.trainer.algorithm.use_kl_loss = True
+    dummy_config.generator.inference_engine.enable_ray_prometheus_stats = False
     trainer = RayPPOTrainer(
         cfg=dummy_config,
         tracker=None,
@@ -115,19 +118,24 @@ def test_full_logprob_rows_are_forwarded_only_to_policy_prescore(dummy_config, d
         generator=dummy_generator,
     )
     trainer.dispatch = MagicMock()
+    trainer.ref_model = MagicMock()
     observed = {}
 
-    def policy_forward(model, data, key, mini_batch_boundaries):
-        observed["model"] = model
-        observed["key"] = key
-        observed["has_full_rows"] = "rollout_full_logprobs" in data
-        observed["has_mask"] = "loss_mask" in data
-        observed["has_rollout_logprobs"] = "rollout_logprobs" in data
-        observed["sample_indices"] = data["sample_indices"].tolist()
-        observed["global_step"] = data.metadata.get("global_step")
+    def collect_forward(model, data, key, mini_batch_boundaries):
+        # Snapshot at dispatch time: the policy later mutates the same batch.
+        observed[model] = {
+            "key": key,
+            "has_full_rows": "rollout_full_logprobs" in data,
+            "has_mask": "loss_mask" in data,
+            "has_rollout_logprobs": "rollout_logprobs" in data,
+            "sample_indices": data["sample_indices"].tolist() if data.get("sample_indices") is not None else None,
+            "global_step": data.metadata.get("global_step"),
+        }
+        if model == "ref":
+            return torch.full((len(data["sequences"]), data.metadata["response_length"]), -2.0)
         return data["rollout_logprobs"].clone()
 
-    trainer._execute_forward_pass = MagicMock(side_effect=policy_forward)
+    trainer._execute_forward_pass = MagicMock(side_effect=collect_forward)
     training_input = TrainingInputBatch(
         {
             "sequences": torch.tensor([[10, 11, 12]]),
@@ -142,8 +150,16 @@ def test_full_logprob_rows_are_forwarded_only_to_policy_prescore(dummy_config, d
 
     trainer.fwd_logprobs_values_reward(training_input)
 
-    assert observed == {
-        "model": "policy",
+    assert list(observed) == ["ref", "policy"]
+    assert observed["ref"] == {
+        "key": "logprobs",
+        "has_full_rows": False,
+        "has_mask": False,
+        "has_rollout_logprobs": False,
+        "sample_indices": None,
+        "global_step": None,
+    }
+    assert observed["policy"] == {
         "key": "logprobs",
         "has_full_rows": True,
         "has_mask": True,
@@ -153,9 +169,10 @@ def test_full_logprob_rows_are_forwarded_only_to_policy_prescore(dummy_config, d
     }
     assert "rollout_full_logprobs" not in training_input
     assert "sample_indices" not in training_input
+    assert training_input["base_action_log_probs"].tolist() == [[-2.0, -2.0]]
     assert training_input["action_log_probs"].tolist() == [[-1.0, -2.0]]
     assert trainer.all_metrics["policy/full_logprobs_verified_rows"] == 2
-    trainer.dispatch.empty_cache.assert_called_once_with()
+    assert trainer.dispatch.empty_cache.call_args_list == [call("ref"), call()]
 
 
 def _get_test_data(trainer: RayPPOTrainer):
