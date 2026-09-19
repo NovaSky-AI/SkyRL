@@ -88,6 +88,16 @@ def build_token_metadata_layout(
     )
 
 
+def canonical_token_metadata_layout(attention_mask: torch.Tensor) -> TokenMetadataLayout:
+    """Describe an unsharded ``[batch, seq_len]`` layout."""
+    mask = attention_mask.to(torch.bool)
+    return TokenMetadataLayout(
+        attention_mask=mask,
+        sequence_lengths=mask.sum(dim=1, dtype=torch.int32).tolist(),
+        aligned_sequence_length=mask.shape[1],
+    )
+
+
 def align_token_metadata(
     metadata: torch.Tensor,
     layout: TokenMetadataLayout,
