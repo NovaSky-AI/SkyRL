@@ -10,8 +10,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from skyrl.utils.cpu_topology import pool_workers
 
-# Extra threads beyond this cap take cores from colocated actors without improving throughput.
-MAX_FILL_WORKERS = 32
+# Measured on a 192-core host across 0.4-32 GB buffers: throughput peaks at 4-8 workers and
+# then degrades as the fill saturates memory bandwidth and threads start contending. 32 workers
+# was 1.4-2.2x slower than 8 at every size, and slower than a serial fill below ~1 GB.
+MAX_FILL_WORKERS = 8
 # Leave room for Ray services in the same cgroup.
 RESERVED_FILL_CORES = 8
 
