@@ -1,3 +1,29 @@
+"""DAPO training client for SkyRL's Tinker API server.
+
+Usage:
+    # Terminal 1 (GPU node)
+    bash examples/tinker/dapo/run_tinker_server.sh
+
+    # Terminal 2
+    TINKER_API_KEY=tml-dummy uv run --extra tinker --with datasets --with torch \
+        python examples/tinker/dapo/dapo_client.py --lora-rank 128   # or --lora-rank 0 for full FT
+
+Reproduces examples/train/algorithms/dapo/run_dapo_qwen3_30b_a3b_{lora_,}megatron_aime.sh through the
+Tinker codepath. The client owns the algorithm: GRPO group-normalized advantages, DAPO soft overlong
+punishment and overlong filtering, token-mean-legacy loss scaling, clip-higher epsilons and LR warmup.
+The server (see run_tinker_server.sh) owns execution: Megatron parallelism, dual-clip loss type,
+weight decay and off-policy correction.
+
+Off-policy correction: unlike the native scripts, this recipe does NOT use TIS. It uses geometric
+sequence masking (see docs/content/docs/algorithms/off_policy_correction.mdx). For the mask to see the
+real train/inference mismatch the client runs a forward pass to obtain the training policy's logprobs
+at sampling time (as the native trainer does) and sends the vLLM sampling logprobs separately as
+`rollout_logprobs` (a SkyRL extension of the Tinker datum).
+
+Smoke testing: the DAPO_* environment variables below override batch sizes and lengths so the loop
+can be exercised on a small model / few GPUs before the full recipe.
+"""
+
 from __future__ import annotations
 
 import os
@@ -25,6 +51,11 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read an integer override from `DAPO_<name>`; used to shrink the recipe for smoke tests."""
+    return int(os.environ.get(f"DAPO_{name}", default))
+
+
 DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-30B-A3B-Base"
 DEFAULT_DATA_DIR = os.path.expanduser("~/data/dapo")
@@ -35,18 +66,18 @@ DEFAULT_WANDB_RUN_NAME = "dapo_qwen3_30b_a3b_tinker"
 DEFAULT_LORA_RANK = 128
 
 # Hyperparameters below mirror examples/train/algorithms/dapo/run_dapo_qwen3_30b_a3b_lora_megatron_aime.sh
-TRAIN_EPOCHS = 20
-TRAIN_BATCH_SIZE = 512
-EVAL_BATCH_SIZE = 1024
-POLICY_MINI_BATCH_SIZE = 32
+TRAIN_EPOCHS = _env_int("TRAIN_EPOCHS", 20)
+TRAIN_BATCH_SIZE = _env_int("TRAIN_BATCH_SIZE", 512)
+EVAL_BATCH_SIZE = _env_int("EVAL_BATCH_SIZE", 1024)
+POLICY_MINI_BATCH_SIZE = _env_int("POLICY_MINI_BATCH_SIZE", 32)  # in prompts
 UPDATE_EPOCHS_PER_BATCH = 1
-N_SAMPLES_PER_PROMPT = 16
-EVAL_N_SAMPLES_PER_PROMPT = 32
-MAX_PROMPT_LENGTH = 2048
-MAX_GENERATE_LENGTH = 8192
-EVAL_BEFORE_TRAIN = True
-CKPT_INTERVAL = 10
-EVAL_INTERVAL = 5
+N_SAMPLES_PER_PROMPT = _env_int("N_SAMPLES_PER_PROMPT", 16)
+EVAL_N_SAMPLES_PER_PROMPT = _env_int("EVAL_N_SAMPLES_PER_PROMPT", 32)
+MAX_PROMPT_LENGTH = _env_int("MAX_PROMPT_LENGTH", 2048)
+MAX_GENERATE_LENGTH = _env_int("MAX_GENERATE_LENGTH", 8192)
+EVAL_BEFORE_TRAIN = bool(_env_int("EVAL_BEFORE_TRAIN", 1))
+CKPT_INTERVAL = _env_int("CKPT_INTERVAL", 10)
+EVAL_INTERVAL = _env_int("EVAL_INTERVAL", 5)
 
 # Loss: dual-clip PPO. The clip epsilons are sent per request; `policy_loss_type=dual_clip`
 # and `clip_ratio_c=10.0` must be set server-side in backend_config (see run_tinker_server.sh).
@@ -56,19 +87,29 @@ CLIP_RATIO_HIGH = 0.28  # eps_clip_high: ratio ceiling is 1 + 0.28 = 1.28
 LOSS_REDUCTION = "token_mean_legacy"
 # Keep aligned with trainer.micro_train_batch_size_per_gpu in run_tinker_server.sh
 # (4 for the LoRA recipe, 2 for full fine-tuning).
-MICRO_TRAIN_BATCH_SIZE = 4
+MICRO_TRAIN_BATCH_SIZE = _env_int("MICRO_TRAIN_BATCH_SIZE", 4)
+# Sequences per `forward` request when recomputing old logprobs; the server micro-batches internally.
+FORWARD_BATCH_SIZE = POLICY_MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT
 
 # Optimizer (trainer.policy.optimizer_config in the reference script)
 POLICY_LEARNING_RATE = 1.0e-5
-NUM_WARMUP_STEPS = 160  # counted in optimizer (mini-batch) steps
+NUM_WARMUP_STEPS = _env_int("NUM_WARMUP_STEPS", 160)  # counted in optimizer (mini-batch) steps
 # Applied server-side: set trainer.policy.optimizer_config.weight_decay=0.1 in backend_config.
 # max_grad_norm=1.0 is the SkyRL optimizer default and is also applied server-side.
 WEIGHT_DECAY = 0.1
 
 # Soft overlong punishment / overlong filtering (DAPO)
-OVERLONG_BUFFER_LEN = 1024 * 4
+OVERLONG_BUFFER_LEN = _env_int("OVERLONG_BUFFER_LEN", 1024 * 4)
 OVERLONG_BUFFER_PENALTY_FACTOR = 1.0
 APPLY_OVERLONG_FILTERING = True
+
+# Off-policy correction. When True, after sampling the client runs a `forward` pass to get the
+# training policy's logprobs (PPO ratio denominator, as in the native trainer) and sends the vLLM
+# sampling logprobs as `rollout_logprobs` so the server's geometric sequence mask
+# (trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric" in backend_config)
+# measures the true train/inference mismatch. When False, the sampling logprobs are used as the
+# ratio denominator and any server-side off-policy correction is a no-op.
+RECOMPUTE_OLD_LOGPROBS = bool(_env_int("RECOMPUTE_OLD_LOGPROBS", 1))
 
 # Sampling
 SAMPLING_STOP_STRINGS: list[str] | None = None
@@ -80,7 +121,7 @@ EVAL_SAMPLING_TOP_P = 0.7
 
 
 class WandbLogger:
-    def __init__(self, output_dir: str | None):
+    def __init__(self, output_dir: str | None, run_config: dict[str, Any] | None = None):
         self._run = None
         self.enabled = False
         api_key = os.environ.get("WANDB_API_KEY")
@@ -97,7 +138,7 @@ class WandbLogger:
         run_kwargs: dict[str, Any] = {
             "project": os.environ.get("WANDB_PROJECT", DEFAULT_WANDB_PROJECT),
             "config": {
-                "base_model": DEFAULT_MODEL_NAME,
+                **(run_config or {}),
                 "train_batch_size": TRAIN_BATCH_SIZE,
                 "policy_mini_batch_size": POLICY_MINI_BATCH_SIZE,
                 "update_epochs_per_batch": UPDATE_EPOCHS_PER_BATCH,
@@ -105,7 +146,7 @@ class WandbLogger:
                 "policy_learning_rate": POLICY_LEARNING_RATE,
                 "num_warmup_steps": NUM_WARMUP_STEPS,
                 "weight_decay": WEIGHT_DECAY,
-                "lora_rank": DEFAULT_LORA_RANK,
+                "recompute_old_logprobs": RECOMPUTE_OLD_LOGPROBS,
                 "clip_ratio_low": CLIP_RATIO_LOW,
                 "clip_ratio_high": CLIP_RATIO_HIGH,
                 "loss_reduction": LOSS_REDUCTION,
@@ -180,7 +221,11 @@ class ExampleRecord:
 class Trajectory:
     prompt_tokens: list[int]
     response_tokens: list[int]
+    # Training-policy logprobs at sampling time: the PPO ratio denominator. Initialized to the
+    # sampling logprobs and replaced by `compute_old_logprobs` when RECOMPUTE_OLD_LOGPROBS is set.
     old_logprobs: list[float]
+    # vLLM sampling logprobs, sent as `rollout_logprobs` for off-policy correction.
+    rollout_logprobs: list[float]
     # Per-response-token loss weights. All ones, or all zeros when the response was truncated
     # and overlong filtering is on (DAPO's "Overlong Filtering").
     loss_mask: list[float]
@@ -221,6 +266,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key", default=os.environ.get("TINKER_API_KEY", "tml-dummy"))
     parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
     parser.add_argument("--output-dir", default=DEFAULT_CKPT_DIR)
+    parser.add_argument("--model", default=DEFAULT_MODEL_NAME, help="Base model; must match the server's --base-model")
+    parser.add_argument(
+        "--lora-rank",
+        type=int,
+        default=DEFAULT_LORA_RANK,
+        help="LoRA rank (128 for the LoRA recipe, 0 for full fine-tuning)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-train-steps", type=int, default=None)
     parser.add_argument("--max-eval-steps", type=int, default=None)
@@ -422,16 +474,61 @@ def build_policy_train_datum(
     old_logprobs: list[float],
     advantages: list[float],
     weights: list[float],
+    rollout_logprobs: list[float] | None = None,
 ) -> types.Datum:
+    loss_fn_inputs = {
+        "target_tokens": tensor_data_int(response_tokens),
+        "weights": tensor_data_float(weights),
+        "logprobs": tensor_data_float(old_logprobs),
+        "advantages": tensor_data_float(advantages),
+    }
+    if rollout_logprobs is not None:
+        # SkyRL extension: lets the server apply off-policy correction against the rollout policy
+        # while `logprobs` remains the PPO ratio denominator.
+        loss_fn_inputs["rollout_logprobs"] = tensor_data_float(rollout_logprobs)
+    return types.Datum(
+        model_input=rollout_model_input(prompt_tokens, response_tokens),
+        loss_fn_inputs=loss_fn_inputs,
+    )
+
+
+def build_forward_datum(prompt_tokens: list[int], response_tokens: list[int]) -> types.Datum:
     return types.Datum(
         model_input=rollout_model_input(prompt_tokens, response_tokens),
         loss_fn_inputs={
             "target_tokens": tensor_data_int(response_tokens),
-            "weights": tensor_data_float(weights),
-            "logprobs": tensor_data_float(old_logprobs),
-            "advantages": tensor_data_float(advantages),
+            "weights": tensor_data_float([1.0] * len(response_tokens)),
         },
     )
+
+
+def extract_logprobs(output: Any) -> list[float]:
+    logprobs = output["logprobs"]
+    if hasattr(logprobs, "data"):
+        return [float(v) for v in logprobs.data]
+    if isinstance(logprobs, dict) and "data" in logprobs:
+        return [float(v) for v in logprobs["data"]]
+    if isinstance(logprobs, list):
+        return [float(v) for v in logprobs]
+    raise TypeError(f"Unsupported forward output format: {type(logprobs)!r}")
+
+
+def compute_old_logprobs(policy_client: tinker.TrainingClient, trajectories: Sequence[Trajectory]) -> None:
+    """Fill `old_logprobs` with the training policy's logprobs before any update this step.
+
+    Mirrors the native trainer's forward pass for `action_log_probs`. Must run before `train_policy`
+    (while the training weights still equal the sampling weights).
+    """
+    for chunk in chunked(list(trajectories), FORWARD_BATCH_SIZE):
+        data = [build_forward_datum(t.prompt_tokens, t.response_tokens) for t in chunk]
+        result = policy_client.forward(data, "cross_entropy").result()
+        for trajectory, output in zip(chunk, result.loss_fn_outputs, strict=True):
+            logprobs = extract_logprobs(output)
+            if len(logprobs) != len(trajectory.response_tokens):
+                raise ValueError(
+                    f"forward returned {len(logprobs)} logprobs for {len(trajectory.response_tokens)} response tokens"
+                )
+            trajectory.old_logprobs = logprobs
 
 
 def train_policy(
@@ -461,6 +558,7 @@ def train_policy(
                     t.old_logprobs,
                     advantages,
                     weights=t.loss_mask,
+                    rollout_logprobs=t.rollout_logprobs if RECOMPUTE_OLD_LOGPROBS else None,
                 )
                 for t, advantages in zip(minibatch, normalized_advantages, strict=True)
             ]
@@ -526,13 +624,14 @@ def collect_rollouts(
                 continue
             response_text = tokenizer.decode(response_tokens, skip_special_tokens=True)
             reward = compute_aime_reward(response_text, record.ground_truth)
-            old_logprobs = list(sequence.logprobs or [0.0] * len(response_tokens))
+            rollout_logprobs = list(sequence.logprobs or [0.0] * len(response_tokens))
             stop_reason = str(sequence.stop_reason)
             trajectories.append(
                 Trajectory(
                     prompt_tokens=record.prompt_tokens,
                     response_tokens=response_tokens,
-                    old_logprobs=old_logprobs,
+                    old_logprobs=rollout_logprobs,
+                    rollout_logprobs=rollout_logprobs,
                     loss_mask=overlong_filter_loss_mask(response_tokens, stop_reason),
                     stop_reason=stop_reason,
                     advantages=[],
@@ -607,16 +706,16 @@ def evaluate_policy(
         if args.max_eval_steps is not None and eval_steps >= args.max_eval_steps:
             break
 
-    avg_reward = total_reward / total_trajectories if total_trajectories else 0.0
+    # avg_score is the mean over all EVAL_N_SAMPLES_PER_PROMPT samples (same as native `eval/all/avg_score`);
+    # pass_at_n is the fraction of prompts with at least one correct sample.
+    avg_score = total_reward / total_trajectories if total_trajectories else 0.0
     mean_positive_reward = total_positive_reward / total_trajectories if total_trajectories else 0.0
-    pass_at_1 = total_passes / total_prompts if total_prompts else 0.0
+    pass_at_n = total_passes / total_prompts if total_prompts else 0.0
     return {
-        "eval/avg_reward": avg_reward,
-        "eval/pass_at_1": pass_at_1,
-        "eval/num_steps": float(eval_steps),
-        "eval/all/avg_score": avg_reward,
-        f"eval/all/pass_at_{EVAL_N_SAMPLES_PER_PROMPT}": pass_at_1,
+        "eval/all/avg_score": avg_score,
+        f"eval/all/pass_at_{EVAL_N_SAMPLES_PER_PROMPT}": pass_at_n,
         "eval/all/mean_positive_reward": mean_positive_reward,
+        "eval/num_steps": float(eval_steps),
     }
 
 
@@ -647,7 +746,7 @@ def save_checkpoint(
 def run_training(args: argparse.Namespace) -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    wandb_logger = WandbLogger(args.output_dir)
+    wandb_logger = WandbLogger(args.output_dir, run_config={"base_model": args.model, "lora_rank": args.lora_rank})
     logger.info(
         "wandb status: enabled=%s project=%s run_name=%s entity=%s",
         wandb_logger.enabled,
@@ -657,9 +756,10 @@ def run_training(args: argparse.Namespace) -> None:
     )
 
     service_client = tinker.ServiceClient(base_url=args.base_url, api_key=args.api_key)
+    # rank=0 selects full-parameter fine-tuning on the SkyRL server.
     policy_client = service_client.create_lora_training_client(
-        base_model=DEFAULT_MODEL_NAME,
-        rank=DEFAULT_LORA_RANK,
+        base_model=args.model,
+        rank=args.lora_rank,
         seed=args.seed,
         train_mlp=True,
         train_attn=True,
@@ -671,11 +771,14 @@ def run_training(args: argparse.Namespace) -> None:
     eval_records = load_split(val_path, tokenizer, max_prompt_length=MAX_PROMPT_LENGTH)
 
     logger.info(
-        "Starting DAPO Tinker training: train_examples=%s, eval_examples=%s, model=%s, policy_loss=%s",
+        "Starting DAPO Tinker training: train_examples=%s, eval_examples=%s, model=%s, lora_rank=%s, "
+        "policy_loss=%s, recompute_old_logprobs=%s",
         len(train_records),
         len(eval_records),
-        DEFAULT_MODEL_NAME,
+        args.model,
+        args.lora_rank,
         POLICY_LOSS,
+        RECOMPUTE_OLD_LOGPROBS,
     )
 
     global_step = 0
@@ -709,6 +812,8 @@ def run_training(args: argparse.Namespace) -> None:
                     logger.warning("Skipping empty rollout batch at step %s", global_step)
                     continue
 
+                if RECOMPUTE_OLD_LOGPROBS:
+                    compute_old_logprobs(policy_client, trajectories)
                 overlong_metrics = apply_soft_overlong_punishment(trajectories)
                 compute_advantages(trajectories)
                 policy_metrics, optim_step = train_policy(policy_client, trajectories, optim_step)
@@ -770,7 +875,7 @@ def main() -> None:
         args.base_url,
         args.data_dir,
         args.output_dir,
-        DEFAULT_MODEL_NAME,
+        args.model,
     )
     run_training(args)
 

@@ -116,11 +116,14 @@ def _build_skyrl_train_config(
     # LoRA rank/alpha must also be on the override dict so post_init validation
     # sees them — e.g. fake_int4_qat.enabled requires lora.rank > 0, which
     # would spuriously fail for LoRA clients if the rank were applied after
-    # from_cli_overrides. The client-requested LoRA config wins over any
-    # backend_config value (matching the previous post-assignment behaviour).
+    # from_cli_overrides. The client-requested rank wins over any backend_config
+    # value. The Tinker SDK cannot express alpha (the API server fills in 32), so
+    # an explicit `trainer.policy.model.lora.alpha` in backend_config takes
+    # precedence over that placeholder; otherwise the API's value is used.
     if lora_config is not None and lora_config.rank > 0:
         user_overrides["trainer.policy.model.lora.rank"] = lora_config.rank
-        user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
+        if "trainer.policy.model.lora.alpha" not in user_overrides:
+            user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
@@ -227,6 +230,7 @@ class SkyRLTrainBackend(AbstractBackend):
             "all_advantages",
             "all_values",
             "all_returns",
+            "all_rollout_logprobs",
             "all_model_ids",
             "all_loss_fns",
             "all_loss_fn_configs",
@@ -719,14 +723,18 @@ class SkyRLTrainBackend(AbstractBackend):
         sequences, attention_masks, loss_masks, response_masks = [], [], [], []
         action_log_probs_list, advantages_list = [], []
         values_list, returns_list = [], []
+        rollout_logprobs_list = []
+        # `all_rollout_logprobs` defaults to [] for batches built before the field existed.
+        all_rollout_logprobs = prepared_batch.all_rollout_logprobs or [[] for _ in full_sequences]
 
-        for seq, weights, logprobs, advs, values, returns in zip(
+        for seq, weights, logprobs, advs, values, returns, rollout_lps in zip(
             full_sequences,
             prepared_batch.all_token_weights,
             prepared_batch.all_sampling_logprobs,
             prepared_batch.all_advantages,
             prepared_batch.all_values,
             prepared_batch.all_returns,
+            all_rollout_logprobs,
         ):
             pad_len = max_seq_len - len(seq)
             sequences.append([self._tokenizer.pad_token_id] * pad_len + list(seq))
@@ -738,6 +746,7 @@ class SkyRLTrainBackend(AbstractBackend):
             advantages_list.append([0.0] * action_pad + [float(a) for a in advs])
             values_list.append([0.0] * action_pad + [float(v) for v in values])
             returns_list.append([0.0] * action_pad + [float(r) for r in returns])
+            rollout_logprobs_list.append([0.0] * action_pad + [float(lp) for lp in rollout_lps])
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
         attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long)
@@ -753,20 +762,34 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Include RL fields (action_log_probs, advantages) when data is present
         has_logprobs = any(len(lp) > 0 for lp in prepared_batch.all_sampling_logprobs)
+        has_rollout_logprobs = any(len(lp) > 0 for lp in all_rollout_logprobs)
         has_advantages = any(len(a) > 0 for a in prepared_batch.all_advantages)
         has_values = any(len(v) > 0 for v in prepared_batch.all_values)
         has_returns = any(len(r) > 0 for r in prepared_batch.all_returns)
         if has_logprobs:
             action_log_probs_tensor = torch.tensor(action_log_probs_list, dtype=torch.float32)
             batch_dict["action_log_probs"] = action_log_probs_tensor
-            # Tinker datums carry the *sampling* (rollout-engine) logprobs.
-            # Mirror them into `rollout_logprobs` so the policy workers emit
-            # the train-vs-rollout logprob-gap metrics
-            # (`minibatch_rollout_logprobs_abs_diff_*`), surfaced by
-            # `_extract_metrics` below.  Loss behaviour only changes when
-            # `trainer.algorithm.off_policy_correction` is explicitly
-            # configured (rollout logprobs are its intended input).
-            batch_dict["rollout_logprobs"] = action_log_probs_tensor
+            if has_rollout_logprobs:
+                # SkyRL extension: the client sent the rollout-engine logprobs separately
+                # (`loss_fn_inputs["rollout_logprobs"]`) and `logprobs` holds the training
+                # policy's logprobs at sampling time. This matches the native trainer, where
+                # `action_log_probs` come from a forward pass and `rollout_logprobs` from the
+                # engine, so `off_policy_correction` (geometric/product sequence masking, TIS)
+                # measures the real train/inference mismatch.
+                if any(
+                    len(rollout_lps) != len(weights)
+                    for rollout_lps, weights in zip(all_rollout_logprobs, prepared_batch.all_token_weights)
+                ):
+                    raise ValueError("`rollout_logprobs` must have one entry per response token when provided")
+                batch_dict["rollout_logprobs"] = torch.tensor(rollout_logprobs_list, dtype=torch.float32)
+            else:
+                # Tinker datums carry the *sampling* (rollout-engine) logprobs.
+                # Mirror them into `rollout_logprobs` so the policy workers emit
+                # the train-vs-rollout logprob-gap metrics
+                # (`minibatch_rollout_logprobs_abs_diff_*`), surfaced by
+                # `_extract_metrics` below. With identical tensors every
+                # `off_policy_correction` ratio is exactly 1, so masking/TIS are no-ops.
+                batch_dict["rollout_logprobs"] = action_log_probs_tensor
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
         if role == "critic":

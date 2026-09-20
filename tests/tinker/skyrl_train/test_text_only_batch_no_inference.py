@@ -76,6 +76,53 @@ def test_text_only_batch_skips_inference_engines():
     assert fake_self._renderer is None
 
 
+def _rl_prepared_batch(rollout_logprobs: list[list[float]] | None) -> types.PreparedModelPassBatch:
+    data = []
+    for i in range(2):
+        kwargs = {}
+        if rollout_logprobs is not None:
+            kwargs["rollout_logprobs"] = types.TensorData(data=rollout_logprobs[i])
+        data.append(
+            types.Datum(
+                model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
+                loss_fn_inputs=types.LossFnInputs(
+                    target_tokens=types.TensorData(data=[2, 3, 4]),
+                    weights=types.TensorData(data=[1.0, 1.0, 1.0]),
+                    advantages=types.TensorData(data=[0.5, 0.5, 0.5]),
+                    logprobs=types.TensorData(data=[-1.0, -2.0, -3.0]),
+                    **kwargs,
+                ),
+            )
+        )
+    requests = {"req1": ("model1", types.ForwardBackwardInput(data=data, loss_fn="ppo"))}
+    return prepare_model_pass_batch(requests)
+
+
+def test_rollout_logprobs_mirror_sampling_logprobs_by_default():
+    """Without `rollout_logprobs`, the datum's `logprobs` fill both roles (ratio == 1)."""
+    batch = skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
+        _fake_backend(), _rl_prepared_batch(None), role="policy"
+    )
+    assert batch["action_log_probs"].tolist() == [[-1.0, -2.0, -3.0]] * 2
+    assert batch["rollout_logprobs"].tolist() == batch["action_log_probs"].tolist()
+
+
+def test_rollout_logprobs_are_used_when_provided():
+    """`rollout_logprobs` feeds off-policy correction; `logprobs` stays the PPO ratio denominator."""
+    batch = skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
+        _fake_backend(), _rl_prepared_batch([[-1.5, -2.5, -3.5], [-1.0, -2.0, -3.0]]), role="policy"
+    )
+    assert batch["action_log_probs"].tolist() == [[-1.0, -2.0, -3.0]] * 2
+    assert batch["rollout_logprobs"].tolist() == [[-1.5, -2.5, -3.5], [-1.0, -2.0, -3.0]]
+
+
+def test_rollout_logprobs_length_mismatch_rejected():
+    with pytest.raises(ValueError, match="rollout_logprobs"):
+        skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
+            _fake_backend(), _rl_prepared_batch([[-1.5, -2.5], [-1.0, -2.0, -3.0]]), role="policy"
+        )
+
+
 def test_image_batch_uses_render_server_not_engines():
     """Batches with image chunks go to the CPU render server, never the engines."""
     fake_self = _fake_backend()

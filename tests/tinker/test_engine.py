@@ -187,6 +187,36 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
     assert batch.all_returns == [returns]
 
 
+def test_prepare_model_pass_batch_rollout_logprobs():
+    """`rollout_logprobs` is optional; it is carried per example and defaults to []."""
+
+    def _datum(rollout_logprobs: list[float] | None) -> types.Datum:
+        kwargs = {}
+        if rollout_logprobs is not None:
+            kwargs["rollout_logprobs"] = types.TensorData(data=rollout_logprobs)
+        return types.Datum(
+            model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
+            loss_fn_inputs=types.LossFnInputs(
+                target_tokens=types.TensorData(data=[2, 3, 4]),
+                weights=types.TensorData(data=[1.0, 1.0, 1.0]),
+                advantages=types.TensorData(data=[0.1, 0.1, 0.1]),
+                logprobs=types.TensorData(data=[-1.0, -1.0, -1.0]),
+                **kwargs,
+            ),
+        )
+
+    requests = {
+        "req1": (
+            "model1",
+            types.ForwardBackwardInput(data=[_datum([-1.1, -0.9, -1.0]), _datum(None)], loss_fn="ppo"),
+        ),
+    }
+
+    batch = prepare_model_pass_batch(requests)
+    assert batch.all_sampling_logprobs == [[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]]
+    assert batch.all_rollout_logprobs == [[-1.1, -0.9, -1.0], []]
+
+
 def test_prepare_sample_batch_session_ids():
     """all_session_ids holds the derived routing key per expanded sample, and None when the request has no session."""
     prompt = types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])])

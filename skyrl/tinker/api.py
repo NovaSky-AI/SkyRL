@@ -673,6 +673,9 @@ class Datum(BaseModel):
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
                 values=inp["values"].to_types() if "values" in inp else types.TensorData(data=[]),
                 returns=inp["returns"].to_types() if "returns" in inp else types.TensorData(data=[]),
+                rollout_logprobs=(
+                    inp["rollout_logprobs"].to_types() if "rollout_logprobs" in inp else types.TensorData(data=[])
+                ),
             ),
             model_input=self.model_input.to_types(),
         )
