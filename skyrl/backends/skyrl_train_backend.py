@@ -45,6 +45,10 @@ from skyrl.train.utils.utils import (
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
+# Prefix the policy workers put on every loss-function metric (see
+# `worker.py`, which writes `status["loss_metrics/" + k]`).
+LOSS_METRICS_PREFIX = "loss_metrics/"
+
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Configuration overrides for the SkyRL-Train backend.
@@ -905,6 +909,27 @@ class SkyRLTrainBackend(AbstractBackend):
                 metrics["policy/rollout_train_logprobs_abs_diff_min:min"] = float(
                     data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY]
                 )
+
+        # Loss-function metrics, which the workers prefix with `loss_metrics/`:
+        # `clip_ratio` plus the whole off-policy-correction family (sequence
+        # masking, token/outlier masks, TIS ratios). Forward them as a family
+        # rather than by name so a correction enabled through
+        # `trainer.algorithm.off_policy_correction` is observable from a Tinker
+        # client instead of being silently dropped here -- without
+        # `geo_sequence_mask_masked_ratio`, say, a masking config that never
+        # fires is indistinguishable from one that is working. `_max` / `_min`
+        # suffixes pick the matching Tinker cross-chunk reduction.
+        for key, value in data.items():
+            if not key.startswith(LOSS_METRICS_PREFIX):
+                continue
+            name = key[len(LOSS_METRICS_PREFIX) :]
+            if name.endswith("_max"):
+                reduction = "max"
+            elif name.endswith("_min"):
+                reduction = "min"
+            else:
+                reduction = "mean"
+            metrics[f"{name}:{reduction}"] = float(value)
 
         return metrics
 

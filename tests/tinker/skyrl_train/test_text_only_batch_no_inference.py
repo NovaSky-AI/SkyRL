@@ -178,3 +178,39 @@ def test_engine_init_invalidates_cpu_render_state():
     assert fake_self._renderer is None
     assert render_server.shutdown_called
     assert fake_self._render_server is None
+
+
+def test_extract_metrics_forwards_loss_metrics_family():
+    """Off-policy-correction metrics reach the client instead of being dropped.
+
+    Without this, a configured correction that never fires is indistinguishable
+    from one that works: `geo_sequence_mask_masked_ratio` is the only signal that
+    the geometric mask is actually rejecting sequences.
+    """
+    data = {
+        "final_loss": 1.0,
+        "loss_metrics/geo_sequence_mask_masked_ratio": 0.25,
+        "loss_metrics/geo_sequence_mask_over_high_ratio": 0.1,
+        "loss_metrics/is_ratio_max": 1.5,
+        "loss_metrics/is_ratio_min": 0.5,
+        "loss_metrics/clip_ratio": 0.03,
+    }
+
+    metrics = skyrl_train_backend.SkyRLTrainBackend._extract_metrics(_fake_backend(), data)
+
+    assert metrics["geo_sequence_mask_masked_ratio:mean"] == 0.25
+    assert metrics["geo_sequence_mask_over_high_ratio:mean"] == 0.1
+    assert metrics["clip_ratio:mean"] == 0.03
+    # `_max` / `_min` names pick the matching Tinker cross-chunk reduction.
+    assert metrics["is_ratio_max:max"] == 1.5
+    assert metrics["is_ratio_min:min"] == 0.5
+    # Non-loss_metrics keys keep their existing handling.
+    assert metrics["total_loss:sum"] == 1.0
+
+
+def test_extract_metrics_without_loss_metrics_is_unchanged():
+    """Batches with no loss-function metrics gain no extra keys."""
+    metrics = skyrl_train_backend.SkyRLTrainBackend._extract_metrics(
+        _fake_backend(), {"final_loss": 2.0, "policy_loss": 1.0}
+    )
+    assert metrics == {"total_loss:sum": 2.0, "pg_loss:sum": 1.0}

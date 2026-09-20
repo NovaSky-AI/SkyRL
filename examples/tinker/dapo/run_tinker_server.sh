@@ -61,6 +61,12 @@ GEO_MASK_HIGH="${GEO_MASK_HIGH:-1.01}"
 # set here; the reference LoRA run uses alpha = rank = 128.
 LORA_ALPHA="${LORA_ALPHA:-128}"
 
+# Ship standalone LoRA adapters to vLLM instead of merging them into the base weights.
+# Required on the Tinker path: sampling addresses the policy by the Tinker model_id, and that name only
+# exists on the engines when the adapter is registered via load_lora_adapter (merge_lora=true syncs
+# merged weights under the base model name instead, so every sample request 404s). Ignored for full FT.
+MERGE_LORA="${MERGE_LORA:-false}"
+
 LORA_CONFIG=""
 if [[ "$FULL_FT" != "1" ]]; then
   LORA_CONFIG=", \"trainer.policy.model.lora.alpha\": $LORA_ALPHA"
@@ -77,6 +83,7 @@ DEFAULT_BACKEND_CONFIG=$(cat <<JSON
   "trainer.policy.megatron_config.context_parallel_size": $MEGATRON_CP,
   "trainer.policy.megatron_config.expert_model_parallel_size": $MEGATRON_EP,
   "trainer.policy.megatron_config.expert_tensor_parallel_size": $MEGATRON_ETP,
+  "trainer.policy.megatron_config.lora_config.merge_lora": $MERGE_LORA,
   "trainer.micro_forward_batch_size_per_gpu": $MICRO_FORWARD_BATCH_SIZE_PER_GPU,
   "trainer.micro_train_batch_size_per_gpu": $MICRO_TRAIN_BATCH_SIZE_PER_GPU,
   "trainer.max_prompt_length": $MAX_PROMPT_LENGTH,

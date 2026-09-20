@@ -95,9 +95,13 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
 
 - `eval/all/avg_score` against the reference W&B runs (LoRA: `fauf9scq`, full FT: `j9sv07vf` in
   `skyrl-train-dapo-aime`).
-- `policy/...loss_metrics...` from the server: `geo_sequence_mask_masked_ratio` (the geometric mask's
-  masked fraction) and the `minibatch_rollout_logprobs_abs_diff_*` train/inference gap. A masked fraction
-  that is exactly 0 for every step means `rollout_logprobs` are not reaching the server.
+- `policy/rollout_train_logprobs_abs_diff_{mean,max}` from the server: the train/inference logprob gap.
+  **Exactly 0 for every step means `rollout_logprobs` are not reaching the server** and the off-policy
+  correction is a silent no-op (a healthy small run shows a mean around 1e-2).
+- `policy/geo_sequence_mask_masked_ratio` from the server: the fraction of sequences the geometric mask
+  drops, with `..._over_high_ratio` / `..._under_low_ratio` splitting it by direction. If it sits at 1.0,
+  the 0.99/1.01 band is rejecting everything and needs widening — the off-policy-correction docs note MoE
+  models often need a wider band, and both full recipes here are MoE.
 - `reward/truncated_ratio` and `reward/overlong_penalized_ratio` from the client.
 
 ## Notes
@@ -107,3 +111,8 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
   `trainer.policy.model.lora.alpha=128` in `backend_config`, which the SkyRL-Train backend now honors.
 - Router replay (R3) for MoE models is not available through the Tinker datum path, so it is not enabled.
 - The reference scripts use TIS (`use_tis=true`); this example deliberately does not.
+- The launcher sets `megatron_config.lora_config.merge_lora=false`. On the Tinker path this is required,
+  not an optimization: sampling addresses the policy by its Tinker `model_id`, and that name only exists
+  on the inference engines when the LoRA adapter is registered through `load_lora_adapter`. With the
+  Megatron default (`merge_lora=true`) the merged weights are served under the base model name and every
+  sample request fails with `404 ... does not exist`.
