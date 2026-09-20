@@ -60,9 +60,12 @@ Every setting is an environment variable with the reference value as default (se
 ## 3. Run the client
 
 ```bash
-TINKER_API_KEY=tml-dummy uv run --extra tinker --with datasets --with torch \
+TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
   python examples/tinker/dapo/dapo_client.py --lora-rank 128     # or --lora-rank 0
 ```
+
+The `skyrl-train` extra is required: the client imports `skyrl_gym` (the AIME verifier) and
+`skyrl.backends.skyrl_train.utils.ppo_utils` (the loss-reduction helper).
 
 Set `WANDB_API_KEY` (and optionally `WANDB_PROJECT` / `WANDB_RUN_NAME` / `WANDB_ENTITY`) for W&B logging;
 metrics are also appended to `<output-dir>/metrics.jsonl`.
@@ -84,7 +87,7 @@ server's `MICRO_TRAIN_BATCH_SIZE_PER_GPU`):
 DAPO_TRAIN_BATCH_SIZE=16 DAPO_POLICY_MINI_BATCH_SIZE=4 DAPO_N_SAMPLES_PER_PROMPT=4 \
 DAPO_EVAL_N_SAMPLES_PER_PROMPT=2 DAPO_MAX_GENERATE_LENGTH=1024 DAPO_OVERLONG_BUFFER_LEN=256 \
 DAPO_NUM_WARMUP_STEPS=4 DAPO_EVAL_BATCH_SIZE=32 DAPO_EVAL_INTERVAL=2 \
-TINKER_API_KEY=tml-dummy uv run --extra tinker --with datasets --with torch \
+TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
   python examples/tinker/dapo/dapo_client.py --model Qwen/Qwen3-1.7B-Base --lora-rank 32 --max-train-steps 4
 ```
 
@@ -92,9 +95,9 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --with datasets --with torch \
 
 - `eval/all/avg_score` against the reference W&B runs (LoRA: `fauf9scq`, full FT: `j9sv07vf` in
   `skyrl-train-dapo-aime`).
-- `policy/...loss_metrics...` from the server: the geometric mask's masked fraction and the
-  `minibatch_rollout_logprobs_abs_diff_*` train/inference gap. A masked fraction that is exactly 0 for every
-  step means `rollout_logprobs` are not reaching the server.
+- `policy/...loss_metrics...` from the server: `geo_sequence_mask_masked_ratio` (the geometric mask's
+  masked fraction) and the `minibatch_rollout_logprobs_abs_diff_*` train/inference gap. A masked fraction
+  that is exactly 0 for every step means `rollout_logprobs` are not reaching the server.
 - `reward/truncated_ratio` and `reward/overlong_penalized_ratio` from the client.
 
 ## Notes

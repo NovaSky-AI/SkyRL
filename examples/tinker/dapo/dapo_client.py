@@ -59,6 +59,10 @@ def _env_int(name: str, default: int) -> int:
 DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-30B-A3B-Base"
 DEFAULT_DATA_DIR = os.path.expanduser("~/data/dapo")
+# Written by examples/train/algorithms/dapo/prepare_dapo_data.sh (the "-cleaned" outputs of
+# data_preprocess_dapo_aime.py, which drops the duplicate rows in DAPO-Math-17k).
+TRAIN_FILE_NAME = "dapo-math-17k-cleaned.parquet"
+VAL_FILE_NAME = "aime-2024-cleaned.parquet"
 DEFAULT_CKPT_DIR = os.path.expanduser("~/ckpts/dapo_qwen3_30b_a3b_tinker")
 DEFAULT_WANDB_PROJECT = "dapo_aime"
 DEFAULT_WANDB_RUN_NAME = "dapo_qwen3_30b_a3b_tinker"
@@ -251,8 +255,10 @@ def load_split(path: str, tokenizer, max_prompt_length: int) -> list[ExampleReco
             ExampleRecord(
                 prompt_messages=row["prompt"],
                 prompt_tokens=prompt_tokens,
-                ground_truth=str(row["reward_spec"]["ground_truth"]).strip(),
-                question=row.get("extra_info", {}).get("question", ""),
+                # Key names follow the DAPO-Math-17k / AIME-2024 parquet schema, i.e. what
+                # skyrl_gym.envs.aime.AIMEEnv reads from env_extras in the native recipe.
+                ground_truth=str(row["reward_model"]["ground_truth"]).strip(),
+                question=(row.get("extra_info") or {}).get("raw_problem", ""),
                 dataset_index=idx,
             )
         )
@@ -280,8 +286,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_split_paths(data_dir: str) -> tuple[str, str]:
-    train_path = os.path.join(expand_path(data_dir), "train.parquet")
-    val_path = os.path.join(expand_path(data_dir), "validation.parquet")
+    """Locate the splits written by examples/train/algorithms/dapo/prepare_dapo_data.sh.
+
+    The filenames match TRAIN_FILE / TEST_FILE in the reference scripts
+    (run_dapo_qwen3_30b_a3b_{lora_,}megatron_aime.sh), i.e. the de-duplicated outputs
+    of data_preprocess_dapo_aime.py rather than the raw downloads.
+    """
+    train_path = os.path.join(expand_path(data_dir), TRAIN_FILE_NAME)
+    val_path = os.path.join(expand_path(data_dir), VAL_FILE_NAME)
     return train_path, val_path
 
 
