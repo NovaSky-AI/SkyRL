@@ -9,12 +9,13 @@ from tinker import types
 from typing import Any, Iterable, Sequence
 import random
 import torch
-import re
 import datasets
 from dataclasses import dataclass
 from collections import defaultdict
 import json
 import time
+
+from skyrl_gym.envs.aime import utils as aime_utils
 
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     apply_loss_reduction_to_advantages_minibatch,
@@ -25,39 +26,57 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_BASE_URL = "http://localhost:8000"
-DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-DEFAULT_DATA_DIR = os.path.expanduser("~/data/gsm8k")
-DEFAULT_CKPT_DIR = os.path.expanduser("~/ckpts/gsm8k_1.5B_ckpt_ppo")
-DEFAULT_WANDB_PROJECT = "gsm8k"
-DEFAULT_WANDB_RUN_NAME = "gsm8k_tinker_ppo"
-DEFAULT_LORA_RANK = 0
+DEFAULT_MODEL_NAME = "Qwen/Qwen3-30B-A3B-Base"
+DEFAULT_DATA_DIR = os.path.expanduser("~/data/dapo")
+DEFAULT_CKPT_DIR = os.path.expanduser("~/ckpts/dapo_qwen3_30b_a3b_tinker")
+DEFAULT_WANDB_PROJECT = "dapo_aime"
+DEFAULT_WANDB_RUN_NAME = "dapo_qwen3_30b_a3b_tinker"
+# LoRA rank: 128 for the LoRA recipe, 0 for full fine-tuning.
+DEFAULT_LORA_RANK = 128
+
+# Hyperparameters below mirror examples/train/algorithms/dapo/run_dapo_qwen3_30b_a3b_lora_megatron_aime.sh
 TRAIN_EPOCHS = 20
-TRAIN_BATCH_SIZE = 1024
+TRAIN_BATCH_SIZE = 512
 EVAL_BATCH_SIZE = 1024
-POLICY_MINI_BATCH_SIZE = 256
-CRITIC_MINI_BATCH_SIZE = 256
+POLICY_MINI_BATCH_SIZE = 32
 UPDATE_EPOCHS_PER_BATCH = 1
-N_SAMPLES_PER_PROMPT = 5
-POLICY_LEARNING_RATE = 1.0e-6
-CRITIC_LEARNING_RATE = 5.0e-6
-MAX_PROMPT_LENGTH = 512
-POLICY_LOSS = "ppo"
+N_SAMPLES_PER_PROMPT = 16
+EVAL_N_SAMPLES_PER_PROMPT = 32
+MAX_PROMPT_LENGTH = 2048
+MAX_GENERATE_LENGTH = 8192
 EVAL_BEFORE_TRAIN = True
-CLIP_RATIO_LOW = 0.2   # eps_clip_low: ratio floor is 1 - 0.2 = 0.8
-CLIP_RATIO_HIGH = 0.28 # eps_clip_high: ratio ceiling is 1 + 0.28 = 1.28
-LOSS_REDUCTION = "token_mean"
-MICRO_TRAIN_BATCH_SIZE = 64
-MAX_GENERATE_LENGTH = 1024
-SAMPLING_STOP_STRINGS: list[str] | None = None
-SAMPLING_TOP_P = 1.0
-SAMPLING_TOP_K = -1
-TRAIN_SAMPLING_TEMPERATURE = 1.0
-EVAL_SAMPLING_TEMPERATURE = 0.0
-EVAL_N_SAMPLES_PER_PROMPT = 1
-STRICT_ANSWER_RE = re.compile(r"#### (\-?[0-9\.,]+)")
-FLEXIBLE_ANSWER_RE = re.compile(r"(\-?[0-9\.,]+)")
 CKPT_INTERVAL = 10
 EVAL_INTERVAL = 5
+
+# Loss: dual-clip PPO. The clip epsilons are sent per request; `policy_loss_type=dual_clip`
+# and `clip_ratio_c=10.0` must be set server-side in backend_config (see run_tinker_server.sh).
+POLICY_LOSS = "ppo"
+CLIP_RATIO_LOW = 0.2  # eps_clip_low: ratio floor is 1 - 0.2 = 0.8
+CLIP_RATIO_HIGH = 0.28  # eps_clip_high: ratio ceiling is 1 + 0.28 = 1.28
+LOSS_REDUCTION = "token_mean_legacy"
+# Keep aligned with trainer.micro_train_batch_size_per_gpu in run_tinker_server.sh
+# (4 for the LoRA recipe, 2 for full fine-tuning).
+MICRO_TRAIN_BATCH_SIZE = 4
+
+# Optimizer (trainer.policy.optimizer_config in the reference script)
+POLICY_LEARNING_RATE = 1.0e-5
+NUM_WARMUP_STEPS = 160  # counted in optimizer (mini-batch) steps
+# Applied server-side: set trainer.policy.optimizer_config.weight_decay=0.1 in backend_config.
+# max_grad_norm=1.0 is the SkyRL optimizer default and is also applied server-side.
+WEIGHT_DECAY = 0.1
+
+# Soft overlong punishment / overlong filtering (DAPO)
+OVERLONG_BUFFER_LEN = 1024 * 4
+OVERLONG_BUFFER_PENALTY_FACTOR = 1.0
+APPLY_OVERLONG_FILTERING = True
+
+# Sampling
+SAMPLING_STOP_STRINGS: list[str] | None = None
+SAMPLING_TOP_K = -1
+TRAIN_SAMPLING_TEMPERATURE = 1.0
+TRAIN_SAMPLING_TOP_P = 1.0
+EVAL_SAMPLING_TEMPERATURE = 1.0
+EVAL_SAMPLING_TOP_P = 0.7
 
 
 class WandbLogger:
@@ -81,11 +100,16 @@ class WandbLogger:
                 "base_model": DEFAULT_MODEL_NAME,
                 "train_batch_size": TRAIN_BATCH_SIZE,
                 "policy_mini_batch_size": POLICY_MINI_BATCH_SIZE,
-                "critic_mini_batch_size": CRITIC_MINI_BATCH_SIZE,
                 "update_epochs_per_batch": UPDATE_EPOCHS_PER_BATCH,
                 "n_samples_per_prompt": N_SAMPLES_PER_PROMPT,
                 "policy_learning_rate": POLICY_LEARNING_RATE,
-                "critic_learning_rate": CRITIC_LEARNING_RATE,
+                "num_warmup_steps": NUM_WARMUP_STEPS,
+                "weight_decay": WEIGHT_DECAY,
+                "lora_rank": DEFAULT_LORA_RANK,
+                "clip_ratio_low": CLIP_RATIO_LOW,
+                "clip_ratio_high": CLIP_RATIO_HIGH,
+                "loss_reduction": LOSS_REDUCTION,
+                "max_generate_length": MAX_GENERATE_LENGTH,
             },
         }
         if output_dir:
@@ -157,6 +181,10 @@ class Trajectory:
     prompt_tokens: list[int]
     response_tokens: list[int]
     old_logprobs: list[float]
+    # Per-response-token loss weights. All ones, or all zeros when the response was truncated
+    # and overlong filtering is on (DAPO's "Overlong Filtering").
+    loss_mask: list[float]
+    stop_reason: str
     advantages: list[float]
     reward: float
     question: str
@@ -206,7 +234,7 @@ def build_split_paths(data_dir: str) -> tuple[str, str]:
 
 
 def policy_loss_config() -> dict | None:
-    if POLICY_LOSS == 'ppo':
+    if POLICY_LOSS == "ppo":
         return {
             "clip_low_threshold": 1.0 - CLIP_RATIO_LOW,
             "clip_high_threshold": 1.0 + CLIP_RATIO_HIGH,
@@ -238,6 +266,51 @@ def grouped_minibatches(
             yield minibatch
 
 
+def overlong_filter_loss_mask(response_tokens: Sequence[int], stop_reason: str) -> list[float]:
+    """DAPO Overlong Filtering: zero every token's loss weight when the response was truncated.
+
+    Mirrors `skyrl.train.generators.utils.apply_overlong_filtering`, which keys off the engine's
+    stop reason ("stop" = finished normally, "length" = hit max_tokens) rather than an EOS id.
+    """
+    if APPLY_OVERLONG_FILTERING and stop_reason != "stop":
+        return [0.0] * len(response_tokens)
+    return [1.0] * len(response_tokens)
+
+
+def apply_soft_overlong_punishment(trajectories: Sequence[Trajectory]) -> dict[str, float]:
+    """DAPO Soft Overlong Punishment: penalize responses that run into the last
+    `OVERLONG_BUFFER_LEN` tokens of the generation budget.
+
+    Mirrors `DAPOTrainer.postprocess_generator_output` in examples/train/algorithms/dapo/main_dapo.py:
+    within the buffer the penalty grows linearly from 0 to `OVERLONG_BUFFER_PENALTY_FACTOR`; a response
+    longer than the budget gets reward 0 (its loss is already masked by overlong filtering).
+    Must run before `compute_advantages` so the GRPO group statistics see the penalized rewards.
+
+    Returns:
+        Metrics: fraction of responses penalized / truncated and the mean reward after the penalty.
+    """
+    if not trajectories:
+        return {}
+    max_exceed_length = MAX_GENERATE_LENGTH - OVERLONG_BUFFER_LEN
+    num_penalized = 0
+    num_truncated = 0
+    for trajectory in trajectories:
+        response_length = len(trajectory.response_tokens)
+        if max_exceed_length < response_length <= MAX_GENERATE_LENGTH:
+            exceed_length = response_length - max_exceed_length
+            trajectory.reward -= exceed_length / OVERLONG_BUFFER_LEN * OVERLONG_BUFFER_PENALTY_FACTOR
+            num_penalized += 1
+        elif response_length > MAX_GENERATE_LENGTH:
+            trajectory.reward = 0.0
+        if trajectory.stop_reason != "stop":
+            num_truncated += 1
+    return {
+        "overlong_penalized_ratio": num_penalized / len(trajectories),
+        "truncated_ratio": num_truncated / len(trajectories),
+        "avg_reward_after_penalty": sum(t.reward for t in trajectories) / len(trajectories),
+    }
+
+
 def compute_advantages(
     trajectories: Sequence[Trajectory],
     epsilon: float = 1e-6,
@@ -264,15 +337,29 @@ def compute_advantages(
             raise ValueError(f"No score in prompt id: {prompt_id}")
     for trajectory in trajectories:
         if grpo_norm_by_std:
-            advantage = (trajectory.reward - id2mean[trajectory.prompt_group]) / (id2std[trajectory.prompt_group] + epsilon)
+            advantage = (trajectory.reward - id2mean[trajectory.prompt_group]) / (
+                id2std[trajectory.prompt_group] + epsilon
+            )
         else:
             advantage = trajectory.reward - id2mean[trajectory.prompt_group]
         trajectory.advantages = advantage.repeat(len(trajectory.response_tokens)).tolist()
 
 
+def policy_learning_rate(optim_step: int) -> float:
+    """Constant LR with linear warmup, counted in optimizer (mini-batch) steps.
+
+    Mirrors SkyRL's `constant_with_warmup` scheduler (Megatron's OptimizerParamScheduler with
+    init_lr=0): the server-side scheduler is disabled for Tinker, so the client ramps the LR.
+    """
+    if NUM_WARMUP_STEPS <= 0:
+        return POLICY_LEARNING_RATE
+    return POLICY_LEARNING_RATE * min(1.0, (optim_step + 1) / NUM_WARMUP_STEPS)
+
+
 def adam_params(learning_rate: float) -> types.AdamParams:
-    # The Tinker backend currently applies only the learning rate at optim step.
-    # These fixed Adam fields are passed solely to satisfy the request schema.
+    # The SkyRL-Train Tinker backend applies only `learning_rate` at optim_step (via set_lr).
+    # betas/eps/weight_decay/max_grad_norm are fixed at optimizer creation from the server's
+    # trainer.policy.optimizer_config, so weight_decay=0.1 must be set in backend_config.
     return types.AdamParams(
         learning_rate=learning_rate,
         beta1=0.9,
@@ -303,7 +390,7 @@ def normalize_policy_minibatch_advantage(
     for row, trajectory in enumerate(minibatch):
         length = len(trajectory.response_tokens)
         advantages[row, :length] = torch.tensor(trajectory.advantages, dtype=torch.float32)
-        loss_mask[row, :length] = 1.0
+        loss_mask[row, :length] = torch.tensor(trajectory.loss_mask, dtype=torch.float32)
 
     normalized = apply_loss_reduction_to_advantages_minibatch(
         advantages=advantages,
@@ -334,8 +421,8 @@ def build_policy_train_datum(
     response_tokens: list[int],
     old_logprobs: list[float],
     advantages: list[float],
+    weights: list[float],
 ) -> types.Datum:
-    weights = [1.0] * len(response_tokens)
     return types.Datum(
         model_input=rollout_model_input(prompt_tokens, response_tokens),
         loss_fn_inputs={
@@ -350,13 +437,22 @@ def build_policy_train_datum(
 def train_policy(
     policy_client: tinker.TrainingClient,
     trajectories: Sequence[Trajectory],
-) -> dict[str, float]:
+    optim_step: int,
+) -> tuple[dict[str, float], int]:
+    """Run one DAPO update over `trajectories`.
+
+    Args:
+        optim_step: Number of optimizer steps taken so far (drives LR warmup).
+
+    Returns:
+        Averaged per-minibatch metrics and the updated optimizer step count.
+    """
     all_metrics = []
-    optimizer = adam_params(POLICY_LEARNING_RATE)
     loss_fn_config = policy_loss_config()
 
     for _ in range(UPDATE_EPOCHS_PER_BATCH):
         for minibatch in grouped_minibatches(trajectories, POLICY_MINI_BATCH_SIZE):
+            optimizer = adam_params(policy_learning_rate(optim_step))
             normalized_advantages = normalize_policy_minibatch_advantage(minibatch)
             data = [
                 build_policy_train_datum(
@@ -364,6 +460,7 @@ def train_policy(
                     t.response_tokens,
                     t.old_logprobs,
                     advantages,
+                    weights=t.loss_mask,
                 )
                 for t, advantages in zip(minibatch, normalized_advantages, strict=True)
             ]
@@ -372,29 +469,19 @@ def train_policy(
             metrics = dict(forward_result.metrics)
             metrics.update(optim_result.metrics or {})
             all_metrics.append(metrics)
+            optim_step += 1
 
-    return average_metrics(all_metrics)
-
-
-def extract_solution(solution_str: str, method: str = "strict") -> str | None:
-    if method == "strict":
-        match = STRICT_ANSWER_RE.search(solution_str)
-        if match is None:
-            return None
-        return match.group(1).replace(",", "").replace("$", "")
-
-    answer = FLEXIBLE_ANSWER_RE.findall(solution_str)
-    for candidate in reversed(answer):
-        if candidate not in {"", "."}:
-            return candidate.replace(",", "").replace("$", "")
-    return None
+    return average_metrics(all_metrics), optim_step
 
 
-def compute_gsm8k_reward(response_text: str, ground_truth: str) -> float:
-    answer = extract_solution(response_text, method="strict")
-    if answer is None:
-        return 0.0
-    return 1.0 if answer == ground_truth else 0.0
+def compute_aime_reward(response_text: str, ground_truth: str) -> float:
+    """Score a response with the same verifier as SkyRL's native `aime` env.
+
+    The verifier reads the last `Answer: ...` line (optionally boxed) and compares it to the
+    ground truth after normalization. Returns 1.0 if correct and -1.0 otherwise, matching
+    `skyrl_gym.envs.aime.utils.compute_score`.
+    """
+    return float(aime_utils.compute_score(response_text, ground_truth)["score"])
 
 
 def collect_rollouts(
@@ -408,6 +495,7 @@ def collect_rollouts(
 ) -> tuple[list[Trajectory], dict[str, float]]:
     sampling_client = policy_client.save_weights_and_get_sampling_client()
     temperature = EVAL_SAMPLING_TEMPERATURE if eval_mode else TRAIN_SAMPLING_TEMPERATURE
+    top_p = EVAL_SAMPLING_TOP_P if eval_mode else TRAIN_SAMPLING_TOP_P
     n_samples = EVAL_N_SAMPLES_PER_PROMPT if eval_mode else N_SAMPLES_PER_PROMPT
     trajectories: list[Trajectory] = []
     prompt_rewards: list[list[float]] = []
@@ -419,7 +507,7 @@ def collect_rollouts(
             seed=args.seed + global_step * 10_000 + batch_offset,
             temperature=temperature,
             stop_strings=SAMPLING_STOP_STRINGS,
-            top_p=SAMPLING_TOP_P,
+            top_p=top_p,
             top_k=SAMPLING_TOP_K,
         )
         future = sampling_client.sample(
@@ -437,17 +525,17 @@ def collect_rollouts(
             if not response_tokens:
                 continue
             response_text = tokenizer.decode(response_tokens, skip_special_tokens=True)
-            reward = compute_gsm8k_reward(response_text, record.ground_truth)
+            reward = compute_aime_reward(response_text, record.ground_truth)
             old_logprobs = list(sequence.logprobs or [0.0] * len(response_tokens))
+            stop_reason = str(sequence.stop_reason)
             trajectories.append(
                 Trajectory(
                     prompt_tokens=record.prompt_tokens,
                     response_tokens=response_tokens,
                     old_logprobs=old_logprobs,
-                    values=[],
+                    loss_mask=overlong_filter_loss_mask(response_tokens, stop_reason),
+                    stop_reason=stop_reason,
                     advantages=[],
-                    returns=[],
-                    token_rewards=[],
                     reward=reward,
                     question=record.question,
                     ground_truth=record.ground_truth,
@@ -592,6 +680,7 @@ def run_training(args: argparse.Namespace) -> None:
 
     global_step = 0
     train_steps = 0
+    optim_step = 0
 
     try:
         if EVAL_BEFORE_TRAIN:
@@ -620,8 +709,9 @@ def run_training(args: argparse.Namespace) -> None:
                     logger.warning("Skipping empty rollout batch at step %s", global_step)
                     continue
 
+                overlong_metrics = apply_soft_overlong_punishment(trajectories)
                 compute_advantages(trajectories)
-                policy_metrics = train_policy(policy_client, trajectories)
+                policy_metrics, optim_step = train_policy(policy_client, trajectories, optim_step)
 
                 global_step += 1
                 train_steps += 1
@@ -631,6 +721,7 @@ def run_training(args: argparse.Namespace) -> None:
                     "step": global_step,
                     "epoch": epoch,
                     "time/step_seconds": elapsed,
+                    "policy/optim_step": optim_step,
                     "rollout/avg_reward": rollout_metrics["avg_reward"],
                     f"rollout/pass_at_{N_SAMPLES_PER_PROMPT}": rollout_metrics["pass_at_n"],
                     "rollout/num_trajectories": rollout_metrics["num_trajectories"],
@@ -640,6 +731,7 @@ def run_training(args: argparse.Namespace) -> None:
                     ],
                     "reward/mean_positive_reward": rollout_metrics["mean_positive_reward"],
                 }
+                log_payload.update({f"reward/{k}": v for k, v in overlong_metrics.items()})
                 log_payload.update({f"policy/{k}": v for k, v in policy_metrics.items()})
 
                 logger.info("Train step %s: %s", global_step, log_payload)
@@ -665,6 +757,9 @@ def run_training(args: argparse.Namespace) -> None:
                 if args.max_train_steps is not None and train_steps >= args.max_train_steps:
                     logger.info("Reached max_train_steps=%s, stopping early", args.max_train_steps)
                     return
+    finally:
+        service_client.holder.close()
+        wandb_logger.finish()
 
 
 def main() -> None:
