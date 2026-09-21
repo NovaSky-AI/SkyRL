@@ -1206,7 +1206,7 @@ class TestMegatronRouterReplayValidation:
         cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
         return cfg
 
-    @pytest.mark.parametrize("vpp_size", [1, 2])
+    @pytest.mark.parametrize("vpp_size", [2])
     def test_routing_replay_refuses_virtual_pipeline_parallelism(self, vpp_size):
         cfg = self._cfg()
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = vpp_size
@@ -1214,7 +1214,9 @@ class TestMegatronRouterReplayValidation:
         with pytest.raises(AssertionError, match="virtual_pipeline_model_parallel_size"):
             validate_megatron_cfg(cfg)
 
-    @pytest.mark.parametrize("vpp_size", [None, 0])
+    # Only sizes above one build interleaved chunks; 1 is a plain non-interleaved schedule,
+    # which megatron_worker.py also permits.
+    @pytest.mark.parametrize("vpp_size", [None, 0, 1])
     def test_routing_replay_allows_unset_virtual_pipeline_parallelism(self, vpp_size):
         cfg = self._cfg()
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = vpp_size
