@@ -515,14 +515,11 @@ def build_forward_datum(prompt_tokens: list[int], response_tokens: list[int]) ->
 
 
 def extract_logprobs(output: Any) -> list[float]:
+    """Read per-token logprobs from a forward output; the SDK returns them as `tinker.TensorData`."""
     logprobs = output["logprobs"]
-    if hasattr(logprobs, "data"):
-        return [float(v) for v in logprobs.data]
-    if isinstance(logprobs, dict) and "data" in logprobs:
-        return [float(v) for v in logprobs["data"]]
-    if isinstance(logprobs, list):
-        return [float(v) for v in logprobs]
-    raise TypeError(f"Unsupported forward output format: {type(logprobs)!r}")
+    if not hasattr(logprobs, "data"):
+        raise TypeError(f"Unsupported forward output format: {type(logprobs)!r}")
+    return [float(v) for v in logprobs.data]
 
 
 def compute_old_logprobs(policy_client: tinker.TrainingClient, trajectories: Sequence[Trajectory]) -> None:
