@@ -1854,12 +1854,20 @@ class SkyRLTrainConfig(BaseConfig):
         ie_cfg = self.generator.inference_engine
         if ie_cfg.fp8_weight_sync_mode is not None:
             from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
-            from skyrl.backends.skyrl_train.weight_sync.fp8 import BLOCKWISE_FP8
+            from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+                AUTO_FP8,
+                WIRE_FORMATS,
+            )
 
-            if ie_cfg.fp8_weight_sync_mode != BLOCKWISE_FP8:
+            # "auto" is still unresolved here -- validate_megatron_cfg turns it
+            # into a concrete wire from the policy's fp8_recipe, long after the
+            # config object is built. Accept it and let the entrypoint-specific
+            # validation (validate_inference_engine_cfg) reject it where there
+            # is no recipe to resolve from.
+            if ie_cfg.fp8_weight_sync_mode not in (*WIRE_FORMATS, AUTO_FP8):
                 raise ValueError(
                     f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}. "
-                    f"Supported value: {BLOCKWISE_FP8!r}."
+                    f"Supported values: {(*WIRE_FORMATS, AUTO_FP8)!r}."
                 )
             if self.trainer.strategy != "megatron":
                 raise ValueError("Serialized FP8 weight sync currently requires trainer.strategy='megatron'.")

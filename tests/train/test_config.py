@@ -251,6 +251,36 @@ def test_mxfp8_runtime_takes_no_blockwise_scale_pins(monkeypatch):
     assert "NVTE_FP8_BLOCK_SCALING_FP32_SCALES" not in env_vars
 
 
+@pytest.mark.parametrize("wire", ["blockwise", "mxfp8", "auto"])
+def test_config_construction_accepts_every_fp8_wire_including_auto(wire):
+    """``__post_init__`` runs long before ``fp8_recipe`` is resolved.
+
+    It sees whatever the launch script passed, so it has to admit both concrete
+    wires *and* the unresolved ``"auto"`` -- which validate_megatron_cfg turns
+    into a concrete wire later, from the policy's recipe. A gate here that
+    knows only one wire rejects a valid launch before training ever starts, and
+    the tests that set the attribute on an already-built config never see it.
+    """
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            f"generator.inference_engine.fp8_weight_sync_mode={wire}",
+        ]
+    )
+
+    assert cfg.generator.inference_engine.fp8_weight_sync_mode == wire
+
+
+def test_config_construction_rejects_an_unknown_fp8_wire():
+    with pytest.raises(ValueError, match="Unsupported fp8_weight_sync_mode"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "generator.inference_engine.fp8_weight_sync_mode=int4",
+            ]
+        )
+
+
 def test_inference_engine_cfg_rejects_unresolved_auto_sync_mode():
     # "auto" resolves from the trainer recipe on the megatron training path;
     # a path that never runs that resolution must reject it with the way out
