@@ -35,8 +35,10 @@ to obtain the training policy's logprobs (`logprobs`) and sends the vLLM samplin
 Set `DAPO_RECOMPUTE_OLD_LOGPROBS=0` to skip the forward pass (the mask becomes a no-op).
 
 The forward pass is not free: on the 30B LoRA recipe on 16xH100 it takes about 5 minutes of a
-35-minute step (generation about 14 minutes, training about 15 minutes), which matched the native
-reference run's step time within a few percent because the Tinker training phase is correspondingly faster.
+35-minute step (generation about 14 minutes, training about 15 minutes). The native trainer runs the same
+pass about a minute faster, and the Tinker training phase is correspondingly faster, so step-for-step wall
+clock matched the native reference run (step 2: 2081 s vs 2084 s). Native step time itself grows over a run
+as responses lengthen, so compare step for step, not against a mean.
 
 ## Hardware
 
@@ -138,7 +140,7 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
   residual is ~25 GiB, so the KV-cache budget sized at engine init no longer fits. This is a capacity
   shortfall, not fragmentation (`use_expandable_segments` does not apply). The value therefore has to leave room
   for the post-first-step footprint rather than be copied from a native recipe; 0.6 was measured safe on 8xH100
-  nodes. Why the native trainer tolerates 0.7 for the same recipe is not established (the LoRA adapter store is
+  nodes with no measurable generation slowdown (generation time matched the native run's within 2%). Why the native trainer tolerates 0.7 for the same recipe is not established (the LoRA adapter store is
   not the cause: it lives in pinned host memory). Note the adapter store does cost one pinned-CPU mirror of
   params, grads and optimizer state per registered adapter.
 - **The engine's SQLite database grows ~135 KB per trajectory** (1.3 GB after ~10k trajectories), i.e. tens of
