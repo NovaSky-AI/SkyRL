@@ -124,5 +124,5 @@ tx/tinker/alembic/__pycache__/
 *.db-wal
 *.db-shm
 
-# claude settings
-.claude/settings.json
+# agent settings
+.agents/settings.json
