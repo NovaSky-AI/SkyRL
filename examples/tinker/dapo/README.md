@@ -77,8 +77,15 @@ Server (e.g. 4 GPUs, Qwen3-1.7B-Base, no expert parallelism):
 ```bash
 BASE_MODEL=Qwen/Qwen3-1.7B-Base NUM_GPUS_PER_NODE=4 MEGATRON_TP=1 MEGATRON_EP=1 \
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1 NUM_INFERENCE_ENGINES=4 MAX_RESPONSE_LENGTH=1024 \
+LORA_ALPHA=32 \
 bash examples/tinker/dapo/run_tinker_server.sh
 ```
+
+`LORA_ALPHA` must be set to match the client's `--lora-rank`: megatron-bridge scales every adapter by
+`alpha / rank`, so leaving the default `LORA_ALPHA=128` while sampling `--lora-rank 32` multiplies the
+adapter update by 4 (the full recipe has alpha = rank = 128, i.e. scale 1). The symptom is entropy
+collapse within ~50 steps -- `policy/entropy_loss` falling by an order of magnitude while
+`reward/avg_pass_at_N` peaks and then drops back below its starting value.
 
 Client, shrinking the recipe with `DAPO_*` overrides (keep `DAPO_MICRO_TRAIN_BATCH_SIZE` equal to the
 server's `MICRO_TRAIN_BATCH_SIZE_PER_GPU`):
