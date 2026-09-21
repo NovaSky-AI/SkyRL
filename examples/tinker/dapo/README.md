@@ -129,6 +129,22 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
 
 ## Notes
 
+- **`GPU_MEMORY_UTILIZATION` defaults to 0.6, not the reference scripts' 0.7.** On the 30B LoRA recipe on
+  16xH100, the run at 0.7 completed step 1 and died in step-2 sampling with a genuine `torch.OutOfMemoryError`
+  (356 MiB free; vLLM 60 GiB + trainer 18 GiB on one GPU). vLLM sizes its KV cache from the free memory at
+  engine init, when the trainer had ~13 GiB resident; after the first `optim_step` the trainer's post-offload
+  residual is ~25 GiB, so the budget no longer fits. This is a capacity shortfall, not fragmentation
+  (`use_expandable_segments` does not apply). Why the native path tolerates 0.7 is not established; the
+  Tinker path's LoRA adapter store and grad parking are the leading suspects.
+- **The engine's SQLite database grows ~135 KB per trajectory** (1.3 GB after ~10k trajectories), i.e. tens of
+  GB over a reference-length run. Its default location is inside the repo (`skyrl/tinker/tinker.db`, kept out
+  of the Ray upload only by `.gitignore`). Pass `--database-url sqlite:////<path outside the repo>/tinker.db`
+  through the launcher for long runs, and archive or rotate it between runs.
+- **After a crash, a plain server restart is not enough.** Ray worker actors (`ray::MegatronPolicyWorkerBase`,
+  vLLM `ray::RayWorkerProc.run`) can survive the API/engine processes and keep GPU memory, and the colocated
+  placement group stays reserved, so a fresh 16-GPU request hangs. Kill the orphaned GPU processes on every
+  node (match actor names against `nvidia-smi` compute apps) and `remove_placement_group` on the stale group,
+  then confirm `ray status` shows 0/16 GPUs used before relaunching.
 - KL loss is disabled (as in the reference scripts; the Tinker backend does not support it).
 - LoRA alpha cannot be sent through the Tinker SDK (the API server records 32). The launcher sets
   `trainer.policy.model.lora.alpha=128` in `backend_config`, which the SkyRL-Train backend now honors.

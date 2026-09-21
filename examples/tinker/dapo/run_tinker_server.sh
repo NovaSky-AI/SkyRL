@@ -27,7 +27,11 @@ NUM_NODES="${NUM_NODES:-1}"
 NUM_GPUS_PER_NODE="${NUM_GPUS_PER_NODE:-8}"
 NUM_INFERENCE_ENGINES="${NUM_INFERENCE_ENGINES:-1}"
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE="${INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE:-8}"
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.7}"
+# The native reference scripts use 0.7. On the Tinker path the trainer keeps ~25 GiB/GPU resident after
+# offload once optimizer state exists (measured on the 30B LoRA recipe, 16xH100), while vLLM sizes its KV
+# cache against the ~13 GiB seen at engine init; 0.7 then OOMs in sampling on the second full step. 0.6 leaves
+# the headroom (see README "Notes").
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 # The original DAPO recipe used enforce_eager due to vLLM instability at the time.
 ENFORCE_EAGER="${ENFORCE_EAGER:-true}"
 
