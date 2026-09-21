@@ -561,6 +561,18 @@ class RayPPOTrainer:
 
                     del training_input, generator_output
 
+                # If dynamic sampling was still accumulating when the dataloader ran out, the step
+                # is left in flight with its `vllm/train` window open. Close it and drop the partial
+                # batch so the next epoch starts clean; otherwise `start('vllm/train')` raises
+                # "called while window 'vllm/train' is still open".
+                if step_started:
+                    if self._vllm_metrics_scraper is not None:
+                        await self._vllm_metrics_scraper.stop()
+                    self.dynamic_sampling_state = None
+                    self.all_metrics = {}
+                    self.all_timings = {}
+                    step_started = False
+
                 self._fire("on_epoch_end")
 
                 if stop_training:

@@ -32,6 +32,10 @@ concurrency:
 
 jobs:
   check_code_quality:
+    # CI runs only in the upstream repo. This workflow needs no secrets and would pass
+    # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base
+    # repository's context.
+    if: github.repository == 'NovaSky-AI/SkyRL'
     runs-on: ubuntu-latest
 
     steps:
@@ -50,6 +54,10 @@ jobs:
         run: uv pip install pre-commit; pre-commit run --all-files --config .pre-commit-config.yaml
   
   skyrl_train_tests:
+    # CI runs only in the upstream repo. This workflow needs no secrets and would pass
+    # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base
+    # repository's context.
+    if: github.repository == 'NovaSky-AI/SkyRL'
     needs: check_code_quality
     runs-on: ubuntu-latest
     defaults:
@@ -71,8 +79,14 @@ jobs:
         run:  uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "not vllm"
       - name: Run cpu tests (with vllm)
         run: uv run --isolated --extra fsdp --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "vllm"
+      - name: Run tinker tests
+        run: uv run --isolated --extra fsdp --extra tinker --extra dev pytest tests/tinker/skyrl_train/
   
   skyrl_gym_tests:
+    # CI runs only in the upstream repo. This workflow needs no secrets and would pass
+    # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base
+    # repository's context.
+    if: github.repository == 'NovaSky-AI/SkyRL'
     needs: check_code_quality
     runs-on: ubuntu-latest
     defaults:

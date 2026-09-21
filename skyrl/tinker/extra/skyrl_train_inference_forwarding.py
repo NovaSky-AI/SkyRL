@@ -15,15 +15,25 @@ from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.utils.log import logger
 
 
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    # TODO: make `external_future_store` required and remove the FutureDB
+    # write-back path in `call_and_store_result` — every production
+    # construction (api.py lifespan) already passes a store.
+    def __init__(
+        self,
+        engine_config: EngineConfig,
+        db_engine,
+        external_future_store: ExternalFutureStore | None = None,
+    ):
         self.engine_config = engine_config
         self.db_engine = db_engine
+        self.external_future_store = external_future_store
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
@@ -76,7 +86,11 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and write the result to FutureDB."""
+        """Forward a sample request to vLLM and resolve its future.
+
+        With an ExternalFutureStore the result stays in memory; without one it
+        is written back to the request's FutureDB row.
+        """
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
@@ -85,6 +99,12 @@ class SkyRLTrainInferenceForwardingClient:
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
+        if self.external_future_store is not None:
+            await self.external_future_store.complete(request_id, result, status)
+            return
+
+        # TODO: remove this FutureDB write-back once `external_future_store`
+        # is required (see __init__).
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
             if future is None:

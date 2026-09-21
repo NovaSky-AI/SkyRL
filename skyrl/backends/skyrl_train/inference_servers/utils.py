@@ -11,14 +11,21 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
 )
 
-# Importing the weight_sync package registers the sharded_rdt engine into vLLM's
-# factory and relaxes WeightTransferConfig.backend so backend="sharded_rdt"
-# validates below. This must run on the driver before the WeightTransferConfig
-# is constructed; the import above already triggers it, this is just explicit.
-from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
-    rdt_vllm_register,  # noqa: F401,E402
+# The receive-side engines must be registered in vLLM's factory before the
+# WeightTransferConfig below is built: `backend` is validated against the
+# registry. Needed on the driver (here) and in every worker process (the
+# worker-extension module imported above).
+from skyrl.backends.skyrl_train.weight_sync import (
+    get_transfer_strategy,
+    get_vllm_receive_backend,
 )
+from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+    BLOCKWISE_FP8,
+    get_serialized_fp8_quantization_config,
+    registered_fp8_spec_names,
+    resolve_fp8_spec,
+)
+from skyrl.backends.skyrl_train.weight_sync.register import register_receive_engines
 from skyrl.train.config import (
     InferenceEngineConfig,
     SkyRLTrainConfig,
@@ -26,6 +33,72 @@ from skyrl.train.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
+    if not model_path:
+        raise ValueError("A model path is required when FP8 weight sync is enabled")
+    try:
+        from transformers import AutoConfig
+
+        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not inspect the model config required to derive FP8 ignored layers: " f"model_path={model_path!r}"
+        ) from exc
+    spec = resolve_fp8_spec(hf_config)
+    if spec is None:
+        raise ValueError(
+            "FP8 weight sync has no registered model spec for this checkpoint layout "
+            f"(registered specs: {', '.join(registered_fp8_spec_names())}); model_path={model_path!r}"
+        )
+    return spec.ignored_layers(hf_config)
+
+
+def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
+    if key in mapping and mapping[key] != expected:
+        raise ValueError(f"{context}.{key} must be {expected!r} when FP8 weight sync is enabled, got {mapping[key]!r}")
+    mapping[key] = copy.deepcopy(expected)
+
+
+def _apply_serialized_fp8_weight_sync_defaults(
+    ie_cfg: InferenceEngineConfig,
+    engine_kwargs: Dict[str, Any],
+    model_path: Optional[str] = None,
+) -> None:
+    """Configure vLLM for checkpoint-format blockwise FP8 weight reloads."""
+    mode = ie_cfg.fp8_weight_sync_mode
+    if mode is None:
+        return
+    if mode != BLOCKWISE_FP8:
+        raise ValueError(f"Unsupported fp8_weight_sync_mode={mode!r}. Supported value: {BLOCKWISE_FP8!r}.")
+
+    _set_or_validate(engine_kwargs, "quantization", "fp8", context="engine_init_kwargs")
+    _set_or_validate(engine_kwargs, "load_format", "dummy", context="engine_init_kwargs")
+
+    hf_overrides_value = engine_kwargs.get("hf_overrides")
+    hf_overrides = {} if hf_overrides_value is None else copy.deepcopy(hf_overrides_value)
+    if not isinstance(hf_overrides, dict):
+        raise ValueError("engine_init_kwargs.hf_overrides must be a dict when FP8 weight sync is enabled")
+
+    qcfg_value = hf_overrides.get("quantization_config")
+    qcfg = {} if qcfg_value is None else copy.deepcopy(qcfg_value)
+    if not isinstance(qcfg, dict):
+        raise ValueError(
+            "engine_init_kwargs.hf_overrides.quantization_config must be a dict when FP8 weight sync is enabled"
+        )
+
+    for key, value in get_serialized_fp8_quantization_config(
+        ignored_layers=_serialized_fp8_ignored_layers(model_path),
+    ).items():
+        _set_or_validate(
+            qcfg,
+            key,
+            value,
+            context="engine_init_kwargs.hf_overrides.quantization_config",
+        )
+    hf_overrides["quantization_config"] = qcfg
+    engine_kwargs["hf_overrides"] = hf_overrides
 
 
 def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
@@ -72,6 +145,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+    register_receive_engines()
+
     # This function may run a GPU-less Ray head
     # node, where ``current_platform`` resolves to ``UnspecifiedPlatform`` with
     # ``device_type == ""``. vLLM's ``add_cli_args`` walks ``VllmConfig`` defaults
@@ -110,7 +185,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         enable_sleep_mode=cfg.trainer.placement.colocate_all or ie_cfg.offload_kv_for_weight_sync,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         weight_transfer_config=WeightTransferConfig(
-            backend=get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
+            backend=get_vllm_receive_backend(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
         ),
         worker_extension_cls=VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS,
         # NOTE (sumanthrh): We set generation config to be vLLM so that the generation behaviour of the server is same as using the vLLM Engine APIs directly
@@ -136,9 +211,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     if get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all) == "sharded_rdt":
         if cfg.trainer.placement.colocate_all:
             raise ValueError(
-                "weight_sync_backend='sharded_rdt' requires non-colocated training/"
-                "inference (placement.colocate_all=false); workers pull from a "
-                "separate named trainer actor over NIXL."
+                "weight_sync_backend='sharded_rdt' requires non-colocated training/inference "
+                "(placement.colocate_all=false)."
             )
         args.distributed_executor_backend = "ray"
 
@@ -174,6 +248,11 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    _apply_serialized_fp8_weight_sync_defaults(
+        ie_cfg,
+        engine_kwargs,
+        cfg.trainer.policy.model.path,
+    )
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
 
@@ -304,14 +383,18 @@ def build_router_args(
     """
     from vllm_router.router_args import RouterArgs
 
-    from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
+    from skyrl.backends.skyrl_train.inference_servers.common import (
+        default_bind_host,
+        get_node_ip,
+        get_open_port,
+    )
 
     is_pd = prefill_urls is not None and decode_urls is not None
 
     port = get_open_port()
 
     kwargs: Dict[str, Any] = dict(
-        host="0.0.0.0",
+        host=default_bind_host(get_node_ip()),
         port=port,
         policy="consistent_hash",
     )

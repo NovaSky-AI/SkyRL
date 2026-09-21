@@ -46,6 +46,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     ppo_critic_loss,
 )
+from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -59,7 +60,7 @@ from skyrl.env_vars import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )
-from skyrl.train.config import TrainerConfig
+from skyrl.train.config import TorchProfilerConfig, TrainerConfig
 from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
@@ -291,7 +292,6 @@ class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: TrainerConfig, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
-        self._transfer_strategy_cls = None  # Set in init_weight_transfer_communicator
         # Populated by init_model when torch profiling is enabled.
         self.profiler = None
 
@@ -340,8 +340,8 @@ class Worker(DistributedTorchRayActor):
         By default only toggles under ``colocate_all`` (the colocated IPC path, which
         only shares CUDA memory when trainer and inference share GPUs); under
         non-colocated runs the push backends use NCCL broadcast, which has its own
-        buffers and is unaffected. ``force`` comes from the sender's
-        ``force_disable_expandable_segments``, for backends that CUDA-IPC share
+        buffers and is unaffected. ``force`` comes from the trainer engine's
+        ``skyrl_force_disable_expandable_segments``, for backends that CUDA-IPC share
         regardless of colocation: sharded_rdt shares every gathered group with its
         sidecar producer over ``reduce_tensor``/CUDA IPC, and expandable-segment
         (VMM) memory makes that export/rebuild ~5-10x slower per storage
@@ -376,20 +376,34 @@ class Worker(DistributedTorchRayActor):
     # torch.profiler RPCs, dispatched via WorkerDispatch pass_through.
     # ------------------------------------------------------------------
 
-    def start_profile(self) -> None:
-        """Arm the profiler before the training loop (no-op when disabled)."""
+    def start_profile(self, config: Optional[dict] = None) -> None:
+        """Arm the configured profiler, or build a one-off profiling session.
+
+        The normal trainer path initializes ``self.profiler`` with the worker
+        model. Tinker's runtime endpoint instead sends a serialized
+        ``TorchProfilerConfig`` here, so each requested session gets a fresh
+        profiler and cannot inherit a previous schedule.
+        """
+        if config is not None:
+            self.profiler = Profiler(TorchProfilerConfig(**config))
         if self.profiler is not None:
             self.profiler.start()
 
-    def profile_step(self) -> None:
-        """Advance the profiler schedule by one global step."""
+    def profile_step(self) -> Optional[str]:
+        """Advance the profiler schedule and return a recoverable worker error."""
         if self.profiler is not None:
             self.profiler.step()
+            return getattr(self.profiler, "last_error", None)
+        return None
 
     def stop_profile(self) -> None:
-        """Stop the profiler after the training loop, flushing any open window."""
-        if self.profiler is not None:
-            self.profiler.stop()
+        """Stop and release the profiler after the training loop."""
+        profiler = self.profiler
+        if profiler is None:
+            return
+        profiler.stop()
+        profiler.close()
+        self.profiler = None
 
     def dump_profiler_summary(self):
         """Return this rank's last-window kernel summary, or None."""
@@ -479,15 +493,21 @@ class Worker(DistributedTorchRayActor):
         inference_engine_client: "RemoteInferenceClient",
         inference_engine_cfg: "InferenceEngineConfig",
     ):
-        """Initialize state for weight syncing with Inference Engine Client
+        """Build this rank's weight source and rendezvous its trainer engine.
 
-        Creates init info and sender, then sends init info to inference engines
-        so they can create receivers.
+        After this, ``broadcast_to_inference_engines`` is one
+        ``engine.send_weights()`` call per sync — the engine owns the whole round
+        trip (start / update / finish, the barriers, and the non-sender
+        collective replay).
 
         .. note::
-            This function should be called on all the ranks in the worker group simultaneously.
+            This function must be called on all the ranks in the worker group
+            simultaneously: rank 0 blocks driving the inference-side handshake
+            while the others reach the collectives it needs.
         """
-        from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy_cls
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+            build_trainer_engine,
+        )
 
         assert inference_engine_client is not None
         # Cache the client so per-sync broadcast_to_inference_engines calls can
@@ -500,46 +520,27 @@ class Worker(DistributedTorchRayActor):
         # Fetch the total inference world size from the servers.
         inference_world_size, _ = await inference_engine_client.get_world_size()
 
-        # Determine transfer strategy based on inference engine config and placement
-        self._transfer_strategy_cls = get_transfer_strategy_cls(
-            weight_sync_backend=inference_engine_cfg.weight_sync_backend,
+        # Off the event loop, on every rank: rank 0 drives the inference-side
+        # handshake with blocking HTTP while the others return immediately.
+        #
+        # Rendezvous happens HERE, not on the first send. sharded_rdt requires
+        # that: deferring it deadlocks, because rank 0 would block in the
+        # inference-side init RPC while the other ranks spin in gather
+        # collectives, and the producer sidecars -- sharing those ranks' GPUs --
+        # could then never finish NIXL agent creation, since libfabric's CUDA
+        # probe blocks behind the spinning kernels. Every rank is inside this
+        # method here, so that window is empty.
+        self._weight_sync_engine = await self._weight_sync_thread(
+            build_trainer_engine,
+            ie_cfg=inference_engine_cfg,
             colocate_all=self.cfg.placement.colocate_all,
-        )
-
-        # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
-        init_info = self._transfer_strategy_cls.create_init_info(
-            inference_engine_cfg,
+            rank=torch.distributed.get_rank(),
             inference_world_size=inference_world_size,
+            source_factory=self._build_weight_source,
+            server_urls=list(inference_engine_client.server_urls),
+            data_parallel_size=int(inference_engine_client.data_parallel_size),
             base_model_path=self.cfg.policy.model.path,
         )
-
-        # Create sender on all ranks
-        # Strategy implementations may have different logic for different ranks
-        # The extractor is passed to every strategy; only those that rendezvous at
-        # init rather than on the first send use it (sharded_rdt). Both workers build
-        # it before calling super(), so it is available here.
-        tasks = [
-            asyncio.to_thread(
-                self._transfer_strategy_cls.create_sender,
-                init_info=init_info,
-                inference_client=inference_engine_client,
-                weight_extractor=getattr(self, "weight_extractor", None),
-            ),
-        ]
-
-        # Only rank 0 initializes receivers on inference engines
-        # NOTE: For broadcast strategy, sender and receiver init must run concurrently
-        # because both need to join the same process group to avoid deadlock
-        # NOTE: strategies whose sender drives the inference-side handshake itself
-        # (sharded_rdt) must NOT be initialized from here as well.
-        # TODO (sumanthrh): `sender_initializes_receivers` is currently used as a workaround for
-        # supporting RDT. We can probably move the inference-side init
-        # as a sender method in all the classes to unify this. RDT doesn't call `init_weight_update_communicator` itself
-        if torch.distributed.get_rank() == 0 and not self._transfer_strategy_cls.sender_initializes_receivers:
-            tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
-
-        results = await asyncio.gather(*tasks)
-        self._weight_transfer_sender = results[0]  # sender is always first task
 
         # # Register signal handlers for termination only on rank 0
         # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
@@ -549,6 +550,104 @@ class Worker(DistributedTorchRayActor):
         # It's commented out so that we can fix this in the future.
         # atexit.register(self._handle_termination)
 
+        torch.distributed.barrier()
+
+    def _build_weight_source(self, dtype: "torch.dtype", backend: str) -> Any:
+        """Build this worker's ``WeightSource`` over the live model.
+
+        Implemented per training backend, and passed to ``build_trainer_engine``
+        as its ``source_factory``. ``backend`` only picks between the plain
+        source and sharded RDT's ownership-aware subclass.
+        """
+        raise NotImplementedError()
+
+    def _weight_sync_thread(self, fn, *args, **kwargs):
+        """Run ``fn`` off the event loop with **this rank's** CUDA device selected.
+
+        Every weight-sync entry point is fully synchronous -- it blocks on
+        collectives and, on rank 0, on blocking HTTP -- so it must not run on the
+        worker's event loop. But the current CUDA device is thread-local and
+        defaults to 0, and under
+        ``RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`` this rank's device is not
+        0, so the NCCL communicator, the IPC handles and the gather collectives
+        would all land on the wrong GPU. Capture it on the main thread, where it
+        is correct, and select it inside the thread.
+        """
+        device = torch.cuda.current_device() if torch.cuda.is_available() else None
+
+        def run():
+            if device is not None:
+                torch.cuda.set_device(device)
+            return fn(*args, **kwargs)
+
+        return asyncio.to_thread(run)
+
+    def _should_reset_prefix_cache(self, inference_engine_cfg) -> bool:
+        """Whether this sync should clear the inference engines' prefix cache.
+
+        Always for synchronous training; for fully-async only when
+        ``clear_kv_cache_on_weight_sync`` is set (otherwise in-flight requests
+        keep generating against their cached prefixes across the sync).
+        """
+        return inference_engine_cfg.enable_prefix_caching and (
+            not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync
+        )
+
+    def _reset_prefix_cache_task(self, inference_engine_client, inference_engine_cfg):
+        """Fire the prefix-cache reset from rank 0, or return None.
+
+        Returned rather than awaited so the caller can overlap it with the send.
+        """
+        if not self._should_reset_prefix_cache(inference_engine_cfg):
+            return None
+        if torch.distributed.get_rank() != 0:
+            return None
+        return inference_engine_client.reset_prefix_cache(reset_running_requests=True)
+
+    async def _sync_weights_to_inference_engines(
+        self,
+        inference_engine_client,
+        inference_engine_cfg,
+    ) -> None:
+        """Run one weight sync: the engine's round trip, plus the worker-side
+        memory bracket around it.
+
+        Three things the engine cannot do for itself, each decided by a
+        capability declared on it (see ``weight_senders.SkyrlTrainerCapabilities``):
+
+        * the prefix-cache reset, unless the engine handles it internally
+          (checkpoint-delta does, inside its own pause bracket);
+        * the ``expandable_segments`` toggle, a trainer-process allocator setting;
+        * ``empty_cache`` afterwards.
+        """
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+            maybe_set_reset_prefix_cache,
+        )
+
+        engine = self._weight_sync_engine
+        maybe_set_reset_prefix_cache(engine, self._should_reset_prefix_cache(inference_engine_cfg))
+
+        cache_reset_task = None
+        if not engine.skyrl_handles_prefix_cache_reset:
+            cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
+
+        torch.cuda.empty_cache()
+
+        # Under colocate_all the CUDA-IPC path calls cudaIpcGetMemHandle, which
+        # is incompatible with the VMM addresses expandable segments use; some
+        # engines (sharded_rdt) share GPU memory on every run and ask for the
+        # toggle unconditionally.
+        with self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments):
+            await self._weight_sync_thread(engine.send_weights)
+
+        if cache_reset_task is not None:
+            await cache_reset_task
+        # An engine whose send buffers are reused next step declares
+        # empty_cache_after_send=False: scrubbing them back to CUDA costs
+        # 0.25-0.53s per rank at 235B and buys nothing. Under colocation an
+        # inference engine wants the physical memory, so empty regardless.
+        if engine.skyrl_empty_cache_after_send or self.cfg.placement.colocate_all:
+            torch.cuda.empty_cache()
         torch.distributed.barrier()
 
     def forward(self, *args, **kwargs) -> WorkerOutput:

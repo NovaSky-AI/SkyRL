@@ -28,11 +28,15 @@ concurrency:
 
 jobs:
   skyrl_gpu_tests:
+    # Forks inherit these workflows but not the secrets they need -- only run upstream.
     # Repository secrets are unavailable to fork pull requests, so skip the
     # remote job instead of reporting a credential failure before tests start.
     if: >
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.repository == 'NovaSky-AI/SkyRL' &&
+      (
+        github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
     runs-on: ubuntu-latest
     defaults:
       run:
