@@ -250,7 +250,7 @@ def sample_support_scores(
         weighted_sum = global_stats[2] if entropy_requires_grad else global_stats[2].detach()
         safe_denominator = torch.where(valid_rows, denominator if entropy_requires_grad else denominator.detach(), 1.0)
         entropy = torch.where(valid_rows, safe_denominator.log() - weighted_sum / safe_denominator, 0.0)
-        entropy = entropy.reshape(sampled_ids.shape)
+        entropy = torch.clamp(entropy, min=0.0).reshape(sampled_ids.shape)
     return SampleSupportScores(
         logprobs=torch.where(valid_rows, logprobs, 0.0).reshape(sampled_ids.shape),
         entropy=entropy,
