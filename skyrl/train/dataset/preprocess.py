@@ -10,7 +10,6 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
     ROUTED_EXPERT_DTYPES,
     RoutedExpertIndices,
 )
-from skyrl.train.dataset.parallel_fill import fill_batch_rows
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +155,7 @@ def _collate_rollout_expert_indices(
     # Distinct experts per padding row, as Megatron's dropless dispatcher requires.
     padding_row = replay_padding_row(topk, dtype=padded.dtype)
 
-    def fill_sample(sample_index: int) -> None:
+    for sample_index in range(num_samples):
         sample_indices = rollout_expert_indices[sample_index]
         flags = sample_indices.flags
         # torch.from_numpy requires a writable buffer.
@@ -169,7 +168,6 @@ def _collate_rollout_expert_indices(
         sample_rows[left_pad:route_end] = torch.from_numpy(sample_indices)
         sample_rows[route_end:] = padding_row
 
-    fill_batch_rows(fill_sample, num_samples)
     return padded
 
 
