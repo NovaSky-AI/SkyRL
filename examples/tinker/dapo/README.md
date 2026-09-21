@@ -34,6 +34,10 @@ to obtain the training policy's logprobs (`logprobs`) and sends the vLLM samplin
 `rollout_logprobs`, a SkyRL extension of the datum. The geometric mask then measures the real mismatch.
 Set `DAPO_RECOMPUTE_OLD_LOGPROBS=0` to skip the forward pass (the mask becomes a no-op).
 
+The forward pass is not free: on the 30B LoRA recipe on 16xH100 it takes about 5 minutes of a
+35-minute step (generation about 14 minutes, training about 15 minutes), which matched the native
+reference run's step time within a few percent because the Tinker training phase is correspondingly faster.
+
 ## Hardware
 
 | Purpose | GPUs |
