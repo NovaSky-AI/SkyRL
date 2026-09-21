@@ -124,5 +124,3 @@ tx/tinker/alembic/__pycache__/
 *.db-wal
 *.db-shm
 
-# agent settings
-.agents/settings.json
