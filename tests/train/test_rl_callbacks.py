@@ -332,3 +332,90 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
             continue
         assert snap["total_steps"] == 2, f"{name}: total_steps={snap['total_steps']}"
         assert snap["steps_per_epoch"] == 2, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"
+
+
+def test_step_in_flight_at_epoch_boundary_is_abandoned_cleanly(monkeypatch):
+    """Regression: dynamic sampling is still resampling when the epoch's last batch ends.
+
+    The step is left in flight with its `vllm/train` window open. The trainer must
+    close the window and drop the partial batch at the epoch boundary; otherwise the
+    next epoch's `start('vllm/train')` raises ValueError.
+    """
+    cfg = _build_test_cfg()
+    cfg.trainer.epochs = 2
+    cfg.trainer.eval_interval = 0
+    cfg.trainer.algorithm.dynamic_sampling.type = "filter"
+    cfg.generator.inference_engine.enable_ray_prometheus_stats = True
+
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 2
+
+    recorder = RecorderCallback()
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=MagicMock(),
+        tokenizer=tokenizer,
+        train_dataset=DummyDataset(size=4),
+        eval_dataset=DummyDataset(size=2),
+        inference_engine_client=None,
+        generator=MagicMock(),
+        callbacks=[recorder],
+    )
+
+    dispatch_mock = MagicMock()
+    dispatch_mock.save_weights_for_sampler = AsyncMock(return_value=None)
+    dispatch_mock.get_lcm_dp_size = MagicMock(return_value=1)
+    trainer.dispatch = dispatch_mock
+
+    # Real scraper (so its start/pause/resume/stop guards are exercised), but with
+    # the Ray/Prometheus read stubbed out. A None snapshot makes stop() return {}.
+    assert trainer._vllm_metrics_scraper is not None
+    monkeypatch.setattr(trainer._vllm_metrics_scraper, "_read_snapshot", AsyncMock(return_value=None))
+
+    monkeypatch.setattr(trainer, "init_weight_sync_state", lambda: None)
+    monkeypatch.setattr(
+        trainer,
+        "generate",
+        AsyncMock(return_value={"rollout_metrics": None, "response_ids": [[1]], "rewards": [0.0]}),
+    )
+    monkeypatch.setattr(trainer, "postprocess_generator_output", lambda gen_out, uids: (gen_out, uids))
+    monkeypatch.setattr(trainer, "convert_to_training_input", lambda *_args, **_kw: _stub_training_input())
+    monkeypatch.setattr(trainer, "fwd_logprobs_values_reward", lambda batch: batch)
+    monkeypatch.setattr(trainer, "compute_advantages_and_returns", lambda batch: batch)
+    monkeypatch.setattr(trainer, "train_critic_and_policy", lambda batch: {"policy_loss": 0.42})
+    monkeypatch.setattr(
+        "skyrl.train.trainer.prepare_generator_input",
+        lambda *_args, **_kw: ({"prompts": [[{"role": "user", "content": "q"}]]}, ["uid-0"]),
+    )
+
+    # Resample on the 2nd batch -- the last one of epoch 0 -- so the step spans the
+    # epoch boundary. Every other batch completes its step normally.
+    sampling_calls = {"n": 0}
+
+    # epoch 0, batch 2 will return keep_sampling == True, trigger the mid-sampling data-exhaust
+    def _fake_dynamic_sampling(generator_output, uids):
+        sampling_calls["n"] += 1
+        keep_sampling = sampling_calls["n"] == 2
+        # Mimic the real accumulation: state is non-None only while resampling.
+        trainer.dynamic_sampling_state = {"sample_batch_count": 1} if keep_sampling else None
+        return generator_output, uids, keep_sampling
+
+    monkeypatch.setattr(trainer, "handle_dynamic_sampling", _fake_dynamic_sampling)
+
+    # Before the fix this raised:
+    #   ValueError: `start('vllm/train')` called while window 'vllm/train' is still open
+    asyncio.run(trainer.train())
+
+    event_names = [name for name, _ in recorder.events]
+    assert sampling_calls["n"] == 4
+    # 4 batches: 3 complete a step, the 2nd is abandoned at the epoch boundary.
+    # The abandoned step still fired on_step_start, so starts lead ends by one.
+    assert event_names.count("on_step_start") == 4
+    assert event_names.count("on_step_end") == 3
+    # The abandoned step must leave nothing behind: no open window, no partial
+    # accumulation to be merged into the next epoch's batch.
+    assert trainer._vllm_metrics_scraper._label is None
+    assert trainer.dynamic_sampling_state is None
+    assert not trainer.all_metrics
+    assert not trainer.all_timings

@@ -501,6 +501,11 @@ class RayPPOTrainer:
                         # 10. Prepare weights for sampling
                         with Timer("sync_weights", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
+                        # `sync_weights` above is the full bracket: it also pauses and
+                        # resumes generation, which under vLLM DP costs seconds of
+                        # coordinator quiesce that is not weight-sync work. The
+                        # dispatch reports the transfer on its own alongside it.
+                        self.all_timings.update(self.dispatch.get_timing_metrics())
 
                     # 11. set logs
                     logger.info(status)
@@ -570,6 +575,18 @@ class RayPPOTrainer:
 
                     if resumed_epoch_steps_remaining == 0 and epoch == start_epoch:
                         break
+
+                # If dynamic sampling was still accumulating when the dataloader ran out, the step
+                # is left in flight with its `vllm/train` window open. Close it and drop the partial
+                # batch so the next epoch starts clean; otherwise `start('vllm/train')` raises
+                # "called while window 'vllm/train' is still open".
+                if step_started:
+                    if self._vllm_metrics_scraper is not None:
+                        await self._vllm_metrics_scraper.stop()
+                    self.dynamic_sampling_state = None
+                    self.all_metrics = {}
+                    self.all_timings = {}
+                    step_started = False
 
                 self._fire("on_epoch_end")
 

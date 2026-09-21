@@ -28,6 +28,8 @@ concurrency:
 
 jobs:
   skyrl_gpu_tests:
+    # Forks inherit these workflows but not the secrets they need -- only run upstream.
+    if: github.repository == 'NovaSky-AI/SkyRL'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -40,7 +42,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:

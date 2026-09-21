@@ -93,28 +93,6 @@ def patch_topk_router_layer_number():
     TopKRouter._set_layer_number_patched = True
 
 
-def patch_topk_router_expert_bias_padding_mask():
-    """Fix the token-mask broadcast in pinned Megatron's expert-bias accounting."""
-    try:
-        from megatron.core.transformer.moe.router import TopKRouter
-    except ImportError:
-        return
-
-    if getattr(TopKRouter, "_expert_bias_padding_mask_patched", False):
-        return
-
-    original_apply_expert_bias = TopKRouter._apply_expert_bias
-
-    def patched_apply_expert_bias(self, routing_map: torch.Tensor, padding_mask: torch.Tensor | None = None):
-        # Megatron combines [tokens, experts] with a token-only mask.
-        if padding_mask is not None and padding_mask.ndim == 1:
-            padding_mask = padding_mask.unsqueeze(-1)
-        return original_apply_expert_bias(self, routing_map, padding_mask)
-
-    TopKRouter._apply_expert_bias = patched_apply_expert_bias
-    TopKRouter._expert_bias_padding_mask_patched = True
-
-
 def _split_replay_indices(rollout_expert_indices: torch.Tensor) -> list[torch.Tensor]:
     per_layer = rollout_expert_indices.permute(2, 0, 1, 3).contiguous().to(torch.int32)
     return list(per_layer.flatten(1, 2).unbind(0))
