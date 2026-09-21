@@ -5,7 +5,7 @@
 
 ## CPU vs GPU
 
-- **CPU workflows** (`cpu_skyrl*.yaml`) run on `ubuntu-latest`, auto-trigger on push to `main`/`rc/*` and on every PR. Run lint + the CPU pytest suites from CLAUDE.md.
+- **CPU workflows** (`cpu_skyrl*.yaml`) run on `ubuntu-latest`, auto-trigger on push to `main`/`rc/*` and on every PR. Run lint + the CPU pytest suites from AGENTS.md.
 - **GPU workflows** (`gpu_*.yaml`, `tinker_*.yaml`) run on `ubuntu-latest` but submit to Anyscale via `anyscale job submit -f ci/<config>.yaml --timeout 12000`. **Label-gated** on PRs.
 
 ## Anyscale
