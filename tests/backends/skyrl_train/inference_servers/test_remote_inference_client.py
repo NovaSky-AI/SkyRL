@@ -35,6 +35,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app = FastAPI()
     app.state.last_generate_features = None
     app.state.last_generate_model = None
+    app.state.last_generate_sampling_params = None
     app.state.last_chat_model = None
     app.state.last_completion_model = None
     app.state.last_render_model = None
@@ -62,6 +63,10 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.get("/test/last_generate_features")
     async def get_last_generate_features():
         return {"features": app.state.last_generate_features}
+
+    @app.get("/test/last_generate_sampling_params")
+    async def get_last_generate_sampling_params():
+        return app.state.last_generate_sampling_params
 
     @app.get("/test/last_models")
     async def get_last_models():
@@ -104,6 +109,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def generate(request: Request):
         body = await request.json()  # Consume body
         sp = body.get("sampling_params", {})
+        app.state.last_generate_sampling_params = sp
         input_token_ids = body.get("token_ids", [])
         app.state.last_generate_model = body.get("model")
         n = sp.get("n", 1)
@@ -245,6 +251,10 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def is_paused():
         # Mock always returns not paused for basic tests
         return {"is_paused": False}
+
+    @app.get("/is_sleeping")
+    async def is_sleeping():
+        return {"is_sleeping": False}
 
     @app.post("/sleep")
     async def sleep(level: int = 2, tags: Optional[List[str]] = Query(None)):
@@ -431,6 +441,10 @@ class TestRemoteInferenceClientInit:
             data_parallel_size=1,
         )
 
+        # Materialize the generate client so the assertion below actually exercises
+        # __getstate__ dropping it, rather than passing because it was never created.
+        assert client._get_generate_client() is not None
+
         # Pickle and unpickle
         pickled = pickle.dumps(client)
         restored = pickle.loads(pickled)
@@ -438,8 +452,8 @@ class TestRemoteInferenceClientInit:
         assert restored.proxy_url == client.proxy_url
         assert restored.server_urls == client.server_urls
         assert restored.model_name == client.model_name
-        # Session should be None after unpickling
-        assert restored._session is None
+        # No sessions should survive unpickling
+        assert restored._generate_client is None
 
 
 class TestDataPlane:
@@ -480,13 +494,16 @@ class TestDataPlane:
             enable_return_routed_experts=True,
         )
         try:
-            result = await client.generate({"prompt_token_ids": [[1, 2, 3]]})
+            result = await client.generate({"prompt_token_ids": [[1, 2, 3]], "routed_experts_prompt_starts": [1]})
+            async with httpx.AsyncClient() as http:
+                captured = (await http.get(f"{mock_servers['proxy_url']}/test/last_generate_sampling_params")).json()
         finally:
             await client.teardown()
 
         assert len(result["rollout_expert_indices"]) == 1
         assert result["rollout_expert_indices"][0].dtype == np.uint8
         assert np.array_equal(result["rollout_expert_indices"][0], np.arange(12).reshape(3, 2, 2))
+        assert captured["routed_experts_prompt_start"] == 1
 
     @pytest.mark.asyncio
     async def test_generate_rejects_list_routed_experts(self, monkeypatch):
@@ -508,7 +525,7 @@ class TestDataPlane:
                 ]
             }
 
-        monkeypatch.setattr(client, "_post", return_list_routes)
+        monkeypatch.setattr(client._get_generate_client(), "_post", return_list_routes)
         with pytest.raises(ValueError, match="must return packed"):
             await client._generate_single([1], {}, None, "model")
 
@@ -622,6 +639,11 @@ class TestControlPlane:
             assert response["body"]["tags"] == ["weights", "kv_cache"]
 
     @pytest.mark.asyncio
+    async def test_is_sleeping(self, client):
+        """Test is_sleeping fans out to all servers and unwraps response bodies."""
+        assert await client.is_sleeping() is False
+
+    @pytest.mark.asyncio
     async def test_wake_up(self, client):
         """Test wake_up fans out to all servers."""
         result = await client.wake_up()
@@ -650,24 +672,10 @@ class TestControlPlane:
 class TestWeightSync:
     """Test weight sync methods."""
 
-    @pytest.mark.asyncio
-    async def test_init_weight_update_communicator(self, client):
-        """Test init_weight_update_communicator expands init_info via to_api_payload and fans out."""
-        api_payload = {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5}
-
-        class MockInitInfo:
-            """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
-
-            def for_servers(self, world_size_per_server, num_servers, dp_size=1):
-                return [self] * num_servers
-
-            def to_api_payload(self):
-                return dict(api_payload)
-
-        result = await client.init_weight_update_communicator(MockInitInfo())
-        assert set(result) == set(client.server_urls)
-        for response in result.values():
-            assert response["body"]["body"] == {"init_info": api_payload}
+    # The init handshake and the start/update/finish lifecycle run on the
+    # trainer-side engines' blocking SkyrlWeightSyncClient
+    # (weight_sync/control_plane.py, covered by test_control_plane.py). Covered
+    # here is what this client drives from the driver.
 
     @pytest.mark.asyncio
     async def test_update_named_weights(self, client):
@@ -685,7 +693,7 @@ class TestWeightSync:
 
     @pytest.mark.asyncio
     async def test_fetch_weights(self, client):
-        """Test fetch_weights uses the first-class /fetch_weights endpoint."""
+        """Test fetch_weights fans out to /fetch_weights on all servers."""
         result = await client.fetch_weights(
             target_version=3,
             sync_dir="gs://bucket/prefix",
@@ -1026,7 +1034,49 @@ class TestContextManager:
             assert len(result) == 2
 
         # Session should be closed after exiting context
-        assert client._session is None or client._session.closed
+        gen_client = client._generate_client
+        assert gen_client is None or all(session.closed for session in gen_client._sessions.values())
+
+
+class TestPerLoopSessions:
+    """HTTP sessions are bound to the event loop that created them."""
+
+    def test_sessions_are_isolated_per_loop(self):
+        client = RemoteInferenceClient(
+            proxy_url="http://localhost:1",
+            server_urls=["http://localhost:1"],
+            data_parallel_size=1,
+        )
+        # A persistent loop on its own thread, like the Tinker engine's continuous sampler.
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+
+        def on_persistent(coro):
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=5)
+
+        try:
+            persistent = on_persistent(client._get_session())
+            # Sessions now live on the extracted generate client.
+            sessions = client._generate_client._sessions
+
+            # A transient loop (asyncio.run) gets its own session and leaves the persistent one open.
+            transient = asyncio.run(client._get_session())
+            assert transient is not persistent
+            assert not persistent.closed
+
+            # The persistent loop keeps reusing its session; the closed loop's entry is evicted.
+            assert on_persistent(client._get_session()) is persistent
+            assert list(sessions) == [loop]
+
+            # aclose() on the persistent loop closes only that loop's session.
+            on_persistent(client.aclose())
+            assert persistent.closed
+            assert sessions == {}
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=5)
+            loop.close()
 
 
 async def _get_lora_registries(server_urls: List[str]) -> List[Dict[str, str]]:

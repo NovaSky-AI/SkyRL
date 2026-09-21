@@ -28,6 +28,8 @@ concurrency:
 
 jobs:
   skyrl_gpu_tests:
+    # Forks inherit these workflows but not the secrets they need -- only run upstream.
+    if: github.repository == 'NovaSky-AI/SkyRL'
     runs-on: ubuntu-latest
     defaults:
       run:

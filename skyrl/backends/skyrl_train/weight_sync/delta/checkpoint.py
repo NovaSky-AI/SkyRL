@@ -25,8 +25,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save, save_file
 
-from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
-from skyrl.backends.skyrl_train.weight_sync.delta_payload import (
+from skyrl.backends.skyrl_train.weight_sync.delta.payload import (
     bytes_to_uint8_tensor,
     compress_bytes,
     decompress_bytes,
@@ -575,8 +574,8 @@ class LocalCheckpointStore:
             f.flush()
 
     def _reset_from_base(self) -> None:
-        # We only reset the `weights_dir` to reuse previously downloaded deltas for the run if they
-        # exist in the `delta_dir`
+        # Only `weights_dir` is reset, so deltas already downloaded into
+        # `deltas_dir` stay reusable for the rest of the run.
         shutil.rmtree(self.weights_dir, ignore_errors=True)
         self._write_state(
             CheckpointState(
@@ -1105,9 +1104,15 @@ class DeltaCheckpointPublisher:
 
     def create_delta_files(
         self,
-        chunks: Iterable[WeightChunk],
+        source: Iterable[Tuple[str, torch.Tensor]],
     ) -> DeltaPublishResult:
-        """Iterate over weight chunks and create delta files locally"""
+        """Drain a ``WeightSource`` and create this rank's delta files locally.
+
+        **Every rank must call this**, source or not: iterating the source is
+        what drives its gather collectives (FSDP ``full_tensor()``, a Megatron
+        export), so a rank that skipped it would deadlock its peers. Non-source
+        ranks drain and drop, and return an empty result.
+        """
         base_version = self.version
         target_version = base_version + 1
         publish_uri = _join_uri(self.sync_dir, _version_name(target_version))
@@ -1184,47 +1189,43 @@ class DeltaCheckpointPublisher:
                 max_tensor_bytes = max((loc.nbytes for loc in locations.values()), default=0)
                 staging_pool = self._staging_pool_for(max_tensor_bytes, num_workers)
             executor = self._publish_executor_for(num_workers) if is_source_rank else None
-            chunk_iter = iter(chunks)
-            while True:
-                try:
-                    chunk = next(chunk_iter)
-                except StopIteration:
-                    break
+            for name, tensor in source:
                 if not is_source_rank:
+                    # Drain and drop: the iteration itself is the collective.
+                    del tensor
                     continue
-                for name, tensor in zip(chunk.names, chunk.tensors):
-                    try:
-                        loc = self._base_location(name)
-                        base = self._snapshot_bytes(name)
-                    except KeyError:
-                        skipped_names.add(name)
-                        stats["skipped_tensors"] += 1
-                        continue
+                try:
+                    loc = self._base_location(name)
+                    base = self._snapshot_bytes(name)
+                except KeyError:
+                    skipped_names.add(name)
+                    stats["skipped_tensors"] += 1
+                    continue
 
-                    t = time.perf_counter()
-                    staged, dtype_name, shape = self._stage_tensor_for_publish(
-                        tensor,
-                        target_dtype=_safetensors_dtype_to_torch(loc.dtype),
-                        target_shape=loc.shape,
-                        staging_pool=staging_pool,
+                t = time.perf_counter()
+                staged, dtype_name, shape = self._stage_tensor_for_publish(
+                    tensor,
+                    target_dtype=_safetensors_dtype_to_torch(loc.dtype),
+                    target_shape=loc.shape,
+                    staging_pool=staging_pool,
+                )
+                stats["cpu_stage_s"] += time.perf_counter() - t
+                if executor is None:
+                    raise RuntimeError("Delta checkpoint source rank is missing a publish executor")
+                pending.append(
+                    executor.submit(
+                        self._process_tensor_delta,
+                        name,
+                        staged,
+                        base,
+                        dtype_name,
+                        shape,
+                        staging_pool,
+                        self.checksum_algorithm,
                     )
-                    stats["cpu_stage_s"] += time.perf_counter() - t
-                    if executor is None:
-                        raise RuntimeError("Delta checkpoint source rank is missing a publish executor")
-                    pending.append(
-                        executor.submit(
-                            self._process_tensor_delta,
-                            name,
-                            staged,
-                            base,
-                            dtype_name,
-                            shape,
-                            staging_pool,
-                            self.checksum_algorithm,
-                        )
-                    )
-                    if len(pending) >= max_inflight:
-                        drain_one()
+                )
+                if len(pending) >= max_inflight:
+                    drain_one()
             while pending:
                 drain_one()
             flush_payload_file()

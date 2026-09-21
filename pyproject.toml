@@ -170,6 +170,35 @@ megatron = [
     "fast-hadamard-transform; sys_platform == 'linux'",
 ]
 
+# Opt-in FlashAttention 4. NOT part of `megatron`, so the default install runs FA2.
+#
+# The combined `flash-attn` wheel (see [tool.uv.sources]) always carries FA4's
+# `flash_attn/cute/` tree -- that is what stops it colliding with flash-attn 2's
+# stale copy. But both consumers gate on the *`flash-attn-4` distribution
+# metadata*, not on the tree:
+#   * Transformer Engine: `get_pkg_version("flash-attn-4")` raising
+#     PackageNotFoundError leaves `flash_attn_func_v4 = None`, so TE never
+#     imports or dispatches to FA4.
+#   * megatron-core: `HAVE_FA4` is False for the same reason.
+# So installing this companion is exactly the switch that turns FA4 on, and
+# leaving it out keeps FA2 as the default with no shim and no runtime patching.
+#
+# Markers: `< '3.15'` matches the companion's own `Requires-Python`, and the
+# `platform_machine` bound keeps it off Linux arches with no combined wheel
+# (there `flash-attn` resolves to plain PyPI 2.8.3, which cannot satisfy the
+# companion's hard dep on ==2.8.3+cu.13.0.torch.2.13.fa4b28.skyrl1). Dropping
+# either bound makes resolution fail outright.
+#
+# FA4 4.0.0b28 is a beta, and TE disables it under context parallelism (TE <= 2.18;
+# main lifts this for cp_comm_type p2p/all_gather/a2a). Note TE 2.16's arch gate
+# only excludes < sm80, so FA4 is selected on sm86/sm87/sm89 (A10, L4, L40S, 4090)
+# where its kernels cannot launch -- set SKYRL_DISABLE_FA4=1 there, or just do not
+# install this extra.
+fa4 = [
+    "skyrl[megatron]",
+    "flash-attn-4[cu13]==4.0.0b28; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64') and python_version < '3.15'",
+]
+
 miniswe = [
     "skyrl[skyrl-train]",
     # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
@@ -272,13 +301,23 @@ override-dependencies = [
     "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
-    # vLLM 0.28.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both overrides
-    # hold these at the versions the lock already resolved to before mamba-ssm moved
-    # to the Astral wheel, so they only relax mamba-ssm's pins — no other package's
-    # resolved version changes. If a vLLM kernel ever fails on the older tilelang,
-    # raise these to vLLM's pins and re-check mamba-ssm.
-    "tilelang==0.1.9; sys_platform == 'linux'",
-    "apache-tvm-ffi==0.1.10; sys_platform == 'linux'",
+    # vLLM 0.28.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both are
+    # overridden here; these two MUST be bumped together.
+    #
+    # FA4 requires apache-tvm-ffi>=0.1.12, newer than either package's metadata
+    # allows. tilelang 0.1.9's own bound is loose enough (`>=0.1.2,~=0.1.0`) that
+    # uv happily resolves it against 0.1.12 -- and then `import tilelang` aborts
+    # with `AttributeError: attribute '__dict__' of 'type' objects is not writable`
+    # from a duplicate ffi field registration, taking `mamba_ssm` and `fla` (the
+    # default FLA_TILELANG path) down with it. Measured:
+    #     tilelang 0.1.9  + ffi 0.1.10  -> import OK   (pre-FA4 state)
+    #     tilelang 0.1.9  + ffi 0.1.12  -> AttributeError
+    #     tilelang 0.1.13 + ffi 0.1.12  -> import OK
+    # 0.1.13 is the first tilelang whose bound (`>=0.1.11,<0.1.13`) admits 0.1.12.
+    "tilelang==0.1.13; sys_platform == 'linux'",
+    "apache-tvm-ffi==0.1.12; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl[cu13]==4.6.2; sys_platform == 'linux'",
+    "quack-kernels[cu13]==0.6.4; sys_platform == 'linux'",
     # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
     # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
     # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
@@ -369,13 +408,38 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 # flash-attn must stay at exactly 2.8.3, NOT 2.8.3.post1: TE gates flash-attn on
 # `max_version = 2.8.3` and 2.8.3.post1 > 2.8.3. TE >= 2.16 strips the local segment
 # before comparing (`PkgVersion(...).public`).
+# WARNING: every `flash-attn` entry below MUST stay a combined FA2+FA4 wheel.
+# The stock 2.8.3 wheel ships a stale `flash_attn/cute/` built against the
+# nvidia-cutlass-dsl 4.0/4.1 API, and megatron-core imports that tree
+# unconditionally -- before its own `flash-attn-4` metadata check -- under a
+# bare `except ImportError`. Against cutlass-dsl 4.6.x the stale tree raises
+# `AttributeError: ThrMma`, which escapes that handler and takes down every
+# `megatron.core.transformer.attention` import. SkyRL used to defuse this at
+# runtime in `skyrl/_compat.py`; that shim is gone, so pointing any of these
+# back at a plain wheel (e.g. the `astral-cu130` TODO above) reintroduces the
+# crash. Rebuild combined wheels instead.
 flash-attn = [
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/flash_attn-2.8.3-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
+    # Both architectures get the combined FA2+FA4 wheels: the plain
+    # cu13torch2.13 FA2 build ships a stale `flash_attn/cute/` tree (21 files,
+    # built against the nvidia-cutlass-dsl 4.0/4.1 API) that collides with real
+    # FA4 (52 files). This wheel is the same torch-2.13 FA2 extension with that
+    # tree replaced by FA4 4.0.0b28's, so one package owns `flash_attn.cute`
+    # outright and FA2 and FA4 are importable side by side. See `flash-attn-4`
+    # below for the companion.
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
+]
+# Metadata-only companion: it carries no runtime files, declares the `cu13`
+# extra, and hard-depends on the exact combined wheel above (which is what
+# actually ships `flash_attn/cute/`). Both must come from the same release --
+# the companion cannot find the combined wheel on PyPI. Transformer Engine
+# gates FA4 on this distribution's metadata, so without it TE never uses FA4.
+flash-attn-4 = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn_4-4.0.0b28%2Bskyrl1-py3-none-any.whl", marker = "sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64') and python_version < '3.15'" },
 ]
 causal-conv1d = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },

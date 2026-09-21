@@ -1,43 +1,36 @@
-"""Trainer-side driver for the sharded-RDT (NIXL pull) weight-sync backend.
+"""Sharded-RDT (NIXL pull) weight sources and trainer init info.
 
-RDT matches vLLM's trainer-send model — a ``WeightSource`` + a
-``TrainerWeightTransferEngine`` + a ``VLLMWeightSyncClient``, where the engine owns
-the round trip and the inference workers pull. ``ShardedRdtTransferStrategy``
-(``sharded_rdt_strategy.py``) presents :class:`RdtWeightSyncSender` through SkyRL's
-``WeightTransferSender`` interface, overriding ``send`` so no chunk stream or
-metadata is ever materialized.
+Sources here are :class:`GroupedWeightSource`s, not the plain
+``weight_sync/sources.py`` ones: a pull backend needs per-rank ownership
+(``held_names()``) and a group index its free barrier counts. See
+``sharded_rdt_base``.
 
-Three ``WeightSource`` flavors, selected by extractor flavor in
-``make_weight_source``: ``_FsdpWeightSource`` (all-gather via ``full_tensor()``),
-``MegatronStackedWeightSource`` (PP-local + EP-local, stack-granularity gathers) and
-``MegatronWeightSource`` (the whole-model Megatron-Bridge ``export_hf_weights``
-fallback).
+Three flavors, chosen in :func:`make_megatron_weight_source` /
+:func:`make_fsdp_weight_source`: :class:`RdtFsdpWeightSource` (all-gather via
+``full_tensor()``), :class:`MegatronStackedWeightSource` (PP-local + EP-local,
+stack-granularity gathers) and :class:`RdtMegatronWeightSource` (the whole-model
+Megatron-Bridge ``export_hf_weights`` fallback).
 """
 
-import asyncio
 import contextlib
 import logging
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterator, List, Optional
+from typing import Any, Iterator, List, Optional
 
 import torch
 from loguru import logger as _loguru
 
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_control_plane import (
-    SyncRdtControlPlaneClient,
-)
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
+    GroupedWeightSource,
     ParamMeta,
-    WeightSource,
     layerwise_groups,
+    materialize_full_tensor,
 )
-from skyrl.train.utils.utils import str_to_torch_dtype
-
-if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-        RemoteInferenceClient,
-    )
+from skyrl.backends.skyrl_train.weight_sync.sources import (
+    FsdpWeightSource,
+    MegatronWeightSource,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +58,8 @@ def _qkv_index_device_ctx():
     tensors, which default to CPU. Indexing a CUDA tensor with CPU indices forces
     a blocking H2D copy plus a stream sync per gather, so the host stalls for
     however much GPU work happens to be queued — measured at ~0.65 s per sync per
-    rank of ``ne_bridge`` at 235B, and the producer is the sync's pacer, so it
-    lands in the wall roughly 1:1.
+    rank at 235B, and the producer is the sync's pacer, so it lands in the wall
+    roughly 1:1.
 
     Rather than vendor the three functions (257 lines of interleave math that would
     then have to track upstream, and whose divergence would silently produce the
@@ -76,11 +69,6 @@ def _qkv_index_device_ctx():
     ``setdefault`` simply stops mattering. The window is one function call in a
     single-threaded export, and the four ``arange`` calls inside each function are
     exactly the index tensors this is for.
-
-    The in-tree fix is four characters — ``device=qkv.device`` on the aranges —
-    and belongs upstream as a PR against megatron-bridge, since it taxes every
-    megatron->hf export of every GQA model. Until that lands, reaching it from
-    outside gets the same result with no forked copy to carry.
     """
     import functools
 
@@ -150,8 +138,6 @@ def _pp_local_export_ctx():
     ``megatron_to_hf``, so an instance-level change — clearing ``pp_group`` to
     reach the upstream ``pp_size == 1`` fast path, say — would miss the delegate
     that actually performs the broadcast.
-
-    Works against the OFFICIAL megatron-bridge; no fork required.
     """
     from megatron.bridge.models.conversion.param_mapping import MegatronParamMapping
 
@@ -177,112 +163,60 @@ def _pp_local_export_ctx():
         ) = saved
 
 
-class _FsdpWeightSource(WeightSource):
-    """``WeightSource`` over the FSDP policy model for the sidecar trainer engine.
+class RdtFsdpWeightSource(FsdpWeightSource, GroupedWeightSource):
+    """The shared FSDP ``WeightSource``, re-ordered group-major.
 
-    Yields ``(name, full tensor)`` pairs in group-contiguous (pre / per-layer /
-    post) order, cast to the inference dtype, using the worker's
-    ``FSDPWeightExtractor`` so the names (incl. ``weight_prefix``) and the
-    all-gather match exactly what the consumer engine baked its plan over.
-
-    ``metadata()`` reads state_dict shapes only (no gather); iteration all-gathers
-    each parameter (``full_tensor()``) and is therefore a collective every trainer
-    rank must run in lockstep — which the vendored engine's ``send_weights``
-    guarantees (all ranks iterate the source).
+    Same state_dict and ``full_tensor()`` gather as
+    ``weight_sync.sources.FsdpWeightSource``; only the order differs. RDT needs
+    each ``model.layers.<N>.*`` block contiguous so ``layerwise_groups``
+    partitions ``metadata()`` exactly -- that partition is the group index the
+    consumers' pull plans and the producer's free barrier are keyed on. The push
+    backends transfer any permutation identically, so they use the plain source.
     """
 
-    def __init__(self, weight_extractor: Any, dtype: torch.dtype) -> None:
-        self._extractor = weight_extractor
-        self._dtype = dtype
-        meta = weight_extractor.get_weight_metadata(dtype)
-        names = list(meta["names"])
-        shapes = [list(s) for s in meta["shapes"]]
-        # Reorder into group-major order so layerwise_groups(names) partitions the
-        # list exactly and each model.layers.<N>.* block is contiguous (the order
-        # the trainer engine validates + the gather loop drives).
+    def __init__(self, model: Any, dtype: torch.dtype, weight_prefix: str = "") -> None:
+        super().__init__(model, dtype, weight_prefix)
+        sd = model.state_dict()
+        prefix = weight_prefix or ""
+        names = [f"{prefix}{key}" for key in sd.keys()]
+        shapes = {f"{prefix}{key}": tuple(param.shape) for key, param in sd.items()}
         idx = {n: i for i, n in enumerate(names)}
         order = [idx[n] for g in layerwise_groups(names) for n in g]
         self._names = [names[i] for i in order]
-        self._shapes = [shapes[i] for i in order]
+        self._shapes = [shapes[names[i]] for i in order]
 
     def metadata(self) -> List[ParamMeta]:
         return [ParamMeta(name, self._dtype, tuple(shape)) for name, shape in zip(self._names, self._shapes)]
 
     def __iter__(self) -> Iterator[tuple]:
-        # A worker thread does not inherit the main thread's current CUDA device;
-        # set it so the gather collectives + casts land on this rank's GPU.
-        if torch.cuda.is_available():
-            torch.cuda.set_device(torch.cuda.current_device())
-        prefix = getattr(self._extractor, "weight_prefix", "") or ""
-        # Use the SAME model handle the metadata came from: get_weight_metadata
-        # reads ``weight_extractor.model.state_dict()`` (the inner HF model),
-        # whereas the worker's ``self.model`` may be a wrapper prefixed otherwise.
-        sd = self._extractor.model.state_dict()
+        # The caller selects this rank's CUDA device before iterating; a worker
+        # thread does not inherit it (see Worker._weight_sync_thread).
+        device = torch.cuda.current_device() if torch.cuda.is_available() else None
+        prefix = self.weight_prefix
+        # The same handle metadata() was built from, so names and gather match
+        # what the consumer engine baked its plan over.
+        sd = self.model.state_dict()
         for name in self._names:
             raw = name[len(prefix) :] if prefix and name.startswith(prefix) else name
-            full = self._extractor._gather_tensor(sd[raw]).to(self._dtype).detach().contiguous()
-            yield name, full
+            param = sd[raw]
+            if device is not None:
+                param = param.to(device, non_blocking=True)
+            yield name, materialize_full_tensor(param).to(self._dtype).detach().contiguous()
 
 
-class MegatronWeightSource(WeightSource):
-    """``WeightSource`` over the Megatron policy model for the sidecar trainer engine.
+class RdtMegatronWeightSource(MegatronWeightSource, GroupedWeightSource):
+    """The shared Megatron ``WeightSource``, with RDT's group channels.
 
-    Wraps ``MegatronWeightExtractor`` and streams ``(HF name, full tensor)`` pairs
-    via the Megatron-Bridge (``bridge.export_hf_weights``), which gathers each
-    parameter across TP / PP / EP internally and — per its contract — "All ranks
-    get full tensors". That is exactly the FSDP ``full_tensor()`` semantics the RDT
-    producer model needs: every trainer rank materializes the whole model (one
-    parameter at a time, so peak memory is bounded), so each producer can serve
-    its bound consumer the complete model.
+    Identical stream to ``weight_sync.sources.MegatronWeightSource``: the
+    whole-model export, in HF-canonical (already group-contiguous) order, with
+    every rank getting full tensors. For a pull backend that whole-model
+    residency is the point -- each producer must be able to serve its bound
+    consumer the complete model -- so the inherited "hold everything" defaults
+    are correct and this subclass adds nothing else.
 
-    We call the bridge **directly** with ``conversion_tasks=None`` rather than the
-    extractor's ``extract_weights`` because the extractor is built with
-    ``enable_bucketing=True``, and bucketing hoists the grouped MoE-expert tasks
-    into dedicated leading buckets — which would break the group-major
-    (pre / per-decoder-layer / post) contiguity the trainer engine's
-    ``trainer_init`` validates. The non-bucketed export yields HF-canonical order,
-    which ``layerwise_groups`` partitions cleanly. ``metadata()`` and iteration run
-    the same export, so their order always agrees.
-
-    Megatron only: this reads ``weight_extractor.bridge`` / ``.actor_module``.
-    ``rdt_send`` selects it (vs ``_FsdpWeightSource``) by the presence of
-    ``bridge`` on the extractor.
+    :class:`MegatronStackedWeightSource` is the narrower alternative;
+    ``make_megatron_weight_source`` falls back here when it cannot serve a layout.
     """
-
-    def __init__(self, weight_extractor: Any, dtype: torch.dtype) -> None:
-        self._bridge = weight_extractor.bridge
-        self._module = weight_extractor.actor_module
-        self._dtype = dtype
-        self._meta: Optional[List[ParamMeta]] = None
-
-    def _export(self) -> Iterator[tuple]:
-        # conversion_tasks=None -> full model in HF-canonical (group-contiguous)
-        # order; the bridge gathers TP/PP/EP and yields full tensors on every rank.
-        return self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=None)
-
-    def metadata(self) -> List[ParamMeta]:
-        # One collective dry-run export to learn names/shapes; tensors are
-        # discarded. Runs once (trainer_init caches the result), so the extra
-        # gather is a one-time init cost, not per-sync.
-        if self._meta is None:
-            meta: List[ParamMeta] = []
-            for name, tensor in self._export():
-                meta.append(ParamMeta(name, self._dtype, tuple(tensor.shape)))
-                del tensor
-            self._meta = meta
-        return self._meta
-
-    def __iter__(self) -> Iterator[tuple]:
-        # A worker thread does not inherit the main thread's current CUDA device;
-        # set it so the bridge's gather collectives + casts land on this rank's GPU.
-        if torch.cuda.is_available():
-            torch.cuda.set_device(torch.cuda.current_device())
-            device = torch.cuda.current_device()
-        else:
-            device = None
-        for name, tensor in self._export():
-            full = tensor.to(device=device, dtype=self._dtype).detach().contiguous()
-            yield name, full
 
 
 @dataclass(frozen=True)
@@ -314,7 +248,7 @@ class _ExpertLayer:
         return self.n_local * self.ep_size
 
 
-class MegatronStackedWeightSource(WeightSource):
+class MegatronStackedWeightSource(GroupedWeightSource):
     """Megatron ``WeightSource`` with STACKED expert gathers (per-tensor-overhead fix).
 
     The plain ``MegatronWeightSource`` streams every HF tensor through the
@@ -324,10 +258,9 @@ class MegatronStackedWeightSource(WeightSource):
     layer and dominates sync time (~13ms/tensor measured; 235B => ~470s/sync).
 
     This source keeps the bridge for everything EXCEPT the per-expert weights
-    (attention, norms, router, embeddings — via ``conversion_tasks`` filtering,
-    the same subset-export idiom ``MegatronWeightExtractor`` uses for
-    bucketing), and gathers the experts itself at STACK granularity — two big
-    collectives per MoE layer instead of ~400:
+    (attention, norms, router, embeddings — selected by filtering
+    ``conversion_tasks``), and gathers the experts itself at STACK granularity —
+    two big collectives per MoE layer instead of ~400:
 
       fc1 stack [n_local, 2F, H] --ep all_gather--> [E, 2F, H] --pp broadcast-->
       per-expert HF views: gate_proj = fc1[e, :F], up_proj = fc1[e, F:],
@@ -342,9 +275,9 @@ class MegatronStackedWeightSource(WeightSource):
     agree. Dense models have no expert tasks and degenerate to the plain
     filtered==full export.
 
-    Falls back (see ``make_weight_source``) for grouped-export archs (qwen3.5
-    style ``is_grouped_export`` mappings emit fused HF names — different
-    contract) and can be disabled with ``SKYRL_RDT_STACKED_EXPERTS=0``.
+    Falls back (see ``make_megatron_weight_source``) for grouped-export archs
+    (qwen3.5 style ``is_grouped_export`` mappings emit fused HF names — a
+    different contract) and can be disabled with ``SKYRL_RDT_STACKED_EXPERTS=0``.
 
     Set ``SKYRL_RDT_VERIFY_STACKED=1`` to numerically compare this source's
     expert tensors against the bridge's per-expert export for sampled layers on
@@ -358,16 +291,16 @@ class MegatronStackedWeightSource(WeightSource):
     also declared through ``held_names()``; foreign experts yield ``None``).
     The RDT consumers route every pull to a rank that holds the data. Layouts
     this cannot serve (a gather group produced by two stages: tied embeddings,
-    MTP) demote the source, and ``make_weight_source`` delegates to the plain
-    ``MegatronWeightSource`` — naive whole-model extraction, also reachable
-    explicitly via ``SKYRL_RDT_STACKED_EXPERTS=0``.
+    MTP) demote the source, and ``make_megatron_weight_source`` delegates to
+    :class:`RdtMegatronWeightSource` — naive whole-model extraction, also
+    reachable explicitly via ``SKYRL_RDT_STACKED_EXPERTS=0``.
     """
 
     _EXPERT_PRED = ".experts.linear_fc"  # model_bridge.py uses the same predicate
 
-    def __init__(self, weight_extractor: Any, dtype: torch.dtype) -> None:
-        self._bridge = weight_extractor.bridge
-        self._module = weight_extractor.actor_module
+    def __init__(self, bridge: Any, module: Any, dtype: torch.dtype) -> None:
+        self._bridge = bridge
+        self._module = module
         self._dtype = dtype
         self._meta: Optional[List[ParamMeta]] = None
         self._verified = False
@@ -386,18 +319,14 @@ class MegatronStackedWeightSource(WeightSource):
         self._stack_ring_pos = 0
         self._stack_ring_depth = max(1, int(os.environ.get("SKYRL_RDT_LOOKAHEAD", _DEFAULT_GATHER_LOOKAHEAD))) + 1
         self._stack_ring_on = os.environ.get("SKYRL_RDT_EXPORT_RING", "1") not in ("0", "false", "False")
-        # This source is SINGLE-MODE: serve only what this rank holds. Two
-        # grains that engage independently: PP-local (pp>1) — this stage
-        # exports only its own parameters; EP-local (ep>1) —
-        # only this coordinate's experts are materialized, foreign experts
-        # yield None. Both are declared through held_names(). The escape hatch to naive whole-model
-        # extraction is the plain MegatronWeightSource
-        # (SKYRL_RDT_STACKED_EXPERTS=0), which make_weight_source also
-        # delegates to automatically when a gather group spans pipeline stages
-        # (tied embeddings, MTP) — see held_names / make_weight_source.
+        # Serve only what this rank holds, at two grains that engage
+        # independently and are both declared through held_names(): PP-local
+        # (pp>1) exports only this stage's parameters; EP-local (ep>1)
+        # materializes only this coordinate's experts and yields None for the
+        # rest. See the class docstring for the fallbacks.
         etp = self._etp_size()
         if etp > 1:
-            # Defense in depth: make_weight_source falls back to the plain
+            # Defense in depth: make_megatron_weight_source falls back to the plain
             # bridge source on ETP>1, so this should be unreachable. Shapes are
             # read off param_weight.shape and no rank holds a whole expert.
             raise RuntimeError(
@@ -412,8 +341,9 @@ class MegatronStackedWeightSource(WeightSource):
         # second chunk on the consumer.
         self._ep_local = self._ep_size > 1
         # Set by held_names when a gather group spans pipeline stages: this
-        # source cannot serve that layout, and make_weight_source delegates to
-        # the plain MegatronWeightSource instead. Iteration refuses to run.
+        # source cannot serve that layout, so make_megatron_weight_source
+        # delegates to the plain RdtMegatronWeightSource instead and iteration
+        # refuses to run.
         self._demoted = False
         # Per-layer (F, H) recorded as layers are walked, so metadata() can
         # synthesize the shapes of foreign experts (their tensors are None).
@@ -421,8 +351,6 @@ class MegatronStackedWeightSource(WeightSource):
         self._group_stages: List[set] = []  # group idx -> stages that produce it
         self._owned_group_idx: List[int] = []
         self._group_index_of_name: dict = {}
-        # Per-sync source phase timing (expert_gather / ne_* buckets), drained
-        # into trainer.jsonl by RdtWeightSyncSender after each send.
 
     @staticmethod
     def _global_layer(global_param_name: str) -> int:
@@ -526,7 +454,7 @@ class MegatronStackedWeightSource(WeightSource):
         the same collectives as the base weights and the old per-layer adapter
         collectives (materialize PP bcast + EP all_gather, ~5 s/sync at 235B)
         disappear. Reads the adapter tasks' local ``param_weight`` directly:
-        with etp==1 (guaranteed by make_weight_source) the bridge's
+        with etp==1 (guaranteed by make_megatron_weight_source) the bridge's
         materialize would return exactly these tensors on the owner stage.
         Same fp32-accumulate-then-cast rounding as the full-stack merge.
         Owner stage only (non-owner ranks receive merged shards)."""
@@ -593,6 +521,10 @@ class MegatronStackedWeightSource(WeightSource):
         re-substituted, so the same template serves foreign experts this rank
         holds no task for.
         """
+        # Conversion tasks retain LoRA wrapper names; the mapping registry uses
+        # unwrapped base names, just as Bridge's conversion-task lookup does.
+        sample_global_param_name = sample_global_param_name.replace(".to_wrap.", ".")
+
         head, _, rest = sample_global_param_name.partition("layers.")
         _layer, _, tail = rest.partition(".")
         base = tail.rsplit("weight", 1)[0]
@@ -629,9 +561,7 @@ class MegatronStackedWeightSource(WeightSource):
                         "sharded_rdt could not resolve expert HF names from the "
                         f"Megatron-Bridge mapping registry for layer {lay.layer} expert {e}: "
                         f"expected fc1 -> {{'gate': str, 'up': str}} and fc2 -> str, got "
-                        f"fc1={fc1!r} fc2={fc2!r}. Refusing to guess: an unresolved expert "
-                        "name is never baked by the consumer, so that expert would silently "
-                        "keep stale weights."
+                        f"fc1={fc1!r} fc2={fc2!r}."
                     )
                 names.append(fc1["gate"])
                 names.append(fc1["up"])
@@ -642,9 +572,7 @@ class MegatronStackedWeightSource(WeightSource):
         except Exception as e:  # noqa: BLE001 - add context, then fail the sync
             raise RuntimeError(
                 "sharded_rdt failed to look up expert HF names via the Megatron-Bridge "
-                f"mapping registry (layer {lay.layer}, {E} experts): {type(e).__name__}: {e}. "
-                "Refusing to fall back to synthesized names, which would silently skip "
-                "these experts."
+                f"mapping registry (layer {lay.layer}, {E} experts): {type(e).__name__}: {e}."
             ) from e
 
     def _expert_names_for(self, lay: "_ExpertLayer", E: int) -> list:
@@ -762,16 +690,13 @@ class MegatronStackedWeightSource(WeightSource):
     def _build_export_plan(self) -> tuple:
         """Per-sync plan: ``(non_expert_tasks, {layer: _ExpertLayer}, adapter_ctx)``.
 
-        Runs once per walk, before any tensor is produced. Timed in its own
-        phase buckets because it is NOT per-yield work and would otherwise hide
-        in the gather loop's ``source_next`` residual (measured 0.74 s/sync at
-        235B — more than every per-tensor cost combined, of which
-        ``get_conversion_tasks`` alone is ~0.5 s).
+        Runs once per walk, before any tensor is produced: it is not per-yield
+        work, and it costs 0.74 s/sync at 235B — more than every per-tensor cost
+        combined, of which ``get_conversion_tasks`` alone is ~0.5 s.
 
         Conversion tasks are rebuilt every sync on purpose: they hold live
         parameter references, and the bridge builds fresh mapping objects with
-        clean PP-collective caches each call (the same reason
-        ``MegatronWeightExtractor`` rebuilds them per sync).
+        clean PP-collective caches each call.
         """
         tasks = self._bridge.get_conversion_tasks(self._module)
         non_expert, raw_layers = self._partition_tasks(tasks)
@@ -793,15 +718,13 @@ class MegatronStackedWeightSource(WeightSource):
         ``(names, tensors)`` parallel lists per layerwise group — pre /
         model.layers.N / post, the same contiguous partition
         ``layerwise_groups`` derives from metadata() — with each layer's
-        stacked expert views appended at its boundary. Batching by group
-        exists because the per-tensor handoff (~37k generator yields + per-name
-        gather-loop bookkeeping per sync at 235B) cost ~0.9s of pure Python on
-        the sync critical path."""
+        stacked expert views appended at its boundary. Batching by group keeps
+        the per-tensor handoff (~37k generator yields + per-name gather-loop
+        bookkeeping per sync at 235B, ~0.9s of pure Python) off the sync
+        critical path."""
         if self._demoted:
             raise RuntimeError(
-                "[stacked-source] this source was demoted (a gather group spans "
-                "pipeline stages) and cannot iterate; make_weight_source "
-                "delegates to the plain MegatronWeightSource automatically."
+                "[stacked-source] this source was demoted (a gather group spans pipeline stages) and cannot iterate."
             )
         if torch.cuda.is_available():
             torch.cuda.set_device(torch.cuda.current_device())
@@ -832,8 +755,7 @@ class MegatronStackedWeightSource(WeightSource):
         _ctx = contextlib.ExitStack()
         if self._pp_local:
             _ctx.enter_context(_pp_local_export_ctx())
-        # Independent of PP-local, and the reason the megatron-bridge fork is no
-        # longer needed for performance either (see _qkv_index_device_ctx).
+        # Independent of PP-local (see _qkv_index_device_ctx).
         _ctx.enter_context(_qkv_index_device_ctx())
         # Not export_hf_weights: with precomputed conversion_tasks it hands the
         # stream to a fresh CONFIG-ONLY model bridge (see _prepared_model_bridge)
@@ -851,11 +773,6 @@ class MegatronStackedWeightSource(WeightSource):
             show_progress=False,
             conversion_tasks=non_expert,
         )
-        # Manual next() so time INSIDE the bridge export ("ne_bridge": TP/PP
-        # gathers, transforms, adapter merge — not our code) is split from our
-        # dtype/device conversion ("ne_convert"). CPU-side wall time: kernel
-        # launches are async, but the loop's pacing is CPU-bound, which is what
-        # these buckets attribute.
         with _ctx:
             _it = iter(_stream)
             names: list = []
@@ -1055,7 +972,7 @@ class MegatronStackedWeightSource(WeightSource):
             logger.warning(
                 "[stacked-source] gather groups %s are produced by more than one pipeline "
                 "stage (tied embeddings / MTP), which this source cannot serve per-stage. "
-                "Demoting: make_weight_source delegates to the plain MegatronWeightSource "
+                "Demoting: make_megatron_weight_source delegates to the plain RdtMegatronWeightSource "
                 "(naive whole-model extraction, correct but slower).",
                 shared[:4],
             )
@@ -1195,260 +1112,200 @@ class MegatronStackedWeightSource(WeightSource):
                 logger.info("[stacked-verify] layer %d: expert tensors match bridge export", layer)
 
 
-def make_weight_source(weight_extractor: Any, dtype: torch.dtype) -> WeightSource:
-    """Pick the RDT ``WeightSource`` for the trainer's weight extractor.
+def make_fsdp_weight_source(model: Any, dtype: torch.dtype, weight_prefix: str = "") -> GroupedWeightSource:
+    """The RDT ``WeightSource`` for an FSDP policy model."""
+    return RdtFsdpWeightSource(model, dtype, weight_prefix)
 
-    The Megatron extractor exposes a Megatron-Bridge (``bridge`` /
-    ``export_hf_weights``); the FSDP extractor exposes an all-gatherable
-    ``state_dict`` (``model`` / ``_gather_tensor``). Selection is by the presence
-    of ``bridge`` so neither backend module has to be imported here.
 
-    For Megatron, prefer ``MegatronStackedWeightSource`` (stack-granularity
-    expert gathers; ~20x fewer collectives on per-expert MoE archs) unless the
-    arch uses grouped-export mappings (fused HF expert names — different
-    contract) or ``SKYRL_RDT_STACKED_EXPERTS=0``.
+def make_megatron_weight_source(bridge: Any, module: Any, dtype: torch.dtype) -> GroupedWeightSource:
+    """Pick the RDT ``WeightSource`` for a Megatron policy model.
+
+    Prefer :class:`MegatronStackedWeightSource` (stack-granularity expert
+    gathers; ~20x fewer collectives on per-expert MoE archs, and PP-local export
+    at pp>1) unless the arch uses grouped-export mappings (fused HF expert names
+    — a different contract) or ``SKYRL_RDT_STACKED_EXPERTS=0``. Everything else
+    falls back to the whole-model :class:`RdtMegatronWeightSource`.
     """
-    if hasattr(weight_extractor, "bridge"):
-        if os.environ.get("SKYRL_RDT_STACKED_EXPERTS", "1") != "0":
+    if os.environ.get("SKYRL_RDT_STACKED_EXPERTS", "1") != "0":
+        try:
+            tasks = bridge.get_conversion_tasks(module)
+            expert_tasks = [t for t in tasks if MegatronStackedWeightSource._EXPERT_PRED in t.param_name]
+            grouped = any(getattr(t.mapping, "is_grouped_export", False) for t in expert_tasks)
+            wrapped = any(".to_wrap." in t.global_param_name for t in expert_tasks)
+            # ETP>1 means no rank holds a WHOLE expert (shapes would be read
+            # off shards; EP-local stamping has no truthful answer), so probe
+            # for EVERY config — Megatron defaults etp to tp when unset, not
+            # to 1. Unprobeable (no mpu) means no ETP — except under LoRA,
+            # where the stack merge is at stake and the conservative answer
+            # is to fall back.
             try:
-                tasks = weight_extractor.bridge.get_conversion_tasks(weight_extractor.actor_module)
-                expert_tasks = [t for t in tasks if MegatronStackedWeightSource._EXPERT_PRED in t.param_name]
-                grouped = any(getattr(t.mapping, "is_grouped_export", False) for t in expert_tasks)
-                wrapped = any(".to_wrap." in t.global_param_name for t in expert_tasks)
-                # ETP>1 means no rank holds a WHOLE expert (shapes would be read
-                # off shards; EP-local stamping has no truthful answer), so probe
-                # for EVERY config — Megatron defaults etp to tp when unset, not
-                # to 1. Unprobeable (no mpu) means no ETP — except under LoRA,
-                # where the stack merge is at stake and the conservative answer
-                # is to fall back (the pre-existing behaviour).
+                from megatron.core import parallel_state
+
+                etp = torch.distributed.get_world_size(parallel_state.get_expert_tensor_parallel_group())
+            except Exception:  # noqa: BLE001
+                etp = 1 if not wrapped else 0
+            etp_ok = etp == 1
+            # A DENSE model has no expert tasks, but the source's two grains
+            # engage INDEPENDENTLY: PP-local ("this stage exports only its own
+            # layers") needs no experts at all. At pp>1 that is the difference
+            # between fitting and not: the plain source's whole-model export is
+            # model-sized rather than shard-sized, and OOMs on Qwen3-32B at both
+            # tp4/pp2 (70.56 GiB) and tp8/pp2 (73.06 GiB) of 79.18.
+            #
+            # At pp==1 the stacked source degenerates to the plain
+            # filtered==full export, so the simpler path is kept. The `_demoted`
+            # check below still catches layouts a stage cannot serve alone (tied
+            # embeddings, MTP).
+            pp_local_gain = False
+            if not expert_tasks:
                 try:
                     from megatron.core import parallel_state
 
-                    etp = torch.distributed.get_world_size(parallel_state.get_expert_tensor_parallel_group())
+                    pp_local_gain = parallel_state.get_pipeline_model_parallel_world_size() > 1
                 except Exception:  # noqa: BLE001
-                    etp = 1 if not wrapped else 0
-                etp_ok = etp == 1
-                # A DENSE model has no expert tasks, but the source's two grains
-                # engage INDEPENDENTLY: PP-local ("this stage exports only its own
-                # layers") needs no experts at all. At pp>1 that is the difference
-                # between fitting and not -- measured on Qwen3-32B, where the plain
-                # source's whole-model export OOMed at both tp4/pp2 (70.56 GiB) and
-                # tp8/pp2 (73.06 GiB) of 79.18. Halving per-rank params did not help,
-                # which is what identifies the export as model-sized rather than
-                # shard-sized.
-                #
-                # At pp==1 the stacked source degenerates to the plain
-                # filtered==full export, so there is nothing to win and the simpler
-                # path is kept. The `_demoted` check below is unchanged and still
-                # catches layouts a stage cannot serve alone (tied embeddings, MTP).
-                pp_local_gain = False
-                if not expert_tasks:
-                    try:
-                        from megatron.core import parallel_state
-
-                        pp_local_gain = parallel_state.get_pipeline_model_parallel_world_size() > 1
-                    except Exception:  # noqa: BLE001
-                        pp_local_gain = False
-                if (expert_tasks or pp_local_gain) and not grouped and etp_ok:
-                    if wrapped:
-                        logger.info("[rdt] stacked expert source with LoRA stack-merge (etp=1)")
-                    src = MegatronStackedWeightSource(weight_extractor, dtype)
-                    # pp>1: run the shared-group discovery NOW (one metadata
-                    # walk, rank-identical on every rank) so a tied-embeddings/
-                    # MTP layout delegates to the plain source here instead of
-                    # failing mid-init. At pp==1 this returns without work.
-                    src.held_names()
-                    if src._demoted:
-                        logger.warning(
-                            "[rdt] a gather group spans pipeline stages; delegating to the "
-                            "plain MegatronWeightSource (naive whole-model extraction)"
-                        )
-                        return MegatronWeightSource(weight_extractor, dtype)
-                    return src
-                if not etp_ok and expert_tasks:
-                    logger.info(
-                        "[rdt] expert_tensor_parallel_size != 1: no rank holds a whole "
-                        "expert; using plain MegatronWeightSource (the bridge gathers "
-                        "ETP shards internally — correct, slower)"
+                    pp_local_gain = False
+            if (expert_tasks or pp_local_gain) and not grouped and etp_ok:
+                if wrapped:
+                    logger.info("[rdt] stacked expert source with LoRA stack-merge (etp=1)")
+                src = MegatronStackedWeightSource(bridge, module, dtype)
+                # pp>1: run the shared-group discovery NOW (one metadata
+                # walk, rank-identical on every rank) so a tied-embeddings/
+                # MTP layout delegates to the plain source here instead of
+                # failing mid-init. At pp==1 this returns without work.
+                src.held_names()
+                if src._demoted:
+                    logger.warning(
+                        "[rdt] a gather group spans pipeline stages; delegating to the "
+                        "plain RdtMegatronWeightSource (naive whole-model extraction)"
                     )
-                elif grouped:
-                    logger.info("[rdt] grouped-export arch; using plain MegatronWeightSource")
-                else:
-                    logger.info(
-                        "[rdt] dense model at pp==1: PP-local serving would narrow nothing "
-                        "and there are no experts to stack; using plain MegatronWeightSource"
-                    )
-            except Exception:  # noqa: BLE001
-                logger.warning("[rdt] stacked-source probe failed; using plain MegatronWeightSource", exc_info=True)
-        return MegatronWeightSource(weight_extractor, dtype)
-    return _FsdpWeightSource(weight_extractor, dtype)
+                    return RdtMegatronWeightSource(bridge, module, dtype)
+                return src
+            if not etp_ok and expert_tasks:
+                logger.info(
+                    "[rdt] expert_tensor_parallel_size != 1: no rank holds a whole "
+                    "expert; using plain RdtMegatronWeightSource (the bridge gathers "
+                    "ETP shards internally — correct, slower)"
+                )
+            elif grouped:
+                logger.info("[rdt] grouped-export arch; using plain RdtMegatronWeightSource")
+            else:
+                logger.info(
+                    "[rdt] dense model at pp==1: PP-local serving would narrow nothing "
+                    "and there are no experts to stack; using plain RdtMegatronWeightSource"
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("[rdt] stacked-source probe failed; using plain RdtMegatronWeightSource", exc_info=True)
+    return RdtMegatronWeightSource(bridge, module, dtype)
 
 
-class RdtWeightSyncSender:
-    """Drives sharded-RDT weight sync through the vendored vLLM trainer-send engine.
-    ``ShardedRdtWeightTransferSender`` wraps this to satisfy SkyRL's
-    ``WeightTransferSender`` interface.
+def build_rdt_trainer_init_info(
+    rank: int,
+    inference_world_size: int,
+    server_urls: List[str],
+    data_parallel_size: int,
+):
+    """Build ``ShardedRDTTrainerInitInfo`` for this rank.
 
-    Built once per worker in ``init_weight_sync_state``; ``send()`` is called from
-    ``broadcast_to_inference_engines`` each RL step. The heavy ``trainer_init``
-    (spawn the per-rank ``_RDTProducerServer`` sidecar + rank-0 bake) and every
-    ``send_weights`` block on Ray + ``torch.distributed`` collectives, so both run
-    off the worker's event loop via ``asyncio.to_thread``. The engine drives the
-    inference side through the synchronous ``SyncRdtControlPlaneClient`` (blocking
-    HTTP to the servers' ``/collective_rpc``), so the whole engine runs
-    sync-to-sync in that worker thread with no event-loop involvement — see
-    ``rdt_control_plane`` for why sidestepping the async ``RemoteInferenceClient``
-    here is safe.
+    Every knob is resolved on the **trainer**: the producer sidecar is a Ray
+    actor that inherits the raylet's environment, so a launch-time ``SKYRL_*``
+    override never reaches it.
+
+    Args:
+        rank: this trainer process's rank. Rank 0 is the sender.
+        inference_world_size: total inference workers across the fleet — the
+            consumer count the producers' free barrier counts against.
+        server_urls: every inference server, ordered
+            ``[engine0_dp0, ..., engine1_dp0, ...]``. Only its length and the DP
+            size are used, to derive the deployment count.
+        data_parallel_size: DP replicas per deployment.
     """
+    from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
+        ShardedRDTTrainerInitInfo,
+    )
 
-    def __init__(
-        self,
-        inference_client: "RemoteInferenceClient",
-        model_dtype: str,
-        inference_world_size: int,
-        trainer_actor_namespace: Optional[str],
-    ) -> None:
-        if not inference_world_size:
-            raise ValueError(
-                f"sharded_rdt requires the inference world size (consumer count); got {inference_world_size!r}."
-            )
-        self._model_dtype = model_dtype
-        self._world_size = int(inference_world_size)
-        self._namespace = trainer_actor_namespace
-        # Snapshot only what the sync control plane needs (server URLs + DP size);
-        # the async client, its aiohttp session, and the event loop are NOT used.
-        self._server_urls = list(inference_client.server_urls)
-        self._data_parallel_size = int(inference_client.data_parallel_size)
-        # Deployment count, derived the same way the control plane derives each
-        # server's `replica_rank` (see `build_rdt_init_payloads`): the DP servers of
-        # one deployment share a parallel config, so they share one ordinal.
-        # [RDT-SHARE-SLOTS] reads it to size a deployment's consumer-id block.
-        self._num_replicas = max(1, len(self._server_urls) // max(1, self._data_parallel_size))
-        self._engine: Any = None
-        self._control_plane: Optional[SyncRdtControlPlaneClient] = None
-
-    def initialize(self, weight_extractor: Any) -> None:
-        """Eagerly rendezvous (spawn sidecar servers + rank-0 bake) at
-        ``init_weight_sync_state`` time, BEFORE any weight-gather collective can
-        be in flight. Deferring this to the first ``send()`` deadlocks: rank 0
-        blocks in the inference-side init RPC while the other ranks spin in the
-        gather NCCL collectives waiting for it, and the producer servers (which
-        share those ranks' GPUs) then can't finish NIXL agent creation —
-        libfabric's fi_getinfo CUDA probe blocks behind the spinning kernels.
-        Called with every rank inside ``init_weight_sync_state`` (followed by a
-        barrier), ranks that finish early sit idle, so the window is empty.
-        Blocking is fine here: ``init_weight_sync_state`` already blocks on a
-        ``torch.distributed.barrier()``."""
-        if weight_extractor is None:
-            raise RuntimeError(
-                "sharded_rdt weight sync requires the worker's weight_extractor " "(built in init_weight_sync_state)."
-            )
-        if self._engine is None:
-            self._engine = self._trainer_init_blocking(weight_extractor)
-
-    async def send(self, weight_extractor: Any) -> None:
-        """Sync weights once; every rank must call it (the gather is a
-        collective). ``initialize()`` should already have run; the lazy fallback
-        here only covers callers that skipped it (and reintroduces the
-        first-send deadlock risk described there — do not rely on it)."""
-        if weight_extractor is None:
-            raise RuntimeError(
-                "sharded_rdt weight sync requires the worker's weight_extractor " "(built in init_weight_sync_state)."
-            )
-        if self._engine is None:
-            self._engine = await asyncio.to_thread(self._trainer_init_blocking, weight_extractor)
-        await asyncio.to_thread(self._engine.send_weights)
-
-    def _trainer_init_blocking(self, weight_extractor: Any) -> Any:
-        """Build the WeightSource + control-plane client + trainer init info and
-        rendezvous. Runs in a worker thread (blocks on the Ray spawn, an
-        all-gather collective, and — on rank 0 — the inference-side bake)."""
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
-            ShardedRDTTrainerInitInfo,
-            ShardedRDTTrainerWeightTransferEngine,
+    if not inference_world_size:
+        raise ValueError(
+            f"sharded_rdt requires the inference world size (consumer count); got {inference_world_size!r}."
         )
 
-        # Constructed on every rank (the engine holds a client on all ranks), but
-        # only the sender rank actually issues control-plane calls.
-        self._control_plane = SyncRdtControlPlaneClient(self._server_urls, self._data_parallel_size)
-        dtype = str_to_torch_dtype(self._model_dtype)
-        source = make_weight_source(weight_extractor, dtype)
-        # Positive configuration tripwire. make_weight_source's own logs use the
-        # vLLM logger, which does NOT forward to the driver log from a Megatron
-        # rank actor (only loguru does), and the STACKED_EXPERTS=0 short-circuit
-        # logs nothing at all -- so an ablation could silently run the wrong
-        # source. Log the CHOSEN CLASS (not the env var) plus both knobs.
-        _loguru.info(
-            "[rdt-config] source={} lookahead_env={} stacked_experts_env={}",
-            type(source).__name__,
-            os.environ.get("SKYRL_RDT_LOOKAHEAD", "<default>"),
-            os.environ.get("SKYRL_RDT_STACKED_EXPERTS", "<default>"),
-        )
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    def _knob(env: str, default):
+        v = os.environ.get(env)
+        return v if v is not None else default
 
-        # Pipeline-depth knobs are env-driven (SKYRL_* env vars are forwarded
-        # into every Ray worker by prepare_runtime_environment). The env
-        # override exists because the sync is a credit-limited latency
-        # pipeline: its steady-state period is (publish->serve->pull->free
-        # RTT) / credits, so deepening K/lookahead hides per-link latency
-        # without touching any link.
-        def _knob(env: str, default):
-            v = os.environ.get(env)
-            return v if v is not None else default
+    # Deployment count, derived the same way the control plane derives each
+    # server's ``replica_rank`` (see ``control_plane.rdt_init_payloads``): the DP
+    # servers of one deployment share a parallel config, so they share one
+    # ordinal. [RDT-SHARE-SLOTS] reads it to size a deployment's consumer-id block.
+    dp = max(1, int(data_parallel_size))
+    num_replicas = max(1, len(server_urls) // dp)
 
-        # [RDT-SHARE-SLOTS] Consumers per deployment, which is what groups the
-        # workers that can share one serve slot on each producer. Resolved here
-        # because the sidecar is a Ray actor that never sees this process's env;
-        # 0 turns sharing off, and one deployment makes it a no-op anyway (the
-        # width equals the consumer count, so every group is a singleton).
-        share_slots = os.environ.get("SKYRL_RDT_SHARE_SLOTS", "1") not in ("0", "false", "False")
-        workers_per_replica = self._world_size // max(1, self._num_replicas) if share_slots else 0
-        _loguru.info(
-            "[rdt-config] num_consumers={} num_replicas={} workers_per_replica={} (slot sharing {})",
-            self._world_size,
-            self._num_replicas,
-            workers_per_replica,
-            "on" if share_slots and self._num_replicas > 1 else "off",
-        )
+    # [RDT-SHARE-SLOTS] Consumers per deployment, which is what groups the
+    # workers that can share one serve slot on each producer. 0 turns sharing
+    # off, and one deployment makes it a no-op anyway (the width equals the
+    # consumer count, so every group is a singleton).
+    share_slots = os.environ.get("SKYRL_RDT_SHARE_SLOTS", "1") not in ("0", "false", "False")
+    workers_per_replica = int(inference_world_size) // num_replicas if share_slots else 0
+    _loguru.info(
+        "[rdt-config] num_consumers={} num_replicas={} workers_per_replica={} (slot sharing {})",
+        inference_world_size,
+        num_replicas,
+        workers_per_replica,
+        "on" if share_slots and num_replicas > 1 else "off",
+    )
 
-        init_info = ShardedRDTTrainerInitInfo(
-            rank=rank,
-            num_consumers=self._world_size,
-            workers_per_replica=workers_per_replica,
-            trainer_actor_namespace=self._namespace,
-            num_rdt_buffers=int(_knob("SKYRL_RDT_NUM_BUFFERS", _DEFAULT_NUM_RDT_BUFFERS)),
-            buffer_presize_gb=float(_knob("SKYRL_RDT_BUFFER_PRESIZE_GB", _DEFAULT_BUFFER_PRESIZE_GB)),
-            gather_lookahead=int(_knob("SKYRL_RDT_LOOKAHEAD", _DEFAULT_GATHER_LOOKAHEAD)),
-            # Resolved here, not in the sidecar: the sidecar is a Ray actor that
-            # inherits the raylet's environment, so a launch-time SKYRL_* override
-            # never reaches it.
-            stall_timeout_s=float(_knob("SKYRL_RDT_STALL_TIMEOUT_S", _DEFAULT_STALL_TIMEOUT_S)),
-        )
-        engine = ShardedRDTTrainerWeightTransferEngine.trainer_init(
-            init_info,
-            client=self._control_plane,
-            source=source,
-        )
-        # The producer sidecar already freezes its object graph "so gen-2 GC
-        # never stops the world mid-serve". The trainer needs it more: it
-        # rebuilds the whole conversion-task graph every sync on top of a 235B
-        # heap, and a gen-2 pass costs up to 1.2s on a rank -- which the sync's
-        # PP all_gather_object then propagates to that rank's partner, so the
-        # slowest pair sets the sync. Freezing leaves gen-0/1 untouched and makes
-        # gen-2 ~40x cheaper by skipping the static graph.
-        if os.environ.get("SKYRL_RDT_GC_FREEZE", "1") not in ("0", "false", "False"):
-            import gc
+    return ShardedRDTTrainerInitInfo(
+        rank=rank,
+        num_consumers=int(inference_world_size),
+        workers_per_replica=workers_per_replica,
+        trainer_actor_namespace=ray_namespace(),
+        num_rdt_buffers=int(_knob("SKYRL_RDT_NUM_BUFFERS", _DEFAULT_NUM_RDT_BUFFERS)),
+        buffer_presize_gb=float(_knob("SKYRL_RDT_BUFFER_PRESIZE_GB", _DEFAULT_BUFFER_PRESIZE_GB)),
+        gather_lookahead=int(_knob("SKYRL_RDT_LOOKAHEAD", _DEFAULT_GATHER_LOOKAHEAD)),
+        stall_timeout_s=float(_knob("SKYRL_RDT_STALL_TIMEOUT_S", _DEFAULT_STALL_TIMEOUT_S)),
+    )
 
-            gc.collect()
-            gc.freeze()
-        return engine
 
-    def teardown(self) -> None:
-        engine = self._engine
-        control_plane = self._control_plane
-        self._engine = None
-        self._control_plane = None
-        if engine is not None:
-            engine.shutdown()
-        if control_plane is not None:
-            control_plane.close()
+def ray_namespace() -> Optional[str]:
+    """This process's Ray namespace, or None outside a Ray runtime.
+
+    The producer sidecars are named actors, so the consumers need the namespace
+    they were created in to resolve them.
+    """
+    try:
+        import ray
+
+        return ray.get_runtime_context().namespace or None
+    except Exception:  # noqa: BLE001 - no Ray runtime: the caller falls back to the default namespace
+        return None
+
+
+def freeze_trainer_heap() -> None:
+    """``gc.freeze()`` the trainer's static object graph after the rendezvous.
+
+    The trainer rebuilds the whole conversion-task graph every sync on top of a
+    235B heap, and a gen-2 pass costs up to 1.2s on a rank -- which the sync's PP
+    ``all_gather_object`` propagates to that rank's partner, so the slowest pair
+    sets the sync. Freezing leaves gen-0/1 untouched and makes gen-2 ~40x cheaper.
+    """
+    if os.environ.get("SKYRL_RDT_GC_FREEZE", "1") in ("0", "false", "False"):
+        return
+    import gc
+
+    gc.collect()
+    gc.freeze()
+
+
+def log_source_choice(source: Any) -> None:
+    """Log the chosen source class and both knobs.
+
+    ``make_megatron_weight_source``'s own logs go to the stdlib logger, which
+    does not forward to the driver log from a Megatron rank actor (only loguru
+    does), and the ``STACKED_EXPERTS=0`` short-circuit logs nothing -- so without
+    this an ablation could silently run the wrong source.
+    """
+    _loguru.info(
+        "[rdt-config] source={} lookahead_env={} stacked_experts_env={}",
+        type(source).__name__,
+        os.environ.get("SKYRL_RDT_LOOKAHEAD", "<default>"),
+        os.environ.get("SKYRL_RDT_STACKED_EXPERTS", "<default>"),
+    )

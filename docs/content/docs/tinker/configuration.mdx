@@ -71,6 +71,46 @@ Hosting multiple LoRA tenants concurrently against one server *does* require ser
 
 See [Multi-tenancy](./multi_tenancy) for the full operator contract and SFT/RL quickstarts.
 
+## torch.profiler
+
+Traces of policy-worker training steps, driven over plain HTTP on a running server rather than through the Tinker SDK. Start the server with `--torch-profiler` to enable it; without the flag the endpoints return `404`.
+
+```bash
+uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
+    --base-model "Qwen/Qwen3-0.6B" --backend fsdp \
+    --torch-profiler '{"export_dir": "/tmp/skyrl_traces", "ranks": [0]}'
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `export_dir` | required | Where traces are written. An absolute local path, or a cloud URI (`s3://`, `gs://`, `gcs://`) |
+| `ranks` | `[0]` | Global ranks to profile |
+| `max_session_duration_sec` | `7200` | Releases the profiling slot if a client never calls `/stop_profiling` |
+
+Then bracket the steps you care about:
+
+```bash
+curl -X POST localhost:8000/start_profiling -H 'Content-Type: application/json' -d '{
+    "model_id": "<your model id>", "global_step": 120, "export_path_extra": "before-fix",
+    "schedule_options": {"skip_first": 0, "wait": 0, "warmup": 1, "active": 5, "repeat": 1}
+}'
+# ... run training ...
+curl -X POST localhost:8000/stop_profiling -H 'Content-Type: application/json' -d '{"model_id": "<your model id>"}'
+curl localhost:8000/profiling_status
+```
+
+Traces land in `{export_dir}/{global_step}_{export_path_extra}`. `schedule_options` is passed to [`torch.profiler.schedule`](https://docs.pytorch.org/docs/stable/profiler.html#torch.profiler.schedule) and `profile_options` to `torch.profiler.profile`. Both are expressed in **optim steps**: the profiler advances once per `optim_step` for the requesting `model_id`, and a trace is written when a window closes, on the transition out of the last active step. `/stop_profiling` flushes an open window, and for a cloud `export_dir` blocks until the upload completes.
+
+Only one profiling session runs at a time server-wide — a second `/start_profiling` gets a `409`, and only the owning `model_id` may stop it. A non-empty target directory is also a `409` unless `overwrite: true` is passed.
+
+<Callout type="warn">
+On the FSDP backend with `colocate_all: true`, profiling requires `trainer.policy.fsdp_config.cpu_offload: true`. The policy is offloaded to CPU between requests, and the default manual offload path moves parameters with `torch.utils.swap_tensors`, which fails while the profiler holds references to them.
+</Callout>
+
+Only policy workers are profiled; inference engines are not. Setting `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected at startup — static config would compete with these endpoints for the same profiler.
+
+See [`examples/tinker/torch_profiling/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/tinker/torch_profiling) for a runnable client.
+
 ## Full Config Reference
 
 For the complete list of configuration options, see the [SkyRL-Train configuration API reference](https://docs.skyrl.ai/docs/api-ref/skyrl/config) and the [`SkyRLTrainConfig` dataclass](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py).
