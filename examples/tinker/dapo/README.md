@@ -131,11 +131,16 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
 
 - **`GPU_MEMORY_UTILIZATION` defaults to 0.6, not the reference scripts' 0.7.** On the 30B LoRA recipe on
   16xH100, the run at 0.7 completed step 1 and died in step-2 sampling with a genuine `torch.OutOfMemoryError`
-  (356 MiB free; vLLM 60 GiB + trainer 18 GiB on one GPU). vLLM sizes its KV cache from the free memory at
-  engine init, when the trainer had ~13 GiB resident; after the first `optim_step` the trainer's post-offload
-  residual is ~25 GiB, so the budget no longer fits. This is a capacity shortfall, not fragmentation
-  (`use_expandable_segments` does not apply). Why the native path tolerates 0.7 is not established; the
-  Tinker path's LoRA adapter store and grad parking are the leading suspects.
+  (356 MiB free; vLLM 60 GiB + trainer 18 GiB on one GPU). vLLM does not reserve a fixed amount: it takes
+  `gpu_memory_utilization` of the free VRAM it sees when the engines are created. On the Tinker server the
+  engines are created lazily on the first sampling call, after the model is built and offloaded but before any
+  training step, when the trainer's post-offload residual was ~13 GiB. After the first `optim_step` that
+  residual is ~25 GiB, so the KV-cache budget sized at engine init no longer fits. This is a capacity
+  shortfall, not fragmentation (`use_expandable_segments` does not apply). The value therefore has to leave room
+  for the post-first-step footprint rather than be copied from a native recipe; 0.6 was measured safe on 8xH100
+  nodes. Why the native trainer tolerates 0.7 for the same recipe is not established (the LoRA adapter store is
+  not the cause: it lives in pinned host memory). Note the adapter store does cost one pinned-CPU mirror of
+  params, grads and optimizer state per registered adapter.
 - **The engine's SQLite database grows ~135 KB per trajectory** (1.3 GB after ~10k trajectories), i.e. tens of
   GB over a reference-length run. Its default location is inside the repo (`skyrl/tinker/tinker.db`, kept out
   of the Ray upload only by `.gitignore`). Pass `--database-url sqlite:////<path outside the repo>/tinker.db`
