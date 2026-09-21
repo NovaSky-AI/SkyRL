@@ -55,7 +55,19 @@ FULL_FT=1 bash examples/tinker/dapo/run_tinker_server.sh    # full fine-tuning
 ```
 
 Every setting is an environment variable with the reference value as default (see the script). Pass your own
-`BACKEND_CONFIG='{...}'` to replace the whole dictionary.
+`BACKEND_CONFIG='{...}'` to replace the whole dictionary. Extra arguments are forwarded to `skyrl.tinker.api`.
+
+**Multi-node runs must pass `--checkpoints-base <shared path>`** (for example
+`NUM_NODES=2 NUM_INFERENCE_ENGINES=2 bash examples/tinker/dapo/run_tinker_server.sh --checkpoints-base /mnt/shared/skyrl_checkpoints/dapo`).
+The default `/tmp/skyrl_checkpoints` is node-local, and on the Tinker path it is on the critical path of every
+sampling round: the LoRA sampler archive is written by the engine process and read by the vLLM engines on every
+node for `load_lora_adapter`, and checkpoint staging happens next to it (see `_staging_root` in
+`skyrl/backends/skyrl_train_backend.py`). Also set the client's `--output-dir` to shared storage so
+`metrics.jsonl` survives a head-node restart.
+
+Ray ships the code to worker nodes by uploading the launch directory (`working_dir`) via the uv runtime-env
+hook. Launch from the repo root and keep the client's `.venv` ignored (SkyRL's `.gitignore` already lists it);
+a venv inside an un-ignored directory makes the upload multi-GB and every actor launch fails.
 
 ## 3. Run the client
 
