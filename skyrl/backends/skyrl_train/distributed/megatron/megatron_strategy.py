@@ -506,6 +506,8 @@ class MegatronStrategy(DistributedStrategy):
             assert (
                 "lr_scheduler" in state_dict
             ), f"LR scheduler state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
+            # Core loads saved progress by incrementing the current step count.
+            scheduler.num_steps = 0
             scheduler.load_state_dict(state_dict["lr_scheduler"])
             self.print("Loaded LR scheduler state dict.")
 
