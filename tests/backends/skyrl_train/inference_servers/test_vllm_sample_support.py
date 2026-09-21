@@ -45,6 +45,18 @@ def test_flat_logprobs_replaces_top_p_masked_candidates():
     np.testing.assert_array_equal(support, [[7, 8, -1]])
 
 
+def test_flat_logprobs_compacts_nonfinite_candidates():
+    flat_logprobs = SimpleNamespace(
+        token_ids=[7, 7, 8, 9, 10],
+        logprobs=[-0.1, -0.1, float("nan"), -0.3, float("inf")],
+    )
+
+    sampled, support = _sample_support_from_flat_logprobs(flat_logprobs, top_k=4)
+
+    assert sampled == [{"logprob": -0.1}]
+    np.testing.assert_array_equal(support, [[7, 9, -1, -1]])
+
+
 def test_flat_logprobs_repairs_sampled_token_absent_from_support():
     top_k = 3
     flat_logprobs = SimpleNamespace(

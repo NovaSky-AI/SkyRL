@@ -367,10 +367,10 @@ class TokenMetadataTrace:
             raise ValueError(f"padding count must be a non-negative integer, got {count!r}")
         if count == 0:
             return
-        if self._schema is None:
+        if self._row_shape is None or self._dtype is None:
             raise ValueError("cannot pad token metadata before any rows are captured")
 
-        row_shape, dtype = self._schema
+        row_shape, dtype = self._row_shape, self._dtype
         self.append(np.full((count, *row_shape), fill, dtype=dtype, order="C"), expected_rows=count)
 
     def finalize(self, *, expected_rows: int) -> np.ndarray:

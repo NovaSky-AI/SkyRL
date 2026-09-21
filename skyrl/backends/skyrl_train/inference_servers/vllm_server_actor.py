@@ -73,12 +73,19 @@ def _sample_support_from_flat_logprobs(
     row_width = top_k + 1
     token_ids = np.asarray(logprobs.token_ids, dtype=SAMPLE_SUPPORT_DTYPE).reshape(-1, row_width)
     processed_logprobs = np.asarray(logprobs.logprobs).reshape(-1, row_width)
-    support_ids = np.where(
-        np.isneginf(processed_logprobs[:, 1:]),
-        SAMPLE_SUPPORT_DTYPE.type(SAMPLE_SUPPORT_PADDING),
-        token_ids[:, 1:],
-    )
-    sampled_logprobs = [{"logprob": value} for value in processed_logprobs[:, 0].tolist()]
+    sampled_logprobs_values = processed_logprobs[:, 0]
+    if not np.isfinite(sampled_logprobs_values).all():
+        raise ValueError("sample-support capture received non-finite sampled logprob(s)")
+    candidate_ids = token_ids[:, 1:]
+    candidate_logprobs = processed_logprobs[:, 1:]
+    support_ids = np.full(candidate_ids.shape, SAMPLE_SUPPORT_PADDING, dtype=SAMPLE_SUPPORT_DTYPE)
+    for row_index, (row_ids, row_logprobs) in enumerate(zip(candidate_ids, candidate_logprobs)):
+        # vLLM emits filtered candidates as -inf. Treat all non-finite values
+        # (including NaN and +inf) as absent, then compact the remaining IDs so
+        # the packed representation retains its required trailing padding.
+        finite_ids = row_ids[np.isfinite(row_logprobs)]
+        support_ids[row_index, : len(finite_ids)] = finite_ids
+    sampled_logprobs = [{"logprob": float(value)} for value in sampled_logprobs_values]
 
     # vLLM's approximate top-k/top-p pivot can omit the sampled token. Replace the
     # weakest valid candidate while preserving the support width and trailing padding.
