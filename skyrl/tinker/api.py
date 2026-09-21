@@ -1427,7 +1427,8 @@ async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackw
     zstd-compressed (``Content-Encoding: zstd``); ASGI servers do not decode
     request bodies, so decompress here.
     """
-    if PROTO_CONTENT_TYPE not in request.headers.get("content-type", "").lower():
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != PROTO_CONTENT_TYPE:
         raise HTTPException(
             status_code=415,
             detail=f"forward_backward requires a {PROTO_CONTENT_TYPE} body (tinker SDK >= 0.25.0)",

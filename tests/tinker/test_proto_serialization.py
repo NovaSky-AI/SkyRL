@@ -263,10 +263,20 @@ async def test_read_forward_backward_request_json_body_raises_415():
             loss_fn="cross_entropy",
         ),
     )
-    for headers in ({}, {"content-type": "application/json"}):
+    for content_type in (None, "application/json", "application/x-protobuf-v2", "fooapplication/x-protobuf"):
+        headers = {} if content_type is None else {"content-type": content_type}
         with pytest.raises(HTTPException) as exc_info:
             await api._read_forward_backward_request(_StubRequest(req.model_dump_json().encode(), headers))
         assert exc_info.value.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_read_forward_backward_request_accepts_content_type_parameters():
+    """Media type parameters (and case) do not affect the content-type match."""
+    request = _StubRequest(encode_sdk_fwd_bwd_request(), {"content-type": "Application/X-Protobuf; charset=binary"})
+    parsed, forward_only = await api._read_forward_backward_request(request)
+    assert not forward_only
+    assert parsed.model_id == "model_abc"
 
 
 @pytest.mark.asyncio
