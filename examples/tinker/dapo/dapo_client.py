@@ -654,7 +654,9 @@ def collect_rollouts(
             rewards_for_prompt.append(reward)
         prompt_rewards.append(rewards_for_prompt)
 
-    return trajectories, summarize_reward_metrics(prompt_rewards, n_samples_per_prompt=n_samples)
+    metrics = summarize_reward_metrics(prompt_rewards, n_samples_per_prompt=n_samples)
+    metrics.update(summarize_response_lengths(trajectories))
+    return trajectories, metrics
 
 
 def summarize_reward_metrics(
@@ -680,6 +682,18 @@ def summarize_reward_metrics(
         "mean_positive_reward": mean_positive_reward,
         "num_prompts": float(len(prompt_rewards)),
         "num_trajectories": float(len(flat_rewards)),
+    }
+
+
+def summarize_response_lengths(trajectories: Sequence[Trajectory]) -> dict[str, float]:
+    """Response-length statistics in tokens; the main DAPO health curve besides reward and entropy."""
+    if not trajectories:
+        return {}
+    lengths = [len(t.response_tokens) for t in trajectories]
+    return {
+        "response_length_mean": float(sum(lengths) / len(lengths)),
+        "response_length_max": float(max(lengths)),
+        "response_length_min": float(min(lengths)),
     }
 
 
@@ -839,6 +853,8 @@ def run_training(args: argparse.Namespace) -> None:
                     "rollout/avg_reward": rollout_metrics["avg_reward"],
                     f"rollout/pass_at_{N_SAMPLES_PER_PROMPT}": rollout_metrics["pass_at_n"],
                     "rollout/num_trajectories": rollout_metrics["num_trajectories"],
+                    "rollout/response_length_mean": rollout_metrics["response_length_mean"],
+                    "rollout/response_length_max": rollout_metrics["response_length_max"],
                     "reward/avg_raw_reward": rollout_metrics["avg_raw_reward"],
                     f"reward/avg_pass_at_{N_SAMPLES_PER_PROMPT}": rollout_metrics[
                         f"avg_pass_at_{N_SAMPLES_PER_PROMPT}"
@@ -846,7 +862,10 @@ def run_training(args: argparse.Namespace) -> None:
                     "reward/mean_positive_reward": rollout_metrics["mean_positive_reward"],
                 }
                 log_payload.update({f"reward/{k}": v for k, v in overlong_metrics.items()})
-                log_payload.update({f"policy/{k}": v for k, v in policy_metrics.items()})
+                # Server metrics that already carry a `policy/` prefix (the loss_metrics family) are kept as is.
+                log_payload.update(
+                    {(k if k.startswith("policy/") else f"policy/{k}"): v for k, v in policy_metrics.items()}
+                )
 
                 logger.info("Train step %s: %s", global_step, log_payload)
                 append_metrics(args.output_dir, log_payload)
