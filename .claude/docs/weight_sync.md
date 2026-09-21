@@ -265,19 +265,23 @@ Memory and lifecycle, per inference GPU:
   on many-expert models use `max_loras=1` (the adapter is replaced in place; register stage
   stayed 0.4-0.5 s across syncs) and size utilization so `total * util - weights - activations`
   leaves both a KV cache and headroom for the stage.
-- **Measured on this base (4xH100-80G, one node).** GLM-4.7-Flash (31B, 64 routed
-  experts), Megatron EP2 -> vLLM TP2, non-colocated, LoRA rank 32, via
+- **Measured (4xH100-80G, one node).** GLM-4.7-Flash (31B, 64 routed experts),
+  Megatron EP2 -> vLLM TP2, non-colocated, LoRA rank 32, via
   `tests/train/gpu_e2e_test/lora_sync_mode_compare.sh`. Mean `timing/sync_weights`
-  over three syncs: **6.74 s on disk (6.05 / 7.11 / 7.07) vs 0.486 s in memory
-  (0.487 / 0.481 / 0.491) — 13.9x, 6.26 s saved per sync.** The rollout-vs-trainer
-  logprob gap is unchanged (0.0336 disk vs 0.0341 memory), which is what says the
-  adapter actually landed. Rank-0 stage split for the memory path: export 0.29 s,
-  send 0.10 s, register on vLLM 0.09 s. Dedupe on this model: **928 unique tensors
-  against 17112 public (19.4x)** — the per-expert keys alias 32-to-1 under EP2,
-  while attention and shared-expert keys never alias. Note the disk baseline is
-  the *favourable* case: trainer and engines shared a node, so `lora_sync_path`
-  was local NVMe with a warm page cache rather than the shared mount a real
-  non-colocated run needs.
+  over three syncs, two runs: **disk 6.74 s then 5.83 s, memory 0.486 s then
+  0.490 s -- 12-14x, and ~5.5 s saved per sync.** The disk path is what varies
+  (file write, then a read per worker); the memory path is stable to a
+  millisecond. The rollout-vs-trainer logprob gap is unchanged between modes
+  (0.034 vs 0.032), which is what says the adapter actually landed. Rank-0 stage
+  split for the memory path: export 0.28-0.29 s, send 0.10-0.11 s, register on
+  vLLM 0.09-0.10 s. Dedupe on this model: **928 unique tensors against 17112
+  public (19.4x)** -- the per-expert keys alias 32-to-1 under EP2, while
+  attention and shared-expert keys never alias. Note the disk baseline is the
+  *favourable* case: trainer and engines shared a node, so `lora_sync_path` was
+  local NVMe with a warm page cache rather than the shared mount a real
+  non-colocated run needs. This config runs `normalize_moe_lora=false`, so every
+  module sits at `config_rank` and the rank-scale fold is a no-op in both paths
+  -- the fold is covered by its own unit tests, not by this job.
 - **Debugging.** The trainer logs `LoRA sync (memory): adapter ... exported in Xs, sent in
   Ys, registered on vLLM in Zs` on rank 0. Worker-side failures (`no tensors are staged`,
   `expected target modules ... but received`) surface through
