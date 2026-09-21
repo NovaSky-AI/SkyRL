@@ -31,7 +31,6 @@ from skyrl.backends.skyrl_train.weight_sync.delta.payload import (
     decompress_bytes,
     uint8_tensor_to_bytes,
 )
-from skyrl.utils.cpu_topology import pool_workers
 
 logger = logging.getLogger(__name__)
 
@@ -760,8 +759,7 @@ class LocalCheckpointStore:
                         mismatches.append(record.name)
                 del region, patch
 
-            # Weight sync is a barrier, so it need not reserve cores for colocated work.
-            workers = min(len(payloads), pool_workers(cap=32, reserved=0))
+            workers = min(len(payloads), max(1, min(32, os.cpu_count() or 8)))
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="skyrl-delta-mmap-apply") as executor:
                 list(executor.map(apply_one, payloads))
         finally:
@@ -1078,8 +1076,7 @@ class DeltaCheckpointPublisher:
         }
 
     def _num_publish_workers(self) -> int:
-        # Publishing is a barrier, like the apply path above.
-        default = pool_workers(cap=8, reserved=0)
+        default = min(8, os.cpu_count() or 1)
         return self.publish_num_workers or default
 
     def _publish_executor_for(self, num_workers: int) -> ThreadPoolExecutor:
