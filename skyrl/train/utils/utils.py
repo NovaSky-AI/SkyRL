@@ -279,6 +279,13 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
                 f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
                 "moe_router_fusion=True -- the fused router bypasses replay. Set moe_router_fusion=False."
             )
+            # Interleaved chunks desynchronise each RouterReplay instance's backward FIFO.
+            vpp_size = config.megatron_config.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size")
+            assert vpp_size is None or vpp_size <= 1, (
+                f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
+                "virtual_pipeline_model_parallel_size -- interleaved chunks desync the replay FIFO. "
+                "Unset virtual_pipeline_model_parallel_size."
+            )
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert (
@@ -960,6 +967,13 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "UV_LINK_MODE",
         "UV_PYTHON",
         "UV_OFFLINE",
+        # HuggingFace cache/auth: model paths resolve against HF_HOME, so a
+        # driver-only setting (e.g. from a local `.env` pointing at a big data
+        # volume) must reach the worker actors or they re-download to ~/.cache.
+        "HF_HOME",
+        "HF_TOKEN",
+        "HF_HUB_OFFLINE",
+        "HF_ENDPOINT",
         "PYTORCH_CUDA_ALLOC_CONF",
         # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
         "CUDA_LAUNCH_BLOCKING",

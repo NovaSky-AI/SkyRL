@@ -17,6 +17,7 @@ from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     batched_mx_cast_to_fp8,
     get_serialized_fp8_quantization_config,
     mx_cast_to_fp8,
+    resolve_serialized_fp8_config,
     scale_name_for_weight,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8.models.qwen35 import (
@@ -165,3 +166,36 @@ def test_moe_wire_targets_cover_both_scale_suffixes():
     assert targets[".experts.gate_proj.weight_scale_inv"] == (".experts.w13_weight_scale_inv", "w1")
     assert targets[".experts.gate_proj.weight_scale"] == (".experts.w13_weight_scale", "w1")
     assert targets[".experts.down_proj.weight_scale"] == (".experts.w2_weight_scale", "w2")
+
+
+def _qwen35_hf_config():
+    return type(
+        "Cfg",
+        (),
+        {"model_type": "qwen3_5_moe", "layer_types": ["linear_attention", "full_attention"]},
+    )()
+
+
+@pytest.mark.parametrize("wire_format", [BLOCKWISE_FP8, MXFP8])
+def test_sender_config_accepts_every_wire_format_and_threads_it(wire_format):
+    """The sender must build a serializer for each supported wire, not just blockwise.
+
+    ``resolve_serialized_fp8_config`` is the only place that turns
+    ``fp8_weight_sync_mode`` into a ``SerializedFp8Config``, so a gate that
+    admits one wire silently makes the other unusable end to end: engines boot
+    for it, and the first sync raises instead.
+    """
+    config = resolve_serialized_fp8_config(wire_format, _qwen35_hf_config())
+
+    assert config is not None
+    assert config.wire_format == wire_format
+    assert config.is_mxfp8 is (wire_format == MXFP8)
+
+
+def test_sender_config_rejects_an_unknown_wire_format():
+    with pytest.raises(ValueError, match="Unsupported fp8_weight_sync_mode"):
+        resolve_serialized_fp8_config("int4", _qwen35_hf_config())
+
+
+def test_sender_config_is_none_when_fp8_weight_sync_is_off():
+    assert resolve_serialized_fp8_config(None, _qwen35_hf_config()) is None

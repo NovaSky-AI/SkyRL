@@ -12,7 +12,7 @@ table, keyed off ``SerializedFp8Config.wire_format``:
   cast kernels          blockwise_cast_to_fp8 /      mx_cast_to_fp8 /
                         batched_blockwise_cast...    batched_mx_cast_to_fp8
 
-Sender (MegatronWeightExtractor) and receiver (worker-extension loaders) are
+Sender (``SerializedFp8WeightSource``) and receiver (worker-extension loaders) are
 wire-format-agnostic; the format decides only what this serializer emits, the
 quantization config injected at engine boot, and the per-model ignore lists.
 """
@@ -89,6 +89,41 @@ class SerializedFp8Config:
                 "resolve_fp8_spec(hf_config) before serializing weights"
             )
         return self.spec
+
+
+def resolve_serialized_fp8_config(
+    fp8_weight_sync_mode: str | None,
+    hf_config: object | None,
+) -> SerializedFp8Config | None:
+    """Turn ``fp8_weight_sync_mode`` into the sender's serializer config.
+
+    The single place a wire-format name becomes a ``SerializedFp8Config``, so a
+    gate that admits one wire and not another cannot diverge between backends:
+    every wire in ``WIRE_FORMATS`` is usable end to end, or none is.
+
+    Returns None when FP8 weight sync is off. Raises ``ValueError`` for a wire
+    outside ``WIRE_FORMATS`` (``"auto"`` included -- it must already be resolved
+    to a concrete wire by then) or for a checkpoint with no registered spec.
+    """
+    from skyrl.backends.skyrl_train.weight_sync.fp8.models import (
+        registered_fp8_spec_names,
+        resolve_fp8_spec,
+    )
+
+    if fp8_weight_sync_mode is None:
+        return None
+    if fp8_weight_sync_mode not in WIRE_FORMATS:
+        raise ValueError(
+            f"Unsupported fp8_weight_sync_mode={fp8_weight_sync_mode!r}. "
+            f"Supported values: {', '.join(WIRE_FORMATS)}."
+        )
+    spec = resolve_fp8_spec(hf_config) if hf_config is not None else None
+    if spec is None:
+        raise ValueError(
+            "FP8 weight sync requires a registered model spec for the configured checkpoint "
+            f"(registered specs: {', '.join(registered_fp8_spec_names())})."
+        )
+    return SerializedFp8Config(spec=spec, wire_format=fp8_weight_sync_mode)
 
 
 def _mxfp8_group_args(dynamic: bool) -> dict:

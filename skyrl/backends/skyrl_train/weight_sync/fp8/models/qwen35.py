@@ -101,17 +101,16 @@ def get_qwen35_fp8_ignored_layers(
     layer_types = list(getattr(text_config, "layer_types", []) or [])
     ignored: list[str] = []
     for layer_idx, layer_type in enumerate(layer_types):
-        if layer_type != "linear_attention":
-            continue
-        layer_prefixes = []
-        for template in _QWEN35_LINEAR_ATTN_PREFIX_TEMPLATES:
-            prefix = template.format(model_prefix=model_prefix, layer_idx=layer_idx)
-            if prefix not in layer_prefixes:
-                layer_prefixes.append(prefix)
+        if layer_type == "linear_attention":
+            layer_prefixes = []
+            for template in _QWEN35_LINEAR_ATTN_PREFIX_TEMPLATES:
+                prefix = template.format(model_prefix=model_prefix, layer_idx=layer_idx)
+                if prefix not in layer_prefixes:
+                    layer_prefixes.append(prefix)
 
-        for layer_prefix in layer_prefixes:
-            for suffix in _QWEN35_UNQUANTIZED_LINEAR_SUFFIXES:
-                ignored.append(f"{layer_prefix}{suffix}")
+            for layer_prefix in layer_prefixes:
+                for suffix in _QWEN35_UNQUANTIZED_LINEAR_SUFFIXES:
+                    ignored.append(f"{layer_prefix}{suffix}")
 
     # vLLM instantiates the vision tower even for text-only runs
     # (language_model_only only affects multimodal weight loading), and ignore

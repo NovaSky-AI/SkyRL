@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
@@ -207,3 +208,87 @@ def scatter_packed_token_values_to_batch(
     )
     batch_values[output_mask] = values[packed_mask]
     return batch_values
+
+
+def _widen_dtype(current: np.dtype, incoming: np.dtype) -> np.dtype:
+    """Return the wider of two dtypes when one losslessly contains the other.
+
+    Chunks of one trace may arrive compacted to different widths (uint8, int16,
+    int32) because each producer picks the smallest dtype for its own values.
+    Widening between them is lossless; a change of kind (integer to float) or a
+    pair with no common member (uint8 and int8) is a schema error.
+    """
+    if incoming == current:
+        return current
+    promoted = np.promote_types(current, incoming)
+    same_family = np.issubdtype(promoted, np.integer) == np.issubdtype(current, np.integer)
+    if not same_family or promoted not in (current, incoming):
+        raise ValueError(f"token metadata dtype changed from {current} to {incoming}")
+    return promoted
+
+
+class TokenMetadataTrace:
+    """Accumulate arrays whose first dimension is aligned to tokens.
+
+    Rows must share one trailing shape. Their dtype may widen across chunks; the
+    finalized array uses the widest dtype seen.
+    """
+
+    def __init__(self) -> None:
+        self._chunks: list[np.ndarray] = []
+        self._row_shape: tuple[int, ...] | None = None
+        self._dtype: np.dtype | None = None
+        self._num_rows = 0
+        self._finalized = False
+
+    @property
+    def num_rows(self) -> int:
+        return self._num_rows
+
+    @property
+    def row_shape(self) -> tuple[int, ...] | None:
+        """Trailing shape shared by every appended row, or None before the first append."""
+        return self._row_shape
+
+    @property
+    def dtype(self) -> np.dtype | None:
+        """Widest dtype appended so far, or None before the first append."""
+        return self._dtype
+
+    def append(self, rows: np.ndarray, *, expected_rows: int) -> None:
+        if self._finalized:
+            raise RuntimeError("token metadata trace is already finalized")
+        if isinstance(expected_rows, bool) or not isinstance(expected_rows, int) or expected_rows < 0:
+            raise ValueError(f"expected_rows must be a non-negative integer, got {expected_rows!r}")
+        if not isinstance(rows, np.ndarray):
+            raise TypeError("token metadata rows must be a NumPy array")
+        if rows.ndim < 1:
+            raise ValueError("token metadata must have a token-row dimension")
+        if rows.shape[0] != expected_rows:
+            raise ValueError(f"token metadata has {rows.shape[0]} rows, expected {expected_rows}")
+        if not rows.flags.c_contiguous:
+            raise ValueError("token metadata rows must be contiguous")
+
+        if self._row_shape is None:
+            self._row_shape = rows.shape[1:]
+            self._dtype = rows.dtype
+        elif rows.shape[1:] != self._row_shape:
+            raise ValueError(f"token metadata schema changed from {self._row_shape} to {rows.shape[1:]}")
+        else:
+            self._dtype = _widen_dtype(self._dtype, rows.dtype)
+
+        self._chunks.append(rows)
+        self._num_rows += expected_rows
+
+    def finalize(self, *, expected_rows: int) -> np.ndarray:
+        if self._finalized:
+            raise RuntimeError("token metadata trace is already finalized")
+        if self._num_rows != expected_rows:
+            raise ValueError(f"token metadata trace has {self._num_rows} rows, expected {expected_rows}")
+        if not self._chunks:
+            raise ValueError("token metadata trace has no chunks")
+
+        self._finalized = True
+        if len(self._chunks) == 1:
+            return self._chunks[0]
+        return np.concatenate(self._chunks, axis=0, dtype=self._dtype)

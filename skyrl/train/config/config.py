@@ -1146,7 +1146,7 @@ class DeltaWeightSyncConfig(BaseConfig):
     """Number of worker threads for ``vllm_multi_thread_safetensors``."""
 
     def __post_init__(self) -> None:
-        from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
+        from skyrl.backends.skyrl_train.weight_sync.delta.checkpoint import (
             _default_local_checkpoint_dir,
             _default_publish_staging_dir,
         )
@@ -1202,7 +1202,11 @@ class InferenceEngineConfig(BaseConfig):
     Use ``"nccl"`` (colocated ``nccl`` uses CUDA IPC internally), or ``"delta"`` for checkpoint-delta sync through
     shared storage in non-colocated vLLM runs. See https://docs.skyrl.ai/docs/examples/delta_weight_sync"""
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
-    """When using ``cuda_ipc``, send weights in batches of this size (GB)."""
+    """Size (GB) of the reusable packed buffer the trainer streams weights through.
+
+    Applies to both push backends -- ``nccl`` and colocated ``ipc``. Raised to fit the
+    model's largest single parameter when that exceeds it, since a tensor too large for
+    the buffer cannot be packed at all."""
     delta_weight_sync: Optional[DeltaWeightSyncConfig] = None
     """Required when ``weight_sync_backend="delta"``."""
     tensor_parallel_size: int = 1
@@ -1848,6 +1852,22 @@ class SkyRLTrainConfig(BaseConfig):
         )
 
         ie_cfg = self.generator.inference_engine
+        if ie_cfg.fp8_weight_sync_mode is not None:
+            from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+            from skyrl.backends.skyrl_train.weight_sync.fp8 import BLOCKWISE_FP8
+
+            if ie_cfg.fp8_weight_sync_mode != BLOCKWISE_FP8:
+                raise ValueError(
+                    f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}. "
+                    f"Supported value: {BLOCKWISE_FP8!r}."
+                )
+            if self.trainer.strategy != "megatron":
+                raise ValueError("Serialized FP8 weight sync currently requires trainer.strategy='megatron'.")
+            backend = get_transfer_strategy(ie_cfg.weight_sync_backend, self.trainer.placement.colocate_all)
+            if backend not in {"nccl", "ipc"}:
+                raise ValueError(
+                    "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, " f"got {backend!r}."
+                )
         if _uses_lora_weight_sync(self) and ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
             import warnings
 
