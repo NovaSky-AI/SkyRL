@@ -61,13 +61,17 @@ def test_lora_export_targets_inference_modules(
         }
     )
     worker = SimpleNamespace(model=SimpleNamespace(model=peft_model), _is_multimodal_lm_only=is_multimodal_lm_only)
+    worker.cfg = SimpleNamespace(
+        policy=SimpleNamespace(model=SimpleNamespace(lora=SimpleNamespace(transfer_mode="shared_filesystem")))
+    )
     monkeypatch.setattr(fsdp_utils, "collect_lora_params", lambda module: source_params)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
     client = Mock(spec=RemoteInferenceClient)
     exported = {}
 
-    async def load_adapter(name, path):
+    async def load_adapter(name, path, transfer_mode):
+        assert transfer_mode == "shared_filesystem"
         # Inspect the actual on-disk payload at the inference handoff.
         exported.update(load_file(str(Path(path) / "adapter_model.safetensors")))
 
@@ -75,7 +79,7 @@ def test_lora_export_targets_inference_modules(
     asyncio.run(
         FSDPPolicyWorkerBase._save_lora_adapters_and_sync(worker, peft_model, str(tmp_path), client, "test-adapter")
     )
-    client.load_lora_adapter.assert_awaited_once_with("test-adapter", str(tmp_path))
+    client.load_lora_adapter.assert_awaited_once_with("test-adapter", str(tmp_path), "shared_filesystem")
     mapper = Qwen3_5ForConditionalGeneration.hf_to_vllm_mapper
     inference_modules = {parse_fine_tuned_lora_name(key, mapper)[0] for key in exported}
     assert inference_modules == {expected_inference_module}
@@ -123,6 +127,9 @@ def test_lora_export_preserves_unrecognized_prefix(tmp_path, monkeypatch, unreco
         peft_config={"default": LoraConfig(r=2, target_modules=["q_proj"], task_type=TaskType.CAUSAL_LM)}
     )
     worker = SimpleNamespace(model=SimpleNamespace(model=peft_model), _is_multimodal_lm_only=is_multimodal_lm_only)
+    worker.cfg = SimpleNamespace(
+        policy=SimpleNamespace(model=SimpleNamespace(lora=SimpleNamespace(transfer_mode="shared_filesystem")))
+    )
     monkeypatch.setattr(fsdp_utils, "collect_lora_params", lambda module: source_params)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
@@ -142,4 +149,4 @@ def test_lora_export_preserves_unrecognized_prefix(tmp_path, monkeypatch, unreco
     assert exported.keys() == {expected_name, original_name}
     assert torch.equal(exported[original_name], source_params[original_name])
     assert torch.equal(exported[expected_name], source_params[recognized_name])
-    client.load_lora_adapter.assert_awaited_once_with("test-adapter", str(export_dir))
+    client.load_lora_adapter.assert_awaited_once_with("test-adapter", str(export_dir), "shared_filesystem")
