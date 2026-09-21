@@ -11,7 +11,7 @@ Megatron training (`trainer.strategy=megatron`) and vLLM inference on AMD Instin
 
 This README covers **how the colocated path works**, **which parallelisms are validated**, and **Megatron-Bridge / core compatibility**.
 
-**Status:** End-to-end Megatron GRPO + vLLM rollout validated on MI355X. Parallelism sweep results: [reports/PARALLELISM_MATRIX.md](reports/PARALLELISM_MATRIX.md). Upstream branch: `feat/rocm-amd-upstream`.
+**Status:** End-to-end Megatron GRPO + vLLM rollout validated on MI355X, including DP, TP=2, PP=2, and CP=2 on two GPUs. Upstream branch: `feat/rocm-amd-upstream`.
 
 ## Supported GPUs
 
@@ -43,21 +43,16 @@ The GSM8K recipe keeps vLLM awake (`enable_sleep_mode=false`) so sleep/wake does
 
 ## Parallelism
 
-Validated end-to-end on 2 Instinct GPUs (MI355X; same recipe is intended for MI300X/MI325X):
+Colocated Megatron GRPO + one vLLM engine, validated end-to-end on 2 Instinct GPUs (MI355X; same recipe is intended for MI300X/MI325X). Each layout below completed GSM8K smoke in a fresh container (`Training done!`).
 
-| Role | Layout | Notes |
-|------|--------|--------|
-| Megatron policy/ref | DP = number of GPUs, `TP=1`, `PP=1` | Recipe knobs: `MEGATRON_TP`, `MEGATRON_PP` (default `1`) |
-| vLLM rollout | 1 engine, `TP = NUM_GPUS` | Recipe knobs: `NUM_ENGINES=1`, `VLLM_TP=${NUM_GPUS}` |
+| Layout | Megatron | vLLM | How to run |
+|--------|----------|------|------------|
+| Data parallel | `DP=2`, `TP=1`, `PP=1`, `CP=1` | 1 engine, `TP=2` | default `NUM_GPUS=2` |
+| Tensor parallel | `TP=2` | 1 engine, `TP=2` | `MEGATRON_TP=2 VLLM_TP=2` |
+| Pipeline parallel | `PP=2` | 1 engine, `TP=2` | `MEGATRON_PP=2 VLLM_TP=2` |
+| Context parallel | `CP=2` | 1 engine, `TP=2` | `MEGATRON_CP=2 VLLM_TP=2` |
 
-What is **wired but not AMD-validated**:
-
-- Megatron `TP>1` or `PP>1` (SkyRL config accepts them; the smoke keeps both at 1).
-- Megatron context / expert parallel (`CP`, `EP`). Single-GPU Bridge validation uses `CP=1`, `EP=1` only.
-- Multi-node colocated vLLM. On ROCm, SkyRL rewrites `distributed_executor_backend=ray` to `mp` only when `TP*PP` fits on one node. Cross-node engines keep Ray; that path has not been run end-to-end here.
-- FSDP / JAX trainers on AMD. This integration is Megatron + vLLM only.
-
-Override the smoke layout with env vars, for example `NUM_GPUS=2 MEGATRON_TP=1 VLLM_TP=2`. If you change it, keep every vLLM engine's `TP*PP` on one node when using the mp backend.
+Recipe knobs: `NUM_GPUS`, `MEGATRON_TP`, `MEGATRON_PP`, `MEGATRON_CP`, `VLLM_TP`, `NUM_ENGINES`. This integration is Megatron + vLLM. On ROCm, SkyRL uses `distributed_executor_backend=mp` when `TP*PP` fits on one node.
 
 ## Compatibility (Megatron-Bridge / megatron-core)
 
@@ -76,7 +71,7 @@ Also required, independent of those git SHAs:
 - No stale `Megatron-LM` tree on `PYTHONPATH` (some ROCm images ship one).
 - The vLLM wheel built against **this** image’s torch/HIP/ISA (cache key includes those).
 
-`MCORE_REV` and `BRIDGE_REV` can be set to any git commit, tag, or branch of megatron-core / Megatron-Bridge. Install with `install_megatron_flexible.sh` (Bridge `--no-deps`, CUDA extras skipped). SkyRL loads Bridge through `bridge_compat.py`, which accepts `from_hf_pretrained`, `from_hf`, or `from_pretrained` and ignores kwargs a given revision does not support. Run `probe_megatron_compat.py` after install. The pair still has to provide AutoBridge + a working ROCm Transformer Engine.
+`MCORE_REV` and `BRIDGE_REV` can be set to any git commit, tag, or branch of megatron-core / Megatron-Bridge. Install with `install_megatron_flexible.sh` (Bridge `--no-deps`, CUDA extras skipped). SkyRL loads Bridge through `bridge_compat.py`, which accepts `from_hf_pretrained`, `from_hf`, or `from_pretrained` and ignores kwargs a given revision does not support. Run `probe_megatron_compat.py` after install. `MCORE_REV=core_v0.19.0` installed as megatron-core 0.19.1 and passed the AutoBridge probe with the pinned Bridge SHA. The pair still has to provide AutoBridge + a working ROCm Transformer Engine.
 
 vLLM is the same story: use the pinned ROCm source build, not PyPI `vllm` and not an untested vLLM SHA.
 
