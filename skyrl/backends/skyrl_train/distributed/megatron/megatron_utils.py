@@ -214,15 +214,15 @@ def freeze_dsa_indexer(model_or_models: Union[nn.Module, List[nn.Module]]):
     """Freeze the dynamic-sparse-attention indexer on every attention layer that has one.
 
     The indexer scores keys and emits the top-k *indices* the sparse attention kernel
-    then gathers. Indices are not differentiable, and this backend wires no auxiliary
-    indexer loss, so no indexer parameter can receive a gradient from any loss the
-    trainer computes. Leaving them trainable is not merely wasteful: Megatron's
+    then gathers. When auxiliary indexer loss is disabled (dsa_indexer_loss_coeff=0),
+    these discrete indices provide no gradient to the indexer. Leaving it trainable
+    in that configuration is not merely wasteful: Megatron's
     ``DistributedDataParallel`` buckets a parameter by ``requires_grad`` at
     construction and, with ``overlap_grad_reduce``, asserts that every bucketed
     parameter's backward hook fired before the bucket reduces.
 
-    Freezing is therefore numerically inert -- it only takes the indexer out of the
-    grad buffer and the optimizer state.
+    Use this option for a fixed pretrained indexer. It removes the indexer from the
+    grad buffer and optimizer state; leave it disabled to train with auxiliary loss.
     """
     models = model_or_models
     if not isinstance(model_or_models, list):
