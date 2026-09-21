@@ -127,7 +127,7 @@ class MegatronWorker:
 
         rank0 = getattr(self, "_rank", 0) == 0
         if fq.enabled:
-            from skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat import (
+            from skyrl.backends.skyrl_train.workers.megatron.quantization.fake_int4_qat import (
                 install_fake_int4_qat,
             )
 
