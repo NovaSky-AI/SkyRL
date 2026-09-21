@@ -22,7 +22,7 @@ The exported branches become a ``GeneratorOutput`` in ``compose``.
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import inspect
 import logging
 import time
 from dataclasses import dataclass
@@ -33,7 +33,6 @@ from tqdm.asyncio import tqdm
 
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
-
 from skyrl.train.generators.base import (
     ConversationType,
     GeneratorInput,
@@ -52,7 +51,7 @@ class TrialOutcome:
     """One completed trial: what capture recorded, plus what only Harbor knows."""
 
     trajectory_id: TrajectoryID
-    # One `token-samples` row per root-to-leaf branch, straight from capture.
+    # One `token_samples` row per root-to-leaf branch, straight from capture.
     rows: List[Dict[str, Any]]
     reward: float = 0.0
     # "complete" | "context_length" | "agent_timeout" | "error" | "length".
@@ -68,17 +67,23 @@ class ICapHarborGenerator(GeneratorInterface):
         generator_cfg: Any,
         harbor_trial_config: Dict[str, Any],
         inference_engine_client: Any,
-        capture_service: Any,
+        capture_endpoint: str,
         *,
         project: str,
-        target_name: str = "policy",
+        run_id: Optional[str] = None,
         max_retries: int = 2,
     ) -> None:
+        from skyrl_capture.sdk import CaptureClient
+
         self.generator_cfg = generator_cfg
         self.inference_engine_client = inference_engine_client
-        self.capture = capture_service
+        self.capture_endpoint = capture_endpoint
+        # One client for the generator's life. `create_trajectory` would make
+        # a throwaway one per trial otherwise, and a connection pool per
+        # rollout is how a long run runs out of file descriptors.
+        self.capture_client = CaptureClient(capture_endpoint)
         self.project = project
-        self.target_name = target_name
+        self.run_id_label = run_id
         # Total attempts per trial, not extra ones. A Harbor failure is often
         # environmental -- a sandbox that did not come up -- which is why the
         # sibling integration retries too.
@@ -218,26 +223,29 @@ class ICapHarborGenerator(GeneratorInterface):
         capture's graph is append-only, so a second attempt against the same
         name would interleave two rollouts into one record.
         """
-        from inference_capture.sdk import create_trajectory
+        from skyrl_capture.sdk import create_trajectory
 
-        labels = [f"step-{step}"] if step is not None else []
-        upstream: Dict[str, Any] = {"body": {"cache_salt": cache_salt}} if cache_salt else {}
-
+        session = _session_id(trajectory_id, run_id=self.run_id, step=step, attempt=attempt)
         trajectory = await asyncio.to_thread(
             create_trajectory,
             project=self.project,
-            target=self.target_name,
+            # First-class dimensions rather than annotations, because every
+            # question about a run groups by them.
+            run_id=self.run_id_label,
+            task_id=_task_id(trajectory_id),
+            step=step,
             # Naming the trajectory is also how the engine's session key is
             # chosen, so capture's session and SkyRL's are the same one.
-            trajectory_id=_session_id(trajectory_id, run_id=self.run_id, step=step, attempt=attempt),
-            upstream=upstream,
-            labels=labels,
-            endpoint=self.capture.base_url,
+            trajectory_id=session,
+            client=self.capture_client,
         )
 
         reward, stop_reason = 0.0, "error"
+        envelope: Dict[str, Any] = {}
         try:
-            config = _with_api_base(self._harbor_trial_config_template, trajectory)
+            config = _with_capture_route(
+                self._harbor_trial_config_template, trajectory, cache_salt=cache_salt
+            )
             results = await self._run_harbor(config, prompt)
         except TimeoutError:
             stop_reason = "agent_timeout"
@@ -246,14 +254,23 @@ class ICapHarborGenerator(GeneratorInterface):
             reward = float(results.get("reward", 0.0))
             stop_reason = results.get("stop_reason", "complete")
         finally:
-            # Record the outcome even on the way out. The graph of a failed
-            # attempt is still worth having, and finishing releases the lease.
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(
-                    trajectory.finish, annotations={"reward": reward, "stop_reason": stop_reason}
+            # Finish and export in one call, from the record that call
+            # committed. A failed finish is a failed attempt: there is no
+            # second call to make and nothing to train from if this did not
+            # land, so it is deliberately not suppressed.
+            try:
+                envelope = await asyncio.to_thread(
+                    trajectory.finish,
+                    annotations={"reward": reward, "stop_reason": stop_reason},
+                    format="token_samples",
                 )
+            finally:
+                # The engine's session outlives the trajectory unless someone
+                # says otherwise, and a router that keeps one per rollout
+                # leaks prefix-cache slots for the length of the run.
+                await _release_session(self.inference_engine_client, session)
 
-        rows = await asyncio.to_thread(trajectory.export, "token-samples")
+        rows = _trainable_rows(envelope, trajectory_id=trajectory_id)
         return TrialOutcome(
             trajectory_id=trajectory_id,
             rows=rows,
@@ -318,7 +335,25 @@ def _session_id(
     return name if attempt == 0 else f"{name}-a{attempt}"
 
 
-def _with_api_base(template: Dict[str, Any], trajectory: Any) -> Dict[str, Any]:
+#: capture authenticates nothing on the way in, but most provider SDKs refuse
+#: to construct a client without a key. This is that placeholder.
+PLACEHOLDER_API_KEY = "skyrl-capture"
+
+
+def _task_id(trajectory_id: TrajectoryID) -> Optional[str]:
+    """Which task this attempt attempted.
+
+    A GRPO group is the repetitions of one instance, so the instance is the
+    task and the repetition is not part of it. `task_id` is an indexed column
+    on a listing, which is what makes "show me this group" a query.
+    """
+    instance = getattr(trajectory_id, "instance_id", None)
+    return None if instance is None else str(instance)
+
+
+def _with_capture_route(
+    template: Dict[str, Any], trajectory: Any, *, cache_salt: Optional[str]
+) -> Dict[str, Any]:
     """Point one trial at its trajectory. The only change Harbor sees.
 
     The key goes in ``llm_kwargs``, not beside ``api_base``. Terminus-2 takes
@@ -327,6 +362,12 @@ def _with_api_base(template: Dict[str, Any], trajectory: Any) -> Dict[str, Any]:
     ``api_key`` set next to ``api_base`` is therefore accepted, ignored, and
     the trajectory route answers 401 -- with nothing in the trial config to
     suggest why.
+
+    ``cache_salt`` rides in ``extra_body``, which LiteLLM merges into the
+    request body. capture carries fields it does not recognise through to the
+    upstream protocol, and `SkyRLTitoProtocol` is what knows this one means a
+    prefix-cache key. It is per trajectory because the weights move every
+    training step while the engine stays put.
     """
     import copy
 
@@ -336,5 +377,60 @@ def _with_api_base(template: Dict[str, Any], trajectory: Any) -> Dict[str, Any]:
     llm_kwargs = kwargs.setdefault("llm_kwargs", {})
     if not isinstance(llm_kwargs, dict):
         raise TypeError("harbor agent kwargs.llm_kwargs must be a mapping")
-    llm_kwargs["api_key"] = trajectory.api_key
+    llm_kwargs["api_key"] = PLACEHOLDER_API_KEY
+    if cache_salt:
+        extra_body = llm_kwargs.setdefault("extra_body", {})
+        if not isinstance(extra_body, dict):
+            raise TypeError("harbor agent kwargs.llm_kwargs.extra_body must be a mapping")
+        extra_body["cache_salt"] = cache_salt
     return config
+
+
+async def _release_session(engine_client: Any, session_id: str) -> None:
+    """Let the router drop this rollout's session.
+
+    Best effort on purpose: the trajectory is already committed by the time
+    this runs, so a router that has gone away must not turn a finished rollout
+    into a failed one. What it costs when it fails is a prefix-cache slot.
+    """
+    finish = getattr(engine_client, "finish_session", None)
+    if finish is None:
+        return
+    try:
+        result = finish(session_id)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.warning("could not release engine session %s", session_id, exc_info=True)
+
+
+def _trainable_rows(envelope: Dict[str, Any], *, trajectory_id: TrajectoryID) -> List[Dict[str, Any]]:
+    """The rows this attempt may train on, or none at all.
+
+    Integrity is a property of the whole capture, not of a row: a trajectory
+    with a gap, an unconfirmed delivery or an unfinished commit has rows that
+    look perfectly well-formed and are missing a turn that happened. Training
+    on the ones that survived would be training on a conversation that never
+    took place, so the whole attempt is refused instead.
+    """
+    status = envelope.get("status")
+    if status != "finished":
+        logger.warning("refusing rows from %s: status is %r", trajectory_id, status)
+        return []
+    records = envelope.get("records") or []
+    for record in records:
+        capture = record.get("capture") or {}
+        if capture and not _capture_is_sound(capture):
+            logger.warning("refusing rows from %s: %s", trajectory_id, capture)
+            return []
+    return list(records)
+
+
+def _capture_is_sound(capture: Dict[str, Any]) -> bool:
+    return (
+        bool(capture.get("complete", True))
+        and not capture.get("calls_missing")
+        and not capture.get("delivery_uncertain")
+        and not capture.get("recovery_uncertain")
+        and not capture.get("errors")
+    )

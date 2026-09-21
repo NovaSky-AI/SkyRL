@@ -1,11 +1,11 @@
-"""Turn inference-capture's ``token-samples`` rows into a ``GeneratorOutput``.
+"""Turn inference-capture's ``token_samples`` rows into a ``GeneratorOutput``.
 
 This is the whole SkyRL-side adapter. inference-capture stays framework
 neutral -- it never imports SkyRL and ``GeneratorOutput`` does not appear in
 it -- so the mapping to whatever shape training wants lives here, where it can
 change without a release on the other side.
 
-``trajectory.export("token-samples")`` returns one row per root-to-leaf branch
+``trajectory.finish(format="token_samples")`` returns one row per root-to-leaf branch
 of the message graph:
 
     {"path_id": ..., "trajectory_id": ..., "node_ids": [...], "abandoned": bool,

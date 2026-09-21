@@ -1,7 +1,7 @@
 """Train on Harbor tasks with inference-capture recording the exact tokens.
 
-The inference setup hook brings capture up beside the engine and registers the
-router as a ``skyrl`` target. Everything after that is the sibling Harbor
+The inference setup hook brings capture up beside the engine, configured with
+the router as its one upstream. Everything after that is the sibling Harbor
 entrypoint: the generator is the only thing swapped.
 
 Runnable as it stands, the same way as the sibling generate entrypoint:
@@ -10,7 +10,8 @@ Runnable as it stands, the same way as the sibling generate entrypoint:
         trainer.policy.model.path=... data.train_data="['/path/to/harbor/tasks']"
 
 Capture comes up inside this process by default, so nothing has to be started
-first. `ICAP_INPROCESS=0` with `CAPTURE_ENDPOINT` uses a separate `icap serve`.
+first -- it writes a record directory and there is no database. `ICAP_INPROCESS=0`
+with `CAPTURE_ENDPOINT` uses a separate `skyrl-capture serve` instead.
 """
 
 from __future__ import annotations
@@ -27,12 +28,19 @@ import yaml
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 
-from ...entrypoints.main_harbor import HARBOR_DEFAULT_CONFIG, HarborSkyRLConfig, _deep_merge
+from ...entrypoints.main_harbor import (
+    HARBOR_DEFAULT_CONFIG,
+    HarborSkyRLConfig,
+    _deep_merge,
+)
 from ...entrypoints.main_harbor_generate import HarborGenerateExp
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DATA_DIR = Path("./icap-data")
+#: The module whose import registers `type="skyrl"` with capture.
+UPSTREAM_MODULE = "examples.train_integrations.harbor.icap.upstream"
+
+DEFAULT_RECORD_DIR = Path("./icap-record")
 
 
 def start_capture(
@@ -41,65 +49,53 @@ def start_capture(
     model_name: str,
     tokenizer_name: str,
     max_model_len: int,
-    data_dir: Any = None,
+    record_dir: Any = None,
     port: int | None = None,
-    num_workers: int = 4,
-    target_name: str = "policy",
 ) -> Any:
-    """Bring capture up in this process and register the engine.
+    """Bring capture up in this process, in front of the engine.
 
-    Called once per run, beside the inference engine. Nothing has to exist
-    first: with no ``DATABASE_URL`` the service starts its own PostgreSQL and
-    keeps the database, the queue and the payloads under one directory.
+    Called once per run. One capture process owns one configured upstream --
+    there is nothing to register afterwards and no target to name, because the
+    upstream is part of the configuration the service is built with. Several
+    policy endpoints mean several capture processes.
 
     ``engine_url`` is the **router's root**, not a generate endpoint. The
-    ``skyrl`` target type knows the path, the singular request shape, the
-    ``X-Session-ID`` affinity header and vLLM's sampling-parameter rules -- all
-    of which a `tokens` target gets wrong against this router, which is why a
-    translating proxy used to be needed here.
+    ``skyrl`` protocol knows the path, the singular request shape, the
+    ``X-Session-ID`` affinity header, vLLM's sampling-parameter rules and
+    ``cache_salt`` -- all of which a `tokens` upstream gets wrong against this
+    router.
 
-    In-process is possible because capture's ``transformers<5`` cap, which
-    conflicted with SkyRL's ``>=5.6.1``, turned out to be unnecessary and was
-    lifted. Before that the service had to run in a second environment.
+    Nothing has to exist first: capture writes a record directory, and creates
+    it if it is new. There is no database.
     """
-    import asyncio
     import os
 
-    from inference_capture.service import CaptureService
+    from skyrl_capture.config import Config, TitoUpstream
+    from skyrl_capture.service import CaptureService
 
-    # Registers `type="skyrl"`. capture speaks protocols, not engines, so this
-    # wire is ours; importing is what puts it in capture's registry. A separate
-    # `icap serve` needs ICAP_UPSTREAM_MODULES pointed at the same module.
-    from .. import upstream as _skyrl_upstream  # noqa: F401
-
-    # `initdb` refuses an ungenerated locale, which several base images have.
-    os.environ.setdefault("LANG", "C.utf8")
-    os.environ.setdefault("LC_ALL", "C.utf8")
-    # `CaptureService` reads CONTROL_KEY; the SDK reads CAPTURE_CONTROL_KEY.
-    # In one process they have to agree.
-    if "CAPTURE_CONTROL_KEY" in os.environ:
-        os.environ.setdefault("CONTROL_KEY", os.environ["CAPTURE_CONTROL_KEY"])
-
-    service = CaptureService(
-        data_dir=data_dir or os.environ.get("ICAP_DATA_DIR") or DEFAULT_DATA_DIR,
-        port=port if port is not None else int(os.environ.get("ICAP_PORT", 8080)),
-        num_workers=num_workers,
-    )
-    # Returns once /healthz answers, so trajectory URLs handed out on the next
-    # line are usable rather than a race the harness loses.
-    base_url = service.start()
-    logger.info("inference-capture serving at %s", base_url)
-
-    asyncio.run(
-        service.ensure_target(
-            name=target_name,
+    config = Config(
+        record_dir=Path(record_dir or os.environ.get("ICAP_RECORD_DIR") or DEFAULT_RECORD_DIR),
+        upstream=TitoUpstream(
             type="skyrl",
             url=engine_url,
-            model=model_name,
             tokenizer=tokenizer_name,
-            config={"max_model_len": max_model_len},
-        )
+            model=model_name,
+            max_model_len=max_model_len,
+        ),
+        # Imported by the service before it serves, which is what puts
+        # `type="skyrl"` in capture's registry. Named rather than imported
+        # here so the same configuration works for a service in another
+        # process, where this module's import would not have happened.
+        upstream_modules=(UPSTREAM_MODULE,),
     )
+    service = CaptureService(
+        config=config,
+        port=port if port is not None else int(os.environ.get("ICAP_PORT", 8080)),
+    )
+    # Returns once the service is serving, so trajectory URLs handed out on
+    # the next line are usable rather than a race the harness loses.
+    service.start(blocking=False)
+    logger.info("skyrl-capture serving at %s, recording to %s", service.base_url, config.record_dir)
     return service
 
 
@@ -111,9 +107,9 @@ def build_generator(cfg: Any, harbor_trial_config: Dict[str, Any], engine_client
         generator_cfg=cfg.generator,
         harbor_trial_config=harbor_trial_config,
         inference_engine_client=engine_client,
-        capture_service=service,
+        capture_endpoint=service.base_url,
         project=getattr(cfg, "experiment_name", None) or "harbor-icap",
-        target_name="policy",
+        run_id=getattr(cfg, "run_id", None) or getattr(cfg, "experiment_name", None),
     )
 
 
@@ -122,26 +118,27 @@ def capture_for_run(
     engine_url: str,
     *,
     tokenizer_name: str | None = None,
-    num_workers: int = 4,
 ) -> Any:
     """Capture for this run: in this process, or one already serving.
 
     In-process is the default and is what most jobs want -- nothing has to be
     started first, and it dies with the job. ``ICAP_INPROCESS=0`` with
-    ``CAPTURE_ENDPOINT`` points at a separate ``icap serve`` instead, which is
-    right when several jobs share one capture, or when the UI should outlive
-    the run.
+    ``CAPTURE_ENDPOINT`` points at a separate ``skyrl-capture serve`` instead,
+    which is right when several jobs share one capture, or when the viewer
+    should outlive the run.
     """
     import os
 
     if os.environ.get("ICAP_INPROCESS", "1").strip().lower() in ("0", "false", "no", "off"):
         endpoint = os.environ.get("CAPTURE_ENDPOINT", "")
         if not endpoint:
-            raise RuntimeError("ICAP_INPROCESS=0 needs CAPTURE_ENDPOINT to point at `icap serve`")
-        logger.info("inference-capture out-of-process at %s", endpoint)
-        # That process resolves the target type, not this one, so it needs the
-        # `skyrl` wire registered too:
-        #   icap serve -u examples.train_integrations.harbor.icap.upstream
+            raise RuntimeError(
+                "ICAP_INPROCESS=0 needs CAPTURE_ENDPOINT to point at `skyrl-capture serve`"
+            )
+        logger.info("skyrl-capture out-of-process at %s", endpoint)
+        # That process is configured with its own upstream, and resolves the
+        # protocol by name, so it needs this wire registered too:
+        #   skyrl-capture serve --upstream-module <UPSTREAM_MODULE> ...
         return RemoteCaptureService(endpoint)
 
     engine_init = cfg.generator.inference_engine.engine_init_kwargs
@@ -155,32 +152,23 @@ def capture_for_run(
         tokenizer_name=tokenizer_name
         or os.environ.get("ICAP_TOKENIZER", cfg.trainer.policy.model.path),
         max_model_len=int(engine_init["max_model_len"]),
-        num_workers=num_workers,
     )
 
 
 class RemoteCaptureService:
-    """The part of ``CaptureService`` a client needs when it is running elsewhere.
+    """The part of ``CaptureService`` a caller needs when it runs elsewhere.
 
-    ``base_url`` and ``ensure_target`` are the whole surface the generator uses,
-    which is why swapping the two is a substitution rather than an abstraction.
+    ``base_url`` is now the whole surface, which is why swapping the two is a
+    substitution rather than an abstraction. A service in another process
+    carries its own upstream configuration; there is nothing to create or
+    update from here.
     """
 
     def __init__(self, endpoint: str) -> None:
         self.base_url = endpoint.rstrip("/")
 
-    def stop(self) -> None:
+    def stop(self, **_kwargs: Any) -> None:
         """Not ours to stop."""
-
-    async def ensure_target(self, *, name: str, **fields: Any) -> Dict[str, Any]:
-        """Create the target, or update it to match -- one idempotent call.
-
-        Deliberately not delete-then-create: capture never resurrects a deleted
-        target, so one wrong bootstrap burns the name permanently.
-        """
-        from inference_capture.sdk import CaptureClient
-
-        return CaptureClient(self.base_url).put(f"/v1/targets/{name}", fields)
 
 
 class ICapHarborGenerateExp(HarborGenerateExp):
@@ -207,9 +195,8 @@ class ICapHarborGenerateExp(HarborGenerateExp):
         return build_generator(cfg, harbor_config, inference_engine_client, self.capture)
 
     def stop_capture(self) -> None:
-        """Idempotent. In-process this stops the embedded PostgreSQL and
-        flushes the spool; skipping it leaves a database running after the job
-        and the last records unwritten."""
+        """Idempotent. Draining is the point: stopping waits for trajectories
+        still committing, so skipping it leaves the last records unwritten."""
         service, self.capture = self.capture, None
         if service is not None:
             logger.info("stopping inference-capture")

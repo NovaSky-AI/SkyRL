@@ -33,7 +33,7 @@ python -m examples.train_integrations.harbor.icap.entrypoints.main_harbor_icap \
 file, which is the whole of it:
 
 ```python
-service = CaptureService(data_dir="./icap-data", port=8080, num_workers=4)
+service = CaptureService(data_dir="/tmp/skyrl/rollouts", port=8080, num_workers=4)
 service.start()                      # returns once /healthz answers
 asyncio.run(service.ensure_target(
     name="policy", type="skyrl", url=router_url,
