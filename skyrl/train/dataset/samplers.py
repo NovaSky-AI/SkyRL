@@ -209,9 +209,9 @@ class _DPAlignedPackingBatchSamplerIterator(Iterator[List[int]], Stateful):
             target = min(max(nominal - cumulative_error, low), high)
 
             remaining_samples = len(self.batch_sampler.sampler) - self.samples_emitted
-            # Reserve at least one sample for the non-tail continuation, then
-            # trim again if the underlying iterator ends early.
-            high = min(high, remaining_samples - 1)
+            # Reserve one sequence per DP rank so the tail can still be packed,
+            # then trim again if the underlying iterator ends early.
+            high = min(high, remaining_samples - self.batch_sampler.dp_size)
             low = min(low, high)
             target = min(max(target, low), high)
             self._fill(high)
