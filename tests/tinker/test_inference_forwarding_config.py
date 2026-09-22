@@ -3,8 +3,12 @@ from unittest.mock import AsyncMock, call, patch
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlmodel import SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker.config import EngineConfig, add_model
+from skyrl.tinker.db_models import EngineStateDB
 from skyrl.tinker.extra.skyrl_train_inference_forwarding import (
     SkyRLTrainInferenceForwardingClient,
 )
@@ -40,7 +44,6 @@ def test_forwarding_client_uses_configured_timeout() -> None:
 @pytest.mark.asyncio
 async def test_forwarding_retries_connection_failure() -> None:
     client = object.__new__(SkyRLTrainInferenceForwardingClient)
-    client._cached_proxy_url = "http://old"
     client._resolve_proxy_url = AsyncMock(side_effect=["http://old", "http://new"])
     expected = object()
     client._forward = AsyncMock(side_effect=[httpx.ConnectError("unreachable"), expected])
@@ -48,7 +51,7 @@ async def test_forwarding_retries_connection_failure() -> None:
     result = await client._forward_with_retry(object(), "model", base_model=None)
 
     assert result is expected
-    client._resolve_proxy_url.assert_has_awaits([call(), call(force_refresh=True)])
+    client._resolve_proxy_url.assert_has_awaits([call(), call()])
     assert client._forward.await_count == 2
 
 
@@ -56,7 +59,6 @@ async def test_forwarding_retries_connection_failure() -> None:
 async def test_forwarding_does_not_retry_read_timeout() -> None:
     client = object.__new__(SkyRLTrainInferenceForwardingClient)
     client.engine_config = EngineConfig(base_model="test-model", forwarding_inference_timeout_sec=123.0)
-    client._cached_proxy_url = "http://inference"
     client._resolve_proxy_url = AsyncMock(return_value="http://inference")
     client._forward = AsyncMock(side_effect=httpx.ReadTimeout("slow response"))
 
@@ -69,3 +71,46 @@ async def test_forwarding_does_not_retry_read_timeout() -> None:
     assert "timed out after 123s" in message
     client._resolve_proxy_url.assert_awaited_once_with()
     client._forward.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("next_url", ["http://new-router", None])
+async def test_forwarding_observes_endpoint_change_after_model_teardown(tmp_path, next_url) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tinker.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+    client = SkyRLTrainInferenceForwardingClient(EngineConfig(base_model="test-model"), engine)
+    sample_request = object()
+    # The old port may be reused by a non-HTTP actor: no ConnectError triggers refresh.
+    client._forward = AsyncMock(return_value=object())
+    try:
+        async with AsyncSession(engine) as session:
+            session.add(EngineStateDB(singleton_id=1, inference_proxy_url="http://old-router"))
+            await session.commit()
+        await client._forward_with_retry(sample_request, "old-model", base_model=None)
+
+        async with AsyncSession(engine) as session:
+            row = await session.get(EngineStateDB, 1)
+            row.inference_proxy_url = next_url
+            await session.commit()
+
+        if next_url is None:
+            with pytest.raises(RuntimeError, match="no proxy URL published"):
+                await client._forward_with_retry(sample_request, "new-model", base_model=None)
+            client._forward.assert_awaited_once()
+        else:
+            await client._forward_with_retry(sample_request, "new-model", base_model=None)
+            client._forward.assert_has_awaits(
+                [
+                    call(
+                        "http://old-router",
+                        sample_request,
+                        "old-model",
+                        base_model=None,
+                    ),
+                    call(next_url, sample_request, "new-model", base_model=None),
+                ]
+            )
+    finally:
+        await client.aclose()
+        await engine.dispose()
