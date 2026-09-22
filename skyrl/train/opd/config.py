@@ -16,7 +16,10 @@ from typing import List, Optional
 
 from loguru import logger
 
-from skyrl.backends.skyrl_train.utils.ppo_utils import LOSSES_WITHOUT_OLD_LOGPROBS
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    LOSSES_WITHOUT_OLD_LOGPROBS,
+    PolicyLossType,
+)
 from skyrl.train.config import AlgorithmConfig, TrainerConfig, make_config
 from skyrl.train.config.config import BaseConfig
 
@@ -122,6 +125,19 @@ def validate_opd_cfg(cfg) -> None:
         raise ValueError(
             f"policy_loss_type={algorithm.policy_loss_type!r} skips the old-logprob forward pass, which the "
             "OPD term reads (action_log_probs)"
+        )
+    if algorithm.policy_loss_type == PolicyLossType.CISPO and algorithm.cispo.cispo_anchor == "rollout":
+        # Same reason: the trainer skips the forward pass for the rollout anchor (_skip_policy_forward),
+        # and the anchor is not visible through LOSSES_WITHOUT_OLD_LOGPROBS.
+        raise ValueError(
+            "policy_loss_type='cispo' with cispo.cispo_anchor='rollout' skips the old-logprob forward pass, "
+            "which the OPD term reads (action_log_probs); use cispo_anchor='old'"
+        )
+    if algorithm.advantage_estimator == "gae" and not opd.use_task_reward:
+        raise ValueError(
+            "advantage_estimator='gae' needs a task reward (opd.use_task_reward=true): with zero rewards GAE's "
+            "advantages are the critic's whitened value residuals, not zeros, and they would replace the teacher "
+            "signal. Pure distillation needs a reward-only estimator such as grpo."
         )
     if cfg.generator.step_wise_trajectories:
         raise ValueError("step_wise_trajectories are not yet supported with OPD")
