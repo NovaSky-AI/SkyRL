@@ -187,7 +187,7 @@ def test_routed_expert_trace_widens_when_a_later_turn_routes_to_a_high_expert() 
     assert result.dtype == np.int16
     assert np.array_equal(result[:4], routes(4))
     assert result[4, 0, 0] == 300
-    assert np.array_equal(result[-1, 0], [0, 1])
+    assert np.array_equal(result[-1, 0], [4, 5])
 
 
 @pytest.mark.parametrize("active", [False, True])
