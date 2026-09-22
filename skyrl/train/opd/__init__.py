@@ -5,7 +5,7 @@ response token; the per-token reverse KL to the teacher becomes a dense advantag
 (pure distillation) or on top of a task reward. Entry point:
 ``skyrl.train.entrypoints.main_opd``; run scripts under ``examples/train/on_policy_distillation``.
 
-- ``teacher_client``: ``TeacherLogprobClient`` (abstract base) and the Fireworks backend.
+- ``teacher_client``: ``TeacherLogprobClient`` (abstract base) with the Fireworks and vLLM backends.
 - ``trainer``: ``OPDTrainer``. Its ``generate`` runs one ``generator.generate`` call per prompt group
   concurrently and scores each group under the teacher as it finishes (any generator works); three
   more ``RayPPOTrainer`` overrides consume the teacher logprobs.
@@ -21,7 +21,11 @@ from skyrl.train.opd.config import (
     TeacherConfig,
     validate_opd_cfg,
 )
-from skyrl.train.opd.teacher_client import FireworksTeacherClient, TeacherLogprobClient
+from skyrl.train.opd.teacher_client import (
+    FireworksTeacherClient,
+    TeacherLogprobClient,
+    VLLMTeacherClient,
+)
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
     TEACHER_LOGPROBS_KEY,
@@ -40,6 +44,7 @@ __all__ = [
     "TEACHER_LOGPROBS_KEY",
     "FireworksTeacherClient",
     "TeacherLogprobClient",
+    "VLLMTeacherClient",
     "OPDTrainer",
     "apply_opd_to_advantages",
     "pad_teacher_logprobs",

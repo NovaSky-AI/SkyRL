@@ -46,11 +46,14 @@ The student and the teacher must share a tokenizer: the teacher scores the stude
 
 ## Teacher backends
 
-- `trainer.teacher.backend=fireworks` (the only backend for now): a Fireworks model id or a dedicated deployment id
+- `trainer.teacher.backend=fireworks` (default): a Fireworks model id or a dedicated deployment id
   (`accounts/<account>/deployments/<id>`), scored through the completions API with an integer prompt and
   `echo_last`. Serverless is fine for checking the plumbing; use a dedicated deployment for training,
   because serverless replicas disagree on logprobs by more than the OPD signal itself and the Qwen3 (2025)
   family is not served serverless.
+- `trainer.teacher.backend=vllm`: vLLM servers you started (a stock `vllm serve` or SkyRL's `serve`
+  entrypoint), given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible
+  `/v1/completions` with vLLM's `prompt_logprobs` parameter. `trainer.teacher.model` is the served model name.
 
 Before any model is loaded, the entrypoint sends one short sequence to the teacher
 `trainer.algorithm.opd.self_test_samples` times concurrently and refuses to train if the answers differ
