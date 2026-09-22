@@ -115,7 +115,8 @@ def test_replay_batch_keeps_full_prompt_routes_and_masks_only_padding():
     routes = [np.ones((3, 78, 8), dtype=np.int32), np.full((5, 78, 8), 2, dtype=np.int32)]
     batch = megatron_lora.build_batch(sequences, 0, routes)
     assert batch["router_padding_mask"].tolist() == [[True, True, False, False, False], [False] * 5]
-    assert batch["rollout_expert_indices"][0, -3:].eq(1).all()
+    assert batch["rollout_expert_indices"][0].shape == (3, 78, 8)
+    assert batch["rollout_expert_indices"][0].eq(1).all()
     assert batch["rollout_expert_indices"][1].eq(2).all()
     assert batch["response_mask"].sum().item() == 6
 

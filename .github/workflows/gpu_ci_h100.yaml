@@ -24,7 +24,7 @@ permissions:
 
 jobs:
 
-  skyrl_train_tests_h100:
+  skyrl_gpu_tests_h100:
     # Gate on the label that fired this event. `types: [labeled]` delivers one event
     # per label added, and `contains(...labels.*.name, ...)` tests the whole label
     # set, so labelling in bulk launched one identical GPU run per label.
@@ -75,7 +75,7 @@ jobs:
         run: |
           envsubst < ci/anyscale_gpu_ci_h100.yaml > ci/anyscale_gpu_ci_h100_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="skyrl-train-gpu-ci-h100-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          JOB_NAME="skyrl-gpu-ci-h100-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
           bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_h100_envsubst.yaml "$JOB_NAME" 7000
           rm -f ci/anyscale_gpu_ci_h100_envsubst.yaml
       # Cancelling the run stops the runner, not the cluster. GitHub still runs

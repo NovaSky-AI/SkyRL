@@ -1,4 +1,3 @@
-import gc
 import os
 import shutil
 from collections import defaultdict
@@ -20,7 +19,6 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from omegaconf import OmegaConf
 from transformers import AutoConfig
 
-import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
 from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
 from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
     fold_lora_rank_scale_for_vllm,
@@ -31,7 +29,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     _clear_mtp_hybrid_pattern,
     _convert_moe_experts_lora_to_vllm,
-    broadcast_object_across_pp_ranks,
     freeze_moe_router,
     gdn_in_proj_lora_is_safe,
     get_model_config,
@@ -43,21 +40,11 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
-from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
-    resolve_auto_fp8_recipe,
-    validate_concrete_fp8_recipe,
-)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
-)
-from skyrl.backends.skyrl_train.patches.megatron.patch_mla_thd_v_pad import (
-    patch_mla_thd_v_pad,
-)
-from skyrl.backends.skyrl_train.patches.te.disable_fa4 import (
-    disable_fa4_if_requested,
 )
 from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
@@ -65,18 +52,19 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
+    append_packed_field_padding,
+    packed_dummy_row_segments,
 )
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
-from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
-    WeightChunk,
-    WeightExtractor,
+    get_transfer_strategy,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     BLOCKWISE_FP8,
     SerializedFp8Config,
-    iter_serialized_fp8_tensors,
     registered_fp8_spec_names,
     resolve_fp8_spec,
 )
@@ -87,13 +75,6 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 )
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
-)
-from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
-    maybe_force_qwen35_text_bridge,
-)
-from skyrl.backends.skyrl_train.workers.megatron.quantization.fp8_param import (
-    initialize_fp8_param_optimizer_masters,
-    is_fp8_param_enabled,
 )
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
@@ -110,10 +91,8 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 )
 from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
-from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
+from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
-
-patch_mla_thd_v_pad()
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.base import (
@@ -121,299 +100,10 @@ if TYPE_CHECKING:
     )
     from skyrl.train.config.config import InferenceEngineConfig
 
-
-class MegatronWeightExtractor(WeightExtractor):
-    """Extracts weights from Megatron model-parallel models.
-
-    Uses Megatron's bridge to export weights in HuggingFace format.
-
-    Args:
-        bridge: Megatron AutoBridge instance for weight conversion
-        actor_module: The actor module to extract weights from
-        enable_bucketing: If True, group parameters into size-based buckets for packing
-        bucket_size_threshold_GB: Size threshold in GB for bucketing (only used if enable_bucketing=True)
-        training_dtype: Training dtype for size calculation (only used if enable_bucketing=True)
-    """
-
-    def __init__(
-        self,
-        bridge,
-        actor_module,
-        enable_bucketing: bool = False,
-        bucket_size_threshold_GB: float = 1.0,
-        training_dtype: torch.dtype = torch.bfloat16,
-        fp8_weight_sync_mode: Optional[str] = None,
-        hf_config=None,
-    ):
-        self.bridge = bridge
-        self.actor_module = actor_module
-        self.enable_bucketing = enable_bucketing
-        self.bucket_size_threshold_GB = bucket_size_threshold_GB
-        self.training_dtype = training_dtype
-        if fp8_weight_sync_mode is None:
-            self.serialized_fp8_config = None
-        elif fp8_weight_sync_mode == BLOCKWISE_FP8:
-            spec = resolve_fp8_spec(hf_config) if hf_config is not None else None
-            if spec is None:
-                raise ValueError(
-                    "FP8 weight sync requires a registered model spec for the "
-                    f"checkpoint layout (registered specs: {', '.join(registered_fp8_spec_names())}); "
-                    "no spec matches the provided hf_config"
-                )
-            self.serialized_fp8_config = SerializedFp8Config(spec=spec)
-        else:
-            raise ValueError(f"Unsupported fp8_weight_sync_mode={fp8_weight_sync_mode!r}")
-
-        # Defer bucket init to first extract_weights call.
-        # At __init__ time the model may be CPU-offloaded (colocate_all),
-        # so param.numel()==0 and bucketing collapses to a single bucket.
-        # By the time extract_weights runs, the dispatch has already
-        # called prepare_for_weight_sync → _ensure_on_gpu.
-        self.bucket_index_groups = None
-        self._buckets_initialized = False
-
-    def _init_param_buckets(self):
-        """Compute bucket boundaries (index groups) from parameter sizes.
-
-        Only the bucket *structure* (which task indices go in which bucket) is
-        persisted.  The actual ``WeightConversionTask`` objects are rebuilt on
-        every ``extract_weights`` call so that mapping objects start with clean
-        PP-collective caches, avoiding stale cached state across offload/reload
-        and training cycles.
-
-        Tasks that participate in grouped export (e.g., fused MoE expert
-        weights) are collected first and placed into dedicated buckets so that
-        all tasks sharing the same ``group_key`` end up in a single
-        ``export_hf_weights`` call.  The bridge's
-        ``_accumulate_grouped_export`` requires every task for a group to be
-        present in one call; splitting them across buckets causes expert
-        weights to never be yielded.
-        """
-        weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
-
-        def calculate_size_in_bytes(param, tp_size, ep_size):
-            if param is None:
-                size_in_bytes = None
-            else:
-                prec_to_bytes = {
-                    torch.bfloat16: 2,
-                    torch.float32: 4,
-                }
-                scale = prec_to_bytes[self.training_dtype] / prec_to_bytes[param.dtype]
-                size_in_bytes = param.element_size() * param.numel() * tp_size * ep_size * scale
-            # allow_missing: a task may correspond to no parameter on any PP rank
-            # (see the layout note below), in which case there is no size to agree on.
-            return broadcast_object_across_pp_ranks(size_in_bytes, allow_missing=True)
-
-        sizes = [
-            calculate_size_in_bytes(
-                task.param_weight,
-                task.mapping.tp_size,
-                task.mapping.ep_size if task.mapping.is_expert else 1,
-            )
-            for task in weight_conversion_tasks
-        ]
-
-        # ---- Separate grouped-export tasks from regular tasks ----
-        # Grouped-export tasks (is_grouped_export=True, e.g. FusedGatedExpertMapping /
-        # FusedExpertMapping for MoE expert weights) must ALL be present in a single
-        # export_hf_weights call for the bridge's _accumulate_grouped_export to produce
-        # the fused tensor.  Collect them by group_key and give each group its own bucket.
-        grouped_task_indices: dict[str, list[int]] = {}  # group_key -> list of task indices
-        regular_task_indices: list[int] = []
-
-        for idx, task in enumerate(weight_conversion_tasks):
-            # Skip tasks that own no parameter on any PP rank. megatron-bridge can
-            # register mappings for BOTH MoE expert layouts -- grouped-GEMM
-            # (`mlp.experts.linear_fc1`) and SequentialMLP
-            # (`mlp.experts.local_experts.*.linear_fc1`) -- so a model built with one
-            # layout still gets conversion tasks for the other. Those have no weights
-            # to export, and including them would break bucket-size accounting.
-            if sizes[idx] is None:
-                continue
-            if getattr(task.mapping, "is_grouped_export", False):
-                gk = getattr(task.mapping, "group_key", None)
-                grouped_task_indices.setdefault(gk, []).append(idx)
-            else:
-                regular_task_indices.append(idx)
-
-        self.bucket_index_groups: list[list[int]] = []
-
-        # Pack grouped-export tasks into buckets by size, keeping each
-        # group_key's tasks together (they must not be split across calls).
-        curr_size = 0
-        threshold = self.bucket_size_threshold_GB * 1024**3
-        for gk, indices in grouped_task_indices.items():
-            group_size = sum(sizes[idx] for idx in indices if sizes[idx] is not None)
-            if not self.bucket_index_groups or curr_size + group_size > threshold:
-                self.bucket_index_groups.append([])
-                curr_size = 0
-            self.bucket_index_groups[-1].extend(indices)
-            curr_size += group_size
-
-        # Bucket regular (non-grouped) tasks by size as before.
-        if regular_task_indices:
-            self.bucket_index_groups.append([])
-            curr_size = 0
-            for idx in regular_task_indices:
-                size = sizes[idx]
-                if curr_size + size > threshold:
-                    self.bucket_index_groups.append([])
-                    curr_size = 0
-                self.bucket_index_groups[-1].append(idx)
-                curr_size += size
-
-    @property
-    def derives_metadata_from_chunks(self) -> bool:
-        """Serialized FP8 expands each tensor into payload + scales whose names
-        and shapes are only known once the chunk is built, so metadata has to
-        come off the stream rather than from :meth:`get_weight_metadata`."""
-        return self.serialized_fp8_config is not None
-
-    def get_weight_metadata(self, dtype: torch.dtype) -> dict:
-        """Return weight metadata without keeping tensors in memory.
-
-        On first call, runs export_hf_weights to discover HF names and shapes
-        (tensors are discarded immediately). Result is cached for subsequent calls.
-        TODO (aaron): find a better way to get all metadata without materializing tensors.
-        """
-        if self.serialized_fp8_config is not None:
-            raise RuntimeError(
-                "Serialized FP8 metadata depends on quantized tensor contents; "
-                "consume extract_weights() chunks instead."
-            )
-        if hasattr(self, "_weight_metadata_cache"):
-            return self._weight_metadata_cache
-
-        self._ensure_buckets_initialized()
-        names = []
-        dtype_names = []
-        shapes = []
-        dtype_name = str(dtype).split(".")[-1]
-        # Collect parameter metadata in the same order
-        # as provided by `.extract_weights`.
-        if not self.enable_bucketing:
-            for name, tensor in self.bridge.export_hf_weights(
-                self.actor_module,
-                show_progress=False,
-                conversion_tasks=None,
-            ):
-                names.append(name)
-                dtype_names.append(dtype_name)
-                shapes.append(list(tensor.shape))
-                del tensor
-        else:
-            # Build fresh tasks each sync so mapping objects have clean
-            # PP-collective caches; reuse the pre-computed bucket structure.
-            fresh_tasks = self.bridge.get_conversion_tasks(self.actor_module)
-            for index_group in self.bucket_index_groups:
-                bucket_tasks = [fresh_tasks[i] for i in index_group]
-                for name, tensor in self.bridge.export_hf_weights(
-                    self.actor_module,
-                    show_progress=False,
-                    conversion_tasks=bucket_tasks,
-                ):
-                    names.append(name)
-                    shapes.append(list(tensor.shape))
-                    dtype_names.append(dtype_name)
-                    del tensor
-
-        self._weight_metadata_cache = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
-        return self._weight_metadata_cache
-
-    def _ensure_buckets_initialized(self):
-        """Lazily initialize param buckets on first use (model must be on GPU)."""
-        if self._buckets_initialized:
-            return
-        if self.enable_bucketing:
-            self._init_param_buckets()
-        self._buckets_initialized = True
-
-    def _iter_sync_tensors(
-        self,
-        name: str,
-        tensor: torch.Tensor,
-        dtype: torch.dtype,
-        device: int,
-    ):
-        if self.serialized_fp8_config is not None:
-            tensor = tensor.to(device=device, non_blocking=True)
-            return iter_serialized_fp8_tensors(name, tensor, dtype, self.serialized_fp8_config)
-        return [(name, tensor.to(device=device, dtype=dtype, non_blocking=True))]
-
-    def extract_weights(self, dtype: torch.dtype):
-        """Extract weights from Megatron model.
-
-        Args:
-            dtype: Target dtype for inference
-
-        Yields:
-            WeightChunk objects (one per parameter, or one per bucket if bucketing enabled)
-        """
-        self._ensure_buckets_initialized()
-        device = torch.cuda.current_device()
-
-        if not self.enable_bucketing:
-            # No bucketing: yield one chunk per parameter
-            hf_params_generator = self.bridge.export_hf_weights(
-                self.actor_module,
-                show_progress=False,
-                conversion_tasks=None,
-            )
-
-            for name, tensor in hf_params_generator:
-                tensor_iter = self._iter_sync_tensors(name, tensor, dtype, device)
-
-                names = []
-                dtypes = []
-                shapes = []
-                tensors = []
-                for out_name, out_tensor in tensor_iter:
-                    out_tensor = out_tensor.contiguous()
-                    names.append(out_name)
-                    dtypes.append(str(out_tensor.dtype))
-                    shapes.append(list(out_tensor.shape))
-                    tensors.append(out_tensor)
-
-                if tensors:
-                    yield WeightChunk(names=names, dtypes=dtypes, shapes=shapes, tensors=tensors)
-        else:
-            # Build fresh tasks each sync so mapping objects have clean
-            # PP-collective caches; reuse the pre-computed bucket structure.
-            fresh_tasks = self.bridge.get_conversion_tasks(self.actor_module)
-
-            for index_group in self.bucket_index_groups:
-                bucket_tasks = [fresh_tasks[i] for i in index_group]
-                hf_params_generator = self.bridge.export_hf_weights(
-                    self.actor_module,
-                    show_progress=False,
-                    conversion_tasks=bucket_tasks,
-                )
-
-                # Collect all parameters in this bucket into one chunk
-                names = []
-                dtypes_list = []
-                shapes = []
-                tensors = []
-
-                for name, tensor in hf_params_generator:
-                    tensor_iter = self._iter_sync_tensors(name, tensor, dtype, device)
-
-                    for out_name, out_tensor in tensor_iter:
-                        out_tensor = out_tensor.contiguous()
-                        names.append(out_name)
-                        dtypes_list.append(str(out_tensor.dtype))
-                        shapes.append(list(out_tensor.shape))
-                        tensors.append(out_tensor)
-
-                # Yield one chunk containing all parameters in this bucket
-                if tensors:
-                    yield WeightChunk(
-                        names=names,
-                        dtypes=dtypes_list,
-                        shapes=shapes,
-                        tensors=tensors,
-                    )
+import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
+from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
+    maybe_force_qwen35_text_bridge,
+)
 
 
 class MegatronWorker:
@@ -519,18 +209,11 @@ class MegatronWorker:
             if isinstance(transformer_config_kwargs, dict)
             else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         )
-        # validate_megatron_cfg resolves fp8_recipe="auto" on the driver when it
-        # can see a GPU; a GPU-less driver ships "auto" through unresolved. The
-        # worker always has the target device visible, so resolve here and
-        # re-run the device/recipe validation the blind driver had to skip.
-        resolve_auto_fp8_recipe(transformer_config_kwargs)
-        validate_concrete_fp8_recipe(transformer_config_kwargs)
 
         if not self.cfg.gradient_checkpointing:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
                 transformer_config_kwargs[key] = None
 
-        fp8_param_enabled = is_fp8_param_enabled(transformer_config_kwargs)
         bridge_source = bridge_weights_path or model_path
         if bridge_weights_path:
             logger.info(
@@ -567,11 +250,7 @@ class MegatronWorker:
                 "DeepSeek-V3 bridge (vision tower + mm projector dropped)"
             )
 
-        # Defer persistent-FP8 checkpoint import until the bridge can expose
-        # unquantized converted shards for optimizer-master initialization.
-        provider = bridge.to_megatron_provider(load_weights=not fp8_param_enabled)
-        if fp8_param_enabled:
-            provider.perform_initialization = False
+        provider = bridge.to_megatron_provider()
 
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
@@ -604,9 +283,8 @@ class MegatronWorker:
         provider.attention_backend = "flash" if flash_attn else "fused"
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
-        # Apply explicit MoE config fields to the provider.
-        # These replace the previously hardcoded values and can be further
-        # overridden by transformer_config_kwargs if needed.
+        # Apply explicit MoE config fields to the provider. Overridable via
+        # transformer_config_kwargs below.
         provider.moe_token_dispatcher_type = megatron_config.moe_token_dispatcher_type
         provider.moe_router_load_balancing_type = megatron_config.moe_router_load_balancing_type
         provider.moe_aux_loss_coeff = megatron_config.moe_aux_loss_coeff
@@ -638,6 +316,15 @@ class MegatronWorker:
                 f"{provider.num_layers} entries to match the configured num_layers"
             )
             provider.linear_attention_freq = linear_attention_freq[: provider.num_layers]
+
+        # Check the resolved provider because it may supply its own VPP default. Interleaved
+        # chunks desynchronise each RouterReplay instance's backward FIFO.
+        vpp_size = provider.virtual_pipeline_model_parallel_size
+        if provider.moe_enable_routing_replay and vpp_size is not None and vpp_size > 1:
+            raise ValueError(
+                f"moe_enable_routing_replay is incompatible with virtual_pipeline_model_parallel_size={vpp_size}: "
+                "interleaved chunks desync the replay FIFO. Unset virtual_pipeline_model_parallel_size."
+            )
 
         # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
         if not enable_mtp:
@@ -683,8 +370,6 @@ class MegatronWorker:
         # the bridge weights path only under fake-INT4 QAT (INT4 model.path, BF16
         # bridge weights); used so saved LoRA adapters reference the INT4 base.
         self._logical_model_path = model_path
-        self._deferred_fp8_param_weight_load = fp8_param_enabled
-        self._fp8_param_unquantized_state_dict = None
 
         # strategy.hf_config is the on-disk source-of-truth used by
         # save_hf_configs and must NOT carry runtime overrides like
@@ -692,40 +377,7 @@ class MegatronWorker:
         self.strategy.hf_config = hf_config_original
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
-
-    def _load_deferred_fp8_param_weights(self, *, retain_unquantized_state: bool = False) -> None:
-        """Load deferred FP8 weights and optionally retain exact master tensors."""
-        if not self._deferred_fp8_param_weight_load:
-            return
-
-        original_export_dtype = self.bridge.export_weight_dtype
-        try:
-            # The FP8 export path retains converted, unquantized local shards.
-            # Only policy workers with an optimizer keep this additional copy.
-            if retain_unquantized_state:
-                self.bridge.export_weight_dtype = "fp8"
-            self.bridge.load_hf_weights(self.actor_module)
-            state_dict = getattr(self.bridge, "unquantized_state_dict", None)
-            if retain_unquantized_state and not state_dict:
-                raise RuntimeError(
-                    "Megatron-Bridge did not capture unquantized checkpoint shards "
-                    "for persistent FP8 optimizer initialization."
-                )
-            self._fp8_param_unquantized_state_dict = state_dict if retain_unquantized_state else None
-        finally:
-            self.bridge.export_weight_dtype = original_export_dtype
-
-    def _release_fp8_param_unquantized_state(self) -> None:
-        """Release temporary checkpoint shards after deferred weight import."""
-        if not self._deferred_fp8_param_weight_load:
-            return
-        self._fp8_param_unquantized_state_dict = None
-        if self.bridge is not None:
-            # Clear both owners; either reference keeps the unquantized shard in HBM.
-            self.bridge.unquantized_state_dict = None
-        self._deferred_fp8_param_weight_load = False
-        gc.collect()
-        torch.cuda.empty_cache()
+        self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
         normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
@@ -814,10 +466,6 @@ class MegatronWorker:
         # Delete along with the patch module once the TE pin includes NVIDIA/TransformerEngine#3360.
         patch_fa2_head_dim_allowlist()
 
-        # Honor SKYRL_DISABLE_FA4. FA4 is otherwise opt-in via the `fa4` extra;
-        # this turns it back off without rebuilding the environment.
-        disable_fa4_if_requested()
-
         # Isolate the DSA index-share holder per checkpointed forward (GLM 5 and
         # other DSA models under activation recompute on the non-packed path).
         # Delete along with the patch module once the megatron-core pin includes
@@ -897,6 +545,11 @@ class MegatronWorker:
                     "num_actions": micro.metadata["response_length"],
                     "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
                     "router_padding_mask": micro.get("router_padding_mask") if self.enable_router_replay else None,
+                    SAMPLE_SUPPORT_FIELD: (
+                        micro.get(SAMPLE_SUPPORT_FIELD) if self.enable_sample_support_replay else None
+                    ),
+                    # The support scorer validates loss-active targets against captured support.
+                    "loss_mask": micro.get("loss_mask") if self.enable_sample_support_replay else None,
                     "sub_seq_lengths": micro.get("sub_seq_lengths"),
                     **vlm_inputs,
                 }
@@ -996,6 +649,12 @@ class MegatronWorker:
             if value is None:
                 padded[key] = None
                 continue
+            if isinstance(value, PackedTensor):
+                # Per-token fields cover the dummy attended token; response fields do not.
+                padded[key] = append_packed_field_padding(
+                    key, value, segment_lengths=packed_dummy_row_segments(key, pad_count)
+                )
+                continue
             if isinstance(value, torch.Tensor):
                 if key == "loss_mask":
                     # Pad with zeros so padded samples don't contribute to loss
@@ -1013,12 +672,6 @@ class MegatronWorker:
                     pad_tensor = torch.arange(seq_len, device=device).unsqueeze(0).expand(pad_count, -1)
                 elif key == "router_padding_mask":
                     pad_tensor = torch.ones((pad_count, *value.shape[1:]), dtype=torch.bool, device=device)
-                elif key == "rollout_expert_indices":
-                    pad_tensor = make_replay_padding_indices(
-                        (pad_count, *value.shape[1:]),
-                        dtype=value.dtype,
-                        device=device,
-                    )
                 elif key == "response_mask":
                     # response_mask should be zeros for padded samples
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
@@ -1167,8 +820,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             snapshot_download(model_path)  # will be no-op if already downloaded
         torch.distributed.barrier()
 
-        self._load_deferred_fp8_param_weights(retain_unquantized_state=not self.cfg.policy.inference_only_init)
-
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
@@ -1186,17 +837,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
             self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
-            fp8_param_masters = initialize_fp8_param_optimizer_masters(
-                self.optimizer,
-                fp8_param=is_fp8_param_enabled(self.cfg.policy.megatron_config.transformer_config_kwargs),
-                fp8_param_gather=self.cfg.policy.megatron_config.ddp_config.fp8_param_gather,
-                state_dict=self._fp8_param_unquantized_state_dict,
-            )
-            if fp8_param_masters:
-                logger.info(
-                    "Initialized {} persistent-FP8 optimizer master shard group(s) from exact checkpoint shards.",
-                    fp8_param_masters,
-                )
+
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(
                 optimizer=self.optimizer,
@@ -1214,8 +855,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     f"MTP: draft head clipped separately from the policy "
                     f"({n_local} head main params on rank {self._rank}; 0 is normal under DP sharding)"
                 )
-
-        self._release_fp8_param_unquantized_state()
 
         # create worker model
         self.model = MegatronModelWrapper(
@@ -1298,6 +937,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
+                    SAMPLE_SUPPORT_FIELD: (
+                        experience.rollout_sample_support if self.enable_sample_support_replay else None
+                    ),
                     "sub_seq_lengths": experience.sub_seq_lengths,
                     **vlm_inputs,
                 }
@@ -1423,6 +1065,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
+                    SAMPLE_SUPPORT_FIELD: (
+                        experience.rollout_sample_support if self.enable_sample_support_replay else None
+                    ),
                     # used with global sequence packing (None when token-based batching is active)
                     "sub_seq_lengths": experience.sub_seq_lengths,
                     "is_padding_batch": (
@@ -1628,23 +1273,52 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 param_group["lr"] = learning_rate
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
-        # Initialize the weight extractor BEFORE super(): a strategy that
-        # rendezvouses at init (sharded_rdt) is handed this extractor by
-        # create_sender. It only depends on
-        # the already-built bridge/actor_module, not on super().
-        self.weight_extractor = MegatronWeightExtractor(
-            bridge=self.bridge,
-            actor_module=self.actor_module,
-            enable_bucketing=True,
-            bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
-            training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
-            fp8_weight_sync_mode=inference_engine_cfg.fp8_weight_sync_mode,
-            hf_config=self.strategy.hf_config,
-        )
-        # super picks the strategy and creates the sender (for sharded_rdt that
-        # includes the eager rendezvous + bake, which is why the extractor is
-        # built first).
+        """Resolve serialized FP8 before the parent builds the weight source."""
+        self._serialized_fp8_config = None
+        mode = inference_engine_cfg.fp8_weight_sync_mode
+        if mode is not None:
+            if mode != BLOCKWISE_FP8:
+                raise ValueError(f"Unsupported fp8_weight_sync_mode={mode!r}. Supported value: {BLOCKWISE_FP8!r}.")
+            resolved_backend = get_transfer_strategy(
+                inference_engine_cfg.weight_sync_backend,
+                self.cfg.placement.colocate_all,
+            )
+            if resolved_backend not in {"nccl", "ipc"}:
+                raise ValueError(
+                    "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
+                    f"got {resolved_backend!r}."
+                )
+            spec = resolve_fp8_spec(self.strategy.hf_config)
+            if spec is None:
+                raise ValueError(
+                    "FP8 weight sync requires a registered model spec for the configured checkpoint "
+                    f"(registered specs: {', '.join(registered_fp8_spec_names())})."
+                )
+            self._serialized_fp8_config = SerializedFp8Config(spec=spec)
+
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
+
+    def _build_weight_source(self, dtype: "torch.dtype", backend: str):
+        """``WeightSource`` over the Megatron policy model, via Megatron-Bridge."""
+        if backend == "sharded_rdt":
+            # RDT pulls, so it needs the ownership + group channels its own
+            # source subclasses add, and can serve PP/EP-local exports.
+            from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+                make_megatron_weight_source,
+            )
+
+            return make_megatron_weight_source(self.bridge, self.actor_module, dtype)
+
+        from skyrl.backends.skyrl_train.weight_sync.sources import MegatronWeightSource
+
+        source = MegatronWeightSource(self.bridge, self.actor_module, dtype)
+        if self._serialized_fp8_config is not None:
+            from skyrl.backends.skyrl_train.weight_sync.sources import (
+                SerializedFp8WeightSource,
+            )
+
+            return SerializedFp8WeightSource(source, self._serialized_fp8_config)
+        return source
 
     def _is_lora_sync_writer_rank(self) -> bool:
         """True on the ranks that write the LoRA adapter files to ``lora_sync_path``.
@@ -1808,53 +1482,24 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     ):
         if inference_engine_client is None:
             inference_engine_client = self._weight_sync_inference_client
-        use_prefix_cache = inference_engine_cfg.enable_prefix_caching
-        generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
-        cache_reset_task = None
-        sender_handles_prefix_cache_reset = self._weight_transfer_sender.handles_prefix_cache_reset
-        # Clear prefix cache for synchronous training or for async training if `clear_kv_cache_on_weight_sync` is set
-        reset_prefix_cache: bool = use_prefix_cache and (
-            not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync
-        )
-        send_chunks_kwargs = {"reset_prefix_cache": reset_prefix_cache}
-
-        if reset_prefix_cache and torch.distributed.get_rank() == 0 and not sender_handles_prefix_cache_reset:
-            # clear prefix cache
-            cache_reset_task = inference_engine_client.reset_prefix_cache(reset_running_requests=True)
-
-        torch.cuda.empty_cache()
 
         if self._is_lora and not self.cfg.policy.megatron_config.lora_config.merge_lora:
             # AdapterStore.swap_to has already made `model_id` the live adapter
             # before we get here; sync that adapter to vLLM under its own name
             # so sample(model=<model_id>) routes correctly. Single-tenant
             # (model_id=None) keeps the legacy shared path + name.
+            cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
+            torch.cuda.empty_cache()
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
-        else:
-            # Send with the sender created at init time. Disable expandable_segments
-            # around it: under colocate_all the CUDA-IPC path calls
-            # cudaIpcGetMemHandle, which is incompatible with the VMM addresses
-            # expandable segments uses, and some senders (sharded_rdt) share GPU
-            # memory on every run and ask for the toggle unconditionally.
-            with self._expandable_segments_disabled_for_sync(
-                force=self._weight_transfer_sender.force_disable_expandable_segments
-            ):
-                await self._weight_transfer_sender.send(
-                    self.weight_extractor,
-                    generator_dtype,
-                    **send_chunks_kwargs,
-                )
+            if cache_reset_task is not None:
+                await cache_reset_task
+            if self.cfg.placement.colocate_all:
+                torch.cuda.empty_cache()
+            torch.distributed.barrier()
+            return
 
-        if cache_reset_task is not None:
-            await cache_reset_task
-        # A sender whose send buffers are reused next step (sharded_rdt) declares
-        # empty_cache_after_send=False: scrubbing them back to CUDA costs 0.25-0.53s
-        # per rank at 235B and buys nothing. Under colocation the physical memory is
-        # wanted by an inference engine, so empty regardless.
-        if self._weight_transfer_sender.empty_cache_after_send or self.cfg.placement.colocate_all:
-            torch.cuda.empty_cache()
-        torch.distributed.barrier()
+        await self._sync_weights_to_inference_engines(inference_engine_client, inference_engine_cfg)
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method
@@ -2051,9 +1696,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         ):  # if not local path, try downloading model weights from huggingface
             snapshot_download(model_path)  # will be no-op if already downloaded
         torch.distributed.barrier()
-
-        self._load_deferred_fp8_param_weights()
-        self._release_fp8_param_unquantized_state()
 
         # load weights
         if self._rank == 0:

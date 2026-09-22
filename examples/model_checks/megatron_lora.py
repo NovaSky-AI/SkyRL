@@ -76,7 +76,7 @@ class LoRALogprobWorker(MegatronPolicyWorkerBase):
 def build_batch(sequences, pad_token_id, routes=None):
     responses = [tokens[1:] for tokens in sequences]
     masks = [[1] * len(tokens) for tokens in responses]
-    tokens, attention, response, rewards, loss_mask, _, replay_routes = convert_prompts_responses_to_batch_tensors(
+    tokens, attention, response, rewards, loss_mask, _, replay_routes, _ = convert_prompts_responses_to_batch_tensors(
         pad_token_id, [[tokens[0]] for tokens in sequences], responses, masks, masks, rollout_expert_indices=routes
     )
     batch = TrainingInputBatch(

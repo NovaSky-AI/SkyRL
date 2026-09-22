@@ -604,6 +604,7 @@ class InferenceEngineState:
             server_urls=server_urls,
             model_name=base_model_name,
             enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
+            enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
             uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
             data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
