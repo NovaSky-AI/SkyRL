@@ -48,13 +48,25 @@ schema. `--record-dir` is where the run goes, and it is required — every
 trajectory is persisted as it runs, so a process with nowhere to write refuses
 to start.
 
-```bash
-pip install skyrl-capture            # text mode: no ML dependency at all
-pip install "skyrl-capture[tokens]"  # adds the renderer and a tokenizer
+This package lives in the SkyRL repository, so there is nothing to fetch
+separately. From the repository root:
 
-UPSTREAM_API_KEY=$OPENAI_API_KEY skyrl-capture serve --record-dir ./traces \
+```bash
+uv run --extra harbor-capture skyrl-capture serve --record-dir ./traces \
   --upstream-type openai --upstream-url https://api.openai.com/v1
 ```
+
+Or from this directory, which is its own uv project:
+
+```bash
+uv sync --all-extras
+UPSTREAM_API_KEY=$OPENAI_API_KEY uv run skyrl-capture serve --record-dir ./traces \
+  --upstream-type openai --upstream-url https://api.openai.com/v1
+```
+
+The extras are what decide whether an ML dependency comes with it: the base
+install is text-mode capture and pulls in none, and `[tokens]` adds the
+renderer and a tokenizer.
 
 The split matters because capture installs *beside* a trainer, in the same
 environment, and a trainer pins its own `transformers`. Text-mode capture
@@ -81,6 +93,13 @@ skyrl-capture view --record ./traces             # offline, no database
 
 Full walkthrough: **[docs/quickstart.md](docs/quickstart.md)** — it runs
 end to end against a bundled mock provider, so it needs no API key.
+
+## Using it from SkyRL
+
+[`examples/train_integrations/harbor_capture/`](../examples/train_integrations/harbor_capture/)
+runs Harbor rollouts through capture in tokens mode, against SkyRL's own
+`/skyrl/v1/generate`, and turns the exported paths into a `GeneratorOutput`.
+Its `validation/` directory holds the end-to-end checks and their results.
 
 ## Documentation
 
@@ -203,14 +222,26 @@ why criterion 13's 10k-rps run needs real hardware rather than a claim.
 
 ## Development
 
+Its own uv project, with its own lockfile, ruff config and Python floor, so
+everything runs from this directory:
+
 ```bash
+cd skyrl-capture
 uv sync --all-extras
 uv run pytest                   # real sockets, no network, no API keys
-uv run ruff check src tests
+uv run ruff check src tests tools scripts viewer
+cd viewer && node --test test/*.test.mjs
 ```
 
 A fresh checkout is one `pytest` away from a green run: there is nothing to
 provision, and nothing a run can touch outside its own temporary directories.
+
+CI is [`cpu_skyrl_capture.yaml`](../.github/workflows/cpu_skyrl_capture.yaml),
+which fires only on changes under `skyrl-capture/`. Beyond the suite it checks
+three things the suite cannot: that the base install pulls in no
+`transformers`, `renderers` or `torch`; that the container image builds and
+answers `/healthz` under both `docker run` and Compose; and that a captured
+record's prompts, re-fed to an engine, reproduce its completions.
 
 ## Status
 
@@ -220,4 +251,4 @@ comparison — has its harness, methodology, and thresholds implemented, and
 needs real multi-node hardware to execute. [docs/LOG.md](docs/LOG.md) maps
 every criterion to the tests that cover it.
 
-**311 tests**, run against both upstream transports (`UPSTREAM_TRANSPORT=httpx` and `lean`).
+**529 tests**, plus 39 for the viewer, run against both upstream transports (`UPSTREAM_TRANSPORT=httpx` and `lean`).
