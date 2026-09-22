@@ -52,6 +52,13 @@ class OPDTrainer(RayPPOTrainer):
             {"disable_tqdm": True} if "disable_tqdm" in inspect.signature(self.generator.generate).parameters else {}
         )
 
+    async def train(self):
+        """Close the teacher client's network sessions after the training loop terminates."""
+        try:
+            await super().train()
+        finally:
+            await self.teacher_client.aclose()
+
     @torch.no_grad()
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """Generate every prompt's group concurrently; score each group under the teacher as it finishes.
@@ -99,10 +106,12 @@ class OPDTrainer(RayPPOTrainer):
         generator_output.pop("rollout_metrics", None)
         validate_generator_output(len(input_batch["prompts"]), generator_output, step_wise=step_wise)
 
-        self.all_metrics["opd/teacher_time_per_group_mean"] = sum(teacher_times) / len(teacher_times)
+        self.all_metrics["opd/teacher_time_per_group_mean"] = (
+            sum(teacher_times) / len(teacher_times) if teacher_times else 0.0
+        )
         # The only teacher cost the overlap cannot hide: the groups still being scored after the last
         # rollout of the batch came back.
-        self.all_metrics["opd/teacher_time_exposed"] = done - max(rollout_done_times)
+        self.all_metrics["opd/teacher_time_exposed"] = done - max(rollout_done_times) if rollout_done_times else 0.0
         return generator_output
 
     @torch.no_grad()
