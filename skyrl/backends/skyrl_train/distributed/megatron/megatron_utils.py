@@ -185,7 +185,9 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
                 "skipping this model chunk. Router params on it stay trainable."
             )
             continue
-        for layer in decoder.layers:
+        # HybridStack wraps transformer layers in HyperConnectionHybridLayer.layer.
+        # Walk the layer subtrees so router lookup reaches the wrapped layer too.
+        for layer in decoder.layers.modules():
             if hasattr(layer, "mlp") and hasattr(layer.mlp, "router"):
                 if getattr(layer.mlp.router, "weight", None) is not None:
                     layer.mlp.router.weight.requires_grad = False
@@ -237,7 +239,8 @@ def freeze_dsa_indexer(model_or_models: Union[nn.Module, List[nn.Module]]):
                 "skipping this model chunk. Indexer params on it stay trainable."
             )
             continue
-        for layer in decoder.layers:
+        # Include transformer layers nested under HyperConnectionHybridLayer.layer.
+        for layer in decoder.layers.modules():
             core_attention = getattr(getattr(layer, "self_attention", None), "core_attention", None)
             indexer = getattr(core_attention, "indexer", None)
             if indexer is None:

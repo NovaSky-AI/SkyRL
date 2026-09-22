@@ -56,6 +56,29 @@ class _Model(nn.Module):
 
 
 @pytest.mark.megatron
+def test_freeze_moe_router_hyperconnection_wrapped_layers():
+    class HyperConnectionHybridLayer(nn.Module):
+        def __init__(self, layer):
+            super().__init__()
+            self.layer = layer
+            self.mhc_weight = nn.Parameter(torch.ones(4))
+
+    model = _Model()
+    model.decoder.layers = nn.ModuleList([HyperConnectionHybridLayer(layer) for layer in model.decoder.layers])
+    multimodal = nn.Module()
+    multimodal.language_model = model
+
+    freeze_moe_router(multimodal)
+
+    for wrapper in model.decoder.layers:
+        assert not wrapper.layer.mlp.router.weight.requires_grad
+        assert not wrapper.layer.mlp.router.bias.requires_grad
+        assert wrapper.layer.mlp.linear_fc1.weight.requires_grad
+        assert wrapper.layer.mlp.shared_experts.gate_weight.requires_grad
+        assert wrapper.mhc_weight.requires_grad
+
+
+@pytest.mark.megatron
 def test_freeze_moe_router_freezes_router_params():
     m = _Model()
     # sanity: all params start trainable

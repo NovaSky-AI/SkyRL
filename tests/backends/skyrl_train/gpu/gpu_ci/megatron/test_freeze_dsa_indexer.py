@@ -67,6 +67,29 @@ def _indexer_params(model: nn.Module):
 
 
 @pytest.mark.megatron
+def test_freeze_dsa_indexer_hyperconnection_wrapped_layers():
+    class HyperConnectionHybridLayer(nn.Module):
+        def __init__(self, layer):
+            super().__init__()
+            self.layer = layer
+            self.mhc_weight = nn.Parameter(torch.ones(4))
+
+    model = _Model()
+    indexer_params = _indexer_params(model)
+    model.decoder.layers = nn.ModuleList([HyperConnectionHybridLayer(layer) for layer in model.decoder.layers])
+    multimodal = nn.Module()
+    multimodal.language_model = model
+
+    freeze_dsa_indexer(multimodal)
+
+    assert not any(param.requires_grad for param in indexer_params)
+    for wrapper in model.decoder.layers:
+        assert wrapper.mhc_weight.requires_grad
+        assert wrapper.layer.self_attention.linear_qkv.weight.requires_grad
+        assert wrapper.layer.mlp.weight.requires_grad
+
+
+@pytest.mark.megatron
 def test_freeze_dsa_indexer_freezes_indexer_params():
     m = _Model()
     # sanity: all params start trainable
