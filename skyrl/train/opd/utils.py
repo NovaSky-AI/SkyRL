@@ -92,7 +92,7 @@ def apply_opd_to_advantages(
     (only k1 has this property, so ``kl_estimator_type`` is deliberately not consulted). Applied
     *after* the advantage estimator so it composes with any of them: with zero task rewards the
     estimator emits zeros and this is pure on-policy distillation; with task rewards it is the
-    additive Miles / KDRL recipe.
+    additive recipe.
 
     Returns the new advantages and metrics under ``opd/``.
     """
