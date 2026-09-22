@@ -102,6 +102,8 @@ class ICapHarborGenerator(GeneratorInterface):
         agent_kwargs = self._harbor_trial_config_template.setdefault("agent", {}).setdefault("kwargs", {})
         agent_kwargs.pop("collect_rollout_details", None)
 
+        _require_grouped_output(generator_cfg)
+
     # -- policy version ----------------------------------------------------
     def _cache_salt(self) -> Optional[str]:
         """Prefix-cache salt keyed on the current weights.
@@ -159,7 +161,12 @@ class ICapHarborGenerator(GeneratorInterface):
             trajectory_ids=[outcome.trajectory_id for outcome in settled],
             rewards=[outcome.reward for outcome in settled],
             stop_reasons=[outcome.stop_reason for outcome in settled],
-            step_wise=getattr(self.generator_cfg, "step_wise_trajectories", True),
+            # `step_wise` is deliberately not passed: every trainable path is
+            # emitted either way now, grouped by trajectory id with the last
+            # marked. What the run still needs is the matching generator
+            # configuration -- `step_wise_trajectories=true` so one rollout may
+            # emit several rows, and `merge_stepwise_output=false` so complete
+            # paths are not re-merged as if they were sequential turns.
             generation_times=[outcome.generation_time or 0.0 for outcome in settled],
         )
 
@@ -333,6 +340,37 @@ def _session_id(
     safe = "".join(character if character.isalnum() or character in "._-" else "-" for character in raw)
     name = f"{run_id}-s{'x' if step is None else step}-{safe}"
     return name if attempt == 0 else f"{name}-a{attempt}"
+
+
+def _require_grouped_output(generator_cfg: Any) -> None:
+    """Refuse to start unless the run is configured for grouped output.
+
+    One capture trajectory can export several complete paths -- a summarizing
+    agent produces them by design -- and this generator emits one row per
+    path. SkyRL expresses "several rows, one rollout, one advantage" with its
+    step-wise machinery, so the run has to be configured for it.
+
+    Checked here rather than at the first batch because the failure is
+    otherwise expensive and indirect: `step_wise_trajectories=false` makes the
+    trainer assert one response per prompt, and it does that *after* a full
+    batch of Harbor trials has been run and thrown away. Raising at
+    construction costs nothing and names the override.
+    """
+    if not getattr(generator_cfg, "step_wise_trajectories", False):
+        raise ValueError(
+            "this generator emits one row per captured path, so a rollout that branched "
+            "produces more rows than prompts. Set generator.step_wise_trajectories=true. "
+            "The rows are complete multi-turn samples grouped by trajectory id, not "
+            "sequential turns -- step-wise is being reused for its grouping."
+        )
+    if getattr(generator_cfg, "merge_stepwise_output", False):
+        raise ValueError(
+            "set generator.merge_stepwise_output=false. Prefix merging recombines "
+            "sequential per-turn rows where prompt[i] + response[i] is a prefix of "
+            "prompt[i+1]. These rows are already complete multi-turn paths, so merging "
+            "would at best be redundant and at worst fuse two distinct paths that "
+            "merely look like a prefix of one another."
+        )
 
 
 #: capture authenticates nothing on the way in, but most provider SDKs refuse

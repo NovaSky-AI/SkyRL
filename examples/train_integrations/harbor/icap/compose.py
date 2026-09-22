@@ -23,9 +23,52 @@ trajectory's rows never counts the same sampled tokens twice. It also never
 drops a row: a fully-masked row carries ``trainable_count == 0`` and usually a
 ``masked_reason``, which is information a missing row would not have.
 
-Two decisions stay here rather than in capture, because only the harness knows
-them: a trial that timed out or errored is masked, and whether a trajectory
-that branched may contribute more than one row.
+One decision stays here rather than in capture, because only the harness knows
+it: a trial that timed out or errored is masked.
+
+**Grouping.** One Harbor execution is one physical rollout with one reward,
+and capture may export several complete paths for it. Those paths are sample
+shards of the same rewarded execution, not independent reward observations, so
+graph shape must not change what a rollout is worth.
+
+SkyRL already has machinery for "several rows, one rollout, one advantage":
+step-wise training. This reuses it rather than generalizing the non-step-wise
+contract, which needs no trainer change at all. A rollout's paths are emitted
+contiguously under one ``TrajectoryID``, every path carries the rollout's
+reward, and ``is_last_step`` marks the last of them. The marker means
+"representative reward row and end of this group" here, not "chronologically
+final LLM turn" -- an imperfect name for what it is being used for, and worth
+knowing when reading the trainer.
+
+Because every path in a group carries the same reward, which path is marked
+does not change the advantage. It does change what step-wise *evaluation*
+keeps: metrics retain only the marked row, so token-exact parity across every
+path has to read the generator output before that filtering.
+
+Two settings go with this shape, and `_require_grouped_output` refuses to
+start without them:
+
+* ``generator.step_wise_trajectories=true`` -- lets one input rollout emit
+  several output rows without touching SkyRL's validation or trainer;
+* ``generator.merge_stepwise_output=false`` -- prefix merging exists to
+  recombine sequential per-turn rows where ``prompt[i] + response[i]`` is a
+  prefix of ``prompt[i+1]``. These rows are already complete multi-turn
+  samples, so merging would at best be redundant and at worst fuse two paths
+  that merely look like a prefix of one another.
+
+TODO(zero-variance): ``trainer_utils.zero_variance_filter`` counts rows, not
+trajectories. It drops a group when more than one *row* shares a reward with
+no spread, but its own contract is "groups with <=1 live trajectory are always
+kept" -- so one rollout that emits several rows looks like several
+trajectories that happen to agree. The fix is to take the variance over the
+``is_last_step`` rows, which is one per rollout.
+
+This is not new and not made worse here: true step-wise already emits one row
+per turn and hits it identically. It stays latent because GRPO runs use more
+than one repetition, and duplication does not move ``max - min``. It bites at
+``n_samples_per_prompt=1``, by either route. Eval-only runs are unaffected.
+Before training with a single repetition that can produce several paths,
+either fix the filter or disable it.
 """
 
 from __future__ import annotations
@@ -77,6 +120,60 @@ def split_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def stepwise_rows(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """One complete path, cut back into the per-turn rows it was built from.
+
+    Not used to train. This is the inverse of what makes a captured path a
+    single sample, and it exists so parity against the harness-side TITO
+    collector can be checked token for token.
+
+    The sibling integration emits, per turn, the full prompt before that turn
+    and that turn's completion with an all-ones mask. A captured path holds
+    the same information differently: one rendered sequence whose loss mask
+    marks the sampled spans. Each contiguous run of ones is one turn, so turn
+    ``t`` is ``input_ids[:start_t]`` and ``input_ids[start_t:end_t]`` -- the
+    same two arrays the sibling built directly.
+
+    Comparing there rather than after composition is the point. Step-wise
+    evaluation keeps only the ``is_last_step`` row, so a parity check run over
+    evaluated output would compare one path out of a rollout's several and
+    pass while the rest went unverified.
+
+    A rollout that branched has no counterpart on the other side at all -- the
+    sibling integration refuses summarization, because compaction breaks its
+    own token accounting. Parity is therefore checked on rollouts that did not
+    branch, and branching is what capture is for rather than something to
+    reconcile.
+    """
+    input_ids: List[int] = list(row["input_ids"])
+    loss_mask: List[int] = [int(value) for value in row["loss_mask"]]
+    if len(loss_mask) != len(input_ids):
+        raise ValueError(
+            f"row {row.get('path_id')} is inconsistent: {len(input_ids)} tokens, "
+            f"{len(loss_mask)} mask"
+        )
+    logprobs = list(row.get("rollout_logprobs") or [])
+
+    turns: List[Dict[str, Any]] = []
+    index = 0
+    while index < len(loss_mask):
+        if not loss_mask[index]:
+            index += 1
+            continue
+        start = index
+        while index < len(loss_mask) and loss_mask[index]:
+            index += 1
+        turns.append(
+            {
+                "prompt_token_ids": input_ids[:start],
+                "response_ids": input_ids[start:index],
+                "loss_mask": [1] * (index - start),
+                "rollout_logprobs": logprobs[start:index] if logprobs else None,
+            }
+        )
+    return turns
+
+
 def _placeholder() -> Dict[str, Any]:
     """A masked row. The batch keeps its shape rather than losing an entry."""
     return {
@@ -94,17 +191,28 @@ def compose(
     trajectory_ids: Sequence[Any],
     rewards: Sequence[float],
     stop_reasons: Sequence[str],
-    step_wise: bool,
+    step_wise: bool = True,
     generation_times: Optional[Sequence[float]] = None,
 ) -> GeneratorOutput:
     """Build a ``GeneratorOutput`` from one export per trajectory.
 
-    ``step_wise`` decides whether a trajectory may contribute more than one
-    row. With it off, a trajectory that branched has no single answer to "what
-    is this trajectory's sample", so it is masked rather than guessed at. A
-    summarizing agent branches by design and hits that every time, which is why
-    summarization wants step-wise on.
+    Every trainable path becomes one complete multi-turn row. A trajectory
+    that branched contributes several, emitted contiguously under its own
+    ``TrajectoryID`` with the rollout's reward on each and ``is_last_step``
+    marking the last -- see the module docstring for why that marker is being
+    borrowed.
+
+    ``step_wise`` is accepted and ignored. It used to decide whether a
+    branched trajectory could contribute more than one row; masking those was
+    always a workaround for a contract that could not express a group, and a
+    summarizing agent branches by design. Deprecated: remove it once no call
+    site passes it.
     """
+    if not step_wise:
+        logger.warning(
+            "compose(step_wise=False) is ignored: a branched trajectory now emits "
+            "one row per path, grouped by trajectory id. Remove the argument."
+        )
     if not (len(exports) == len(trajectory_ids) == len(rewards) == len(stop_reasons)):
         raise ValueError("compose() inputs must be the same length, one entry per trajectory")
 
@@ -117,22 +225,14 @@ def compose(
     out_stop_reasons: List[str] = []
     out_trajectory_ids: List[Any] = []
     out_times: List[float] = []
+    out_is_last_step: List[bool] = []
 
     for index, rows in enumerate(exports):
         stop_reason = stop_reasons[index]
         trainable = [] if stop_reason in MASKED_STOP_REASONS else [s for s in map(split_row, rows) if s]
 
-        if not step_wise and len(trainable) > 1:
-            logger.warning(
-                "masking trajectory %s: it produced %d trainable branches and step_wise "
-                "is off, so there is no single row for it. A summarizing agent branches "
-                "by design -- turn step_wise on to train those rows.",
-                trajectory_ids[index],
-                len(trainable),
-            )
-            trainable = []
-
-        for row in trainable or [_placeholder()]:
+        group = trainable or [_placeholder()]
+        for position, row in enumerate(group):
             prompt_token_ids.append(row["prompt_token_ids"])
             response_ids.append(row["response_ids"])
             loss_masks.append(row["loss_mask"])
@@ -142,7 +242,13 @@ def compose(
             # of sub-agents needs, so every row from a trajectory carries it.
             out_rewards.append(rewards[index])
             out_stop_reasons.append(stop_reason)
+            # Contiguous, under one id: that grouping is what lets the trainer
+            # compute this rollout's advantage once and broadcast it.
             out_trajectory_ids.append(trajectory_ids[index])
+            # The last path of the group, not the last turn of a conversation.
+            # Every path carries the same reward, so which one is marked does
+            # not change the advantage -- only what step-wise evaluation keeps.
+            out_is_last_step.append(position == len(group) - 1)
             if generation_times is not None:
                 out_times.append(generation_times[index])
 
@@ -156,5 +262,6 @@ def compose(
         rollout_expert_indices=(expert_indices if any(entry is not None for entry in expert_indices) else None),
         trajectory_ids=out_trajectory_ids,
         trajectory_generation_times=out_times or None,
+        is_last_step=out_is_last_step,
         rollout_metrics=None,
     )
