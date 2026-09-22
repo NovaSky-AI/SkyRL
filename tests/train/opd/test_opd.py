@@ -77,6 +77,17 @@ class WrongLengthTeacher(TeacherLogprobClient):
         return [0.0] * (len(response_ids) + 1)
 
 
+class NonFiniteTeacher(TeacherLogprobClient):
+    """Answers with one bad value first, then well-formed logprobs."""
+
+    def __init__(self, value: float):
+        super().__init__()
+        self.value = value
+
+    async def _compute_logprobs(self, prompt_ids, response_ids):
+        return [self.value] + [-0.5] * (len(response_ids) - 1)
+
+
 # ---------------------------------------------------------------------------
 # opd_utils
 # ---------------------------------------------------------------------------
@@ -138,6 +149,16 @@ async def test_base_client_empty_response_short_circuits():
 async def test_base_client_length_invariant():
     with pytest.raises(RuntimeError, match="returned 3 logprobs for 2"):
         await WrongLengthTeacher().compute_logprobs([1], [5, 6])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+async def test_base_client_rejects_non_finite(value):
+    teacher = NonFiniteTeacher(value)
+    with pytest.raises(RuntimeError, match="non-finite"):
+        await teacher.compute_logprobs([1], [2, 3])
+    with pytest.raises(RuntimeError, match="non-finite"):  # the self-test cannot let it through either
+        await teacher.self_test([1], [2, 3], n=2)
 
 
 @pytest.mark.asyncio
