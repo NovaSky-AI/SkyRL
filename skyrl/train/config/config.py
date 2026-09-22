@@ -592,9 +592,6 @@ class MegatronConfig(BaseConfig):
     The on-disk format is identical to a synchronous save. Only the sharded
     model/optimizer state is async -- the rank-0 HF config/tokenizer write stays inline.
     Falls back to synchronous for cloud paths."""
-    async_dist_ckpt_strategy: str = "mcore"
-    """Backend for the async write. ``mcore`` needs no extra deps; megatron-core's own
-    default ``nvrx`` requires nvidia-resiliency-ext. Only used when async saves are on."""
     async_save_prestage_to_cpu: bool = False
     """Copy shards to host memory on the training rank before handing them to the async
     checkpoint writer, instead of letting the writer pull them over CUDA IPC.
