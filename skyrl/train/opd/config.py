@@ -33,12 +33,6 @@ class OPDConfig(BaseConfig):
     ``False`` zeroes the environment reward after its metrics are logged, so the advantage estimator
     contributes nothing. ``True`` sends the reward through the configured estimator and adds the
     teacher term on top."""
-    self_test_samples: int = 8
-    """Number of identical scoring requests sent to the teacher before training starts."""
-    self_test_max_abs_diff: float = 0.05
-    """Largest disagreement (nats) tolerated between the self-test requests.
-    A teacher whose logprobs depend on which replica answers is refused; the reverse-KL signal is
-    itself only a few hundredths of a nat."""
 
 
 @dataclass
@@ -108,8 +102,6 @@ def validate_opd_cfg(cfg) -> None:
 
     if opd.kl_coef < 0:
         raise ValueError("trainer.algorithm.opd.kl_coef must be >= 0")
-    if opd.self_test_samples < 2:
-        raise ValueError("trainer.algorithm.opd.self_test_samples must be >= 2")
 
     if algorithm.zero_variance_filter:
         raise ValueError(

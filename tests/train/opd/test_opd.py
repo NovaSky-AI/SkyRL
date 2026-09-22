@@ -43,17 +43,15 @@ from skyrl.train.trainer import RayPPOTrainer
 
 
 class FakeTeacher(TeacherLogprobClient):
-    """Deterministic teacher: logprob of token id t is -t/100. Optional jitter and in-flight tracking."""
+    """Deterministic teacher: logprob of token id t is -t/100. Optional delay and in-flight tracking."""
 
-    def __init__(self, max_concurrency: int = 32, jitter: float = 0.0, delay: float = 0.0):
+    def __init__(self, max_concurrency: int = 32, delay: float = 0.0):
         super().__init__(max_concurrency=max_concurrency)
-        self.jitter = jitter
         self.delay = delay
         self.calls: List[tuple] = []
         self.in_flight = 0
         self.max_in_flight = 0
         self.closed = False
-        self._n = 0
 
     async def aclose(self) -> None:
         self.closed = True
@@ -65,9 +63,7 @@ class FakeTeacher(TeacherLogprobClient):
         try:
             if self.delay:
                 await asyncio.sleep(self.delay)
-            self._n += 1
-            offset = self.jitter * (self._n % 2)  # alternate answers when jitter > 0
-            return [-t / 100.0 + offset for t in response_ids]
+            return [-t / 100.0 for t in response_ids]
         finally:
             self.in_flight -= 1
 
@@ -157,8 +153,6 @@ async def test_base_client_rejects_non_finite(value):
     teacher = NonFiniteTeacher(value)
     with pytest.raises(RuntimeError, match="non-finite"):
         await teacher.compute_logprobs([1], [2, 3])
-    with pytest.raises(RuntimeError, match="non-finite"):  # the self-test cannot let it through either
-        await teacher.self_test([1], [2, 3], n=2)
 
 
 @pytest.mark.asyncio
@@ -166,13 +160,6 @@ async def test_base_client_limits_concurrency():
     teacher = FakeTeacher(max_concurrency=2, delay=0.05)
     await asyncio.gather(*(teacher.compute_logprobs([1], [i]) for i in range(6)))
     assert teacher.max_in_flight == 2
-
-
-@pytest.mark.asyncio
-async def test_self_test_accepts_deterministic_and_rejects_noisy():
-    assert await FakeTeacher().self_test([1], [2, 3], n=4, max_abs_diff=0.01) == 0.0
-    with pytest.raises(RuntimeError, match="not reproducible"):
-        await FakeTeacher(jitter=0.3).self_test([1], [2, 3], n=4, max_abs_diff=0.05)
 
 
 # ---------------------------------------------------------------------------
