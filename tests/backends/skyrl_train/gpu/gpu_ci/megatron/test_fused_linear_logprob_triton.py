@@ -74,6 +74,16 @@ _BACKWARD_CONFIG_SPECS = _SCHEDULE_SYMBOLS["_BACKWARD_CONFIG_SPECS"]
 _autotune_token_bucket = _SCHEDULE_SYMBOLS["_autotune_token_bucket"]
 
 
+@pytest.mark.parametrize("dtype", [torch.bool, torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64])
+def test_active_mask_accepts_bool_and_integer_dtypes(dtype) -> None:
+    assert fused_linear_logprob_triton._is_integer_or_bool(torch.ones(1, dtype=dtype))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.complex64])
+def test_active_mask_rejects_non_integer_dtypes(dtype) -> None:
+    assert not fused_linear_logprob_triton._is_integer_or_bool(torch.ones(1, dtype=dtype))
+
+
 def test_autotune_schedules_include_incumbents_and_variants() -> None:
     assert (128, 256, 32, 5, 8) in _FORWARD_MAINLOOP_CONFIG_SPECS
     assert (128, 256, 32, 3, 8) in _FORWARD_MAINLOOP_CONFIG_SPECS
@@ -91,24 +101,42 @@ def test_autotune_schedules_include_incumbents_and_variants() -> None:
 
 def test_all_triton_entrypoints_use_bucketed_cached_autotune() -> None:
     module = ast.parse(_kernel_source())
-    autotune_decorators = [
-        decorator
-        for node in module.body
-        if isinstance(node, ast.FunctionDef)
-        for decorator in node.decorator_list
-        if (
-            isinstance(decorator, ast.Call)
-            and isinstance(decorator.func, ast.Attribute)
-            and decorator.func.attr == "autotune"
-        )
-    ]
+    autotune_decorators = {}
+    jit_decorators = {}
+    for node in module.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            if (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr == "autotune"
+            ):
+                autotune_decorators[node.name] = decorator
+            if (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr == "jit"
+            ):
+                jit_decorators[node.name] = decorator
     assert len(autotune_decorators) == 5
-    for decorator in autotune_decorators:
+    for decorator in autotune_decorators.values():
         keywords = {keyword.arg: keyword.value for keyword in decorator.keywords}
         assert ast.literal_eval(keywords["cache_results"]) is True
         keys = ast.literal_eval(keywords["key"])
         assert "num_tokens_bucket" in keys
         assert "COMPUTE_ENTROPY" in keys
+    for name in {
+        "efficient_entropy_kernel_general_mainloop",
+        "efficient_entropy_triton_kernel_epilogue",
+        "efficient_entropy_triton_epilogue_tp_update",
+        "efficient_entropy_backward_kernel_general_d_logits_split_N",
+    }:
+        keywords = {keyword.arg: keyword.value for keyword in autotune_decorators[name].keywords}
+        assert "HAS_ACTIVE_MASK" in ast.literal_eval(keywords["key"])
+    for name in autotune_decorators:
+        keywords = {keyword.arg: keyword.value for keyword in jit_decorators[name].keywords}
+        assert "num_tokens" in ast.literal_eval(keywords["do_not_specialize"])
 
 
 def test_skyrl_adapter_gates_entropy_work() -> None:
@@ -172,11 +200,20 @@ def test_autotune_token_bucket_rejects_empty_input() -> None:
         _autotune_token_bucket(0)
 
 
-def _direct_fused_logprobs(hidden, weight_shard, target_shifted, vstart, vend, chunk_size, grad_seed):
+def _direct_fused_logprobs(
+    hidden,
+    weight_shard,
+    target_shifted,
+    vstart,
+    vend,
+    chunk_size,
+    grad_seed,
+    active_mask=None,
+):
     """Run the Triton Function on already-shifted targets."""
     leaf_h = hidden.detach().clone().requires_grad_(True)
     leaf_w = weight_shard.detach().clone().requires_grad_(True)
-    lp = FusedLinearLogprobTriton.apply(
+    args = (
         leaf_h,
         leaf_w,
         target_shifted,
@@ -185,6 +222,11 @@ def _direct_fused_logprobs(hidden, weight_shard, target_shifted, vstart, vend, c
         chunk_size,
         dist.group.WORLD,
         False,
+    )
+    lp = (
+        FusedLinearLogprobTriton.apply(*args, active_mask)
+        if active_mask is not None
+        else FusedLinearLogprobTriton.apply(*args)
     )
     lp.backward(grad_seed.clone())
     return lp.detach(), leaf_h.grad.detach(), leaf_w.grad.detach()
@@ -204,7 +246,7 @@ def test_adapter_entropy_loss_gradients_match_materialized_reference() -> None:
     leaf_hidden = hidden.clone().requires_grad_(True)
     leaf_weight = weight.clone().requires_grad_(True)
     logprobs, entropy = FusedLinearLogprobTriton.apply(
-        leaf_hidden, leaf_weight, target, 0, vocab_size, num_tokens, None, False, True, True
+        leaf_hidden, leaf_weight, target, 0, vocab_size, num_tokens, None, False, None, True, True
     )
     logprob_seed = torch.linspace(0.5, 1.5, num_tokens, device=device).unsqueeze(0)
     entropy_seed = torch.linspace(-0.25, 0.75, num_tokens, device=device).unsqueeze(0)
@@ -225,7 +267,7 @@ def test_adapter_entropy_loss_gradients_match_materialized_reference() -> None:
     torch.testing.assert_close(leaf_weight.grad, reference_weight.grad, atol=3e-3, rtol=3e-3)
 
 
-def _stock_shifted(hidden, weight_shard, target_shifted, vstart, vend, chunk_size):
+def _stock_shifted(hidden, weight_shard, target_shifted, vstart, vend, chunk_size, active_mask=None):
     """Materialized-logits reference on already-shifted targets."""
     from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
         ChunkedDistributedLogprob,
@@ -240,6 +282,8 @@ def _stock_shifted(hidden, weight_shard, target_shifted, vstart, vend, chunk_siz
         lp = ChunkedDistributedLogprob.apply(logits, target_shifted, vstart, vend, chunk_size, dist.group.WORLD, False)
     else:
         lp = DistributedLogprob.apply(logits, target_shifted, vstart, vend, dist.group.WORLD, False)
+    if active_mask is not None:
+        lp = lp.masked_fill(~active_mask, 0.0)
     grad_seed = torch.linspace(0.5, 1.5, steps=lp.numel(), device=lp.device, dtype=lp.dtype).reshape(lp.shape)
     lp.backward(grad_seed)
     return lp.detach(), leaf_h.grad.detach(), leaf_w.grad.detach(), grad_seed
@@ -252,7 +296,7 @@ def _tol_for_dtype(dtype):
     return dict(atol=1e-4, rtol=1e-4)
 
 
-def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
+def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, with_active_mask, ret_dict):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
     os.environ["RANK"] = str(rank)
@@ -281,7 +325,12 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
         torch.manual_seed(0)  # identical across ranks => identical hidden/weight/target
 
         # verl requires hidden_size % 128 == 0.
-        batch_size, seq_len, hidden_size, vocab_size = 3, 24, 128, 256
+        batch_size, seq_len, hidden_size, vocab_size = (
+            3,
+            (192 if with_active_mask else 24),
+            128,
+            256,
+        )
         hidden = (torch.randn(batch_size, seq_len, hidden_size, device=device) * 0.5).to(dtype)
         weight_full = (torch.randn(vocab_size, hidden_size, device=device) * 0.1).to(dtype)
         target_high = vocab_size + 50 if with_oov else vocab_size
@@ -294,12 +343,26 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
 
         # Keep target shifting out of the kernel-under-test.
         target_shifted = target.roll(shifts=-1, dims=-1)
+        active_mask = None
+        if with_active_mask:
+            # Covers two fully inactive BLOCK_M=128 tiles, a partial tile, and
+            # dense active tiles for every production forward schedule.
+            active_mask = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
+            active_mask.reshape(-1)[:256] = False
+            active_mask.reshape(-1)[300:332] = False
 
         lp_ref, gh_ref, gw_ref, grad_seed = _stock_shifted(
-            hidden, weight_shard, target_shifted, vstart, vend, chunk_size
+            hidden, weight_shard, target_shifted, vstart, vend, chunk_size, active_mask
         )
         lp_fused, gh_fused, gw_fused = _direct_fused_logprobs(
-            hidden, weight_shard, target_shifted, vstart, vend, chunk_size, grad_seed
+            hidden,
+            weight_shard,
+            target_shifted,
+            vstart,
+            vend,
+            chunk_size,
+            grad_seed,
+            active_mask,
         )
 
         tol = _tol_for_dtype(dtype)
@@ -315,6 +378,8 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
             "fwd_max_abs": float((lp_fused.float() - lp_ref.float()).abs().max()),
             "gh_max_abs": float((gh_fused.float() - gh_ref.float()).abs().max()),
             "gw_max_abs": float((gw_fused.float() - gw_ref.float()).abs().max()),
+            "inactive_lp_zero": active_mask is None or bool(torch.count_nonzero(lp_fused[~active_mask]) == 0),
+            "inactive_gh_zero": active_mask is None or bool(torch.count_nonzero(gh_fused[~active_mask]) == 0),
         }
     finally:
         # Reliably reset the precision flag so a True never leaks into a later (e.g. bf16) run that
@@ -323,7 +388,7 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, ret_dict):
         dist.destroy_process_group()
 
 
-def _run(world_size, chunk_size, with_oov, dtype_str):
+def _run(world_size, chunk_size, with_oov, dtype_str, with_active_mask=False):
     ctx = mp.get_context("spawn")
     manager = ctx.Manager()
     ret = manager.dict()
@@ -334,7 +399,7 @@ def _run(world_size, chunk_size, with_oov, dtype_str):
         port = s.getsockname()[1]
     mp.spawn(
         _worker,
-        args=(world_size, port, chunk_size, with_oov, dtype_str, ret),
+        args=(world_size, port, chunk_size, with_oov, dtype_str, with_active_mask, ret),
         nprocs=world_size,
         join=True,
     )
@@ -367,8 +432,25 @@ def test_fused_triton_matches_stock_logits_path(dtype_str, world_size, chunk_siz
         assert r["gw_ok"], f"grad-weight mismatch rank={rank}: {r}"
 
 
+@pytest.mark.parametrize("world_size", [1, 2])
+@pytest.mark.parametrize("dtype_str", ["fp32", "bf16"])
+@pytest.mark.parametrize("with_oov", [False, True])
+def test_active_mask_matches_explicit_masked_reference(world_size, dtype_str, with_oov):
+    if world_size > 1 and torch.cuda.device_count() < world_size:
+        pytest.skip(f"need >= {world_size} CUDA devices")
+    results = _run(world_size, 1000, with_oov, dtype_str, with_active_mask=True)
+    assert len(results) == world_size
+    for rank, result in results.items():
+        assert result["fwd_ok"], f"forward mismatch rank={rank}: {result}"
+        assert result["gh_ok"], f"grad-hidden mismatch rank={rank}: {result}"
+        assert result["gw_ok"], f"grad-weight mismatch rank={rank}: {result}"
+        assert result["inactive_lp_zero"], result
+        assert result["inactive_gh_zero"], result
+
+
 @pytest.mark.parametrize("logit_offset", [-20.0, -120.0])
-def test_epilogue_handles_strongly_negative_logits(logit_offset) -> None:
+@pytest.mark.parametrize("with_active_mask", [False, True])
+def test_epilogue_handles_strongly_negative_logits(logit_offset, with_active_mask) -> None:
     """The epilogue's log-sum-exp shift must be the true row max, not max(0, max).
 
     A zero-initialised ``global_max`` leaves the shift at 0 whenever every logit for
@@ -388,13 +470,18 @@ def test_epilogue_handles_strongly_negative_logits(logit_offset) -> None:
         weight += logit_offset / hidden.sum(-1).min()
         labels = torch.randint(0, vocab_size, (num_tokens,), device=device, generator=gen)
         grad_logprobs = torch.linspace(0.5, 1.5, num_tokens, device=device)
+        active_mask = None
+        if with_active_mask:
+            active_mask = torch.arange(num_tokens, device=device) >= num_tokens // 2
 
         logits = hidden.double() @ weight.double().T
         assert logits.max().item() < 0.0, "setup must drive every logit negative"
         expected = logits.gather(1, labels[:, None]).squeeze(1) - torch.logsumexp(logits, dim=-1)
+        if active_mask is not None:
+            expected = expected.masked_fill(~active_mask, 0.0)
 
         logprobs, entropy, maximum, accumulate, entropy_b = fused_linear_logprob_triton.efficient_entropy_forward(
-            hidden, weight, labels, 1.0, None
+            hidden, weight, labels, 1.0, None, active_mask
         )
         d_hidden, d_weight = fused_linear_logprob_triton.efficient_entropy_backward(
             grad_logprobs,
@@ -408,11 +495,15 @@ def test_epilogue_handles_strongly_negative_logits(logit_offset) -> None:
             False,
             1.0,
             None,
+            active_mask,
         )
 
         assert torch.isfinite(logprobs).all(), f"non-finite log-probs at max logit {logits.max().item():.1f}"
         assert torch.isfinite(entropy).all(), "non-finite entropy"
         assert torch.isfinite(d_hidden).all() and torch.isfinite(d_weight).all(), "non-finite grads"
         torch.testing.assert_close(logprobs.double(), expected, rtol=1e-3, atol=1e-3)
+        if active_mask is not None:
+            assert torch.count_nonzero(logprobs[~active_mask]) == 0
+            assert torch.count_nonzero(d_hidden[~active_mask]) == 0
     finally:
         fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = previous

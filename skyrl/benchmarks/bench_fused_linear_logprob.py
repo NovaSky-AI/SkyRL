@@ -60,6 +60,7 @@ CHUNK_SIZE = 1024
 WARMUP_REPS = 1
 BENCH_REPS = 3
 MODES = ["baseline", "nvidia", "liger", "triton"]
+BLOCK_MASK_ACTIVE_FRACTIONS = (1.0, 0.95, 0.75, 0.66, 0.25)
 
 AUTOTUNE_MODELS = {
     "nemotron-super-120b": (4096, 131072),
@@ -88,7 +89,17 @@ def _vocab_bounds(vocab_local, tp_group):
     return vocab_start, vocab_start + vocab_local
 
 
-def _loss(mode, hidden, weight, target, vocab_local, chunk_size, tp_group):
+def _loss(
+    mode,
+    hidden,
+    weight,
+    target,
+    vocab_local,
+    chunk_size,
+    tp_group,
+    active_mask=None,
+    mask_in_kernel=True,
+):
     """Per-token CE summed to a scalar (so all modes produce identical grads)."""
     from megatron.core.fusions.fused_cross_entropy import (
         fused_vocab_parallel_cross_entropy,
@@ -110,8 +121,25 @@ def _loss(mode, hidden, weight, target, vocab_local, chunk_size, tp_group):
             FusedLinearLogprobTriton,
         )
 
-        lp = FusedLinearLogprobTriton.apply(hidden, weight, target, vocab_start, vocab_end, chunk_size, tp_group, False)
-        return (-lp).sum()
+        args = (
+            hidden,
+            weight,
+            target,
+            vocab_start,
+            vocab_end,
+            chunk_size,
+            tp_group,
+            False,
+        )
+        kernel_mask = active_mask if mask_in_kernel else None
+        lp = (
+            FusedLinearLogprobTriton.apply(*args, kernel_mask)
+            if kernel_mask is not None
+            else FusedLinearLogprobTriton.apply(*args)
+        )
+        if active_mask is not None and not mask_in_kernel:
+            return -(lp * active_mask).sum()
+        return -lp.sum()
     logits = torch.matmul(hidden, weight.t())  # [B, S, vocab//TP]
     if mode == "baseline":
         ce = vocab_parallel_cross_entropy(logits, target, 0.0, tp_group)
@@ -122,7 +150,18 @@ def _loss(mode, hidden, weight, target, vocab_local, chunk_size, tp_group):
     return ce.sum()
 
 
-def _measure(mode, seq_len, vocab_local, chunk_size, tp_group, device, reps):
+def _measure(
+    mode,
+    seq_len,
+    vocab_local,
+    chunk_size,
+    tp_group,
+    device,
+    reps,
+    active_fraction=None,
+    hidden_size=HIDDEN,
+    mask_in_kernel=True,
+):
     """forward+backward; return (mean_ms, mean_peak_bytes) or (None, None) on OOM."""
     times, peaks = [], []
     tp_rank = dist.get_rank(tp_group)
@@ -137,7 +176,7 @@ def _measure(mode, seq_len, vocab_local, chunk_size, tp_group, device, reps):
             hidden = torch.randn(
                 1,
                 seq_len,
-                HIDDEN,
+                hidden_size,
                 dtype=torch.bfloat16,
                 device=device,
                 generator=shared_generator,
@@ -146,12 +185,12 @@ def _measure(mode, seq_len, vocab_local, chunk_size, tp_group, device, reps):
             weight = (
                 torch.randn(
                     vocab_local,
-                    HIDDEN,
+                    hidden_size,
                     dtype=torch.bfloat16,
                     device=device,
                     generator=weight_generator,
                 )
-                * (HIDDEN**-0.5)
+                * (hidden_size**-0.5)
             ).requires_grad_(True)
             target = torch.randint(
                 0,
@@ -160,9 +199,24 @@ def _measure(mode, seq_len, vocab_local, chunk_size, tp_group, device, reps):
                 device=device,
                 generator=shared_generator,
             )
+            active_mask = None
+            if active_fraction is not None:
+                active_tokens = math.ceil(seq_len * active_fraction)
+                active_mask = torch.zeros((1, seq_len), dtype=torch.bool, device=device)
+                active_mask[:, seq_len - active_tokens :] = True
             torch.cuda.synchronize(device)
             t0 = time.perf_counter()
-            loss = _loss(mode, hidden, weight, target, vocab_local, chunk_size, tp_group)
+            loss = _loss(
+                mode,
+                hidden,
+                weight,
+                target,
+                vocab_local,
+                chunk_size,
+                tp_group,
+                active_mask,
+                mask_in_kernel,
+            )
             loss.backward()
             torch.cuda.synchronize(device)
             times.append((time.perf_counter() - t0) * 1000.0)
@@ -350,6 +404,7 @@ def _kernel_args(module, shape: AutotuneLocalShape, buffers):
         hidden,
         weight,
         labels,
+        labels,
         shape.num_tokens,
         module._autotune_token_bucket(shape.num_tokens),
         shape.hidden_size,
@@ -400,6 +455,7 @@ def _raw_launch(module, shape: AutotuneLocalShape, buffers, spec):
         BLOCK_SIZE_N=block_n,
         BLOCK_SIZE_K=block_k,
         USE_TMA=module.SUPPORT_CUDA_TMA,
+        HAS_ACTIVE_MASK=False,
         COMPUTE_ENTROPY=True,
         INPUT_PRECISION="tf32",
         num_stages=num_stages,
@@ -416,6 +472,7 @@ def _autotuned_launch(module, shape: AutotuneLocalShape, buffers):
     module.efficient_entropy_kernel_general_mainloop[grid](
         *_kernel_args(module, shape, buffers),
         USE_TMA=module.SUPPORT_CUDA_TMA,
+        HAS_ACTIVE_MASK=False,
         COMPUTE_ENTROPY=True,
         INPUT_PRECISION="tf32",
     )
@@ -638,6 +695,334 @@ def _run_backend_comparison(args) -> None:
     dist.destroy_process_group()
 
 
+def _load_block_mask_trace(path: Path, dataset: str, num_tokens: int, tp: int, cp: int, cp_rank: int) -> torch.Tensor:
+    """Rebuild an ordered CP-local mask trace without token data."""
+    payload = json.loads(path.read_text())
+    datasets = {item["dataset"]: item for item in payload["datasets"]}
+    if dataset not in datasets:
+        raise ValueError(f"Unknown mask trace {dataset!r}; choose from {sorted(datasets)}")
+
+    records = []
+    for encoded in datasets[dataset]["records"]:
+        value = bool(encoded["starts_active"])
+        mask = []
+        for run in encoded["runs"]:
+            mask.extend([value] * int(run))
+            value = not value
+        if len(mask) != int(encoded["length"]):
+            raise ValueError(f"Malformed mask trace record with length {encoded['length']}")
+        records.append(mask)
+
+    # Match production first-fit-decreasing segment ordering. Segment padding
+    # is part of the kernel mask; hidden rows themselves remain untouched.
+    bins: list[list[list[bool]]] = []
+    remaining: list[int] = []
+    for mask in sorted(records, key=len, reverse=True):
+        for index, capacity in enumerate(remaining):
+            if capacity >= len(mask):
+                bins[index].append(mask)
+                remaining[index] -= len(mask)
+                break
+        else:
+            bins.append([mask])
+            remaining.append(32768 - len(mask))
+
+    alignment = tp if cp == 1 else tp * cp * 2
+    # Build one full local trace period. Taking the first N rows is badly biased
+    # for short benchmark windows because FFD puts the longest records first.
+    # Instead, start at the real record boundary whose cyclic window most closely
+    # matches this CP rank's full-trace density. This preserves run lengths and
+    # natural row order without sorting or moving rows in the measured kernel.
+    local_stream: list[bool] = []
+    record_starts: list[int] = []
+    for packed_bin in bins:
+        for mask in packed_bin:
+            record_starts.append(len(local_stream))
+            padded_length = math.ceil(len(mask) / alignment) * alignment
+            padded = mask + [False] * (padded_length - len(mask))
+            if cp == 1:
+                local_stream.extend(padded)
+            else:
+                chunk = padded_length // (2 * cp)
+                local_stream.extend(padded[cp_rank * chunk : (cp_rank + 1) * chunk])
+                mirrored = 2 * cp - cp_rank - 1
+                local_stream.extend(padded[mirrored * chunk : (mirrored + 1) * chunk])
+
+    local_tokens = num_tokens // cp
+    repeats = math.ceil((len(local_stream) + local_tokens) / len(local_stream))
+    cyclic_stream = local_stream * repeats
+    prefix = [0]
+    for active in cyclic_stream:
+        prefix.append(prefix[-1] + int(active))
+    target_fraction = sum(local_stream) / len(local_stream)
+    start = min(
+        record_starts,
+        key=lambda offset: abs((prefix[offset + local_tokens] - prefix[offset]) / local_tokens - target_fraction),
+    )
+    window = cyclic_stream[start : start + local_tokens]
+    return torch.tensor(window, dtype=torch.bool).unsqueeze(0)
+
+
+def _run_block_mask_probe(args) -> None:
+    """Measure the end-to-end value and dense-call overhead of tile skipping."""
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    import megatron.core.parallel_state as mpu
+
+    world = dist.get_world_size()
+    if world != args.tensor_parallel * args.context_parallel:
+        raise ValueError(
+            f"torchrun world size {world} must equal TP*CP=" f"{args.tensor_parallel * args.context_parallel}"
+        )
+    mpu.initialize_model_parallel(
+        tensor_model_parallel_size=args.tensor_parallel,
+        context_parallel_size=args.context_parallel,
+    )
+    tp_group = mpu.get_tensor_model_parallel_group()
+    cp_rank = mpu.get_context_parallel_rank()
+    device = torch.device("cuda", local_rank)
+    rank0 = dist.get_rank() == 0
+    vocab_local = (args.vocab or VOCAB_SHARDS[-1]) // args.tensor_parallel
+
+    # Compare the masked kernel against the existing dense kernel with the same
+    # mask applied to its output. This checks the scalar loss and both gradients
+    # before any performance result is accepted.
+    from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
+        FusedLinearLogprobTriton,
+    )
+
+    check_tokens = 257
+    check_hidden = 256
+    check_vocab_local = 2048
+    shared_generator = torch.Generator(device=device).manual_seed(761)
+    weight_generator = torch.Generator(device=device).manual_seed(991 + dist.get_rank(tp_group))
+    hidden_base = torch.randn(
+        1,
+        check_tokens,
+        check_hidden,
+        dtype=torch.bfloat16,
+        device=device,
+        generator=shared_generator,
+    )
+    weight_base = torch.randn(
+        check_vocab_local,
+        check_hidden,
+        dtype=torch.bfloat16,
+        device=device,
+        generator=weight_generator,
+    ) * (check_hidden**-0.5)
+    target = torch.randint(
+        0,
+        check_vocab_local * args.tensor_parallel,
+        (1, check_tokens),
+        device=device,
+        generator=shared_generator,
+    )
+    vocab_start, vocab_end = _vocab_bounds(check_vocab_local, tp_group)
+    masks = {
+        "all": torch.ones((1, check_tokens), dtype=torch.bool, device=device),
+        "blocky95": torch.arange(check_tokens, device=device).unsqueeze(0) >= 13,
+        "blocky66": torch.arange(check_tokens, device=device).unsqueeze(0) >= 87,
+        "blocky25": torch.arange(check_tokens, device=device).unsqueeze(0) >= 193,
+        "none": torch.zeros((1, check_tokens), dtype=torch.bool, device=device),
+    }
+    correctness = []
+    fused_args = (
+        target,
+        vocab_start,
+        vocab_end,
+        check_tokens,
+        tp_group,
+        False,
+    )
+    for mask_name, mask in masks.items():
+        dense_hidden = hidden_base.clone().requires_grad_(True)
+        dense_weight = weight_base.clone().requires_grad_(True)
+        dense_logprobs = FusedLinearLogprobTriton.apply(dense_hidden, dense_weight, *fused_args)
+        dense_loss = -(dense_logprobs * mask).sum()
+        dense_loss.backward()
+
+        masked_hidden = hidden_base.clone().requires_grad_(True)
+        masked_weight = weight_base.clone().requires_grad_(True)
+        masked_logprobs = FusedLinearLogprobTriton.apply(masked_hidden, masked_weight, *fused_args, mask)
+        masked_loss = -masked_logprobs.sum()
+        masked_loss.backward()
+
+        expected_logprobs = dense_logprobs.masked_fill(~mask, 0.0)
+        logprob_delta = (masked_logprobs - expected_logprobs).abs().max().item()
+        loss_delta = (masked_loss - dense_loss).abs().item()
+        hidden_delta = (masked_hidden.grad - dense_hidden.grad).abs().max().item()
+        weight_delta = (masked_weight.grad - dense_weight.grad).abs().max().item()
+        torch.testing.assert_close(masked_logprobs, expected_logprobs, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(masked_loss, dense_loss, atol=1e-4, rtol=1e-6)
+        torch.testing.assert_close(masked_hidden.grad, dense_hidden.grad, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(masked_weight.grad, dense_weight.grad, atol=2e-2, rtol=2e-2)
+        correctness.append(
+            {
+                "mask": mask_name,
+                "logprob_max_abs": logprob_delta,
+                "loss_max_abs": loss_delta,
+                "hidden_grad_max_abs": hidden_delta,
+                "weight_grad_max_abs": weight_delta,
+            }
+        )
+
+    if rank0:
+        print(
+            "BLOCK_MASK_CORRECTNESS=" + json.dumps(correctness, sort_keys=True),
+            flush=True,
+        )
+
+    if rank0:
+        print(
+            f"block-mask probe | {torch.cuda.get_device_name(device)} "
+            f"| TP={args.tensor_parallel} CP={args.context_parallel} "
+            f"| hidden={args.hidden} | vocab/rank={vocab_local}"
+        )
+        print("synthetic masks are contiguous active suffixes; trace masks preserve real run structure")
+
+    for seq_len in args.seq_lens:
+        shared_generator = torch.Generator(device=device).manual_seed(1000 + seq_len)
+        weight_generator = torch.Generator(device=device).manual_seed(2000 + dist.get_rank(tp_group))
+        weight = (
+            torch.randn(
+                vocab_local,
+                args.hidden,
+                dtype=torch.bfloat16,
+                device=device,
+                generator=weight_generator,
+            )
+            * (args.hidden**-0.5)
+        ).requires_grad_(True)
+        local_seq_len = seq_len // args.context_parallel
+        if local_seq_len * args.context_parallel != seq_len:
+            raise ValueError(f"seq_len={seq_len} must be divisible by CP={args.context_parallel}")
+        hidden = torch.randn(
+            1,
+            local_seq_len,
+            args.hidden,
+            dtype=torch.bfloat16,
+            device=device,
+            generator=shared_generator,
+            requires_grad=True,
+        )
+        target = torch.randint(
+            0,
+            vocab_local * args.tensor_parallel,
+            (1, local_seq_len),
+            device=device,
+            generator=shared_generator,
+        )
+
+        mask_cases = []
+        if not args.block_mask_trace_only:
+            for fraction in BLOCK_MASK_ACTIVE_FRACTIONS:
+                active_tokens = math.ceil(seq_len * fraction)
+                global_active_mask = torch.zeros((1, seq_len), dtype=torch.bool, device=device)
+                global_active_mask[:, seq_len - active_tokens :] = True
+                if args.context_parallel > 1:
+                    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
+                        _get_tokens_on_this_cp_rank,
+                    )
+
+                    active_mask = _get_tokens_on_this_cp_rank(
+                        global_active_mask,
+                        cp_rank,
+                        args.context_parallel,
+                        seq_dim=1,
+                    )
+                else:
+                    active_mask = global_active_mask
+                mask_cases.append((f"suffix-{fraction:.0%}", fraction, active_mask))
+
+        if args.mask_trace is not None:
+            for trace_dataset in args.mask_trace_datasets:
+                trace_mask = _load_block_mask_trace(
+                    args.mask_trace,
+                    trace_dataset,
+                    seq_len,
+                    args.tensor_parallel,
+                    args.context_parallel,
+                    cp_rank,
+                ).to(device)
+                trace_active = trace_mask.sum(dtype=torch.float64)
+                dist.all_reduce(trace_active, op=dist.ReduceOp.SUM)
+                trace_fraction = trace_active.item() / (trace_mask.numel() * world)
+                mask_cases.append(
+                    (
+                        trace_dataset,
+                        trace_fraction,
+                        trace_mask,
+                    )
+                )
+
+        for pattern, fraction, active_mask in mask_cases:
+
+            def launch(mask_in_kernel, hidden_input, weight_input, target_input, mask_input):
+                hidden_input.grad = None
+                weight_input.grad = None
+                loss = _loss(
+                    "triton",
+                    hidden_input,
+                    weight_input,
+                    target_input,
+                    vocab_local,
+                    args.chunk_size,
+                    tp_group,
+                    mask_input,
+                    mask_in_kernel,
+                )
+                loss.backward()
+
+            # Compile/autotune both binary modes outside the samples. Alternate
+            # their measured order to avoid clock/temperature drift.
+            launch(False, hidden, weight, target, active_mask)
+            launch(True, hidden, weight, target, active_mask)
+            torch.cuda.synchronize(device)
+            samples = {False: [], True: []}
+            peaks = {False: [], True: []}
+            for repetition in range(args.repetitions):
+                order = (False, True) if repetition % 2 == 0 else (True, False)
+                for mask_in_kernel in order:
+                    torch.cuda.reset_peak_memory_stats(device)
+                    start = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    start.record()
+                    launch(mask_in_kernel, hidden, weight, target, active_mask)
+                    end.record()
+                    end.synchronize()
+                    samples[mask_in_kernel].append(start.elapsed_time(end))
+                    peaks[mask_in_kernel].append(torch.cuda.max_memory_allocated(device))
+
+            local_metrics = torch.tensor(
+                [
+                    statistics.median(samples[False]),
+                    statistics.median(samples[True]),
+                    statistics.median(peaks[False]),
+                    statistics.median(peaks[True]),
+                ],
+                dtype=torch.float64,
+                device=device,
+            )
+            # Training step latency is set by the slowest TP/CP rank.
+            dist.reduce(local_metrics, dst=0, op=dist.ReduceOp.MAX)
+            dense_ms, masked_ms, dense_peak, masked_peak = local_metrics.tolist()
+            if rank0:
+                print(
+                    f"tokens={seq_len} pattern={pattern} active={fraction:>5.1%} "
+                    f"dense={dense_ms:.3f}ms masked={masked_ms:.3f}ms "
+                    f"speedup={dense_ms / masked_ms:.3f}x "
+                    f"dense_peak={dense_peak / 1024**2:.0f}MB "
+                    f"masked_peak={masked_peak / 1024**2:.0f}MB"
+                )
+
+        del hidden, weight, target
+        torch.cuda.empty_cache()
+
+    dist.destroy_process_group()
+
+
 def _entropy_specialization_call(
     module,
     hidden: torch.Tensor,
@@ -645,6 +1030,7 @@ def _entropy_specialization_call(
     labels: torch.Tensor,
     grad_logprobs: torch.Tensor,
     tp_group,
+    active_mask: torch.Tensor | None,
     *,
     compute_entropy: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -653,6 +1039,7 @@ def _entropy_specialization_call(
         weight,
         labels,
         dist_process_group=tp_group,
+        active_mask=active_mask,
         compute_entropy=compute_entropy,
     )
     dentropy = torch.zeros_like(grad_logprobs) if compute_entropy else None
@@ -666,13 +1053,14 @@ def _entropy_specialization_call(
         accumulate,
         entropy_b,
         dist_process_group=tp_group,
+        active_mask=active_mask,
         compute_entropy=compute_entropy,
     )
     return logprobs, d_hidden, d_weight
 
 
 def _run_entropy_specialization_probe(args) -> None:
-    """Compare the general entropy path with the dense log-prob-only path."""
+    """Compare the general entropy path with SkyRL's logprob-only specialization."""
     dist.init_process_group(backend="nccl")
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
@@ -718,43 +1106,62 @@ def _run_entropy_specialization_probe(args) -> None:
         generator=shared_generator,
     )
     check_grad = torch.linspace(0.5, 1.5, check_tokens, dtype=torch.float32, device=device)
-    with_entropy = _entropy_specialization_call(
-        module,
-        check_hidden_tensor,
-        check_weight,
-        check_labels,
-        check_grad,
-        tp_group,
-        compute_entropy=True,
-    )
-    logprob_only = _entropy_specialization_call(
-        module,
-        check_hidden_tensor,
-        check_weight,
-        check_labels,
-        check_grad,
-        tp_group,
-        compute_entropy=False,
-    )
-    deltas = []
-    for actual, expected in zip(logprob_only, with_entropy):
-        torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-        deltas.append((actual.float() - expected.float()).abs().max().item())
-    if rank0:
-        print(
-            "ENTROPY_SPECIALIZATION_CORRECTNESS="
-            + json.dumps(
-                {
-                    "logprobs_max_abs": deltas[0],
-                    "dhidden_max_abs": deltas[1],
-                    "dweight_max_abs": deltas[2],
-                },
-                sort_keys=True,
-            ),
-            flush=True,
+    rows = torch.arange(check_tokens, device=device)
+    check_masks = {
+        "dense": None,
+        "blocky": ((rows >= 13) & (rows < 117)) | (rows >= 193),
+    }
+    correctness = []
+    for name, active_mask in check_masks.items():
+        with_entropy = _entropy_specialization_call(
+            module,
+            check_hidden_tensor,
+            check_weight,
+            check_labels,
+            check_grad,
+            tp_group,
+            active_mask,
+            compute_entropy=True,
         )
+        logprob_only = _entropy_specialization_call(
+            module,
+            check_hidden_tensor,
+            check_weight,
+            check_labels,
+            check_grad,
+            tp_group,
+            active_mask,
+            compute_entropy=False,
+        )
+        deltas = []
+        for actual, expected in zip(logprob_only, with_entropy):
+            torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+            deltas.append((actual.float() - expected.float()).abs().max().item())
+        if active_mask is not None:
+            torch.testing.assert_close(
+                logprob_only[0][~active_mask],
+                torch.zeros_like(logprob_only[0][~active_mask]),
+                atol=0,
+                rtol=0,
+            )
+            torch.testing.assert_close(
+                logprob_only[1][~active_mask],
+                torch.zeros_like(logprob_only[1][~active_mask]),
+                atol=0,
+                rtol=0,
+            )
+        correctness.append(
+            {
+                "mask": name,
+                "logprobs_max_abs": deltas[0],
+                "dhidden_max_abs": deltas[1],
+                "dweight_max_abs": deltas[2],
+            }
+        )
+    if rank0:
+        print("ENTROPY_SPECIALIZATION_CORRECTNESS=" + json.dumps(correctness, sort_keys=True), flush=True)
 
-    vocab_local = args.vocab // args.tensor_parallel
+    vocab_local = (args.vocab or VOCAB_SHARDS[-1]) // args.tensor_parallel
     weight = torch.randn(
         vocab_local,
         args.hidden,
@@ -775,12 +1182,15 @@ def _run_entropy_specialization_probe(args) -> None:
         )
         labels = torch.randint(
             0,
-            args.vocab,
+            vocab_local * args.tensor_parallel,
             (local_tokens,),
             device=device,
             generator=shared_generator,
         )
         grad_logprobs = torch.linspace(0.5, 1.5, local_tokens, dtype=torch.float32, device=device)
+        active_mask = torch.zeros(local_tokens, dtype=torch.bool, device=device)
+        active_mask[local_tokens - math.ceil(local_tokens * 0.66) :] = True
+
         launch = functools.partial(
             _entropy_specialization_call,
             module,
@@ -789,6 +1199,7 @@ def _run_entropy_specialization_probe(args) -> None:
             labels,
             grad_logprobs,
             tp_group,
+            active_mask,
         )
 
         variants = {"entropy": True, "logprob-only": False}
@@ -839,14 +1250,15 @@ def _run_entropy_specialization_probe(args) -> None:
                         "vocab_local": vocab_local,
                         "tp": args.tensor_parallel,
                         "cp": args.context_parallel,
-                        **metrics,
+                        "metrics": metrics,
                     },
                     sort_keys=True,
                 ),
                 flush=True,
             )
+        del launch, hidden, labels, grad_logprobs, active_mask
+        torch.cuda.empty_cache()
 
-    mpu.destroy_model_parallel()
     dist.destroy_process_group()
 
 
@@ -860,34 +1272,53 @@ def main() -> None:
     )
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
     parser.add_argument("--hidden", type=int, default=HIDDEN)
-    parser.add_argument("--tensor-parallel", type=int, default=1)
+    parser.add_argument("--tensor-parallel", type=int, default=None)
     parser.add_argument("--context-parallel", type=int, default=1)
-    parser.add_argument("--seq-lens", nargs="+", type=int, default=SEQ_LENS)
+    parser.add_argument("--mask-trace", type=Path)
+    parser.add_argument("--mask-trace-datasets", nargs="+")
     parser.add_argument(
         "--autotune-sweep",
         action="store_true",
         help="sweep Triton schedules over production local shapes",
     )
     parser.add_argument(
+        "--block-mask-probe",
+        action="store_true",
+        help="compare dense Triton with 100/95/75/66/25%-active suffix masks",
+    )
+    parser.add_argument(
+        "--entropy-specialization-probe",
+        action="store_true",
+        help="compare general entropy with SkyRL's logprob-only specialization",
+    )
+    parser.add_argument(
+        "--block-mask-trace-only",
+        action="store_true",
+        help="omit synthetic suffix masks from the block-mask probe",
+    )
+    parser.add_argument("--seq-lens", type=int, nargs="+", default=SEQ_LENS)
+    parser.add_argument(
         "--output-dir",
         type=Path,
         help="JSONL output directory required by --autotune-sweep",
     )
     parser.add_argument("--repetitions", type=int, default=BENCH_REPS)
-    parser.add_argument(
-        "--entropy-specialization-probe",
-        action="store_true",
-        help="compare entropy and dense log-prob-only kernel paths",
-    )
     args = parser.parse_args()
-    if args.entropy_specialization_probe:
-        if args.vocab is None:
-            parser.error("--entropy-specialization-probe requires --vocab")
-        _run_entropy_specialization_probe(args)
-    elif args.autotune_sweep:
+    if args.tensor_parallel is None:
+        args.tensor_parallel = int(os.environ.get("WORLD_SIZE", "1")) // args.context_parallel
+    if (args.mask_trace is None) != (args.mask_trace_datasets is None):
+        parser.error("--mask-trace and --mask-trace-datasets must be provided together")
+    probes = (args.autotune_sweep, args.block_mask_probe, args.entropy_specialization_probe)
+    if sum(probes) > 1:
+        parser.error("choose only one benchmark probe mode")
+    if args.autotune_sweep:
         if args.output_dir is None:
             parser.error("--autotune-sweep requires --output-dir")
         _run_autotune_sweep(args.output_dir, args.repetitions)
+    elif args.block_mask_probe:
+        _run_block_mask_probe(args)
+    elif args.entropy_specialization_probe:
+        _run_entropy_specialization_probe(args)
     else:
         _run_backend_comparison(args)
 

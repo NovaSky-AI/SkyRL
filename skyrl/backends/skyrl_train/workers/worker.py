@@ -43,6 +43,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
+    PolicyLossType,
     compute_approx_kl,
     ppo_critic_loss,
 )
@@ -1132,8 +1133,8 @@ class PolicyWorkerBase(Worker):
                 rollout_logprobs=rollout_action_logprobs,
             )
 
-        # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
-        if resolved_loss_name == "cross_entropy":
+        # SFT objectives contain their complete loss and need no RL KL/entropy terms.
+        if resolved_loss_name == PolicyLossType.CROSS_ENTROPY:
             # Policy loss masks are pre-scaled to achieve the correct reduction
             # when summing across the entire minibatch (see `DefaultCollator`).
             # FSDP averages loss value over DP ranks by default,
@@ -1189,6 +1190,8 @@ class PolicyWorkerBase(Worker):
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
             }
+            for key, value in loss_metrics.items():
+                status["loss_metrics/" + key] = value
         else:
             # RL path: add optional KL/entropy terms
             # entropy loss
