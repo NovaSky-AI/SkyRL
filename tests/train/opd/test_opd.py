@@ -6,7 +6,7 @@ uv run --isolated --extra dev pytest tests/train/opd/test_opd.py
 
 import asyncio
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import torch
@@ -35,6 +35,7 @@ from skyrl.train.opd.utils import (
     pad_teacher_logprobs,
     split_generator_input,
 )
+from skyrl.train.trainer import RayPPOTrainer
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -51,7 +52,11 @@ class FakeTeacher(TeacherLogprobClient):
         self.calls: List[tuple] = []
         self.in_flight = 0
         self.max_in_flight = 0
+        self.closed = False
         self._n = 0
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     async def _compute_logprobs(self, prompt_ids, response_ids):
         self.calls.append((tuple(prompt_ids), tuple(response_ids)))
@@ -482,6 +487,25 @@ async def test_trainer_generate_scores_each_group_as_it_finishes(generator_cls, 
     assert trainer.all_metrics["generate/custom_avg"] == 2.0  # per-group metrics re-aggregated
     assert trainer.all_metrics["opd/teacher_time_exposed"] >= 0.0
     assert trainer.all_metrics["opd/teacher_time_per_group_mean"] >= 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["returns", "raises"])
+async def test_trainer_train_closes_teacher_client(outcome, tokenizer):
+    """The teacher's sessions are closed when the training loop ends, and when it fails."""
+    teacher = FakeTeacher()
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, teacher=teacher)
+    base_train = AsyncMock(side_effect=RuntimeError("boom") if outcome == "raises" else None)
+
+    with patch.object(RayPPOTrainer, "train", base_train):
+        if outcome == "raises":
+            with pytest.raises(RuntimeError, match="boom"):
+                await trainer.train()
+        else:
+            await trainer.train()
+
+    base_train.assert_awaited_once()
+    assert teacher.closed
 
 
 @pytest.mark.asyncio
