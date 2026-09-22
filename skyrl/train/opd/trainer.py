@@ -15,7 +15,8 @@ The other three overrides consume the resulting ``GeneratorOutput["teacher_logpr
   ``rollout_logprobs``.
 - ``compute_advantages_and_returns`` subtracts ``kl_coef * (action_log_probs - teacher_logprobs)``
   on trainable tokens *after* the configured estimator, which is what lets the teacher term compose
-  with any estimator (GRPO would otherwise sum the per-token signal into one scalar per sequence).
+  with any estimator in mixed mode and any reward-only estimator in pure mode (GRPO would otherwise
+  sum the per-token signal into one scalar per sequence).
 """
 
 import asyncio

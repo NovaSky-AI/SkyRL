@@ -326,6 +326,15 @@ def test_opd_config_defaults_and_overrides(monkeypatch):
         (["trainer.teacher.model=m", "trainer.algorithm.zero_variance_filter=true"], "zero_variance_filter"),
         (["trainer.teacher.model=m", "trainer.algorithm.advantage_batch_normalize=true"], "advantage_batch_normalize"),
         (["trainer.teacher.model=m", "trainer.algorithm.policy_loss_type=rollout_is"], "old-logprob forward"),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.policy_loss_type=cispo",
+                "trainer.algorithm.cispo.cispo_anchor=rollout",
+            ],
+            "cispo_anchor='old'",
+        ),
+        (["trainer.teacher.model=m", "trainer.algorithm.advantage_estimator=gae"], "needs a task reward"),
         (["trainer.teacher.model=m", "trainer.algorithm.opd.kl_coef=-1"], "kl_coef"),
         (["trainer.teacher.model=m", "generator.step_wise_trajectories=true"], "step_wise"),
     ],
@@ -335,6 +344,21 @@ def test_validate_opd_cfg_rejects(monkeypatch, overrides, message):
     cfg = OPDExpConfig.from_cli_overrides(overrides)
     with pytest.raises(ValueError, match=message):
         validate_opd_cfg(cfg)
+
+
+def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo(monkeypatch):
+    monkeypatch.setenv("FIREWORKS_API_KEY", "k")
+    validate_opd_cfg(
+        OPDExpConfig.from_cli_overrides(
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.advantage_estimator=gae",
+                "trainer.algorithm.opd.use_task_reward=true",
+                "trainer.algorithm.policy_loss_type=cispo",
+                "trainer.algorithm.cispo.cispo_anchor=old",
+            ]
+        )
+    )
 
 
 def test_validate_opd_cfg_requires_api_key(monkeypatch):

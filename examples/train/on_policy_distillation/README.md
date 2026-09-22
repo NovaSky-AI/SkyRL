@@ -99,11 +99,13 @@ sent to vLLM servers.
 The entrypoint changes two algorithm defaults: `trainer.algorithm.use_kl_loss=false` (no reference
 model is instantiated; turn it on to add a reference-KL loss alongside the teacher) and
 `policy_loss_type=importance_sampling` (the Thinking Machines recipe; `regular`, PPO-clip, also
-works). Everything else keeps the core default: `advantage_estimator=grpo` (with zero rewards it
-emits zeros, so pure OPD needs no special estimator), `zero_variance_filter=false`, no dynamic
-sampling, `advantage_batch_normalize=false`, temperature and top-p 1.0. `validate_opd_cfg` rejects
-settings that would silently break the signal (zero-variance filtering, dynamic sampling,
-batch-normalized advantages, losses that skip the old-logprob forward pass).
+works). Everything else keeps the core default: `advantage_estimator=grpo` (with zero rewards the
+reward-only estimators, GRPO, RLOO and REINFORCE++, emit zeros, so pure OPD needs no special
+estimator), `zero_variance_filter=false`, no dynamic sampling, `advantage_batch_normalize=false`,
+temperature and top-p 1.0. `validate_opd_cfg` rejects settings that would silently break the signal:
+zero-variance filtering, dynamic sampling, batch-normalized advantages, losses that skip the
+old-logprob forward pass (`rollout_is`, `dppo`, and `cispo` with `cispo_anchor=rollout`), and `gae`
+in pure mode, where a critic's whitened value residuals would replace the teacher signal.
 
 ## How it works
 
@@ -117,8 +119,9 @@ batch-normalized advantages, losses that skip the old-logprob forward pass).
 - The same trainer zeroes the per-token rewards after their metrics are logged (pure mode), pads
   `teacher_logprobs` into the training batch right-aligned like `rollout_logprobs`, and after the
   advantage estimator subtracts `kl_coef · (action_log_probs − teacher_logprobs) · loss_mask`.
-  Applying the term after the estimator is what makes it compose with any estimator: GRPO would
-  otherwise sum the per-token signal into one scalar per sequence.
+  Applying the term after the estimator is what makes it compose with any estimator in mixed mode,
+  and with any reward-only estimator in pure mode: GRPO would otherwise sum the per-token signal
+  into one scalar per sequence.
 - `skyrl.train.opd.teacher_client.TeacherLogprobClient` is the abstract base class for teachers; it owns the concurrency limit,
   the length and finiteness checks, and a backend implements one method, `_compute_logprobs`.
 
