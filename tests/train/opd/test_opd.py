@@ -25,6 +25,7 @@ from skyrl.train.opd.config import (
 from skyrl.train.opd.teacher_client import (
     FireworksTeacherClient,
     TeacherLogprobClient,
+    VLLMTeacherClient,
     _extract_echoed_logprobs,
 )
 from skyrl.train.opd.trainer import OPDTrainer
@@ -218,6 +219,70 @@ async def test_fireworks_id_mismatch_raises():
 
 
 # ---------------------------------------------------------------------------
+# VLLMTeacherClient
+# ---------------------------------------------------------------------------
+
+
+def _vllm_response(prompt_len: int, ids: List[int], logprobs: List[float]) -> Dict[str, Any]:
+    """A vLLM completions choice with prompt_logprobs: None at position 0, then {id: {"logprob"}} per
+    token (JSON keys are strings). Each entry also carries an alternative, as a k>0 server would,
+    to show the lookup by sent id ignores extra entries."""
+    entries: List[Any] = [None] + [{"7": {"logprob": -9.0, "rank": 1}} for _ in range(prompt_len - 1)]
+    entries += [
+        {"7": {"logprob": -0.01, "rank": 1}, str(tid): {"logprob": lp, "rank": 2}} for tid, lp in zip(ids, logprobs)
+    ]
+    return {"choices": [{"text": "x", "logprobs": None, "prompt_logprobs": entries}]}
+
+
+def test_vllm_client_rejects_missing_model_and_urls():
+    with pytest.raises(ValueError, match="model name"):
+        VLLMTeacherClient("", server_urls=["http://a:8000"])
+    with pytest.raises(ValueError, match="server url"):
+        VLLMTeacherClient("m", server_urls=[])
+
+
+@pytest.mark.asyncio
+async def test_vllm_request_parse_and_round_robin():
+    client = VLLMTeacherClient("teacher", server_urls=["http://a:8000/", "http://b:8000"])
+    seen: Dict[str, Any] = {}
+
+    async def fake_post(body):
+        seen.update(body)
+        return _vllm_response(prompt_len=2, ids=[30, 31, 32], logprobs=[-0.5, -0.25, -0.125])
+
+    client._post = fake_post  # type: ignore[method-assign]
+    out = await client.compute_logprobs([10, 11], [30, 31, 32])
+
+    assert out == [-0.5, -0.25, -0.125]
+    assert seen["prompt"] == [10, 11, 30, 31, 32]
+    assert seen["model"] == "teacher" and seen["max_tokens"] == 1 and seen["prompt_logprobs"] == 0
+    assert [client._next_url() for _ in range(3)] == [
+        "http://a:8000/v1/completions",
+        "http://b:8000/v1/completions",
+        "http://a:8000/v1/completions",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vllm_wrong_token_id_and_short_response_raise():
+    client = VLLMTeacherClient("teacher", server_urls=["http://a:8000"])
+
+    async def scored_a_different_token(body):
+        return _vllm_response(prompt_len=1, ids=[99], logprobs=[-1.0])  # we sent 30
+
+    client._post = scored_a_different_token  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="tokenizer"):
+        await client.compute_logprobs([10], [30])
+
+    async def too_short(body):
+        return {"choices": [{"prompt_logprobs": [None]}]}
+
+    client._post = too_short  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="prompt logprobs"):
+        await client.compute_logprobs([10], [30])
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -244,6 +309,7 @@ def test_opd_config_defaults_and_overrides(monkeypatch):
     [
         ([], "trainer.teacher.model must be set"),
         (["trainer.teacher.model=m", "trainer.teacher.backend=bogus"], "backend must be one of"),
+        (["trainer.teacher.model=m", "trainer.teacher.backend=vllm"], "server_urls"),
         (["trainer.teacher.model=m", "trainer.algorithm.zero_variance_filter=true"], "zero_variance_filter"),
         (["trainer.teacher.model=m", "trainer.algorithm.advantage_batch_normalize=true"], "advantage_batch_normalize"),
         (["trainer.teacher.model=m", "trainer.algorithm.policy_loss_type=rollout_is"], "old-logprob forward"),
