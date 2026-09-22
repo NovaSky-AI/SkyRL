@@ -262,8 +262,8 @@ async def test_run_checks_the_actual_published_update_and_cleans_up(
     ]
     if update_size >= 0.05:
         expected += ["publish", "score_adapter"]
-        if not wrong_publication:
-            expected += ["score_adapter"]
+        expected += ["score_adapter"]
+        assert "updated_repeat_noise" in report
     assert calls == expected + ["cleanup"]
 
 

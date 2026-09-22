@@ -69,9 +69,9 @@ async def run(args, report):
             check_update_stimulus(report, args.mean_atol)
             await publish(policy, client, cfg)
             report["updated"] = await score_sampler(client, sequences, adapter)
-            check_updated_adapter(report, args.mean_atol, args.max_atol)
             report["updated_repeat"] = await score_sampler(client, sequences, adapter)
             check_updated_repeat(report)
+            check_updated_adapter(report, args.mean_atol, args.max_atol)
         finally:
             # Preserve failed assertions even if subsequent runtime cleanup hangs.
             write_report(args.output_dir, report)
@@ -109,9 +109,9 @@ async def check_replayed_policy(policy, client, cfg, sequences, pad_token_id, re
     await publish(policy, client, cfg)
     updated_batch = await score_phase("updated", adapter)
     report["trainer_updated"] = score_trainer(policy, updated_batch)
-    check_updated_adapter(report, args.mean_atol, args.max_atol)
     await score_phase("updated_repeat", adapter)
     check_updated_repeat(report)
+    check_updated_adapter(report, args.mean_atol, args.max_atol)
 
 
 def write_report(output_dir, report):
