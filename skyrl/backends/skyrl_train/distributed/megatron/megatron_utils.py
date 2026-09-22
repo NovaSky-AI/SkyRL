@@ -20,10 +20,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import gc
-import re
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -265,6 +264,7 @@ def patch_packed_per_expert_sharded_state_dict():
 
     cls.sharded_state_dict = sharded_state_dict
     cls._skyrl_sharded_state_dict_patched = True
+
 
 def gdn_in_proj_lora_is_safe(bridge) -> bool:
     """Whether LoRA on GatedDeltaNet ``in_proj`` can round-trip through weight sync.

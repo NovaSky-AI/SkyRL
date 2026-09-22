@@ -435,12 +435,12 @@ class MegatronWorker:
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
                 lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
                 experts_shared_outer_loras=experts_shared_outer_loras,
+                normalize_moe_lora=normalize_moe_lora,
+                share_expert_adapters=lora_config.share_expert_adapters,
             )
         elif lora_type == "canonical_lora":
             if experts_shared_outer_loras:
                 raise ValueError("experts_shared_outer_loras is only supported with lora_type='lora'")
-            normalize_moe_lora=self.cfg.policy.megatron_config.lora_config.normalize_moe_lora,
-            share_expert_adapters=lora_config.share_expert_adapters,
             # TODO (sumanthrh): Why is share_expert_adapters not passed here?
             self.lora_cls = CanonicalLoRA(
                 target_modules=target_modules,
