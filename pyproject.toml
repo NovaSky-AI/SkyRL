@@ -337,6 +337,10 @@ fast-hadamard-transform = ["torch==2.13.0", "ninja"]
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 fast-hadamard-transform = { FAST_HADAMARD_TRANSFORM_FORCE_BUILD = "TRUE"}
+# SkyRL only uses NVRx's async checkpointing. Its CUPTI straggler-detection extension
+# only adds CUPTI's include dir and fails with `cuda.h: No such file or directory` unless
+# the toolkit's headers are on the default include path, so skip building it.
+nvidia-resiliency-ext = { STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD = "1" }
 
 
 [[tool.uv.index]]
