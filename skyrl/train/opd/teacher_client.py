@@ -6,8 +6,9 @@ That is a prefill (a forward pass over ``prompt + response`` with nothing sample
 belongs on an inference engine, not on a training worker.
 
 ``TeacherLogprobClient`` is the abstract base class. It owns everything every backend needs
-identically -- the concurrency limit, the empty-response case, the length invariant and the
-startup determinism check -- and a backend implements one method, ``_compute_logprobs``.
+identically -- the concurrency limit, the empty-response case, the length and finiteness
+invariants and the startup determinism check -- and a backend implements one method,
+``_compute_logprobs``.
 Callers only ever use ``compute_logprobs``.
 
 Backends, both over ``aiohttp`` so the package adds no dependency:
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -62,7 +64,9 @@ class TeacherLogprobClient(abc.ABC):
         """``log p_teacher(response_ids[t] | prompt_ids + response_ids[:t])`` for every ``t``.
 
         Returns one float per response token, in order. Empty responses return ``[]`` without a
-        request. At most ``max_concurrency`` requests are in flight per client.
+        request. At most ``max_concurrency`` requests are in flight per client. A wrong number of
+        values or a non-finite value raises: a NaN or infinity would pass the self-test unnoticed
+        (every comparison with NaN is false) and poison the advantages.
         """
         if not response_ids:
             return []
@@ -70,6 +74,11 @@ class TeacherLogprobClient(abc.ABC):
             logprobs = await self._compute_logprobs(list(prompt_ids), list(response_ids))
         if len(logprobs) != len(response_ids):
             raise RuntimeError(f"teacher returned {len(logprobs)} logprobs for {len(response_ids)} response tokens")
+        if not all(math.isfinite(value) for value in logprobs):
+            raise RuntimeError(
+                "teacher returned a non-finite logprob (NaN or infinity); its forward pass is numerically broken "
+                "or a logit processor masked a token"
+            )
         return logprobs
 
     @abc.abstractmethod
