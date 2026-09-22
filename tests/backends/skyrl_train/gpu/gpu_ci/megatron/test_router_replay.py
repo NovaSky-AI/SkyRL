@@ -161,17 +161,94 @@ def build_training_input_from_text_samples(
     return training_input
 
 
+def _configure_lora_adapter(cfg: SkyRLTrainConfig) -> None:
+    """Serve the policy as a LoRA adapter (Megatron ``merge_lora=False``) so vLLM runs with ``enable_lora``.
+
+    Moonlight is MLA, so the attention LoRA target is linear_proj only; linear_fc1/fc2 put
+    LoRA on the routed experts, exercising vLLM's fused-MoE LoRA path under route capture.
+    """
+    lora = cfg.trainer.policy.model.lora
+    lora.rank = 32
+    lora.alpha = 32
+    lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    # lora_B is zero-initialized; a LoRA-scale LR makes the few steps below move it.
+    cfg.trainer.policy.optimizer_config.lr = 1e-4
+
+
+async def _sync_policy_to_engines(policy, client, cfg: SkyRLTrainConfig) -> None:
+    """Colocated weight sync: engines asleep, policy on GPU -> engines awake, policy offloaded."""
+    policy.offload_to_cpu(offload_optimizer=True, offload_model=False)
+    await client.wake_up(tags=["weights"])
+    ray.get(
+        policy.async_run_ray_method(
+            "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+        )
+    )
+    policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
+    await client.wake_up(tags=["kv_cache"])
+    await client.reset_prefix_cache()
+
+
+async def _train_sync_and_check_lora_adapter(policy, client, cfg: SkyRLTrainConfig, tokenizer) -> None:
+    """Move the adapter off its zero init, sync it, and check vLLM applies it on /skyrl/v1/generate."""
+    # No routes in the batch, so this trains on native routing even with replay enabled on the worker.
+    train_input = build_training_input_from_text_samples(
+        tokenizer,
+        [(f"What is {i} + {i}?", f"The answer is {i + i}.") for i in range(8)],
+    )
+    gen = torch.Generator().manual_seed(0)
+    train_input["advantages"] = torch.randn(train_input["advantages"].shape, generator=gen)
+    for _ in range(3):
+        ray.get(policy.async_run_ray_method("mesh", "forward_backward", data=train_input))
+        ray.get(policy.async_run_ray_method("pass_through", "optim_step"))
+
+    await _sync_policy_to_engines(policy, client, cfg)
+
+    # Greedy rollouts under the adapter name must diverge from the base model on the same prompts.
+    probe_prompts = [
+        tokenizer.encode(f"Question: what is {i} times {i + 3}? Answer:", add_special_tokens=False) for i in range(8)
+    ]
+    greedy = get_sampling_params_for_backend(
+        "vllm", SamplingParams(temperature=0.0, max_generate_length=32, logprobs=1)
+    )
+    base_out = await client.generate(
+        {"prompt_token_ids": probe_prompts, "sampling_params": greedy}, model=client.model_name
+    )
+    adapter_out = await client.generate(
+        {"prompt_token_ids": probe_prompts, "sampling_params": greedy}, model=resolve_policy_model_name(cfg)
+    )
+    assert base_out["rollout_expert_indices"] is not None
+    assert adapter_out["rollout_expert_indices"] is not None
+    base_lp = torch.tensor([lp[0] for lp in base_out["response_logprobs"]])
+    adapter_lp = torch.tensor([lp[0] for lp in adapter_out["response_logprobs"]])
+    outputs_differ = base_out["response_ids"] != adapter_out["response_ids"]
+    first_lp_diff = (base_lp - adapter_lp).abs().max().item()
+    print(f"adapter vs base: outputs_differ={outputs_differ}, max first-token logprob diff={first_lp_diff:.6f}")
+    assert (
+        outputs_differ or first_lp_diff > 1e-3
+    ), "adapter rollouts match the base model -- /skyrl/v1/generate is not applying the LoRA adapter"
+
+
 @pytest.mark.asyncio
 @pytest.mark.h100
 @pytest.mark.parametrize(
-    "tp,pp,cp,ep,etp,extra_tf_kwargs",
+    "tp,pp,cp,ep,etp,extra_tf_kwargs,use_lora",
     [
-        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, id="tp2_pp2_ep2"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, False, id="tp2_pp2_ep2"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, True, id="tp2_pp2_ep2_lora"),
     ],
 )
-async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs):
+async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs, use_lora):
     """
     Check that logprob diff is lower when using router replay. Runs on 4xH100.
+
+    With ``use_lora`` the policy is served as a LoRA adapter (Megatron ``merge_lora=False``),
+    so rollouts go through ``/skyrl/v1/generate`` with ``model=<adapter>``. The adapter is
+    trained a few steps and synced first, and must visibly change rollouts vs the base model.
+
+    Both scoring passes run on one worker: it skips replay for a batch that carries no routes,
+    so dropping them gives native routing with identical weights (including the adapter).
     """
     with ray_init(extra_env_vars=_extra_env_vars_for_model(MOE_MODEL_NAME)):
         cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
@@ -187,7 +264,25 @@ async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs):
         cfg.generator.batched = False
         cfg.generator.max_turns = 1
 
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
+        if extra_tf_kwargs is not None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        cfg.trainer.policy.megatron_config.context_parallel_size = cp
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
+        cfg.trainer.micro_forward_batch_size_per_gpu = 2
+        cfg.trainer.micro_train_batch_size_per_gpu = 2
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
+        if use_lora:
+            _configure_lora_adapter(cfg)
+        validate_cfg(cfg)
+        assert _uses_lora_weight_sync(cfg) == use_lora
+
         tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
         async with InferenceEngineState.create(
             cfg=cfg,
@@ -196,16 +291,36 @@ async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs):
             colocate_all=True,
             backend="vllm",
             sleep_level=1,
-            gpu_memory_utilization=0.9,
+            gpu_memory_utilization=0.8 if use_lora else 0.9,
         ) as engines:
             client, pg = engines.client, engines.pg
-            await client.wake_up()
+
+            policy = None
+            if use_lora:
+                # The adapter only exists on vLLM after a sync, so build the policy first.
+                await client.sleep()
+                policy = init_worker_with_type(
+                    "policy",
+                    shared_pg=pg,
+                    colocate_all=True,
+                    num_gpus_per_node=4,
+                    cfg=cfg,
+                )
+                ray.get(
+                    policy.async_run_ray_method(
+                        "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+                    )
+                )
+                await _train_sync_and_check_lora_adapter(policy, client, cfg, tokenizer)
+            else:
+                await client.wake_up()
 
             generator = SkyRLGymGenerator(
                 generator_cfg=cfg.generator,
                 skyrl_gym_cfg=cfg.environment.skyrl_gym,
                 inference_engine_client=client,
                 tokenizer=tokenizer,
+                policy_model_name=resolve_policy_model_name(cfg) if use_lora else None,
             )
 
             input_batch: GeneratorInput = get_test_generator_input(
@@ -240,78 +355,67 @@ async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs):
             ), f"Batch size mismatch: {len(indices)} indices vs {len(responses)} responses"
             await client.sleep()
 
-        rewards = generator_output["rewards"]
-        if rewards and not isinstance(rewards[0], list):
-            rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
-        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor, _ = (
-            convert_prompts_responses_to_batch_tensors(
-                pad_token_id=tokenizer.pad_token_id,
-                prompts=generator_output["prompt_token_ids"],
-                responses=responses,
-                rewards=rewards,
-                loss_masks=generator_output["loss_masks"],
-                logprobs=generator_output.get("rollout_logprobs"),
-                rollout_expert_indices=indices,
-            )
-        )
-
-        assert rii_tensor is not None
-        router_padding_mask = make_router_padding_mask(attention_mask, [len(sample) for sample in indices])
-        num_actions = response_mask.shape[1]
-        batch_size = sequences.shape[0]
-        training_input = TrainingInputBatch(
-            {
-                "sequences": sequences,
-                "attention_mask": attention_mask,
-                "response_mask": response_mask,
-                "rewards": rewards_t,
-                "loss_mask": loss_mask_t,
-                "rollout_logprobs": (
-                    logprobs_t
-                    if logprobs_t is not None
-                    else torch.zeros((batch_size, num_actions), dtype=torch.float32)
-                ),
-                "rollout_expert_indices": rii_tensor,
-                "router_padding_mask": router_padding_mask,
-                "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            }
-        )
-        training_input.metadata = {"response_length": num_actions}
-
-        cfg.trainer.placement.policy_num_gpus_per_node = 4
-        if extra_tf_kwargs is not None:
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
-        cfg.trainer.policy.megatron_config.context_parallel_size = cp
-        cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
-        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
-        cfg.trainer.micro_forward_batch_size_per_gpu = 2
-        cfg.trainer.micro_train_batch_size_per_gpu = 2
-
-        def run_megatron_forward(enable_replay: bool) -> torch.Tensor:
-            cfg.trainer.policy.megatron_config.moe_enable_routing_replay = enable_replay
-            actor_group = init_worker_with_type(
-                "policy",
-                shared_pg=pg,
-                colocate_all=True,
-                num_gpus_per_node=4,
-                cfg=cfg,
+            rewards = generator_output["rewards"]
+            if rewards and not isinstance(rewards[0], list):
+                rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
+            sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor, _ = (
+                convert_prompts_responses_to_batch_tensors(
+                    pad_token_id=tokenizer.pad_token_id,
+                    prompts=generator_output["prompt_token_ids"],
+                    responses=responses,
+                    rewards=rewards,
+                    loss_masks=generator_output["loss_masks"],
+                    logprobs=generator_output.get("rollout_logprobs"),
+                    rollout_expert_indices=indices,
+                )
             )
 
-            refs = actor_group.async_run_ray_method("mesh", "forward", data=training_input)
-            results = ray.get(refs)
-            output = WorkerOutput.cat(actor_group.actor_infos, results)
-            outputs = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
+            assert rii_tensor is not None and logprobs_t is not None
+            router_padding_mask = make_router_padding_mask(attention_mask, [len(sample) for sample in indices])
+            num_actions = response_mask.shape[1]
+            batch_size = sequences.shape[0]
+            training_input = TrainingInputBatch(
+                {
+                    "sequences": sequences,
+                    "attention_mask": attention_mask,
+                    "response_mask": response_mask,
+                    "rewards": rewards_t,
+                    "loss_mask": loss_mask_t,
+                    "rollout_logprobs": logprobs_t,
+                    "rollout_expert_indices": rii_tensor,
+                    "router_padding_mask": router_padding_mask,
+                    "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+                    "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+                    "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+                }
+            )
+            training_input.metadata = {"response_length": num_actions}
+            no_replay_input = training_input.select(
+                [k for k in training_input if k not in ("rollout_expert_indices", "router_padding_mask")]
+            )
 
-            for actor in actor_group._actor_handlers:
+            if policy is None:
+                policy = init_worker_with_type(
+                    "policy",
+                    shared_pg=pg,
+                    colocate_all=True,
+                    num_gpus_per_node=4,
+                    cfg=cfg,
+                )
+            else:
+                policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
+
+            def run_megatron_forward(data: TrainingInputBatch) -> torch.Tensor:
+                results = ray.get(policy.async_run_ray_method("mesh", "forward", data=data))
+                output = WorkerOutput.cat(policy.actor_infos, results)
+                return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
+
+            r3_logprobs = run_megatron_forward(training_input)
+            no_r3_logprobs = run_megatron_forward(no_replay_input)
+
+            for actor in policy._actor_handlers:
                 ray.kill(actor)
-            return outputs
 
-        r3_logprobs = run_megatron_forward(enable_replay=True)
-        no_r3_logprobs = run_megatron_forward(enable_replay=False)
         mask = response_mask.bool()
 
         vllm_valid = logprobs_t[mask]
@@ -574,241 +678,3 @@ def test_forward_backward_variable_length_full_recompute(tp, pp, cp, ep, etp, ex
 
         for actor in actor_group._actor_handlers:
             ray.kill(actor)
-
-
-async def _sync_policy_to_engines(policy, client, cfg: SkyRLTrainConfig) -> None:
-    """Colocated weight sync: engines asleep, policy on GPU -> engines awake, policy offloaded."""
-    policy.offload_to_cpu(offload_optimizer=True, offload_model=False)
-    await client.wake_up(tags=["weights"])
-    ray.get(
-        policy.async_run_ray_method(
-            "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
-        )
-    )
-    policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
-    await client.wake_up(tags=["kv_cache"])
-    await client.reset_prefix_cache()
-
-
-@pytest.mark.asyncio
-@pytest.mark.h100
-@pytest.mark.parametrize(
-    "tp,pp,cp,ep,etp,extra_tf_kwargs",
-    [
-        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, id="tp2_pp2_ep2"),
-    ],
-)
-async def test_logprobs_lora_adapter(tp, pp, cp, ep, etp, extra_tf_kwargs):
-    """R3 with the policy served as a LoRA adapter (Megatron ``merge_lora=False``). Runs on 4xH100.
-
-    vLLM runs with ``enable_lora``, so rollouts go through ``/skyrl/v1/generate`` with
-    ``model=<adapter>``. Checks that (1) the endpoint actually applies the adapter --
-    after a few optimizer steps, adapter rollouts differ from base-model rollouts on
-    the same prompts -- and (2) replaying the routes vLLM recorded under the adapter
-    brings Megatron's logprobs closer to vLLM's than native routing does.
-    """
-    with ray_init(extra_env_vars=_extra_env_vars_for_model(MOE_MODEL_NAME)):
-        cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
-        cfg.trainer.strategy = "megatron"
-        cfg.generator.inference_engine.enable_return_routed_experts = True
-        cfg.generator.inference_engine.tensor_parallel_size = 4
-        cfg.generator.inference_engine.num_engines = 1
-        cfg.generator.sampling_params = SamplingParams(
-            max_generate_length=MAX_GENERATE_LENGTH,
-            logprobs=1,
-            temperature=1.0,
-        )
-        cfg.generator.batched = False
-        cfg.generator.max_turns = 1
-
-        # Serve the policy as an adapter rather than merged weights. Moonlight is MLA,
-        # so the attention LoRA target is linear_proj only; linear_fc1/fc2 put LoRA on
-        # the routed experts, exercising vLLM's fused-MoE LoRA path under capture.
-        lora = cfg.trainer.policy.model.lora
-        lora.rank = 32
-        lora.alpha = 32
-        lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
-        cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
-        # lora_B is zero-initialized; a LoRA-scale LR makes the few steps below move it.
-        cfg.trainer.policy.optimizer_config.lr = 1e-4
-
-        cfg.trainer.placement.policy_num_gpus_per_node = 4
-        if extra_tf_kwargs is not None:
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
-        cfg.trainer.policy.megatron_config.context_parallel_size = cp
-        cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
-        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
-        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
-        validate_cfg(cfg)
-        assert _uses_lora_weight_sync(cfg), "test premise: vLLM must serve the policy as a LoRA adapter"
-        adapter_name = resolve_policy_model_name(cfg)
-
-        tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        async with InferenceEngineState.create(
-            cfg=cfg,
-            model=MOE_MODEL_NAME,
-            use_local=True,
-            colocate_all=True,
-            backend="vllm",
-            sleep_level=1,
-            gpu_memory_utilization=0.8,
-        ) as engines:
-            client, pg = engines.client, engines.pg
-            await client.sleep()
-
-            policy = init_worker_with_type(
-                "policy",
-                shared_pg=pg,
-                colocate_all=True,
-                num_gpus_per_node=4,
-                cfg=cfg,
-            )
-            ray.get(
-                policy.async_run_ray_method(
-                    "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
-                )
-            )
-
-            # Move the adapter off its zero init. No routes in the batch, so this
-            # trains on native routing even with replay enabled on the worker.
-            train_input = build_training_input_from_text_samples(
-                tokenizer,
-                [(f"What is {i} + {i}?", f"The answer is {i + i}.") for i in range(8)],
-            )
-            gen = torch.Generator().manual_seed(0)
-            train_input["advantages"] = torch.randn(train_input["advantages"].shape, generator=gen)
-            for _ in range(3):
-                ray.get(policy.async_run_ray_method("mesh", "forward_backward", data=train_input))
-                ray.get(policy.async_run_ray_method("pass_through", "optim_step"))
-
-            await _sync_policy_to_engines(policy, client, cfg)
-
-            # (1) The adapter is applied on the custom generate path: greedy rollouts
-            # under the adapter name diverge from the base model on the same prompts.
-            probe_prompts = [
-                tokenizer.encode(f"Question: what is {i} times {i + 3}? Answer:", add_special_tokens=False)
-                for i in range(8)
-            ]
-            greedy = get_sampling_params_for_backend(
-                "vllm", SamplingParams(temperature=0.0, max_generate_length=32, logprobs=1)
-            )
-            base_out = await client.generate(
-                {"prompt_token_ids": probe_prompts, "sampling_params": greedy}, model=client.model_name
-            )
-            adapter_out = await client.generate(
-                {"prompt_token_ids": probe_prompts, "sampling_params": greedy}, model=adapter_name
-            )
-            assert base_out["rollout_expert_indices"] is not None
-            assert adapter_out["rollout_expert_indices"] is not None
-            base_lp = torch.tensor([lp[0] for lp in base_out["response_logprobs"]])
-            adapter_lp = torch.tensor([lp[0] for lp in adapter_out["response_logprobs"]])
-            outputs_differ = base_out["response_ids"] != adapter_out["response_ids"]
-            first_lp_diff = (base_lp - adapter_lp).abs().max().item()
-            print(f"adapter vs base: outputs_differ={outputs_differ}, max first-token logprob diff={first_lp_diff:.6f}")
-            assert (
-                outputs_differ or first_lp_diff > 1e-3
-            ), "adapter rollouts match the base model -- /skyrl/v1/generate is not applying the LoRA adapter"
-
-            # (2) R3 under the adapter.
-            generator = SkyRLGymGenerator(
-                generator_cfg=cfg.generator,
-                skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                inference_engine_client=client,
-                tokenizer=tokenizer,
-                policy_model_name=adapter_name,
-            )
-            input_batch: GeneratorInput = get_test_generator_input(
-                model=MOE_MODEL_NAME,
-                num_prompts=NUM_PROMPTS,
-                n_samples_per_prompt=N_SAMPLES_PER_PROMPT,
-                max_prompt_length=512,
-                env_class="gsm8k",
-            )
-            input_batch["sampling_params"] = get_sampling_params_for_backend(
-                "vllm",
-                SamplingParams(
-                    temperature=1.0,
-                    top_p=1.0,
-                    top_k=-1,
-                    max_generate_length=MAX_GENERATE_LENGTH,
-                    min_p=0.0,
-                    logprobs=1,
-                ),
-            )
-            with Timer("generate_with_router_replay_lora"):
-                generator_output = await generator.generate(input_batch)
-
-            indices = generator_output["rollout_expert_indices"]
-            responses = generator_output["response_ids"]
-            assert indices is not None and len(indices) == len(responses)
-            await client.sleep()
-
-            rewards = generator_output["rewards"]
-            if rewards and not isinstance(rewards[0], list):
-                rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
-            sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor, _ = (
-                convert_prompts_responses_to_batch_tensors(
-                    pad_token_id=tokenizer.pad_token_id,
-                    prompts=generator_output["prompt_token_ids"],
-                    responses=responses,
-                    rewards=rewards,
-                    loss_masks=generator_output["loss_masks"],
-                    logprobs=generator_output.get("rollout_logprobs"),
-                    rollout_expert_indices=indices,
-                )
-            )
-            assert rii_tensor is not None and logprobs_t is not None
-            num_actions = response_mask.shape[1]
-            batch_size = sequences.shape[0]
-            training_input = TrainingInputBatch(
-                {
-                    "sequences": sequences,
-                    "attention_mask": attention_mask,
-                    "response_mask": response_mask,
-                    "rewards": rewards_t,
-                    "loss_mask": loss_mask_t,
-                    "rollout_logprobs": logprobs_t,
-                    "rollout_expert_indices": rii_tensor,
-                    "router_padding_mask": make_router_padding_mask(attention_mask, [len(s) for s in indices]),
-                    "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                    "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                    "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                }
-            )
-            training_input.metadata = {"response_length": num_actions}
-            # Same adapter, native routing: the worker skips replay when a batch carries no routes.
-            no_replay_input = training_input.select(
-                [k for k in training_input if k not in ("rollout_expert_indices", "router_padding_mask")]
-            )
-
-            policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
-
-            def run_forward(data: TrainingInputBatch) -> torch.Tensor:
-                results = ray.get(policy.async_run_ray_method("mesh", "forward", data=data))
-                output = WorkerOutput.cat(policy.actor_infos, results)
-                return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
-
-            r3_logprobs = run_forward(training_input)
-            no_r3_logprobs = run_forward(no_replay_input)
-
-            for actor in policy._actor_handlers:
-                ray.kill(actor)
-
-        mask = response_mask.bool()
-        vllm_valid = logprobs_t[mask]
-        r3_diff = (vllm_valid - r3_logprobs[mask]).abs()
-        no_r3_diff = (vllm_valid - no_r3_logprobs[mask]).abs()
-        print(f"LoRA with replay    - logprob diff mean: {r3_diff.mean().item():.6f}, std: {r3_diff.std().item():.6f}")
-        print(
-            f"LoRA without replay - logprob diff mean: {no_r3_diff.mean().item():.6f}, std: {no_r3_diff.std().item():.6f}"
-        )
-
-        assert r3_diff.mean().item() < no_r3_diff.mean().item(), (
-            f"Router replay under a LoRA adapter should reduce logprob diff vs rollout, "
-            f"but with_replay={r3_diff.mean().item():.6f} >= without_replay={no_r3_diff.mean().item():.6f}"
-        )
