@@ -50,11 +50,10 @@ Capture, from SkyRL's environment -- the upstream plugin imports SkyRL's
       --record-dir /tmp/harbor-capture \
       --upstream-module examples.train_integrations.harbor_capture.upstream
 
-Rollouts (`MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` for Harbor's sandboxes,
-`HARBOR_TASKS` for the task directory):
+Rollouts (`MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` for Harbor's sandboxes):
 
-    python validation/rollout_phase.py --tasks 4 --group-size 8 --turns 8 \
-      --timeout 180 --concurrency 16
+    python validation/rollout_phase.py --task-dir /path/to/harbor/tasks \
+      --tasks 4 --group-size 8 --turns 8 --timeout 180 --concurrency 16
 
 Then:
 

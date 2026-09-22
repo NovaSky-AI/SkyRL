@@ -33,9 +33,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger("rollout")
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1].parent / "harbor/harbor_trial_config/default.yaml"
-TASKS = Path(os.environ.get("HARBOR_TASKS", "/home/ray/default/work_skyrl/work_icap/data/harbor"))
-#: Where a run writes its summary. One file per run id.
-RESULTS = Path(os.environ.get("CAPTURE_RESULTS", Path(__file__).resolve().parent / "results"))
+#: Where a run writes its summary, one file per run id.
+RESULTS = Path(__file__).resolve().parent / "results"
 
 
 class GeneratorConfig:
@@ -93,15 +92,16 @@ def trial_config(model: str, *, turns: int, timeout: int, summarize: bool) -> di
     return config
 
 
-def pick_tasks(count: int) -> list[str]:
-    found = sorted(p for p in TASKS.iterdir() if (p / "task.toml").is_file())
+def pick_tasks(directory: Path, count: int) -> list[str]:
+    found = sorted(p for p in directory.iterdir() if (p / "task.toml").is_file())
     if not found:
-        raise SystemExit(f"no harbor tasks under {TASKS}")
+        raise SystemExit(f"no harbor tasks under {directory}")
     return [str(p) for p in found[:count]]
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--task-dir", required=True, help="directory of Harbor tasks")
     parser.add_argument("--tasks", type=int, default=1, help="distinct prompts")
     parser.add_argument("--group-size", type=int, default=1, help="rollouts per prompt")
     parser.add_argument("--concurrency", type=int, default=16, help="sandboxes in flight")
@@ -118,7 +118,7 @@ async def main() -> int:
         if not os.environ.get(name):
             raise SystemExit(f"{name} is not set; Harbor cannot start a sandbox")
 
-    prompts = pick_tasks(args.tasks)
+    prompts = pick_tasks(Path(args.task_dir), args.tasks)
     # One rollout per (prompt, repetition). The repetitions of a prompt are
     # its GRPO group: they share an `instance_id`, which is what the trainer
     # groups by when it normalises rewards.

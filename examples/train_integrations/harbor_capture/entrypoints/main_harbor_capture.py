@@ -10,8 +10,8 @@ Runnable as it stands, the same way as the sibling generate entrypoint:
         trainer.policy.model.path=... data.train_data="['/path/to/harbor/tasks']"
 
 Capture comes up inside this process by default, so nothing has to be started
-first -- it writes a record directory and there is no database. `CAPTURE_INPROCESS=0`
-with `CAPTURE_ENDPOINT` uses a separate `skyrl-capture serve` instead.
+first -- it writes a record directory and there is no database. Setting
+`CAPTURE_ENDPOINT` uses a separate `skyrl-capture serve` instead.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 UPSTREAM_MODULE = "examples.train_integrations.harbor_capture.upstream"
 
 DEFAULT_RECORD_DIR = Path("./harbor-capture-record")
+DEFAULT_PORT = 8080
 
 
 def start_capture(
@@ -49,8 +50,8 @@ def start_capture(
     model_name: str,
     tokenizer_name: str,
     max_model_len: int,
-    record_dir: Any = None,
-    port: int | None = None,
+    record_dir: Any = DEFAULT_RECORD_DIR,
+    port: int = DEFAULT_PORT,
 ) -> Any:
     """Bring capture up in this process, in front of the engine.
 
@@ -68,13 +69,11 @@ def start_capture(
     Nothing has to exist first: capture writes a record directory, and creates
     it if it is new. There is no database.
     """
-    import os
-
     from skyrl_capture.config import Config, TitoUpstream
     from skyrl_capture.service import CaptureService
 
     config = Config(
-        record_dir=Path(record_dir or os.environ.get("CAPTURE_RECORD_DIR") or DEFAULT_RECORD_DIR),
+        record_dir=Path(record_dir),
         upstream=TitoUpstream(
             type="skyrl",
             url=engine_url,
@@ -88,10 +87,7 @@ def start_capture(
         # process, where this module's import would not have happened.
         upstream_modules=(UPSTREAM_MODULE,),
     )
-    service = CaptureService(
-        config=config,
-        port=port if port is not None else int(os.environ.get("CAPTURE_PORT", 8080)),
-    )
+    service = CaptureService(config=config, port=port)
     # Returns once the service is serving, so trajectory URLs handed out on
     # the next line are usable rather than a race the harness loses.
     service.start(blocking=False)
@@ -122,19 +118,18 @@ def capture_for_run(
     """Capture for this run: in this process, or one already serving.
 
     In-process is the default and is what most jobs want -- nothing has to be
-    started first, and it dies with the job. ``CAPTURE_INPROCESS=0`` with
-    ``CAPTURE_ENDPOINT`` points at a separate ``skyrl-capture serve`` instead,
-    which is right when several jobs share one capture, or when the viewer
-    should outlive the run.
+    started first, and it dies with the job. Setting ``CAPTURE_ENDPOINT``
+    points at a separate ``skyrl-capture serve`` instead, which is right when
+    several jobs share one capture, or when the viewer should outlive the run.
+
+    Naming an endpoint is the whole intent, so there is no second variable
+    saying whether to use it. ``CAPTURE_ENDPOINT`` is also what the capture
+    SDK reads, so this is not a setting invented here.
     """
     import os
 
-    if os.environ.get("CAPTURE_INPROCESS", "1").strip().lower() in ("0", "false", "no", "off"):
-        endpoint = os.environ.get("CAPTURE_ENDPOINT", "")
-        if not endpoint:
-            raise RuntimeError(
-                "CAPTURE_INPROCESS=0 needs CAPTURE_ENDPOINT to point at `skyrl-capture serve`"
-            )
+    endpoint = os.environ.get("CAPTURE_ENDPOINT", "").strip()
+    if endpoint:
         logger.info("skyrl-capture out-of-process at %s", endpoint)
         # That process is configured with its own upstream, and resolves the
         # protocol by name, so it needs this wire registered too:
@@ -149,8 +144,7 @@ def capture_for_run(
         # The tokenizer capture renders with. It need not be the one the
         # trainer renders with -- when they differ, that difference is the
         # thing worth measuring.
-        tokenizer_name=tokenizer_name
-        or os.environ.get("CAPTURE_TOKENIZER", cfg.trainer.policy.model.path),
+        tokenizer_name=tokenizer_name or cfg.trainer.policy.model.path,
         max_model_len=int(engine_init["max_model_len"]),
     )
 

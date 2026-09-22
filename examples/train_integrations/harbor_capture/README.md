@@ -118,11 +118,16 @@ uv run --with-editable /path/to/inference-capture \
   data.train_data="['/path/to/harbor/tasks']"
 ```
 
-Capture runs in this process by default. `CAPTURE_INPROCESS=0` with
-`CAPTURE_ENDPOINT` points at a separate `skyrl-capture serve` instead, which
-needs the same upstream module named on its command line -- and needs
-`PYTHONPATH` to include this checkout, since `examples.…` is a path, not an
-installed package.
+Capture runs in this process by default. Setting `CAPTURE_ENDPOINT` points at
+a separate `skyrl-capture serve` instead -- naming an endpoint is the whole
+intent, so there is no second switch. That process needs the same upstream
+module on its command line, and `PYTHONPATH` set to this checkout, since
+`examples.…` is a path rather than an installed package.
+
+`CAPTURE_ENDPOINT` is the only environment variable this example reads, and it
+is the capture SDK's own. Everything else -- the record directory, the port,
+the tokenizer -- is an argument or comes from the run config, so there is one
+place to look for each.
 
 The plugin imports SkyRL's `generate_wire` for the routed-expert decoder, so a
 standalone capture process has to run from SkyRL's environment.
