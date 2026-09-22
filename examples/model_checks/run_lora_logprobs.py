@@ -51,7 +51,7 @@ async def run(args, report):
         try:
             replay = cfg.trainer.policy.megatron_config.moe_enable_routing_replay
             if replay:
-                await check_replayed_policy(policy, client, cfg, batch, sequences, pad_token_id, report, args)
+                await check_replayed_policy(policy, client, cfg, sequences, pad_token_id, report, args)
                 return
             await check_zero_initialized_policy(
                 policy,
@@ -77,7 +77,7 @@ async def run(args, report):
             write_report(args.output_dir, report)
 
 
-async def check_replayed_policy(policy, client, cfg, unreplayed_batch, sequences, pad_token_id, report, args):
+async def check_replayed_policy(policy, client, cfg, sequences, pad_token_id, report, args):
     """Replay each sampler capture’s expert routes when scoring the trainer."""
 
     async def score_phase(phase, model):
@@ -90,8 +90,6 @@ async def check_replayed_policy(policy, client, cfg, unreplayed_batch, sequences
     await publish(policy, client, cfg)
     adapter = resolve_policy_model_name(cfg)
     zero_batch = await score_phase("zero", adapter)
-    report["trainer_zero_unreplayed"] = score_trainer(policy, unreplayed_batch)
-    report["zero_parity_unreplayed"] = compare_logprobs(report["trainer_zero_unreplayed"], report["zero"])
     report["trainer_zero"] = score_trainer(policy, zero_batch)
     repeat_batch = await score_phase("repeat", adapter)
     report["trainer_repeat"] = score_trainer(policy, repeat_batch)

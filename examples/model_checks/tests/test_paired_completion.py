@@ -143,7 +143,7 @@ async def test_replayed_phases_preserve_prepublication_evidence_and_use_fresh_ro
 
     def trainer(policy, batch):
         trainer_calls.append(batch)
-        return {"unreplayed": [-2.3], 1: [-2.0] if trainer_calls.count(1) == 1 else [-1.7], 2: [-2.0], 4: [-1.8]}[batch]
+        return {1: [-2.0] if trainer_calls.count(1) == 1 else [-1.7], 2: [-2.0], 4: [-1.8]}[batch]
 
     async def publish(*args):
         calls.append(("publish",))
@@ -157,7 +157,7 @@ async def test_replayed_phases_preserve_prepublication_evidence_and_use_fresh_ro
     report = {}
     args = SimpleNamespace(mean_atol=0.05, max_atol=0.5, lora_b_multiplier=10)
     coroutine = run_lora_logprobs.check_replayed_policy(
-        None, SimpleNamespace(model_name="base"), None, "unreplayed", [[1, 2]], 0, report, args
+        None, SimpleNamespace(model_name="base"), None, [[1, 2]], 0, report, args
     )
     if repeat_shift:
         with pytest.raises(AssertionError, match="repeat_noise exceeds"):
@@ -171,11 +171,10 @@ async def test_replayed_phases_preserve_prepublication_evidence_and_use_fresh_ro
         return
     await coroutine
     assert report["updated_repeat_noise"]["max_abs"] == 0
-    assert trainer_calls == ["unreplayed", 1, 2, 1, 4]
+    assert trainer_calls == [1, 2, 1, 4]
     assert report["trainer_updated_before_publication"] == [-1.7]
     assert report["trainer_updated"] == [-1.8]
     assert report["stale_parity_before_publication"]["mean_abs"] == pytest.approx(0.3)
-    assert report["zero_parity_unreplayed"]["mean_abs"] == pytest.approx(0.3)
     assert report["updated_parity"]["max_abs"] == 0
     assert [call[0] for call in calls] == ["score", "publish", "score", "score", "score", "publish", "score", "score"]
 
