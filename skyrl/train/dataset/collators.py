@@ -31,7 +31,33 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 
-from .bin_packing import PackingStrategy, make_seq_packer
+from .bin_packing import PackingStrategy, SeqPacker, make_seq_packer
+
+
+def make_sft_sequence_packer(
+    bin_capacity: int,
+    tp_size: int,
+    cp_size: int,
+    *,
+    dp_size: Optional[int] = None,
+    fp8_enabled: bool = False,
+    fp8_recipe: Optional[str] = None,
+) -> SeqPacker:
+    """Build an MFFD packer with the collator's TP/CP/FP8 capacity rules.
+
+    Set ``dp_size`` to enforce equal DP shard sizes; omit it to count unpadded bins.
+    CP/SP alignment applies per sequence, while TP/FP8 padding is paid once per bin.
+    """
+    sequence_align = get_packing_align_size_sequence(tp_size, cp_size)
+    total_align = get_packing_align_size_total(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
+    return make_seq_packer(
+        PackingStrategy.MODIFIED_FIRST_FIT_DECREASING,
+        bin_capacity=max(bin_capacity, total_align),
+        min_bin_count=dp_size,
+        bin_count_multiple=dp_size,
+        sequence_length_multiple=sequence_align,
+        packed_length_multiple=total_align,
+    )
 
 
 class DefaultCollator:
@@ -131,28 +157,20 @@ class PackedDataCollator:
         if batch_size != self.batch_size:
             return self._default_collator(examples, batch_size=batch_size)
 
-        bin_capacity = self.max_tokens_per_microbatch
-
         tp_size = self.tp_size
         pp_size = self.pp_size
         cp_size = self.cp_size
-        # CP/SP layout constraints apply independently to each sub-sequence.
-        # TP without CP and FP8 constrain only the final packed token slab.
-        #   - Context Parallelism splits each segment into ``2*cp_size`` equal
-        #     load-balanced causal chunks. With SP, each chunk is also sharded
-        #     across ``tp_size``.
-        #   - When FP8 is enabled, Transformer Engine GEMMs require each CP
-        #     rank's aggregate token slab to be 16-aligned; globally this means
-        #     the final packed length is divisible by ``16*cp_size``.
-        # The padded layout itself comes from ``packed_segment_layout`` below, which the
-        # worker's preprocess_packed_seqs and the host metadata builders also call, so the
-        # divisors cannot drift apart. These two sizes are used here only for bin capacity
-        # and the PP>1 global max, which are not part of that layout.
-        packing_align_size_sequence = get_packing_align_size_sequence(tp_size, cp_size)
-        packing_align_size_total = get_packing_align_size_total(
-            tp_size, cp_size, fp8_enabled=self.fp8_enabled, fp8_recipe=self.fp8_recipe
+        packer = make_sft_sequence_packer(
+            self.max_tokens_per_microbatch,
+            tp_size,
+            cp_size,
+            dp_size=self.dp_size,
+            fp8_enabled=self.fp8_enabled,
+            fp8_recipe=self.fp8_recipe,
         )
-        packing_capacity = max(bin_capacity, packing_align_size_total)
+        packing_align_size_sequence = packer.sequence_length_multiple
+        packing_align_size_total = packer.packed_length_multiple
+        packing_capacity = packer.bin_capacity
 
         def _round_up(x: int, multiple: int) -> int:
             return ((x + multiple - 1) // multiple) * multiple
@@ -189,17 +207,7 @@ class PackedDataCollator:
         # same number of micro-batches. Forcing the global bin count to a
         # multiple of ``dp_size`` makes the per-DP-rank bin count (and thus
         # ``num_microbatches``) identical across ranks.
-        packing_lengths = seq_lengths
-        bin_count_multiple = dp_size
-        packer = make_seq_packer(
-            PackingStrategy.MODIFIED_FIRST_FIT_DECREASING,
-            bin_capacity=packing_capacity,
-            min_bin_count=bin_count_multiple,
-            bin_count_multiple=bin_count_multiple,
-            sequence_length_multiple=packing_align_size_sequence,
-            packed_length_multiple=packing_align_size_total,
-        )
-        bins: List[List[int]] = packer.pack(packing_lengths)
+        bins: List[List[int]] = packer.pack(seq_lengths)
 
         # Assign bins to DP shards via round-robin (bin_idx % shards).
         # Concretely we want the resulting layout to be shard-major:
