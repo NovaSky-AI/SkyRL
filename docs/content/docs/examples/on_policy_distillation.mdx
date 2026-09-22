@@ -55,10 +55,10 @@ The student and the teacher must share a tokenizer: the teacher scores the stude
   entrypoint), given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible
   `/v1/completions` with vLLM's `prompt_logprobs` parameter. `trainer.teacher.model` is the served model name.
 
-Before any model is loaded, the entrypoint sends one short sequence to the teacher
-`trainer.algorithm.opd.self_test_samples` times concurrently and refuses to train if the answers differ
-by more than `trainer.algorithm.opd.self_test_max_abs_diff` nats. This catches replica-dependent serving,
-models that reject echo, and a mismatched tokenizer before the run starts.
+There are no preflight checks yet: nothing verifies the teacher's tokenizer, context length, or
+reproducibility before training (a TODO in `skyrl/train/entrypoints/main_opd.py` records what other
+frameworks check). Pick a teacher from the student's model family, serve it with enough context, and
+prefer a dedicated deployment over serverless.
 
 ## Pure and mixed distillation
 

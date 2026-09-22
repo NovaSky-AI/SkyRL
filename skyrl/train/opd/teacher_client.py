@@ -7,8 +7,7 @@ belongs on an inference engine, not on a training worker.
 
 ``TeacherLogprobClient`` is the abstract base class. It owns everything every backend needs
 identically -- the concurrency limit, the empty-response case, the length and finiteness
-invariants and the startup determinism check -- and a backend implements one method,
-``_compute_logprobs``.
+invariants -- and a backend implements one method, ``_compute_logprobs``.
 Callers only ever use ``compute_logprobs``.
 
 Backends, both over ``aiohttp`` so the package adds no dependency:
@@ -65,8 +64,7 @@ class TeacherLogprobClient(abc.ABC):
 
         Returns one float per response token, in order. Empty responses return ``[]`` without a
         request. At most ``max_concurrency`` requests are in flight per client. A wrong number of
-        values or a non-finite value raises: a NaN or infinity would pass the self-test unnoticed
-        (every comparison with NaN is false) and poison the advantages.
+        values or a non-finite value raises: a NaN or infinity would poison the advantages.
         """
         if not response_ids:
             return []
@@ -88,34 +86,6 @@ class TeacherLogprobClient(abc.ABC):
         Must return the teacher's log-probability of each response token, in order, as floats.
         ``response_ids`` is non-empty.
         """
-
-    async def self_test(
-        self,
-        prompt_ids: List[int],
-        response_ids: List[int],
-        n: int = 8,
-        max_abs_diff: float = 0.05,
-    ) -> float:
-        """Score one sequence ``n`` times concurrently and require the answers to agree.
-
-        Returns the worst absolute difference (nats) between any two answers, and raises if it
-        exceeds ``max_abs_diff``. A teacher whose logprobs depend on which replica answered is not
-        usable for a reverse-KL advantage whose signal is a few hundredths of a nat.
-        """
-        if n < 2:
-            raise ValueError(f"self_test needs n >= 2 identical requests, got {n}")
-        answers = await asyncio.gather(*(self.compute_logprobs(prompt_ids, response_ids) for _ in range(n)))
-        worst = 0.0
-        for i in range(len(answers)):
-            for j in range(i + 1, len(answers)):
-                worst = max(worst, max(abs(a - b) for a, b in zip(answers[i], answers[j])))
-        if worst > max_abs_diff:
-            raise RuntimeError(
-                f"teacher logprobs are not reproducible: max |diff| = {worst:.4f} nats across {n} identical "
-                f"requests (limit {max_abs_diff}). A serverless endpoint served by mixed replicas does this; "
-                "use a dedicated deployment."
-            )
-        return worst
 
     async def aclose(self) -> None:
         """Release network resources. The default holds none."""
@@ -147,9 +117,9 @@ def _extract_echoed_logprobs(choice: Dict[str, Any]) -> Tuple[List[Optional[int]
 class _HttpTeacherClient(TeacherLogprobClient):
     """Shared HTTP plumbing for teachers behind a completions endpoint.
 
-    One ``aiohttp`` session per event loop (a session is bound to the loop that created it, and the
-    self-test runs under a temporary loop before the trainer's exists), round-robin over ``urls``,
-    and ``_post`` with exponential backoff on timeouts, connection errors and retryable statuses.
+    One ``aiohttp`` session per event loop (a session is bound to the loop that created it),
+    round-robin over ``urls``, and ``_post`` with exponential backoff on timeouts, connection errors
+    and retryable statuses.
     """
 
     def __init__(
