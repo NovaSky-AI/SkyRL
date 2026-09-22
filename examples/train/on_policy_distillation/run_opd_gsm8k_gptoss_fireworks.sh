@@ -5,9 +5,10 @@ set -exo pipefail
 # Both use the gpt-oss (o200k_harmony) tokenizer, which is what lets the teacher score the student's
 # token ids verbatim. Same gpt-oss training flags as examples/train/gptoss/run_gsm8k_gptoss.sh.
 #
-# Serverless is fine for checking the plumbing; the startup self-test refuses a teacher whose
-# logprobs differ across replicas by more than trainer.algorithm.opd.self_test_max_abs_diff nats.
-# For a real run use a dedicated deployment (run_on_policy_distill_math_qwen3_4b.sh).
+# Serverless is fine for checking the plumbing, not for a real run: in our probes serverless replicas
+# disagreed on logprobs by ~0.25 nats on identical requests, more than the distillation signal, and
+# nothing checks this at startup yet. For a real run use a dedicated deployment
+# (run_on_policy_distill_math_qwen3_4b.sh).
 #
 # uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export FIREWORKS_API_KEY=<your_key_here>

@@ -10,8 +10,8 @@ On top of ``main_base``: ``OPDTrainer.generate`` runs one ``generator.generate``
 group concurrently and scores each group under the teacher as soon as its rollouts are back, so
 teacher latency overlaps with the rest of the batch's generation and any generator works; the
 trainer's other overrides consume the resulting ``GeneratorOutput["teacher_logprobs"]``; and this
-experiment class builds the teacher client and runs a determinism self-test against it before any
-model is loaded. See ``skyrl.train.opd``.
+experiment class builds the teacher client. Nothing verifies the teacher before training yet; see
+the TODO in ``_setup_trainer``. See ``skyrl.train.opd``.
 
 Usage (Fireworks teacher):
 
@@ -25,13 +25,10 @@ Usage (Fireworks teacher):
 Run scripts: ``examples/train/on_policy_distillation/``.
 """
 
-import asyncio
 import os
 import sys
-from typing import List, Tuple
 
 import ray
-from loguru import logger
 
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.opd.config import OPDExpConfig, validate_opd_cfg
@@ -43,10 +40,6 @@ from skyrl.train.opd.teacher_client import (
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import initialize_ray, validate_cfg
-
-# Text the teacher self-test scores; any text works, it only has to be reproducible.
-SELF_TEST_PROMPT = "The quick brown fox jumps over the lazy dog. Then it"
-SELF_TEST_RESPONSE = " went home, curled up in its den and slept until the sun came up the next morning."
 
 
 class OPDExp(BasePPOExp):
@@ -79,34 +72,29 @@ class OPDExp(BasePPOExp):
     def get_trainer(self, *args, **kwargs) -> RayPPOTrainer:
         return OPDTrainer(*args, teacher_client=self._teacher_client, **kwargs)
 
-    def _self_test_sequence(self) -> Tuple[List[int], List[int]]:
-        prompt_ids = self.tokenizer.encode(SELF_TEST_PROMPT)
-        response_ids = self.tokenizer.encode(SELF_TEST_RESPONSE, add_special_tokens=False)
-        return list(prompt_ids), list(response_ids)
-
-    def run_teacher_self_test(self) -> None:
-        """Test to see if the teacher must answer, and answer reproducibly."""
-        opd = self.cfg.trainer.algorithm.opd
-        prompt_ids, response_ids = self._self_test_sequence()
-
-        async def _run() -> float:
-            try:
-                return await self._teacher_client.self_test(
-                    prompt_ids, response_ids, n=opd.self_test_samples, max_abs_diff=opd.self_test_max_abs_diff
-                )
-            finally:
-                # Sessions are bound to this temporary loop; the training loop opens its own.
-                await self._teacher_client.aclose()
-
-        worst = asyncio.run(_run())
-        logger.info(
-            f"Teacher self-test passed: {opd.self_test_samples} identical requests agree within {worst:.4f} nats "
-            f"(limit {opd.self_test_max_abs_diff})"
-        )
-
     def _setup_trainer(self) -> RayPPOTrainer:
         self._teacher_client = self.get_teacher_client()
-        self.run_teacher_self_test()
+        # TODO (kyuds): preflight checks on the teacher before any model is loaded. Nothing verifies the
+        # teacher today, so a wrong setup surfaces minutes into the run, or never: a teacher with a
+        # different vocabulary accepts the student's token ids, echoes them and scores them
+        # deterministically. What other frameworks do (surveyed 2026-09-22):
+        #   - NeMo-RL (nemo_rl/algorithms/distillation.py, check_vocab_equality): loads the teacher
+        #     tokenizer and asserts get_vocab(), len() and config.vocab_size equal the student's;
+        #     skippable with an env var. The only one of these with a tokenizer check.
+        #   - verl (verl/workers/config/distillation.py, validate_and_prepare_for_distillation): the
+        #     teacher's max_model_len must cover prompt_length + response_length + 1; teacher config
+        #     completeness (model_path, key, num_replicas, no duplicate keys).
+        #   - prime-rl (orchestrator/clients.py, wait_for_ready / maybe_check_has_model): polls /health
+        #     on every teacher server until ready, then requires the configured model in /v1/models.
+        #   - Miles (utils/arguments.py, rollout/on_policy_distillation.py): argument validation only
+        #     (teacher URL syntax, duplicates, a default entry, checkpoint path exists); no probe.
+        #   - tinker-cookbook: nothing; both sides share the student's tokenizer by construction.
+        # Candidates here, to be decided: NeMo-RL's vocabulary equality (needs the teacher's HF
+        # tokenizer path; Fireworks model ids are not HF paths), prime-rl's /v1/models listing plus
+        # verl's context bound for vLLM teachers (max_input_length + max_generate_length + 1), and a
+        # reproducibility probe that scores one sequence n times and refuses replica-dependent teachers
+        # (serverless Fireworks replicas disagreed by ~0.25 nats mean / 2.7 nats max on identical
+        # requests, more than the 0.01-0.09 nat distillation signal).
         return super()._setup_trainer()
 
 
