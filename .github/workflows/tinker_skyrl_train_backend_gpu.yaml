@@ -1,4 +1,4 @@
-name: Tinker-SkyRL-Train-Backend-GPU
+name: Tinker-SkyRL-Backend-GPU
 
 on:
   push:

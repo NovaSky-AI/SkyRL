@@ -1,4 +1,4 @@
-name: SkyRL-Train-GPU-Megatron
+name: SkyRL-GPU-Megatron
 
 on: 
   push: 
