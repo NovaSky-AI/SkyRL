@@ -3,14 +3,14 @@
 Runs without a cluster, an engine, or capture itself: the input is the row
 shape `token-samples` emits, written out by hand.
 
-    uv run --with pytest python -m pytest examples/train_integrations/harbor/icap/ -q
+    uv run --with pytest python -m pytest examples/train_integrations/harbor_capture/ -q
 """
 
 from __future__ import annotations
 
 import pytest
 
-from examples.train_integrations.harbor.icap.compose import (
+from examples.train_integrations.harbor_capture.compose import (
     compose,
     split_row,
 )
@@ -180,7 +180,7 @@ class _Cfg:
 
 
 def _require(cfg):
-    from examples.train_integrations.harbor.icap.harbor_generator import (
+    from examples.train_integrations.harbor_capture.harbor_generator import (
         _require_grouped_output,
     )
 

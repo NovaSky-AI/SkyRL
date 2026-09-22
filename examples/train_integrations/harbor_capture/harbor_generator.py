@@ -29,10 +29,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from tqdm.asyncio import tqdm
-
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
+from tqdm.asyncio import tqdm
+
 from skyrl.train.generators.base import (
     ConversationType,
     GeneratorInput,
@@ -59,7 +59,7 @@ class TrialOutcome:
     generation_time: Optional[float] = None
 
 
-class ICapHarborGenerator(GeneratorInterface):
+class HarborCaptureGenerator(GeneratorInterface):
     """Run Harbor trials against a capture token proxy."""
 
     def __init__(

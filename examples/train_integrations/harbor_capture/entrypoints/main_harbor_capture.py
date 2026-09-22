@@ -1,4 +1,4 @@
-"""Train on Harbor tasks with inference-capture recording the exact tokens.
+"""Train on Harbor tasks with skyrl-capture recording the exact tokens.
 
 The inference setup hook brings capture up beside the engine, configured with
 the router as its one upstream. Everything after that is the sibling Harbor
@@ -6,11 +6,11 @@ entrypoint: the generator is the only thing swapped.
 
 Runnable as it stands, the same way as the sibling generate entrypoint:
 
-    python -m examples.train_integrations.harbor.icap.entrypoints.main_harbor_icap \\
+    python -m examples.train_integrations.harbor_capture.entrypoints.main_harbor_capture \\
         trainer.policy.model.path=... data.train_data="['/path/to/harbor/tasks']"
 
 Capture comes up inside this process by default, so nothing has to be started
-first -- it writes a record directory and there is no database. `ICAP_INPROCESS=0`
+first -- it writes a record directory and there is no database. `CAPTURE_INPROCESS=0`
 with `CAPTURE_ENDPOINT` uses a separate `skyrl-capture serve` instead.
 """
 
@@ -28,19 +28,19 @@ import yaml
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 
-from ...entrypoints.main_harbor import (
+from ...harbor.entrypoints.main_harbor import (
     HARBOR_DEFAULT_CONFIG,
     HarborSkyRLConfig,
     _deep_merge,
 )
-from ...entrypoints.main_harbor_generate import HarborGenerateExp
+from ...harbor.entrypoints.main_harbor_generate import HarborGenerateExp
 
 logger = logging.getLogger(__name__)
 
 #: The module whose import registers `type="skyrl"` with capture.
-UPSTREAM_MODULE = "examples.train_integrations.harbor.icap.upstream"
+UPSTREAM_MODULE = "examples.train_integrations.harbor_capture.upstream"
 
-DEFAULT_RECORD_DIR = Path("./icap-record")
+DEFAULT_RECORD_DIR = Path("./harbor-capture-record")
 
 
 def start_capture(
@@ -74,7 +74,7 @@ def start_capture(
     from skyrl_capture.service import CaptureService
 
     config = Config(
-        record_dir=Path(record_dir or os.environ.get("ICAP_RECORD_DIR") or DEFAULT_RECORD_DIR),
+        record_dir=Path(record_dir or os.environ.get("CAPTURE_RECORD_DIR") or DEFAULT_RECORD_DIR),
         upstream=TitoUpstream(
             type="skyrl",
             url=engine_url,
@@ -90,7 +90,7 @@ def start_capture(
     )
     service = CaptureService(
         config=config,
-        port=port if port is not None else int(os.environ.get("ICAP_PORT", 8080)),
+        port=port if port is not None else int(os.environ.get("CAPTURE_PORT", 8080)),
     )
     # Returns once the service is serving, so trajectory URLs handed out on
     # the next line are usable rather than a race the harness loses.
@@ -101,14 +101,14 @@ def start_capture(
 
 def build_generator(cfg: Any, harbor_trial_config: Dict[str, Any], engine_client: Any, service: Any):
     """The generator, pointed at a capture service rather than the engine."""
-    from ..harbor_generator import ICapHarborGenerator
+    from ..harbor_generator import HarborCaptureGenerator
 
-    return ICapHarborGenerator(
+    return HarborCaptureGenerator(
         generator_cfg=cfg.generator,
         harbor_trial_config=harbor_trial_config,
         inference_engine_client=engine_client,
         capture_endpoint=service.base_url,
-        project=getattr(cfg, "experiment_name", None) or "harbor-icap",
+        project=getattr(cfg, "experiment_name", None) or "harbor-capture",
         run_id=getattr(cfg, "run_id", None) or getattr(cfg, "experiment_name", None),
     )
 
@@ -122,18 +122,18 @@ def capture_for_run(
     """Capture for this run: in this process, or one already serving.
 
     In-process is the default and is what most jobs want -- nothing has to be
-    started first, and it dies with the job. ``ICAP_INPROCESS=0`` with
+    started first, and it dies with the job. ``CAPTURE_INPROCESS=0`` with
     ``CAPTURE_ENDPOINT`` points at a separate ``skyrl-capture serve`` instead,
     which is right when several jobs share one capture, or when the viewer
     should outlive the run.
     """
     import os
 
-    if os.environ.get("ICAP_INPROCESS", "1").strip().lower() in ("0", "false", "no", "off"):
+    if os.environ.get("CAPTURE_INPROCESS", "1").strip().lower() in ("0", "false", "no", "off"):
         endpoint = os.environ.get("CAPTURE_ENDPOINT", "")
         if not endpoint:
             raise RuntimeError(
-                "ICAP_INPROCESS=0 needs CAPTURE_ENDPOINT to point at `skyrl-capture serve`"
+                "CAPTURE_INPROCESS=0 needs CAPTURE_ENDPOINT to point at `skyrl-capture serve`"
             )
         logger.info("skyrl-capture out-of-process at %s", endpoint)
         # That process is configured with its own upstream, and resolves the
@@ -150,7 +150,7 @@ def capture_for_run(
         # trainer renders with -- when they differ, that difference is the
         # thing worth measuring.
         tokenizer_name=tokenizer_name
-        or os.environ.get("ICAP_TOKENIZER", cfg.trainer.policy.model.path),
+        or os.environ.get("CAPTURE_TOKENIZER", cfg.trainer.policy.model.path),
         max_model_len=int(engine_init["max_model_len"]),
     )
 
@@ -171,7 +171,7 @@ class RemoteCaptureService:
         """Not ours to stop."""
 
 
-class ICapHarborGenerateExp(HarborGenerateExp):
+class HarborCaptureGenerateExp(HarborGenerateExp):
     """`HarborGenerateExp` with capture in front of the engine.
 
     The generator is the only thing swapped. Harbor runs unmodified in text
@@ -211,7 +211,7 @@ class ICapHarborGenerateExp(HarborGenerateExp):
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg):
-    ICapHarborGenerateExp(cfg).run()
+    HarborCaptureGenerateExp(cfg).run()
 
 
 def main() -> None:

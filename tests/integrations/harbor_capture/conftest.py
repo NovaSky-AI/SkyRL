@@ -1,6 +1,6 @@
 """A stand-in for skyrl-capture, so this suite runs without it installed.
 
-`examples/train_integrations/harbor/icap/upstream.py` subclasses capture's
+`examples/train_integrations/harbor_capture/upstream.py` subclasses capture's
 `VLLMTitoProtocol` and registers itself at module scope, so it cannot be
 imported unless capture is present. capture is an optional dependency of one
 example, not of SkyRL, and the CPU pipeline does not install it.
@@ -21,7 +21,7 @@ import types
 
 import pytest
 
-UPSTREAM_MODULE = "examples.train_integrations.harbor.icap.upstream"
+UPSTREAM_MODULE = "examples.train_integrations.harbor_capture.upstream"
 
 #: What the stub's `request` returns, so a test can tell "inherited" from
 #: "overridden" without reimplementing the wire.

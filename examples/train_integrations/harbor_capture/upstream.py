@@ -36,7 +36,7 @@ proxy runs here. For a separate `skyrl-capture serve`, name it on the command
 line, or put it in `Config.upstream_modules`:
 
     skyrl-capture serve --upstream-module \
-        examples.train_integrations.harbor.icap.upstream
+        examples.train_integrations.harbor_capture.upstream
 """
 
 from __future__ import annotations
