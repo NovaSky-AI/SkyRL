@@ -530,15 +530,25 @@ class VLLMServerActor(ServerActorProtocol):
             }
 
         # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
-        # endpoint /inference/v1/generate does not support returning routed expert IDs.
-        # TODO (sumanthrh): Migrate back to /inference/v1/generate once this is fixed on the vllm side
+        # endpoint /inference/v1/generate does not support sample-support capture,
+        # `routed_experts_prompt_start`, or the packed side-channel payload in `generate_wire`.
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
             """SkyRL generate endpoint that returns routed_experts alongside token output."""
-            if getattr(cli_args, "enable_lora", False):
-                raise HTTPException(status_code=400, detail="/skyrl/v1/generate does not support LoRA.")
-
             body = await request.json()
+
+            # Resolve `model` to a loaded LoRA adapter, as the native endpoint does
+            # (`OpenAIServing._maybe_get_adapters`). Looked up per request so an
+            # in-place adapter reload is picked up on the next generate.
+            lora_request = None
+            model_name = body.get("model")
+            if getattr(cli_args, "enable_lora", False) and model_name:
+                models = request.app.state.openai_serving_models
+                if model_name in models.lora_requests:
+                    lora_request = models.lora_requests[model_name]
+                elif not models.is_base_model(model_name):
+                    raise HTTPException(status_code=404, detail=f"The model `{model_name}` does not exist.")
+
             token_ids = body["token_ids"]
             sampling_params_dict = body.get("sampling_params", {})
             cache_salt = body.get("cache_salt")
@@ -566,7 +576,7 @@ class VLLMServerActor(ServerActorProtocol):
             request_id = random_uuid()
 
             final_res = None
-            async for res in engine.generate(prompt, sampling_params, request_id=request_id):
+            async for res in engine.generate(prompt, sampling_params, request_id=request_id, lora_request=lora_request):
                 final_res = res
 
             if final_res is None:
