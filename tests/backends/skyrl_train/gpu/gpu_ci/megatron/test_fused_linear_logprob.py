@@ -31,6 +31,7 @@ import torch.distributed as dist
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     ChunkedDistributedLogprob,
     FusedLinearChunkedDistributedLogprob,
+    _compute_distributed_log_softmax,
 )
 from skyrl.train.utils.utils import get_free_port
 
@@ -68,8 +69,19 @@ def _fused_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size):
     return out.detach(), h.grad.detach(), w.grad.detach()
 
 
+def _fused_entropy_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size):
+    """Return log-prob, no-grad entropy, and log-prob-only gradients."""
+    h = hidden.detach().clone().requires_grad_(True)
+    w = weight.detach().clone().requires_grad_(True)
+    out, entropy = FusedLinearChunkedDistributedLogprob.apply(
+        h, w, target, vstart, vend, chunk_size, tp_group, False, True
+    )
+    out.backward(_grad_seed(out))
+    return out.detach(), entropy, h.grad.detach(), w.grad.detach()
+
+
 def _fused_entropy_loss_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size):
-    """Return fused log-prob, entropy, and their combined gradients."""
+    """Return fused outputs and gradients from both log-prob and entropy."""
     h = hidden.detach().clone().requires_grad_(True)
     w = weight.detach().clone().requires_grad_(True)
     out, entropy = FusedLinearChunkedDistributedLogprob.apply(
@@ -188,6 +200,27 @@ def test_fused_forward_matches_liger_flce(tp_group):
     torch.testing.assert_close(out_f.reshape(-1), (-ce).float(), atol=1e-2, rtol=1e-2)
 
 
+def test_fused_reuses_projection_for_no_grad_entropy(tp_group):
+    device = torch.device("cuda")
+    torch.manual_seed(122)
+    B, S, V = 2, 31, 4096
+    hidden = torch.randn(B, S, H, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(V, H, dtype=torch.bfloat16, device=device) * (H**-0.5)
+    target = torch.randint(0, V, (B, S), device=device, dtype=torch.long)
+
+    out, entropy, grad_hidden, grad_weight = _fused_entropy_fb(hidden, weight, target, 0, V, tp_group, 7)
+    baseline_out, baseline_grad_hidden, baseline_grad_weight = _fused_fb(hidden, weight, target, 0, V, tp_group, 7)
+    logits = hidden @ weight.T
+    log_probs = torch.log_softmax(logits.float(), dim=-1)
+    expected_entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+
+    assert not entropy.requires_grad
+    torch.testing.assert_close(out, baseline_out, atol=0, rtol=0)
+    torch.testing.assert_close(entropy, expected_entropy, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(grad_hidden, baseline_grad_hidden, atol=0, rtol=0)
+    torch.testing.assert_close(grad_weight, baseline_grad_weight, atol=0, rtol=0)
+
+
 def test_fused_entropy_loss_matches_materialized_logits(tp_group):
     device = torch.device("cuda")
     torch.manual_seed(123)
@@ -241,10 +274,21 @@ def _distributed_main():
         torch.testing.assert_close(gh_f, gh_r, atol=5e-3, rtol=5e-3)
         torch.testing.assert_close(gw_f.float(), gw_r.float(), atol=5e-3, rtol=5e-3)
 
+        out_e, entropy, gh_e, gw_e = _fused_entropy_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size)
+        logits = hidden.float() @ weight.float().T
+        distributed_log_probs = _compute_distributed_log_softmax(logits, group=tp_group)
+        expected_entropy = -(distributed_log_probs.exp() * distributed_log_probs).sum(dim=-1)
+        dist.all_reduce(expected_entropy)
+        torch.testing.assert_close(out_e, out_f, atol=0, rtol=0)
+        torch.testing.assert_close(entropy, expected_entropy, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(gh_e, gh_f, atol=0, rtol=0)
+        torch.testing.assert_close(gw_e, gw_f, atol=0, rtol=0)
+
         out_el, entropy_el, gh_el, gw_el = _fused_entropy_loss_fb(
             hidden, weight, target, vstart, vend, tp_group, chunk_size
         )
-        out_er, entropy_er, gh_er, gw_er = _materialized_entropy_loss_fb(hidden, w_full.to(dev), target)
+        full_weight = w_full.to(dev, weight.dtype)
+        out_er, entropy_er, gh_er, gw_er = _materialized_entropy_loss_fb(hidden, full_weight, target)
         torch.testing.assert_close(out_el, out_er, atol=1e-4, rtol=1e-4)
         torch.testing.assert_close(entropy_el, entropy_er, atol=1e-4, rtol=1e-4)
         torch.testing.assert_close(gh_el, gh_er, atol=5e-3, rtol=5e-3)
@@ -254,6 +298,115 @@ def _distributed_main():
     dist.all_reduce(ok, op=dist.ReduceOp.MIN)
     if rank == 0:
         print(f"RESULT: PASS (TP={world})")
+    dist.destroy_process_group()
+
+
+def _distributed_packed_cp_entropy_main():
+    """Check differentiable fused entropy through the packed TP2/CP2 layout."""
+    from skyrl.backends.skyrl_train.distributed.megatron.active_spans import (
+        build_packed_active_metadata,
+    )
+    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
+        _get_tokens_on_this_cp_rank,
+        from_parallel_hidden_to_logprobs_packed_sequences,
+    )
+    from skyrl.train.fused_lm_head import FusedLmHeadBackend
+
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+    tp_size = cp_size = 2
+    tp_rank = rank % tp_size
+    cp_rank = rank // tp_size
+    tp_groups = [dist.new_group([cp * tp_size + tp for tp in range(tp_size)]) for cp in range(cp_size)]
+    cp_groups = [dist.new_group([cp * tp_size + tp for cp in range(cp_size)]) for tp in range(tp_size)]
+    tp_group = tp_groups[cp_rank]
+    cp_group = cp_groups[tp_rank]
+
+    batch, sequence, hidden_size, vocab = 1, 64, H, 4096
+    generator = torch.Generator().manual_seed(4321)
+    full_hidden = torch.randn(batch, sequence, hidden_size, generator=generator, dtype=torch.float32).to(
+        device, torch.bfloat16
+    )
+    full_weight = (torch.randn(vocab, hidden_size, generator=generator) * hidden_size**-0.5).to(device)
+    target = torch.randint(0, vocab, (batch, sequence), generator=generator).to(device)
+    loss_mask = torch.zeros((batch, sequence - 1), dtype=torch.bool)
+    loss_mask[:, 8:29] = True
+    loss_mask[:, 37:] = True
+    metadata = build_packed_active_metadata(
+        loss_mask,
+        num_actions=sequence - 1,
+        sequence_length=sequence,
+        attention_mask=torch.ones((batch, sequence), dtype=torch.bool),
+        sub_seq_lengths=[[sequence]],
+        tp_size=tp_size,
+        cp_size=cp_size,
+        cp_rank=cp_rank,
+        fp8_enabled=False,
+    )
+    local_hidden_source = _get_tokens_on_this_cp_rank(full_hidden, cp_rank, cp_size, seq_dim=1)
+    local_weight_source = full_weight[tp_rank * (vocab // tp_size) : (tp_rank + 1) * (vocab // tp_size)]
+    cu_seqlens = torch.tensor([0, sequence], device=device, dtype=torch.int32)
+    device_loss_mask = loss_mask.to(device)
+    logprob_seed = torch.linspace(0.5, 1.5, sequence - 1, device=device).unsqueeze(0)
+    entropy_seed = torch.linspace(-0.25, 0.75, sequence - 1, device=device).unsqueeze(0)
+
+    for backend in (
+        FusedLmHeadBackend.TORCH,
+        FusedLmHeadBackend.TRITON,
+        FusedLmHeadBackend.TRITON_BLOCK_SPARSE,
+    ):
+        hidden = local_hidden_source.detach().clone().requires_grad_(True)
+        weight = local_weight_source.detach().clone().requires_grad_(True)
+        block_sparse = backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE
+        logprobs, entropy = from_parallel_hidden_to_logprobs_packed_sequences(
+            hidden,
+            weight,
+            target,
+            cu_seqlens,
+            sequence,
+            vocab_start_index=tp_rank * (vocab // tp_size),
+            vocab_end_index=(tp_rank + 1) * (vocab // tp_size),
+            group=tp_group,
+            cp_group=cp_group,
+            chunk_size=16,
+            attention_mask=torch.ones((batch, sequence), dtype=torch.bool, device=device),
+            sub_seq_lengths=[[sequence]],
+            fused_backend=backend,
+            active_mask=metadata.active_mask.to(device) if block_sparse else None,
+            active_spans=metadata.active_spans if block_sparse else None,
+            return_entropy=True,
+            entropy_requires_grad=True,
+        )
+        local_loss = ((logprobs * logprob_seed + entropy * entropy_seed) * device_loss_mask).sum()
+        local_loss.backward()
+        dist.all_reduce(hidden.grad, group=tp_group)
+        dist.all_reduce(weight.grad, group=cp_group)
+
+        reference_hidden = full_hidden.detach().clone().requires_grad_(True)
+        reference_weight = full_weight.detach().clone().requires_grad_(True)
+        reference_logits = reference_hidden.float() @ reference_weight.T
+        reference_log_probs = torch.log_softmax(reference_logits, dim=-1)
+        reference_selected = reference_log_probs[:, :-1].gather(-1, target[:, 1:].unsqueeze(-1)).squeeze(-1)
+        reference_entropy = -(reference_log_probs[:, :-1].exp() * reference_log_probs[:, :-1]).sum(dim=-1)
+        ((reference_selected * logprob_seed + reference_entropy * entropy_seed) * device_loss_mask).sum().backward()
+        expected_hidden_grad = _get_tokens_on_this_cp_rank(reference_hidden.grad, cp_rank, cp_size, seq_dim=1)
+        expected_weight_grad = reference_weight.grad[tp_rank * (vocab // tp_size) : (tp_rank + 1) * (vocab // tp_size)]
+
+        expected_logprobs = (
+            reference_selected if not block_sparse else reference_selected.masked_fill(~device_loss_mask, 0.0)
+        )
+        expected_entropy = (
+            reference_entropy if not block_sparse else reference_entropy.masked_fill(~device_loss_mask, 0.0)
+        )
+        torch.testing.assert_close(logprobs, expected_logprobs, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(entropy, expected_entropy, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(hidden.grad, expected_hidden_grad, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(weight.grad, expected_weight_grad, atol=2e-2, rtol=2e-2)
+
+    if rank == 0:
+        print("RESULT: PASS (packed TP=2 CP=2 entropy gradients)")
     dist.destroy_process_group()
 
 
@@ -276,5 +429,32 @@ def test_fused_linear_logprob_tp(nproc):
     assert "RESULT: PASS" in (res.stdout + res.stderr), f"TP={nproc} failed:\n{res.stdout}\n{res.stderr}"
 
 
+def test_fused_entropy_loss_packed_tp2_cp2():
+    if torch.cuda.device_count() < 4:
+        pytest.skip(f"needs >= 4 GPUs, have {torch.cuda.device_count()}")
+    env = dict(
+        os.environ,
+        MASTER_ADDR="localhost",
+        MASTER_PORT=str(get_free_port()),
+        SKYRL_TEST_PACKED_CP_ENTROPY="1",
+    )
+    cmd = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--nproc_per_node=4",
+        "--master_port",
+        env["MASTER_PORT"],
+        __file__,
+    ]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
+    assert "RESULT: PASS (packed TP=2 CP=2 entropy gradients)" in (
+        result.stdout + result.stderr
+    ), f"packed TP2/CP2 failed:\n{result.stdout}\n{result.stderr}"
+
+
 if __name__ == "__main__":
-    _distributed_main()
+    if os.environ.get("SKYRL_TEST_PACKED_CP_ENTROPY") == "1":
+        _distributed_packed_cp_entropy_main()
+    else:
+        _distributed_main()

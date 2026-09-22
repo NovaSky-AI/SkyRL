@@ -78,28 +78,54 @@ def test_pack_sequence_values_uses_target_layout(values, attention_mask, cu_seql
 
 
 @pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
-def test_packed_fused_active_mask_is_cp_local_and_two_dimensional():
+@pytest.mark.parametrize("return_entropy,entropy_requires_grad", [(False, False), (True, False), (True, True)])
+def test_packed_sparse_metadata_mask_and_spans_share_cp_layout(return_entropy, entropy_requires_grad):
     from skyrl.backends.skyrl_train.distributed.megatron import model_utils
+    from skyrl.backends.skyrl_train.distributed.megatron.active_spans import (
+        build_packed_active_metadata,
+    )
 
     hidden = torch.zeros((1, 4, 128))
     weight = torch.zeros((16, 128))
     target = torch.arange(8).unsqueeze(0)
-    active_mask = torch.tensor([[True, False, True, False, True, False, True, False]])
+    loss_mask = torch.tensor([[True, False, True, False, True, False, True]])
+    active_metadata = build_packed_active_metadata(
+        loss_mask,
+        num_actions=7,
+        sequence_length=8,
+        attention_mask=torch.ones((1, 8), dtype=torch.bool),
+        sub_seq_lengths=[[8]],
+        tp_size=1,
+        cp_size=2,
+        cp_rank=0,
+        fp8_enabled=False,
+    )
     cu_seqlens = torch.tensor([0, 8])
     tp_group = object()
     cp_group = object()
+    requested_entropy_grad = entropy_requires_grad
 
     def fused_apply(*args):
-        local_mask = args[-3]
+        local_mask, active_spans, compute_entropy, actual_entropy_requires_grad = args[-4:]
+        assert compute_entropy == return_entropy
+        assert actual_entropy_requires_grad == requested_entropy_grad
         assert local_mask.shape == (1, 4)
         torch.testing.assert_close(local_mask, torch.tensor([[True, False, True, False]]))
+        covered = torch.zeros(local_mask.numel(), dtype=torch.bool)
+        for start, end in active_spans:
+            covered[start:end] = True
+        assert torch.all(~local_mask.reshape(-1) | covered)
+        if return_entropy:
+            return torch.zeros((1, 4)), torch.ones((1, 4))
         return torch.zeros((1, 4))
+
+    gathered = [torch.zeros(8), torch.ones(8)] if return_entropy else [torch.zeros(8)]
 
     with (
         patch.object(model_utils.torch.distributed, "get_world_size", return_value=2),
         patch.object(model_utils.torch.distributed, "get_rank", return_value=0),
         patch.object(model_utils, "_fused_lm_head_logprob_apply", side_effect=fused_apply),
-        patch.object(model_utils, "allgather_cp_sharded_packed_tensor", return_value=torch.zeros(8)),
+        patch.object(model_utils, "allgather_cp_sharded_packed_tensor", side_effect=gathered),
     ):
         result = model_utils.from_parallel_hidden_to_logprobs_packed_sequences(
             hidden,
@@ -111,10 +137,18 @@ def test_packed_fused_active_mask_is_cp_local_and_two_dimensional():
             vocab_end_index=16,
             group=tp_group,
             cp_group=cp_group,
-            active_mask=active_mask,
+            active_mask=active_metadata.active_mask,
+            active_spans=active_metadata.active_spans,
+            return_entropy=return_entropy,
+            entropy_requires_grad=entropy_requires_grad,
         )
 
-    assert result.shape == (1, 7)
+    if return_entropy:
+        logprobs, entropy = result
+        assert logprobs.shape == entropy.shape == (1, 7)
+        torch.testing.assert_close(entropy, torch.ones_like(entropy))
+    else:
+        assert result.shape == (1, 7)
 
 
 # ---------------------------------------------------------------------------
