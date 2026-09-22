@@ -1,0 +1,49 @@
+{
+ "id": "tr_01M310328E25H55F88067QYX0M",
+ "project": "viewer",
+ "run_id": "run-t",
+ "task_id": "t1",
+ "step": 0,
+ "upstream": {
+  "mode": "text",
+  "type": "openai",
+  "protocol": "openai",
+  "url": "http://127.0.0.1:60287/v1",
+  "model": null
+ },
+ "mode": "text",
+ "status": "finished",
+ "labels": [],
+ "annotations": {
+  "reward": 0.5
+ },
+ "bodies": "full",
+ "created_at": "2026-09-21T03:27:55.664321+00:00",
+ "first_event_at": "2026-09-21T03:27:55.666936+00:00",
+ "finished_at": "2026-09-21T03:27:55.670741+00:00",
+ "capture": {
+  "exchange_count": 1,
+  "node_count": 2,
+  "calls_after_close": 0,
+  "complete": true,
+  "calls_missing": 0,
+  "recovery_uncertain": false,
+  "delivery_uncertain": [],
+  "errors": []
+ },
+ "command_result": null,
+ "source_metadata": {},
+ "schema_version": 4,
+ "revision": 1,
+ "gap_distribution": {
+  "samples": 0,
+  "min_ms": null,
+  "max_ms": null,
+  "mean_ms": null,
+  "p50_ms": null,
+  "p95_ms": null,
+  "p99_ms": null,
+  "overlapping": 0,
+  "total_wait_ms": 0
+ }
+}

@@ -1,0 +1,682 @@
+{
+ "exports": {
+  "graph": [
+   {
+    "schema_version": 4,
+    "trajectory_id": "<tr#1>",
+    "project": "golden",
+    "run_id": "run-g",
+    "task_id": "t6",
+    "step": 2,
+    "mode": "text",
+    "status": "finished",
+    "command_result": null,
+    "labels": [],
+    "annotations": {},
+    "upstream": {
+     "type": "openai",
+     "url": "http://127.0.0.1:<port>/v1",
+     "model": null,
+     "tokenizer": null
+    },
+    "integrity": {
+     "complete": true,
+     "calls_missing": 0,
+     "calls_after_close": 0
+    },
+    "bodies": "full",
+    "created_at": "<volatile>",
+    "finished_at": "<volatile>",
+    "derivation_version": 2,
+    "nodes": [
+     {
+      "node_id": "<nd#1>",
+      "parent": null,
+      "children": [
+       "<nd#2>"
+      ],
+      "role": "user",
+      "author": "client",
+      "message": {
+       "content": "go",
+       "role": "user"
+      },
+      "message_hash": "16f97dfe4556587c505d591608c2de0e882c521ae2075c22d3c19e2632f15d76",
+      "context_hash": "a678da4b10073a741e42c2bb39762a3c85c4826a8f591b6448b0e290fbb30dac"
+     },
+     {
+      "node_id": "<nd#3>",
+      "parent": null,
+      "children": [
+       "<nd#4>"
+      ],
+      "role": "user",
+      "author": "client",
+      "message": {
+       "content": "go",
+       "role": "user"
+      },
+      "message_hash": "16f97dfe4556587c505d591608c2de0e882c521ae2075c22d3c19e2632f15d76",
+      "context_hash": "0cb5ff29ea7b7becacfa911b6b0ed97e51f7243786fdb0580b8fdc30feb3e86e"
+     },
+     {
+      "node_id": "<nd#2>",
+      "parent": "<nd#1>",
+      "children": [],
+      "role": "assistant",
+      "author": "model",
+      "message": {
+       "content": "SAME",
+       "role": "assistant"
+      },
+      "message_hash": "e6dc01c52e88e9f2af8bc3d898775e8262b9a50bea9c459f7e44b0d5f6f6d574",
+      "context_hash": "3ae808349b24f672f4810af95627292fedd1b6c9aa8be4db38be028a520e1e2e",
+      "call": {
+       "endpoint": "/v1/chat/completions",
+       "model": "mock-model",
+       "status": 200,
+       "streaming": false,
+       "finish_reason": "stop",
+       "tools_hash": "7f3207c07df6ed5323c65725b9bd1ec78e8b44ebbbc1150981d93bf3f3fd4222",
+       "sampling": {
+        "temperature": 0.3,
+        "max_tokens": 32
+       },
+       "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1,
+        "total_tokens": 2,
+        "cached_tokens": 0,
+        "reasoning_tokens": null,
+        "raw": {
+         "prompt_tokens": 1,
+         "completion_tokens": 1,
+         "total_tokens": 2,
+         "prompt_tokens_details": {
+          "cached_tokens": 0
+         }
+        }
+       },
+       "timing": {
+        "started_at": "<volatile>",
+        "ended_at": "<volatile>",
+        "duration_ms": "<volatile>",
+        "ttft_ms": "<volatile>"
+       }
+      }
+     },
+     {
+      "node_id": "<nd#4>",
+      "parent": "<nd#3>",
+      "children": [],
+      "role": "assistant",
+      "author": "model",
+      "message": {
+       "content": "SAME",
+       "role": "assistant"
+      },
+      "message_hash": "e6dc01c52e88e9f2af8bc3d898775e8262b9a50bea9c459f7e44b0d5f6f6d574",
+      "context_hash": "3b450965848348edda6cae9b045b53324497ddbc72b94b4a1571df3b2bec34ea",
+      "call": {
+       "endpoint": "/v1/chat/completions",
+       "model": "mock-model",
+       "status": 200,
+       "streaming": false,
+       "finish_reason": "stop",
+       "tools_hash": "4464532dd05a9ab3aa55d9a6b1bc81e323d25791d0888e2ada767952e2605aed",
+       "sampling": {
+        "temperature": 0.3,
+        "max_tokens": 32
+       },
+       "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1,
+        "total_tokens": 2,
+        "cached_tokens": 0,
+        "reasoning_tokens": null,
+        "raw": {
+         "prompt_tokens": 1,
+         "completion_tokens": 1,
+         "total_tokens": 2,
+         "prompt_tokens_details": {
+          "cached_tokens": 0
+         }
+        }
+       },
+       "timing": {
+        "started_at": "<volatile>",
+        "ended_at": "<volatile>",
+        "duration_ms": "<volatile>",
+        "ttft_ms": "<volatile>"
+       }
+      }
+     }
+    ]
+   }
+  ],
+  "replay": [
+   {
+    "schema_version": 4,
+    "session_id": "<tr#1>-s0000",
+    "trajectory_id": "<tr#1>",
+    "parent_session_id": null,
+    "delay_ms": null,
+    "arrival_ms": "<volatile>",
+    "forks": [],
+    "turns": [
+     {
+      "delay_ms": null,
+      "method": "POST",
+      "endpoint": "/v1/chat/completions",
+      "payload": {
+       "model": "mock-model",
+       "messages": [
+        {
+         "content": "go",
+         "role": "user"
+        }
+       ],
+       "max_tokens": 32,
+       "tools": [
+        {
+         "function": {
+          "name": "search",
+          "parameters": {}
+         },
+         "type": "function"
+        }
+       ],
+       "temperature": 0.3
+      }
+     }
+    ]
+   },
+   {
+    "schema_version": 4,
+    "session_id": "<tr#1>-s0001",
+    "trajectory_id": "<tr#1>",
+    "parent_session_id": null,
+    "delay_ms": null,
+    "arrival_ms": "<volatile>",
+    "forks": [],
+    "turns": [
+     {
+      "delay_ms": null,
+      "method": "POST",
+      "endpoint": "/v1/chat/completions",
+      "payload": {
+       "model": "mock-model",
+       "messages": [
+        {
+         "content": "go",
+         "role": "user"
+        }
+       ],
+       "max_tokens": 32,
+       "tools": [
+        {
+         "function": {
+          "name": "write",
+          "parameters": {}
+         },
+         "type": "function"
+        }
+       ],
+       "temperature": 0.3
+      }
+     }
+    ]
+   }
+  ],
+  "text_samples": [
+   {
+    "schema_version": 4,
+    "path_id": "<tr#1>-p0000",
+    "trajectory_id": "<tr#1>",
+    "node_ids": [
+     "<nd#1>",
+     "<nd#2>"
+    ],
+    "abandoned": false,
+    "labels": [],
+    "annotations": {},
+    "model": "mock-model",
+    "tools": [
+     {
+      "function": {
+       "name": "search",
+       "parameters": {}
+      },
+      "type": "function"
+     }
+    ],
+    "trainable_count": 1,
+    "messages": [
+     {
+      "node_id": "<nd#1>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "go",
+       "role": "user"
+      }
+     },
+     {
+      "node_id": "<nd#2>",
+      "author": "model",
+      "trainable": true,
+      "message": {
+       "content": "SAME",
+       "role": "assistant"
+      }
+     }
+    ]
+   },
+   {
+    "schema_version": 4,
+    "path_id": "<tr#1>-p0001",
+    "trajectory_id": "<tr#1>",
+    "node_ids": [
+     "<nd#3>",
+     "<nd#4>"
+    ],
+    "abandoned": false,
+    "labels": [],
+    "annotations": {},
+    "model": "mock-model",
+    "tools": [
+     {
+      "function": {
+       "name": "write",
+       "parameters": {}
+      },
+      "type": "function"
+     }
+    ],
+    "trainable_count": 1,
+    "messages": [
+     {
+      "node_id": "<nd#3>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "go",
+       "role": "user"
+      }
+     },
+     {
+      "node_id": "<nd#4>",
+      "author": "model",
+      "trainable": true,
+      "message": {
+       "content": "SAME",
+       "role": "assistant"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "api": {
+  "/": {
+   "id": "<tr#1>",
+   "project": "golden",
+   "run_id": "run-g",
+   "task_id": "t6",
+   "step": 2,
+   "upstream": {
+    "mode": "text",
+    "type": "openai",
+    "protocol": "openai",
+    "url": "http://127.0.0.1:<port>/v1",
+    "model": null
+   },
+   "mode": "text",
+   "status": "finished",
+   "labels": [],
+   "annotations": {},
+   "bodies": "full",
+   "created_at": "<volatile>",
+   "first_event_at": "<volatile>",
+   "finished_at": "<volatile>",
+   "capture": {
+    "exchange_count": 2,
+    "node_count": 4,
+    "calls_after_close": 0,
+    "complete": true,
+    "calls_missing": 0,
+    "recovery_uncertain": false,
+    "delivery_uncertain": [],
+    "errors": []
+   },
+   "command_result": null,
+   "source_metadata": {},
+   "schema_version": 4,
+   "revision": 0,
+   "gap_distribution": {
+    "samples": 0,
+    "min_ms": null,
+    "max_ms": null,
+    "mean_ms": null,
+    "p50_ms": null,
+    "p95_ms": null,
+    "p99_ms": null,
+    "overlapping": 0,
+    "total_wait_ms": "<volatile>"
+   }
+  },
+  "/exchanges": {
+   "data": [
+    {
+     "id": "<ex#1>",
+     "sequence": 0,
+     "provider": "openai",
+     "model": "mock-model",
+     "endpoint_kind": "chat_completions",
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "http_status": 200,
+     "streaming": false,
+     "transport_error": null,
+     "provider_error": null,
+     "retry_attempt": 0,
+     "completion_reason": "stop",
+     "request_start_at": "<volatile>",
+     "response_end_at": "<volatile>",
+     "ttft_ms": "<volatile>",
+     "duration_ms": "<volatile>",
+     "gap_ms": null,
+     "overlapping": false,
+     "chunk_count": 1,
+     "stream_summary": {
+      "chunk_count": 1,
+      "first_chunk_ms": "<volatile>",
+      "last_chunk_ms": "<volatile>",
+      "total_bytes": 303,
+      "mean_inter_chunk_ms": null,
+      "max_inter_chunk_ms": null
+     },
+     "usage": {
+      "prompt_tokens": 1,
+      "completion_tokens": 1,
+      "total_tokens": 2,
+      "cached_tokens": 0,
+      "reasoning_tokens": null,
+      "raw": {
+       "prompt_tokens": 1,
+       "completion_tokens": 1,
+       "total_tokens": 2,
+       "prompt_tokens_details": {
+        "cached_tokens": 0
+       }
+      }
+     },
+     "request_byte_count": 190,
+     "response_byte_count": 303,
+     "provider_request_id": "<chatcmpl-mock>",
+     "provider_response_id": "<chatcmpl-mock>",
+     "previous_response_id": null,
+     "input_prefix_node_id": null,
+     "input_node_ids": [
+      "<nd#1>"
+     ],
+     "input_leaf_node_id": "<nd#1>",
+     "output_node_id": "<nd#2>",
+     "parent_output_node_id": null,
+     "previous_exchange_id": null,
+     "is_duplicate_retry": false,
+     "late": false,
+     "has_payload": true,
+     "schema_version": 4,
+     "derivation_version": 2
+    },
+    {
+     "id": "<ex#2>",
+     "sequence": 1,
+     "provider": "openai",
+     "model": "mock-model",
+     "endpoint_kind": "chat_completions",
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "http_status": 200,
+     "streaming": false,
+     "transport_error": null,
+     "provider_error": null,
+     "retry_attempt": 0,
+     "completion_reason": "stop",
+     "request_start_at": "<volatile>",
+     "response_end_at": "<volatile>",
+     "ttft_ms": "<volatile>",
+     "duration_ms": "<volatile>",
+     "gap_ms": null,
+     "overlapping": false,
+     "chunk_count": 1,
+     "stream_summary": {
+      "chunk_count": 1,
+      "first_chunk_ms": "<volatile>",
+      "last_chunk_ms": "<volatile>",
+      "total_bytes": 303,
+      "mean_inter_chunk_ms": null,
+      "max_inter_chunk_ms": null
+     },
+     "usage": {
+      "prompt_tokens": 1,
+      "completion_tokens": 1,
+      "total_tokens": 2,
+      "cached_tokens": 0,
+      "reasoning_tokens": null,
+      "raw": {
+       "prompt_tokens": 1,
+       "completion_tokens": 1,
+       "total_tokens": 2,
+       "prompt_tokens_details": {
+        "cached_tokens": 0
+       }
+      }
+     },
+     "request_byte_count": 189,
+     "response_byte_count": 303,
+     "provider_request_id": "<chatcmpl-mock>",
+     "provider_response_id": "<chatcmpl-mock>",
+     "previous_response_id": null,
+     "input_prefix_node_id": null,
+     "input_node_ids": [
+      "<nd#3>"
+     ],
+     "input_leaf_node_id": "<nd#3>",
+     "output_node_id": "<nd#4>",
+     "parent_output_node_id": null,
+     "previous_exchange_id": null,
+     "is_duplicate_retry": false,
+     "late": false,
+     "has_payload": true,
+     "schema_version": 4,
+     "derivation_version": 2
+    }
+   ],
+   "next_cursor": null,
+   "has_more": false
+  },
+  "/graph": {
+   "trajectory": "<tr#1>",
+   "nodes": [
+    {
+     "node_id": "<nd#1>",
+     "parent_node_id": null,
+     "exchange_id": "<ex#1>",
+     "depth": 0,
+     "role": "user",
+     "author": "client",
+     "message_hash": "16f97dfe4556587c505d591608c2de0e882c521ae2075c22d3c19e2632f15d76",
+     "delta_hash": "78e496f0c19aa86faa3005da441a92e022b46535a4cbf62de4ad608d7e5b3a89",
+     "content_block_count": 1,
+     "char_count": 2,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "matched_prefix_messages": 0,
+      "tail_offset": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#3>",
+     "parent_node_id": null,
+     "exchange_id": "<ex#2>",
+     "depth": 0,
+     "role": "user",
+     "author": "client",
+     "message_hash": "16f97dfe4556587c505d591608c2de0e882c521ae2075c22d3c19e2632f15d76",
+     "delta_hash": "7e34d9a28a410c24445923fb537199b5cdb23aae4d7589fa086b9c4e56367f2d",
+     "content_block_count": 1,
+     "char_count": 2,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "matched_prefix_messages": 0,
+      "tail_offset": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#2>",
+     "parent_node_id": "<nd#1>",
+     "exchange_id": "<ex#1>",
+     "depth": 1,
+     "role": "assistant",
+     "author": "model",
+     "message_hash": "e6dc01c52e88e9f2af8bc3d898775e8262b9a50bea9c459f7e44b0d5f6f6d574",
+     "delta_hash": "f9b3b6af47732dbfcf469a5edb6b07d1a1b63fd3e56860c9e81a27623cee1d65",
+     "content_block_count": 1,
+     "char_count": 4,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": "<volatile>",
+     "output_ended_at": "<volatile>",
+     "derivation": {
+      "matched_prefix_messages": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#4>",
+     "parent_node_id": "<nd#3>",
+     "exchange_id": "<ex#2>",
+     "depth": 1,
+     "role": "assistant",
+     "author": "model",
+     "message_hash": "e6dc01c52e88e9f2af8bc3d898775e8262b9a50bea9c459f7e44b0d5f6f6d574",
+     "delta_hash": "e04e6f4124821fded5530cda7f4ee9853bf3ba80602975df755f2cafa43bc40e",
+     "content_block_count": 1,
+     "char_count": 4,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": "<volatile>",
+     "output_ended_at": "<volatile>",
+     "derivation": {
+      "matched_prefix_messages": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    }
+   ],
+   "leaf_node_ids": [
+    "<nd#2>",
+    "<nd#4>"
+   ],
+   "leaf_assistant_node_ids": [
+    "<nd#2>",
+    "<nd#4>"
+   ],
+   "branch_points": []
+  },
+  "/paths": {
+   "trajectory": "<tr#1>",
+   "mode": "text",
+   "tokenizer": null,
+   "paths": [
+    {
+     "path_id": "<tr#1>-p0000",
+     "node_ids": [
+      "<nd#1>",
+      "<nd#2>"
+     ],
+     "leaf_node_id": "<nd#2>",
+     "abandoned": false,
+     "masked_reason": null,
+     "stop_reason": null,
+     "token_count": 0,
+     "trainable_count": 0,
+     "blocking": null,
+     "blocks": [],
+     "messages": [
+      {
+       "role": "user",
+       "author": "client",
+       "chars": 33
+      },
+      {
+       "role": "assistant",
+       "author": "model",
+       "chars": 40
+      }
+     ]
+    },
+    {
+     "path_id": "<tr#1>-p0001",
+     "node_ids": [
+      "<nd#3>",
+      "<nd#4>"
+     ],
+     "leaf_node_id": "<nd#4>",
+     "abandoned": false,
+     "masked_reason": null,
+     "stop_reason": null,
+     "token_count": 0,
+     "trainable_count": 0,
+     "blocking": null,
+     "blocks": [],
+     "messages": [
+      {
+       "role": "user",
+       "author": "client",
+       "chars": 33
+      },
+      {
+       "role": "assistant",
+       "author": "model",
+       "chars": 40
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

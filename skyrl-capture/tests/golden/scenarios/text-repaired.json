@@ -1,0 +1,739 @@
+{
+ "exports": {
+  "graph": [
+   {
+    "schema_version": 4,
+    "trajectory_id": "<tr#1>",
+    "project": "golden",
+    "run_id": "run-g",
+    "task_id": "t3",
+    "step": 1,
+    "mode": "text",
+    "status": "finished",
+    "command_result": null,
+    "labels": [],
+    "annotations": {
+     "reward": 0.0
+    },
+    "upstream": {
+     "type": "openai",
+     "url": "http://127.0.0.1:<port>/v1",
+     "model": null,
+     "tokenizer": null
+    },
+    "integrity": {
+     "complete": true,
+     "calls_missing": 0,
+     "calls_after_close": 0
+    },
+    "bodies": "full",
+    "created_at": "<volatile>",
+    "finished_at": "<volatile>",
+    "derivation_version": 2,
+    "nodes": [
+     {
+      "node_id": "<nd#1>",
+      "parent": null,
+      "children": [
+       "<nd#2>",
+       "<nd#3>"
+      ],
+      "role": "user",
+      "author": "client",
+      "message": {
+       "content": "look up the weather",
+       "role": "user"
+      },
+      "message_hash": "00590df0885d485804e36904a91e097c5eefa5d9c6933d8487bbe15acf2307e0",
+      "context_hash": "0b8bfc4ceb96521de878069cae2d85d56e0302c1adc8f73677bcdd55907663b7"
+     },
+     {
+      "node_id": "<nd#2>",
+      "parent": "<nd#1>",
+      "children": [],
+      "role": "assistant",
+      "author": "model",
+      "message": {
+       "content": "CALL get_weather(city=\"Berlin\"",
+       "role": "assistant"
+      },
+      "message_hash": "e8206395a2dd9c2af260785f546c9a202ee2614e55c666f0f4a7200d7db48ffd",
+      "context_hash": "86bb98118c6b0547d3a50f8d4fb93bdfb0f0efb286acfcf1402abb3d44202640",
+      "call": {
+       "endpoint": "/v1/chat/completions",
+       "model": "mock-model",
+       "status": 200,
+       "streaming": false,
+       "finish_reason": "stop",
+       "tools_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "sampling": {},
+       "usage": {
+        "prompt_tokens": 4,
+        "completion_tokens": 2,
+        "total_tokens": 6,
+        "cached_tokens": 0,
+        "reasoning_tokens": null,
+        "raw": {
+         "prompt_tokens": 4,
+         "completion_tokens": 2,
+         "total_tokens": 6,
+         "prompt_tokens_details": {
+          "cached_tokens": 0
+         }
+        }
+       },
+       "timing": {
+        "started_at": "<volatile>",
+        "ended_at": "<volatile>",
+        "duration_ms": "<volatile>",
+        "ttft_ms": "<volatile>"
+       }
+      }
+     },
+     {
+      "node_id": "<nd#3>",
+      "parent": "<nd#1>",
+      "children": [
+       "<nd#4>"
+      ],
+      "role": "assistant",
+      "author": "client",
+      "message": {
+       "content": "CALL get_weather(city=\"Berlin\")",
+       "role": "assistant"
+      },
+      "message_hash": "bdffd7d857218dfea78832af6c8ec3b8df62d785856de9950635d0f9361a8b66",
+      "context_hash": "c30a1f759ee1ce3b1a22f9dc682995c865a3cabf361ac0ab9b6087e9e4b3edb4"
+     },
+     {
+      "node_id": "<nd#4>",
+      "parent": "<nd#3>",
+      "children": [
+       "<nd#5>"
+      ],
+      "role": "user",
+      "author": "client",
+      "message": {
+       "content": "tool result: 18C",
+       "role": "user"
+      },
+      "message_hash": "77b83899ea385c8f901eda8f443ed6d2aa6bc0d8f5e99fddd5f811e3d6119398",
+      "context_hash": "33d172aefb00b827d90087b446728b65de2c3a59544327836111345e74d57a73"
+     },
+     {
+      "node_id": "<nd#5>",
+      "parent": "<nd#4>",
+      "children": [],
+      "role": "assistant",
+      "author": "model",
+      "message": {
+       "content": "It is 18C.",
+       "role": "assistant"
+      },
+      "message_hash": "dc3f222a78c8a652394926901b780813ac110f3cf7e7cae97ee04047d246420f",
+      "context_hash": "9b0e23b536a036d0afe244bba63a8c6b1478766422bf5f5d76bce5abc2cbcece",
+      "call": {
+       "endpoint": "/v1/chat/completions",
+       "model": "mock-model",
+       "status": 200,
+       "streaming": false,
+       "finish_reason": "stop",
+       "tools_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "sampling": {},
+       "usage": {
+        "prompt_tokens": 15,
+        "completion_tokens": 3,
+        "total_tokens": 18,
+        "cached_tokens": 0,
+        "reasoning_tokens": null,
+        "raw": {
+         "prompt_tokens": 15,
+         "completion_tokens": 3,
+         "total_tokens": 18,
+         "prompt_tokens_details": {
+          "cached_tokens": 0
+         }
+        }
+       },
+       "timing": {
+        "started_at": "<volatile>",
+        "ended_at": "<volatile>",
+        "duration_ms": "<volatile>",
+        "ttft_ms": "<volatile>"
+       }
+      }
+     }
+    ]
+   }
+  ],
+  "replay": [
+   {
+    "schema_version": 4,
+    "session_id": "<tr#1>-s0000",
+    "trajectory_id": "<tr#1>",
+    "parent_session_id": null,
+    "delay_ms": null,
+    "arrival_ms": "<volatile>",
+    "forks": [],
+    "turns": [
+     {
+      "delay_ms": null,
+      "method": "POST",
+      "endpoint": "/v1/chat/completions",
+      "payload": {
+       "model": "mock-model",
+       "messages": [
+        {
+         "content": "look up the weather",
+         "role": "user"
+        }
+       ]
+      }
+     }
+    ]
+   },
+   {
+    "schema_version": 4,
+    "session_id": "<tr#1>-s0001",
+    "trajectory_id": "<tr#1>",
+    "parent_session_id": null,
+    "delay_ms": null,
+    "arrival_ms": "<volatile>",
+    "forks": [],
+    "turns": [
+     {
+      "delay_ms": null,
+      "method": "POST",
+      "endpoint": "/v1/chat/completions",
+      "payload": {
+       "model": "mock-model",
+       "messages": [
+        {
+         "content": "look up the weather",
+         "role": "user"
+        },
+        {
+         "content": "CALL get_weather(city=\"Berlin\")",
+         "role": "assistant"
+        },
+        {
+         "content": "tool result: 18C",
+         "role": "user"
+        }
+       ]
+      }
+     }
+    ]
+   }
+  ],
+  "text_samples": [
+   {
+    "schema_version": 4,
+    "path_id": "<tr#1>-p0000",
+    "trajectory_id": "<tr#1>",
+    "node_ids": [
+     "<nd#1>",
+     "<nd#2>"
+    ],
+    "abandoned": true,
+    "labels": [],
+    "annotations": {
+     "reward": 0.0
+    },
+    "model": "mock-model",
+    "tools": null,
+    "trainable_count": 1,
+    "messages": [
+     {
+      "node_id": "<nd#1>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "look up the weather",
+       "role": "user"
+      }
+     },
+     {
+      "node_id": "<nd#2>",
+      "author": "model",
+      "trainable": true,
+      "message": {
+       "content": "CALL get_weather(city=\"Berlin\"",
+       "role": "assistant"
+      }
+     }
+    ]
+   },
+   {
+    "schema_version": 4,
+    "path_id": "<tr#1>-p0001",
+    "trajectory_id": "<tr#1>",
+    "node_ids": [
+     "<nd#1>",
+     "<nd#3>",
+     "<nd#4>",
+     "<nd#5>"
+    ],
+    "abandoned": false,
+    "labels": [],
+    "annotations": {
+     "reward": 0.0
+    },
+    "model": "mock-model",
+    "tools": null,
+    "trainable_count": 1,
+    "messages": [
+     {
+      "node_id": "<nd#1>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "look up the weather",
+       "role": "user"
+      }
+     },
+     {
+      "node_id": "<nd#3>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "CALL get_weather(city=\"Berlin\")",
+       "role": "assistant"
+      }
+     },
+     {
+      "node_id": "<nd#4>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "tool result: 18C",
+       "role": "user"
+      }
+     },
+     {
+      "node_id": "<nd#5>",
+      "author": "model",
+      "trainable": true,
+      "message": {
+       "content": "It is 18C.",
+       "role": "assistant"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "api": {
+  "/": {
+   "id": "<tr#1>",
+   "project": "golden",
+   "run_id": "run-g",
+   "task_id": "t3",
+   "step": 1,
+   "upstream": {
+    "mode": "text",
+    "type": "openai",
+    "protocol": "openai",
+    "url": "http://127.0.0.1:<port>/v1",
+    "model": null
+   },
+   "mode": "text",
+   "status": "finished",
+   "labels": [],
+   "annotations": {
+    "reward": 0.0
+   },
+   "bodies": "full",
+   "created_at": "<volatile>",
+   "first_event_at": "<volatile>",
+   "finished_at": "<volatile>",
+   "capture": {
+    "exchange_count": 2,
+    "node_count": 5,
+    "calls_after_close": 0,
+    "complete": true,
+    "calls_missing": 0,
+    "recovery_uncertain": false,
+    "delivery_uncertain": [],
+    "errors": []
+   },
+   "command_result": null,
+   "source_metadata": {},
+   "schema_version": 4,
+   "revision": 1,
+   "gap_distribution": {
+    "samples": 0,
+    "min_ms": null,
+    "max_ms": null,
+    "mean_ms": null,
+    "p50_ms": null,
+    "p95_ms": null,
+    "p99_ms": null,
+    "overlapping": 0,
+    "total_wait_ms": "<volatile>"
+   }
+  },
+  "/exchanges": {
+   "data": [
+    {
+     "id": "<ex#1>",
+     "sequence": 0,
+     "provider": "openai",
+     "model": "mock-model",
+     "endpoint_kind": "chat_completions",
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "http_status": 200,
+     "streaming": false,
+     "transport_error": null,
+     "provider_error": null,
+     "retry_attempt": 0,
+     "completion_reason": "stop",
+     "request_start_at": "<volatile>",
+     "response_end_at": "<volatile>",
+     "ttft_ms": "<volatile>",
+     "duration_ms": "<volatile>",
+     "gap_ms": null,
+     "overlapping": false,
+     "chunk_count": 1,
+     "stream_summary": {
+      "chunk_count": 1,
+      "first_chunk_ms": "<volatile>",
+      "last_chunk_ms": "<volatile>",
+      "total_bytes": 331,
+      "mean_inter_chunk_ms": null,
+      "max_inter_chunk_ms": null
+     },
+     "usage": {
+      "prompt_tokens": 4,
+      "completion_tokens": 2,
+      "total_tokens": 6,
+      "cached_tokens": 0,
+      "reasoning_tokens": null,
+      "raw": {
+       "prompt_tokens": 4,
+       "completion_tokens": 2,
+       "total_tokens": 6,
+       "prompt_tokens_details": {
+        "cached_tokens": 0
+       }
+      }
+     },
+     "request_byte_count": 98,
+     "response_byte_count": 331,
+     "provider_request_id": "<chatcmpl-mock>",
+     "provider_response_id": "<chatcmpl-mock>",
+     "previous_response_id": null,
+     "input_prefix_node_id": null,
+     "input_node_ids": [
+      "<nd#1>"
+     ],
+     "input_leaf_node_id": "<nd#1>",
+     "output_node_id": "<nd#2>",
+     "parent_output_node_id": null,
+     "previous_exchange_id": null,
+     "is_duplicate_retry": false,
+     "late": false,
+     "has_payload": true,
+     "schema_version": 4,
+     "derivation_version": 2
+    },
+    {
+     "id": "<ex#2>",
+     "sequence": 1,
+     "provider": "openai",
+     "model": "mock-model",
+     "endpoint_kind": "chat_completions",
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "http_status": 200,
+     "streaming": false,
+     "transport_error": null,
+     "provider_error": null,
+     "retry_attempt": 0,
+     "completion_reason": "stop",
+     "request_start_at": "<volatile>",
+     "response_end_at": "<volatile>",
+     "ttft_ms": "<volatile>",
+     "duration_ms": "<volatile>",
+     "gap_ms": null,
+     "overlapping": false,
+     "chunk_count": 1,
+     "stream_summary": {
+      "chunk_count": 1,
+      "first_chunk_ms": "<volatile>",
+      "last_chunk_ms": "<volatile>",
+      "total_bytes": 311,
+      "mean_inter_chunk_ms": null,
+      "max_inter_chunk_ms": null
+     },
+     "usage": {
+      "prompt_tokens": 15,
+      "completion_tokens": 3,
+      "total_tokens": 18,
+      "cached_tokens": 0,
+      "reasoning_tokens": null,
+      "raw": {
+       "prompt_tokens": 15,
+       "completion_tokens": 3,
+       "total_tokens": 18,
+       "prompt_tokens_details": {
+        "cached_tokens": 0
+       }
+      }
+     },
+     "request_byte_count": 210,
+     "response_byte_count": 311,
+     "provider_request_id": "<chatcmpl-mock>",
+     "provider_response_id": "<chatcmpl-mock>",
+     "previous_response_id": null,
+     "input_prefix_node_id": "<nd#1>",
+     "input_node_ids": [
+      "<nd#3>",
+      "<nd#4>"
+     ],
+     "input_leaf_node_id": "<nd#4>",
+     "output_node_id": "<nd#5>",
+     "parent_output_node_id": null,
+     "previous_exchange_id": null,
+     "is_duplicate_retry": false,
+     "late": false,
+     "has_payload": true,
+     "schema_version": 4,
+     "derivation_version": 2
+    }
+   ],
+   "next_cursor": null,
+   "has_more": false
+  },
+  "/graph": {
+   "trajectory": "<tr#1>",
+   "nodes": [
+    {
+     "node_id": "<nd#1>",
+     "parent_node_id": null,
+     "exchange_id": "<ex#1>",
+     "depth": 0,
+     "role": "user",
+     "author": "client",
+     "message_hash": "00590df0885d485804e36904a91e097c5eefa5d9c6933d8487bbe15acf2307e0",
+     "delta_hash": "fd6118145707b0a17c46ae7e1119b05b595edd237476f6554951bc220c7c9563",
+     "content_block_count": 1,
+     "char_count": 19,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "matched_prefix_messages": 0,
+      "tail_offset": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#2>",
+     "parent_node_id": "<nd#1>",
+     "exchange_id": "<ex#1>",
+     "depth": 1,
+     "role": "assistant",
+     "author": "model",
+     "message_hash": "e8206395a2dd9c2af260785f546c9a202ee2614e55c666f0f4a7200d7db48ffd",
+     "delta_hash": "d86999146261d1fcf56f7cd43324230e2ecc08e384a311f7c2fcc77b39c5a7ea",
+     "content_block_count": 1,
+     "char_count": 30,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": "<volatile>",
+     "output_ended_at": "<volatile>",
+     "derivation": {
+      "matched_prefix_messages": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#3>",
+     "parent_node_id": "<nd#1>",
+     "exchange_id": "<ex#2>",
+     "depth": 1,
+     "role": "assistant",
+     "author": "client",
+     "message_hash": "bdffd7d857218dfea78832af6c8ec3b8df62d785856de9950635d0f9361a8b66",
+     "delta_hash": "3322e3d2fcdc3dab694d3a9018820956d825050f3e894004261337c3fc8ca1dc",
+     "content_block_count": 1,
+     "char_count": 31,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "matched_prefix_messages": 1,
+      "tail_offset": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#4>",
+     "parent_node_id": "<nd#3>",
+     "exchange_id": "<ex#2>",
+     "depth": 2,
+     "role": "user",
+     "author": "client",
+     "message_hash": "77b83899ea385c8f901eda8f443ed6d2aa6bc0d8f5e99fddd5f811e3d6119398",
+     "delta_hash": "34a02707240f682c585a956037bca1c9f07058f1d4c0fbe727bbfe4a73d8b72d",
+     "content_block_count": 1,
+     "char_count": 16,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "matched_prefix_messages": 1,
+      "tail_offset": 1,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#5>",
+     "parent_node_id": "<nd#4>",
+     "exchange_id": "<ex#2>",
+     "depth": 3,
+     "role": "assistant",
+     "author": "model",
+     "message_hash": "dc3f222a78c8a652394926901b780813ac110f3cf7e7cae97ee04047d246420f",
+     "delta_hash": "abbd6b67ab481ff1704f8d6bcc3b69ec912d1c1550fc07fe779cd8bd793ed9a7",
+     "content_block_count": 1,
+     "char_count": 10,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": "<volatile>",
+     "output_ended_at": "<volatile>",
+     "derivation": {
+      "matched_prefix_messages": 1,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    }
+   ],
+   "leaf_node_ids": [
+    "<nd#2>",
+    "<nd#5>"
+   ],
+   "leaf_assistant_node_ids": [
+    "<nd#2>",
+    "<nd#5>"
+   ],
+   "branch_points": [
+    {
+     "node_id": "<nd#1>",
+     "child_count": 2,
+     "child_ids": [
+      "<nd#2>",
+      "<nd#3>"
+     ]
+    }
+   ]
+  },
+  "/paths": {
+   "trajectory": "<tr#1>",
+   "mode": "text",
+   "tokenizer": null,
+   "paths": [
+    {
+     "path_id": "<tr#1>-p0000",
+     "node_ids": [
+      "<nd#1>",
+      "<nd#2>"
+     ],
+     "leaf_node_id": "<nd#2>",
+     "abandoned": false,
+     "masked_reason": null,
+     "stop_reason": null,
+     "token_count": 0,
+     "trainable_count": 0,
+     "blocking": null,
+     "blocks": [],
+     "messages": [
+      {
+       "role": "user",
+       "author": "client",
+       "chars": 50
+      },
+      {
+       "role": "assistant",
+       "author": "model",
+       "chars": 66
+      }
+     ]
+    },
+    {
+     "path_id": "<tr#1>-p0001",
+     "node_ids": [
+      "<nd#1>",
+      "<nd#3>",
+      "<nd#4>",
+      "<nd#5>"
+     ],
+     "leaf_node_id": "<nd#5>",
+     "abandoned": false,
+     "masked_reason": null,
+     "stop_reason": null,
+     "token_count": 0,
+     "trainable_count": 0,
+     "blocking": null,
+     "blocks": [],
+     "messages": [
+      {
+       "role": "user",
+       "author": "client",
+       "chars": 50
+      },
+      {
+       "role": "assistant",
+       "author": "client",
+       "chars": 67
+      },
+      {
+       "role": "user",
+       "author": "client",
+       "chars": 47
+      },
+      {
+       "role": "assistant",
+       "author": "model",
+       "chars": 46
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

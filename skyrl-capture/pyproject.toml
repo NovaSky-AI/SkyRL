@@ -1,0 +1,94 @@
+[project]
+name = "skyrl-capture"
+version = "0.1.0"
+description = "Trajectory-scoped inference capture: proxy, context graph, token capture, and benchmark exports"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Anyscale" }]
+dependencies = [
+    "uvicorn>=0.30",
+    "httpx>=0.27",
+    "zstandard>=0.22",
+    "typer>=0.12",
+    "rich>=13.7",
+    "fastapi>=0.111",
+    "orjson>=3.10",
+]
+
+# The base install is text-mode capture: a proxy, the record, the exports and
+# the viewer. It has no ML dependency at all, which is the point --
+# `skyrl-capture` installs beside a trainer that pins its own transformers, and
+# `skyrl-capture[tokens]` is the only thing that brings one. The renderer is
+# imported inside the functions that build it, so the base install never
+# touches it.
+[project.optional-dependencies]
+fast = ["uvloop>=0.19; sys_platform != 'win32'", "httptools>=0.6"]
+# Prime Intellect's renderers is pinned to the revision SkyRL's
+# token-in/token-out proxy uses, so a capture and a SkyRL rollout render
+# identically. It is not optional within tokens mode: it is the renderer.
+tokens = [
+    # This bound used to be `<5`, on the belief that the pinned `renderers`
+    # revision imports a 4.x-only path. It does not: every symbol it imports --
+    # including `transformers.tokenization_utils.PreTrainedTokenizer`, the one
+    # said to be gone -- still resolves on 5.16.1, and the renderers render
+    # byte-identically on both. The cap was the only reason capture and a
+    # trainer pinning transformers 5.x could not share an environment.
+    #
+    # `<6` rather than unbounded: what this protects is not the import, it is
+    # that the tokens are the same. A major release may change them, and
+    # `tests/test_renderer_parity.py` is what would notice.
+    "transformers>=4.50,<6",
+    "jinja2>=3.1",
+    "renderers @ git+https://github.com/PrimeIntellect-ai/renderers@5fdf78c30e89a2b9694d17bfe1ea0bc1c299f028",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
+    "ruff>=0.5",
+    # Only the TLS transport tests need it, to mint a self-signed certificate.
+    # Nothing at run time stores a secret, so there is nothing to encrypt.
+    "cryptography>=42.0",
+]
+
+[project.scripts]
+skyrl-capture = "skyrl_capture.cli.main:app_main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# The `tokens` extra pins a git revision, which hatchling refuses to package
+# without this.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skyrl_capture"]
+
+# The viewer lives at the repo root, where it reads as what it is -- a small
+# separate program -- but it has to travel inside the wheel for
+# `skyrl-capture viewer` to work from a plain install. It is static files and
+# one zero-dependency Node server, so shipping it costs a few tens of KB and
+# no dependency at all.
+[tool.hatch.build.targets.wheel.force-include]
+"viewer" = "skyrl_capture/viewer"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008", "E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# The repo root, so a test can reach `tools/` -- the verification workflow is
+# development machinery and is tested from where it lives rather than being
+# kept in the package to make it importable.
+pythonpath = ["."]
+addopts = "-q"
+timeout = 300

@@ -1,0 +1,10 @@
+{
+  "name": "skyrl-capture-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The skyrl-capture viewer: a browser over the /v1 read API.",
+  "type": "module",
+  "main": "server.mjs",
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server.mjs" }
+}

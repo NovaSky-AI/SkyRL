@@ -1,0 +1,55 @@
+{
+ "id": "tr_01M3103279ND9DB279AB2W6M4B",
+ "project": "viewer",
+ "run_id": "run-v",
+ "task_id": "t1",
+ "step": 0,
+ "upstream": {
+  "mode": "tokens",
+  "type": "tokens",
+  "protocol": "openai",
+  "url": "http://127.0.0.1:60503/generate",
+  "model": "mock-tokens-model",
+  "tokenizer": "builtin",
+  "config": {
+   "max_model_len": 4096
+  }
+ },
+ "mode": "tokens",
+ "status": "finished",
+ "labels": [
+  "scored"
+ ],
+ "annotations": {
+  "reward": 1
+ },
+ "bodies": "full",
+ "created_at": "2026-09-21T03:27:55.638281+00:00",
+ "first_event_at": "2026-09-21T03:27:55.641167+00:00",
+ "finished_at": "2026-09-21T03:27:55.648386+00:00",
+ "capture": {
+  "exchange_count": 2,
+  "node_count": 5,
+  "calls_after_close": 0,
+  "complete": true,
+  "calls_missing": 0,
+  "recovery_uncertain": false,
+  "delivery_uncertain": [],
+  "errors": []
+ },
+ "command_result": null,
+ "source_metadata": {},
+ "schema_version": 4,
+ "revision": 1,
+ "gap_distribution": {
+  "samples": 0,
+  "min_ms": null,
+  "max_ms": null,
+  "mean_ms": null,
+  "p50_ms": null,
+  "p95_ms": null,
+  "p99_ms": null,
+  "overlapping": 0,
+  "total_wait_ms": 0
+ }
+}

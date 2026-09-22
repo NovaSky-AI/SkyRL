@@ -1,0 +1,176 @@
+{
+  "configuration": {
+    "requests_per_arm": 2000,
+    "load_processes": 2,
+    "concurrency_per_process": 4,
+    "aggregate_concurrency": 8,
+    "streaming": true,
+    "duration_seconds": null,
+    "target_rps": 250.0,
+    "python": "3.13.3",
+    "platform": "darwin",
+    "cpu_count": 10,
+    "uvloop": true
+  },
+  "arms": {
+    "baseline_capture_off": {
+      "name": "capture-off",
+      "requests": 2000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 9.3652,
+      "throughput_rps": 213.6,
+      "latency_ms": {
+        "min": 1.6419,
+        "p50": 3.7024,
+        "p95": 7.0126,
+        "p99": 9.1486,
+        "max": 12.0508,
+        "mean": 3.9935,
+        "samples": 2000
+      },
+      "first_byte_ms": {
+        "min": 1.2465,
+        "p50": 3.2097,
+        "p95": 6.4182,
+        "p99": 8.6359,
+        "max": 11.6589,
+        "mean": 3.501,
+        "samples": 2000
+      },
+      "capture": {
+        "dropped": 0,
+        "ingested_exchanges": 0,
+        "note": "capture disabled"
+      }
+    },
+    "capture_on_split_ingestion": {
+      "name": "capture-on (split ingestion)",
+      "requests": 2000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 9.2419,
+      "throughput_rps": 216.4,
+      "latency_ms": {
+        "min": 1.9513,
+        "p50": 3.315,
+        "p95": 5.9224,
+        "p99": 8.4783,
+        "max": 13.8852,
+        "mean": 3.6612,
+        "samples": 2000
+      },
+      "first_byte_ms": {
+        "min": 1.3355,
+        "p50": 2.683,
+        "p95": 5.2895,
+        "p99": 7.6398,
+        "max": 13.2605,
+        "mean": 3.0359,
+        "samples": 2000
+      },
+      "capture": {
+        "offered": 2008,
+        "dropped": 0,
+        "max_ring_depth": 4,
+        "ring_capacity": 262144,
+        "spool_records": 2008,
+        "spool_bytes": 8983792,
+        "ingested_exchanges": 2008,
+        "ingestion": "separate process"
+      }
+    },
+    "capture_on_in_process_ingestion": {
+      "name": "capture-on (in-process ingestion)",
+      "requests": 2000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 9.2654,
+      "throughput_rps": 215.9,
+      "latency_ms": {
+        "min": 1.7149,
+        "p50": 3.3413,
+        "p95": 6.1057,
+        "p99": 10.4888,
+        "max": 27.1298,
+        "mean": 3.7702,
+        "samples": 2000
+      },
+      "first_byte_ms": {
+        "min": 1.316,
+        "p50": 2.7365,
+        "p95": 5.3502,
+        "p99": 9.438,
+        "max": 25.781,
+        "mean": 3.1746,
+        "samples": 2000
+      },
+      "capture": {
+        "offered": 2008,
+        "dropped": 0,
+        "max_ring_depth": 3,
+        "ring_capacity": 262144,
+        "spool_records": 2008,
+        "spool_bytes": 8983792,
+        "ingested_exchanges": 2008,
+        "ingestion": "in process"
+      }
+    }
+  },
+  "deltas": {
+    "capture_on_split_ingestion": {
+      "throughput_ratio_pct": 101.31,
+      "added_latency_p50_ms": -0.3874,
+      "added_latency_p95_ms": -1.0902,
+      "added_latency_p99_ms": -0.6703,
+      "added_latency_mean_ms": -0.3323,
+      "added_error_rate_pct_points": 0.0,
+      "added_first_byte_p50_ms": -0.5267,
+      "added_first_byte_p95_ms": -1.1287,
+      "added_first_byte_p99_ms": -0.9961
+    },
+    "capture_on_in_process_ingestion": {
+      "throughput_ratio_pct": 101.08,
+      "added_latency_p50_ms": -0.3611,
+      "added_latency_p95_ms": -0.9069,
+      "added_latency_p99_ms": 1.3402,
+      "added_latency_mean_ms": -0.2233,
+      "added_error_rate_pct_points": 0.0,
+      "added_first_byte_p50_ms": -0.4732,
+      "added_first_byte_p95_ms": -1.068,
+      "added_first_byte_p99_ms": 0.8021
+    }
+  },
+  "methodology": {
+    "mode": "open-loop",
+    "note": "Open-loop (--target-rps) paces arrivals below the ceiling and is the only mode in which added latency is meaningful. Closed-loop saturates the proxy and measures the throughput ceiling; its latency deltas are queueing, not per-request cost.",
+    "measured_capture_cpu_cost_us_per_request": 6.5
+  },
+  "thresholds": {
+    "throughput_at_least_99pct_of_baseline": {
+      "passed": true,
+      "observed": "101.31% of baseline",
+      "meaningful": true
+    },
+    "added_p99_latency_at_most_1ms": {
+      "passed": true,
+      "observed": "-0.6703 ms",
+      "meaningful": true
+    },
+    "added_error_rate_at_most_0.01pct_points": {
+      "passed": true,
+      "observed": "0.0 points",
+      "meaningful": true
+    },
+    "zero_dropped_capture_events": {
+      "passed": true,
+      "observed": "0 dropped",
+      "meaningful": true
+    },
+    "all_exchanges_ingested": {
+      "passed": true,
+      "observed": "2008 of 2000 successful requests",
+      "meaningful": true
+    }
+  }
+}
