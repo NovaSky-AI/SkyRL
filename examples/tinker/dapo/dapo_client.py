@@ -188,13 +188,25 @@ class WandbLogger:
             if isinstance(value, (int, float, bool)) and not isinstance(value, str)
         }
         if numeric_payload:
-            self._wandb.log(numeric_payload, step=payload.get("step"))
+            # With an explicit `step`, W&B buffers the payload until a higher step is logged, so train and
+            # eval payloads for the same step merge into one row. `commit_step` flushes it at step end.
+            self._wandb.log(numeric_payload, step=payload.get("step"), commit=False)
 
         for key, value in payload.items():
             if key in numeric_payload:
                 continue
             if isinstance(value, str):
                 self._run.summary[key] = value
+
+    def commit_step(self, step: int) -> None:
+        """Flush the buffered W&B row for `step` so charts do not trail the run by one step.
+
+        Call once per step after every payload for that step (train, checkpoint, eval) has been logged.
+        Committing on every `log` call instead would drop the second payload for a step as non-monotonic.
+        """
+        if self._run is None:
+            return
+        self._wandb.log({}, step=step, commit=True)
 
     def finish(self) -> None:
         if self._run is not None:
@@ -815,6 +827,7 @@ def run_training(args: argparse.Namespace) -> None:
             payload = {"step": global_step, **eval_metrics}
             append_metrics(args.output_dir, payload)
             wandb_logger.log(payload)
+            wandb_logger.commit_step(global_step)
 
         for epoch in range(TRAIN_EPOCHS):
             epoch_rng = random.Random(args.seed + epoch)
@@ -886,6 +899,8 @@ def run_training(args: argparse.Namespace) -> None:
                     payload = {"step": global_step, **eval_metrics}
                     append_metrics(args.output_dir, payload)
                     wandb_logger.log(payload)
+
+                wandb_logger.commit_step(global_step)
 
                 if args.max_train_steps is not None and train_steps >= args.max_train_steps:
                     logger.info("Reached max_train_steps=%s, stopping early", args.max_train_steps)

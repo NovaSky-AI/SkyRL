@@ -86,7 +86,8 @@ The `skyrl-train` extra is required: the client imports `skyrl_gym` (the AIME ve
 `skyrl.backends.skyrl_train.utils.ppo_utils` (the loss-reduction helper).
 
 Set `WANDB_API_KEY` (and optionally `WANDB_PROJECT` / `WANDB_RUN_NAME` / `WANDB_ENTITY`) for W&B logging;
-metrics are also appended to `<output-dir>/metrics.jsonl`.
+metrics are also appended to `<output-dir>/metrics.jsonl`, which is the live source of truth for a running job
+(train, checkpoint and eval payloads for one step share one W&B row, committed at the end of the step).
 
 ## Smoke test on a small model
 
