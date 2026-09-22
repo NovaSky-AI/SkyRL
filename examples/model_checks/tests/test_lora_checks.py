@@ -109,11 +109,14 @@ def test_update_smaller_than_the_budget_cannot_qualify_publication():
         check_update_stimulus(report, 0.05)
 
 
-def test_stimulus_uses_the_actual_stale_snapshot_and_existing_boundary():
+def test_stimulus_requires_the_actual_stale_snapshot_to_fail_agreement():
     report = {"trainer_updated": [-1.0], "stale": [-1.125]}
-    check_update_stimulus(report, 0.125)
+    check_update_stimulus(report, 0.124)
+    with pytest.raises(AssertionError):
+        check_agreement(report["stale_parity"], 0.124, 0.5)
+    check_agreement(report["stale_parity"], 0.125, 0.5)
     with pytest.raises(AssertionError, match="insufficient test stimulus"):
-        check_update_stimulus(report, 0.126)
+        check_update_stimulus(report, 0.125)
 
 
 def test_ordinary_agreement_does_not_claim_tight_delta_equivalence():

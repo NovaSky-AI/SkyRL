@@ -34,7 +34,7 @@ def check_withheld_publication(report):
 def check_update_stimulus(report, atol):
     """The actual stale sampler must fail the same agreement check publication will face."""
     report["stale_parity"] = compare_logprobs(report["trainer_updated"], report["stale"])
-    assert report["stale_parity"]["mean_abs"] >= atol, "insufficient test stimulus to distinguish stale publication"
+    assert report["stale_parity"]["mean_abs"] > atol, "insufficient test stimulus to distinguish stale publication"
 
 
 def check_updated_adapter(report, mean_atol, max_atol):
