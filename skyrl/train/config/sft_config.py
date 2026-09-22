@@ -6,6 +6,7 @@ bridge function ``build_skyrl_config_for_sft`` that maps it to the internal
 ``SkyRLTrainConfig`` used by the SkyRL backend.
 """
 
+import math
 import os
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -296,6 +297,15 @@ class SFTConfig(BaseConfig):
     one micro-batch. Must be ``>= max_length`` so any single sequence fits in a
     bin. ``None`` (default) resolves to ``max_length`` (each bin holds one
     sequence)."""
+    align_packing_bins_to_dp: bool = False
+    """Vary packed training-batch cardinality to avoid DP bin-count rounding.
+
+    The sampler preserves sample order and keeps every sample, but moves the
+    contiguous boundary between adjacent optimizer steps. Only the training
+    path is affected; evaluation keeps its configured chunk size.
+    """
+    packing_batch_size_allowed_variation: float = 0.05
+    """Maximum fractional variation from ``batch_size`` when aligning packed bins to DP."""
 
     # ---- Dummy run / benchmarking ----
     dummy_run_full_ctx: bool = False  # Skip real data; fabricate full-context sequences
@@ -622,6 +632,26 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         # Resolve and validate the MFFD bin capacity (asserts it is >= max_length
         # so any single sequence fits in a bin).
         cfg.resolved_bin_capacity()
+    if cfg.align_packing_bins_to_dp:
+        if not cfg.use_sequence_packing:
+            raise ValueError("align_packing_bins_to_dp=True requires use_sequence_packing=True.")
+        if cfg.sampler == "custom":
+            raise ValueError("align_packing_bins_to_dp=True does not yet support sampler='custom'.")
+        variation = cfg.packing_batch_size_allowed_variation
+        if not 0 < variation < 1:
+            raise ValueError("packing_batch_size_allowed_variation must be in (0, 1), " f"got {variation}.")
+        min_batch_size = math.ceil(cfg.batch_size * (1 - variation))
+        tp = cfg.megatron_config.tensor_model_parallel_size
+        pp = cfg.megatron_config.pipeline_model_parallel_size
+        cp = cfg.megatron_config.context_parallel_size
+        total_world_size = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
+        dp_size = total_world_size // (tp * pp * cp)
+        if min_batch_size < dp_size:
+            raise ValueError(
+                "packing_batch_size_allowed_variation permits fewer samples than DP ranks: "
+                f"min_batch_size={min_batch_size}, dp_size={dp_size}. Reduce "
+                "packing_batch_size_allowed_variation or disable align_packing_bins_to_dp."
+            )
 
 
 # NOTE (sumanthrh): Ideally this is not needed, but our internal abstractions for workers and worker groups depend

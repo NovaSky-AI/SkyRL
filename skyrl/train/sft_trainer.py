@@ -937,6 +937,7 @@ class SFTTrainer:
             if self.sft_cfg.use_sequence_packing or self.sft_cfg.remove_microbatch_padding:
                 logger.warning("VLM detected: disabling sequence packing / microbatch padding removal.")
             self.sft_cfg.use_sequence_packing = False
+            self.sft_cfg.align_packing_bins_to_dp = False
             self.sft_cfg.remove_microbatch_padding = False
             self.cfg.trainer.remove_microbatch_padding = False
 
@@ -1419,6 +1420,11 @@ class SFTTrainer:
         out of the loss), instead of being dropped. (Packed batches are not
         row-padded; the MFFD packer already handles a short example list.)
 
+        When ``align_packing_bins_to_dp`` is enabled, a stateful batch sampler moves only
+        contiguous batch boundaries and checkpoints its bounded read-ahead
+        carry. It works with every map-style SFT dataset path; custom samplers
+        (including the curriculum example) are rejected during validation.
+
         Resume note: ``StatefulDataLoader`` restores the *in-progress* epoch
         bit-exactly (the common case). For the built-in ``"random"`` sampler,
         epochs after the resumed one are re-shuffled into a valid but not
@@ -1443,6 +1449,28 @@ class SFTTrainer:
 
         sampler = self.build_train_sampler(tokenized)
         num_workers = self.sft_cfg.dataloader_num_workers
+
+        if self.sft_cfg.align_packing_bins_to_dp:
+            from skyrl.train.dataset.samplers import (
+                build_dp_aligned_packing_batch_sampler,
+            )
+
+            batch_sampler = build_dp_aligned_packing_batch_sampler(
+                tokenized=tokenized,
+                sampler=sampler,
+                generator=seeded_generator,
+                sft_cfg=self.sft_cfg,
+                dp_size=self._dp_size(),
+            )
+            return StatefulDataLoader(
+                tokenized,
+                batch_sampler=batch_sampler,
+                collate_fn=collate_fn,
+                generator=seeded_generator,
+                num_workers=num_workers,
+                persistent_workers=self.sft_cfg.dataloader_persistent_workers and num_workers > 0,
+                multiprocessing_context="spawn" if num_workers > 0 else None,
+            )
 
         return StatefulDataLoader(
             tokenized,
