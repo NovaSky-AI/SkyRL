@@ -1842,6 +1842,7 @@ class SFTTrainer:
                     "train/tokens_per_second": tokens_per_second,
                     "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                     "train/actual_num_tokens": actual_num_tokens,
+                    "train/actual_batch_size": batch.batch_size,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
@@ -2058,6 +2059,12 @@ class SFTTrainer:
                 batch_padded_seq_len = batch["sequences"].shape[1]
                 pad_size = batch.metadata.get("pad_size", 0) if batch.metadata else 0
                 real_rows = batch["attention_mask"].shape[0] - pad_size
+                # Packed rows are bins; count the original examples inside them.
+                actual_batch_size = (
+                    sum(lengths.numel() for lengths in batch["sub_seq_lengths"])
+                    if self.sft_cfg.use_sequence_packing
+                    else real_rows
+                )
                 actual_num_tokens = batch["attention_mask"][:real_rows].sum().item()
                 self._total_tokens_processed += actual_num_tokens
                 tokens_per_second = actual_num_tokens / all_timings["step"]
@@ -2069,6 +2076,7 @@ class SFTTrainer:
                     "train/tokens_per_second": tokens_per_second,
                     "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                     "train/actual_num_tokens": actual_num_tokens,
+                    "train/actual_batch_size": actual_batch_size,
                     "train/batch_padded_seq_len": batch_padded_seq_len,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
