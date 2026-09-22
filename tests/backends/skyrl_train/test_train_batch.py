@@ -1,5 +1,6 @@
 import pickle
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -22,6 +23,21 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
     cu_seqlens_from_lengths,
 )
 from skyrl.backends.skyrl_train.utils.routed_experts import ROUTED_EXPERT_DTYPES
+
+OUT_OF_BAND_PICKLE_PROTOCOL = 5
+
+
+@pytest.fixture
+def oob_round_trip():
+    """Round trip protocol-5 buffers, optionally as read-only views."""
+
+    def round_trip(obj: Any, read_only: bool = False) -> tuple[Any, bytes, list[memoryview]]:
+        buffers: list[pickle.PickleBuffer] = []
+        payload = pickle.dumps(obj, protocol=OUT_OF_BAND_PICKLE_PROTOCOL, buffer_callback=buffers.append)
+        views = [memoryview(bytes(buffer.raw())) if read_only else buffer.raw() for buffer in buffers]
+        return pickle.loads(payload, buffers=views), payload, views
+
+    return round_trip
 
 
 def test_train_batch_initialization():
