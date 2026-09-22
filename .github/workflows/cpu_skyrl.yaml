@@ -53,7 +53,7 @@ jobs:
       - name: Run pre-commit hooks
         run: uv pip install pre-commit; pre-commit run --all-files --config .pre-commit-config.yaml
   
-  skyrl_train_tests:
+  skyrl_tests:
     # CI runs only in the upstream repo. This workflow needs no secrets and would pass
     # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base
     # repository's context.
@@ -86,7 +86,7 @@ jobs:
     # The Tinker API server tests used to live in the JAX workflow because the
     # server defaults to the JAX backend. That workflow is now scoped to `skyrl/tx`
     # changes only, and the server is actively maintained, so its tests run here on
-    # every PR instead. Separate job rather than a step on `skyrl_train_tests`:
+    # every PR instead. Separate job rather than a step on `skyrl_tests`:
     # `jax` and `fsdp` are conflicting backend extras, so they need separate envs,
     # and `tests/tinker/test_api.py` re-execs `uv run` with the parent's flags.
     if: github.repository == 'NovaSky-AI/SkyRL'

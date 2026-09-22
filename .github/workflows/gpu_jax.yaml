@@ -19,8 +19,8 @@ on:
       - 'skyrl/tinker/types.py'
       - 'tests/tx/**'
       - 'tests/backends/test_jax_backend.py'
-      - 'ci/anyscale_gpu_ci.yaml'
-      - 'ci/gpu_ci_run.sh'
+      - 'ci/anyscale_gpu_ci_jax.yaml'
+      - 'ci/gpu_ci_run_jax.sh'
       - 'ci/submit_anyscale_job.sh'
       - '.github/workflows/gpu_jax.yaml'
   pull_request:
@@ -33,8 +33,8 @@ on:
       - 'skyrl/tinker/types.py'
       - 'tests/tx/**'
       - 'tests/backends/test_jax_backend.py'
-      - 'ci/anyscale_gpu_ci.yaml'
-      - 'ci/gpu_ci_run.sh'
+      - 'ci/anyscale_gpu_ci_jax.yaml'
+      - 'ci/gpu_ci_run_jax.sh'
       - 'ci/submit_anyscale_job.sh'
       - '.github/workflows/gpu_jax.yaml'
   workflow_dispatch:
@@ -77,8 +77,8 @@ jobs:
           ANYSCALE_HOST: https://console.anyscale.com
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          envsubst < ci/anyscale_gpu_ci.yaml > ci/anyscale_gpu_ci_envsubst.yaml
+          envsubst < ci/anyscale_gpu_ci_jax.yaml > ci/anyscale_gpu_ci_jax_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="skyrl-tx-gpu-ci-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
-          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_envsubst.yaml "$JOB_NAME" 10000
-          rm -f ci/anyscale_gpu_ci_envsubst.yaml
+          JOB_NAME="skyrl-jax-gpu-ci-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_jax_envsubst.yaml "$JOB_NAME" 10000
+          rm -f ci/anyscale_gpu_ci_jax_envsubst.yaml

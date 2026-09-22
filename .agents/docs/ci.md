@@ -5,12 +5,22 @@
 
 ## Workflow namespaces
 
-| Check name | File | Covers |
-|---|---|---|
-| `SkyRL-CPU` | `cpu_skyrl.yaml` | pre-commit, `tests/train`, `tests/backends/skyrl_train` (CPU), `tests/tinker`, `tests/utils`, `skyrl-gym` |
-| `SkyRL-GPU` | `gpu_skyrl.yaml` | `tests/backends/skyrl_train/gpu/gpu_ci` on Anyscale |
-| `SkyRL-JAX-CPU` | `cpu_jax.yaml` | `tests/tx`, `tests/backends/test_jax_backend.py`, engine benchmark |
-| `SkyRL-JAX-GPU` | `gpu_jax.yaml` | `tests/tx/gpu` on Anyscale |
+One naming stem per pipeline, used by the workflow file, the Anyscale job spec, the
+runner script and the Anyscale job name. `train` is not part of any of them -- it
+survives only where it names a real thing (the `skyrl_train` package, the
+`novaskyai/skyrl-train-ray-*` image).
+
+| Check name | Workflow | Anyscale spec / runner | Covers |
+|---|---|---|---|
+| `SkyRL-CPU` | `cpu_skyrl.yaml` | — | pre-commit, `tests/train`, `tests/backends/skyrl_train` (CPU), `tests/tinker`, `tests/utils`, `skyrl-gym` |
+| `SkyRL-GPU` | `gpu_skyrl.yaml` | `anyscale_gpu_ci_skyrl.yaml` / `gpu_ci_run_skyrl.sh` | `tests/backends/skyrl_train/gpu/gpu_ci` |
+| `SkyRL-GPU-Megatron` | `gpu_skyrl_megatron.yaml` | `anyscale_gpu_ci_skyrl_megatron.yaml` / `gpu_ci_run_skyrl_megatron.sh` | the `megatron` marker |
+| `Megatron-Model-GPU-CI` | `gpu_skyrl_megatron_models.yaml` | `anyscale_gpu_ci_skyrl_megatron_models.yaml` / `gpu_ci_run_skyrl_megatron_models.sh` | the `megatron_models` marker |
+| `H100-GPU-CI` | `gpu_ci_h100.yaml` | `anyscale_gpu_ci_h100.yaml` / `gpu_ci_run_h100.sh` | H100-only suites |
+| `Tinker-SkyRL-Backend-GPU` | `tinker_skyrl_backend_gpu.yaml` | `anyscale_tinker_skyrl_backend_gpu.yaml` / `gpu_ci_run_tinker_skyrl_backend.sh` | `tests/tinker/skyrl_train` |
+| `SkyRL-JAX-CPU` | `cpu_jax.yaml` | — | `tests/tx`, `tests/backends/test_jax_backend.py`, engine benchmark |
+| `SkyRL-JAX-GPU` | `gpu_jax.yaml` | `anyscale_gpu_ci_jax.yaml` / `gpu_ci_run_jax.sh` | `tests/tx/gpu` |
+| `SkyRL-GPU-E2E-CI*` | `gpu_e2e_ci*.yaml` | `anyscale_gpu_e2e_test*.yaml` / `gpu_e2e_test_run*.sh` | end-to-end training runs |
 
 ## CPU vs GPU
 

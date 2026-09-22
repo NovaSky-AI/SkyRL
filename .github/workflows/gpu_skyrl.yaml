@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   
-  skyrl_train_tests:
+  skyrl_gpu_tests:
     # Gate on the label that fired this event. `types: [labeled]` delivers one event
     # per label added, and `contains(...labels.*.name, ...)` tests the whole label
     # set, so labelling in bulk launched one identical GPU run per label.
@@ -74,11 +74,11 @@ jobs:
           ANYSCALE_HOST: https://console.anyscale.com
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          envsubst < ci/anyscale_gpu_ci_skyrl_train.yaml > ci/anyscale_gpu_ci_skyrl_train_envsubst.yaml
+          envsubst < ci/anyscale_gpu_ci_skyrl.yaml > ci/anyscale_gpu_ci_skyrl_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="skyrl-train-gpu-ci-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
-          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_train_envsubst.yaml "$JOB_NAME" 12000
-          rm -f ci/anyscale_gpu_ci_skyrl_train_envsubst.yaml
+          JOB_NAME="skyrl-gpu-ci-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_envsubst.yaml "$JOB_NAME" 12000
+          rm -f ci/anyscale_gpu_ci_skyrl_envsubst.yaml
       # Cancelling the run stops the runner, not the cluster. GitHub still runs
       # `if: cancelled()` steps, so this is where an orphaned GPU job gets reaped.
       - name: Terminate Anyscale jobs on cancellation
