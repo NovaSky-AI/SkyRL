@@ -1,21 +1,46 @@
-name: SkyRL-CPU
+name: SkyRL-JAX-CPU
 
+# The JAX/tx backend is a mostly unmaintained code path, so this workflow is
+# scoped to the files that can actually break it: `skyrl/tx`, the JAX backend
+# adapters, the handful of shared modules tx imports, and the dependency
+# resolution surface. Everything else that used to run here (the Tinker API
+# server tests and `tests/utils`) moved to SkyRL-CPU, which runs on every PR.
+#
+# Keep the two `paths:` lists below in sync -- GitHub Actions does not support
+# YAML anchors.
 on:
   push:
     branches: [ main ]
     paths:
-      - 'ci/**'
-      - 'skyrl/**'
-      - 'tests/**'
+      - 'skyrl/tx/**'
+      - 'skyrl/backends/backend.py'
+      - 'skyrl/backends/jax.py'
+      - 'skyrl/backends/ray_jax.py'
+      - 'skyrl/benchmarks/**'
+      # tx imports these directly -- see `skyrl/tx/utils/models.py` and the loaders.
+      - 'skyrl/utils/**'
+      - 'skyrl/tinker/types.py'
+      - 'tests/tx/**'
+      - 'tests/backends/test_jax_backend.py'
+      # Resolution changes are the main way a JAX break sneaks in without anyone
+      # touching tx, and this runner is free, so keep them in scope.
       - 'pyproject.toml'
-      - '.github/workflows/cpu_skyrl.yaml'
+      - 'uv.lock'
+      - '.github/workflows/cpu_jax.yaml'
   pull_request:
     paths:
-      - 'ci/**'
-      - 'skyrl/**'
-      - 'tests/**'
+      - 'skyrl/tx/**'
+      - 'skyrl/backends/backend.py'
+      - 'skyrl/backends/jax.py'
+      - 'skyrl/backends/ray_jax.py'
+      - 'skyrl/benchmarks/**'
+      - 'skyrl/utils/**'
+      - 'skyrl/tinker/types.py'
+      - 'tests/tx/**'
+      - 'tests/backends/test_jax_backend.py'
       - 'pyproject.toml'
-      - '.github/workflows/cpu_skyrl.yaml'
+      - 'uv.lock'
+      - '.github/workflows/cpu_jax.yaml'
   workflow_dispatch:
 
 permissions:
@@ -28,7 +53,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  skyrl_tests:
+  skyrl_jax_tests:
     # CI runs only in the upstream repo. This workflow needs no secrets and would pass
     # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base
     # repository's context.
@@ -47,16 +72,10 @@ jobs:
       uses: astral-sh/setup-uv@v6
       with:
         enable-cache: true
-    - name: Run lint
-      run: |
-        # Pin to match the ruff rev in .pre-commit-config.yaml. Unpinned `uvx ruff`
-        # picks up ruff's expanded default rule set in newer releases and fails CI.
-        uvx ruff@0.11.9 check
     - name: Run pytest
       run: |
         uv run --extra tinker --extra jax --extra dev --with transformers==5.2.0 pytest --forked -s tests/tx/models/test_qwen3_5.py
-        uv run --extra tinker --extra jax --extra dev pytest --forked -s tests --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train --ignore=tests/tinker/skyrl_train --ignore=tests/tx/models/test_qwen3_5.py
+        uv run --extra tinker --extra jax --extra dev pytest --forked -s tests/tx tests/backends/test_jax_backend.py --ignore=tests/tx/gpu --ignore=tests/tx/models/test_qwen3_5.py
     - name: Run engine benchmarks
       run: |
         uv run --extra tinker --extra dev python skyrl/benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1}' --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16
-

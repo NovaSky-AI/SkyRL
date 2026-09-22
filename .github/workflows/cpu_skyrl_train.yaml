@@ -1,4 +1,4 @@
-name: SkyRL-Train-CPU
+name: SkyRL-CPU
 
 on: 
   push: 
@@ -82,6 +82,30 @@ jobs:
       - name: Run tinker tests
         run: uv run --isolated --extra fsdp --extra tinker --extra dev pytest tests/tinker/skyrl_train/
   
+  skyrl_tinker_tests:
+    # The Tinker API server tests used to live in the JAX workflow because the
+    # server defaults to the JAX backend. That workflow is now scoped to `skyrl/tx`
+    # changes only, and the server is actively maintained, so its tests run here on
+    # every PR instead. Separate job rather than a step on `skyrl_train_tests`:
+    # `jax` and `fsdp` are conflicting backend extras, so they need separate envs,
+    # and `tests/tinker/test_api.py` re-execs `uv run` with the parent's flags.
+    if: github.repository == 'NovaSky-AI/SkyRL'
+    needs: check_code_quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Run tinker API server + shared util tests
+        run: uv run --extra tinker --extra jax --extra dev pytest --forked -s tests/tinker tests/utils --ignore=tests/tinker/skyrl_train
+
   skyrl_gym_tests:
     # CI runs only in the upstream repo. This workflow needs no secrets and would pass
     # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base

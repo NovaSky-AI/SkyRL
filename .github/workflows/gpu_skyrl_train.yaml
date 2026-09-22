@@ -1,4 +1,4 @@
-name: SkyRL-Train-GPU
+name: SkyRL-GPU
 
 on: 
   push: 

@@ -3,10 +3,19 @@
 - **Workflows**: `.github/workflows/{cpu,gpu,tinker}_*.yaml`.
 - **Runner glue**: `ci/anyscale_*.yaml` (Anyscale job spec) → `ci/gpu_*_run*.sh` (pytest invocation).
 
+## Workflow namespaces
+
+| Check name | File | Covers |
+|---|---|---|
+| `SkyRL-CPU` | `cpu_skyrl_train.yaml` | pre-commit, `tests/train`, `tests/backends/skyrl_train` (CPU), `tests/tinker`, `tests/utils`, `skyrl-gym` |
+| `SkyRL-GPU` | `gpu_skyrl_train.yaml` | `tests/backends/skyrl_train/gpu/gpu_ci` on Anyscale |
+| `SkyRL-JAX-CPU` | `cpu_jax.yaml` | `tests/tx`, `tests/backends/test_jax_backend.py`, engine benchmark |
+| `SkyRL-JAX-GPU` | `gpu_jax.yaml` | `tests/tx/gpu` on Anyscale |
+
 ## CPU vs GPU
 
-- **CPU workflows** (`cpu_skyrl*.yaml`) run on `ubuntu-latest`, auto-trigger on push to `main`/`rc/*` and on every PR. Run lint + the CPU pytest suites from AGENTS.md.
-- **GPU workflows** (`gpu_*.yaml`, `tinker_*.yaml`) run on `ubuntu-latest` but submit to Anyscale via `anyscale job submit -f ci/<config>.yaml --timeout 12000`. **Label-gated** on PRs.
+- **CPU workflows** (`cpu_*.yaml`) run on `ubuntu-latest`, auto-trigger on push to `main`/`rc/*` and on PRs. Run lint + the CPU pytest suites from AGENTS.md.
+- **GPU workflows** (`gpu_*.yaml`, `tinker_*.yaml`) run on `ubuntu-latest` but submit to Anyscale via `anyscale job submit -f ci/<config>.yaml --timeout 12000`. **Label-gated** on PRs (except `SkyRL-JAX-GPU`, which is path-gated).
 
 ## Anyscale
 
@@ -24,3 +33,4 @@
 ## Gotchas
 
 - The `paths:` filter on each workflow gates whether CPU CI even runs. Touching only `docs/` or `examples/` skips CI.
+- The `SkyRL-JAX-*` workflows are deliberately scoped to the JAX/tx code path (`skyrl/tx`, `skyrl/backends/{backend,jax,ray_jax}.py`, `skyrl/utils`, `skyrl/tinker/types.py`, `tests/tx`), so most PRs never run them. If you touch tx, check that your files are in those `paths:` lists — and note the `push:` and `pull_request:` lists are duplicated, because GitHub Actions does not support YAML anchors.

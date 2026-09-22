@@ -1,21 +1,42 @@
-name: SkyRL-GPU
+name: SkyRL-JAX-GPU
 
+# Same scoping rationale as SkyRL-JAX-CPU (see cpu_jax.yaml), minus
+# `pyproject.toml`/`uv.lock`: this workflow submits a paid Anyscale GPU job, and
+# dependency bumps are already covered on the free CPU runner. Use
+# `workflow_dispatch` if you want a GPU run for a resolution change.
+#
+# Keep the two `paths:` lists below in sync -- GitHub Actions does not support
+# YAML anchors.
 on:
   push:
     branches: [ main ]
     paths:
-      - 'ci/**'
-      - 'skyrl/tx/'
-      - 'tests/**'
-      - 'pyproject.toml'
-      - '.github/workflows/gpu_skyrl.yaml'
+      - 'skyrl/tx/**'
+      - 'skyrl/backends/backend.py'
+      - 'skyrl/backends/jax.py'
+      - 'skyrl/backends/ray_jax.py'
+      - 'skyrl/utils/**'
+      - 'skyrl/tinker/types.py'
+      - 'tests/tx/**'
+      - 'tests/backends/test_jax_backend.py'
+      - 'ci/anyscale_gpu_ci.yaml'
+      - 'ci/gpu_ci_run.sh'
+      - 'ci/submit_anyscale_job.sh'
+      - '.github/workflows/gpu_jax.yaml'
   pull_request:
     paths:
-      - 'ci/**'
-      - 'skyrl/**'
-      - 'tests/**'
-      - 'pyproject.toml'
-      - '.github/workflows/gpu_skyrl.yaml'
+      - 'skyrl/tx/**'
+      - 'skyrl/backends/backend.py'
+      - 'skyrl/backends/jax.py'
+      - 'skyrl/backends/ray_jax.py'
+      - 'skyrl/utils/**'
+      - 'skyrl/tinker/types.py'
+      - 'tests/tx/**'
+      - 'tests/backends/test_jax_backend.py'
+      - 'ci/anyscale_gpu_ci.yaml'
+      - 'ci/gpu_ci_run.sh'
+      - 'ci/submit_anyscale_job.sh'
+      - '.github/workflows/gpu_jax.yaml'
   workflow_dispatch:
 
 permissions:
@@ -27,7 +48,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  skyrl_gpu_tests:
+  skyrl_jax_gpu_tests:
     # Forks inherit these workflows but not the secrets they need -- only run upstream.
     if: github.repository == 'NovaSky-AI/SkyRL'
     runs-on: ubuntu-latest
