@@ -14,8 +14,10 @@
 #     `rollout_logprobs` (dapo_client.py does this when RECOMPUTE_OLD_LOGPROBS=1).
 #
 # Usage:
-#   bash examples/tinker/dapo/run_tinker_server.sh                 # LoRA recipe (rank/alpha 128)
-#   FULL_FT=1 bash examples/tinker/dapo/run_tinker_server.sh       # full fine-tuning recipe
+#   bash examples/tinker/dapo/run_tinker_server.sh                 # LoRA recipe (rank/alpha 128; client --lora-rank 128, LR 1e-5)
+#   FULL_FT=1 bash examples/tinker/dapo/run_tinker_server.sh       # full fine-tuning recipe (client --lora-rank 0, LR 1e-6)
+# The learning rate lives on the CLIENT (dapo_client.py picks 1e-5 or 1e-6 from --lora-rank); pair FULL_FT=1
+# with --lora-rank 0 and vice versa.
 #   BASE_MODEL=Qwen/Qwen3-1.7B-Base MEGATRON_TP=1 MEGATRON_EP=1 ... bash ...   # smaller smoke test
 set -euo pipefail
 

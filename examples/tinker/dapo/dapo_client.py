@@ -4,9 +4,16 @@ Usage:
     # Terminal 1 (GPU node)
     bash examples/tinker/dapo/run_tinker_server.sh
 
-    # Terminal 2
-    TINKER_API_KEY=tml-dummy uv run --extra tinker --with datasets --with torch \
-        python examples/tinker/dapo/dapo_client.py --lora-rank 128   # or --lora-rank 0 for full FT
+    # Terminal 2, LoRA recipe (rank/alpha 128, LR 1e-5)
+    TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
+        python examples/tinker/dapo/dapo_client.py --lora-rank 128
+
+    # Terminal 2, full fine-tuning (LR 1e-6; pair with FULL_FT=1 on the server)
+    TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
+        python examples/tinker/dapo/dapo_client.py --lora-rank 0
+
+The learning rate follows --lora-rank (the two reference scripts differ: 1e-5 for LoRA, 1e-6 for full FT);
+override with --learning-rate or DAPO_POLICY_LEARNING_RATE.
 
 Reproduces examples/train/algorithms/dapo/run_dapo_qwen3_30b_a3b_{lora_,}megatron_aime.sh through the
 Tinker codepath. The client owns the algorithm: GRPO group-normalized advantages, DAPO soft overlong
@@ -56,6 +63,12 @@ def _env_int(name: str, default: int) -> int:
     return int(os.environ.get(f"DAPO_{name}", default))
 
 
+def _env_float(name: str, default: float | None) -> float | None:
+    """Read a float override from `DAPO_<name>`; `None` when neither the env var nor a default is set."""
+    value = os.environ.get(f"DAPO_{name}")
+    return float(value) if value is not None else default
+
+
 DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-30B-A3B-Base"
 DEFAULT_DATA_DIR = os.path.expanduser("~/data/dapo")
@@ -95,8 +108,10 @@ MICRO_TRAIN_BATCH_SIZE = _env_int("MICRO_TRAIN_BATCH_SIZE", 4)
 # Sequences per `forward` request when recomputing old logprobs; the server micro-batches internally.
 FORWARD_BATCH_SIZE = POLICY_MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT
 
-# Optimizer (trainer.policy.optimizer_config in the reference script)
-POLICY_LEARNING_RATE = 1.0e-5
+# Optimizer (trainer.policy.optimizer_config in the reference scripts). The LR differs between the two
+# recipes, so it is resolved from --lora-rank at startup (see `default_policy_learning_rate`).
+LORA_LEARNING_RATE = 1.0e-5  # run_dapo_qwen3_30b_a3b_lora_megatron_aime.sh
+FULL_FT_LEARNING_RATE = 1.0e-6  # run_dapo_qwen3_30b_a3b_megatron_aime.sh
 NUM_WARMUP_STEPS = _env_int("NUM_WARMUP_STEPS", 160)  # counted in optimizer (mini-batch) steps
 # Applied server-side: set trainer.policy.optimizer_config.weight_decay=0.1 in backend_config.
 # max_grad_norm=1.0 is the SkyRL optimizer default and is also applied server-side.
@@ -147,7 +162,6 @@ class WandbLogger:
                 "policy_mini_batch_size": POLICY_MINI_BATCH_SIZE,
                 "update_epochs_per_batch": UPDATE_EPOCHS_PER_BATCH,
                 "n_samples_per_prompt": N_SAMPLES_PER_PROMPT,
-                "policy_learning_rate": POLICY_LEARNING_RATE,
                 "num_warmup_steps": NUM_WARMUP_STEPS,
                 "weight_decay": WEIGHT_DECAY,
                 "recompute_old_logprobs": RECOMPUTE_OLD_LOGPROBS,
@@ -291,6 +305,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_LORA_RANK,
         help="LoRA rank (128 for the LoRA recipe, 0 for full fine-tuning)",
     )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=_env_float("POLICY_LEARNING_RATE", None),
+        help="Peak policy LR; defaults to 1e-5 for LoRA (--lora-rank > 0) and 1e-6 for full fine-tuning",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-train-steps", type=int, default=None)
     parser.add_argument("--max-eval-steps", type=int, default=None)
@@ -421,15 +441,20 @@ def compute_advantages(
         trajectory.advantages = advantage.repeat(len(trajectory.response_tokens)).tolist()
 
 
-def policy_learning_rate(optim_step: int) -> float:
+def default_policy_learning_rate(lora_rank: int) -> float:
+    """Peak LR for the recipe selected by `lora_rank`: 1e-5 for LoRA, 1e-6 for full fine-tuning."""
+    return LORA_LEARNING_RATE if lora_rank > 0 else FULL_FT_LEARNING_RATE
+
+
+def policy_learning_rate(optim_step: int, peak_lr: float) -> float:
     """Constant LR with linear warmup, counted in optimizer (mini-batch) steps.
 
     Mirrors SkyRL's `constant_with_warmup` scheduler (Megatron's OptimizerParamScheduler with
     init_lr=0): the server-side scheduler is disabled for Tinker, so the client ramps the LR.
     """
     if NUM_WARMUP_STEPS <= 0:
-        return POLICY_LEARNING_RATE
-    return POLICY_LEARNING_RATE * min(1.0, (optim_step + 1) / NUM_WARMUP_STEPS)
+        return peak_lr
+    return peak_lr * min(1.0, (optim_step + 1) / NUM_WARMUP_STEPS)
 
 
 def adam_params(learning_rate: float) -> types.AdamParams:
@@ -556,11 +581,13 @@ def train_policy(
     policy_client: tinker.TrainingClient,
     trajectories: Sequence[Trajectory],
     optim_step: int,
+    peak_lr: float,
 ) -> tuple[dict[str, float], int]:
     """Run one DAPO update over `trajectories`.
 
     Args:
         optim_step: Number of optimizer steps taken so far (drives LR warmup).
+        peak_lr: Learning rate after warmup (recipe dependent, see `default_policy_learning_rate`).
 
     Returns:
         Averaged per-minibatch metrics and the updated optimizer step count.
@@ -570,7 +597,7 @@ def train_policy(
 
     for _ in range(UPDATE_EPOCHS_PER_BATCH):
         for minibatch in grouped_minibatches(trajectories, POLICY_MINI_BATCH_SIZE):
-            optimizer = adam_params(policy_learning_rate(optim_step))
+            optimizer = adam_params(policy_learning_rate(optim_step, peak_lr))
             normalized_advantages = normalize_policy_minibatch_advantage(minibatch)
             data = [
                 build_policy_train_datum(
@@ -781,7 +808,11 @@ def save_checkpoint(
 def run_training(args: argparse.Namespace) -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    wandb_logger = WandbLogger(args.output_dir, run_config={"base_model": args.model, "lora_rank": args.lora_rank})
+    peak_lr = args.learning_rate if args.learning_rate is not None else default_policy_learning_rate(args.lora_rank)
+    wandb_logger = WandbLogger(
+        args.output_dir,
+        run_config={"base_model": args.model, "lora_rank": args.lora_rank, "policy_learning_rate": peak_lr},
+    )
     logger.info(
         "wandb status: enabled=%s project=%s run_name=%s entity=%s",
         wandb_logger.enabled,
@@ -807,11 +838,13 @@ def run_training(args: argparse.Namespace) -> None:
 
     logger.info(
         "Starting DAPO Tinker training: train_examples=%s, eval_examples=%s, model=%s, lora_rank=%s, "
-        "policy_loss=%s, recompute_old_logprobs=%s",
+        "policy_learning_rate=%s (reference: 1e-5 for LoRA, 1e-6 for full FT), policy_loss=%s, "
+        "recompute_old_logprobs=%s",
         len(train_records),
         len(eval_records),
         args.model,
         args.lora_rank,
+        peak_lr,
         POLICY_LOSS,
         RECOMPUTE_OLD_LOGPROBS,
     )
@@ -852,7 +885,7 @@ def run_training(args: argparse.Namespace) -> None:
                     compute_old_logprobs(policy_client, trajectories)
                 overlong_metrics = apply_soft_overlong_punishment(trajectories)
                 compute_advantages(trajectories)
-                policy_metrics, optim_step = train_policy(policy_client, trajectories, optim_step)
+                policy_metrics, optim_step = train_policy(policy_client, trajectories, optim_step, peak_lr)
 
                 global_step += 1
                 train_steps += 1

@@ -5,10 +5,13 @@ SkyRL's Tinker API server, mirroring [`examples/train/algorithms/dapo`](../../tr
 
 Two recipes share one client and one server launcher (Megatron backend):
 
-| Recipe | Client flag | Server | Reference (native) |
-|---|---|---|---|
-| LoRA (rank 128, alpha 128) | `--lora-rank 128` (default) | `bash run_tinker_server.sh` | `run_dapo_qwen3_30b_a3b_lora_megatron_aime.sh` |
-| Full fine-tuning | `--lora-rank 0` | `FULL_FT=1 bash run_tinker_server.sh` | `run_dapo_qwen3_30b_a3b_megatron_aime.sh` |
+| Recipe | Client flag | Learning rate | Server | Reference (native) |
+|---|---|---|---|---|
+| LoRA (rank 128, alpha 128) | `--lora-rank 128` (default) | 1e-5 | `bash run_tinker_server.sh` | `run_dapo_qwen3_30b_a3b_lora_megatron_aime.sh` |
+| Full fine-tuning | `--lora-rank 0` | 1e-6 | `FULL_FT=1 bash run_tinker_server.sh` | `run_dapo_qwen3_30b_a3b_megatron_aime.sh` |
+
+The client picks the learning rate from `--lora-rank` (the two reference scripts differ); `--learning-rate` or
+`DAPO_POLICY_LEARNING_RATE` overrides it.
 
 Both recipes run DAPO **without dynamic sampling**, and use **geometric sequence masking instead of TIS**
 for off-policy correction (see [Off-policy correction](https://docs.skyrl.ai/docs/algorithms/off_policy_correction)).
@@ -129,6 +132,10 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
   the 0.99/1.01 band is rejecting everything and needs widening — the off-policy-correction docs note MoE
   models often need a wider band, and both full recipes here are MoE.
 - `reward/truncated_ratio` and `reward/overlong_penalized_ratio` from the client.
+- **An eval score well above the reference early in the run is a red flag, not a success.** A full-FT run
+  accidentally trained at the LoRA LR (10x the reference) scored +0.20 above the reference at step 5 while its
+  entropy fell 4x faster than the LoRA run's; that is the leading edge of collapse, not a better recipe.
+  Check the LR, alpha/rank, and clip settings before celebrating.
 
 ## Notes
 
