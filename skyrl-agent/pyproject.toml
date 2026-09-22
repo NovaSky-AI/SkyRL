@@ -73,7 +73,7 @@ tinker = ["tinker", "chz"]
 
 
 [tool.uv]
-override-dependencies = ["ray==2.51.1", "xgrammar==0.1.17",  "opentelemetry-api==1.26.0", "opentelemetry-sdk==1.26.0", "opentelemetry-exporter-otlp==1.26.0", "opentelemetry-exporter-otlp-proto-grpc==1.26.0"]
+override-dependencies = ["ray==2.56.0", "xgrammar==0.1.17",  "opentelemetry-api==1.26.0", "opentelemetry-sdk==1.26.0", "opentelemetry-exporter-otlp==1.26.0", "opentelemetry-exporter-otlp-proto-grpc==1.26.0"]
 conflicts = [
   [
     { extra = "skyrl-train" },

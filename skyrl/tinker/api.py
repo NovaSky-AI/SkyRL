@@ -1,48 +1,67 @@
 import asyncio
+import json
 import os
 import random
+import re
+import shutil
 import signal
 import threading
-import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
 from uuid import uuid4
 
 import fastapi
 import psutil
-from fastapi import Depends, FastAPI, HTTPException, Request
+import zstandard
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError as FastAPIRequestValidationError
 from fastapi.responses import RedirectResponse, StreamingResponse
+from google.protobuf.message import DecodeError
 from pydantic import (
     Base64Bytes,
     BaseModel,
     Discriminator,
     Field,
     Tag,
+    ValidationError,
     model_validator,
 )
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlmodel import SQLModel, func, select
+from sqlmodel import SQLModel, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig, add_model, config_to_argv
+from skyrl.tinker.config import (
+    EngineConfig,
+    TinkerTorchProfilerConfig,
+    add_model,
+    config_to_argv,
+)
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
     FutureDB,
     ModelDB,
+    ProfilerControlDB,
+    ProfilerState,
     RequestStatus,
     SamplingSessionDB,
     SessionDB,
     enable_sqlite_wal,
     get_async_database_url,
 )
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.tinker.extra import (
     ExternalInferenceClient,
     SkyRLTrainInferenceForwardingClient,
+)
+from skyrl.tinker.proto_serialization import (
+    PROTO_CONTENT_TYPE,
+    PROTO_SERIALIZABLE_REQUEST_TYPES,
+    parse_forward_backward_request,
+    serialize_result,
 )
 from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
@@ -55,6 +74,174 @@ API_SERVER_STARTUP_ARGS = ["-m", "skyrl.tinker.api"]
 
 # Timeout for graceful shutdown when engine crashes
 SHUTDOWN_TIMEOUT_SECONDS = 10
+
+# How long retrieve_future waits for a result before returning 408
+RETRIEVE_FUTURE_TIMEOUT_SECONDS = 300
+
+# Interactive defaults, a bit different from TorchProfilerConfig's
+# (skip_first=10, active=1), to also capture traces for very short
+# training sessions.
+DEFAULT_PROFILER_SCHEDULE = {"skip_first": 0, "wait": 0, "warmup": 1, "active": 5, "repeat": 1}
+# with_stack records a Python stack per operator: high per-step overhead, which
+# distorts the timings being measured, and much larger traces. Off here even
+# though the trainer path defaults it on.
+DEFAULT_PROFILER_OPTIONS = {"activities": ["cpu", "cuda"], "with_stack": False, "use_gzip": True}
+
+_MISSING_PROFILER_ROW = "profiler control row is missing; the server did not initialize it at startup"
+
+PROFILER_START_ACK_TIMEOUT_SEC = 30.0
+PROFILER_STOP_ACK_TIMEOUT_SEC = 600.0
+
+
+# How often poll_futures looks for newly finished requests. A single query
+# covers every waiter, so this can stay tight without the load scaling up with
+# the number of in-flight requests.
+FUTURE_POLL_INTERVAL_SECONDS = 0.05
+
+# Statuses a request never moves out of, i.e. the ones a waiter resolves on.
+TERMINAL_STATUSES = (RequestStatus.COMPLETED, RequestStatus.FAILED)
+
+
+def raw_json_response(payload: str | None) -> Response:
+    """Return already-serialized JSON without routing it through FastAPI's encoder.
+
+    Returning a dict makes FastAPI walk the whole structure with
+    ``jsonable_encoder`` and then ``json.dumps`` it again. For a multi-MB
+    numeric payload that is ~300ms of event-loop time per request, which
+    serializes every other caller behind it. The stored text is already valid
+    JSON, so hand it back as-is.
+    """
+    # `null` keeps the response valid JSON when a completed future stored no
+    # result body, matching what encoding `None` would have produced.
+    return Response(content=payload if payload is not None else "null", media_type="application/json")
+
+
+async def wait_for_future(
+    waiters: dict[int, set[asyncio.Future]], request_id: int, timeout: float
+) -> tuple[RequestStatus, types.RequestType, str | None] | None:
+    """Wait for ``request_id`` to finish, returning its ``(status, request_type, result_data)``.
+
+    ``result_data`` is the JSON text stored for the request, not a decoded
+    object -- see :class:`FutureDB`.
+
+    Returns None if ``timeout`` elapses first, and raises KeyError if the request
+    does not exist -- :func:`poll_futures` reports both.
+
+    Each caller gets its own future rather than sharing one per id, so that a
+    caller giving up removes only its own entry. That matters because concurrent
+    waiters on one id are routine: the SDK times out a retrieve_future call after
+    45s and retries the same request_id, while this endpoint holds the request for
+    up to 300s, so anything slower than 45s accumulates overlapping waiters. It
+    also keeps an abandoned request from pinning an entry in ``waiters`` forever,
+    which would grow the poll query without bound.
+    """
+    waiter = asyncio.get_running_loop().create_future()
+    waiters.setdefault(request_id, set()).add(waiter)
+    try:
+        return await asyncio.wait_for(waiter, timeout)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        remaining = waiters.get(request_id)
+        if remaining is not None:
+            remaining.discard(waiter)
+            if not remaining:
+                del waiters[request_id]
+
+
+async def poll_futures(
+    db_engine, waiters: dict[int, set[asyncio.Future]], poll_interval_sec: float = FUTURE_POLL_INTERVAL_SECONDS
+) -> None:
+    """Resolve the requests awaited in ``waiters`` as they finish, until cancelled.
+
+    Also reports ids that do not exist. Rows are created before their request_id
+    reaches the client and are never deleted, so an awaited id this query does not
+    return never existed, and its waiters get a KeyError. Detecting that here
+    rather than from a dedicated lookup in the endpoint makes it free: it rides
+    the query already in flight instead of costing a connection checkout on every
+    call, which at a few thousand simultaneous calls is a burst the pool feels.
+
+    ``result_data`` is stored as JSON text and handed to the waiters that way:
+    results may carry big numeric payloads (e.g. top-k prompt logprobs for every
+    prompt token, a few MB per request), and decoding them into Python objects
+    only to have FastAPI re-encode them would cost hundreds of milliseconds of
+    event-loop time per call. See :func:`raw_json_response`.
+    """
+    while True:
+        try:
+            if waiters:
+                awaited = list(waiters)
+                async with AsyncSession(db_engine) as session:
+                    # The awaited ids go in as bound parameters, capped at 32766
+                    # by SQLite (since 3.32) and 65535 by Postgres -- far above
+                    # any plausible number of in-flight requests.
+                    statement = select(
+                        FutureDB.request_id, FutureDB.status, FutureDB.request_type, FutureDB.result_data
+                    ).where(FutureDB.request_id.in_(awaited))
+                    rows = (await session.exec(statement)).all()
+
+                # Pending requests are left alone to be picked up on a later tick.
+                outcomes: dict[int, tuple[RequestStatus, types.RequestType, str | None] | KeyError] = {
+                    request_id: (status, request_type, result_data)
+                    for request_id, status, request_type, result_data in rows
+                    if status in TERMINAL_STATUSES
+                }
+                for request_id in set(awaited) - {request_id for request_id, *_ in rows}:
+                    outcomes[request_id] = KeyError(request_id)
+
+                for request_id, outcome in outcomes.items():
+                    for waiter in waiters.pop(request_id, ()):
+                        if waiter.done():
+                            continue
+                        if isinstance(outcome, BaseException):
+                            waiter.set_exception(outcome)
+                        else:
+                            waiter.set_result(outcome)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Keep the poller alive; waiters fall back on their own timeouts.
+            logger.exception("Future poller iteration failed")
+        await asyncio.sleep(poll_interval_sec)
+
+
+def _serialize_proto_result(request_type: types.RequestType, result_data: str) -> bytes:
+    return serialize_result(request_type, json.loads(result_data))
+
+
+async def _close_external_inference(app: FastAPI) -> None:
+    # The store drains its forwarding tasks before anything else so no task is
+    # still using the inference client's connections when it closes.
+    if app.state.external_future_store is not None:
+        await app.state.external_future_store.close()
+
+    inference_client = getattr(app.state, "external_inference_client", None)
+    aclose = getattr(inference_client, "aclose", None)
+    if aclose is not None:
+        with suppress(Exception):
+            await aclose()
+
+
+async def _close_runtime(app: FastAPI, background_engine: asyncio.subprocess.Process) -> None:
+    try:
+        await _close_external_inference(app)
+    finally:
+        logger.info(f"Stopping background engine (PID {background_engine.pid})")
+        with suppress(ProcessLookupError):
+            background_engine.terminate()
+            try:
+                await asyncio.wait_for(background_engine.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
+                background_engine.kill()
+                await background_engine.wait()
+        logger.info("Background engine stopped")
+
+
+def _get_db_write_context(db_engine):
+    if db_engine.dialect.name == "sqlite":
+        return asyncio.Lock()
+    return nullcontext()
 
 
 def _get_parent_uv_run_args(parent_cmd: list[str]) -> list[str]:
@@ -114,6 +301,30 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
+    # Fail fast on a bad --torch-profiler rather than at the first request.
+    app.state.profiler_cfg = None
+    if app.state.engine_config.torch_profiler:
+        app.state.profiler_cfg = TinkerTorchProfilerConfig(**app.state.engine_config.torch_profiler)
+        app.state.profiler_cfg.validate_startup(app.state.engine_config.backend)
+
+    # The profiler CAS updates an existing row: without this insert every claim
+    # would match zero rows and 409 forever.
+    async with AsyncSession(app.state.db_engine) as session:
+        if await session.get(ProfilerControlDB, 1) is None:
+            session.add(ProfilerControlDB(singleton_id=1))
+            with suppress(IntegrityError):
+                await session.commit()
+
+    app.state.future_waiters = {}
+    app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
+    app.state.proto_serialization_lock = asyncio.Lock()
+    app.state.external_future_store = None
+    app.state.db_write_lock = _get_db_write_context(app.state.db_engine)
+    app.state.sampling_model_cache = {}
+    app.state.sampling_model_cache_lock = asyncio.Lock()
+    app.state.validated_sampler_checkpoints = set()
+    app.state.sampler_checkpoint_validation_lock = asyncio.Lock()
+
     # Setup external inference client if configured.
     #
     # Three cases:
@@ -134,11 +345,17 @@ async def lifespan(app: FastAPI):
     # when the operator explicitly sets it to False.
     is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
     if app.state.engine_config.external_inference_url:
-        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
+        app.state.external_future_store = ExternalFutureStore()
+        await app.state.external_future_store.start()
+        app.state.external_inference_client = ExternalInferenceClient(
+            app.state.engine_config, app.state.db_engine, app.state.external_future_store
+        )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif backend_name in ("megatron", "fsdp") and not is_colocated:
+        app.state.external_future_store = ExternalFutureStore()
+        await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
-            app.state.engine_config, app.state.db_engine
+            app.state.engine_config, app.state.db_engine, app.state.external_future_store
         )
         logger.info(
             "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
@@ -187,25 +404,11 @@ async def lifespan(app: FastAPI):
     shutting_down = True
     monitor_task.cancel()
 
-    # Close the forwarding client's persistent httpx connection pool if we
-    # installed one. Cheap no-op when external_inference_client doesn't own
-    # an httpx client (ExternalInferenceClient creates one per call).
-    inference_client = getattr(app.state, "external_inference_client", None)
-    aclose = getattr(inference_client, "aclose", None)
-    if aclose is not None:
-        with suppress(Exception):
-            await aclose()
+    app.state.future_poller.cancel()
+    with suppress(asyncio.CancelledError):
+        await app.state.future_poller
 
-    logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
-    with suppress(ProcessLookupError):
-        background_engine.terminate()
-        try:
-            await asyncio.wait_for(background_engine.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
-            background_engine.kill()
-            await background_engine.wait()
-    logger.info("Background engine stopped")
+    await _close_runtime(app, background_engine)
 
 
 app = FastAPI(title="Tinker API Mock", version="0.0.1", lifespan=lifespan)
@@ -232,17 +435,47 @@ async def create_future(
     request_type: types.RequestType,
     model_id: str | None,
     request_data: BaseModel,
+    seq_id: int | None = None,
 ) -> int:
-    """Create a FutureDB entry and return its auto-generated request_id."""
+    """Create a future, returning the original request_id when an SDK request is retried."""
+    serialized_request = request_data.model_dump(mode="json")
+
+    async def existing_request_id() -> int | None:
+        """The request_id already recorded for this (model_id, seq_id), if there is one."""
+        if model_id is None or seq_id is None:
+            return None
+        statement = select(FutureDB).where(FutureDB.model_id == model_id, FutureDB.seq_id == seq_id)
+        existing = (await session.exec(statement)).first()
+        if existing is None:
+            return None
+        if existing.request_type != request_type or existing.request_data != serialized_request:
+            raise HTTPException(status_code=409, detail="Training request sequence number was reused")
+        return existing.request_id
+
+    if (request_id := await existing_request_id()) is not None:
+        return request_id
+
     future_db = FutureDB(
         request_type=request_type,
         model_id=model_id,
-        request_data=request_data.model_dump(mode="json"),
+        seq_id=seq_id,
+        request_data=serialized_request,
         status=RequestStatus.PENDING,
     )
-    session.add(future_db)
-    await session.flush()  # Flush to generate auto-increment request_id
-    assert future_db.request_id
+    try:
+        # Savepoint rather than a plain flush: losing the insert race must roll back
+        # only this row. Callers stage other writes before getting here (save_weights
+        # adds a pending checkpoint), and a session-wide rollback would discard them.
+        async with session.begin_nested():
+            session.add(future_db)
+            await session.flush()  # Flush to generate auto-increment request_id
+    except IntegrityError:
+        # A concurrent retry inserted the same (model_id, seq_id) first; return its future.
+        request_id = await existing_request_id()
+        if request_id is None:
+            raise
+        return request_id
+    assert future_db.request_id is not None
     return future_db.request_id
 
 
@@ -450,12 +683,14 @@ class ForwardBackwardInput(BaseModel):
         "cross_entropy": set(),
         "importance_sampling": set(),
         "ppo": {"clip_low_threshold", "clip_high_threshold", "value_clip"},
+        "gspo": {"clip_low_threshold", "clip_high_threshold"},
         "cispo": {"clip_low_threshold", "clip_high_threshold"},
         "ppo_critic": {"value_clip"},
+        "dppo": {"delta_low", "delta_high"},
     }
 
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "gspo", "cispo", "ppo_critic", "dppo"]
     loss_fn_config: dict[str, float] | None = None
 
     @model_validator(mode="after")
@@ -488,11 +723,13 @@ class ForwardBackwardInput(BaseModel):
 class ForwardBackwardRequest(BaseModel):
     model_id: str
     forward_backward_input: ForwardBackwardInput
+    seq_id: int | None = None
 
 
 class ForwardRequest(BaseModel):
     model_id: str
     forward_input: ForwardBackwardInput
+    seq_id: int | None = None
 
 
 class AdamParams(BaseModel):
@@ -515,6 +752,7 @@ class AdamParams(BaseModel):
 class OptimStepRequest(BaseModel):
     model_id: str
     adam_params: AdamParams
+    seq_id: int | None = None
 
 
 class SaveWeightsForSamplerRequest(BaseModel):
@@ -582,7 +820,7 @@ class SampleRequest(BaseModel):
     sampling_session_id: str | None = None
     seq_id: int | None = None
     prompt_logprobs: bool | None = None
-    topk_prompt_logprobs: int = 0
+    topk_prompt_logprobs: int = Field(default=0, ge=0)
     type: Literal["sample"] = "sample"
 
     @model_validator(mode="after")
@@ -611,6 +849,8 @@ class SaveWeightsRequest(BaseModel):
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
+    optimizer: bool = True
+    seq_id: int | None = None
     type: Literal["load_weights"] | None = None
 
 
@@ -733,6 +973,262 @@ async def client_config():
     return ClientConfigResponse()
 
 
+# ----------------------------------------------------------------------
+# torch.profiler control. A SkyRL extension, not part of the Tinker API --
+# these are called with a plain HTTP client, never the Tinker SDK, so they
+# live at the root rather than under /api/v1.
+# ----------------------------------------------------------------------
+
+
+def _export_path_occupied(export_path: str) -> bool:
+    """Whether the target dir already holds traces. Best effort.
+
+    Repeat sessions are an explicit goal, so the same global_step with no
+    export_path_extra is a real collision rather than a hypothetical. Note this
+    is checked from the API process: authoritative for a cloud export_dir (all
+    ranks share one prefix), and for a local export_dir only on this node.
+    """
+    from skyrl.backends.skyrl_train.utils.io import io as skyrl_io
+
+    try:
+        if not skyrl_io.exists(export_path):
+            return False
+        return bool(skyrl_io.list_dir(export_path))
+    except Exception:
+        # If we cannot tell, do not block the user.
+        return False
+
+
+def _validate_worker_profiler_config(worker_config: dict, engine_config: EngineConfig) -> None:
+    """Reuse TorchProfilerConfig's validation for the schedule and profile options.
+
+    save_path is swapped for a dummy local path first: it may legitimately be a
+    cloud URI here (the worker stages locally and uploads), which the validator
+    rejects, and export_dir was already validated at startup.
+    """
+    from skyrl.train.config.config import TorchProfilerConfig
+
+    backend_cfg = engine_config.backend_config or {}
+    probe = TorchProfilerConfig(**{**worker_config, "save_path": "/tmp/skyrl_profiler_validate"})
+    probe.validate(
+        strategy=engine_config.backend,
+        colocate_all=bool(backend_cfg.get("trainer.placement.colocate_all", True)),
+        fsdp_cpu_offload=bool(backend_cfg.get("trainer.policy.fsdp_config.cpu_offload", False)),
+    )
+
+
+class StartProfilingRequest(BaseModel):
+    model_id: str
+    global_step: int
+    export_path_extra: str | None = None
+    schedule_options: dict[str, Any] = Field(default_factory=dict)
+    profile_options: dict[str, Any] = Field(default_factory=dict)
+    overwrite: bool = False
+
+
+class StopProfilingRequest(BaseModel):
+    model_id: str
+
+
+class ProfilingStatusResponse(BaseModel):
+    active: bool
+    model_id: str | None = None
+    export_path: str | None = None
+    step: int = 0
+    error: str | None = None
+
+
+def _require_profiling_enabled(request: Request) -> TinkerTorchProfilerConfig:
+    cfg = getattr(request.app.state, "profiler_cfg", None)
+    if cfg is None:
+        raise HTTPException(
+            status_code=404,
+            detail="torch profiling is not enabled; start the server with --torch-profiler",
+        )
+    if request.app.state.engine_config.backend == "jax":
+        raise HTTPException(status_code=400, detail="torch profiling is not supported for the jax backend")
+    return cfg
+
+
+def _resolve_export_path(cfg: TinkerTorchProfilerConfig, req: StartProfilingRequest) -> str:
+    """Build {export_dir}/{global_step}[_{export_path_extra}]."""
+    name = str(req.global_step)
+    if req.export_path_extra:
+        extra = req.export_path_extra
+        # Treated as a single path component: the client picks part of a
+        # server-side write path, so separators would let it escape export_dir.
+        if "/" in extra or "\\" in extra or extra in (".", "..") or extra.startswith("."):
+            raise HTTPException(
+                status_code=400,
+                detail="export_path_extra must be a single path component with no separators",
+            )
+        name = f"{name}_{extra}"
+    base = cfg.export_dir.rstrip("/")
+    return f"{base}/{name}"
+
+
+async def _wait_for_profiler_ack(db_engine, version: int, timeout: float) -> ProfilerControlDB:
+    """Poll until the engine has applied ``version``, so the HTTP result reflects
+    what actually happened on the workers rather than what we wrote to a row."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        async with AsyncSession(db_engine) as session:
+            row = await session.get(ProfilerControlDB, 1)
+            if row is not None:
+                if row.applied_version > version:
+                    # Only the API advances `version`, and it holds the slot for the
+                    # duration of this request, so the engine cannot be ahead of it.
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            f"profiler control row is inconsistent: applied_version "
+                            f"{row.applied_version} is ahead of version {version}"
+                        ),
+                    )
+                if row.applied_version == version:
+                    return row
+        if asyncio.get_event_loop().time() >= deadline:
+            raise HTTPException(
+                status_code=504,
+                detail=f"engine did not apply the profiling request within {timeout}s",
+            )
+        await asyncio.sleep(0.05)
+
+
+@app.post("/start_profiling", response_model=ProfilingStatusResponse)
+async def start_profiling(req: StartProfilingRequest, request: Request):
+    """Claim the single profiling slot and start a session."""
+    cfg = _require_profiling_enabled(request)
+    export_path = _resolve_export_path(cfg, req)
+    db_engine = request.app.state.db_engine
+
+    async with AsyncSession(db_engine) as session:
+        model = (await session.exec(select(ModelDB).where(ModelDB.model_id == req.model_id))).first()
+        if model is None:
+            raise HTTPException(status_code=409, detail=f"model {req.model_id!r} is not loaded")
+
+    if not req.overwrite and await asyncio.to_thread(_export_path_occupied, export_path):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{export_path} already exists; pass a different export_path_extra " f"or overwrite=true"),
+        )
+
+    worker_config = {
+        **DEFAULT_PROFILER_SCHEDULE,
+        **DEFAULT_PROFILER_OPTIONS,
+        **req.profile_options,
+        **req.schedule_options,
+        "enable": True,
+        "ranks": cfg.ranks,
+        "save_path": export_path,
+    }
+    try:
+        _validate_worker_profiler_config(worker_config, request.app.state.engine_config)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Compare-and-swap: claim the slot only if it is free. Two simultaneous
+    # requests cannot both win, which matters because Kineto is process-global --
+    # a second concurrent profiler either raises or silently corrupts traces.
+    now = datetime.now(timezone.utc)
+    async with AsyncSession(db_engine) as session:
+        result = await session.exec(
+            update(ProfilerControlDB)
+            .where(
+                ProfilerControlDB.singleton_id == 1,
+                ProfilerControlDB.desired_state == ProfilerState.STOPPED,
+            )
+            .values(
+                desired_state=ProfilerState.RUNNING,
+                owner_model_id=req.model_id,
+                config_json=json.dumps(worker_config),
+                # A SQL expression, not a Python read-then-write: the latter
+                # reopens the race the CAS exists to close.
+                version=ProfilerControlDB.version + 1,
+                started_at=now,
+                step=0,
+                error=None,
+            )
+        )
+        if result.rowcount == 0:
+            await session.rollback()
+            row = await session.get(ProfilerControlDB, 1)
+            if row is None:
+                raise HTTPException(status_code=500, detail=_MISSING_PROFILER_ROW)
+            raise HTTPException(
+                status_code=409,
+                detail=f"a profiling session is already active for model {row.owner_model_id!r}",
+            )
+        await session.commit()
+        row = await session.get(ProfilerControlDB, 1)
+        version = row.version
+
+    row = await _wait_for_profiler_ack(db_engine, version, PROFILER_START_ACK_TIMEOUT_SEC)
+    if row.desired_state != ProfilerState.RUNNING:
+        raise HTTPException(status_code=500, detail=row.error or "profiling failed to start")
+    return ProfilingStatusResponse(active=True, model_id=req.model_id, export_path=export_path, step=row.step)
+
+
+@app.post("/stop_profiling", response_model=ProfilingStatusResponse)
+async def stop_profiling(req: StopProfilingRequest, request: Request):
+    """Stop the session, flushing and uploading its final window before returning."""
+    _require_profiling_enabled(request)
+    db_engine = request.app.state.db_engine
+
+    async with AsyncSession(db_engine) as session:
+        result = await session.exec(
+            update(ProfilerControlDB)
+            .where(
+                ProfilerControlDB.singleton_id == 1,
+                ProfilerControlDB.desired_state == ProfilerState.RUNNING,
+                ProfilerControlDB.owner_model_id == req.model_id,
+            )
+            .values(desired_state=ProfilerState.STOPPED, version=ProfilerControlDB.version + 1)
+        )
+        if result.rowcount == 0:
+            await session.rollback()
+            row = await session.get(ProfilerControlDB, 1)
+            if row is None or row.desired_state != ProfilerState.RUNNING:
+                detail = "no profiling session is active"
+                if row is not None and row.error:
+                    detail = f"{detail}: {row.error}"
+                raise HTTPException(status_code=409, detail=detail)
+            raise HTTPException(
+                status_code=409,
+                detail=(f"profiling session is owned by model {row.owner_model_id!r}, " f"not {req.model_id!r}"),
+            )
+        await session.commit()
+        row = await session.get(ProfilerControlDB, 1)
+        version = row.version
+
+    # Blocks through the final window's upload, so a 200 means the traces landed.
+    row = await _wait_for_profiler_ack(db_engine, version, PROFILER_STOP_ACK_TIMEOUT_SEC)
+    if row.error:
+        raise HTTPException(status_code=500, detail=row.error)
+    return ProfilingStatusResponse(active=False, step=row.step)
+
+
+@app.get("/profiling_status", response_model=ProfilingStatusResponse)
+async def profiling_status(request: Request):
+    """Report the single slot's state: whose session, how far along, any error."""
+    _require_profiling_enabled(request)
+    async with AsyncSession(request.app.state.db_engine) as session:
+        row = await session.get(ProfilerControlDB, 1)
+    if row is None:
+        raise HTTPException(status_code=500, detail=_MISSING_PROFILER_ROW)
+    active = row.desired_state == ProfilerState.RUNNING
+    export_path = None
+    if active and row.config_json:
+        export_path = json.loads(row.config_json).get("save_path")
+    return ProfilingStatusResponse(
+        active=active,
+        model_id=row.owner_model_id if active else None,
+        export_path=export_path,
+        step=row.step,
+        error=row.error,
+    )
+
+
 @app.get("/api/v1/healthz", response_model=HealthResponse)
 async def healthz():
     """Checks if the API server is ready."""
@@ -756,14 +1252,19 @@ async def create_session(request: CreateSessionRequest, session: AsyncSession = 
 
 
 @app.post("/api/v1/session_heartbeat", response_model=SessionHeartbeatResponse)
-async def session_heartbeat(request: SessionHeartbeatRequest, session: AsyncSession = Depends(get_session)):
+async def session_heartbeat(
+    request: SessionHeartbeatRequest,
+    raw_request: Request,
+    session: AsyncSession = Depends(get_session),
+):
     """Heartbeat for an active session to keep it alive."""
-    session_db = await session.get(SessionDB, request.session_id)
-    if session_db is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session_db.last_heartbeat_at = datetime.now(timezone.utc)
-    session_db.heartbeat_count += 1
-    await session.commit()
+    async with raw_request.app.state.db_write_lock:
+        session_db = await session.get(SessionDB, request.session_id)
+        if session_db is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        session_db.last_heartbeat_at = datetime.now(timezone.utc)
+        session_db.heartbeat_count += 1
+        await session.commit()
     return SessionHeartbeatResponse()
 
 
@@ -917,36 +1418,80 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
     )
 
 
+# Upper bound for a decompressed forward_backward body. Far above any
+# legitimate payload (requests are chunked client-side well below this), but
+# it keeps a small crafted body from ballooning into an arbitrarily large
+# allocation.
+_MAX_FWDBWD_BODY_BYTES = 1 << 30  # 1 GiB
+
+
+async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackwardRequest, bool]:
+    """Read a forward_backward body in either wire format.
+
+    tinker SDK >= 0.25.0 submits the body as protobuf and routes forward-only
+    passes here via the proto's ``forward_only`` flag instead of calling
+    ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
+    Large proto bodies may arrive zstd-compressed (``Content-Encoding: zstd``);
+    ASGI servers do not decode request bodies, so decompress here.
+    """
+    body = await request.body()
+    if request.headers.get("content-encoding", "").strip().lower() == "zstd":
+        try:
+            body = zstandard.ZstdDecompressor().decompress(body, max_output_size=_MAX_FWDBWD_BODY_BYTES)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"failed to zstd-decompress request body: {exc}") from exc
+    if PROTO_CONTENT_TYPE in request.headers.get("content-type", "").lower():
+        try:
+            request_dict, forward_only = parse_forward_backward_request(body)
+        except (DecodeError, ValueError) as e:
+            raise HTTPException(status_code=422, detail=f"Invalid proto forward_backward body: {e}")
+    else:
+        request_dict, forward_only = None, False
+    try:
+        if request_dict is not None:
+            return ForwardBackwardRequest.model_validate(request_dict), forward_only
+        return ForwardBackwardRequest.model_validate_json(body), forward_only
+    except ValidationError as e:
+        # Match FastAPI's native body validation error shape (422).
+        raise FastAPIRequestValidationError(e.errors())
+
+
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
-async def forward_backward(request: ForwardBackwardRequest, session: AsyncSession = Depends(get_session)):
-    """Compute and accumulate gradients."""
-    await get_model(session, request.model_id)
-
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.FORWARD_BACKWARD,
-        model_id=request.model_id,
-        request_data=request.forward_backward_input.to_types(),
-    )
-
-    await session.commit()
+async def forward_backward(request: Request, session: AsyncSession = Depends(get_session)):
+    """Compute and accumulate gradients (or run forward-only when the proto body asks for it)."""
+    req, forward_only = await _read_forward_backward_request(request)
+    async with request.app.state.db_write_lock:
+        await get_model(session, req.model_id)
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD,
+            model_id=req.model_id,
+            request_data=req.forward_backward_input.to_types(),
+            seq_id=req.seq_id,
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
 @app.post("/api/v1/forward", response_model=FutureResponse)
-async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_session)):
+async def forward(request: ForwardRequest, raw_request: Request, session: AsyncSession = Depends(get_session)):
     """Forward pass to obtain logprobs without accumulating gradients"""
-    await get_model(session, request.model_id)
+    # Serialize before the first SQL statement: AsyncSession checks out its
+    # pool connection lazily, so waiters queue on the lock holding nothing and
+    # a burst of forwards cannot exhaust the connection pool.
+    async with raw_request.app.state.db_write_lock:
+        await get_model(session, request.model_id)
 
-    request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.FORWARD,
-        model_id=request.model_id,
-        request_data=request.forward_input.to_types(),
-    )
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.FORWARD,
+            model_id=request.model_id,
+            request_data=request.forward_input.to_types(),
+            seq_id=request.seq_id,
+        )
 
-    await session.commit()
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -961,6 +1506,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
         request_type=types.RequestType.OPTIM_STEP,
         model_id=request.model_id,
         request_data=types.OptimStepInput(adam_params=request.adam_params.to_types()),
+        seq_id=request.seq_id,
     )
 
     await session.commit()
@@ -970,8 +1516,25 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
 
 @app.post("/api/v1/load_weights", response_model=FutureResponse)
 async def load_weights(request: LoadWeightsRequest, req: Request, session: AsyncSession = Depends(get_session)):
-    """Loads weights and training state."""
+    """Loads weights and training state.
+
+    Matching the Tinker service, LoadWeights is only permitted as a model's first
+    request: any prior request for the model (forward_backward, save_weights, a
+    previous load_weights, ...) makes further loads a 400. Load into a freshly
+    created model instead (create_training_client_from_state[_with_optimizer]).
+    """
     await get_model(session, request.model_id)
+
+    prior_requests = await session.exec(
+        select(func.count())
+        .select_from(FutureDB)
+        .where(FutureDB.model_id == request.model_id)
+        .where(FutureDB.request_type != types.RequestType.CREATE_MODEL)
+    )
+    prior_count = prior_requests.one()
+    if prior_count > 0:
+        seq_id = request.seq_id if request.seq_id is not None else prior_count + 1
+        raise HTTPException(status_code=400, detail=f"LoadWeights is not permitted with seq_id {seq_id}")
 
     path = types.TinkerPath.parse(request.path)
     if (
@@ -990,7 +1553,11 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
         session=session,
         request_type=types.RequestType.LOAD_WEIGHTS,
         model_id=request.model_id,
-        request_data=types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id),
+        request_data=types.LoadWeightsInput(
+            source_model_id=source_model_id,
+            checkpoint_id=checkpoint_id,
+            load_optimizer=request.optimizer,
+        ),
     )
 
     await session.commit()
@@ -1066,15 +1633,60 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
-async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (str | None, str | None):
+async def get_sampling_model(
+    request: SampleRequest,
+    req: Request,
+    session: AsyncSession,
+) -> tuple[str | None, str | None]:
     """Return (base_model, model_path) for a sampling request."""
-    # Resolve model/base from sampling_session_id if provided
-    if request.sampling_session_id is not None:
-        sampling_session = await session.get(SamplingSessionDB, request.sampling_session_id)
+    sampling_session_id = request.sampling_session_id
+    if sampling_session_id is None:
+        return (request.base_model, request.model_path)
+
+    cache = req.app.state.sampling_model_cache
+    cached = cache.get(sampling_session_id)
+    if cached is not None:
+        return cached
+
+    async with req.app.state.sampling_model_cache_lock:
+        cached = cache.get(sampling_session_id)
+        if cached is not None:
+            return cached
+        sampling_session = await session.get(SamplingSessionDB, sampling_session_id)
         if sampling_session is None:
             raise HTTPException(status_code=404, detail="Sampling session not found")
-        return (sampling_session.base_model, sampling_session.model_path)
-    return (request.base_model, request.model_path)
+        sampling_model = (
+            sampling_session.base_model,
+            sampling_session.model_path,
+        )
+        cache[sampling_session_id] = sampling_model
+        return sampling_model
+
+
+async def validate_sampler_checkpoint_once(
+    request: Request,
+    model_id: str,
+    checkpoint_id: str,
+    session: AsyncSession,
+) -> None:
+    """Validate an immutable sampler checkpoint once before serving it."""
+    key = (model_id, checkpoint_id)
+    validated = request.app.state.validated_sampler_checkpoints
+    if key in validated:
+        return
+
+    async with request.app.state.sampler_checkpoint_validation_lock:
+        if key in validated:
+            return
+        await get_model(session, model_id)
+        await validate_checkpoint(
+            request,
+            model_id,
+            checkpoint_id,
+            types.CheckpointType.SAMPLER,
+            session,
+        )
+        validated.add(key)
 
 
 @app.post("/api/v1/asample", response_model=FutureResponse)
@@ -1086,7 +1698,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             detail="sampling_session_id must not contain ':' (the routing-key delimiter)",
         )
 
-    base_model, model_path = await get_sampling_model(request, session)
+    base_model, model_path = await get_sampling_model(request, req, session)
 
     if base_model:
         model_id = checkpoint_id = ""
@@ -1104,36 +1716,39 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
                 status_code=400,
                 detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
             )
-        await get_model(session, model_id)
-        # Validate that the checkpoint exists and is ready
-        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
+        await validate_sampler_checkpoint_once(req, model_id, checkpoint_id, session)
 
-    request_id = await create_future(
-        session=session,
-        request_type=(
-            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
-        ),
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
-            prompt_logprobs=request.prompt_logprobs if request.prompt_logprobs is not None else False,
-            seq_id=request.seq_id,
-            sampling_session_id=request.sampling_session_id,
-        ),
+    sample_input = types.SampleInput(
+        base_model=base_model,
+        prompt=request.prompt.to_types(),
+        sampling_params=request.sampling_params.to_types(),
+        num_samples=request.num_samples,
+        checkpoint_id=checkpoint_id,
+        # A positive topk implies prompt logprobs: both are read off the same
+        # prompt forward pass, so asking for one asks for the other.
+        prompt_logprobs=bool(request.prompt_logprobs) or request.topk_prompt_logprobs > 0,
+        topk_prompt_logprobs=request.topk_prompt_logprobs,
+        seq_id=request.seq_id,
+        sampling_session_id=request.sampling_session_id,
     )
-
-    await session.commit()
-
-    if req.app.state.external_inference_client:
-        asyncio.create_task(
+    external_future_store = req.app.state.external_future_store
+    if external_future_store is not None:
+        # Every external inference mode has a store, so this branch covers all
+        # forwarded samples; the DB path below is only for the internal engine.
+        request_id = external_future_store.create(model_id, sample_input)
+        external_future_store.spawn_forwarding_task(
             req.app.state.external_inference_client.call_and_store_result(
                 request_id, request, model_id, checkpoint_id, base_model=base_model
             )
         )
+    else:
+        request_id = await create_future(
+            session=session,
+            request_type=types.RequestType.SAMPLE,
+            model_id=model_id,
+            request_data=sample_input,
+        )
+        await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -1154,47 +1769,57 @@ class RetrieveFutureRequest(BaseModel):
 @app.post("/api/v1/retrieve_future")
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
-    timeout = 300  # 5 minutes
-    deadline = time.perf_counter() + timeout
+    request_id = int(request.request_id)
 
-    # Start with 100ms, grow to 1s
-    poll = 0.1
-    max_poll = 1.0
-
-    while time.perf_counter() < deadline:
+    found_in_memory = False
+    external_future_store = req.app.state.external_future_store
+    if external_future_store is not None:
         try:
-            async with AsyncSession(req.app.state.db_engine) as session:
-                # First, only query the status to avoid deserializing JSON data
-                statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
-                result = await session.exec(statement)
-                status = result.first()
-
-                if not status:
-                    raise HTTPException(status_code=404, detail="Future not found")
-
-                # Only fetch full record if status is terminal (completed or failed)
-                if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
-                    statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
-                    result = await session.exec(statement)
-                    future = result.first()
-
-                    if future.status == RequestStatus.COMPLETED:
-                        return future.result_data
-
-                    if future.status == RequestStatus.FAILED:
-                        # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                        if future.result_data and "error" in future.result_data:
-                            raise HTTPException(status_code=400, detail=future.result_data["error"])
-                        else:
-                            raise HTTPException(status_code=500, detail="Unknown error")
-        except SATimeoutError:
+            row = await external_future_store.wait(request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+            found_in_memory = True
+        except KeyError:
             pass
+    if not found_in_memory:
+        try:
+            row = await wait_for_future(req.app.state.future_waiters, request_id, RETRIEVE_FUTURE_TIMEOUT_SECONDS)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Future not found")
 
-        # Exponential backoff
-        await asyncio.sleep(poll)
-        poll = min(poll * 1.5, max_poll)
+    if row is None:
+        raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
-    raise HTTPException(status_code=408, detail="Timeout waiting for result")
+    status, request_type, result_data = row
+    if status == RequestStatus.COMPLETED:
+        # The SDK retrieves sample/forward/forward_backward results in proto
+        # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
+        # for these types. Errors and other result types stay JSON.
+        if (
+            types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
+            and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
+        ):
+            async with req.app.state.proto_serialization_lock:
+                content = await asyncio.to_thread(
+                    _serialize_proto_result,
+                    types.RequestType(request_type),
+                    result_data,
+                )
+            response: Response = Response(content=content, media_type=PROTO_CONTENT_TYPE)
+        else:
+            response = raw_json_response(result_data)
+        # Start the retry-grace clock now that the response is built and about to
+        # be sent, so a large result is never evicted mid-delivery.
+        if found_in_memory:
+            external_future_store.mark_retrieved(request_id)
+        return response
+
+    # Return 400 for handled errors (validation, etc.), 500 for unexpected failures.
+    # Every writer of a FAILED row stores a types.ErrorResponse, so decode it as
+    # one; anything else is not an error we can report, and falls through to 500.
+    try:
+        error = types.ErrorResponse.model_validate_json(result_data)
+    except ValidationError:
+        raise HTTPException(status_code=500, detail="Unknown error")
+    raise HTTPException(status_code=400, detail=error.error)
 
 
 @app.post("/api/v1/telemetry", response_model=TelemetryResponse)
@@ -1219,8 +1844,57 @@ async def validate_checkpoint(
     if checkpoint_db.status == CheckpointStatus.FAILED:
         raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
 
-    subdir = "sampler_weights" if checkpoint_type == types.CheckpointType.SAMPLER else ""
-    return request.app.state.engine_config.checkpoints_base / unique_id / subdir / f"{checkpoint_id}.tar.gz"
+    return checkpoint_file_path(request, unique_id, checkpoint_id, checkpoint_type)
+
+
+def checkpoint_file_path(
+    request: Request, unique_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType
+) -> Any:
+    checkpoint_dir = request.app.state.engine_config.checkpoints_base / unique_id
+    if checkpoint_type == types.CheckpointType.SAMPLER:
+        checkpoint_dir = checkpoint_dir / "sampler_weights"
+    return checkpoint_dir / f"{checkpoint_id}.tar.gz"
+
+
+def parse_checkpoint_delete_path(
+    checkpoint_path: str, checkpoint_type: types.CheckpointType | None
+) -> tuple[str, types.CheckpointType | None]:
+    path_kind, separator, checkpoint_id = checkpoint_path.partition("/")
+    if separator:
+        if path_kind == "weights":
+            inferred_checkpoint_type = types.CheckpointType.TRAINING
+        elif path_kind == "sampler_weights":
+            inferred_checkpoint_type = types.CheckpointType.SAMPLER
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid checkpoint path: {checkpoint_path}")
+
+        if checkpoint_type is not None and checkpoint_type != inferred_checkpoint_type:
+            raise HTTPException(status_code=400, detail="checkpoint_type does not match checkpoint path")
+    else:
+        checkpoint_id = checkpoint_path
+        inferred_checkpoint_type = checkpoint_type
+
+    if not re.fullmatch(ID_PATTERN, checkpoint_id) or len(checkpoint_id) > ID_MAX_LENGTH:
+        raise HTTPException(status_code=422, detail="Invalid checkpoint_id")
+
+    return checkpoint_id, inferred_checkpoint_type
+
+
+def delete_checkpoint_file(checkpoint_path: Any) -> None:
+    # Only remove the checkpoint artifact itself; leave the enclosing directories in
+    # place. The run may still be active, and every save path recreates its directory
+    # on demand (parents=True / makedirs), so pruning them here is pointless churn that
+    # couples a per-checkpoint delete to run-wide directory state.
+    if checkpoint_path.is_dir():
+        if hasattr(checkpoint_path, "rmtree"):
+            checkpoint_path.rmtree()
+        else:
+            shutil.rmtree(checkpoint_path)
+    else:
+        try:
+            checkpoint_path.unlink()
+        except FileNotFoundError:
+            return
 
 
 @app.get("/api/v1/training_runs")
@@ -1303,6 +1977,52 @@ async def download_checkpoint_archive(
     return StreamingResponse(file_buffer, media_type="application/octet-stream", headers=headers)
 
 
+@app.delete("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_path:path}", status_code=204)
+async def delete_checkpoint(
+    request: Request,
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    checkpoint_path: str = fastapi.Path(...),
+    checkpoint_type: types.CheckpointType | None = fastapi.Query(None),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Delete a saved checkpoint artifact and its database row."""
+    checkpoint_id, resolved_checkpoint_type = parse_checkpoint_delete_path(checkpoint_path, checkpoint_type)
+    if resolved_checkpoint_type is None:
+        # The PK is (unique_id, checkpoint_id, checkpoint_type), so a training and a
+        # sampler checkpoint can share an id. Rather than guessing a type (which would
+        # make two identical DELETEs delete different rows), require the type to be
+        # explicit -- either via the "weights/"/"sampler_weights/" path prefix or the
+        # checkpoint_type query param. This matches upstream tinker, which rejects a
+        # bare id with a 400 and the same guidance.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid checkpoint identifier. Expected format 'weights/<name>' (training weights) "
+                "or 'sampler_weights/<name>' (sampler weights), where <name> is a single path segment."
+            ),
+        )
+
+    sampler_checkpoint = resolved_checkpoint_type == types.CheckpointType.SAMPLER
+    validation_context = request.app.state.sampler_checkpoint_validation_lock if sampler_checkpoint else nullcontext()
+    async with validation_context:
+        checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, resolved_checkpoint_type))
+        if not checkpoint_db:
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
+
+        if checkpoint_db.status == CheckpointStatus.PENDING:
+            raise HTTPException(status_code=425, detail="Checkpoint is still being created")
+
+        # Commit the row deletion before unlinking the artifact. If the commit fails we
+        # leave an orphaned file (GC-able) rather than a row that lists a checkpoint whose
+        # archive is gone, which would make every subsequent download 500.
+        path = checkpoint_file_path(request, unique_id, checkpoint_id, resolved_checkpoint_type)
+        await session.delete(checkpoint_db)
+        await session.commit()
+        if sampler_checkpoint:
+            request.app.state.validated_sampler_checkpoints.discard((unique_id, checkpoint_id))
+    await asyncio.to_thread(delete_checkpoint_file, path)
+
+
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints")
 async def list_checkpoints(
     unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
@@ -1379,12 +2099,22 @@ async def root():
         "name": "Tinker API Mock",
         "version": "0.0.1",
         "endpoints": {
-            "models": ["/api/v1/create_model", "/api/v1/get_info", "/api/v1/training_runs/{model_id}"],
+            "models": [
+                "/api/v1/create_model",
+                "/api/v1/get_info",
+                "/api/v1/training_runs/{model_id}",
+            ],
             "training": ["/api/v1/forward_backward", "/api/v1/optim_step"],
             "futures": ["/api/v1/retrieve_future"],
             "service": ["/api/v1/get_server_capabilities"],
             "telemetry": ["/api/v1/telemetry"],
-            "checkpoints": ["/api/v1/training_runs/{unique_id}/checkpoints"],
+            "checkpoints": [
+                "/api/v1/training_runs/{unique_id}/checkpoints",
+                # Delete requires an explicit checkpoint type via the path prefix (or the
+                # checkpoint_type query param); a bare checkpoint_id is rejected with 400.
+                "DELETE /api/v1/training_runs/{unique_id}/checkpoints/weights/{checkpoint_id}",
+                "DELETE /api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}",
+            ],
             "download": [
                 "/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive",
                 "/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/download",

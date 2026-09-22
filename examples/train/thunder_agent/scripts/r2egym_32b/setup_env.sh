@@ -44,7 +44,7 @@ sync_env() {
     --torch-backend "$TORCH_BACKEND" \
     --compile-bytecode \
     "$VLLM_CU129_WHEEL_URL" \
-    ray==2.51.1 \
+    ray==2.56.0 \
     omegaconf hydra-core datasets tensorboard func_timeout accelerate \
     torchdata peft debugpy tensordict jaxtyping polars s3fs pybind11 \
     wandb cloudpathlib hf_transfer harbor mini-swe-agent litellm skyrl-gym
@@ -79,7 +79,7 @@ for name in required:
 expected = {
     "torch": "2.11.0",
     "vllm": "0.20.1",
-    "ray": "2.51.1",
+    "ray": "2.56.0",
 }
 for name, expected_prefix in expected.items():
     actual = versions[name]

@@ -29,6 +29,14 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 
 
+@pytest.fixture(scope="module", autouse=True)
+def shutdown_hook():
+    yield
+    # repopulate registries after this module finishes
+    PolicyLossRegistry.repopulate_registry()
+    AdvantageEstimatorRegistry.repopulate_registry()
+
+
 @pytest.fixture
 def dummy_data():
     log_probs = torch.tensor([[0.2, 0.3, 0.5]])

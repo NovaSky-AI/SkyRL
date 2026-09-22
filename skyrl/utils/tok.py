@@ -28,9 +28,16 @@ def get_tokenizer(model_name_or_path, **tokenizer_kwargs) -> AutoTokenizer:
     return tokenizer
 
 
-def check_is_vlm(model_name_or_path) -> bool:
-    """Returns True if the model config declares a non-null ``vision_config``."""
-    model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+def check_is_vlm(model_config_or_path) -> bool:
+    """Returns True if the model config declares a non-null ``vision_config``.
+
+    Accepts either an already-loaded ``PretrainedConfig`` or a model name/path.
+    Passing the config avoids a redundant ``AutoConfig.from_pretrained`` round-trip
+    when the caller already holds it."""
+    if isinstance(model_config_or_path, str):
+        model_config = AutoConfig.from_pretrained(model_config_or_path, trust_remote_code=True)
+    else:
+        model_config = model_config_or_path
     return hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
 
 

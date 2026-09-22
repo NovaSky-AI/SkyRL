@@ -383,11 +383,8 @@ def test_loss_norm_sums_to_expected(tokenizer):
     """After collate_batch normalization, loss_mask encodes the correct
     per-non-pad-token scaling factor.
 
-    For a batch with ``total_nonpad`` non-pad loss tokens:
-      loss_mask.sum() == batch_size / micro_batch_size
-
-    This ensures that reduce_loss (sum over micro-batch) combined with
-    microbatch_weight (mbs/pgb) produces a mean-per-non-pad-token loss.
+    For a batch with ``total_nonpad`` non-pad loss tokens, non-zero mask
+    entries are ``1 / total_nonpad`` and ``loss_mask.sum() == 1``.
     """
     from skyrl.train.dataset.collators import DefaultCollator
 
@@ -411,12 +408,10 @@ def test_loss_norm_sums_to_expected(tokenizer):
     batch = collator(examples, batch_size=cfg.batch_size)
 
     total_nonpad = 2 + 4 + 1 + 3  # = 10
-    expected_scaling = cfg.batch_size / (cfg.micro_train_batch_size_per_gpu * total_nonpad)
+    expected_scaling = 1 / total_nonpad
 
     # Each non-pad position should have value = expected_scaling
-    # Total sum = total_nonpad * expected_scaling = batch_size / micro_batch_size
-    expected_sum = cfg.batch_size / cfg.micro_train_batch_size_per_gpu
-    assert abs(batch["loss_mask"].sum().item() - expected_sum) < 1e-5
+    assert abs(batch["loss_mask"].sum().item() - 1.0) < 1e-5
 
     # Verify individual non-zero values equal expected_scaling
     nonzero_vals = batch["loss_mask"][batch["loss_mask"] > 0]
@@ -424,9 +419,7 @@ def test_loss_norm_sums_to_expected(tokenizer):
 
 
 def test_loss_norm_all_nonpad(tokenizer):
-    """When all tokens are non-pad, loss_mask values equal
-    batch_size / (micro_batch_size * batch_size * num_actions)
-    = 1 / (micro_batch_size * num_actions)."""
+    """When all tokens are non-pad, loss_mask values equal ``1 / total_nonpad``."""
     from skyrl.train.dataset.collators import DefaultCollator
 
     cfg = SFTConfig(batch_size=2, micro_train_batch_size_per_gpu=1)
@@ -441,15 +434,13 @@ def test_loss_norm_all_nonpad(tokenizer):
     batch = collator(examples, batch_size=cfg.batch_size)
 
     total_nonpad = 4  # 2 + 2
-    expected_scaling = cfg.batch_size / (cfg.micro_train_batch_size_per_gpu * total_nonpad)
-    # = 2 / (1 * 4) = 0.5
+    expected_scaling = 1 / total_nonpad
 
     # All loss_mask values should be either 0 or expected_scaling
     nonzero_vals = batch["loss_mask"][batch["loss_mask"] > 0]
     assert torch.allclose(nonzero_vals, torch.tensor(expected_scaling, dtype=torch.float32))
 
-    # Sum should be batch_size / micro_batch_size = 2
-    assert abs(batch["loss_mask"].sum().item() - 2.0) < 1e-5
+    assert abs(batch["loss_mask"].sum().item() - 1.0) < 1e-5
 
 
 # ---------------------------------------------------------------------------

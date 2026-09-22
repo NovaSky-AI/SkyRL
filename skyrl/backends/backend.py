@@ -25,6 +25,7 @@ Design:
 
 from abc import ABC, abstractmethod
 
+from cloudpathlib import AnyPath
 from pydantic import BaseModel
 
 from skyrl.tinker import types
@@ -114,7 +115,7 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def save_checkpoint(self, output_path, model_id: str) -> None:
+    def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         """Save training checkpoint to disk.
 
         Args:
@@ -124,17 +125,18 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, load_optimizer: bool) -> None:
         """Load training checkpoint from disk.
 
         Args:
             checkpoint_path: Path to the checkpoint file
             model_id: The model identifier
+            load_optimizer: Whether to restore optimizer and scheduler state
         """
         pass
 
     @abstractmethod
-    def save_sampler_checkpoint(self, output_path, model_id: str, persist: bool = True) -> None:
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
         """Prepare model weights for sampling and optionally save to disk.
 
         Backends that use colocated inference engines should sync weights

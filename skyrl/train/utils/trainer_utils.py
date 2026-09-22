@@ -15,6 +15,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
@@ -27,6 +28,7 @@ from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
     get_metrics_from_generator_output,
+    slice_generator_output,
 )
 
 BasicType = Union[int, float, str, bool, type(None)]
@@ -489,20 +491,11 @@ def handle_replace_sampling(
         for uid in bad_uids:
             bad_indices.extend(uid2indices[uid])
 
-        # Replace bad samples with good ones (modify in place because replacement_idx and bad_idx should not overlap)
+        source_indices = list(range(len(uids)))
         for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
-            generator_output["prompt_token_ids"][bad_idx] = generator_output["prompt_token_ids"][replacement_idx].copy()
-            generator_output["response_ids"][bad_idx] = generator_output["response_ids"][replacement_idx].copy()
-            replacement_reward = generator_output["rewards"][replacement_idx]
-            generator_output["rewards"][bad_idx] = (
-                replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
-            )
-            generator_output["loss_masks"][bad_idx] = generator_output["loss_masks"][replacement_idx].copy()
-            if generator_output["stop_reasons"]:
-                generator_output["stop_reasons"][bad_idx] = generator_output["stop_reasons"][replacement_idx]
-
-            if generator_output["rollout_logprobs"]:
-                generator_output["rollout_logprobs"][bad_idx] = generator_output["rollout_logprobs"][replacement_idx]
+            source_indices[bad_idx] = replacement_idx
+        if bad_indices:
+            generator_output = slice_generator_output(generator_output, source_indices)
 
         # Update UIDs accordingly
         replaced_uids = uids.copy()
@@ -631,22 +624,7 @@ def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> Li
 
 def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) -> GeneratorOutput:
     """Filter GeneratorOutput based on kept indices."""
-    filtered = {
-        "prompt_token_ids": [output["prompt_token_ids"][i] for i in kept_indices],
-        "response_ids": [output["response_ids"][i] for i in kept_indices],
-        "rewards": [output["rewards"][i] for i in kept_indices],
-        "loss_masks": [output["loss_masks"][i] for i in kept_indices],
-        "stop_reasons": None,
-        "rollout_metrics": output.get("rollout_metrics"),
-        "rollout_logprobs": (
-            [output["rollout_logprobs"][i] for i in kept_indices] if output["rollout_logprobs"] else None
-        ),
-    }
-
-    if output.get("stop_reasons"):
-        filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
-
-    return filtered
+    return slice_generator_output(output, kept_indices)
 
 
 def zero_variance_filter(
@@ -725,6 +703,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "stop_reasons",
             "trajectory_ids",
             "rollout_expert_indices",
+            "rollout_sample_support",
             "is_last_step",
             "pixel_values",
             "image_grid_thw",
@@ -770,8 +749,54 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             not isinstance(reward, list) for reward in rewards
         ), "rewards must be `List[float]` or `List[List[float]]`"
 
+    _validate_per_token_side_channels(generator_output, step_wise)
+
     if step_wise:
         _validate_step_wise_fields(generator_output, num_responses)
+
+
+def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wise: bool):
+    """Validate side-channel row counts against their token domains."""
+    rollout_expert_indices = generator_output.get("rollout_expert_indices")
+    rollout_sample_support = generator_output.get(SAMPLE_SUPPORT_FIELD)
+    prompt_token_ids = generator_output["prompt_token_ids"]
+    response_ids = generator_output["response_ids"]
+
+    # Trajectory-aligned routes cannot be replayed against per-turn samples.
+    assert not (step_wise and rollout_expert_indices is not None), (
+        "rollout router replay (r3) is not supported with step-wise training: a route trace is "
+        "accumulated over one contiguous prompt+response token sequence, so replaying it against "
+        "per-turn samples would silently route trained tokens by another token's rollout routes"
+    )
+
+    if rollout_expert_indices is not None:
+        loss_masks = generator_output["loss_masks"]
+        for i, sample_indices in enumerate(rollout_expert_indices):
+            assert sample_indices is not None, f"rollout_expert_indices[{i}] is None, expected captured routes"
+            prompt_length = len(prompt_token_ids[i])
+            sequence_length = prompt_length + len(response_ids[i])
+            captured_rows = len(sample_indices)
+            assert 0 < captured_rows <= sequence_length, (
+                f"rollout_expert_indices[{i}] has {captured_rows} route rows for a "
+                f"{sequence_length}-token trajectory, expected a non-empty prefix of it"
+            )
+            # Row t covers target t + 1, so every trained target needs a captured row.
+            trained_positions = np.flatnonzero(np.asarray(loss_masks[i]))
+            if trained_positions.size:
+                last_trained_token = prompt_length + int(trained_positions[-1])
+                assert captured_rows >= last_trained_token, (
+                    f"rollout_expert_indices[{i}] captured {captured_rows} route rows, which stops "
+                    f"short of loss-active token {last_trained_token}: replaying that token on a "
+                    "dummy route trains it on a route the rollout never took"
+                )
+
+    if rollout_sample_support is not None:
+        for i, sample_support in enumerate(rollout_sample_support):
+            assert sample_support is not None, f"{SAMPLE_SUPPORT_FIELD}[{i}] is None, expected captured support"
+            assert len(sample_support) == len(response_ids[i]), (
+                f"{SAMPLE_SUPPORT_FIELD}[{i}] has {len(sample_support)} support rows for "
+                f"{len(response_ids[i])} response tokens, expected one row per response token"
+            )
 
 
 def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses: int):

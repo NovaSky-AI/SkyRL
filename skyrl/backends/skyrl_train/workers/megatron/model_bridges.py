@@ -8,15 +8,23 @@ All registrations are guarded by a top-level ``try/except ImportError`` so that
 the rest of the codebase still works in CPU-only (no megatron-bridge) environments.
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 try:
     from megatron.bridge.models.conversion.mapping_registry import (
         MegatronMappingRegistry,
     )
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
+    from megatron.bridge.models.conversion.param_mapping import AutoMapping
+    from megatron.bridge.models.conversion.utils import moe_experts_stored_packed
+    from megatron.bridge.models.deepseek.common import get_common_mapping_list
     from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
     from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
     from megatron.bridge.models.qwen.qwen35_bridge import Qwen35Bridge, Qwen35MoEBridge
     from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.utils import unwrap_model
 
     @MegatronModelBridge.register_bridge(
         source="Glm4MoeLiteForCausalLM",
@@ -35,14 +43,19 @@ try:
         rope fields so the base CONFIG_MAPPING can handle them.
         """
 
-        def build_conversion_tasks(self, hf_pretrained, megatron_model):
+        def build_conversion_tasks(self, hf_pretrained, megatron_model, weight_dtype=None):
             """Filter out None tasks from the base implementation.
 
             megatron-bridge 0.3.1 build_conversion_tasks returns None entries
             for params with no mapping, but load_weights_hf_to_megatron
             doesn't guard against them.
+
+            ``weight_dtype`` was added to the base signature in megatron-bridge
+            0.7.0 and is passed by keyword from ``load_weights_hf_to_megatron``;
+            overrides must accept and forward it (see upstream's own overrides in
+            ``kimi_k3_bridge`` / ``kimi_k25_vl_bridge``).
             """
-            tasks = super().build_conversion_tasks(hf_pretrained, megatron_model)
+            tasks = super().build_conversion_tasks(hf_pretrained, megatron_model, weight_dtype=weight_dtype)
             return [t for t in tasks if t is not None]
 
         def provider_bridge(self, hf_pretrained: PreTrainedCausalLM):
@@ -67,9 +80,13 @@ try:
                     hf_config.rope_theta = orig_rope_theta
 
             provider.moe_router_score_function = "sigmoid"
-            # TODO (erictang000): follow up when Megatron-Bridge supports MTP
-            # layers for DeepSeek-V3 style models
-            provider.mtp_num_layers = None
+            # NOTE: MTP is now honored. DeepSeekV3Bridge.provider_bridge already sets
+            # provider.mtp_num_layers from hf_config.num_nextn_predict_layers, and
+            # megatron-bridge's get_common_mapping_list emits the MTP weight mappings
+            # (enorm/hnorm/eh_proj/shared_head.* + nextn transformer layers) for HF
+            # round-tripping. SkyRL's MegatronWorker.init_configs can still override
+            # provider.mtp_num_layers via policy.megatron_config.mtp_num_layers (e.g.
+            # set it to 0 to force-disable, or leave None to use the model default).
             return provider
 
     # Qwen3.5 (language-model-only) -> GPTModel.
@@ -119,8 +136,23 @@ try:
         """MoE Qwen3.5 language model (``model.language_model.*``) -> GPTModel."""
 
         def mapping_registry(self) -> MegatronMappingRegistry:
+            # Routed experts are stored either fused (`experts.gate_up_proj`, one
+            # stacked tensor per projection) or per-expert
+            # (`experts.<i>.gate_proj.weight`), depending on the transformers
+            # version that wrote the checkpoint -- so it has to be detected from
+            # the actual keys. megatron-bridge 0.6.0 hardcoded the fused layout;
+            # 0.7.0 made it the `experts_packed` argument, defaulting to False,
+            # which silently produces mappings that match nothing on a fused
+            # checkpoint (the expert weights then keep their initialized values).
+            experts_packed = moe_experts_stored_packed(
+                getattr(self, "hf_pretrained", None), "model.language_model.layers."
+            )
             return MegatronMappingRegistry(
-                *self._get_moe_lm_mappings(hf_prefix="model.language_model.", megatron_prefix="")
+                *self._get_moe_lm_mappings(
+                    hf_prefix="model.language_model.",
+                    megatron_prefix="",
+                    experts_packed=experts_packed,
+                )
             )
 
     @MegatronModelBridge.register_bridge(
@@ -136,6 +168,133 @@ try:
                 *self._get_dense_lm_mappings(hf_prefix="model.language_model.", megatron_prefix="")
             )
 
+    # Kimi K2.5-family (KimiK25ForConditionalGeneration, e.g. Kimi-K2.7-Code):
+    # a unified VL checkpoint whose language model is DeepSeek-V3 architecture
+    # (MLA + MoE; ``text_config`` is a DeepseekV3Config with model_type
+    # "kimi_k2") and whose text weights live under a ``language_model.`` prefix
+    # (language_model.model.layers.* / language_model.lm_head.weight).
+    #
+    # Trained text-only: the vision tower and mm projector are never built on
+    # the Megatron side (they stay frozen in the inference engine), so
+    # ``MegatronWorker`` requires ``language_model_only=True`` for these
+    # checkpoints. Registering the real architecture name is what AutoBridge
+    # dispatch needs -- it resolves remote-code checkpoints through
+    # ``config.auto_map["AutoModelForCausalLM"]`` (-> "KimiK25ForConditionalGeneration")
+    # and ``from_hf_pretrained`` requires an implementation under that exact name.
+    #
+    # megatron-bridge also registers that name, for its own ``KimiK25VLBridge`` ->
+    # ``KimiK25VLModel``. The dispatch registry is last-write-wins and this module is
+    # imported after ``megatron.bridge.models``, so the text bridge overrides it;
+    # ``MegatronWorker.init_configs`` asserts the override actually took effect
+    # rather than leaving it to import order.
+
+    def _prefix_hf_param(hf_param, prefix: str):
+        """Re-root a mapping's HF-side name(s) (str or compound dict) under ``prefix``."""
+        if isinstance(hf_param, str):
+            return prefix + hf_param
+        return {key: prefix + value for key, value in hf_param.items()}
+
+    @MegatronModelBridge.register_bridge(
+        source="KimiK25ForConditionalGeneration",
+        target=GPTModel,
+        model_type="kimi_k25",
+    )
+    class KimiK25TextBridge(DeepSeekV3Bridge):
+        """Kimi K2.5-family language model (``language_model.*``) -> GPTModel."""
+
+        def build_conversion_tasks(self, hf_pretrained, megatron_model, *args, **kwargs):
+            """Filter out None tasks (same megatron-bridge quirk as GLM47FlashBridge).
+
+            Extra positional/keyword arguments are forwarded untouched so the
+            override survives base-signature growth: megatron-bridge 0.7.0
+            adds a ``weight_dtype`` keyword (passed by keyword from
+            ``load_weights_hf_to_megatron``), and a fixed two-argument
+            signature would raise TypeError there. Under 0.7.0 the None-filter
+            itself is redundant (see NovaSky-AI/SkyRL#2042's module-level
+            filter) but harmless.
+            """
+            tasks = super().build_conversion_tasks(hf_pretrained, megatron_model, *args, **kwargs)
+            return [t for t in tasks if t is not None]
+
+        def provider_bridge(self, hf_pretrained):
+            hf_config = hf_pretrained.config
+            text_config = hf_config.text_config
+            # tie_word_embeddings lives on the top-level VL config, not text_config.
+            if not hasattr(text_config, "tie_word_embeddings"):
+                text_config.tie_word_embeddings = getattr(hf_config, "tie_word_embeddings", False)
+            return super().provider_bridge(_TextConfigShim(hf_pretrained, text_config))
+
+        def mapping_registry(self) -> MegatronMappingRegistry:
+            # DeepSeekV3Bridge's mappings with the HF side re-rooted under the
+            # unified checkpoint's prefix (model.* -> language_model.model.*,
+            # lm_head.* -> language_model.lm_head.*). Mutating hf_param on the
+            # freshly-built mapping objects is safe: beyond pattern validation
+            # (which a literal prefix cannot invalidate -- it adds no
+            # wildcards), mappings derive no state from hf_param at
+            # construction time.
+            mapping_list = get_common_mapping_list(hf_config=self.hf_config)
+            mapping_list.append(
+                AutoMapping(
+                    megatron_param="decoder.layers.*.mlp.router.expert_bias",
+                    hf_param="model.layers.*.mlp.gate.e_score_correction_bias",
+                )
+            )
+            for mapping in mapping_list:
+                mapping.hf_param = _prefix_hf_param(mapping.hf_param, "language_model.")
+            return MegatronMappingRegistry(*mapping_list)
+
+    # ------------------------------------------------------------------
+    # Drop unmapped (None) conversion tasks for *every* bridge.
+    #
+    # `build_conversion_tasks` is typed `List[None | WeightConversionTask]`: it
+    # leaves a None slot for any Megatron parameter its mapping registry has no
+    # entry for ("Skip tasks with no mapping found"). Upstream's consumers only
+    # guard `task.megatron_module is None`, not `task is None`, so a None slot
+    # raises `AttributeError: 'NoneType' object has no attribute
+    # 'megatron_module'` in `load_weights_hf_to_megatron`.
+    #
+    # Skipping is what upstream intends for an unmapped parameter -- the
+    # neighbouring `megatron_module is None` branch does exactly that -- so
+    # filtering here is faithful, and it replaces the per-bridge workaround
+    # `GLM47FlashBridge` has carried since megatron-bridge 0.3.1.
+    #
+    # The dropped names are logged once per process: an unmapped parameter is
+    # expected for Megatron-internal state, but would be a real bug for a weight
+    # that ought to come from the HF checkpoint.
+    # ------------------------------------------------------------------
+    _orig_build_conversion_tasks = MegatronModelBridge.build_conversion_tasks
+
+    def _unmapped_param_names(self, tasks, megatron_model):
+        """Recover the Megatron parameter names behind the None slots in ``tasks``.
+
+        Mirrors how ``build_conversion_tasks`` indexes its task list, so the
+        warning can name the parameters rather than just count them.
+        """
+        names = self._megatron_global_param_names_all_pp_ranks(megatron_model)
+        model_config = unwrap_model(megatron_model)[0].config
+        if self._share_embeddings_and_output_weights(model_config):
+            names = [name for name in names if "output_layer" not in name]
+        return [names[i] if i < len(names) else f"<index {i}>" for i, task in enumerate(tasks) if task is None]
+
+    def _build_conversion_tasks_dropping_unmapped(self, hf_pretrained, megatron_model, *args, **kwargs):
+        tasks = _orig_build_conversion_tasks(self, hf_pretrained, megatron_model, *args, **kwargs)
+        if None not in tasks:
+            return tasks
+
+        kept = [task for task in tasks if task is not None]
+        if not getattr(type(self), "_skyrl_logged_unmapped", False):
+            type(self)._skyrl_logged_unmapped = True
+            try:
+                dropped = _unmapped_param_names(self, tasks, megatron_model)
+            except Exception:  # never let diagnostics break weight loading
+                dropped = [f"<index {i}>" for i, task in enumerate(tasks) if task is None]
+            logger.warning(
+                f"{type(self).__name__}: dropping {len(dropped)} of {len(tasks)} conversion "
+                f"tasks with no entry in the mapping registry: {sorted(set(dropped))}"
+            )
+        return kept
+
+    MegatronModelBridge.build_conversion_tasks = _build_conversion_tasks_dropping_unmapped
     # VL arch -> sentinel ...ForCausalLM key registered above. The ForCausalLM
     # suffix passes AutoBridge's filter; not being a real transformers class makes
     # dispatch fall back to the string key -> our bridge.

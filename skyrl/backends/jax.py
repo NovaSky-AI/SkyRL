@@ -634,8 +634,9 @@ class JaxBackendImpl(AbstractBackend):
         """
         if not prepared_batch.all_model_inputs:
             return {}
-        if "ppo_critic" in prepared_batch.all_loss_fns:
-            raise ValueError("ppo_critic is only supported by the SkyRL-Train backend")
+        unsupported_loss_fns = set(prepared_batch.all_loss_fns) - LOSS_TYPES.keys()
+        if unsupported_loss_fns:
+            raise ValueError(f"Loss functions {sorted(unsupported_loss_fns)} are not supported by the JAX backend")
 
         results = {}
 
@@ -911,7 +912,15 @@ class JaxBackendImpl(AbstractBackend):
                 if needs_prompt_logprobs and result.prompt_logprobs:
                     all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
 
-        for request_id, _, start_idx, end_idx, prompt_logprobs_requested in request_batch_slices:
+        for request_id, _, start_idx, end_idx, prompt_logprobs_requested, topk_prompt_logprobs in request_batch_slices:
+            if topk_prompt_logprobs > 0:
+                # tx's generator only returns the sampled token's logprob per
+                # prompt position, so there is nothing to build top-k from.
+                results[request_id] = types.ErrorResponse(
+                    error="topk_prompt_logprobs is not supported by the JAX backend",
+                    status="error",
+                )
+                continue
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
             # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
             prompt_logprobs = (
@@ -945,7 +954,7 @@ class JaxBackendImpl(AbstractBackend):
             "lora_config": self.models[model_id].lora_config.model_dump(),
         }
 
-    def _insert_checkpoint_data(self, model_id: str, checkpoint_data: dict) -> None:
+    def _insert_checkpoint_data(self, model_id: str, checkpoint_data: dict, load_optimizer: bool) -> None:
         """Insert checkpoint data into model state."""
         adapter_index = self.models[model_id].adapter_index
         rank = checkpoint_data["lora_config"]["rank"]
@@ -957,11 +966,12 @@ class JaxBackendImpl(AbstractBackend):
             )
 
         insert_adapter_state(adapter_index, self.lora_params, checkpoint_data["lora_weights"], rank)
-        insert_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
-        )
+        if load_optimizer:
+            insert_adapter_state(
+                adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
+            )
 
-    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, load_optimizer: bool) -> None:
         """Load training checkpoint using Flax checkpoints."""
         checkpoint = checkpoints.restore_checkpoint(
             ckpt_dir=checkpoint_path,
@@ -972,7 +982,7 @@ class JaxBackendImpl(AbstractBackend):
         if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_path}")
 
-        self._insert_checkpoint_data(model_id, checkpoint)
+        self._insert_checkpoint_data(model_id, checkpoint, load_optimizer)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
@@ -1144,8 +1154,10 @@ class JaxBackend(JaxBackendImpl):
     def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         self._broadcast_and_call("save_checkpoint", output_path=output_path, model_id=model_id)
 
-    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
-        self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str, load_optimizer: bool) -> None:
+        self._broadcast_and_call(
+            "load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id, load_optimizer=load_optimizer
+        )
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
         # Write probe so workers can detect shared filesystem

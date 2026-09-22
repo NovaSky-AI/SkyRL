@@ -41,6 +41,33 @@ The error message is referring to worker process not starting up within timeout.
 2. Slow startup : Your run can hang even if you simply exceed Ray's timeout limit for worker startup. This can happen with a cold-start run - the first SkyRL run in your cluster when `uv` has to download all the dependencies and populate its cache.
    - Fix: Increase the registration timeout for Ray workers with `RAY_worker_register_timeout_seconds` (say 600). This should be set before the ray cluster is launched with ray start. The ideal fix is to bake this large value in the container. 
 
+## Hard `Aborted`/SIGABRT crash with GPU memory still free
+
+If a run dies with a hard `Aborted`/SIGABRT rather than a catchable CUDA OOM, and the worker had
+plenty of free VRAM at the time, the likely cause is **address-space fragmentation** rather than a
+genuine capacity problem. PyTorch's default CUDA allocator can fragment over a long run, so a worker
+can fail to satisfy a single large *contiguous* allocation while still holding tens of GiB free.
+
+This shows up whenever allocation sizes vary over time — forward/backward passes with variable
+sequence lengths, or dynamic microbatch token counts, leave differently-sized holes step to step.
+`trainer.placement.colocate_all=true` is the worst case: the trainer repeatedly offloads to CPU and
+backloads to GPU while the inference engine sleeps and wakes in the same address space, and large
+reallocations (such as Megatron's `reload_from_cpu` resizing a param buffer) fragment memory badly.
+
+PyTorch's `expandable_segments` allocator avoids this by growing segments in place instead of
+requiring one contiguous block. Two **independent** flags control it, because the trainer and the
+inference engine are separate processes with separate allocators:
+
+- `trainer.use_expandable_segments` (default **on**) — trainer workers (policy/critic/ref). Enabled
+  after model init, and automatically turned off around CUDA-IPC weight sync, since IPC handles are
+  incompatible with the VMM addresses expandable segments uses.
+- `generator.inference_engine.use_expandable_segments` (default **off**) — vLLM engine processes.
+  Enable it to defragment the engine side too. Safe with sleep mode on vLLM >= 0.20.1, whose
+  `CuMemAllocator` auto-disables expandable segments around its sleep/wake pool. On older vLLM,
+  sleep mode plus expandable segments is a hard error, so leave it off there.
+
+See [`TrainerConfig.use_expandable_segments`](/docs/api-ref/skyrl/config) for details.
+
 ## Memory leaks during training with code that uses `multiprocessing`
 
 One of the most common issues during training is unexplained memory leaks that lead to CPU RAM OOMs. The root cause can be varied, but typically you can get to the problematic piece of code by just inspecting memory usage: 

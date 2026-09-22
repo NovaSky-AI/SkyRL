@@ -10,9 +10,12 @@ import tempfile
 from typing import Union
 from unittest.mock import Mock, mock_open, patch
 
+import numpy as np
 import pytest
 import ray
 
+from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertTrace
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_DTYPE
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.utils.trainer_utils import (
@@ -393,6 +396,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
         "stop_reasons": ["length"] * 6,
         "rollout_metrics": None,
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.25], [0.15, 0.25], [0.1, 0.2], [0.3, 0.4]],
+        "rollout_expert_indices": [np.asarray([[[i, i + 1]]], dtype=np.uint8) for i in range(6)],
     }
     uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
@@ -408,6 +412,12 @@ def test_handle_replace_sampling_sufficient_good_samples():
     assert len(result_output["rewards"]) == 6
     assert len(result_output["rollout_logprobs"]) == 6
     assert len(result_uids) == 6
+    route_by_response = {
+        tuple(response): routes
+        for response, routes in zip(generator_output["response_ids"], generator_output["rollout_expert_indices"])
+    }
+    for response, routes in zip(result_output["response_ids"], result_output["rollout_expert_indices"]):
+        assert np.array_equal(routes, route_by_response[tuple(response)])
 
     # Check that bad uid2 samples were replaced with good samples
     uid2_indices = [i for i, uid in enumerate(result_uids) if uid == "uid2"]
@@ -636,6 +646,7 @@ def test_handle_filter_sampling_single_sample_per_prompt():
 
 def test_filter_generator_output():
     """Test the filter_generator_output utility function."""
+    routes = [np.asarray([[[i, i + 1]]], dtype=np.uint8) for i in range(3)]
     generator_output = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
         "response_ids": [[7, 8], [9, 10], [11, 12]],
@@ -644,6 +655,7 @@ def test_filter_generator_output():
         "stop_reasons": ["length", "length", "stop"],
         "rollout_metrics": {"metric": "value"},
         "rollout_logprobs": [[0.16, 0.4], [0.1, 0.2], [0.3, 0.4]],
+        "rollout_expert_indices": routes,
     }
     kept_indices = [0, 2]  # Keep first and third samples
 
@@ -656,6 +668,8 @@ def test_filter_generator_output():
     assert filtered["stop_reasons"] == ["length", "stop"]
     assert filtered["rollout_metrics"] == {"metric": "value"}
     assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
+    assert filtered["rollout_expert_indices"][0] is routes[0]
+    assert filtered["rollout_expert_indices"][1] is routes[2]
 
 
 def test_zero_variance_filter_mixed_groups():
@@ -1126,3 +1140,137 @@ def test_validate_stepwise_multiple_is_last_step_true_per_trajectory():
     output["is_last_step"] = [True, True, True]
     with pytest.raises(AssertionError, match="is_last_step.*True.*trajectory continues"):
         validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
+def _make_side_channel_output(
+    rollout_expert_indices=None,
+    rollout_sample_support=None,
+    loss_masks=None,
+):
+    """A two-trajectory GeneratorOutput with 5- and 4-token sequences."""
+    return GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3], [4, 5]],
+        response_ids=[[10, 11], [12, 13]],
+        rewards=[0.5, 0.6],
+        loss_masks=loss_masks if loss_masks is not None else [[1, 1], [1, 1]],
+        stop_reasons=["stop", "stop"],
+        rollout_metrics={},
+        rollout_logprobs=None,
+        rollout_expert_indices=rollout_expert_indices,
+        rollout_sample_support=rollout_sample_support,
+    )
+
+
+def _routes(num_rows):
+    return np.zeros((num_rows, 2, 2), dtype=np.int16)
+
+
+def _support(num_rows):
+    return np.zeros((num_rows, 3), dtype=SAMPLE_SUPPORT_DTYPE)
+
+
+@pytest.mark.parametrize(
+    ("route_rows", "loss_masks"),
+    [
+        ((5, 4), [[1, 1], [1, 1]]),
+        ((4, 3), [[1, 1], [1, 1]]),
+        ((3, 2), [[1, 0], [1, 0]]),
+    ],
+)
+def test_validate_generator_output_accepts_route_under_coverage(route_rows, loss_masks):
+    """Route prefixes are valid when every trained token is covered."""
+    output = _make_side_channel_output(
+        rollout_expert_indices=[_routes(rows) for rows in route_rows],
+        loss_masks=loss_masks,
+    )
+
+    validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_rejects_routes_that_stop_short_of_a_trained_token():
+    """A route prefix must cover the last trained token."""
+    output = _make_side_channel_output(rollout_expert_indices=[_routes(3), _routes(3)])
+
+    with pytest.raises(AssertionError, match=r"rollout_expert_indices\[0\] captured 3 route rows.*token 4"):
+        validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_accepts_the_coverage_a_multi_turn_trace_produces():
+    """Validation accepts the prefix produced by a multi-turn route trace."""
+    trace = RoutedExpertTrace()
+    trace.record_generation(prompt_token_count=3, generated_token_count=2, routed_experts=_routes(4))
+    trace.record_generation(prompt_token_count=7, generated_token_count=2, routed_experts=_routes(4))
+    loss_mask = [1, 1, 0, 0, 1, 1]
+    routes = trace.finalize(token_count=9, loss_mask=[0, 0, 0] + loss_mask)
+    assert len(routes) == 8
+
+    output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3]],
+        response_ids=[[10, 11, 20, 21, 12, 13]],
+        rewards=[0.5],
+        loss_masks=[loss_mask],
+        stop_reasons=["stop"],
+        rollout_metrics={},
+        rollout_logprobs=None,
+        rollout_expert_indices=[routes],
+        rollout_sample_support=None,
+    )
+
+    validate_generator_output(num_prompts=1, generator_output=output)
+
+
+@pytest.mark.parametrize(
+    ("invalid_rows", "message"),
+    [
+        (5, r"rollout_expert_indices\[1\] has 5 route rows for a 4-token"),
+        (0, r"rollout_expert_indices\[1\] has 0 route rows"),
+    ],
+)
+def test_validate_generator_output_rejects_invalid_route_bounds(invalid_rows, message):
+    output = _make_side_channel_output(rollout_expert_indices=[_routes(5), _routes(invalid_rows)])
+
+    with pytest.raises(AssertionError, match=message):
+        validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_rejects_none_route_entry():
+    output = _make_side_channel_output(rollout_expert_indices=[_routes(5), None])
+
+    with pytest.raises(AssertionError, match=r"rollout_expert_indices\[1\] is None"):
+        validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_accepts_dense_sample_support():
+    output = _make_side_channel_output(rollout_sample_support=[_support(2), _support(2)])
+
+    validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_rejects_sample_support_row_shortfall():
+    output = _make_side_channel_output(rollout_sample_support=[_support(2), _support(1)])
+
+    with pytest.raises(AssertionError, match=r"rollout_sample_support\[1\] has 1 support rows for 2 response tokens"):
+        validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_rejects_none_sample_support_entry():
+    output = _make_side_channel_output(rollout_sample_support=[None, _support(2)])
+
+    with pytest.raises(AssertionError, match=r"rollout_sample_support\[0\] is None"):
+        validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_refuses_routes_under_step_wise():
+    """Trajectory-aligned routes cannot be replayed against per-turn samples."""
+    output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
+    output["rollout_expert_indices"] = [_routes(len(prompt) + 3) for prompt in output["prompt_token_ids"]]
+
+    with pytest.raises(AssertionError, match="not supported with step-wise training"):
+        validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
+def test_validate_generator_output_allows_sample_support_under_step_wise():
+    output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
+    output["rollout_sample_support"] = [_support(len(response)) for response in output["response_ids"]]
+
+    validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)

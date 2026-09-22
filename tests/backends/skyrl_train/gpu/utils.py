@@ -129,7 +129,7 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
         advantages=0.6 * torch.ones((B, num_actions), device="cpu"),
         attention_mask=torch.ones((B, T), dtype=int, device="cpu"),
         loss_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
-        action_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
+        response_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
         num_actions=num_actions,
         info={},
     )
@@ -148,20 +148,28 @@ def import_worker(strategy: str, worker_type: str):
 
 
 def init_worker_with_type(
-    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
+    worker_type: str,
+    shared_pg=None,
+    colocate_all=False,
+    num_gpus_per_node=1,
+    num_nodes=1,
+    cfg=None,
+    num_gpus_per_actor=None,
 ) -> PPORayActorGroup:
     if cfg is None:
         cfg = get_test_actor_config()
 
     if shared_pg is not None:
         pg = ResolvedPlacementGroup(shared_pg)
-        num_gpus_per_actor = 0.2
+        if num_gpus_per_actor is None:
+            num_gpus_per_actor = 0.2
     else:
         bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
         raw_pg = placement_group(bundles, strategy="PACK")
         get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
         pg = ResolvedPlacementGroup(raw_pg)
-        num_gpus_per_actor = 0.75
+        if num_gpus_per_actor is None:
+            num_gpus_per_actor = 0.75
 
     worker_cls = import_worker(cfg.trainer.strategy, worker_type)
     model = PPORayActorGroup(
@@ -383,7 +391,8 @@ def ray_init_for_tests():
         env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
-    env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH")
+    if "LD_LIBRARY_PATH" in os.environ:
+        env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
     ray.init(runtime_env={"env_vars": env_vars})
 
 
@@ -595,6 +604,7 @@ class InferenceEngineState:
             server_urls=server_urls,
             model_name=base_model_name,
             enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
+            enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
             uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
             data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=get_tokenizer(cfg.trainer.policy.model.path),

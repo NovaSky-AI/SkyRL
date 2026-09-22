@@ -1,6 +1,7 @@
 {
   "title": "Tutorials",
   "pages": [
+    "placement",
     "new_env",
     "one_step_off_async",
     "fully_async",

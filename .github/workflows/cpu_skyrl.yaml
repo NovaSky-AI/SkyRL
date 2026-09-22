@@ -1,13 +1,16 @@
 name: SkyRL-CPU
 
-on:
-  push:
-    branches: [ main ]
+on: 
+  push: 
+    branches: 
+      - main 
+      - rc/**
     paths:
       - 'ci/**'
       - 'skyrl/**'
       - 'tests/**'
       - 'pyproject.toml'
+      - 'skyrl-gym/**'
       - '.github/workflows/cpu_skyrl.yaml'
   pull_request:
     paths:
@@ -15,8 +18,8 @@ on:
       - 'skyrl/**'
       - 'tests/**'
       - 'pyproject.toml'
+      - 'skyrl-gym/**'
       - '.github/workflows/cpu_skyrl.yaml'
-  workflow_dispatch:
 
 permissions:
   checks: write   # for status checks to appear
@@ -24,29 +27,108 @@ permissions:
 
 # Cancel runs for previous commits on the same branch
 concurrency:
-  group: skyrl-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  check_code_quality:
+    # CI runs only in the upstream repo. This workflow needs no secrets and would pass
+    # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base
+    # repository's context.
+    if: github.repository == 'NovaSky-AI/SkyRL'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        # This is the version of the action for setting up Python, not the Python version.
+        uses: actions/setup-python@v5
+        with:
+          # Semantic version range syntax or exact version of a Python version
+          python-version: '3.12'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Run pre-commit hooks
+        run: uv pip install pre-commit; pre-commit run --all-files --config .pre-commit-config.yaml
+  
   skyrl_tests:
+    # CI runs only in the upstream repo. This workflow needs no secrets and would pass
+    # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base
+    # repository's context.
+    if: github.repository == 'NovaSky-AI/SkyRL'
+    needs: check_code_quality
     runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
         working-directory: .
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install uv
-      run: |
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-    - name: Run lint
-      run: |
-        uvx ruff check
-    - name: Run pytest
-      run: |
-        uv run --extra tinker --extra jax --extra dev --with transformers==5.2.0 pytest --forked -s tests/tx/models/test_qwen3_5.py
-        uv run --extra tinker --extra jax --extra dev pytest --forked -s tests --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train --ignore=tests/tx/models/test_qwen3_5.py
-    - name: Run engine benchmarks
-      run: |
-        uv run --extra tinker --extra dev python skyrl/benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1}' --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16
 
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Run cpu tests (without vllm)
+        run:  uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "not vllm"
+      - name: Run cpu tests (with vllm)
+        run: uv run --isolated --extra fsdp --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "vllm"
+      - name: Run tinker tests
+        run: uv run --isolated --extra fsdp --extra tinker --extra dev pytest tests/tinker/skyrl_train/
+  
+  skyrl_tinker_tests:
+    # The Tinker API server tests used to live in the JAX workflow because the
+    # server defaults to the JAX backend. That workflow is now scoped to `skyrl/tx`
+    # changes only, and the server is actively maintained, so its tests run here on
+    # every PR instead. Separate job rather than a step on `skyrl_tests`:
+    # `jax` and `fsdp` are conflicting backend extras, so they need separate envs,
+    # and `tests/tinker/test_api.py` re-execs `uv run` with the parent's flags.
+    if: github.repository == 'NovaSky-AI/SkyRL'
+    needs: check_code_quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Run tinker API server + shared util tests
+        run: uv run --isolated --extra tinker --extra jax --extra dev pytest --forked -s tests/tinker tests/utils --ignore=tests/tinker/skyrl_train
+
+  skyrl_gym_tests:
+    # CI runs only in the upstream repo. This workflow needs no secrets and would pass
+    # on a fork, but fork CI is off by policy -- fork PRs are tested here, in the base
+    # repository's context.
+    if: github.repository == 'NovaSky-AI/SkyRL'
+    needs: check_code_quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./skyrl-gym
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Install skyrl-gym
+        run:  uv sync --frozen --extra dev # installs from lock file
+      - name: Run cpu tests
+        run:  uv run --frozen pytest tests/

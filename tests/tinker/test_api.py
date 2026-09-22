@@ -69,6 +69,11 @@ def start_api_server(
                 "host": "0.0.0.0",
                 "port": str(TEST_SERVER_PORT),
                 "base-model": BASE_MODEL,
+                # Pinned rather than inherited from EngineConfig's default: these
+                # run on a CPU runner, and jax is the only backend that works
+                # without a GPU. `_build_uv_run_cmd_engine` turns this into
+                # `--extra <backend>` for the engine child process.
+                "backend": "jax",
                 "backend-config": '{"max_lora_adapters": 4}',
                 "database-url": f"sqlite:///{resolved_db_path}",
             }
@@ -222,8 +227,16 @@ def test_training_workflow(service_client):
     # The third example omits weights (auto-filled with 1s), so all losses should be non-zero
     assert all(v != 0.0 for v in fwdbwd_result.loss_fn_outputs[2]["elementwise_loss"].data)
 
-    # Load the optimizer state and verify another forward_backward pass has the same loss
-    training_client.load_state(resume_path)
+    # Matching the Tinker service, LoadWeights is only permitted as a model's first
+    # request; this client has already saved and trained, so both load flavors are rejected.
+    with pytest.raises(Exception, match="LoadWeights is not permitted"):
+        training_client.load_state(resume_path).result()
+    with pytest.raises(Exception, match="LoadWeights is not permitted"):
+        training_client.load_state_with_optimizer(resume_path).result()
+
+    # Restore the run on a fresh client instead (weights-only load as its first request)
+    # and verify a forward_backward pass reproduces the pre-optim-step losses.
+    training_client = service_client.create_training_client_from_state(resume_path)
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert_loss_fn_outputs_equal(fwdbwd_result2.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
     # Also check that custom loss function produces the same loss
@@ -232,10 +245,9 @@ def test_training_workflow(service_client):
     ).result()
     assert_loss_fn_outputs_equal(fwdbwd_result_custom.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
 
-    # Test that we can restore the training run
-    training_client = service_client.create_training_client_from_state(resume_path)
-    # Verify the restored client has the same state by running forward_backward again
-    fwdbwd_result3 = training_client.forward_backward(processed_examples, "cross_entropy").result()
+    # Restoring with optimizer state also loads as a fresh client's first request
+    training_client_opt = service_client.create_training_client_from_state_with_optimizer(resume_path)
+    fwdbwd_result3 = training_client_opt.forward_backward(processed_examples, "cross_entropy").result()
     assert_loss_fn_outputs_equal(fwdbwd_result3.loss_fn_outputs, fwdbwd_result.loss_fn_outputs)
 
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
@@ -265,6 +277,77 @@ def test_training_workflow(service_client):
     assert training_run.is_lora is True
     assert training_run.lora_rank == 32
     assert training_run.corrupted is False
+
+
+def test_delete_checkpoint(tmp_path):
+    """Test that deleting checkpoints removes them from the listing and from disk.
+
+    Mirrors the real-client style of ``test_training_workflow``: save several
+    training checkpoints plus a sampler checkpoint, then delete a subset via the
+    REST client and verify the deleted checkpoints disappear from both the
+    listing and the on-disk checkpoint store, while the rest are untouched. The
+    server is started with an explicit ``checkpoints-base`` so the test knows
+    where the artifacts live on disk.
+    """
+    checkpoints_base = tmp_path / "checkpoints"
+    with start_api_server(
+        overrides={"checkpoints-base": str(checkpoints_base)},
+        wait_for_up=True,
+        teardown_timeout=20.0,
+    ):
+        service_client = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/", api_key=TINKER_API_KEY)
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+        rest_client = service_client.create_rest_client()
+
+        # Save several training checkpoints and one sampler checkpoint.
+        training_run_id = None
+        for name in ["ckpt0", "ckpt1", "ckpt2", "ckpt3"]:
+            resume_path = training_client.save_state(name=name).result().path
+            training_run_id = urlparse(resume_path).netloc
+        training_client.save_weights_for_sampler(name="sampler0").result()
+
+        # On-disk layout: training -> <base>/<run>/<id>.tar.gz,
+        # sampler -> <base>/<run>/sampler_weights/<id>.tar.gz (see checkpoint_file_path).
+        def training_ckpt_file(checkpoint_id):
+            return checkpoints_base / training_run_id / f"{checkpoint_id}.tar.gz"
+
+        def sampler_ckpt_file(checkpoint_id):
+            return checkpoints_base / training_run_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
+
+        def listed_checkpoints():
+            return {
+                ckpt.checkpoint_id: ckpt for ckpt in rest_client.list_checkpoints(training_run_id).result().checkpoints
+            }
+
+        assert set(listed_checkpoints()) == {"ckpt0", "ckpt1", "ckpt2", "ckpt3", "sampler0"}
+        for checkpoint_id in ["ckpt0", "ckpt1", "ckpt2", "ckpt3"]:
+            assert training_ckpt_file(checkpoint_id).exists()
+        assert sampler_ckpt_file("sampler0").exists()
+
+        # Delete two training checkpoints and the sampler checkpoint. Delete via the
+        # type-qualified tinker path (the canonical tinker flow); the checkpoint type
+        # is carried by the path's "weights/"/"sampler_weights/" prefix.
+        checkpoints = listed_checkpoints()
+        for checkpoint_id in ["ckpt1", "ckpt3", "sampler0"]:
+            rest_client.delete_checkpoint_from_tinker_path(checkpoints[checkpoint_id].tinker_path).result()
+
+        # Deleted checkpoints are gone from both the listing and disk.
+        assert set(listed_checkpoints()) == {"ckpt0", "ckpt2"}
+        assert not training_ckpt_file("ckpt1").exists()
+        assert not training_ckpt_file("ckpt3").exists()
+        assert not sampler_ckpt_file("sampler0").exists()
+        # Un-deleted checkpoints remain on disk.
+        assert training_ckpt_file("ckpt0").exists()
+        assert training_ckpt_file("ckpt2").exists()
+
+        # A bare (untyped) id is rejected with 400 -- the checkpoint type must be
+        # explicit, since a training and sampler checkpoint could share an id. This
+        # matches upstream tinker. The rejected delete must leave the checkpoint intact.
+        with pytest.raises(Exception) as exc_info:
+            rest_client.delete_checkpoint(training_run_id, "ckpt0").result()
+        assert getattr(exc_info.value, "status_code", None) == 400
+        assert set(listed_checkpoints()) == {"ckpt0", "ckpt2"}
+        assert training_ckpt_file("ckpt0").exists()
 
 
 @pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
@@ -347,6 +430,46 @@ def test_sample_top_k(service_client):
     # top_k=-1 (disabled) should vary with different seeds
     results_no_top_k = sample_with_top_k(top_k=-1)
     assert not all(seq == results_no_top_k[0] for seq in results_no_top_k), "Without top_k, outputs should vary"
+
+
+def test_sample_prompt_logprobs(service_client):
+    """Test that prompt logprob requests reach the backend and come back populated."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    prompt_tokens = tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True)
+    prompt = types.ModelInput.from_ints(prompt_tokens)
+    sampling_params = types.SamplingParams(temperature=0.0, max_tokens=4, seed=42)
+
+    result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=sampling_params,
+        num_samples=1,
+        include_prompt_logprobs=True,
+    ).result()
+    assert result.prompt_logprobs is not None
+    assert all(lp is None or isinstance(lp, float) for lp in result.prompt_logprobs)
+    # Not requested, so the field stays unset rather than being invented.
+    assert result.topk_prompt_logprobs is None
+
+    # Without the flag the backend must not pay for prompt logprobs at all.
+    assert (
+        sampling_client.sample(prompt=prompt, sampling_params=sampling_params, num_samples=1).result().prompt_logprobs
+        is None
+    )
+
+    # topk needs a full per-position distribution, which the JAX generator does
+    # not produce; the request must fail loudly instead of silently dropping it.
+    # The SkyRL-Train backend (megatron/fsdp) does support it -- the full
+    # contract runs end-to-end on megatron + vLLM in
+    # tests/tinker/skyrl_train/test_multi_lora_megatron.py::test_sample_prompt_logprobs.
+    with pytest.raises(ValueError, match="topk_prompt_logprobs is not supported"):
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            num_samples=1,
+            include_prompt_logprobs=True,
+            topk_prompt_logprobs=4,
+        ).result()
 
 
 def test_sample_with_stop_strings(service_client):

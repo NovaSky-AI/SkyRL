@@ -13,6 +13,7 @@ from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
 )
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     LOSSES_WITHOUT_OLD_LOGPROBS,
+    compute_policy_loss_cispo,
     dppo_policy_loss,
     rollout_is_policy_loss,
 )
@@ -55,6 +56,35 @@ def test_skip_path_losses_run_with_old_log_probs_none(loss_name, loss_fn):
     loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
 
     loss, _ = loss_fn(
+        log_probs,
+        None,  # old_log_probs: skipped forward pass
+        advantages,
+        config=config,
+        loss_mask=loss_mask,
+        rollout_logprobs=rollout_logprobs,
+    )
+    assert torch.isfinite(loss)
+
+
+def test_cispo_rollout_anchor_runs_with_old_log_probs_none():
+    """Skip-path invariant for cispo with cispo_anchor='rollout': it anchors on rollout logprobs
+    and never reads old logprobs, so it must produce a finite loss with ``old_log_probs=None``.
+    This is what makes it safe for ``_skip_policy_forward`` to skip the old-logprobs forward."""
+    from skyrl.train.config import CISPOConfig
+
+    config = AlgorithmConfig(
+        policy_loss_type="cispo",
+        cispo=CISPOConfig(cispo_anchor="rollout"),
+        off_policy_correction=OffPolicyCorrectionConfig(),
+    )
+    assert not off_policy_correction_enabled(config.off_policy_correction)
+
+    log_probs = torch.tensor([[-1.0, -1.5, -0.8], [-0.7, -1.2, -2.0]])
+    rollout_logprobs = torch.tensor([[-1.2, -1.0, -0.9], [-0.6, -1.5, -1.7]])
+    advantages = torch.tensor([[1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]])
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
+
+    loss, _ = compute_policy_loss_cispo(
         log_probs,
         None,  # old_log_probs: skipped forward pass
         advantages,

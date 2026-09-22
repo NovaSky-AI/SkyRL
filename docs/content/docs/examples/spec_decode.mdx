@@ -1,0 +1,160 @@
+---
+title: "Faster Rollouts with MTP Speculative Decoding"
+---
+
+<Callout type="info">
+MTP training requires the `megatron` backend and the `vllm` inference engine.
+</Callout>
+
+<Callout type="info">
+MTP traininng is currently experimental. We are actively working on benchmarking MTP in fully async, multi-turn RL scenarios as well as providing guidelines on when it is most useful.
+</Callout>
+
+In this example we train a model's native **Multi-Token Prediction (MTP)** head with a decoupled draft loss, and reuse that head for **vLLM speculative decoding** to speed up rollout. Because the draft loss is autograd-decoupled, it trains only the MTP head and never perturbs the policy, leaving the RL dynamics unchanged.
+
+Source code: `examples/train/spec_decode/`.
+
+## Overview
+
+During RL training, rollouts (generation) are typically the throughput bottleneck. Speculative decoding improves throughput (at lower batch size) with a small, cheap **drafter** that proposes the next `k` tokens, which the policy then verifies in a single forward pass.
+
+Since the policy distribution changes in RL, the drafter must be co-trained to stay aligned. SkyRL trains the MTP heads with a top-k soft cross-entropy loss, which better aligns the drafter and policy distributions while reducing the memory overhead of training the additional heads.
+
+There are two pieces:
+
+1. **Training the head** — a decoupled draft loss distills the policy's own next-token distribution into the MTP head on the Megatron backend.
+2. **Drafting with it** — the trained head is handed to vLLM as an MTP drafter, and weight sync keeps it aligned with the policy every step.
+
+### How does it work?
+
+The draft loss reuses the hidden states the policy's forward pass already computed: it replays the MTP block on the **detached** trunk and trains the head against the policy's own detached next-token distribution. The loss is vocab-parallel, so it works under tensor parallelism.
+
+Everything but the head is detached: trunk, re-embedding, output weight, and teacher. So the draft gradient reaches only the MTP head, never the backbone. The head shares the policy's gradient buffer and optimizer but is clipped by its own gradient norm.
+
+## Enabling MTP
+
+`trainer.mtp` is the single high-level knob. It propagates to both the training side (Megatron MTP heads + draft loss) and the inference side (vLLM `speculative_config`):
+
+```bash
+trainer.mtp.enabled=true \
+trainer.mtp.num_speculative_tokens=3 \
+trainer.mtp.loss_weight=0.2
+```
+
+This requires an **MTP-capable checkpoint** — most recent models ship one. Training always trains the checkpoint's own heads. If the model resolves to zero heads, the run fails during model init rather than silently training without a drafter.
+
+`num_speculative_tokens` is the vLLM **draft depth**, independent of the trained head count. Single-head checkpoints reuse the one head autoregressively at depths > 1 — more speedup, but acceptance decays with depth, since the head only trains at depth 1. Start at `k=3` and tune with the [per-depth metrics](#monitoring-acceptance).
+
+<Callout type="warn">
+The draft loss is `megatron` backend only. `trainer.mtp.enabled=true` under `trainer.strategy=fsdp` will not build any heads.
+</Callout>
+
+## Configuration
+
+The high-level knob:
+
+| Field | Default | Description |
+|---|---|---|
+| `trainer.mtp.enabled` | `false` | Train MTP heads and use them for speculative decoding. |
+| `trainer.mtp.num_speculative_tokens` | `1` | vLLM draft depth per step. |
+| `trainer.mtp.loss_weight` | `0.1` | Weight `w` of the draft loss in `policy_loss + w * draft_loss`. |
+
+Megatron-side fields tune the draft loss; most runs only need `mtp_loss_topk`:
+
+| Field | Default | Description |
+|---|---|---|
+| `mtp_num_layers` | `null` | Head count. `null` honors the model's HF config; `0` force-disables MTP. |
+| `mtp_loss_topk` | `null` | Distill only the teacher's top-k tokens instead of the full vocab: `O(seq*k)` memory rather than `O(seq*vocab)`. `null` uses the exact full-vocab loss. |
+| `mtp_loss_chunk_size` | `1024` | Sequence-chunk size for the draft loss, with gradient checkpointing, to bound peak memory. Numerically identical to no chunking; ignored when `mtp_loss_topk` is set. |
+| `mtp_loss_weight` | `0.1` | Set automatically from `trainer.mtp.loss_weight`. |
+
+## Example
+
+Two complete examples in `examples/train/spec_decode/`, both on a single 8xH100 node:
+
+| Script | Task | Model |
+|---|---|---|
+| `run_megatron_dapo_mimo_7b_rl_specdecode.sh` | DAPO on `dapo-math-17k` | `XiaomiMiMo/MiMo-7B-RL` |
+| `run_megatron_dapo_qwen3.5_9b_specdecode.sh` | DAPO on `dapo-math-17k` | `Qwen/Qwen3.5-9B` |
+
+The MTP-specific parameters are:
+
+```bash title="examples/train/spec_decode/run_megatron_dapo_mimo_7b_rl_specdecode.sh"
+MTP_ENABLED=true
+MTP_NUM_SPECULATIVE_TOKENS=3
+MTP_LOSS_WEIGHT=0.2
+MTP_LOSS_TOPK=256
+
+uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
+    trainer.strategy=megatron \
+    trainer.mtp.enabled=$MTP_ENABLED \
+    trainer.mtp.num_speculative_tokens=$MTP_NUM_SPECULATIVE_TOKENS \
+    trainer.mtp.loss_weight=$MTP_LOSS_WEIGHT \
+    trainer.policy.megatron_config.mtp_loss_topk=$MTP_LOSS_TOPK \
+    generator.inference_engine.backend=vllm \
+    ...
+```
+
+To run it (from the SkyRL root directory):
+
+```bash
+bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+export WANDB_API_KEY=<your_key_here>
+bash examples/train/spec_decode/run_megatron_dapo_mimo_7b_rl_specdecode.sh
+```
+
+## Monitoring acceptance
+
+Acceptance determines your speedup. It is logged under `vllm/train/`:
+
+- `draft_acceptance_rate` — accepted / drafted tokens.
+- `draft_mean_acceptance_length` — tokens produced per target forward pass. This *is* the speedup factor: 1.0 means no gain, `k+1` is the ceiling.
+- `draft_acceptance_rate_pos_{1..k}` — per-depth breakdown.
+- `draft_num_draft_tokens`, `draft_num_accepted_tokens` — raw counts.
+
+The draft loss is logged as `mtp_loss` on the training side.
+
+Watch the per-depth breakdown when tuning `k`: acceptance decays with depth, so a low `draft_acceptance_rate_pos_k` means `k` is too deep for your model.
+
+## Results
+
+We evaluate a DAPO run of `Qwen3.5-9B` against a baseline with speculative decoding disabled. The runs differ **only** in the MTP switch.
+
+**Setup.** Single 8xH100 node. Training: Megatron `TP=4, PP=1, CP=1`, bf16. Rollout: 8 vLLM engines (round-robin router), depth-3 speculative decoding. DAPO on `dapo-math-17k`, AIME-2024 eval, 32 prompts x 8 samples/step, `max_generate_length=8192`.
+
+### Rollout throughput
+
+Speculative decoding roughly doubles generation throughput in rollout:
+
+![Generation throughput with and without MTP speculative decoding](/images/examples/specdecode_generation_throughput.png)
+
+| Phase | Baseline | MTP | Speedup |
+|---|---:|---:|---:|
+| **Total step** | **400.7 s** | **246.8 s** | **1.62x** |
+| Rollout | 310.1 s | 152.4 s | **2.03x** |
+| Policy train | 57.3 s | 61.3 s | 0.93x |
+
+Rollout is 2.03x faster; at ~77% of the step, that gives a **1.62x step speedup**. Draft acceptance was **77.3%**, with a mean accepted length of **3.32 tokens** (88.6/77.0/66.3% at depth 1/2/3).
+
+### No effect on policy training
+
+Reward and policy loss track the baseline, differing only by the run-to-run noise of independent runs. `test_mtp_grad_isolation` asserts the gradient isolation directly in CI.
+
+![Raw reward, MTP vs baseline](/images/examples/specdecode_reward.png)
+
+![Policy loss, MTP vs baseline](/images/examples/specdecode_policy_loss.png)
+
+### Small training overhead
+
+The MTP head adds ~7% to the train phase (57.3 → 61.3 s/step), easily paid for by the 2x rollout speedup.
+
+![Training tokens per second per GPU](/images/examples/specdecode_tokens_per_sec_per_gpu.png)
+
+
+## What's Next
+
+Native MTP heads are the first drafter SkyRL supports. We're working on broader drafter support:
+- **DFlash**
+- **DSpark**
+- **EAGLE-3**
+- **Dynamic draft length**

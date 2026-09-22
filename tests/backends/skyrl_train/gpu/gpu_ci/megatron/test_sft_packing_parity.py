@@ -22,6 +22,8 @@ import torch
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_fp8_enabled,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
@@ -260,7 +262,8 @@ def _make_sft_cfg(use_sequence_packing: bool, cp: int, gpus: int) -> SFTConfig:
         max_tokens_per_microbatch=MAX_LENGTH if use_sequence_packing else None,
         seed=SEED,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
-        dataset_name="allenai/tulu-3-sft-mixture",
+        train_datasets=["allenai/tulu-3-sft-mixture"],
+        train_dataset_splits=["train[:100]"],
         placement=SFTPlacementConfig(num_nodes=1, num_gpus_per_node=gpus),
         megatron_config=MegatronConfig(
             tensor_model_parallel_size=1,

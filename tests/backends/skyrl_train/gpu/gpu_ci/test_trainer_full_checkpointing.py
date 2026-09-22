@@ -111,7 +111,7 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
     tracker = Tracking(
         project_name=cfg.trainer.project_name,
         experiment_name=cfg.trainer.run_name,
-        backends=cfg.trainer.logger,
+        backend=cfg.trainer.logger,
         config=cfg,
     )
 

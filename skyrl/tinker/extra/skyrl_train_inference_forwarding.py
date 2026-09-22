@@ -11,18 +11,29 @@ import httpx
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.backends.renderer import render_model_input
+from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.utils.log import logger
 
 
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    def __init__(self, engine_config: EngineConfig, db_engine):
+    # TODO: make `external_future_store` required and remove the FutureDB
+    # write-back path in `call_and_store_result` — every production
+    # construction (api.py lifespan) already passes a store.
+    def __init__(
+        self,
+        engine_config: EngineConfig,
+        db_engine,
+        external_future_store: ExternalFutureStore | None = None,
+    ):
         self.engine_config = engine_config
         self.db_engine = db_engine
+        self.external_future_store = external_future_store
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
@@ -31,7 +42,12 @@ class SkyRLTrainInferenceForwardingClient:
         max_conn = engine_config.forwarding_inference_max_connections
         max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=engine_config.forwarding_inference_timeout_sec,
+                write=300.0,
+                pool=300.0,
+            ),
             limits=httpx.Limits(
                 max_connections=max_conn,
                 max_keepalive_connections=max_keepalive,
@@ -70,16 +86,25 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and write the result to FutureDB."""
+        """Forward a sample request to vLLM and resolve its future.
+
+        With an ExternalFutureStore the result stays in memory; without one it
+        is written back to the request's FutureDB row.
+        """
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
-            result_data = result.model_dump()
             status = RequestStatus.COMPLETED
         except Exception as e:
             logger.exception("Backend-forwarded sample failed (request_id=%s)", request_id)
-            result_data = {"error": str(e), "status": "failed"}
+            result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
+        if self.external_future_store is not None:
+            await self.external_future_store.complete(request_id, result, status)
+            return
+
+        # TODO: remove this FutureDB write-back once `external_future_store`
+        # is required (see __init__).
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
             if future is None:
@@ -87,26 +112,42 @@ class SkyRLTrainInferenceForwardingClient:
                 # request, stale-session GC). Nothing to write back.
                 logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
                 return
-            future.result_data = result_data
+            # `result_data` is a text column holding pre-serialized JSON.
+            future.result_data = result.model_dump_json()
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        # httpx.RequestError covers ConnectError, ReadError, TimeoutException, etc.
-        # HTTP 4xx/5xx surfaces as RuntimeError below and is NOT retried.
+        # Retry only failures that occur before a request can reach vLLM. Read
+        # and write failures are ambiguous: vLLM may still be executing the
+        # request, so retrying would duplicate generation load.
         try:
-            proxy_url = await self._resolve_proxy_url()
-            return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-        except httpx.RequestError as e:
-            logger.warning(
-                "Network error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
-                self._cached_proxy_url,
-                type(e).__name__,
-                e,
-            )
-            proxy_url = await self._resolve_proxy_url(force_refresh=True)
-            return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+            try:
+                proxy_url = await self._resolve_proxy_url()
+                return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                logger.warning(
+                    "Connection error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
+                    self._cached_proxy_url,
+                    type(e).__name__,
+                    e,
+                )
+                proxy_url = await self._resolve_proxy_url(force_refresh=True)
+                return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+        except httpx.ReadTimeout as e:
+            # Not retried (see above). Long-context requests routinely exceed the
+            # default read deadline, so tell the caller how to raise it. The
+            # message is stored in the FutureDB ErrorResponse and shown to clients.
+            timeout_sec = self.engine_config.forwarding_inference_timeout_sec
+            raise RuntimeError(
+                f"Inference request to {self._cached_proxy_url} timed out after {timeout_sec:g}s waiting for "
+                "a response (httpx.ReadTimeout). The request was not retried because vLLM may still be "
+                "executing it. If requests are expected to take this long (long prompts, large max_tokens, "
+                "or queueing behind other requests), increase the deadline with "
+                "`--forwarding-inference-timeout-sec` (EngineConfig.forwarding_inference_timeout_sec) or "
+                "the SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC environment variable."
+            ) from e
 
     async def _forward(
         self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None
@@ -133,6 +174,12 @@ class SkyRLTrainInferenceForwardingClient:
             "stream": False,
             "return_token_ids": True,
         }
+        # vLLM's `prompt_logprobs` is an int: 0 returns just the prompt tokens'
+        # own logprobs, k>0 also returns the top-k per position.
+        topk_prompt_logprobs = getattr(sample_req, "topk_prompt_logprobs", 0) or 0
+        want_prompt_logprobs = bool(sample_req.prompt_logprobs) or topk_prompt_logprobs > 0
+        if want_prompt_logprobs:
+            payload["prompt_logprobs"] = topk_prompt_logprobs
         # SamplingParams.stop is polymorphic (list[str] | list[int]).
         stop = getattr(sp, "stop", None)
         if stop:
@@ -160,6 +207,17 @@ class SkyRLTrainInferenceForwardingClient:
                 f"content-type={response.headers.get('content-type')!r}): {response.text[:512]}"
             ) from e
 
+        prompt_logprobs = None
+        topk = None
+        if want_prompt_logprobs:
+            # All `n` choices share one prompt, so vLLM repeats the same prompt
+            # logprobs on each choice; read them off the first.
+            choices = result.get("choices") or []
+            raw = choices[0].get("prompt_logprobs") if choices else None
+            if raw is None:
+                logger.warning("Requested prompt logprobs but vLLM /v1/completions returned none")
+            prompt_logprobs, topk = convert_vllm_prompt_logprobs(prompt_tokens, raw, topk=topk_prompt_logprobs)
+
         sequences = []
         for choice in result.get("choices", []):
             tokens = choice.get("token_ids", [])
@@ -181,4 +239,8 @@ class SkyRLTrainInferenceForwardingClient:
                 )
             )
 
-        return types.SampleOutput(sequences=sequences, prompt_logprobs=None)
+        return types.SampleOutput(
+            sequences=sequences,
+            prompt_logprobs=prompt_logprobs,
+            topk_prompt_logprobs=topk,
+        )

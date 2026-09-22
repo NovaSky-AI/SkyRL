@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_router_replay.py
+uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_router_replay.py
 """
 
 import pytest
@@ -16,11 +16,16 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
-from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+from skyrl.train.dataset.preprocess import (
+    convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
+)
 from skyrl.train.generators.base import GeneratorInput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
+from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
@@ -32,6 +37,44 @@ MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B-Instruct"
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 4
 MAX_GENERATE_LENGTH = 128
+# Moonlight 16B: 27 MoE layers, top_k=6, 64 routed experts.
+MOONLIGHT_NUM_LAYERS = 27
+MOONLIGHT_TOPK = 6
+MOONLIGHT_NUM_EXPERTS = 64
+
+
+def _packed_moonlight_routes(attention_mask: torch.Tensor) -> PackedTensor:
+    """Moonlight-shaped routes packed to each trajectory's real tokens."""
+    route_offsets = torch.arange(MOONLIGHT_TOPK, dtype=torch.int32)
+    segments = []
+    for real_tokens in attention_mask.sum(dim=1).tolist():
+        route_start = torch.randint(
+            0,
+            MOONLIGHT_NUM_EXPERTS,
+            (real_tokens, MOONLIGHT_NUM_LAYERS, 1),
+            dtype=torch.int32,
+        )
+        segments.append((route_start + route_offsets) % MOONLIGHT_NUM_EXPERTS)
+    return PackedTensor.from_segments(segments)
+
+
+def _extra_env_vars_for_model(model_name: str) -> dict[str, str] | None:
+    """Per-model Ray env-var overrides for the router-replay tests.
+
+    The gpu_ci conftest globally sets ``NVTE_FUSED_ATTN=0``; MLA models such as
+    Moonlight need cuDNN fused attention for the Megatron forward with sample
+    packing, so re-enable it here.
+
+    ``VLLM_USE_FLASHINFER_MOE_FP16=0`` forces vLLM's unquantized MoE oracle off
+    the FlashInfer TRTLLM block-layout kernel. That kernel is auto-selected on
+    Blackwell (sm100) and asserts ``K % blockK == 0`` (which Moonlight's sharded
+    intermediate size violates), crashing engine-core init. Disabling it falls
+    back to the Triton MoE kernel -- the same path H100 (sm90) already uses, so
+    this is a no-op there.
+    """
+    if "moonlight" in model_name.lower() or "glm-4" in model_name.lower():
+        return {"NVTE_FUSED_ATTN": "1", "VLLM_USE_FLASHINFER_MOE_FP16": "0"}
+    return None
 
 
 def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
@@ -41,6 +84,13 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.remove_microbatch_padding = True
     cfg.generator.inference_engine.distributed_executor_backend = "mp"
+    # turn on optimizer offload for Moonlight 16B on 4xH100
+    cfg.trainer.policy.megatron_config.optimizer_config_kwargs = {
+        "overlap_cpu_optimizer_d2h_h2d": True,
+        "use_precision_aware_optimizer": True,
+        "optimizer_cpu_offload": True,
+        "optimizer_offload_fraction": 1.0,
+    }
     # flash attn + mla works without sample packing, logprobs are crazy/wrong
     # but flash-attn correctly throws error with sample packing
     # we should add an assert that if you set remove_microbatch_padding=False flash attn can accidentally be used
@@ -78,12 +128,14 @@ def build_training_input_from_text_samples(
         rewards.append([0.0] * len(response_ids))
         loss_masks.append([1] * len(response_ids))
 
-    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = convert_prompts_responses_to_batch_tensors(
-        tokenizer=tokenizer,
-        prompts=prompts,
-        responses=responses,
-        rewards=rewards,
-        loss_masks=loss_masks,
+    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _, _ = (
+        convert_prompts_responses_to_batch_tensors(
+            pad_token_id=tokenizer.pad_token_id,
+            prompts=prompts,
+            responses=responses,
+            rewards=rewards,
+            loss_masks=loss_masks,
+        )
     )
 
     num_actions = response_mask.shape[1]
@@ -99,7 +151,6 @@ def build_training_input_from_text_samples(
             "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
             "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
             "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "action_mask": response_mask.to(dtype=torch.int64),
         }
     )
     training_input.metadata = {"response_length": num_actions}
@@ -107,23 +158,23 @@ def build_training_input_from_text_samples(
 
 
 @pytest.mark.asyncio
-@pytest.mark.megatron
-@pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
+@pytest.mark.h100
 @pytest.mark.parametrize(
     "tp,pp,cp,ep,etp,extra_tf_kwargs",
     [
-        pytest.param(2, 2, 2, 4, 1, {"num_layers_in_first_pipeline_stage": 13}, id="max_parallelism"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, id="tp2_pp2_ep2"),
     ],
 )
-async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
+async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs):
     """
-    Check that logprob diff is lower when using router replay. Requires full 8xH100 setup to do full forward pass.
+    Check that logprob diff is lower when using router replay. Runs on 4xH100.
     """
-    try:
+    with ray_init(extra_env_vars=_extra_env_vars_for_model(MOE_MODEL_NAME)):
         cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
         cfg.trainer.strategy = "megatron"
         cfg.generator.inference_engine.enable_return_routed_experts = True
-        cfg.generator.inference_engine.tensor_parallel_size = 8
+        cfg.generator.inference_engine.tensor_parallel_size = 4
+        cfg.generator.inference_engine.num_engines = 1
         cfg.generator.sampling_params = SamplingParams(
             max_generate_length=MAX_GENERATE_LENGTH,
             logprobs=1,
@@ -188,9 +239,9 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
         rewards = generator_output["rewards"]
         if rewards and not isinstance(rewards[0], list):
             rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
-        (sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor) = (
+        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor, _ = (
             convert_prompts_responses_to_batch_tensors(
-                tokenizer=tokenizer,
+                pad_token_id=tokenizer.pad_token_id,
                 prompts=generator_output["prompt_token_ids"],
                 responses=responses,
                 rewards=rewards,
@@ -201,6 +252,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
         )
 
         assert rii_tensor is not None
+        router_padding_mask = make_router_padding_mask(attention_mask, [len(sample) for sample in indices])
         num_actions = response_mask.shape[1]
         batch_size = sequences.shape[0]
         training_input = TrainingInputBatch(
@@ -216,15 +268,15 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
                     else torch.zeros((batch_size, num_actions), dtype=torch.float32)
                 ),
                 "rollout_expert_indices": rii_tensor,
+                "router_padding_mask": router_padding_mask,
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "action_mask": response_mask.to(dtype=torch.int64),
             }
         )
         training_input.metadata = {"response_length": num_actions}
 
-        cfg.trainer.placement.policy_num_gpus_per_node = 8
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
         if extra_tf_kwargs is not None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
@@ -241,7 +293,7 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
                 "policy",
                 shared_pg=pg,
                 colocate_all=True,
-                num_gpus_per_node=8,
+                num_gpus_per_node=4,
                 cfg=cfg,
             )
 
@@ -274,25 +326,22 @@ async def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
             f"Router replay should reduce logprob diff vs rollout, "
             f"but with_replay={r3_diff.mean().item():.6f} >= without_replay={no_r3_diff.mean().item():.6f}"
         )
-    finally:
-        ray.shutdown()
 
 
-@pytest.mark.megatron
-@pytest.mark.skip(reason="Skipping router replay tests for now due to size constraints")
+@pytest.mark.h100
 @pytest.mark.parametrize(
     "tp,pp,cp,ep,etp,extra_tf_kwargs",
     [
-        pytest.param(2, 2, 2, 4, 1, {"num_layers_in_first_pipeline_stage": 13}, id="max_parallelism"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, id="tp2_pp2_ep2"),
     ],
 )
-def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
+def test_forward_backward(tp, pp, cp, ep, etp, extra_tf_kwargs):
     """
     Check that forward_backward with router replay completes without error.
-    Uses dummy expert routing indices (no vLLM engine needed).
+    Uses dummy expert routing indices (no vLLM engine needed). Runs on 4xH100.
     Non-zero advantages / action_log_probs verify the loss is actually computed.
     """
-    try:
+    with ray_init(extra_env_vars=_extra_env_vars_for_model(MOE_MODEL_NAME)):
         cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
         cfg.trainer.strategy = "megatron"
 
@@ -315,9 +364,9 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
             rewards.append([1.0] * len(response_ids))
             loss_masks.append([1] * len(response_ids))
 
-        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = (
+        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _, _ = (
             convert_prompts_responses_to_batch_tensors(
-                tokenizer=tokenizer,
+                pad_token_id=tokenizer.pad_token_id,
                 prompts=prompts,
                 responses=responses,
                 rewards=rewards,
@@ -326,17 +375,9 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
         )
 
         batch_size = sequences.shape[0]
-        seq_len = sequences.shape[1]
         num_actions = response_mask.shape[1]
 
-        # Moonlight 16B: 27 MoE layers, top_k=6, 64 routed experts
-        MOONLIGHT_NUM_LAYERS = 27
-        MOONLIGHT_TOPK = 6
-        MOONLIGHT_NUM_EXPERTS = 64
-        rollout_expert_indices = torch.randint(
-            0, MOONLIGHT_NUM_EXPERTS, (batch_size, seq_len, MOONLIGHT_NUM_LAYERS, MOONLIGHT_TOPK), dtype=torch.int32
-        )
-        rollout_expert_indices[attention_mask == 0] = 0
+        rollout_expert_indices = _packed_moonlight_routes(attention_mask)
 
         gen = torch.Generator().manual_seed(42)
         training_input = TrainingInputBatch(
@@ -348,15 +389,15 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
                 "loss_mask": loss_mask_t,
                 "rollout_logprobs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "rollout_expert_indices": rollout_expert_indices,
+                "router_padding_mask": ~attention_mask.bool(),
                 "action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "base_action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
                 "advantages": torch.randn((batch_size, num_actions), generator=gen),
-                "action_mask": response_mask.to(dtype=torch.int64),
             }
         )
         training_input.metadata = {"response_length": num_actions}
 
-        cfg.trainer.placement.policy_num_gpus_per_node = 8
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
         if extra_tf_kwargs is not None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
@@ -370,7 +411,7 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
 
         actor_group = init_worker_with_type(
             "policy",
-            num_gpus_per_node=8,
+            num_gpus_per_node=4,
             cfg=cfg,
         )
 
@@ -378,13 +419,154 @@ def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=training_input))
 
-        metrics = results[0]
-        loss = metrics["policy_loss"]
+        # `forward_backward` returns a WorkerOutput; metrics are already
+        # all-reduced across DP ranks, so any rank's dict is representative.
+        loss = results[0].metrics["policy_loss"]
         print(f"Router replay forward_backward - loss: {loss:.6f}")
         assert loss is not None and not torch.isnan(torch.tensor(loss)), "Loss should be valid (not NaN)"
         assert loss != 0.0, "Loss should be non-zero with non-zero advantages"
 
         for actor in actor_group._actor_handlers:
             ray.kill(actor)
-    finally:
-        ray.shutdown()
+
+
+@pytest.mark.h100
+@pytest.mark.parametrize(
+    "tp,pp,cp,ep,etp,extra_tf_kwargs",
+    [
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, id="tp2_pp2_ep2"),
+    ],
+)
+def test_forward_backward_variable_length_full_recompute(tp, pp, cp, ep, etp, extra_tf_kwargs):
+    """Replayed routes must stay paired with their own microbatch.
+
+    Each forward microbatch appends its expert routes to a FIFO that
+    activation-checkpoint recomputation drains once during backward. If a
+    microbatch queues its routes more than once (or not at all), backward
+    replays a *different* microbatch's routes. Megatron's MoE all-to-all then
+    computes split sizes from a token count that doesn't match the tensors in
+    flight and the collective fails.
+
+    Two conditions are needed to expose that, and both are set here:
+
+    * ``recompute_granularity="full"`` so backward actually recomputes the
+      MoE layers and consumes the queue (the default only recomputes
+      ``core_attn``, which never replays routes).
+    * Sequence lengths that differ *between* microbatches, so a mispaired
+      replay changes the token count rather than silently reusing a
+      same-shaped tensor. Uniform lengths can mask the bug entirely.
+
+    Prompts are built with deliberately spread lengths and ``micro_*=2`` over
+    8 samples, giving 4 microbatches whose padded widths differ.
+    """
+    with ray_init(extra_env_vars=_extra_env_vars_for_model(MOE_MODEL_NAME)):
+        cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
+        cfg.trainer.strategy = "megatron"
+
+        tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        # Lengths chosen so consecutive microbatches (pairs, micro_bs=2) have
+        # different maxima: a stale replay is then shape-visible, not benign.
+        filler_words = [1, 6, 2, 14, 3, 25, 4, 40]
+        prompts, responses, rewards, loss_masks = [], [], [], []
+        for i, filler in enumerate(filler_words):
+            prompt_ids = tokenizer.encode(
+                "Question: " + ("token " * filler) + f"what is {i} plus {i}?",
+                add_special_tokens=False,
+            )
+            response_ids = tokenizer.encode(
+                ("because " * filler) + f"the answer is {i + i}.",
+                add_special_tokens=False,
+            )
+            if tokenizer.eos_token_id is not None and (not response_ids or response_ids[-1] != tokenizer.eos_token_id):
+                response_ids.append(tokenizer.eos_token_id)
+            prompts.append(prompt_ids)
+            responses.append(response_ids)
+            rewards.append([1.0] * len(response_ids))
+            loss_masks.append([1] * len(response_ids))
+
+        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _, _ = (
+            convert_prompts_responses_to_batch_tensors(
+                pad_token_id=tokenizer.pad_token_id,
+                prompts=prompts,
+                responses=responses,
+                rewards=rewards,
+                loss_masks=loss_masks,
+            )
+        )
+
+        # Guard the premise: if padding collapsed the spread, the test would
+        # pass for the wrong reason.
+        real_token_counts = attention_mask.sum(dim=-1)
+        assert (
+            real_token_counts.unique().numel() > 1
+        ), f"variable-length premise broken: every sample has {real_token_counts[0].item()} real tokens"
+
+        batch_size = sequences.shape[0]
+        num_actions = response_mask.shape[1]
+
+        rollout_expert_indices = _packed_moonlight_routes(attention_mask)
+
+        gen = torch.Generator().manual_seed(42)
+        training_input = TrainingInputBatch(
+            {
+                "sequences": sequences,
+                "attention_mask": attention_mask,
+                "response_mask": response_mask,
+                "rewards": rewards_t,
+                "loss_mask": loss_mask_t,
+                "rollout_logprobs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
+                "rollout_expert_indices": rollout_expert_indices,
+                "router_padding_mask": ~attention_mask.bool(),
+                "action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
+                "base_action_log_probs": -torch.rand((batch_size, num_actions), generator=gen) * 2.0,
+                "advantages": torch.randn((batch_size, num_actions), generator=gen),
+                "action_mask": response_mask.to(dtype=torch.int64),
+            }
+        )
+        training_input.metadata = {"response_length": num_actions}
+
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
+        if extra_tf_kwargs is not None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(extra_tf_kwargs)
+        # Recompute whole layers so backward re-runs the MoE routers and drains
+        # the replay queue; ``core_attn`` alone never replays routes.
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(
+            {
+                "recompute_granularity": "full",
+                "recompute_method": "uniform",
+                "recompute_num_layers": 1,
+            }
+        )
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs.pop("recompute_modules", None)
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        cfg.trainer.policy.megatron_config.context_parallel_size = cp
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
+        # 8 samples / 2 per microbatch = 4 microbatches of differing widths.
+        cfg.trainer.micro_forward_batch_size_per_gpu = 2
+        cfg.trainer.micro_train_batch_size_per_gpu = 2
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
+
+        actor_group = init_worker_with_type(
+            "policy",
+            num_gpus_per_node=4,
+            cfg=cfg,
+        )
+
+        # Two steps: the first leaves any surplus queue entry behind, so a
+        # mispairing shows up on the second even if the first survives.
+        ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=training_input))
+        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=training_input))
+
+        loss = results[0].metrics["policy_loss"]
+        print(f"Variable-length replay forward_backward - loss: {loss:.6f}")
+        assert loss is not None and not torch.isnan(torch.tensor(loss)), "Loss should be valid (not NaN)"
+        assert loss != 0.0, "Loss should be non-zero with non-zero advantages"
+
+        for actor in actor_group._actor_handlers:
+            ray.kill(actor)

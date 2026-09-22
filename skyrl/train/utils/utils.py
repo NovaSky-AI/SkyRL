@@ -15,18 +15,32 @@ import torch
 from loguru import logger
 from ray.util.placement_group import (
     PlacementGroup,
-    PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
 )
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    has_visible_cuda_device,
+    is_blackwell_or_newer,
+    is_fp8_enabled,
+    resolve_auto_fp8_recipe,
+    validate_concrete_fp8_recipe,
+)
+from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+    BLOCKWISE_FP8,
+)
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_PYTHONPATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
 )
-from skyrl.train.config.config import SkyRLTrainConfig
+from skyrl.train.config.config import (
+    SUPPORTED_SPECULATIVE_DECODING_METHODS,
+    SkyRLTrainConfig,
+    get_config_as_dict,
+)
 
 
 class Timer:
@@ -194,9 +208,38 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
-    assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
+    assert ie_cfg.weight_sync_backend in {
+        "nccl",
+        "delta",
+        "sharded_rdt",
+    }, "only nccl, delta and sharded_rdt are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
+
+    policy_cfg = cfg.trainer.policy
+    policy_fp8_param = is_fp8_enabled(policy_cfg.megatron_config.transformer_config_kwargs.get("fp8_param"))
+    if (
+        policy_fp8_param
+        and not policy_cfg.inference_only_init
+        and not policy_cfg.megatron_config.ddp_config.fp8_param_gather
+    ):
+        raise ValueError(
+            "Persistent policy fp8_param training requires "
+            "trainer.policy.megatron_config.ddp_config.fp8_param_gather=true"
+        )
+
+    # Resolve fp8_recipe="auto" to the architecture-native recipe (blockwise on
+    # Hopper, mxfp8 on Blackwell) before the config is shipped to Ray actors.
+    # A GPU-less driver leaves "auto" in place — guessing here would bake the
+    # wrong recipe into every worker's config — and each Megatron worker then
+    # resolves and re-validates locally against its own device.
+    for worker_cfg in (cfg.trainer.policy, cfg.trainer.ref):
+        megatron_config = getattr(worker_cfg, "megatron_config", None)
+        transformer_kwargs = getattr(megatron_config, "transformer_config_kwargs", None)
+        if not transformer_kwargs:
+            continue
+        resolve_auto_fp8_recipe(transformer_kwargs)
+        validate_concrete_fp8_recipe(transformer_kwargs)
 
     if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
         assert (
@@ -205,6 +248,22 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
+        # Megatron's fused top-k returns before compute_topk consults router_replay
+        # (moe_utils.topk_routing_with_score_function), so the replayed experts are
+        # silently discarded while R3 still pays its full cost. Refuse the pair rather
+        # than train against routing that does not match the rollout.
+        if config.megatron_config.moe_enable_routing_replay:
+            assert not config.megatron_config.transformer_config_kwargs.get("moe_router_fusion"), (
+                f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
+                "moe_router_fusion=True -- the fused router bypasses replay. Set moe_router_fusion=False."
+            )
+            # Interleaved chunks desynchronise each RouterReplay instance's backward FIFO.
+            vpp_size = config.megatron_config.transformer_config_kwargs.get("virtual_pipeline_model_parallel_size")
+            assert vpp_size is None or vpp_size <= 1, (
+                f"{worker_type}.megatron_config: moe_enable_routing_replay is incompatible with "
+                "virtual_pipeline_model_parallel_size -- interleaved chunks desync the replay FIFO. "
+                "Unset virtual_pipeline_model_parallel_size."
+            )
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert (
@@ -218,6 +277,46 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
 
 
 # TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses
+def _apply_mtp_config(cfg: SkyRLTrainConfig):
+    """Propagate the high-level ``trainer.mtp`` knob to the training + inference configs: train the
+    model's native MTP heads with the decoupled draft loss and enable vLLM MTP speculative decoding.
+    The vLLM draft depth (``num_speculative_tokens``) is decoupled from the trained head count
+    (depth > 1 reuses the head autoregressively). When disabled, force the heads off.
+    """
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is None:
+        return
+
+    mcfg = cfg.trainer.policy.megatron_config
+    if not mtp.enabled:
+        # Explicit 0 force-disables MTP even on MTP-capable models.
+        mcfg.mtp_num_layers = 0
+        return
+
+    assert mtp.num_speculative_tokens >= 1, "trainer.mtp.num_speculative_tokens must be >= 1 when enabled"
+    if mcfg.mtp_num_layers == 0:
+        raise ValueError(
+            "trainer.mtp.enabled=true but trainer.policy.megatron_config.mtp_num_layers=0 "
+            "(explicit force-disable). Remove the mtp_num_layers override or disable trainer.mtp."
+        )
+    # Leave mcfg.mtp_num_layers untouched (None => megatron-bridge infers the head count from the
+    # model's HF config; MegatronWorker fails loud if it resolves to zero while MTP is enabled).
+    mcfg.mtp_loss_weight = mtp.loss_weight
+
+    # SKYRL_DISABLE_SPEC=1: train the MTP heads, but keep the vLLM rollout plain autoregressive.
+    if os.environ.get("SKYRL_DISABLE_SPEC") == "1":
+        return
+
+    # Inference side: vLLM MTP speculative decoding with the same draft depth. Don't clobber an
+    # explicit user-provided speculative_config.
+    ie_cfg = cfg.generator.inference_engine
+    if ie_cfg.speculative_config is None:
+        ie_cfg.speculative_config = {
+            "method": "mtp",
+            "num_speculative_tokens": mtp.num_speculative_tokens,
+        }
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -235,6 +334,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
+
+    # Multi-Token Prediction (MTP): the high-level `trainer.mtp` knob is the single source of truth.
+    # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
+    # side (vLLM MTP speculative decoding) so both stay consistent.
+    _apply_mtp_config(cfg)
+
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
         PolicyLossRegistry,
@@ -309,6 +414,16 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         # TODO(Charlie): this can be fixed, can revisit later.
         raise ValueError(
             "`token_mean_legacy` loss reduction is not supported with step-wise training. Use `token_mean` instead."
+        )
+
+    if cfg.generator.step_wise_trajectories and cfg.generator.inference_engine.enable_return_routed_experts:
+        raise ValueError(
+            "`generator.inference_engine.enable_return_routed_experts=True` is not supported with "
+            "`generator.step_wise_trajectories=True`. Each step-wise row's prompt is the whole history so "
+            "far, while routes are recorded for that step's generated tokens only. The trainer aligns "
+            "routes from the start of the sequence, so a step's routes would replay onto the first N prompt "
+            "tokens of its row with no length mismatch to assert on, silently training against routing that "
+            "does not match the rollout."
         )
 
     if cfg.generator.merge_stepwise_output and not cfg.generator.step_wise_trajectories:
@@ -391,6 +506,14 @@ def validate_cfg(cfg: SkyRLTrainConfig):
                 "`megatron_config.lora_config.experts_shared_outer_loras` is only supported with "
                 f'`lora_type="lora"`, got lora_type="{megatron_lora_cfg.lora_type}"'
             )
+
+        # delta weight sync is not yet supported
+        # TODO (sumanthrh): Delta weight sync should be naturally supported for `merge_lora=true`, we should
+        # test and enable this in a follow-up. `merge_lora=false` needs bookkeeping of per-LoRA safetensors
+        # on the inference side.
+        assert (
+            cfg.generator.inference_engine.weight_sync_backend != "delta"
+        ), "Delta weight sync is not yet supported for LoRA"
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
@@ -482,12 +605,64 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     """
     ie_cfg = cfg.generator.inference_engine
 
+    if ie_cfg.fp8_weight_sync_mode not in (None, BLOCKWISE_FP8):
+        raise ValueError(
+            f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}; " f"expected {BLOCKWISE_FP8!r} or None"
+        )
+    if ie_cfg.fp8_weight_sync_mode == BLOCKWISE_FP8:
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError("blockwise FP8 weight sync requires trainer.strategy='megatron'")
+        if ie_cfg.weight_sync_backend in {"sharded_rdt", "delta"}:
+            # Neither backend can carry the quantized payload + scale pairs that
+            # blockwise FP8 sync is made of: the RDT weight sources export bridge
+            # tensors cast to the inference dtype, and the delta checkpoint format
+            # cannot represent the marker names and scale tensors. Both senders
+            # refuse at send time too, but vLLM is built with quantization="fp8"
+            # and load_format="dummy" long before the first sync, so the model is
+            # already loaded by then.
+            raise ValueError(
+                "blockwise FP8 weight sync is not supported with "
+                f"weight_sync_backend={ie_cfg.weight_sync_backend!r}; use 'nccl'"
+            )
+        lora_cfg = cfg.trainer.policy.model.lora
+        if lora_cfg.rank > 0 and not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
+            raise ValueError(
+                "blockwise FP8 weight sync requires full-weight updates; "
+                "Megatron LoRA with merge_lora=false syncs adapters only"
+            )
+
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
         assert (
             ie_cfg.num_prefill < ie_cfg.num_engines
         ), "num_prefill must be < num_engines (need at least one decode worker)"
         assert ie_cfg.num_engines >= 2, "num_engines must be >= 2 for PD disaggregation"
+
+    # Role-specific engine kwargs for PD disaggregation.
+    if ie_cfg.prefill_init_kwargs or ie_cfg.decode_init_kwargs:
+        if not ie_cfg.enable_pd:
+            raise ValueError(
+                "generator.inference_engine.prefill_init_kwargs / decode_init_kwargs "
+                "are only valid with enable_pd=true."
+            )
+        if ie_cfg.engine_init_kwargs:
+            raise ValueError(
+                "generator.inference_engine.engine_init_kwargs cannot be combined with "
+                "prefill_init_kwargs / decode_init_kwargs. Move all engine overrides "
+                "(including shared ones like kv_transfer_config) into the role-specific "
+                "prefill_init_kwargs and decode_init_kwargs."
+            )
+        # Completeness: role-specific kwargs replace engine_init_kwargs entirely, so each
+        # role must carry its own kv_transfer_config. Fail fast here rather than at
+        # serve-setup time in get_pd_cli_args (which raises per-role once the engine starts).
+        for role in ("prefill", "decode"):
+            role_kwargs = getattr(ie_cfg, f"{role}_init_kwargs")
+            if "kv_transfer_config" not in role_kwargs:
+                raise ValueError(
+                    f"generator.inference_engine.{role}_init_kwargs must set kv_transfer_config when "
+                    "using role-specific PD kwargs. Both prefill_init_kwargs and decode_init_kwargs must "
+                    "be fully specified (each with its own kv_transfer_config)."
+                )
 
     # Validate inference engine parallelism.
     ep_size = ie_cfg.expert_parallel_size
@@ -524,6 +699,31 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         raise ValueError(
             "Each inference engine DP rank (TP*PP workers) must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
         )
+
+    # Validate the non-colocated sleep-during-weight-sync option.
+    if ie_cfg.offload_kv_for_weight_sync:
+        assert not cfg.trainer.placement.colocate_all, (
+            "offload_kv_for_weight_sync is for non-colocated weight sync only; "
+            "colocated mode already sleeps the engines and wakes weights/KV cache around sync."
+        )
+        assert cfg.trainer.policy.model.lora.rank == 0, (
+            "offload_kv_for_weight_sync does not support LoRA weight sync "
+            "(the in-place LoRA adapter swap path does not go through the sleep/wake broadcast)."
+        )
+        assert (
+            ie_cfg.weight_sync_backend != "delta"
+        ), "Offloading KV cache during weight sync is not supported for delta weight sync"
+
+    # Validate speculative decoding. `method` is required rather than left to vLLM's
+    # inference from the draft model config, so an unsupported drafter cannot reach the
+    # engine implicitly.
+    if ie_cfg.speculative_config is not None:
+        method = get_config_as_dict(ie_cfg.speculative_config).get("method")
+        if method not in SUPPORTED_SPECULATIVE_DECODING_METHODS:
+            raise ValueError(
+                f"invalid `generator.inference_engine.speculative_config.method`: {method!r}. "
+                f"Must be one of {list(SUPPORTED_SPECULATIVE_DECODING_METHODS)}."
+            )
 
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
@@ -640,6 +840,13 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
             env_vars["NVTE_FUSED_ATTN"] = "0"
 
+        # Forward TransformerEngine attention-backend debug logging to workers when
+        # set on the driver. Workers are re-exec'd through the runtime env (e.g. the
+        # uv hook), so a plain raylet/driver export does not reach them.
+        for nvte_var in ("NVTE_DEBUG", "NVTE_DEBUG_LEVEL"):
+            if os.environ.get(nvte_var):
+                env_vars[nvte_var] = os.environ[nvte_var]
+
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
@@ -648,12 +855,15 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-        # NOTE (sumanthrh): In vLLM >= 0.9.0, we've observed compilatiion failures with torch compile.
-        # removing the compilation directory and trying again does not fix the issue. Temporarily we disable
-        # compilation cache, which seems to fix the issue. This should not have any effect on performance -
-        # compilation will still happen, it's just not cached
-        # TODO (sumanthrh): remove this once vLLM fixes the issue
-        env_vars["VLLM_DISABLE_COMPILE_CACHE"] = "1"
+        # vLLM torch compile is default enabled, we leave it as-is and propagate any user-supplied
+        # overrides for `VLLM_DISABLE_COMPILE_CACHE`
+        # TODO (sumanthrh): Test with shared storage in a multi-node env where we can persist cache
+        if os.environ.get("VLLM_DISABLE_COMPILE_CACHE"):
+            logger.info(
+                "Exporting `VLLM_DISABLE_COMPILE_CACHE` to ray runtime env: "
+                f"{os.environ['VLLM_DISABLE_COMPILE_CACHE']}"
+            )
+            env_vars["VLLM_DISABLE_COMPILE_CACHE"] = os.environ["VLLM_DISABLE_COMPILE_CACHE"]
 
         if not os.environ.get("VLLM_USE_V1", False):
             logger.info(
@@ -693,6 +903,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
 
+    if os.environ.get("NCCL_NET_PLUGIN"):
+        logger.info(f"Exporting NCCL_NET_PLUGIN to ray runtime env: {os.environ['NCCL_NET_PLUGIN']}")
+        env_vars["NCCL_NET_PLUGIN"] = os.environ["NCCL_NET_PLUGIN"]
+
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
     if os.environ.get("WANDB_API_KEY"):
@@ -726,17 +940,123 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
-    if pg_timeout := os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S"):
-        logger.info(f"Exporting `SKYRL_RAY_PG_TIMEOUT_IN_S` to ray runtime env: {pg_timeout}")
-        env_vars["SKYRL_RAY_PG_TIMEOUT_IN_S"] = pg_timeout
+    # Forward uv's project-environment selection to the workers. Ray's uv runtime-env hook makes each
+    # worker re-run `uv run ... --extra <backend>`, and that subprocess must resolve to the SAME venv
+    # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a
+    # driver-only `UV_PROJECT_ENVIRONMENT` (e.g. from a local `.env`) would otherwise be lost and the
+    # worker's `uv run` would fall back to the empty project `.venv` (-> `No module named 'megatron'`).
+    for var_name in (
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_CACHE_DIR",
+        "UV_LINK_MODE",
+        "UV_PYTHON",
+        "UV_OFFLINE",
+        # HuggingFace cache/auth: model paths resolve against HF_HOME, so a
+        # driver-only setting (e.g. from a local `.env` pointing at a big data
+        # volume) must reach the worker actors or they re-download to ~/.cache.
+        "HF_HOME",
+        "HF_TOKEN",
+        "HF_HUB_OFFLINE",
+        "HF_ENDPOINT",
+        "PYTORCH_CUDA_ALLOC_CONF",
+        # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
+        "CUDA_LAUNCH_BLOCKING",
+        "PYTHONFAULTHANDLER",
+        "TORCH_SHOW_CPP_STACKTRACES",
+        "TORCH_USE_CUDA_DSA",
+        "NCCL_DEBUG",
+    ):
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            env_vars[var_name] = value
 
-    # Health-check timeout for the inference server actor. Forwarded so `VLLMServerActor.start`
-    # sees the override.
-    if health_timeout := os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"):
-        logger.info(
-            f"Exporting `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S` to ray runtime env: {health_timeout}"
-        )
-        env_vars["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = health_timeout
+    # Forward any SKYRL_* overrides set in the launching shell (e.g.
+    # SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S for very large models
+    # whose weight load exceeds the 600s default) — skyrl.env_vars reads them at
+    # import time in every process, so they must ride the runtime env.
+    forwarded = {k: v for k, v in os.environ.items() if k.startswith("SKYRL_") and k not in env_vars}
+    if forwarded:
+        logger.info(f"Exporting SKYRL_* overrides to ray runtime env: {sorted(forwarded)}")
+    env_vars.update(forwarded)
+
+    # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32
+    # scales; Blackwell (SM100+) defaults to power-of-two scales, the only mode TE
+    # supports for blockwise quantization there (it emulates Float8BlockScaling on
+    # the MX datapath).
+    serialized_fp8 = cfg.generator.inference_engine.fp8_weight_sync_mode == BLOCKWISE_FP8
+    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    policy_megatron_config = getattr(cfg.trainer.policy, "megatron_config", None)
+    ref_megatron_config = getattr(cfg.trainer.ref, "megatron_config", None)
+    policy_transformer_kwargs = getattr(policy_megatron_config, "transformer_config_kwargs", None) or {}
+    ref_transformer_kwargs = getattr(ref_megatron_config, "transformer_config_kwargs", None) or {}
+    policy_fp8_param = is_fp8_enabled(policy_transformer_kwargs.get("fp8_param"))
+    ref_fp8_param = use_ref_model and is_fp8_enabled(ref_transformer_kwargs.get("fp8_param"))
+    fp8_compute = is_fp8_enabled(policy_transformer_kwargs.get("fp8")) or (
+        use_ref_model and is_fp8_enabled(ref_transformer_kwargs.get("fp8"))
+    )
+    fp8_contract_enabled = serialized_fp8 or fp8_compute or policy_fp8_param or ref_fp8_param
+
+    fp8_env_defaults: dict[str, str] = {}
+    configured_scale_mode = os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES")
+    if fp8_contract_enabled or configured_scale_mode is not None:
+        if configured_scale_mode is None and not has_visible_cuda_device():
+            # The block-scale contract must be identical in every actor, so it is
+            # fixed here, before ray.init ships it in the runtime env — too early
+            # to probe the cluster. A GPU-less head cannot infer the workers'
+            # architecture, and defaulting to the Hopper contract would silently
+            # hand FP32 block scales to Blackwell workers, where TE emulates
+            # blockwise on the MX datapath and only supports power-of-2 scales.
+            raise ValueError(
+                "FP8 is enabled but this driver sees no CUDA device, so the block-scale "
+                "contract cannot be inferred from the workers' architecture. Export "
+                "NVTE_FP8_BLOCK_SCALING_FP32_SCALES explicitly: '0' (power-of-2 scales) "
+                "on Blackwell/SM100+, '1' (FP32 scales) on Hopper."
+            )
+        scale_mode = configured_scale_mode or ("0" if is_blackwell_or_newer() else "1")
+        if scale_mode not in {"0", "1"}:
+            raise ValueError("NVTE_FP8_BLOCK_SCALING_FP32_SCALES must be '0' (power-of-2) " "or '1' (FP32 scales).")
+
+        if scale_mode == "0" and (policy_fp8_param or ref_fp8_param):
+            raise ValueError(
+                "Persistent fp8_param requires FP32 block scales. Blackwell only supports "
+                "power-of-2 block scales, so use fp8_param=false on Blackwell."
+            )
+
+        if fp8_contract_enabled:
+            fp8_env_defaults["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = scale_mode
+        if serialized_fp8 and scale_mode == "1":
+            e8m0_mode = os.environ.get("VLLM_USE_DEEP_GEMM_E8M0", "0")
+            if e8m0_mode != "0":
+                raise ValueError(
+                    "FP32 block scales require VLLM_USE_DEEP_GEMM_E8M0=0 so vLLM "
+                    "does not requantize them to power-of-2 scales."
+                )
+            fp8_env_defaults["VLLM_USE_DEEP_GEMM_E8M0"] = e8m0_mode
+        elif serialized_fp8 and scale_mode == "0":
+            # The symmetric rule, and a property of the wire format rather than of
+            # this process's device: power-of-2 scales are exactly representable in
+            # E8M0, so vLLM's requantization is lossless. vLLM then picks the
+            # per-device form itself (UE8M0 on SM100/SM120, FP32-ceil-to-UE8M0 on
+            # Hopper), which is why this default must not be gated on the driver's
+            # architecture — a GPU-less head would drop it. SM100 DeepGEMM also
+            # rejects the alternative outright ("Unsupported architecture or
+            # scaling factor types" with VLLM_USE_DEEP_GEMM_E8M0=0).
+            e8m0_mode = os.environ.get("VLLM_USE_DEEP_GEMM_E8M0", "1")
+            if e8m0_mode != "1":
+                raise ValueError(
+                    "Power-of-2 block scales require VLLM_USE_DEEP_GEMM_E8M0=1: they "
+                    "requantize to E8M0 losslessly, and Blackwell DeepGEMM accepts no "
+                    "other scale factor type. Unset the variable or set it to 1."
+                )
+            fp8_env_defaults["VLLM_USE_DEEP_GEMM_E8M0"] = e8m0_mode
+
+    for var_name in (
+        "NVTE_FP8_BLOCK_SCALING_FP32_SCALES",
+        "VLLM_USE_DEEP_GEMM_E8M0",
+    ):
+        if value := os.environ.get(var_name, fp8_env_defaults.get(var_name)):
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            env_vars[var_name] = value
 
     return env_vars
 

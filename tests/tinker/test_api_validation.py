@@ -45,6 +45,24 @@ def test_forward_backward_input_accepts_ppo_critic_value_clip():
     assert req.loss_fn_config == {"value_clip": 0.2}
 
 
+def test_forward_backward_input_accepts_dppo_delta_keys():
+    req = api.ForwardBackwardInput(
+        data=[_make_datum()],
+        loss_fn="dppo",
+        loss_fn_config={"delta_low": 0.2, "delta_high": 0.2},
+    )
+    assert req.loss_fn_config == {"delta_low": 0.2, "delta_high": 0.2}
+
+
+def test_forward_backward_input_rejects_invalid_dppo_loss_fn_config_keys():
+    with pytest.raises(ValidationError, match="Invalid loss_fn_config keys"):
+        api.ForwardBackwardInput(
+            data=[_make_datum()],
+            loss_fn="dppo",
+            loss_fn_config={"clip_low_threshold": 0.9},
+        )
+
+
 def test_forward_backward_input_rejects_invalid_ppo_loss_fn_config_keys():
     with pytest.raises(ValidationError, match="Invalid loss_fn_config keys"):
         api.ForwardBackwardInput(
@@ -82,6 +100,17 @@ def test_datum_to_types_preserves_values_and_returns():
 
     assert datum.loss_fn_inputs.values.data == [0.1, 0.2, 0.3]
     assert datum.loss_fn_inputs.returns.data == [0.4, 0.5, 0.6]
+
+
+@pytest.mark.parametrize("optimizer", [False, True])
+def test_load_weights_request_preserves_optimizer_choice(optimizer):
+    request = api.LoadWeightsRequest(
+        model_id="model_test",
+        path="tinker://source_model/weights/checkpoint",
+        optimizer=optimizer,
+    )
+
+    assert request.optimizer is optimizer
 
 
 # --- ModelInputChunk discriminator tests (api) ---
