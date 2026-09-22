@@ -77,5 +77,7 @@ jobs:
         uv run --extra tinker --extra jax --extra dev --with transformers==5.2.0 pytest --forked -s tests/tx/models/test_qwen3_5.py
         uv run --extra tinker --extra jax --extra dev pytest --forked -s tests/tx tests/backends/test_jax_backend.py --ignore=tests/tx/gpu --ignore=tests/tx/models/test_qwen3_5.py
     - name: Run engine benchmarks
+      # `--backend jax` is explicit: this step runs on a CPU runner, so it must
+      # not inherit whatever EngineConfig happens to default to.
       run: |
-        uv run --extra tinker --extra dev python skyrl/benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1}' --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16
+        uv run --extra tinker --extra dev python skyrl/benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --backend jax --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1}' --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16
