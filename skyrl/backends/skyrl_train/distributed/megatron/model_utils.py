@@ -1329,6 +1329,9 @@ class _VocabParallelEntropy(torch.autograd.Function):
         normalized_sum_exp_logits = normalized_exp_logits.sum(dim=-1, keepdim=True)
         dist.all_reduce(normalized_sum_exp_logits, group=mpu.get_tensor_model_parallel_group())
         softmax_logits = normalized_exp_logits.div_(normalized_sum_exp_logits)
+        # As in Categorical.entropy, avoid 0 * -inf for masked vocabulary rows.
+        # Clamp after softmax to preserve their zero probability and invalid inputs.
+        vocab_parallel_logits = vocab_parallel_logits.clamp_min(torch.finfo(vocab_parallel_logits.dtype).min)
         sum_softmax_times_logits = mul_reduce(softmax_logits, vocab_parallel_logits)
         dist.all_reduce(sum_softmax_times_logits, group=mpu.get_tensor_model_parallel_group())
         entropy = logits_max + normalized_sum_exp_logits.log() - sum_softmax_times_logits
