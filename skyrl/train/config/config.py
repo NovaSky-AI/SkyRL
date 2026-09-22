@@ -1844,6 +1844,11 @@ class SkyRLTrainConfig(BaseConfig):
                 raise ValueError(
                     "sample-support replay requires trainer.strategy=megatron, got " f"{self.trainer.strategy}"
                 )
+            if not self.generator.use_conversation_multi_turn:
+                raise ValueError(
+                    "sample-support replay requires generator.use_conversation_multi_turn=True because "
+                    "use_conversation_multi_turn=False appends a synthetic loss-active EOS without captured support"
+                )
 
         # Eval requests opt out of capture and do not use these constraints.
         if self.generator.inference_engine.enable_return_sample_support_set:

@@ -241,139 +241,6 @@ def sample_support_scores(
     )
 
 
-def _trajectory_ids_for_fallback(
-    synthetic_eos_mask: torch.Tensor,
-    metadata_layout: TokenMetadataLayout | None,
-) -> tuple[torch.Tensor, int]:
-    """Return each model position's trajectory id and the number of fallback slots to reserve."""
-    if metadata_layout is None or metadata_layout.padded_sequence_lengths is None:
-        if synthetic_eos_mask.shape[0] == 0 or synthetic_eos_mask.shape[1] == 0:
-            raise ValueError(f"Synthetic EOS fallback requires non-empty segments, got {synthetic_eos_mask.shape}")
-        width = synthetic_eos_mask.shape[1]
-        positions = torch.arange(synthetic_eos_mask.numel(), device=synthetic_eos_mask.device)
-        return positions // width, synthetic_eos_mask.shape[0]
-
-    if synthetic_eos_mask.shape[0] != 1:
-        raise ValueError(
-            f"Packed synthetic EOS metadata must have a singleton batch dimension, got {synthetic_eos_mask.shape}"
-        )
-    if metadata_layout.cu_seqlens_padded is None:
-        raise ValueError("Packed synthetic EOS fallback requires padded sequence boundaries")
-    if any(length <= 0 for length in metadata_layout.padded_sequence_lengths):
-        raise ValueError(
-            f"Synthetic EOS fallback requires non-empty segments, got {metadata_layout.padded_sequence_lengths}"
-        )
-    expected_tokens = metadata_layout.aligned_sequence_length // metadata_layout.context_parallel_size
-    if expected_tokens != synthetic_eos_mask.numel():
-        raise ValueError(
-            f"Synthetic EOS layout holds {expected_tokens} tokens for a {synthetic_eos_mask.numel()}-token microbatch"
-        )
-    # CP shards each padded segment evenly, so a CP-local segment is its padded length over cp_size.
-    lengths = (
-        metadata_layout.cu_seqlens_padded.to(device=synthetic_eos_mask.device, dtype=torch.long).diff()
-        // metadata_layout.context_parallel_size
-    )
-    trajectory_ids = torch.repeat_interleave(
-        torch.arange(lengths.shape[0], device=lengths.device),
-        lengths,
-        output_size=synthetic_eos_mask.numel(),
-    )
-    return trajectory_ids, lengths.shape[0]
-
-
-def synthetic_eos_logprobs(
-    logits_or_hidden: torch.Tensor,
-    sampled_ids: torch.Tensor,
-    synthetic_eos_mask: torch.Tensor,
-    *,
-    vocab_start_index: int,
-    vocab_end_index: int,
-    tp_group: torch.distributed.ProcessGroup | None,
-    inference_only: bool,
-    lm_head_weight: torch.Tensor | None = None,
-    temperature: float = 1.0,
-    chunk_size: int | None = None,
-    fused_backend: str = "torch",
-    metadata_layout: TokenMetadataLayout | None = None,
-) -> torch.Tensor:
-    """Score an EOS appended after generation over the full vocabulary."""
-    if synthetic_eos_mask.shape != sampled_ids.shape:
-        raise ValueError(
-            f"synthetic_eos_mask shape {synthetic_eos_mask.shape} does not match sampled ids {sampled_ids.shape}"
-        )
-
-    trajectory_ids, capacity = _trajectory_ids_for_fallback(synthetic_eos_mask, metadata_layout)
-    flat_mask = synthetic_eos_mask.reshape(-1)
-    # Replay permits only the single appended EOS to lack recorded support.
-    per_trajectory_count = torch.zeros(capacity, dtype=torch.long, device=flat_mask.device).scatter_add_(
-        0, trajectory_ids, flat_mask.long()
-    )
-    offenders = (per_trajectory_count > 1).nonzero().flatten()
-    if offenders.numel():
-        raise ValueError(
-            "sample-support replay permits at most one loss-bearing token without recorded support per "
-            f"trajectory (the appended EOS), got counts {per_trajectory_count[offenders].tolist()} for "
-            f"trajectories {offenders.tolist()}"
-        )
-
-    token_indices = torch.arange(synthetic_eos_mask.numel(), device=flat_mask.device)
-    sentinel = synthetic_eos_mask.numel()
-    candidate_indices = torch.where(flat_mask, token_indices, sentinel)
-    selected_indices = torch.full(
-        (capacity,),
-        sentinel,
-        dtype=torch.long,
-        device=flat_mask.device,
-    ).scatter_reduce(0, trajectory_ids, candidate_indices, reduce="amin", include_self=True)
-    has_selection = selected_indices != sentinel
-    selected_indices = torch.where(has_selection, selected_indices, 0)
-
-    flat_source = logits_or_hidden.reshape(-1, logits_or_hidden.shape[-1])
-    flat_targets = sampled_ids.reshape(-1)
-    selected_source = flat_source.index_select(0, selected_indices)
-    selected_targets = flat_targets.index_select(0, selected_indices)
-    if lm_head_weight is None and tp_group is None:
-        # Only one row per trajectory is softmaxed on the unsharded path.
-        selected = selected_source.log_softmax(dim=-1).gather(1, selected_targets.unsqueeze(1)).squeeze(1)
-    elif lm_head_weight is None:
-        from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
-            DistributedLogprob,
-        )
-
-        selected = DistributedLogprob.apply(
-            selected_source.unsqueeze(0),
-            selected_targets.unsqueeze(0),
-            vocab_start_index,
-            vocab_end_index,
-            tp_group,
-            inference_only,
-        ).squeeze(0)
-    else:
-        from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
-            _fused_lm_head_logprob_apply,
-        )
-
-        if temperature != 1.0:
-            lm_head_weight = lm_head_weight / temperature
-        selected_chunk_size = (
-            selected_source.shape[0] if chunk_size is None else min(chunk_size, selected_source.shape[0])
-        )
-        selected = _fused_lm_head_logprob_apply(
-            fused_backend,
-            selected_source.unsqueeze(0),
-            lm_head_weight,
-            selected_targets.unsqueeze(0),
-            vocab_start_index,
-            vocab_end_index,
-            selected_chunk_size,
-            tp_group,
-            inference_only,
-        ).squeeze(0)
-    selected = torch.where(has_selection, selected, 0.0)
-    output = torch.zeros(sampled_ids.numel(), dtype=selected.dtype, device=selected.device)
-    return output.scatter_add(0, selected_indices, selected).reshape(sampled_ids.shape)
-
-
 def _row_ids_in_canonical_positions(row_ids: torch.Tensor, layout: TokenMetadataLayout) -> torch.Tensor:
     """Restore left padding to row ids aligned in Megatron's real-token layout."""
     sequence_length = layout.attention_mask.shape[1]
@@ -410,11 +277,9 @@ def compute_sample_support_scores(
     vocab_start_index: int,
     vocab_end_index: int,
     tp_group: torch.distributed.ProcessGroup | None,
-    inference_only: bool,
     lm_head_weight: torch.Tensor | None,
     temperature: float,
     chunk_size: int | None,
-    fused_backend: str,
 ) -> SampleSupportScores:
     """Score support-conditioned logprobs in canonical trainer layout."""
     if sample_support is None:
@@ -449,26 +314,13 @@ def compute_sample_support_scores(
         temperature=temperature if lm_head_weight is not None else 1.0,
         chunk_size=chunk_size,
     )
-    synthetic_eos_mask = aligned_loss_mask & ~scores.valid_mask
-    eos_logprobs = synthetic_eos_logprobs(
-        aligned_source,
-        aligned_sampled_ids,
-        synthetic_eos_mask,
-        vocab_start_index=vocab_start_index,
-        vocab_end_index=vocab_end_index,
-        tp_group=tp_group,
-        inference_only=inference_only,
-        lm_head_weight=lm_head_weight,
-        temperature=temperature if lm_head_weight is not None else 1.0,
-        chunk_size=chunk_size,
-        fused_backend=fused_backend,
-        metadata_layout=metadata_layout if packed else None,
-    )
-    logprobs = torch.where(synthetic_eos_mask, eos_logprobs, scores.logprobs)
+    unsupported_loss_active = aligned_loss_mask & ~scores.valid_mask
+    if unsupported_loss_active.any():
+        raise ValueError("sample-support replay requires captured support for every loss-active token")
     if not packed:
-        return SampleSupportScores(logprobs=logprobs, entropy=None, valid_mask=scores.valid_mask)
+        return scores
     return SampleSupportScores(
-        logprobs=scatter_packed_token_values_to_batch(logprobs, metadata_layout, 0),
+        logprobs=scatter_packed_token_values_to_batch(scores.logprobs, metadata_layout, 0),
         entropy=None,
         valid_mask=scatter_packed_token_values_to_batch(scores.valid_mask, metadata_layout, False),
     )

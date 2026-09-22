@@ -358,11 +358,9 @@ class MegatronModelWrapper:
                     vocab_start_index=tp_rank * shard_vocab_size,
                     vocab_end_index=(tp_rank + 1) * shard_vocab_size,
                     tp_group=tp_grp,
-                    inference_only=True,
                     lm_head_weight=lm_head_weight if fused_lm_head else None,
                     temperature=temperature,
                     chunk_size=self.cfg.logprobs_chunk_size,
-                    fused_backend=self._fused_lm_head_backend,
                 ).logprobs
             elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
@@ -702,11 +700,9 @@ class MegatronModelWrapper:
                     vocab_start_index=tp_rank * shard_vocab_size,
                     vocab_end_index=(tp_rank + 1) * shard_vocab_size,
                     tp_group=tp_grp,
-                    inference_only=forward_only,
                     lm_head_weight=lm_head_weight if fused_lm_head else None,
                     temperature=temperature,
                     chunk_size=self.cfg.logprobs_chunk_size,
-                    fused_backend=self._fused_lm_head_backend,
                 ).logprobs
             elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(

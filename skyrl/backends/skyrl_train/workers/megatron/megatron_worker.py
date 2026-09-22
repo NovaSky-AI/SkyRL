@@ -548,7 +548,7 @@ class MegatronWorker:
                     SAMPLE_SUPPORT_FIELD: (
                         micro.get(SAMPLE_SUPPORT_FIELD) if self.enable_sample_support_replay else None
                     ),
-                    # The support scorer needs the loss mask to find the appended EOS.
+                    # The support scorer validates loss-active targets against captured support.
                     "loss_mask": micro.get("loss_mask") if self.enable_sample_support_replay else None,
                     "sub_seq_lengths": micro.get("sub_seq_lengths"),
                     **vlm_inputs,

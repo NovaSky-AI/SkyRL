@@ -1,4 +1,4 @@
-"""Tests for support-conditioned scoring and synthetic-EOS fallback."""
+"""Tests for support-conditioned scoring."""
 
 import sys
 import types
@@ -23,7 +23,6 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     compute_sample_support_scores,
     reject_unsupported_sample_support_packing,
     sample_support_scores,
-    synthetic_eos_logprobs,
 )
 
 VOCAB = 11
@@ -32,11 +31,9 @@ DENSE_SCORER_KWARGS = dict(
     vocab_start_index=0,
     vocab_end_index=VOCAB,
     tp_group=None,
-    inference_only=True,
     lm_head_weight=None,
     temperature=1.0,
     chunk_size=None,
-    fused_backend="torch",
 )
 
 
@@ -194,21 +191,6 @@ def test_support_ids_must_use_the_canonical_dtype():
         )
 
 
-def _install_fake_distributed_logprob(monkeypatch, calls):
-    """Stand in for the Megatron TP collectives, which cannot be imported on a CPU host."""
-    model_utils = types.ModuleType("skyrl.backends.skyrl_train.distributed.megatron.model_utils")
-
-    class DistributedLogprob:
-        @staticmethod
-        def apply(source, targets, *args):
-            calls.append(source.shape)
-            return source.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-
-    model_utils.DistributedLogprob = DistributedLogprob
-    monkeypatch.setitem(sys.modules, model_utils.__name__, model_utils)
-    return model_utils
-
-
 @pytest.fixture
 def megatron_parallel_state(monkeypatch):
     """Let ``model_utils`` import for its pure-torch packed-index helpers."""
@@ -224,140 +206,6 @@ def megatron_parallel_state(monkeypatch):
         monkeypatch.setitem(sys.modules, "megatron.core", core)
         monkeypatch.setitem(sys.modules, "megatron.core.parallel_state", mpu)
     return mpu
-
-
-def test_synthetic_eos_uses_one_fixed_slot_per_unpacked_trajectory(monkeypatch):
-    calls = []
-    _install_fake_distributed_logprob(monkeypatch, calls)
-    logits = torch.arange(3 * 4 * 5, dtype=torch.float64).reshape(3, 4, 5).requires_grad_(True)
-    sampled_ids = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4], [2, 3, 4, 0]])
-    synthetic_eos_mask = torch.tensor(
-        [[False, False, True, False], [False, False, False, False], [False, True, False, False]]
-    )
-
-    actual = synthetic_eos_logprobs(
-        logits,
-        sampled_ids,
-        synthetic_eos_mask,
-        vocab_start_index=0,
-        vocab_end_index=5,
-        tp_group=object(),
-        inference_only=False,
-    )
-
-    expected = torch.zeros_like(actual)
-    expected[0, 2] = logits.detach()[0, 2, 2]
-    expected[2, 1] = logits.detach()[2, 1, 3]
-    torch.testing.assert_close(actual, expected)
-    # One slot per trajectory whether or not it holds a fallback: the middle row holds none.
-    assert calls == [torch.Size([1, 3, 5])]
-
-    actual.sum().backward()
-    expected_grad = torch.zeros_like(logits)
-    expected_grad[0, 2, 2] = 1
-    expected_grad[2, 1, 3] = 1
-    torch.testing.assert_close(logits.grad, expected_grad)
-
-
-def test_synthetic_eos_leaves_rows_without_a_fallback_at_zero(monkeypatch):
-    calls = []
-    _install_fake_distributed_logprob(monkeypatch, calls)
-
-    actual = synthetic_eos_logprobs(
-        torch.arange(2 * 3 * 5, dtype=torch.float64).reshape(2, 3, 5),
-        torch.zeros((2, 3), dtype=torch.long),
-        torch.zeros((2, 3), dtype=torch.bool),
-        vocab_start_index=0,
-        vocab_end_index=5,
-        tp_group=object(),
-        inference_only=True,
-    )
-
-    assert torch.all(actual == 0)
-    # The collective still runs at full capacity, so TP ranks stay in step.
-    assert calls == [torch.Size([1, 2, 5])]
-
-
-def test_synthetic_eos_uses_packed_cp_trajectory_segments(monkeypatch):
-    calls = []
-    _install_fake_distributed_logprob(monkeypatch, calls)
-    logits = torch.arange(4 * 5, dtype=torch.float64).reshape(1, 4, 5).requires_grad_(True)
-    layout = TokenMetadataLayout(
-        attention_mask=torch.ones((2, 3), dtype=torch.bool),
-        sequence_lengths=[3, 3],
-        aligned_sequence_length=8,
-        padded_sequence_lengths=[4, 4],
-        cu_seqlens_padded=torch.tensor([0, 4, 8], dtype=torch.int32),
-        context_parallel_size=2,
-        context_parallel_rank=0,
-    )
-
-    actual = synthetic_eos_logprobs(
-        logits,
-        torch.tensor([[0, 1, 2, 3]]),
-        torch.tensor([[False, True, False, True]]),
-        vocab_start_index=0,
-        vocab_end_index=5,
-        tp_group=object(),
-        inference_only=False,
-        metadata_layout=layout,
-    )
-
-    expected = torch.zeros_like(actual)
-    expected[0, 1] = logits.detach()[0, 1, 1]
-    expected[0, 3] = logits.detach()[0, 3, 3]
-    torch.testing.assert_close(actual, expected)
-    # Two CP-local segments of two tokens each, so capacity is two rather than four.
-    assert calls == [torch.Size([1, 2, 5])]
-
-
-def test_synthetic_eos_rejects_a_second_unsupported_row_in_one_trajectory(monkeypatch):
-    """``scatter_reduce(amin)`` keeps one slot, so a second row would silently score 0.0."""
-    _install_fake_distributed_logprob(monkeypatch, [])
-
-    with pytest.raises(ValueError, match="at most one loss-bearing token"):
-        synthetic_eos_logprobs(
-            torch.randn(2, 3, 5, dtype=torch.float64),
-            torch.zeros((2, 3), dtype=torch.long),
-            torch.tensor([[False, True, True], [False, False, False]]),
-            vocab_start_index=0,
-            vocab_end_index=5,
-            tp_group=object(),
-            inference_only=False,
-        )
-
-
-def test_synthetic_eos_fused_projection_keeps_capacity_and_chunk_bound(monkeypatch):
-    calls = []
-    model_utils = _install_fake_distributed_logprob(monkeypatch, calls)
-
-    def fused_apply(backend, hidden, weight, targets, start, end, chunk_size, group, inference_only):
-        calls.append((hidden.shape, chunk_size))
-        return hidden[..., 0]
-
-    model_utils._fused_lm_head_logprob_apply = fused_apply
-    hidden = torch.arange(3 * 4 * 2, dtype=torch.float64).reshape(3, 4, 2).requires_grad_(True)
-
-    actual = synthetic_eos_logprobs(
-        hidden,
-        torch.zeros((3, 4), dtype=torch.long),
-        torch.tensor([[False] * 4, [False, True, False, False], [False] * 4]),
-        vocab_start_index=0,
-        vocab_end_index=5,
-        tp_group=object(),
-        inference_only=False,
-        lm_head_weight=torch.ones((5, 2), dtype=torch.float64),
-        chunk_size=2,
-    )
-
-    expected = torch.zeros_like(actual)
-    expected[1, 1] = hidden.detach()[1, 1, 0]
-    torch.testing.assert_close(actual, expected)
-    assert calls == [(torch.Size([1, 3, 2]), 2)]
-    actual.sum().backward()
-    expected_grad = torch.zeros_like(hidden)
-    expected_grad[1, 1, 0] = 1
-    torch.testing.assert_close(hidden.grad, expected_grad)
 
 
 def test_multi_subsequence_rows_are_rejected():
@@ -470,27 +318,21 @@ def test_packed_and_unpacked_joins_score_the_same_tokens(megatron_parallel_state
     torch.testing.assert_close(packed, unpacked)
 
 
-def test_appended_eos_falls_back_to_the_full_vocabulary():
-    """A loss-bearing token with an all-padding support row is scored densely, not as 0.0."""
+def test_loss_active_token_without_support_is_rejected():
     lengths = [(3, 3)]
-    sequences, mask, _, _, logits = _batch_tensors(lengths)
     support = _support(lengths)
     support.values[-1] = SAMPLE_SUPPORT_PADDING
 
-    scores = _dense_scores(lengths, support=support)
-
-    eos_position = mask.shape[1] - 2
-    expected = logits[0, eos_position].log_softmax(dim=-1)[sequences[0, eos_position + 1]]
-    assert not scores.valid_mask[0, eos_position]
-    torch.testing.assert_close(scores.logprobs[0, eos_position], expected)
+    with pytest.raises(ValueError, match="every loss-active token"):
+        _dense_scores(lengths, support=support)
 
 
-def test_a_second_unsupported_response_token_is_rejected():
+def test_multiple_loss_active_tokens_without_support_are_rejected():
     lengths = [(3, 3)]
     support = _support(lengths)
     support.values[-2:] = SAMPLE_SUPPORT_PADDING
 
-    with pytest.raises(ValueError, match="at most one loss-bearing token"):
+    with pytest.raises(ValueError, match="every loss-active token"):
         _dense_scores(lengths, support=support)
 
 
