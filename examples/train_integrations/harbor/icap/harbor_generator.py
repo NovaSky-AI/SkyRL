@@ -249,27 +249,51 @@ class ICapHarborGenerator(GeneratorInterface):
 
         reward, stop_reason = 0.0, "error"
         envelope: Dict[str, Any] = {}
+        failure: Optional[BaseException] = None
         try:
             config = _with_capture_route(
                 self._harbor_trial_config_template, trajectory, cache_salt=cache_salt
             )
             results = await self._run_harbor(config, prompt)
-        except TimeoutError:
+        except TimeoutError as error:
             stop_reason = "agent_timeout"
+            failure = error
+            raise
+        except BaseException as error:
+            failure = error
             raise
         else:
             reward = float(results.get("reward", 0.0))
             stop_reason = results.get("stop_reason", "complete")
         finally:
-            # Finish and export in one call, from the record that call
-            # committed. A failed finish is a failed attempt: there is no
-            # second call to make and nothing to train from if this did not
-            # land, so it is deliberately not suppressed.
+            if failure is not None:
+                # Say why, on the trajectory, before trying to finish it.
+                # `annotate` is a metadata edit and does not wait for turns to
+                # settle, so it lands even when `finish` cannot -- and an
+                # abandoned agent leaves a generation running, which is exactly
+                # when finishing is refused. Without this the record carries no
+                # trace of what went wrong and reads as merely unfinished.
+                await _explain_failure(trajectory, stop_reason, failure)
             try:
                 envelope = await asyncio.to_thread(
                     trajectory.finish,
                     annotations={"reward": reward, "stop_reason": stop_reason},
                     format="token_samples",
+                )
+            except Exception as error:
+                # On the success path a failed finish is a failed attempt:
+                # nothing committed, so there is nothing to train from.
+                #
+                # On the failure path it must not speak. The trial already
+                # failed for a reason the caller acts on -- a timeout is masked
+                # and not retried -- and letting a finish error replace it
+                # turns that into a generic failure and buys a retry the
+                # timeout policy exists to avoid. The reason is annotated
+                # above, and the record is completed by capture's sweep.
+                if failure is None:
+                    raise
+                logger.warning(
+                    "could not finish %s after %s: %s", trajectory.id, stop_reason, error
                 )
             finally:
                 # The engine's session outlives the trajectory unless someone
@@ -422,6 +446,30 @@ def _with_capture_route(
             raise TypeError("harbor agent kwargs.llm_kwargs.extra_body must be a mapping")
         extra_body["cache_salt"] = cache_salt
     return config
+
+
+async def _explain_failure(trajectory: Any, stop_reason: str, error: BaseException) -> None:
+    """Record why a trial failed, on the trajectory itself.
+
+    Best effort, and deliberately separate from `finish`: a metadata edit
+    applies to a live trajectory without waiting for its turns to settle, so it
+    succeeds in the one case that matters -- an agent that gave up mid-call,
+    leaving a generation in flight that refuses the finish behind it.
+
+    The label is what a listing filters on; the annotation is what a reader
+    needs. Both travel with the record when it is eventually compiled, because
+    they are in the journal before the finish is attempted.
+    """
+    try:
+        await asyncio.to_thread(
+            trajectory.annotate,
+            failed=True,
+            failure_reason=stop_reason,
+            failure_detail=f"{type(error).__name__}: {error}"[:500],
+        )
+        await asyncio.to_thread(trajectory.tag, "failed", stop_reason)
+    except Exception as annotate_error:
+        logger.warning("could not annotate the failure of %s: %s", trajectory.id, annotate_error)
 
 
 async def _release_session(engine_client: Any, session_id: str) -> None:

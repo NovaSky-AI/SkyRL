@@ -13,7 +13,6 @@ import pytest
 from examples.train_integrations.harbor.icap.compose import (
     compose,
     split_row,
-    stepwise_rows,
 )
 
 
@@ -206,45 +205,3 @@ def test_prefix_merging_is_refused():
 
 def test_the_configuration_this_integration_wants_is_accepted():
     assert _require(_Cfg()) is None
-
-
-# -- parity against the harness-side collector --------------------------------
-def test_a_path_cuts_back_into_the_per_turn_rows_the_sibling_emits():
-    """The sibling integration emits, per turn, the prompt before that turn and
-    that turn's completion with an all-ones mask. A captured path holds the
-    same information as one sequence plus a mask, so parity is a token-for-token
-    comparison once the path is cut at its trainable runs."""
-    path = row(
-        [1, 2, 3, 4, 5, 6, 7],
-        [0, 0, 1, 1, 0, 1, 0],
-        logprobs=[0.0, 0.0, -0.1, -0.2, 0.0, -0.3, 0.0],
-    )
-    turns = stepwise_rows(path)
-    assert len(turns) == 2, "two sampled spans, two turns"
-    assert turns[0]["prompt_token_ids"] == [1, 2]
-    assert turns[0]["response_ids"] == [3, 4]
-    assert turns[0]["loss_mask"] == [1, 1]
-    assert turns[0]["rollout_logprobs"] == [-0.1, -0.2]
-    assert turns[1]["prompt_token_ids"] == [1, 2, 3, 4, 5], "the prompt is the whole prefix"
-    assert turns[1]["response_ids"] == [6]
-
-
-def test_the_turns_tile_the_trainable_tokens_exactly():
-    """Every trainable token belongs to exactly one turn, and prompts grow --
-    which is what makes them successive turns rather than an arbitrary cut."""
-    path = row([1, 2, 3, 4, 5, 6, 7, 8], [0, 1, 1, 0, 0, 1, 0, 1])
-    turns = stepwise_rows(path)
-    assert sum(len(turn["response_ids"]) for turn in turns) == sum(
-        int(value) for value in path["loss_mask"]
-    )
-    lengths = [len(turn["prompt_token_ids"]) for turn in turns]
-    assert lengths == sorted(lengths) and len(set(lengths)) == len(lengths)
-
-
-def test_a_path_with_nothing_trainable_has_no_turns():
-    assert stepwise_rows(row([1, 2], [0, 0])) == []
-
-
-def test_a_path_whose_arrays_disagree_is_an_error():
-    with pytest.raises(ValueError, match="inconsistent"):
-        stepwise_rows({"path_id": "p", "input_ids": [1, 2, 3], "loss_mask": [0, 1]})

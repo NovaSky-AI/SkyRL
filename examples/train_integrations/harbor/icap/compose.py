@@ -42,7 +42,7 @@ knowing when reading the trainer.
 
 Because every path in a group carries the same reward, which path is marked
 does not change the advantage. It does change what step-wise *evaluation*
-keeps: metrics retain only the marked row, so token-exact parity across every
+keeps -- metrics retain only the marked row -- so a measurement over every
 path has to read the generator output before that filtering.
 
 Two settings go with this shape, and `_require_grouped_output` refuses to
@@ -118,60 +118,6 @@ def split_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "rollout_logprobs": logprobs[first:],
         "rollout_expert_indices": routed,
     }
-
-
-def stepwise_rows(row: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """One complete path, cut back into the per-turn rows it was built from.
-
-    Not used to train. This is the inverse of what makes a captured path a
-    single sample, and it exists so parity against the harness-side TITO
-    collector can be checked token for token.
-
-    The sibling integration emits, per turn, the full prompt before that turn
-    and that turn's completion with an all-ones mask. A captured path holds
-    the same information differently: one rendered sequence whose loss mask
-    marks the sampled spans. Each contiguous run of ones is one turn, so turn
-    ``t`` is ``input_ids[:start_t]`` and ``input_ids[start_t:end_t]`` -- the
-    same two arrays the sibling built directly.
-
-    Comparing there rather than after composition is the point. Step-wise
-    evaluation keeps only the ``is_last_step`` row, so a parity check run over
-    evaluated output would compare one path out of a rollout's several and
-    pass while the rest went unverified.
-
-    A rollout that branched has no counterpart on the other side at all -- the
-    sibling integration refuses summarization, because compaction breaks its
-    own token accounting. Parity is therefore checked on rollouts that did not
-    branch, and branching is what capture is for rather than something to
-    reconcile.
-    """
-    input_ids: List[int] = list(row["input_ids"])
-    loss_mask: List[int] = [int(value) for value in row["loss_mask"]]
-    if len(loss_mask) != len(input_ids):
-        raise ValueError(
-            f"row {row.get('path_id')} is inconsistent: {len(input_ids)} tokens, "
-            f"{len(loss_mask)} mask"
-        )
-    logprobs = list(row.get("rollout_logprobs") or [])
-
-    turns: List[Dict[str, Any]] = []
-    index = 0
-    while index < len(loss_mask):
-        if not loss_mask[index]:
-            index += 1
-            continue
-        start = index
-        while index < len(loss_mask) and loss_mask[index]:
-            index += 1
-        turns.append(
-            {
-                "prompt_token_ids": input_ids[:start],
-                "response_ids": input_ids[start:index],
-                "loss_mask": [1] * (index - start),
-                "rollout_logprobs": logprobs[start:index] if logprobs else None,
-            }
-        )
-    return turns
 
 
 def _placeholder() -> Dict[str, Any]:
