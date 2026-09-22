@@ -29,14 +29,16 @@ class OPDConfig(BaseConfig):
     """Coefficient of the per-token teacher term: ``advantages -= kl_coef * (log pi_student - log pi_teacher)``.
     ``1.0`` is the Thinking Machines / tinker recipe."""
     use_task_reward: bool = False
-    """``False``: pure on-policy distillation; the environment reward is zeroed after its metrics are
-    logged, so the advantage estimator contributes nothing. ``True``: the reward flows through the
-    configured estimator and the teacher term is added on top (Miles mixed mode / AReaL KDRL)."""
+    """Pure distillation when ``False``; task reward plus the teacher term when ``True``.
+    ``False`` zeroes the environment reward after its metrics are logged, so the advantage estimator
+    contributes nothing. ``True`` sends the reward through the configured estimator and adds the
+    teacher term on top."""
     self_test_samples: int = 8
     """Number of identical scoring requests sent to the teacher before training starts."""
     self_test_max_abs_diff: float = 0.05
-    """Largest disagreement (nats) tolerated between those requests. A teacher whose logprobs depend on
-    which replica answers is refused; the reverse-KL signal is itself only a few hundredths of a nat."""
+    """Largest disagreement (nats) tolerated between the self-test requests.
+    A teacher whose logprobs depend on which replica answers is refused; the reverse-KL signal is
+    itself only a few hundredths of a nat."""
 
 
 @dataclass
@@ -44,8 +46,10 @@ class TeacherConfig(BaseConfig):
     """The frozen teacher, served by an inference engine."""
 
     backend: str = "fireworks"
-    """``"fireworks"``: a Fireworks model or dedicated deployment id. ``"vllm"``: vLLM servers you started
-    (a stock ``vllm serve`` or SkyRL's ``serve`` entrypoint), given by ``server_urls``."""
+    """Which teacher backend to use: ``"fireworks"`` or ``"vllm"``.
+    ``"fireworks"`` scores through a Fireworks model or dedicated deployment id. ``"vllm"`` scores
+    through vLLM servers you started (a stock ``vllm serve`` or SkyRL's ``serve`` entrypoint), given
+    by ``server_urls``."""
     model: str = ""
     """Fireworks: ``accounts/fireworks/models/<id>`` or a dedicated ``accounts/<account>/deployments/<id>``.
     vLLM: the served model name, e.g. ``Qwen/Qwen3-32B``."""
@@ -54,8 +58,8 @@ class TeacherConfig(BaseConfig):
     api_key_var: str = "FIREWORKS_API_KEY"
     """Environment variable holding the Fireworks API key (Fireworks only)."""
     server_urls: Optional[List[str]] = None
-    """``backend="vllm"``: base URLs of the servers, e.g. ``["http://host:8000"]``. Requests round-robin
-    across them, and a retry moves to the next one."""
+    """Base URLs of the vLLM servers for ``backend="vllm"``, e.g. ``["http://host:8000"]``.
+    Requests round-robin across them, and a retry moves to the next one."""
     max_concurrency: int = 32
     """Maximum teacher requests in flight."""
     request_timeout_s: float = 120.0
@@ -69,8 +73,8 @@ class OPDAlgorithmConfig(AlgorithmConfig):
     opd: OPDConfig = field(default_factory=OPDConfig)
     """On-policy distillation knobs."""
     use_kl_loss: bool = False
-    """Off by default: the reference model is not needed for distillation. Turn it on to add a
-    reference-KL loss alongside the teacher term."""
+    """Off by default; the reference model is not needed for distillation.
+    Turn it on to add a reference-KL loss alongside the teacher term."""
     policy_loss_type: str = "importance_sampling"
     """The Thinking Machines / tinker recipe. ``"regular"`` (PPO clip) is also valid."""
 

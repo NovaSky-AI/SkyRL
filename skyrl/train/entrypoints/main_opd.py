@@ -1,10 +1,10 @@
 """On-policy distillation (OPD) entrypoint.
 
 The student samples its own rollouts; a frozen teacher served by an inference engine scores every
-response token; the per-token reverse KL to the teacher, ``log pi_student - log pi_teacher``,
-becomes a dense advantage. Pure distillation is the default (the environment reward is only
-logged); ``trainer.algorithm.opd.use_task_reward=true`` adds the teacher term on top of the
-reward's advantages instead.
+response token; the negative per-token reverse KL to the teacher,
+``log pi_teacher - log pi_student``, becomes a dense advantage. Pure distillation is the default
+(the environment reward is only logged); ``trainer.algorithm.opd.use_task_reward=true`` adds the
+teacher term on top of the reward's advantages instead.
 
 On top of ``main_base``: ``OPDTrainer.generate`` runs one ``generator.generate`` call per prompt
 group concurrently and scores each group under the teacher as soon as its rollouts are back, so
