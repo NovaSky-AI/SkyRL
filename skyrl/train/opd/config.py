@@ -12,7 +12,7 @@ Adds two blocks to the standard config and changes two algorithm defaults:
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 from loguru import logger
 
@@ -20,7 +20,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import LOSSES_WITHOUT_OLD_LOGPRO
 from skyrl.train.config import AlgorithmConfig, TrainerConfig, make_config
 from skyrl.train.config.config import BaseConfig
 
-TEACHER_BACKENDS = ("fireworks",)
+TEACHER_BACKENDS = ("fireworks", "vllm")
 
 
 @dataclass
@@ -44,19 +44,24 @@ class TeacherConfig(BaseConfig):
     """The frozen teacher, served by an inference engine."""
 
     backend: str = "fireworks"
-    """``"fireworks"``: a Fireworks model or dedicated deployment id. vLLM-served teachers come next."""
+    """``"fireworks"``: a Fireworks model or dedicated deployment id. ``"vllm"``: vLLM servers you started
+    (a stock ``vllm serve`` or SkyRL's ``serve`` entrypoint), given by ``server_urls``."""
     model: str = ""
-    """``accounts/fireworks/models/<id>`` or a dedicated ``accounts/<account>/deployments/<id>``."""
+    """Fireworks: ``accounts/fireworks/models/<id>`` or a dedicated ``accounts/<account>/deployments/<id>``.
+    vLLM: the served model name, e.g. ``Qwen/Qwen3-32B``."""
     base_url: Optional[str] = None
     """Fireworks server root without ``/v1``; defaults to the Fireworks data plane."""
     api_key_var: str = "FIREWORKS_API_KEY"
-    """Environment variable holding the Fireworks API key."""
+    """Environment variable holding the Fireworks API key (Fireworks only)."""
+    server_urls: Optional[List[str]] = None
+    """``backend="vllm"``: base URLs of the servers, e.g. ``["http://host:8000"]``. Requests round-robin
+    across them, and a retry moves to the next one."""
     max_concurrency: int = 32
     """Maximum teacher requests in flight."""
     request_timeout_s: float = 120.0
-    """Per-request timeout (Fireworks backend)."""
+    """Per-request timeout."""
     max_retries: int = 3
-    """Retries with exponential backoff on timeouts and retryable HTTP statuses (Fireworks backend)."""
+    """Retries with exponential backoff on timeouts, connection errors and retryable HTTP statuses."""
 
 
 @dataclass
@@ -92,6 +97,8 @@ def validate_opd_cfg(cfg) -> None:
         raise ValueError("trainer.teacher.model must be set")
     if teacher.backend == "fireworks" and not os.environ.get(teacher.api_key_var):
         raise ValueError(f"trainer.teacher.api_key_var={teacher.api_key_var!r} is not set in the environment")
+    if teacher.backend == "vllm" and not teacher.server_urls:
+        raise ValueError("trainer.teacher.backend='vllm' requires trainer.teacher.server_urls")
     if teacher.max_concurrency <= 0:
         raise ValueError("trainer.teacher.max_concurrency must be positive")
 

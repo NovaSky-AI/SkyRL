@@ -5,7 +5,7 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 
 - `algorithms/`: Examples for how to configure and run RL with various algorithms and policy-loss variants (e.g., DAPO, SAPO, GRPO, CISPO, GSPO, or your own custom advantage estimators and custom policy losses).
 - `ppo/`: Vanilla PPO training (with a critic, ref, and policy model)
-- `on_policy_distillation/`: On-policy distillation entrypoint: a frozen teacher served by an inference engine (Fireworks) grades every token of the student's rollouts, optionally on top of a task reward, following the [Thinking Machines blog](https://thinkingmachines.ai/blog/on-policy-distillation/).
+- `on_policy_distillation/`: On-policy distillation entrypoint: a frozen teacher served by an inference engine (Fireworks, or vLLM servers you run) grades every token of the student's rollouts, optionally on top of a task reward, following the [Thinking Machines blog](https://thinkingmachines.ai/blog/on-policy-distillation/).
 - `tis_correction/`: Applying [Truncated Importance Sampling (TIS)](https://fengyao.notion.site/off-policy-rl) correction to improve off-policy stability.
 - `turn_level_rewards/`: GSM8K multi-turn environment illustrating turn-level rewards and custom advantage estimators.
 

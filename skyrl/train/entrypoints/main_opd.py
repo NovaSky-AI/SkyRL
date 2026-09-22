@@ -35,7 +35,11 @@ from loguru import logger
 
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.opd.config import OPDExpConfig, validate_opd_cfg
-from skyrl.train.opd.teacher_client import FireworksTeacherClient, TeacherLogprobClient
+from skyrl.train.opd.teacher_client import (
+    FireworksTeacherClient,
+    TeacherLogprobClient,
+    VLLMTeacherClient,
+)
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import initialize_ray, validate_cfg
@@ -58,6 +62,14 @@ class OPDExp(BasePPOExp):
                 teacher.model,
                 api_key=os.environ[teacher.api_key_var],
                 base_url=teacher.base_url,
+                max_concurrency=teacher.max_concurrency,
+                request_timeout_s=teacher.request_timeout_s,
+                max_retries=teacher.max_retries,
+            )
+        if teacher.backend == "vllm":
+            return VLLMTeacherClient(
+                teacher.model,
+                server_urls=list(teacher.server_urls),
                 max_concurrency=teacher.max_concurrency,
                 request_timeout_s=teacher.request_timeout_s,
                 max_retries=teacher.max_retries,

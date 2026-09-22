@@ -50,22 +50,46 @@ verbatim.
 | `trainer.teacher.backend` | What it is | Notes |
 |---|---|---|
 | `fireworks` (default) | A Fireworks model id (`accounts/fireworks/models/<id>`) or dedicated deployment (`accounts/<account>/deployments/<id>`), scored through the completions API with an integer prompt and `echo_last` | Serverless is fine for checking the plumbing; for training use a dedicated deployment. Serverless replicas disagree on logprobs by more than the OPD signal itself, some serverless models do not support echo, and the Qwen3 (2025) family is not serverless. Custom checkpoints can be uploaded with `firectl model create` and deployed. |
+| `vllm` | vLLM servers you started, given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible `/v1/completions` with vLLM's `prompt_logprobs` parameter | Works with a stock `vllm serve` and with SkyRL's `serve` entrypoint (`examples/train/remote_inference_server/run_vllm_server.sh`). Any model vLLM serves; `max_model_len` must cover prompt + response + 1. Requests round-robin across the URLs. The servers are never weight-synced or slept. |
 
 Before any model is loaded, the entrypoint sends the same short sequence to the teacher
 `trainer.algorithm.opd.self_test_samples` times concurrently and refuses to train if the answers
 differ by more than `self_test_max_abs_diff` nats (default 0.05). This catches replica-dependent
 serving, models that reject echo, and a mismatched tokenizer, at minute 0 instead of minute 40.
 
+### A vLLM teacher
+
+Start the teacher on GPUs the training job does not use, either with vLLM directly or with SkyRL's
+standalone server (`examples/train/remote_inference_server/run_vllm_server.sh`, which logs its
+`server_urls`), then point the run at it:
+
+```bash
+vllm serve Qwen/Qwen3-32B --tensor-parallel-size 4 --port 8000   # on the teacher node(s)
+
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
+  trainer.teacher.backend=vllm \
+  trainer.teacher.model=Qwen/Qwen3-32B \
+  trainer.teacher.server_urls="['http://teacher-host:8000']" \
+  ...
+```
+
+The self-test at startup catches the two usual server-side problems: a `max_model_len` shorter than
+prompt + response + 1, and a vLLM version that rejects `prompt_logprobs` while prefix caching is on
+(start such a server with `--no-enable-prefix-caching`). Scoring requests bypass the prefix cache
+on the versions that allow them, so each request prefills the full sequence. No authentication is
+sent to vLLM servers.
+
 ## Configuration
 
 | Key | Default | Meaning |
 |---|---|---|
-| `trainer.teacher.backend` | `fireworks` | The only backend for now; vLLM-served teachers come next |
-| `trainer.teacher.model` | — | Fireworks model id or dedicated deployment id |
+| `trainer.teacher.backend` | `fireworks` | `fireworks` or `vllm` |
+| `trainer.teacher.model` | — | Fireworks model / deployment id, or the served model name of the vLLM servers |
 | `trainer.teacher.base_url` | Fireworks data plane | Server root without `/v1` |
-| `trainer.teacher.api_key_var` | `FIREWORKS_API_KEY` | Environment variable holding the key |
+| `trainer.teacher.api_key_var` | `FIREWORKS_API_KEY` | Environment variable holding the key (Fireworks only) |
+| `trainer.teacher.server_urls` | — | `vllm` only: base URLs, e.g. `"['http://host:8000']"` |
 | `trainer.teacher.max_concurrency` | 32 | Teacher requests in flight |
-| `trainer.teacher.request_timeout_s`, `max_retries` | 120, 3 | Fireworks request timeout and retries with backoff |
+| `trainer.teacher.request_timeout_s`, `max_retries` | 120, 3 | Request timeout and retries with backoff (a retry moves to the next URL) |
 | `trainer.algorithm.opd.kl_coef` | 1.0 | `advantages -= kl_coef · (log π_student − log π_teacher)` |
 | `trainer.algorithm.opd.use_task_reward` | `false` | `false`: pure distillation (env reward is only logged). `true`: the reward's advantages plus the teacher term |
 | `trainer.algorithm.opd.self_test_samples`, `self_test_max_abs_diff` | 8, 0.05 | The startup determinism check |
