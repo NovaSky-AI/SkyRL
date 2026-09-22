@@ -1,4 +1,4 @@
-"""Check native LoRA publication on an owned Ray cluster."""
+"""Compare logprobs: zero adapter -> perturb trainer -> verify stale sampler -> publish."""
 
 import argparse
 import asyncio
@@ -64,16 +64,22 @@ async def run(args, report):
                 args.max_atol,
             )
             apply_trainer_update(policy, batch, report, args.lora_b_multiplier)
-            await check_unpublished_sampler(client, sequences, adapter, report)
+            report["stale"] = await score_sampler(client, sequences, adapter)
+            check_withheld_publication(report)
             check_update_stimulus(report, args.mean_atol)
             await publish(policy, client, cfg)
-            await check_published_update(client, sequences, adapter, report, args.mean_atol, args.max_atol)
+            report["updated"] = await score_sampler(client, sequences, adapter)
+            check_updated_adapter(report, args.mean_atol, args.max_atol)
+            report["updated_repeat"] = await score_sampler(client, sequences, adapter)
+            check_updated_repeat(report)
         finally:
             # Preserve failed assertions even if subsequent runtime cleanup hangs.
             write_report(args.output_dir, report)
 
 
 async def check_replayed_policy(policy, client, cfg, unreplayed_batch, sequences, pad_token_id, report, args):
+    """Replay each sampler capture’s expert routes when scoring the trainer."""
+
     async def score_phase(phase, model):
         scores, routes = await score_with_routes(client, sequences, model)
         report[phase] = scores
@@ -130,18 +136,6 @@ async def check_zero_initialized_policy(policy, client, cfg, batch, sequences, r
 def apply_trainer_update(policy, batch, report, multiplier=10):
     report["perturbation"] = perturb_trainer(policy, multiplier)
     report["trainer_updated"] = score_trainer(policy, batch)
-
-
-async def check_unpublished_sampler(client, sequences, adapter, report):
-    report["stale"] = await score_sampler(client, sequences, adapter)
-    check_withheld_publication(report)
-
-
-async def check_published_update(client, sequences, adapter, report, mean_atol, max_atol):
-    report["updated"] = await score_sampler(client, sequences, adapter)
-    check_updated_adapter(report, mean_atol, max_atol)
-    report["updated_repeat"] = await score_sampler(client, sequences, adapter)
-    check_updated_repeat(report)
 
 
 def check_updated_repeat(report):
