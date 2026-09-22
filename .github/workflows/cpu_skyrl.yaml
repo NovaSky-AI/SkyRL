@@ -11,7 +11,7 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'skyrl-gym/**'
-      - '.github/workflows/cpu_skyrl_train.yaml'
+      - '.github/workflows/cpu_skyrl.yaml'
   pull_request:
     paths:
       - 'ci/**'
@@ -19,7 +19,7 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'skyrl-gym/**'
-      - '.github/workflows/cpu_skyrl_train.yaml'
+      - '.github/workflows/cpu_skyrl.yaml'
 
 permissions:
   checks: write   # for status checks to appear

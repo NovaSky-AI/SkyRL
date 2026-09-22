@@ -15,7 +15,7 @@ on:
       - 'pyproject.toml'
       - '!docs/**'
       - '!examples/**'
-      - '.github/workflows/tinker_skyrl_train_backend_gpu.yaml'
+      - '.github/workflows/tinker_skyrl_backend_gpu.yaml'
   pull_request_target:
     types: [labeled]
   workflow_dispatch:

@@ -7,8 +7,8 @@
 
 | Check name | File | Covers |
 |---|---|---|
-| `SkyRL-CPU` | `cpu_skyrl_train.yaml` | pre-commit, `tests/train`, `tests/backends/skyrl_train` (CPU), `tests/tinker`, `tests/utils`, `skyrl-gym` |
-| `SkyRL-GPU` | `gpu_skyrl_train.yaml` | `tests/backends/skyrl_train/gpu/gpu_ci` on Anyscale |
+| `SkyRL-CPU` | `cpu_skyrl.yaml` | pre-commit, `tests/train`, `tests/backends/skyrl_train` (CPU), `tests/tinker`, `tests/utils`, `skyrl-gym` |
+| `SkyRL-GPU` | `gpu_skyrl.yaml` | `tests/backends/skyrl_train/gpu/gpu_ci` on Anyscale |
 | `SkyRL-JAX-CPU` | `cpu_jax.yaml` | `tests/tx`, `tests/backends/test_jax_backend.py`, engine benchmark |
 | `SkyRL-JAX-GPU` | `gpu_jax.yaml` | `tests/tx/gpu` on Anyscale |
 
@@ -27,7 +27,7 @@
 ## Adding a New Test to CI
 
 1. Decide CPU or GPU. CPU is free; GPU costs Anyscale credits per run.
-2. CPU: just add the test under `tests/` — `cpu_skyrl_train.yaml` already globs the suite.
+2. CPU: just add the test under `tests/` — `cpu_skyrl.yaml` already globs the suite.
 3. GPU: add the test, then either (a) extend an existing `ci/gpu_*_run*.sh` to include it, or (b) add a new workflow + runner pair if it needs a different extras combo or a different compute config.
 
 ## Gotchas
