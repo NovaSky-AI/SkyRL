@@ -1,5 +1,6 @@
 import math
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Optional, Sequence
 
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_mxfp8_recipe,
@@ -50,3 +51,52 @@ def get_unpacked_seq_align_size(tp_size: int, fp8_enabled: bool = False, fp8_rec
     if not fp8_enabled:
         return tp_size
     return math.lcm(tp_size, _fp8_token_align(tp_size, 1, fp8_recipe))
+
+
+@dataclass(frozen=True)
+class PackedSegmentLayout:
+    """Where every packed sub-sequence starts and ends once alignment is applied."""
+
+    padded_lengths: tuple[int, ...]
+    cu_seqlens_padded: tuple[int, ...]
+
+    @property
+    def total(self) -> int:
+        return self.cu_seqlens_padded[-1]
+
+
+def packed_segment_layout(
+    sequence_lengths: Sequence[int],
+    *,
+    tp_size: int,
+    cp_size: int,
+    fp8_enabled: bool = False,
+    fp8_recipe: Optional[str] = None,
+) -> PackedSegmentLayout:
+    """Resolve the padded packed layout for one batch of sub-sequence lengths.
+
+    The single source of truth for two decisions every packing site depends on: each
+    sub-sequence is padded to the sequence alignment so flash-attn varlen sees aligned
+    segment boundaries, and the aggregate slab alignment that TP and FP8 need is then
+    applied **once, by growing the final sub-sequence** — not by padding every one of
+    them, and not as a separate trailing segment. Pure integer arithmetic so the host
+    metadata builders, the controller collator and the worker can all share it.
+    """
+    sequence_align = get_packing_align_size_sequence(tp_size, cp_size)
+    total_align = get_packing_align_size_total(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
+
+    padded = []
+    for raw_length in sequence_lengths:
+        length = int(raw_length)
+        if length <= 0:
+            raise ValueError(f"Packed sub-sequence lengths must be positive, got {length}")
+        padded.append(length + (-length % sequence_align))
+    if not padded:
+        return PackedSegmentLayout(padded_lengths=(), cu_seqlens_padded=(0,))
+
+    padded[-1] += -sum(padded) % total_align
+
+    offsets = [0]
+    for length in padded:
+        offsets.append(offsets[-1] + length)
+    return PackedSegmentLayout(padded_lengths=tuple(padded), cu_seqlens_padded=tuple(offsets))
