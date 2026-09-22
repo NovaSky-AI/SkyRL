@@ -17,6 +17,20 @@
 - **CPU workflows** (`cpu_*.yaml`) run on `ubuntu-latest`, auto-trigger on push to `main`/`rc/*` and on PRs. Run lint + the CPU pytest suites from AGENTS.md.
 - **GPU workflows** (`gpu_*.yaml`, `tinker_*.yaml`) run on `ubuntu-latest` but submit to Anyscale via `anyscale job submit -f ci/<config>.yaml --timeout 12000`. **Label-gated** on PRs (except `SkyRL-JAX-GPU`, which is path-gated).
 
+### GPU gating labels
+
+Apply one of these to a PR to launch the corresponding Anyscale job. The label must
+already exist in repo settings -- a workflow referencing a label nobody can apply
+never runs, and fails silently.
+
+| Label | Launches |
+|---|---|
+| `run_gpu_ci` | `SkyRL-GPU` |
+| `run_megatron_gpu_ci` | `SkyRL-GPU-Megatron` |
+| `run_megatron_gpu_ci_models` | `Megatron-Model-GPU-CI` |
+| `run_h100_gpu_ci` | `H100-GPU-CI` |
+| `run_tinker_skyrl_backend_gpu_ci` | `Tinker-SkyRL-Backend-GPU` |
+
 ## Anyscale
 
 - Compute config: `l4_ci` (referenced from `ci/anyscale_*.yaml`).
