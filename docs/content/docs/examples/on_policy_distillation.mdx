@@ -66,8 +66,9 @@ prefer a dedicated deployment over serverless.
 logged but zeroed before the advantage estimator, so the advantage is the teacher term alone.
 `use_task_reward=true` keeps the reward: the configured estimator (GRPO by default) produces its
 advantages and the teacher term, `kl_coef · (log π_student − log π_teacher)`, is subtracted per token after
-it. Applying the term after the estimator is what lets it compose with any estimator; GRPO would
-otherwise sum the per-token signal into one scalar per sequence.
+it. Applying the term after the estimator is what lets it compose with any estimator in mixed mode, and
+with any reward-only estimator in pure mode (`gae` is rejected there: a critic's whitened residuals would
+replace the teacher signal). GRPO would otherwise sum the per-token signal into one scalar per sequence.
 
 ## Metrics
 
