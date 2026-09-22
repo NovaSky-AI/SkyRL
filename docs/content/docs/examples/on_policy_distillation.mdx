@@ -3,8 +3,8 @@ title: "On-Policy Distillation"
 ---
 
 On-policy distillation (OPD) trains a student on its own rollouts while a frozen teacher grades every
-token: the per-token reverse KL to the teacher, `log π_student − log π_teacher`, is the advantage. It keeps
-the on-policy character of RL and adds a dense, per-token signal
+token: the negative per-token reverse KL to the teacher, `log π_teacher − log π_student`, is the
+advantage. It keeps the on-policy character of RL and adds a dense, per-token signal
 ([Thinking Machines](https://thinkingmachines.ai/blog/on-policy-distillation/)).
 
 SkyRL's entrypoint, `skyrl.train.entrypoints.main_opd` (library code under `skyrl/train/opd/`, run scripts under `examples/train/on_policy_distillation/`), serves the teacher from an

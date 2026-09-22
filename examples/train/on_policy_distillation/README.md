@@ -1,8 +1,8 @@
 # On-Policy Distillation
 
 On-policy distillation (OPD) trains a student on its own rollouts with a frozen teacher grading
-every token: the per-token reverse KL to the teacher, `log π_student − log π_teacher`, is the
-advantage. It combines the on-policy character of RL with a dense, per-token signal, and was
+every token: the negative per-token reverse KL to the teacher, `log π_teacher − log π_student`,
+is the advantage. It combines the on-policy character of RL with a dense, per-token signal, and was
 popularized by [Thinking Machines](https://thinkingmachines.ai/blog/on-policy-distillation/)
 (earlier: [Agarwal et al.](https://arxiv.org/abs/2306.13649), [Gu et al.](https://arxiv.org/abs/2306.08543),
 the [Qwen3 report](https://arxiv.org/abs/2505.09388)).
