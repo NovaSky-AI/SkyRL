@@ -1398,19 +1398,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         from safetensors.torch import save_file
 
-<<<<<<< HEAD
-        # Shared-outer grouped-expert LoRA emits the per-expert side of packed-HF
-        # models (e.g. Qwen3.5/3.6 MoE) as one 2D slice per expert under the same
-        # expert-agnostic name; collect repeats in emission order (expert 0..E-1)
-        # and stack them back into the (E, out, in) layout the converter expects.
-        adapter_tensor_lists: Dict[str, List[torch.Tensor]] = {}
-        for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
-            adapter_tensor_lists.setdefault(f"base_model.model.{name}", []).append(tensor.clone().float())
-        adapter_state = {
-            name: tensors[0] if len(tensors) == 1 else torch.stack(tensors, dim=0)
-            for name, tensors in adapter_tensor_lists.items()
-        }
-=======
         # Every rank must participate in the bridge's collective export, but only
         # the writer ranks materialize the gathered tensors: with MoE expert
         # adapters the full adapter state can reach tens of GB (per-expert
@@ -1419,15 +1406,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # only gates the bridge's trailing device-to-host copy (not its
         # collectives), so non-writers skip that copy for tensors they discard.
         keep_state = self._is_lora_sync_writer_rank()
-        adapter_state = {}
+        # Shared-outer grouped-expert LoRA emits the per-expert side of packed-HF
+        # models (e.g. Qwen3.5/3.6 MoE) as one 2D slice per expert under the same
+        # expert-agnostic name; collect repeats in emission order (expert 0..E-1)
+        # and stack them back into the (E, out, in) layout the converter expects.
+        adapter_tensor_lists: Dict[str, List[torch.Tensor]] = {}
         for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=keep_state, show_progress=False):
             if keep_state:
                 # Keep the training dtype (bf16): upcasting to float32 doubles
                 # the already-large per-expert adapter state (and the file the
                 # engines re-read every step) for no fidelity gain -- vLLM casts
                 # adapters to its lora dtype on load.
-                adapter_state[f"base_model.model.{name}"] = tensor.clone()
->>>>>>> 990a77432cc5dbf190d0dc827db806c26d65e695
+                adapter_tensor_lists.setdefault(f"base_model.model.{name}", []).append(tensor.clone())
+        adapter_state = {
+            name: tensors[0] if len(tensors) == 1 else torch.stack(tensors, dim=0)
+            for name, tensors in adapter_tensor_lists.items()
+        }
 
         rank = torch.distributed.get_rank()
         if keep_state:
