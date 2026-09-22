@@ -1,9 +1,25 @@
-name: CI
+name: SkyRL-Capture
 
+# Only what is inside the package, so a change to the trainer or another
+# example does not spend a runner on it -- and a change in here does not have
+# to wait on the rest of the repo's matrix.
 on:
   push:
-    branches: [main]
+    branches: [ main ]
+    paths:
+      - 'skyrl-capture/**'
+      - '.github/workflows/cpu_skyrl_capture.yaml'
   pull_request:
+    paths:
+      - 'skyrl-capture/**'
+      - '.github/workflows/cpu_skyrl_capture.yaml'
+  workflow_dispatch:
+
+# The package is its own uv project, with its own lockfile, ruff config and
+# Python floor, so every step runs from its directory.
+defaults:
+  run:
+    working-directory: skyrl-capture
 
 jobs:
   test:
