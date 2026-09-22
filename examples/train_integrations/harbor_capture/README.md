@@ -112,11 +112,14 @@ batch keeps one row per rollout so rewards and rollouts stay aligned.
 ## Running
 
 ```bash
-uv run --with-editable /path/to/inference-capture \
+uv run --extra harbor-capture \
   -m examples.train_integrations.harbor_capture.entrypoints.main_harbor_capture \
   trainer.policy.model.path=Qwen/Qwen3-4B-Instruct-2507 \
   data.train_data="['/path/to/harbor/tasks']"
 ```
+
+`skyrl-capture` lives in this repo, under `skyrl-capture/`, and the extra
+installs it from there.
 
 Capture runs in this process by default. Setting `CAPTURE_ENDPOINT` points at
 a separate `skyrl-capture serve` instead -- naming an endpoint is the whole

@@ -208,6 +208,13 @@ miniswe = [
 harbor = [
     "harbor[daytona,modal]",
 ]
+# Harbor rollouts recorded in token space by `skyrl-capture`, for
+# `examples/train_integrations/harbor_capture`. `[tokens]` is what brings the
+# renderer: the base install has no ML dependency at all.
+harbor-capture = [
+    "harbor[daytona,modal]",
+    "skyrl-capture[tokens]",
+]
 # Mooncake distributed KV for vLLM: the store connector (MooncakeStoreConnector,
 # KV-cache offloading) and P2P PD transfer (MooncakeConnector). Provides the python
 # bindings and the `mooncake_master` binary. Off-the-shelf PyPI wheel; Linux-only.
@@ -377,6 +384,7 @@ explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
+skyrl-capture = { path = "./skyrl-capture", editable = true }
 # Match torch's CUDA variant (cu130).
 flashinfer-jit-cache = { index = "flashinfer-cu130", marker = "sys_platform == 'linux'" }
 flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
@@ -567,6 +575,9 @@ extend-ignore = [
 exclude = [
     "skyrl-agent/",
     "examples/",
+    # Carries its own ruff config -- a narrower line length and its own rule
+    # set -- and is linted by its own CI job.
+    "skyrl-capture/",
 ]
 
 [tool.ruff.lint]

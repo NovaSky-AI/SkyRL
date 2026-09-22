@@ -42,7 +42,7 @@ run with it off**.
 Capture, from SkyRL's environment -- the upstream plugin imports SkyRL's
 `generate_wire`, so it cannot load from capture's own venv:
 
-    PYTHONPATH=$PWD uv run --with-editable /path/to/inference-capture \
+    PYTHONPATH=$PWD uv run --extra harbor-capture \
       skyrl-capture serve --host 0.0.0.0 --port 8080 --mode tokens \
       --upstream-type skyrl --upstream-url http://127.0.0.1:9500 \
       --model Qwen/Qwen3-4B-Instruct-2507 \

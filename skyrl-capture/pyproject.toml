@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Trajectory-scoped inference capture: proxy, context graph, token capture, and benchmark exports"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
-authors = [{ name = "Anyscale" }]
+license = { text = "Apache-2.0" }
+authors = [{ name = "NovaSky AI Team" }]
 dependencies = [
     "uvicorn>=0.30",
     "httpx>=0.27",
