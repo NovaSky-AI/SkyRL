@@ -52,10 +52,13 @@ verbatim.
 | `fireworks` (default) | A Fireworks model id (`accounts/fireworks/models/<id>`) or dedicated deployment (`accounts/<account>/deployments/<id>`), scored through the completions API with an integer prompt and `echo_last` | Serverless is fine for checking the plumbing; for training use a dedicated deployment. Serverless replicas disagree on logprobs by more than the OPD signal itself, some serverless models do not support echo, and the Qwen3 (2025) family is not serverless. Custom checkpoints can be uploaded with `firectl model create` and deployed. |
 | `vllm` | vLLM servers you started, given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible `/v1/completions` with vLLM's `prompt_logprobs` parameter | Works with a stock `vllm serve` and with SkyRL's `serve` entrypoint (`examples/train/remote_inference_server/run_vllm_server.sh`). Any model vLLM serves; `max_model_len` must cover prompt + response + 1. Requests round-robin across the URLs. The servers are never weight-synced or slept. |
 
-Before any model is loaded, the entrypoint sends the same short sequence to the teacher
-`trainer.algorithm.opd.self_test_samples` times concurrently and refuses to train if the answers
-differ by more than `self_test_max_abs_diff` nats (default 0.05). This catches replica-dependent
-serving, models that reject echo, and a mismatched tokenizer, at minute 0 instead of minute 40.
+There are no preflight checks yet. Nothing verifies before training that the teacher's tokenizer
+matches the student's, that a vLLM teacher's context covers the longest input plus the longest
+response, or that a serverless teacher answers identical requests identically. Those are tracked as
+a TODO in `skyrl/train/entrypoints/main_opd.py`, together with what other frameworks check. Until
+then: pick a teacher from the student's model family (same tokenizer), serve it with enough context,
+and prefer a dedicated deployment over serverless (in our probes serverless replicas disagreed by
+about 0.25 nats on identical requests, more than the distillation signal).
 
 ### A vLLM teacher
 
@@ -73,9 +76,9 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
   ...
 ```
 
-The self-test at startup catches the two usual server-side problems: a `max_model_len` shorter than
-prompt + response + 1, and a vLLM version that rejects `prompt_logprobs` while prefix caching is on
-(start such a server with `--no-enable-prefix-caching`). Scoring requests bypass the prefix cache
+Two usual server-side problems to rule out yourself: a `max_model_len` shorter than the longest
+input + longest response + 1, and a vLLM version that rejects `prompt_logprobs` while prefix caching
+is on (start such a server with `--no-enable-prefix-caching`). Scoring requests bypass the prefix cache
 on the versions that allow them, so each request prefills the full sequence. No authentication is
 sent to vLLM servers.
 
@@ -92,7 +95,6 @@ sent to vLLM servers.
 | `trainer.teacher.request_timeout_s`, `max_retries` | 120, 3 | Request timeout and retries with backoff (a retry moves to the next URL) |
 | `trainer.algorithm.opd.kl_coef` | 1.0 | `advantages -= kl_coef · (log π_student − log π_teacher)` |
 | `trainer.algorithm.opd.use_task_reward` | `false` | `false`: pure distillation (env reward is only logged). `true`: the reward's advantages plus the teacher term |
-| `trainer.algorithm.opd.self_test_samples`, `self_test_max_abs_diff` | 8, 0.05 | The startup determinism check |
 
 The entrypoint changes two algorithm defaults: `trainer.algorithm.use_kl_loss=false` (no reference
 model is instantiated; turn it on to add a reference-KL loss alongside the teacher) and
@@ -118,7 +120,7 @@ batch-normalized advantages, losses that skip the old-logprob forward pass).
   Applying the term after the estimator is what makes it compose with any estimator: GRPO would
   otherwise sum the per-token signal into one scalar per sequence.
 - `skyrl.train.opd.teacher_client.TeacherLogprobClient` is the abstract base class for teachers; it owns the concurrency limit,
-  the length check and the self-test, and a backend implements one method, `_compute_logprobs`.
+  the length and finiteness checks, and a backend implements one method, `_compute_logprobs`.
 
 ## Metrics
 

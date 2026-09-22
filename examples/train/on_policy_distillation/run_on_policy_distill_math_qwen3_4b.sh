@@ -6,8 +6,9 @@ set -x
 # create`). The teacher must share the student's tokenizer.
 #
 # The teacher is a dedicated deployment id, `accounts/<account>/deployments/<id>`; Fireworks
-# serverless does not host the Qwen3 (2025) family and its replica-dependent logprobs would fail
-# the startup self-test anyway.
+# serverless does not host the Qwen3 (2025) family, and its replica-dependent logprobs (~0.25 nats
+# apart on identical requests in our probes) are unusable for distillation anyway; nothing checks
+# this at startup yet.
 #
 # bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 # export FIREWORKS_API_KEY=<your_key_here>
