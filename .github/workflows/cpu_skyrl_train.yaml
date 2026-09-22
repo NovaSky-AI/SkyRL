@@ -104,7 +104,7 @@ jobs:
         with:
           enable-cache: true
       - name: Run tinker API server + shared util tests
-        run: uv run --extra tinker --extra jax --extra dev pytest --forked -s tests/tinker tests/utils --ignore=tests/tinker/skyrl_train
+        run: uv run --isolated --extra tinker --extra jax --extra dev pytest --forked -s tests/tinker tests/utils --ignore=tests/tinker/skyrl_train
 
   skyrl_gym_tests:
     # CI runs only in the upstream repo. This workflow needs no secrets and would pass
