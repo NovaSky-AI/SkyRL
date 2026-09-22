@@ -7,6 +7,16 @@ import math
 from pathlib import Path
 from time import perf_counter
 
+from examples.model_checks.logprob_checks import (
+    build_probe_sequences as build_sequences,
+)
+from examples.model_checks.logprob_checks import (
+    check_initial_adapter,
+    check_update_stimulus,
+    check_updated_adapter,
+    check_withheld_publication,
+    compare_logprobs,
+)
 from examples.model_checks.megatron_lora import (
     build_batch,
     open_runtime,
@@ -17,14 +27,6 @@ from examples.model_checks.megatron_lora import (
 )
 from examples.model_checks.paired_completion import score_with_routes
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
-from skyrl.tinker.logprob_checks import build_probe_sequences as build_sequences
-from skyrl.tinker.logprob_checks import (
-    check_initial_adapter,
-    check_update_stimulus,
-    check_updated_adapter,
-    check_withheld_publication,
-    compare_logprobs,
-)
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.utils.tok import get_tokenizer
 

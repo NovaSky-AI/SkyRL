@@ -1,8 +1,7 @@
 import pytest
 import torch
 
-from examples.model_checks.lora_logprobs import perturb_adapters
-from skyrl.tinker.logprob_checks import (
+from examples.model_checks.logprob_checks import (
     check_agreement,
     check_initial_adapter,
     check_update_stimulus,
@@ -10,6 +9,7 @@ from skyrl.tinker.logprob_checks import (
     check_withheld_publication,
     compare_logprobs,
 )
+from examples.model_checks.lora_logprobs import perturb_adapters
 
 
 @pytest.mark.parametrize(

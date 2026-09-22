@@ -1,4 +1,4 @@
-"""Logprob comparisons shared by native and SDK model checks."""
+"""Logprob comparisons for the standalone LoRA diagnostic."""
 
 from itertools import cycle, islice
 
