@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 
 def _fft_dispatch_cfg(weight_sync_backend: str = "nccl") -> SimpleNamespace:
@@ -34,6 +35,163 @@ def _fft_dispatch_cfg(weight_sync_backend: str = "nccl") -> SimpleNamespace:
 
 
 _has_megatron = "megatron" in sys.modules or __import__("importlib").util.find_spec("megatron") is not None
+
+
+# ---------------------------------------------------------------------------
+# Packed aligned tensors
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+@pytest.mark.parametrize(
+    ("values", "attention_mask", "cu_seqlens", "sub_seq_lengths", "expected"),
+    [
+        (
+            [[10, 11, 12, 0], [20, 21, 0, 0]],
+            [[1, 1, 1, 0], [1, 1, 0, 0]],
+            [0, 4, 8],
+            None,
+            [[10, 11, 12, 0, 20, 21, 0, 0]],
+        ),
+        (
+            [[10, 11, 0, 0, 20, 21, 22, 0]],
+            [[1, 1, 0, 0, 1, 1, 1, 0]],
+            [0, 4, 8],
+            [[2, 3]],
+            [[10, 11, 0, 0, 20, 21, 22, 0]],
+        ),
+    ],
+)
+def test_pack_sequence_values_uses_target_layout(values, attention_mask, cu_seqlens, sub_seq_lengths, expected):
+    from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
+        _pack_sequence_values,
+    )
+
+    packed_seq_params = SimpleNamespace(cu_seqlens_q_padded=torch.tensor(cu_seqlens))
+    actual = _pack_sequence_values(
+        torch.tensor(values),
+        torch.tensor(attention_mask, dtype=torch.bool),
+        packed_seq_params,
+        sub_seq_lengths,
+    )
+    torch.testing.assert_close(actual, torch.tensor(expected))
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+@pytest.mark.parametrize("return_entropy,entropy_requires_grad", [(False, False), (True, False), (True, True)])
+def test_packed_sparse_metadata_mask_and_spans_share_cp_layout(return_entropy, entropy_requires_grad):
+    from skyrl.backends.skyrl_train.distributed.megatron import model_utils
+    from skyrl.backends.skyrl_train.distributed.megatron.active_spans import (
+        build_packed_active_metadata,
+    )
+
+    hidden = torch.zeros((1, 4, 128))
+    weight = torch.zeros((16, 128))
+    target = torch.arange(8).unsqueeze(0)
+    loss_mask = torch.tensor([[True, False, True, False, True, False, True]])
+    active_metadata = build_packed_active_metadata(
+        loss_mask,
+        num_actions=7,
+        sequence_length=8,
+        attention_mask=torch.ones((1, 8), dtype=torch.bool),
+        sub_seq_lengths=[[8]],
+        tp_size=1,
+        cp_size=2,
+        cp_rank=0,
+        fp8_enabled=False,
+    )
+    cu_seqlens = torch.tensor([0, 8])
+    tp_group = object()
+    cp_group = object()
+    requested_entropy_grad = entropy_requires_grad
+
+    def fused_apply(*args):
+        local_mask, active_spans, compute_entropy, actual_entropy_requires_grad = args[-4:]
+        assert compute_entropy == return_entropy
+        assert actual_entropy_requires_grad == requested_entropy_grad
+        assert local_mask.shape == (1, 4)
+        torch.testing.assert_close(local_mask, torch.tensor([[True, False, True, False]]))
+        covered = torch.zeros(local_mask.numel(), dtype=torch.bool)
+        for start, end in active_spans:
+            covered[start:end] = True
+        assert torch.all(~local_mask.reshape(-1) | covered)
+        if return_entropy:
+            return torch.zeros((1, 4)), torch.ones((1, 4))
+        return torch.zeros((1, 4))
+
+    gathered = [torch.zeros(8), torch.ones(8)] if return_entropy else [torch.zeros(8)]
+
+    with (
+        patch.object(model_utils.torch.distributed, "get_world_size", return_value=2),
+        patch.object(model_utils.torch.distributed, "get_rank", return_value=0),
+        patch.object(model_utils, "_fused_lm_head_logprob_apply", side_effect=fused_apply),
+        patch.object(model_utils, "allgather_cp_sharded_packed_tensor", side_effect=gathered),
+    ):
+        result = model_utils.from_parallel_hidden_to_logprobs_packed_sequences(
+            hidden,
+            weight,
+            target,
+            cu_seqlens,
+            unpacked_seqlen=8,
+            vocab_start_index=0,
+            vocab_end_index=16,
+            group=tp_group,
+            cp_group=cp_group,
+            active_mask=active_metadata.active_mask,
+            active_spans=active_metadata.active_spans,
+            return_entropy=return_entropy,
+            entropy_requires_grad=entropy_requires_grad,
+        )
+
+    if return_entropy:
+        logprobs, entropy = result
+        assert logprobs.shape == entropy.shape == (1, 7)
+        torch.testing.assert_close(entropy, torch.ones_like(entropy))
+    else:
+        assert result.shape == (1, 7)
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+def test_unpacked_active_spans_accept_exact_cp1_layout():
+    from skyrl.backends.skyrl_train.distributed.megatron import model_utils
+
+    with (
+        patch.object(model_utils.torch.distributed, "get_rank", return_value=0),
+        patch.object(model_utils, "_fused_lm_head_logprob_apply", return_value=torch.zeros((1, 4))) as apply,
+    ):
+        result = model_utils.from_parallel_hidden_to_logprobs(
+            torch.zeros((1, 4, 8)),
+            torch.zeros((16, 8)),
+            torch.arange(4).unsqueeze(0),
+            0,
+            16,
+            object(),
+            active_mask=torch.tensor([[True, True, False]]),
+            active_spans=((0, 2),),
+        )
+
+    assert result.shape == (1, 3)
+    apply.assert_called_once()
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+@pytest.mark.parametrize("hidden_tokens,target_tokens,cp_size", [(5, 4, 1), (2, 4, 2)])
+def test_unpacked_active_spans_reject_changed_row_coordinates(hidden_tokens, target_tokens, cp_size):
+    from skyrl.backends.skyrl_train.distributed.megatron import model_utils
+
+    with patch.object(model_utils.torch.distributed, "get_world_size", return_value=cp_size):
+        with pytest.raises(ValueError, match="Unpacked active_spans require"):
+            model_utils.from_parallel_hidden_to_logprobs(
+                torch.zeros((1, hidden_tokens, 8)),
+                torch.zeros((16, 8)),
+                torch.arange(target_tokens).unsqueeze(0),
+                0,
+                16,
+                object(),
+                cp_group=object() if cp_size > 1 else None,
+                active_mask=torch.ones((1, target_tokens - 1), dtype=torch.bool),
+                active_spans=((0, 1),),
+            )
 
 
 # ---------------------------------------------------------------------------

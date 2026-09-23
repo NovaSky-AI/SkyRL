@@ -4,7 +4,7 @@ Two callables cover the two SFT data paths:
 
 - :class:`DefaultCollator` left-pads sequences to the batch maximum and applies
   the per-non-pad-token loss normalization.
-- :class:`PackedDataCollator` performs controller-level FFD bin-packing
+- :class:`PackedDataCollator` performs controller-level MFFD bin-packing
   (Megatron-only): once per training step it packs sequences into bins of
   capacity ``max_tokens_per_microbatch``, rounds the bin count up to a multiple
   of ``dp_size`` (so every DP rank gets the same number of micro-batches), and
@@ -25,11 +25,43 @@ import torch
 from loguru import logger
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packed_seq_align_size,
+    get_packing_align_size_sequence,
+    get_packing_align_size_total,
+    packed_segment_layout,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 
-from .bin_packing import make_seq_packer
+from .bin_packing import PackingStrategy, SeqPacker, make_seq_packer
+
+PACKED_SFT_REAL_EXAMPLES_KEY = "packed_sft_real_examples"
+PACKED_SFT_REAL_TOKENS_KEY = "packed_sft_real_tokens"
+
+
+def make_sft_sequence_packer(
+    bin_capacity: int,
+    tp_size: int,
+    cp_size: int,
+    *,
+    dp_size: Optional[int] = None,
+    fp8_enabled: bool = False,
+    fp8_recipe: Optional[str] = None,
+) -> SeqPacker:
+    """Build an MFFD packer with the collator's TP/CP/FP8 capacity rules.
+
+    Set ``dp_size`` to enforce equal DP shard sizes; omit it to count unpadded bins.
+    CP/SP alignment applies per sequence, while TP/FP8 padding is paid once per bin.
+    """
+    sequence_align = get_packing_align_size_sequence(tp_size, cp_size)
+    total_align = get_packing_align_size_total(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
+    return make_seq_packer(
+        PackingStrategy.MODIFIED_FIRST_FIT_DECREASING,
+        bin_capacity=max(bin_capacity, total_align),
+        min_bin_count=dp_size,
+        bin_count_multiple=dp_size,
+        sequence_length_multiple=sequence_align,
+        packed_length_multiple=total_align,
+        allow_empty_bins=dp_size is not None,
+    )
 
 
 class DefaultCollator:
@@ -66,14 +98,13 @@ class DefaultCollator:
 
 
 class PackedDataCollator:
-    """Pack examples into bin rows via FFD and return a :class:`TrainingInputBatch`.
+    """Pack examples into bin rows via MFFD and return a :class:`TrainingInputBatch`.
 
     Activates on the training-step batch (``batch_size == self.batch_size``).
     Flow:
 
     1. Compute per-example sequence lengths.
-    2. FFD-pack using each sequence's alignment-padded footprint and
-       ``bin_capacity = max(max_tokens_per_microbatch, align_size)``,
+    2. MFFD-pack with ``bin_capacity = max_tokens_per_microbatch``,
        ``min_bin_count = dp_size``, ``bin_count_multiple = dp_size``.
     3. Round-robin assign bins to DP shards (this happens implicitly inside
        ``MeshDispatch.dispatch`` because the rows are laid out in shard-major
@@ -130,29 +161,20 @@ class PackedDataCollator:
         if batch_size != self.batch_size:
             return self._default_collator(examples, batch_size=batch_size)
 
-        bin_capacity = self.max_tokens_per_microbatch
-
         tp_size = self.tp_size
         pp_size = self.pp_size
         cp_size = self.cp_size
-        # Each sub-seq's padded length must satisfy these divisibility
-        # constraints, which is why ``align_size`` carries all required factors:
-        #   - Sequence Parallelism (auto-on when tp>1) shards along the seq
-        #     dim, so each segment must be divisible by ``tp_size``.
-        #   - Context Parallelism splits each segment into ``2*cp_size`` equal
-        #     load-balanced causal chunks, so each segment must be divisible by
-        #     ``2*cp_size``.
-        #   - FP8: TE with fp8_recipe=blockwise needs 16-token local slabs at
-        #     TP=1 and quantizes sequence-parallel all-gather inputs in
-        #     128-token blocks (so the global segment includes the TP and CP
-        #     shard factors); fp8_recipe=mxfp8 quantizes in 1x32 tiles, so the
-        #     TP=1 slab grows to 32.
-        # This MUST stay in lockstep with the worker's preprocess_packed_seqs
-        # (megatron_utils.py): if the divisors drift, the per-rank CP/SP
-        # gather/scatter offsets silently corrupt loss/grads (no crash).
-        align_size = get_packed_seq_align_size(
-            tp_size, cp_size, fp8_enabled=self.fp8_enabled, fp8_recipe=self.fp8_recipe
+        packer = make_sft_sequence_packer(
+            self.max_tokens_per_microbatch,
+            tp_size,
+            cp_size,
+            dp_size=self.dp_size,
+            fp8_enabled=self.fp8_enabled,
+            fp8_recipe=self.fp8_recipe,
         )
+        packing_align_size_sequence = packer.sequence_length_multiple
+        packing_align_size_total = packer.packed_length_multiple
+        packing_capacity = packer.bin_capacity
 
         def _round_up(x: int, multiple: int) -> int:
             return ((x + multiple - 1) // multiple) * multiple
@@ -181,7 +203,7 @@ class PackedDataCollator:
             full_input_ids.append(np.asarray(ex["input_ids"], dtype=np.int64))
 
         # ------------------------------------------------------------------
-        # 2. FFD pack with DP-symmetry constraints
+        # 2. MFFD pack with DP-symmetry constraints
         # ------------------------------------------------------------------
         # Each bin row is one worker micro-batch. Megatron's
         # ``forward_backward_func`` runs one micro-batch per bin on each DP
@@ -189,26 +211,7 @@ class PackedDataCollator:
         # same number of micro-batches. Forcing the global bin count to a
         # multiple of ``dp_size`` makes the per-DP-rank bin count (and thus
         # ``num_microbatches``) identical across ranks.
-        # Under FP8, pack each sequence's *aligned* footprint rather than its raw
-        # length: align_size is 128*tp*cp (vs tp*cp*2 without FP8), so per-sequence
-        # padding can otherwise push a bin far past max_tokens_per_microbatch and
-        # overflow the row budget. Also allow at least one alignment unit per bin,
-        # since a single padded sub-seq already costs align_size tokens.
-        # Non-FP8 keeps upstream's raw-length packing byte-for-byte.
-        if self.fp8_enabled:
-            packing_lengths = [_round_up(length, align_size) for length in seq_lengths]
-            packing_capacity = max(bin_capacity, align_size)
-        else:
-            packing_lengths = seq_lengths
-            packing_capacity = bin_capacity
-        bin_count_multiple = dp_size
-        packer = make_seq_packer(
-            "first_fit_decreasing",
-            bin_capacity=packing_capacity,
-            min_bin_count=bin_count_multiple,
-            bin_count_multiple=bin_count_multiple,
-        )
-        bins: List[List[int]] = packer.pack(packing_lengths)
+        bins: List[List[int]] = packer.pack(seq_lengths)
 
         # Assign bins to DP shards via round-robin (bin_idx % shards).
         # Concretely we want the resulting layout to be shard-major:
@@ -225,16 +228,21 @@ class PackedDataCollator:
             flat_bins.extend(shard_bins[shard_idx])
 
         # ------------------------------------------------------------------
-        # 3. Compute packed-row lengths (with align_size padding per sub-seq)
+        # 3. Compute packed-row lengths with per-sequence layout padding and
+        #    one aggregate tail pad.
         #    and the global max packed length (for PP > 1 uniform padding).
         # ------------------------------------------------------------------
         bin_packed_lengths: List[int] = []
         bin_subseq_lengths: List[List[int]] = []  # one list per bin row
         for bin_indices in flat_bins:
-            subseq_lens = [seq_lengths[idx] for idx in bin_indices]
-            # Each sub-seq's length is independently aligned to align_size
-            # (matches preprocess_packed_seqs behavior).
-            packed_len = sum(_round_up(s, align_size) for s in subseq_lens)
+            subseq_lens = [seq_lengths[idx] for idx in bin_indices] if bin_indices else [1]
+            packed_len = packed_segment_layout(
+                subseq_lens,
+                tp_size=tp_size,
+                cp_size=cp_size,
+                fp8_enabled=self.fp8_enabled,
+                fp8_recipe=self.fp8_recipe,
+            ).total
             bin_packed_lengths.append(packed_len)
             bin_subseq_lengths.append(subseq_lens)
 
@@ -242,17 +250,9 @@ class PackedDataCollator:
             # Pad all packed rows to the global max so Megatron's
             # pipeline schedule sees uniform shapes.
             max_packed_len = max(bin_packed_lengths) if bin_packed_lengths else 0
-            # Also align the global max to align_size to keep layouts uniform.
-            max_packed_len = _round_up(max_packed_len, align_size)
+            max_packed_len = _round_up(max_packed_len, packing_align_size_total)
         else:
             max_packed_len = max(bin_packed_lengths) if bin_packed_lengths else 0
-
-        # Guard against degenerate rows (e.g. an empty bin from
-        # _adjust_bin_count) — empty bins must not be produced in practice
-        # because the redistribution moves one sub-seq into every empty
-        # bin. If we ever see one, we widen this assertion.
-        for bin_indices in flat_bins:
-            assert bin_indices, "FFD produced an empty bin; _adjust_bin_count should prevent this"
 
         # ------------------------------------------------------------------
         # 4. Build per-row tensors: sequences, attention_mask, loss_mask
@@ -263,8 +263,7 @@ class PackedDataCollator:
         n_samples = len(examples)
         logger.info(
             f"sequence packing | packed {n_samples} samples into {num_bins} bins "
-            f"(~{num_bins // dp_size}/DP rank, bin_capacity={packing_capacity}"
-            f"{' aligned' if self.fp8_enabled else ''} tokens)"
+            f"(~{num_bins // dp_size}/DP rank, bin_capacity={packing_capacity} tokens)"
         )
 
         # Fill NumPy buffers by slice, then convert once.
@@ -276,6 +275,11 @@ class PackedDataCollator:
         loss_mask_width = max_packed_len - 1
 
         for row_idx, bin_indices in enumerate(flat_bins):
+            if not bin_indices:
+                # A short epoch tail can have fewer examples than DP ranks.
+                # This valid, zero-loss segment keeps every rank in the step.
+                attention_mask_np[row_idx, 0] = 1
+                continue
             row_offset = 0
             for ex_idx in bin_indices:
                 s = seq_lengths[ex_idx]
@@ -290,8 +294,7 @@ class PackedDataCollator:
                     if n_write > 0:
                         loss_mask_np[row_idx, row_offset:write_end] = full_loss_masks[ex_idx][1 : 1 + n_write]
 
-                # Match the aligned footprint consumed by preprocess_packed_seqs.
-                row_offset += _round_up(s, align_size)
+                row_offset += _round_up(s, packing_align_size_sequence)
 
         # Count response-token loss slots before normalization. The vectorized
         # build makes this exact, so no post-hoc reconciliation is needed.
@@ -312,7 +315,7 @@ class PackedDataCollator:
         # ------------------------------------------------------------------
         # 6. Pack into TrainingInputBatch with sub_seq_lengths data field
         # ------------------------------------------------------------------
-        # ``sub_seq_lengths`` is genuinely per-sample data: after FFD the
+        # ``sub_seq_lengths`` is genuinely per-sample data: after MFFD the
         # batch's "sample" *is* a bin, so ``len(bin_subseq_lengths) == num_bins
         # == batch_size``, co-indexed with ``sequences[r]``. We store it as a
         # ``TensorList`` (one 1-D int tensor per bin, ragged across bins — same
@@ -332,5 +335,7 @@ class PackedDataCollator:
         )
         batch.metadata = {
             "response_length": max_packed_len - 1,
+            PACKED_SFT_REAL_EXAMPLES_KEY: n_samples,
+            PACKED_SFT_REAL_TOKENS_KEY: sum(seq_lengths),
         }
         return batch

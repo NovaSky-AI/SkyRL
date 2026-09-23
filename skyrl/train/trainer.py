@@ -60,6 +60,7 @@ from skyrl.train.dataset.preprocess import (
     make_router_padding_mask,
 )
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
+from skyrl.train.fused_lm_head import FusedLmHeadBackend
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -1346,6 +1347,8 @@ class RayPPOTrainer:
             - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
         """
         fwd_keys = ["sequences", "attention_mask"]
+        if self.cfg.trainer.fused_lm_head_logprob_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE:
+            fwd_keys.append("loss_mask")
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")
         if training_input.get("router_padding_mask") is not None:

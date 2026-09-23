@@ -180,7 +180,7 @@ trained model**.
 
 By default `remove_microbatch_padding=true` packs multiple sequences per
 micro-batch (requires flash attention). The Megatron backend additionally
-supports **controller-level FFD bin-packing** across the global mini-batch with
+supports **controller-level MFFD bin-packing** across the global mini-batch with
 `use_sequence_packing=true`:
 
 ```bash
@@ -190,11 +190,19 @@ bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
 ```
 
 When enabled, the trainer bin-packs the mini-batch into bins of capacity
-`max_length` (padding the bin count to a multiple of the data-parallel size);
-each bin becomes one row of the dispatched batch and one worker micro-batch.
+`max_tokens_per_microbatch` (padding the bin count to a multiple of the
+data-parallel size); each bin becomes one row of the dispatched batch and one
+worker micro-batch.
 `use_sequence_packing` requires `remove_microbatch_padding=true` and
 `max_length` to be set, and `max_tokens_per_microbatch` (if given) must be
 `>= max_length`.
+
+Set `align_packing_bins_to_dp=true` to vary each training batch's example
+count by up to `packing_batch_size_allowed_variation` (default `0.05`). The
+sampler moves only contiguous batch boundaries, preserves every example and
+its order, and checkpoints its bounded read-ahead carry. This avoids creating
+extra bins solely to round the packed-bin count up to `dp_size`. Custom
+samplers are not supported with this option yet.
 
 ## Checkpointing, resume, and HF export
 
