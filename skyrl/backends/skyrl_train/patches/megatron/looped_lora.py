@@ -128,7 +128,28 @@ def _looped_block_forward(block: nn.Module, *args: Any, **kwargs: Any):
             block.num_layers_per_pipeline_rank = physical_layer_count
 
 
-def install_looped_lora(model: nn.Module | Sequence[nn.Module], sections: Sequence[dict[str, int]], mode: str) -> None:
+def _start_looped_backward(block: nn.Module, grad_output: tuple[torch.Tensor, ...]) -> None:
+    block._looped_lora_backward_tokens = (
+        _loop_schedule_active.set(True),
+        _adapter_only.set(False),
+    )
+
+
+def _finish_looped_backward(
+    block: nn.Module,
+    grad_input: tuple[torch.Tensor | None, ...],
+    grad_output: tuple[torch.Tensor | None, ...],
+) -> None:
+    schedule_token, adapter_token = block._looped_lora_backward_tokens
+    _adapter_only.reset(adapter_token)
+    _loop_schedule_active.reset(schedule_token)
+
+
+def install_looped_lora(
+    model: nn.Module | Sequence[nn.Module],
+    sections: Sequence[dict[str, int]],
+    mode: str,
+) -> None:
     """Install the Megatron forward schedule matching SkyRL's vLLM loop semantics."""
     if mode not in {"lora_only", "full_block"}:
         raise ValueError(f"Unsupported looped LoRA mode: {mode!r}")
@@ -166,3 +187,5 @@ def install_looped_lora(model: nn.Module | Sequence[nn.Module], sections: Sequen
     block.layers = _LoopedModuleList(physical_layers, schedule)
     block._looped_lora_original_forward = block.forward
     block.forward = MethodType(_looped_block_forward, block)
+    block.register_full_backward_pre_hook(_start_looped_backward)
+    block.register_full_backward_hook(_finish_looped_backward)
