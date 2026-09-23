@@ -151,6 +151,49 @@ def test_packed_sparse_metadata_mask_and_spans_share_cp_layout(return_entropy, e
         assert result.shape == (1, 7)
 
 
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+def test_unpacked_active_spans_accept_exact_cp1_layout():
+    from skyrl.backends.skyrl_train.distributed.megatron import model_utils
+
+    with (
+        patch.object(model_utils.torch.distributed, "get_rank", return_value=0),
+        patch.object(model_utils, "_fused_lm_head_logprob_apply", return_value=torch.zeros((1, 4))) as apply,
+    ):
+        result = model_utils.from_parallel_hidden_to_logprobs(
+            torch.zeros((1, 4, 8)),
+            torch.zeros((16, 8)),
+            torch.arange(4).unsqueeze(0),
+            0,
+            16,
+            object(),
+            active_mask=torch.tensor([[True, True, False]]),
+            active_spans=((0, 2),),
+        )
+
+    assert result.shape == (1, 3)
+    apply.assert_called_once()
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+@pytest.mark.parametrize("hidden_tokens,target_tokens,cp_size", [(5, 4, 1), (2, 4, 2)])
+def test_unpacked_active_spans_reject_changed_row_coordinates(hidden_tokens, target_tokens, cp_size):
+    from skyrl.backends.skyrl_train.distributed.megatron import model_utils
+
+    with patch.object(model_utils.torch.distributed, "get_world_size", return_value=cp_size):
+        with pytest.raises(ValueError, match="Unpacked active_spans require"):
+            model_utils.from_parallel_hidden_to_logprobs(
+                torch.zeros((1, hidden_tokens, 8)),
+                torch.zeros((16, 8)),
+                torch.arange(target_tokens).unsqueeze(0),
+                0,
+                16,
+                object(),
+                cp_group=object() if cp_size > 1 else None,
+                active_mask=torch.ones((1, target_tokens - 1), dtype=torch.bool),
+                active_spans=((0, 1),),
+            )
+
+
 # ---------------------------------------------------------------------------
 # C1: grad_scale_func fix
 # ---------------------------------------------------------------------------
