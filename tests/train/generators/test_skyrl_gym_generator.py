@@ -2,6 +2,7 @@
 uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_generator.py
 """
 
+import asyncio
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +26,7 @@ from skyrl.train.generators.base import (
 from skyrl.train.generators.skyrl_gym_generator import (
     AgentLoopState,
     SkyRLGymGenerator,
+    TrajectoryOutput,
     TurnOutput,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
@@ -153,6 +155,89 @@ def mock_env_cfg():
     cfg.max_env_workers = 0
     cfg.env_class = "gsm8k"
     return cfg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["cancel", "timeout", "error"])
+async def test_generate_joins_trajectory_tasks_on_failure(stop, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg):
+    generator_cfg.batched = False
+    generator = SkyRLGymGenerator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+    active = set()
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def agent_loop(prompt, *args, **kwargs):
+        task = asyncio.current_task()
+        active.add(task)
+        if len(active) == 2:
+            started.set()
+        try:
+            await started.wait()
+            if stop == "error" and prompt[0]["content"] == "1":
+                raise ValueError("trajectory failed")
+            await blocked.wait()
+        finally:
+            active.remove(task)
+
+    generator.agent_loop = agent_loop
+    inputs = {
+        "prompts": [[{"role": "user", "content": str(i)}] for i in range(2)],
+        "env_classes": ["gsm8k"] * 2,
+        "env_extras": [{}, {}],
+    }
+
+    async def run():
+        async with asyncio.timeout(0.05 if stop == "timeout" else None):
+            await generator.generate(inputs, disable_tqdm=True)
+
+    task = asyncio.create_task(run())
+    try:
+        if stop == "cancel":
+            await asyncio.wait_for(started.wait(), 2)
+            task.cancel()
+        error = {"cancel": asyncio.CancelledError, "timeout": TimeoutError, "error": ValueError}[stop]
+        with pytest.raises(error):
+            await asyncio.wait_for(task, 2)
+        assert not active
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        children = list(active)
+        for child in children:
+            child.cancel()
+        await asyncio.gather(*children, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_generate_keeps_input_order_when_trajectories_finish_out_of_order(
+    mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+):
+    generator_cfg.batched = False
+    generator = SkyRLGymGenerator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+    second_finished = asyncio.Event()
+
+    async def agent_loop(prompt, *args, **kwargs):
+        index = int(prompt[0]["content"])
+        if index == 0:
+            await second_finished.wait()
+        else:
+            second_finished.set()
+        return TrajectoryOutput([100 + index], float(index), "stop", [1], [1], None, {})
+
+    generator.agent_loop = agent_loop
+    output = await asyncio.wait_for(
+        generator.generate(
+            {
+                "prompts": [[{"role": "user", "content": str(i)}] for i in range(2)],
+                "env_classes": ["gsm8k"] * 2,
+                "env_extras": [{}, {}],
+            },
+            disable_tqdm=True,
+        ),
+        2,
+    )
+    assert output["response_ids"] == [[100], [101]]
+    assert output["rewards"] == [0.0, 1.0]
 
 
 def validate_generator_input(input_batch: GeneratorInput) -> bool:
