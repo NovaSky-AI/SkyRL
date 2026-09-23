@@ -90,7 +90,7 @@ def test_packed_fused_active_mask_is_cp_local_and_two_dimensional():
     cp_group = object()
 
     def fused_apply(*args):
-        local_mask = args[-1]
+        local_mask = args[-3]
         assert local_mask.shape == (1, 4)
         torch.testing.assert_close(local_mask, torch.tensor([[True, False, True, False]]))
         return torch.zeros((1, 4))
