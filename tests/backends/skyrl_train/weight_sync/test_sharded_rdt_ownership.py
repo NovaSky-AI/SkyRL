@@ -419,11 +419,11 @@ class TestStampedYieldValidation:
 
     @staticmethod
     def _engine(held):
-        from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
-            ShardedRDTTrainerWeightTransferEngine,
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
+            SkyRLShardedRDTTrainerWeightTransferEngine,
         )
 
-        e = ShardedRDTTrainerWeightTransferEngine.__new__(ShardedRDTTrainerWeightTransferEngine)
+        e = SkyRLShardedRDTTrainerWeightTransferEngine.__new__(SkyRLShardedRDTTrainerWeightTransferEngine)
         e._held_names = held
         return e
 

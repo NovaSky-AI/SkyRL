@@ -19,36 +19,33 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-# The native vLLM engine imports at module scope, so this module cannot be imported
+# The SkyRL engine imports vLLM at module scope, so this module cannot be imported
 # without the wheel. The import guard lets collection survive, and the marker is what
 # the ``-m vllm`` CI job selects.
-pytest.importorskip("vllm", reason="the native sharded_rdt engine imports vllm at module scope")
+pytest.importorskip("vllm", reason="the SkyRL sharded_rdt engine imports vllm at module scope")
 
 pytestmark = pytest.mark.vllm
-
-from vllm.distributed.weight_transfer.sharded_rdt_common import (  # noqa: E402
-    RdtRouter,
-    assign_producer_indices,
-    buffer_alloc_bytes,
-)
-from vllm.distributed.weight_transfer.sharded_rdt_engine import (  # noqa: E402
-    ShardedRDTWeightTransferEngine,
-    ShardedRDTWeightTransferInitInfo,
-    _dtype_from_name,
-)
-from vllm.distributed.weight_transfer.sharded_rdt_fake import (  # noqa: E402
-    SUPPORTED_OPS,
-    BakeSink,
-    FakeRDTTensor,
-    _Scatter,
-    _UnsupportedFakeOp,
-)
 
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (  # noqa: E402
     layerwise_groups,
 )
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common import (  # noqa: E402
     ALLOWED_OPS,
+    SUPPORTED_OPS,
+    RdtRouter,
+    assign_producer_indices,
+    buffer_alloc_bytes,
+)
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (  # noqa: E402
+    SkyRLShardedRDTWeightTransferEngine,
+    SkyRLShardedRDTWeightTransferInitInfo,
+    _dtype_from_name,
+)
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_fake import (  # noqa: E402
+    BakeSink,
+    FakeRDTTensor,
+    _Scatter,
+    _UnsupportedFakeOp,
 )
 
 META = torch.device("meta")
@@ -92,6 +89,7 @@ def _copy(name, layer_param="weight", *, offset=0, shape=(4,), ops=(), layer=Non
         shape=tuple(shape),
         stride=stride,
         dtype=dtype,
+        nbytes=prod(shape) * dtype.itemsize,
     )
 
 
@@ -121,7 +119,7 @@ def _planner(baked, *, name_meta, live=None, held_by=None, group_lens=None):
             classes.append(seen[key])
     else:
         n_prod, owner_sets, classes = 1, [[0]], [0] * len(names)
-    eng = object.__new__(ShardedRDTWeightTransferEngine)
+    eng = object.__new__(SkyRLShardedRDTWeightTransferEngine)
     eng._name_to_plan = dict(baked)
     eng._name_meta = dict(name_meta)
     eng._live_names = set(live or name_meta)
@@ -367,8 +365,7 @@ class TestBakeRecording:
 
         (recorded,) = rec.copies_by_layer[layer]
         assert recorded.dtype is torch.float32, "recorded the source dtype"
-        assert recorded.shape == (2,)
-        assert prod(recorded.shape) * recorded.dtype.itemsize == 8
+        assert recorded.nbytes == 2 * torch.float32.itemsize == 8
         # What the source name alone would have said, and what the producer
         # would NOT have sent.
         assert 2 * torch.bfloat16.itemsize == 4
@@ -594,7 +591,7 @@ class TestReplicaOverlay:
 
 def _producer_pack_offsets(slices):
     """The producer's rule, transcribed from ``rdt_produce_weights_batched``
-    in vLLM's RDT trainer: 16B-aligned offsets in specs order.
+    in SkyRL's RDT trainer: 16B-aligned offsets in specs order.
 
     Kept as an independent implementation on purpose: the consumer computing the
     same offsets is the invariant that makes the packed blob readable, and this
@@ -749,7 +746,7 @@ class TestChunkModuleScatters:
             (2, ["a1", "b1"]),
         ]
 
-    def test_scatters_carry_their_own_dtype_and_shape(self):
+    def test_scatters_carry_their_own_dtype_and_nbytes(self):
         """dtype rides the record from the bake, where it is the fake's dtype
         AFTER its op chain — not a plan-time lookup of the source name, which
         would be wrong for any chain that reinterprets dtype."""
@@ -760,8 +757,7 @@ class TestChunkModuleScatters:
         )
         (sc,) = scatters
         assert sc.dtype is torch.float32
-        assert sc.shape == (10,)
-        assert prod(sc.shape) * sc.dtype.itemsize == 40
+        assert sc.nbytes == 40
         assert sc.layer is layer
 
 
@@ -1330,13 +1326,13 @@ class TestConsumerIdentity:
     a collision silently serves two workers out of one ring."""
 
     def _engine(self, *, dp_index, rank, world_size):
-        eng = object.__new__(ShardedRDTWeightTransferEngine)
+        eng = object.__new__(SkyRLShardedRDTWeightTransferEngine)
         eng.parallel_config = SimpleNamespace(data_parallel_index=dp_index, rank=rank, world_size=world_size)
         return eng
 
     def _ids(self, *, num_consumers, workers, replica_rank=0, num_replicas=1):
         """Consumer ids for a DP-only engine whose workers are ``dp_index``es."""
-        info = ShardedRDTWeightTransferInitInfo(
+        info = SkyRLShardedRDTWeightTransferInitInfo(
             num_consumers=num_consumers,
             replica_rank=replica_rank,
             num_replicas=num_replicas,
@@ -1352,7 +1348,7 @@ class TestConsumerIdentity:
         """dense-via-TP and MoE-via-DP+EP both flatten to 0..C-1."""
         eng = self._engine(dp_index=0, rank=3, world_size=8)
         eng._num_consumers_override = 8
-        info = ShardedRDTWeightTransferInitInfo(num_consumers=8)
+        info = SkyRLShardedRDTWeightTransferInitInfo(num_consumers=8)
         assert eng._resolve_consumer_id(info) == 3
 
         eng = self._engine(dp_index=5, rank=0, world_size=1)
@@ -1378,15 +1374,15 @@ class TestRequiresTheRayExecutor:
 
     def _construct(self, backend):
         cfg = SimpleNamespace(parallel_config=SimpleNamespace(distributed_executor_backend=backend))
-        eng = object.__new__(ShardedRDTWeightTransferEngine)
+        eng = object.__new__(SkyRLShardedRDTWeightTransferEngine)
         # Only the guard is under test, so stand in for the base __init__.
         with pytest.MonkeyPatch.context() as m:
             m.setattr(
-                ShardedRDTWeightTransferEngine.__bases__[0],
+                SkyRLShardedRDTWeightTransferEngine.__bases__[0],
                 "__init__",
                 lambda self, *a, **k: None,
             )
-            ShardedRDTWeightTransferEngine.__init__(eng, None, cfg, META, None)
+            SkyRLShardedRDTWeightTransferEngine.__init__(eng, None, cfg, META, None)
         return eng
 
     @pytest.mark.parametrize("backend", ["uni", "mp", "external_launcher"])

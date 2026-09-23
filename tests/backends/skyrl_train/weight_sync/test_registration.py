@@ -48,9 +48,6 @@ class TestTrainerFactory:
         from vllm.distributed.weight_transfer.factory import (
             WeightTransferTrainerFactory,
         )
-        from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
-            ShardedRDTTrainerWeightTransferEngine,
-        )
 
         from skyrl.backends.skyrl_train.weight_sync.delta.trainer import (
             DeltaTrainerWeightTransferEngine,
@@ -58,16 +55,15 @@ class TestTrainerFactory:
         from skyrl.backends.skyrl_train.weight_sync.register import (
             register_trainer_engines,
         )
-        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
-            get_skyrl_rdt_trainer,
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
+            SkyRLShardedRDTTrainerWeightTransferEngine,
         )
 
         register_trainer_engines()
         registry = WeightTransferTrainerFactory._registry
         assert _resolve(registry, "delta") is DeltaTrainerWeightTransferEngine
         rdt_engine = _resolve(registry, "sharded_rdt")
-        assert rdt_engine is get_skyrl_rdt_trainer()
-        assert issubclass(rdt_engine, ShardedRDTTrainerWeightTransferEngine)
+        assert rdt_engine is SkyRLShardedRDTTrainerWeightTransferEngine
 
     def test_vllms_own_engines_are_still_there(self):
         """SkyRL registers alongside vLLM's, never over them."""
@@ -87,12 +83,12 @@ class TestTrainerFactory:
 class TestReceiveFactory:
     def test_skyrl_backends_resolve_to_their_classes(self):
         from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
-        from vllm.distributed.weight_transfer.sharded_rdt_engine import (
-            ShardedRDTWeightTransferEngine,
-        )
 
         from skyrl.backends.skyrl_train.weight_sync.delta.engine import (
             DeltaWeightTransferEngine,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
+            SkyRLShardedRDTWeightTransferEngine,
         )
         from skyrl.backends.skyrl_train.weight_sync.weight_receivers import (
             get_skyrl_ipc_engine,
@@ -104,7 +100,7 @@ class TestReceiveFactory:
         assert _resolve(registry, "skyrl_nccl") is get_skyrl_nccl_engine()
         assert _resolve(registry, "skyrl_ipc") is get_skyrl_ipc_engine()
         assert _resolve(registry, "delta") is DeltaWeightTransferEngine
-        assert _resolve(registry, "sharded_rdt") is ShardedRDTWeightTransferEngine
+        assert _resolve(registry, "sharded_rdt") is SkyRLShardedRDTWeightTransferEngine
 
     def test_skyrl_nccl_and_ipc_subclass_vllms_engines(self):
         """The new names exist because ``register_engine`` refuses a duplicate,

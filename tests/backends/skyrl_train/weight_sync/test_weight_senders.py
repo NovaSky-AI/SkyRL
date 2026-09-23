@@ -374,15 +374,14 @@ class TestCapabilityDeclarations:
         assert DeltaTrainerWeightTransferEngine.skyrl_handles_prefix_cache_reset is True
         assert DeltaTrainerWeightTransferEngine.skyrl_empty_cache_after_send is True
 
-    def test_native_rdt_adapter_declares_its_memory_flags(self):
-        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
-            get_skyrl_rdt_trainer,
+    def test_skyrl_rdt_trainer_declares_its_memory_flags(self):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
+            SkyRLShardedRDTTrainerWeightTransferEngine,
         )
 
-        E = get_skyrl_rdt_trainer()
-        assert E.skyrl_handles_prefix_cache_reset is False
-        assert E.skyrl_force_disable_expandable_segments is True
-        assert E.skyrl_empty_cache_after_send is False
+        assert SkyRLShardedRDTTrainerWeightTransferEngine.skyrl_handles_prefix_cache_reset is False
+        assert SkyRLShardedRDTTrainerWeightTransferEngine.skyrl_force_disable_expandable_segments is True
+        assert SkyRLShardedRDTTrainerWeightTransferEngine.skyrl_empty_cache_after_send is False
 
     def test_set_reset_prefix_cache_is_optional(self):
         maybe_set_reset_prefix_cache(_Bare(), True)

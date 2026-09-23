@@ -30,18 +30,18 @@ import torch
 # The native vLLM trainer imports at module scope, so this module cannot be
 # imported without the wheel. The import guard lets collection survive, and the
 # marker is what the ``-m vllm`` CI job selects.
-pytest.importorskip("vllm", reason="the native sharded_rdt trainer imports vllm at module scope")
+pytest.importorskip("vllm", reason="the SkyRL sharded_rdt trainer imports vllm at module scope")
 
 pytestmark = pytest.mark.vllm
 
-import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod  # noqa: E402
-from vllm.distributed.weight_transfer.sharded_rdt_common import (  # noqa: E402
+import skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer as trainer_mod  # noqa: E402
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common import (  # noqa: E402
     buffer_alloc_bytes,
 )
-from vllm.distributed.weight_transfer.sharded_rdt_trainer import (  # noqa: E402
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (  # noqa: E402
     DEFAULT_GATHER_LOOKAHEAD,
-    ShardedRDTTrainerInitInfo,
-    ShardedRDTTrainerWeightTransferEngine,
+    SkyRLShardedRDTTrainerInitInfo,
+    SkyRLShardedRDTTrainerWeightTransferEngine,
     _RDTProducerServer,
 )
 
@@ -269,8 +269,8 @@ def _loop_engine(server, n_groups, *, lookahead):
     state `_run_gather_loop` reads. The `_rpc` seam dispatches inline;
     `_publish_async` sees no `.remote` and runs inline too."""
     groups = [(f"model.layers.{gi}.w",) for gi in range(n_groups)]
-    e = ShardedRDTTrainerWeightTransferEngine.__new__(ShardedRDTTrainerWeightTransferEngine)
-    e._init_info = ShardedRDTTrainerInitInfo(rank=0, num_consumers=1, gather_lookahead=lookahead)
+    e = SkyRLShardedRDTTrainerWeightTransferEngine.__new__(SkyRLShardedRDTTrainerWeightTransferEngine)
+    e._init_info = SkyRLShardedRDTTrainerInitInfo(rank=0, num_consumers=1, gather_lookahead=lookahead)
     e.source = _CountingSource(groups)
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
@@ -341,7 +341,7 @@ class TestGatherCredit:
 
         consumer = threading.Thread(target=_consumer, daemon=True)
         consumer.start()
-        engine._run_gather_loop(update_future=None, live_count=1, live_ids=[0])
+        engine._run_gather_loop(update_future=None, consumer_ids=[0])
         consumer.join(timeout=10)
 
         assert not consumer.is_alive() and not failures, failures
@@ -356,7 +356,7 @@ class TestGatherCredit:
 
         def _run():
             try:
-                engine._run_gather_loop(update_future=None, live_count=1, live_ids=[0])
+                engine._run_gather_loop(update_future=None, consumer_ids=[0])
             except Exception:
                 pass  # unwound via set_gather_error below
 
@@ -455,14 +455,14 @@ class TestBeginSync:
     def test_begin_sync_sets_the_barrier_target(self, server_factory):
         server = server_factory()
         server.begin_sync(5)
-        assert server._live_count == 5
+        assert server._consumer_count == 5
 
     def test_the_target_is_floored_at_one(self, server_factory):
         """A bare/zero call must not make every group free instantly (or divide
         the barrier by zero)."""
         server = server_factory()
         server.begin_sync(0)
-        assert server._live_count == 1
+        assert server._consumer_count == 1
 
     def test_begin_sync_clears_per_sync_state(self, server_factory):
         server = server_factory()
@@ -712,7 +712,7 @@ class TestExportRing:
 
     @staticmethod
     def _engine():
-        eng = ShardedRDTTrainerWeightTransferEngine.__new__(ShardedRDTTrainerWeightTransferEngine)
+        eng = SkyRLShardedRDTTrainerWeightTransferEngine.__new__(SkyRLShardedRDTTrainerWeightTransferEngine)
         eng._export_ring = [None, None]
         eng._export_ring_args = [None, None]
         return eng
@@ -847,7 +847,7 @@ class TestExportRingSlotSafety:
 
         consumer = threading.Thread(target=_consumer, daemon=True)
         consumer.start()
-        engine._run_gather_loop(update_future=None, live_count=1, live_ids=[0])
+        engine._run_gather_loop(update_future=None, consumer_ids=[0])
         consumer.join(timeout=15)
 
         assert last_holder, "no group was ring-packed; the test proves nothing"
@@ -884,7 +884,7 @@ class TestExportRingSlotSafety:
 
         consumer = threading.Thread(target=_consumer, daemon=True)
         consumer.start()
-        engine._run_gather_loop(update_future=None, live_count=1, live_ids=[0])
+        engine._run_gather_loop(update_future=None, consumer_ids=[0])
         consumer.join(timeout=15)
 
         assert seen, "no group was ring-packed; the test proves nothing"

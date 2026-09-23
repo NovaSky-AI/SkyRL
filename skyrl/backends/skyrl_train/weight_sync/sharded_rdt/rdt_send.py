@@ -1202,7 +1202,7 @@ def build_rdt_trainer_init_info(
     server_urls: List[str],
     data_parallel_size: int,
 ):
-    """Build ``ShardedRDTTrainerInitInfo`` for this rank.
+    """Build ``SkyRLShardedRDTTrainerInitInfo`` for this rank.
 
     Every knob is resolved on the **trainer**: the producer sidecar is a Ray
     actor that inherits the raylet's environment, so a launch-time ``SKYRL_*``
@@ -1217,8 +1217,8 @@ def build_rdt_trainer_init_info(
             size are used, to derive the deployment count.
         data_parallel_size: DP replicas per deployment.
     """
-    from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
-        ShardedRDTTrainerInitInfo,
+    from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
+        SkyRLShardedRDTTrainerInitInfo,
     )
 
     if not inference_world_size:
@@ -1245,7 +1245,7 @@ def build_rdt_trainer_init_info(
         "on" if share_slots and num_replicas > 1 else "off",
     )
 
-    return ShardedRDTTrainerInitInfo(
+    return SkyRLShardedRDTTrainerInitInfo(
         rank=rank,
         num_consumers=int(inference_world_size),
         workers_per_replica=workers_per_replica,
