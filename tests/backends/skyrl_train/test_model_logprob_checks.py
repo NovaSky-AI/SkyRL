@@ -9,6 +9,7 @@ from examples.model_checks.logprob_checks import (
     compare_logprobs,
     perturb_full_weights,
     perturb_lora_b,
+    replicate_to_multiple,
 )
 
 
@@ -20,6 +21,23 @@ class _Tokenizer:
 def test_probe_sequences_have_requested_lengths():
     sequences = build_probe_sequences(_Tokenizer())
     assert [len(s) for s in sequences] == [65, 129]
+
+
+@pytest.mark.parametrize(
+    "multiple,expected", [(1, [0, 1]), (2, [0, 1]), (3, [0, 1, 0]), (4, [0, 1, 0, 1]), (5, [0, 1, 0, 1, 0])]
+)
+def test_replicate_to_multiple_cycles_sequences(multiple, expected):
+    sequences = [[0], [1]]
+    replicated = replicate_to_multiple(sequences, multiple)
+    assert len(replicated) % multiple == 0
+    assert [s[0] for s in replicated] == expected
+
+
+def test_replicate_to_multiple_rejects_bad_inputs():
+    with pytest.raises(ValueError):
+        replicate_to_multiple([[0]], 0)
+    with pytest.raises(ValueError):
+        replicate_to_multiple([], 2)
 
 
 def test_compare_logprobs_reports_error_statistics():

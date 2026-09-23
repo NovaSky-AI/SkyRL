@@ -33,6 +33,7 @@ from examples.model_checks.logprob_checks import (
     compare_logprobs,
     perturb_full_weights,
     perturb_lora_b,
+    replicate_to_multiple,
 )
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
@@ -222,7 +223,8 @@ async def publish(policy: PPORayActorGroup, client, cfg: SkyRLTrainConfig) -> No
 
 
 async def run_check(policy, client, cfg: SkyRLTrainConfig, tokenizer, args: argparse.Namespace) -> None:
-    sequences = build_probe_sequences(tokenizer)
+    # Mesh dispatch hands each data-parallel rank an equal share of the batch.
+    sequences = replicate_to_multiple(build_probe_sequences(tokenizer), policy.get_dp_size())
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     batch = build_batch(sequences, pad_token_id)
     lora = cfg.trainer.policy.model.lora.rank > 0

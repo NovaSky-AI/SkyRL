@@ -17,6 +17,20 @@ def build_probe_sequences(tokenizer, probes: Sequence[Tuple[str, int]] = PROBE_T
     return [list(islice(cycle(tokenizer.encode(text, add_special_tokens=False)), length)) for text, length in probes]
 
 
+def replicate_to_multiple(sequences: List[List[int]], multiple: int) -> List[List[int]]:
+    """Repeat ``sequences`` cyclically until their count is divisible by ``multiple``.
+
+    Mesh dispatch splits a batch into one equal chunk per data-parallel rank, so the
+    batch size must be a multiple of the data-parallel size.
+    """
+    if multiple <= 0:
+        raise ValueError("multiple must be positive")
+    if not sequences:
+        raise ValueError("sequences must be non-empty")
+    count = -(-len(sequences) // multiple) * multiple
+    return [sequences[i % len(sequences)] for i in range(count)]
+
+
 def compare_logprobs(reference: Sequence[float], actual: Sequence[float]) -> Dict[str, float]:
     """Absolute error statistics between two aligned 1-D logprob lists."""
     reference_t = torch.as_tensor(reference, dtype=torch.float64)
