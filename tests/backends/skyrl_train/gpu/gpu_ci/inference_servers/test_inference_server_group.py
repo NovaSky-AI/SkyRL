@@ -38,12 +38,7 @@ def make_vllm_cli_args(
     """Create CLI args for vLLM server using official parser."""
     from vllm import AsyncEngineArgs
     from vllm.entrypoints.launchers.cli_args import FrontendArgs
-    from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-    # The Ray head has no GPU, but vLLM's parser requires a device type.
-    if not current_platform.device_type:
-        current_platform.device_type = "cuda"
 
     parser = FlexibleArgumentParser(description="vLLM server")
     parser = FrontendArgs.add_cli_args(parser)
