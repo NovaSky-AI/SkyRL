@@ -126,7 +126,7 @@ def install_looped_lora(model: nn.Module | Sequence[nn.Module], sections: Sequen
         raise ValueError("Looped LoRA training currently requires every transformer layer on one pipeline stage (PP=1)")
     if any(layer.layer_number != index + 1 for index, layer in enumerate(physical_layers)):
         raise ValueError("Looped LoRA requires contiguous, one-based Megatron layer numbers")
-    if block.config.enable_mhc_connections:
+    if getattr(block.config, "enable_mhc_connections", False):
         raise ValueError("Looped LoRA does not support Megatron hyper-connections")
 
     schedule = build_looped_lora_schedule(num_hidden_layers, sections)
