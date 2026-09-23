@@ -8,6 +8,9 @@ description: Operational guide for choosing and combining parallelism strategies
 > **Source.** Adapted from NVIDIA Megatron-Bridge docs:
 > `https://docs.nvidia.com/nemo/megatron-bridge/latest/skills/perf-techniques/parallelism-strategies/SKILL.html`
 > Re-fetch from upstream when bumping the `megatron-bridge` pin in `pyproject.toml`.
+> Refreshed against `b244f2457790df364fab46ab4d522cd9c7e36d67`
+> (`skills/nemo-mbridge-perf-parallelism-strategies/SKILL.md`); the sizing and
+> parallelism guidance below remains applicable.
 >
 > **SkyRL adaptation.** Upstream uses `cfg.model.<field>`. In SkyRL these are surfaced through `MegatronConfig` (`skyrl/train/config.py`) and set on the CLI as e.g. `trainer.megatron.tensor_model_parallel_size=...` for SFT and `trainer.policy.megatron_config.` for RL. Field names are otherwise identical.
 >
