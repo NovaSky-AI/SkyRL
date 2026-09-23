@@ -8,9 +8,12 @@ Start Ray across both nodes; LoRA export requires a shared /shared mount.
 
 import argparse
 import asyncio
+import base64
+import io
 import math
 from contextlib import asynccontextmanager
 
+import numpy as np
 import ray
 import torch
 
@@ -26,6 +29,7 @@ from skyrl.backends.skyrl_train.inference_servers.setup import (
 )
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.routed_experts import compact_routed_expert_indices
 from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
     MegatronPolicyWorkerBase,
 )
@@ -33,6 +37,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
 )
 from skyrl.train.utils.utils import initialize_ray
 from skyrl.utils.tok import get_tokenizer
@@ -91,11 +96,11 @@ class LoRALogprobWorker(MegatronPolicyWorkerBase):
         return perturb_adapters(parameters, multiplier=multiplier)
 
 
-def build_batch(sequences, pad_token_id):
+def build_batch(sequences, pad_token_id, routes=None):
     responses = [tokens[1:] for tokens in sequences]
     masks = [[1] * len(tokens) for tokens in responses]
     tokens, attention, response, rewards, loss_mask, _, replay_routes, _ = convert_prompts_responses_to_batch_tensors(
-        pad_token_id, [[tokens[0]] for tokens in sequences], responses, masks, masks
+        pad_token_id, [[tokens[0]] for tokens in sequences], responses, masks, masks, rollout_expert_indices=routes
     )
     batch = TrainingInputBatch(
         {
@@ -111,6 +116,8 @@ def build_batch(sequences, pad_token_id):
             "advantages": torch.zeros_like(loss_mask),
         }
     )
+    if routes is not None:
+        batch["router_padding_mask"] = make_router_padding_mask(attention, [len(route) for route in routes])
     batch.metadata = {"response_length": response.shape[1]}
     return batch
 
@@ -151,6 +158,43 @@ async def score_sampler(client, sequences, model):
     return scores
 
 
+async def score_sampler_with_routes(client, sequences, model):
+    """Capture fixed-token scores and replay routes from the same completion."""
+    await client.reset_prefix_cache()
+    scores, routes = [], []
+    for tokens in sequences:
+        result = await client.completion(
+            {
+                "json": {
+                    "model": model,
+                    "prompt": tokens,
+                    "max_tokens": 1,
+                    "temperature": 1.0,
+                    "n": 1,
+                    "stream": False,
+                    "prompt_logprobs": 0,
+                    "add_special_tokens": False,
+                    "return_token_ids": True,
+                    "routed_experts_prompt_start": 0,
+                }
+            }
+        )
+        assert len(result["choices"]) == 1
+        choice = result["choices"][0]
+        assert choice["prompt_token_ids"] == tokens
+        values = choice["prompt_logprobs"]
+        assert len(values) == len(tokens) and values[0] is None
+        selected = [values[index][str(token)]["logprob"] for index, token in enumerate(tokens[1:], 1)]
+        assert all(math.isfinite(value) and value != -9999 for value in selected)
+        captured = compact_routed_expert_indices(
+            np.load(io.BytesIO(base64.b64decode(choice["routed_experts"], validate=True)), allow_pickle=False)
+        )
+        assert captured.shape[0] == len(tokens) and all(captured.shape[1:])
+        scores.extend(selected)
+        routes.append(captured)
+    return scores, routes
+
+
 async def publish(policy, client, cfg):
     await client.pause_generation()
     try:
@@ -166,35 +210,63 @@ async def publish(policy, client, cfg):
         await client.resume_generation()
 
 
-async def check_logprobs(policy, client, cfg, tokenizer):
+async def check_logprobs(policy, client, cfg, tokenizer, report=None):
     sequences = build_probe_sequences(tokenizer)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    batch = build_batch(sequences, pad_id)
     lora = cfg.trainer.policy.model.lora.rank > 0
+    replay = cfg.trainer.policy.megatron_config.moe_enable_routing_replay
+    assert replay == cfg.generator.inference_engine.enable_return_routed_experts
     model = resolve_policy_model_name(cfg) if lora else client.model_name
     colocated = cfg.trainer.placement.colocate_all
-    scores = {}
+    scores = {} if report is None else report
+    scores["tokens"] = sequences
     for phase in ["zero", "perturbed"] if lora else ["full_ft"]:
         if phase == "perturbed":
             perturb_trainer(policy)
-        trainer = score_trainer(policy, batch)
+        current = scores[phase] = {}
+        if not replay:
+            current["trainer"] = score_trainer(policy, build_batch(sequences, pad_id))
         if colocated:
-            policy.offload_to_cpu(offload_optimizer=True, offload_model=False)
+            # Match WorkerDispatch's adapter-only sync: offload the base before receiver wake.
+            policy.offload_to_cpu(offload_optimizer=True, offload_model=lora)
             await client.wake_up(tags=["weights"])
+        if phase == "perturbed":
+            if colocated:
+                await client.wake_up(tags=["kv_cache"])
+            if replay:
+                stale, stale_routes = await score_sampler_with_routes(client, sequences, model)
+                current["stale_routes"] = [route.tolist() for route in stale_routes]
+            else:
+                stale = await score_sampler(client, sequences, model)
+            current["stale"] = stale
+            assert compare_logprobs(scores["zero"]["inference"], stale)["max_abs"] <= 1e-6
+            if colocated:
+                await client.sleep()
+                await client.wake_up(tags=["weights"])
         await publish(policy, client, cfg)
         if colocated:
-            policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
+            if not lora:
+                policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
             await client.wake_up(tags=["kv_cache"])
-        inference = await score_sampler(client, sequences, model)
-        repeat = await score_sampler(client, sequences, model)
-        difference = compare_logprobs(trainer, inference)
-        print(f"{phase}: {difference}", flush=True)
-        check_agreement(difference, mean_atol=0.05, max_atol=0.5)
-        assert compare_logprobs(inference, repeat)["max_abs"] <= 1e-6
-        scores[phase] = {"trainer": trainer, "inference": inference}
+        if replay:
+            inference, routes = await score_sampler_with_routes(client, sequences, model)
+            current.update(inference=inference, routes=[route.tolist() for route in routes])
+            repeat, repeat_routes = await score_sampler_with_routes(client, sequences, model)
+            current.update(repeat=repeat, repeat_routes=[route.tolist() for route in repeat_routes])
+        else:
+            current["inference"] = await score_sampler(client, sequences, model)
+            current["repeat"] = await score_sampler(client, sequences, model)
         if colocated:
             await client.sleep()
             policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
+        if replay:
+            current["trainer"] = score_trainer(policy, build_batch(sequences, pad_id, routes))
+        difference = compare_logprobs(current["trainer"], current["inference"])
+        print(f"{phase}: {difference}", flush=True)
+        check_agreement(difference, mean_atol=0.05, max_atol=0.5)
+        assert compare_logprobs(current["inference"], current["repeat"])["max_abs"] <= 1e-6
+        if replay:
+            assert all(np.array_equal(route, repeat) for route, repeat in zip(routes, repeat_routes, strict=True))
     if lora:
         for backend in ("trainer", "inference"):
             assert compare_logprobs(scores["zero"][backend], scores["perturbed"][backend])["max_abs"] > 1e-6

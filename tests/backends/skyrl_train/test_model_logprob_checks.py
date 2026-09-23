@@ -1,8 +1,11 @@
+import base64
 import importlib.util
+import io
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -123,32 +126,40 @@ def checks(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "fault,colocated", [(None, False), ("stale", False), ("parity", False), ("repeat", False), (None, True)]
-)
-async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatch, checks, fault, colocated):
-    current = {"updated": False, "trainer_on_gpu": True, "inference": "asleep"}
-    sampler_calls = []
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("colocated", [False, True])
+@pytest.mark.parametrize("fault", [None, "stale", "parity", "repeat", "leaked_update", "routes"])
+async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatch, checks, fault, colocated, replay):
+    current = {"updated": False, "published": False, "trainer_on_gpu": True, "inference": "asleep"}
+    calls = []
+    route = np.zeros((2, 1, 1), dtype=np.uint8)
     monkeypatch.setattr(checks, "build_probe_sequences", lambda _: [[1, 2]])
-    monkeypatch.setattr(checks, "build_batch", lambda *_: None)
     monkeypatch.setattr(checks, "resolve_policy_model_name", lambda _: "adapter")
     monkeypatch.setattr(checks, "perturb_trainer", lambda _: current.update(updated=True))
+
+    def build_batch(sequences, pad_id, routes=None):
+        assert sequences == [[1, 2]]
+        if replay:
+            np.testing.assert_array_equal(routes, [route])
+        else:
+            assert routes is None
+
+    monkeypatch.setattr(checks, "build_batch", build_batch)
 
     def score_trainer(*_):
         assert current["trainer_on_gpu"]
         if colocated:
             assert current["inference"] == "asleep"
+        if replay:
+            assert calls and current["published"] == current["updated"]
         return [-1.0 if current["updated"] else -2.0]
 
     monkeypatch.setattr(checks, "score_trainer", score_trainer)
 
     def offload(offload_optimizer, offload_model):
-        assert current["trainer_on_gpu"]
-        if offload_model:
-            assert current["inference"] == "published"
-            current["trainer_on_gpu"] = False
-        else:
-            assert offload_optimizer and current["inference"] == "asleep"
+        assert current["trainer_on_gpu"] and current["inference"] == "asleep"
+        assert offload_optimizer and offload_model
+        current["trainer_on_gpu"] = False
 
     def backload(backload_optimizer, backload_model):
         assert current["inference"] == "asleep"
@@ -156,12 +167,12 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatc
         current["trainer_on_gpu"] = True
 
     async def wake_up(tags):
+        assert not current["trainer_on_gpu"]
         if tags == ["weights"]:
-            assert current["trainer_on_gpu"] and current["inference"] == "asleep"
+            assert current["inference"] == "asleep"
             current["inference"] = "weights"
         else:
-            assert tags == ["kv_cache"]
-            assert not current["trainer_on_gpu"] and current["inference"] == "published"
+            assert tags == ["kv_cache"] and current["inference"] == "weights"
             current["inference"] = "ready"
 
     async def sleep():
@@ -173,35 +184,95 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatc
 
     async def publish(*_):
         if colocated:
-            assert current["trainer_on_gpu"] and current["inference"] == "weights"
-            current["inference"] = "published"
+            assert not current["trainer_on_gpu"] and current["inference"] == "weights"
+        if fault != "stale":
+            current["published"] = current["updated"]
 
     async def score(*_):
         if colocated:
             assert not current["trainer_on_gpu"] and current["inference"] == "ready"
-        updated = current["updated"]
-        value = -1.0 if updated and fault != "stale" else -2.0
+        updated = current["published"] or (fault == "leaked_update" and current["updated"])
+        value = -1.0 if updated else -2.0
         if updated and fault == "parity":
             value += 0.1
-        if updated and fault == "repeat" and len(sampler_calls) == 3:
+        if updated and fault == "repeat" and len(calls) == 4:
             value += 0.001
-        sampler_calls.append(value)
+        calls.append(value)
         return [value]
+
+    async def score_routes(*args):
+        values = await score(*args)
+        captured = route + 1 if fault == "routes" and len(calls) == 5 else route
+        return values, [captured]
 
     monkeypatch.setattr(checks, "publish", publish)
     monkeypatch.setattr(checks, "score_sampler", score)
+    monkeypatch.setattr(checks, "score_sampler_with_routes", score_routes)
     cfg = SimpleNamespace(
         trainer=SimpleNamespace(
-            policy=SimpleNamespace(model=SimpleNamespace(lora=SimpleNamespace(rank=8))),
+            policy=SimpleNamespace(
+                model=SimpleNamespace(lora=SimpleNamespace(rank=8)),
+                megatron_config=SimpleNamespace(moe_enable_routing_replay=replay),
+            ),
             placement=SimpleNamespace(colocate_all=colocated),
-        )
+        ),
+        generator=SimpleNamespace(inference_engine=SimpleNamespace(enable_return_routed_experts=replay)),
     )
-    call = checks.check_logprobs(policy, client, cfg, SimpleNamespace(pad_token_id=0))
-    if fault:
+    report = {}
+    call = checks.check_logprobs(policy, client, cfg, SimpleNamespace(pad_token_id=0), report)
+    if fault and (fault != "routes" or replay):
         with pytest.raises(AssertionError):
             await call
+        assert report["perturbed"]
     else:
         result = await call
-        assert result["perturbed"] == {"trainer": [-1.0], "inference": [-1.0]}
+        assert result is report
+        assert result["perturbed"]["trainer"] == result["perturbed"]["inference"] == [-1.0]
+        assert result["perturbed"]["stale"] == [-2.0]
         if colocated:
             assert current["trainer_on_gpu"] and current["inference"] == "asleep"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [None, "tokens", "short_routes", "float_routes", "missing_routes", "nonfinite"])
+async def test_completion_pairs_scores_with_exact_prompt_routes(checks, fault):
+    tokens = [3, 7, 11]
+    routes = np.arange(6, dtype=np.int64).reshape(3, 2, 1)
+    if fault == "short_routes":
+        routes = routes[:-1]
+    if fault == "float_routes":
+        routes = routes.astype(float)
+    buffer = io.BytesIO()
+    np.save(buffer, routes, allow_pickle=False)
+    choice = {
+        "prompt_token_ids": tokens if fault != "tokens" else [3, 7, 12],
+        "prompt_logprobs": [None, {"7": {"logprob": -0.2}}, {"11": {"logprob": -0.3}}],
+        "routed_experts": base64.b64encode(buffer.getvalue()).decode(),
+    }
+    if fault == "missing_routes":
+        del choice["routed_experts"]
+    if fault == "nonfinite":
+        choice["prompt_logprobs"][1]["7"]["logprob"] = float("nan")
+
+    async def completion(payload):
+        body = payload["json"]
+        assert body["prompt"] == tokens and body["routed_experts_prompt_start"] == 0
+        assert body["max_tokens"] == 1 and not body["add_special_tokens"]
+        return {"choices": [choice]}
+
+    async def reset():
+        pass
+
+    call = checks.score_sampler_with_routes(
+        SimpleNamespace(completion=completion, reset_prefix_cache=reset), [tokens], "adapter"
+    )
+    if fault:
+        with pytest.raises((AssertionError, ValueError, KeyError)):
+            await call
+    else:
+        scores, captured = await call
+        assert scores == [-0.2, -0.3]
+        np.testing.assert_array_equal(captured, [routes])
+        batch = checks.build_batch([tokens, tokens[:2]], 0, [captured[0], captured[0][:2]])
+        assert batch["router_padding_mask"].tolist() == [[False, False, False], [True, False, False]]
+        assert batch["response_mask"].sum().item() == 3
