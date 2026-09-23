@@ -76,7 +76,9 @@ def test_text_only_batch_skips_inference_engines():
     assert fake_self._renderer is None
 
 
-def _rl_prepared_batch(rollout_logprobs: list[list[float]] | None) -> types.PreparedModelPassBatch:
+def _rl_prepared_batch_with_rollout_logprobs(
+    rollout_logprobs: list[list[float]] | None,
+) -> types.PreparedModelPassBatch:
     data = []
     for i in range(2):
         kwargs = {}
@@ -101,7 +103,7 @@ def _rl_prepared_batch(rollout_logprobs: list[list[float]] | None) -> types.Prep
 def test_rollout_logprobs_mirror_sampling_logprobs_by_default():
     """Without `rollout_logprobs`, the datum's `logprobs` fill both roles (ratio == 1)."""
     batch = skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
-        _fake_backend(), _rl_prepared_batch(None), role="policy"
+        _fake_backend(), _rl_prepared_batch_with_rollout_logprobs(None), role="policy"
     )
     assert batch["action_log_probs"].tolist() == [[-1.0, -2.0, -3.0]] * 2
     assert batch["rollout_logprobs"].tolist() == batch["action_log_probs"].tolist()
@@ -110,7 +112,9 @@ def test_rollout_logprobs_mirror_sampling_logprobs_by_default():
 def test_rollout_logprobs_are_used_when_provided():
     """`rollout_logprobs` feeds off-policy correction; `logprobs` stays the PPO ratio denominator."""
     batch = skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
-        _fake_backend(), _rl_prepared_batch([[-1.5, -2.5, -3.5], [-1.0, -2.0, -3.0]]), role="policy"
+        _fake_backend(),
+        _rl_prepared_batch_with_rollout_logprobs([[-1.5, -2.5, -3.5], [-1.0, -2.0, -3.0]]),
+        role="policy",
     )
     assert batch["action_log_probs"].tolist() == [[-1.0, -2.0, -3.0]] * 2
     assert batch["rollout_logprobs"].tolist() == [[-1.5, -2.5, -3.5], [-1.0, -2.0, -3.0]]
@@ -119,7 +123,7 @@ def test_rollout_logprobs_are_used_when_provided():
 def test_rollout_logprobs_length_mismatch_rejected():
     with pytest.raises(ValueError, match="rollout_logprobs"):
         skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
-            _fake_backend(), _rl_prepared_batch([[-1.5, -2.5], [-1.0, -2.0, -3.0]]), role="policy"
+            _fake_backend(), _rl_prepared_batch_with_rollout_logprobs([[-1.5, -2.5], [-1.0, -2.0, -3.0]]), role="policy"
         )
 
 
@@ -128,7 +132,7 @@ def test_mixed_batch_rejected():
     provides it is a client inconsistency and fails loudly instead of silently losing correction."""
     with pytest.raises(ValueError, match="every datum"):
         skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
-            _fake_backend(), _rl_prepared_batch([[-1.5, -2.5, -3.5], []]), role="policy"
+            _fake_backend(), _rl_prepared_batch_with_rollout_logprobs([[-1.5, -2.5, -3.5], []]), role="policy"
         )
 
 
