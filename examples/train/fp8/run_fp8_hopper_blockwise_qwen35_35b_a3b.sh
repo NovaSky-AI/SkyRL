@@ -16,6 +16,9 @@ DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 LOGGER="wandb"  # change to "console" to print to stdout
+ENV_FILE=${ENV_FILE:-.env.test}
+WANDB_PROJECT=${WANDB_PROJECT:-qwen_weight_sync_bench}
+RUN_NAME=${RUN_NAME:-fp8_hopper_blockwise_qwen35_35b_a3b}
 
 # Colocated by default: training and inference share the same GPUs. For a
 # disaggregated (non-colocated) run, set COLOCATE_ALL=false and split the GPUs,
@@ -25,14 +28,19 @@ COLOCATE_ALL=${COLOCATE_ALL:-true}
 
 NUM_NODES=2
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=2
-INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
+# Qwen3.5's routed experts have a 512-wide intermediate dimension. Blockwise
+# FP8 uses 128-column tiles, so TP8 would create invalid 64-wide expert
+# shards. Four TP4 engines still occupy the same 16 GPUs across two nodes.
+NUM_INFERENCE_ENGINES=4
+INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=4
 
 MEGATRON_TP=2
 MEGATRON_PP=1
 MEGATRON_CP=1
 MEGATRON_EP=8
 MEGATRON_ETP=1
+OPTIMIZER_OFFLOAD=${OPTIMIZER_OFFLOAD:-true}
+OPTIMIZER_OFFLOAD_FRACTION=${OPTIMIZER_OFFLOAD_FRACTION:-1.0}
 
 # Qwen3.5 goes through the VL bridge (Qwen3VLModel), which packs sequences in its own
 # forward and conflicts with SkyRL sample packing; language_model_only routes it to the
@@ -50,7 +58,7 @@ FP8_WEIGHT_SYNC_MODE=blockwise
 export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
 export VLLM_USE_DEEP_GEMM_E8M0=0
 
-uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
+uv run --env-file "$ENV_FILE" --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -84,6 +92,10 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
   trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
+  trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=$OPTIMIZER_OFFLOAD \
+  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=$OPTIMIZER_OFFLOAD \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_OFFLOAD \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
   trainer.ref.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.ref.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.ref.megatron_config.context_parallel_size=$MEGATRON_CP \
@@ -124,8 +136,8 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="skyrl_fp8" \
-  trainer.run_name="fp8_hopper_blockwise_qwen35_35b_a3b" \
+  trainer.project_name="$WANDB_PROJECT" \
+  trainer.run_name="$RUN_NAME" \
   trainer.ckpt_interval=-1 \
   trainer.hf_save_interval=-1 \
   trainer.resume_mode=null \
