@@ -143,6 +143,11 @@ class LoopedLoraConfig(BaseConfig):
     mode: Literal["lora_only", "full_block"] = "lora_only"
     """Extra-pass compute path. ``full_block`` is a benchmark reference mode."""
 
+    def __post_init__(self) -> None:
+        from skyrl.train.looped_lora import parse_looped_lora_sections
+
+        parse_looped_lora_sections(self.sections)
+
 
 @dataclass
 class FakeInt4QatConfig(BaseConfig):

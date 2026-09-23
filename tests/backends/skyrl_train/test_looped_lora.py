@@ -1,10 +1,105 @@
-import pytest
+from types import MethodType
 
+import pytest
+import torch
+from torch import nn
+
+from skyrl.backends.skyrl_train.patches.megatron.looped_lora import (
+    _adapter_only,
+    _looped_block_forward,
+    _looped_linear_forward,
+    _LoopedModuleList,
+    _set_context,
+)
 from skyrl.train.looped_lora import (
     LayerExecution,
     build_looped_lora_schedule,
     get_lora_only_executions_by_physical_layer,
 )
+
+
+class _RecordingLayer(nn.Module):
+    def __init__(self, layer_number: int, calls: list[int]) -> None:
+        super().__init__()
+        self.layer_number = layer_number
+        self.calls = calls
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        self.calls.append(self.layer_number - 1)
+        return hidden_states + self.layer_number
+
+
+class _RecordingBlock(nn.Module):
+    def __init__(self, num_layers: int, schedule) -> None:
+        super().__init__()
+        self.calls: list[int] = []
+        layers = [_RecordingLayer(index + 1, self.calls) for index in range(num_layers)]
+        self.layers = _LoopedModuleList(layers, schedule)
+        self._looped_lora_original_forward = self.forward
+        self.forward = MethodType(_looped_block_forward, self)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            hidden_states = layer(hidden_states)
+        return hidden_states
+
+
+class _FakeRMSNormLinear(nn.Module):
+    def __init__(self, hidden_size: int) -> None:
+        super().__init__()
+        self.layer_norm_weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = nn.Parameter(torch.eye(hidden_size))
+        self.normalization = "RMSNorm"
+        self.eps = 1e-6
+        self.zero_centered_gamma = False
+
+
+class _FakeLoraLinear(nn.Module):
+    def __init__(self, hidden_size: int) -> None:
+        super().__init__()
+        self.to_wrap = _FakeRMSNormLinear(hidden_size)
+        self.adapter = nn.Linear(hidden_size, hidden_size, bias=False)
+        self._adapter_enabled = True
+        self._base_returns_tuple = True
+        self.base_calls = 0
+
+    def _looped_lora_original_forward(self, inputs: torch.Tensor):
+        self.base_calls += 1
+        return self.to_wrap.weight @ inputs, None
+
+    def adapter_forward(self, adapter: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
+        return adapter(inputs)
+
+
+def test_megatron_extra_pass_skips_frozen_linear_and_backpropagates_through_lora() -> None:
+    linear = _FakeLoraLinear(hidden_size=3)
+    inputs = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+
+    with _set_context(_adapter_only, True):
+        output, bias = _looped_linear_forward(linear, inputs)
+    output.sum().backward()
+
+    assert bias is None
+    assert linear.base_calls == 0
+    assert linear.adapter.weight.grad is not None
+    assert linear.to_wrap.weight.grad is None
+    assert inputs.grad is not None
+
+
+@pytest.mark.parametrize("repeat_count", [1, 2, 4])
+def test_megatron_block_uses_vllm_section_order(repeat_count: int) -> None:
+    schedule = build_looped_lora_schedule(
+        6,
+        [{"start_layer": 1, "end_layer": 4, "repeat_count": repeat_count}],
+    )
+    block = _RecordingBlock(6, schedule)
+
+    output = block(torch.zeros(1))
+
+    expected_calls = [0, 1, 2, 3] + [1, 2, 3] * (repeat_count - 1) + [4, 5]
+    assert block.calls == expected_calls
+    assert output.item() == sum(index + 1 for index in expected_calls)
+    assert [layer.layer_number for layer in block.layers] == list(range(1, 7))
 
 
 @pytest.mark.parametrize(
