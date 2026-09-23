@@ -105,14 +105,16 @@ def _looped_block_forward(block: nn.Module, *args: Any, **kwargs: Any):
             block.num_layers_per_pipeline_rank = physical_layer_count
 
 
-def install_looped_lora(model: nn.Module, sections: Sequence[dict[str, int]], mode: str) -> None:
+def install_looped_lora(model: nn.Module | Sequence[nn.Module], sections: Sequence[dict[str, int]], mode: str) -> None:
     """Install the Megatron forward schedule matching SkyRL's vLLM loop semantics."""
     if mode not in {"lora_only", "full_block"}:
         raise ValueError(f"Unsupported looped LoRA mode: {mode!r}")
 
     from megatron.bridge.peft.lora_layers import LoRALinear, TEFusedLoRALinear
 
-    blocks = [module for module in model.modules() if hasattr(module, "layers") and module.layers]
+    roots = (model,) if isinstance(model, nn.Module) else tuple(model)
+    modules = tuple(module for root in roots for module in root.modules())
+    blocks = [module for module in modules if hasattr(module, "layers") and module.layers]
     blocks = [block for block in blocks if all(hasattr(layer, "layer_number") for layer in block.layers)]
     if len(blocks) != 1:
         raise ValueError("Looped LoRA training currently requires one non-empty Megatron transformer block (PP=1)")
@@ -131,9 +133,9 @@ def install_looped_lora(model: nn.Module, sections: Sequence[dict[str, int]], mo
     if mode == "full_block":
         schedule = tuple(LayerExecution(execution.physical_layer, False) for execution in schedule)
 
-    for module in model.modules():
+    for module in modules:
         if isinstance(module, TEFusedLoRALinear):
-            raise RuntimeError("Looped LoRA does not support fused Transformer Engine LoRA")
+            raise TypeError("Looped LoRA does not support fused Transformer Engine LoRA")
         if isinstance(module, LoRALinear):
             module._looped_lora_original_forward = module.forward
             module.forward = MethodType(_looped_linear_forward, module)
