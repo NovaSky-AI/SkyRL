@@ -9,8 +9,14 @@ uv run --isolated --extra dev --extra skyrl-train pytest tests/backends/skyrl_tr
 
 from typing import List
 
+import pytest
 import torch
 
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packing_align_size_sequence,
+    get_packing_align_size_total,
+    packed_segment_layout,
+)
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
     PackedTensor,
@@ -170,6 +176,34 @@ class TestTokenBasedBatchIterator:
 
         assert iterator._token_counts == [12, 12]
         assert iterator._microbatches == [[0], [1]]
+
+    @pytest.mark.parametrize(
+        "tp,cp,fp8,recipe",
+        [
+            (1, 1, False, None),
+            (4, 1, False, None),
+            (1, 2, False, None),
+            (2, 2, False, None),
+            (2, 2, True, "blockwise"),
+            (2, 2, True, "mxfp8"),
+        ],
+    )
+    def test_controller_row_footprint_matches_shared_layout(self, tp, cp, fp8, recipe):
+        batch = self._make_batch([8, 8])
+        batch["sub_seq_lengths"] = TensorList([torch.tensor([3, 5]), torch.tensor([3, 5])])
+        sequence_multiple = get_packing_align_size_sequence(tp, cp)
+        total_multiple = get_packing_align_size_total(tp, cp, fp8_enabled=fp8, fp8_recipe=recipe)
+        expected = packed_segment_layout([3, 5, 3, 5], tp_size=tp, cp_size=cp, fp8_enabled=fp8, fp8_recipe=recipe).total
+
+        iterator = TokenBasedBatchIterator(
+            batch,
+            max_tokens_per_microbatch=expected,
+            sequence_length_multiple=sequence_multiple,
+            packed_length_multiple=total_multiple,
+        )
+
+        assert iterator._microbatches == [[0, 1]]
+        assert sum(iterator._token_counts) + (-sum(iterator._token_counts) % total_multiple) == expected
 
     def test_len_matches_iteration(self):
         batch = self._make_batch([10, 10, 5, 5])
