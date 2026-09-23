@@ -18,7 +18,7 @@ from skyrl.train.utils.utils import (
     get_ray_pg_ready_with_timeout,
 )
 
-from .common import SERVER_PORT_STRIDE
+from .common import SERVER_PORT_STRIDE, ServerInfo
 from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
 from .utils import (
@@ -52,6 +52,51 @@ class InferenceServerSetup:
     server_groups: List[ServerGroup] = field(default_factory=list)
     prefill_server_groups: List[ServerGroup] = field(default_factory=list)
     decode_server_groups: List[ServerGroup] = field(default_factory=list)
+    # Outstanding ``ServerGroup.start`` refs when built with ``wait_for_ready=False``.
+    pending_start_refs: List[ray.ObjectRef] = field(default_factory=list)
+
+    def wait_until_ready(self) -> None:
+        """Block until every launched server is healthy and the router is serving.
+
+        No-op when the servers were created with ``wait_for_ready=True``.
+        """
+        if self.pending_start_refs:
+            ray.get(self.pending_start_refs)
+            self.pending_start_refs = []
+        if self.router is not None and not self.router.is_started:
+            self.router.start()
+
+
+def _launch_server_groups(
+    groups: List[ServerGroup], wait_for_ready: bool
+) -> Tuple[List[ray.ObjectRef], List[List[ServerInfo]]]:
+    """Start every group and return ``(pending refs, per-group server infos)``.
+
+    With ``wait_for_ready`` the refs are resolved here and the returned list is
+    empty; otherwise the infos come from the actors' constructor-time state and
+    the caller is responsible for resolving the refs later.
+    """
+    start_refs: List[ray.ObjectRef] = []
+    for g in groups:
+        start_refs.extend(g.start(blocking=False))
+    if wait_for_ready:
+        ray.get(start_refs)
+        return [], [g.server_infos for g in groups]
+    return start_refs, [g.get_server_infos_nowait() for g in groups]
+
+
+def _make_router(router_args, log_path: str, wait_for_ready: bool) -> Tuple[VLLMRouter, str]:
+    """Construct the router and return it with its URL.
+
+    The router waits for its backends to pass health checks before it serves, so
+    it is only started here when the servers are already healthy; otherwise
+    ``InferenceServerSetup.wait_until_ready`` starts it. The URL is known either
+    way because the port is reserved in the constructor.
+    """
+    router = VLLMRouter(router_args, log_path=log_path)
+    if wait_for_ready:
+        return router, router.start()
+    return router, router.url
 
 
 def create_inference_servers(
@@ -59,6 +104,7 @@ def create_inference_servers(
     cli_args: Namespace,
     log_path: str,
     placement_group=None,
+    wait_for_ready: bool = True,
 ) -> InferenceServerSetup:
     """Build server groups and router from config.
 
@@ -73,13 +119,18 @@ def create_inference_servers(
         log_path: Log path for SkyRL logs
         placement_group: Optional resolved placement group for colocated
             training.  ``None`` when not colocated.
+        wait_for_ready: Block until every server is healthy and the router is
+            serving. With ``False`` the servers are launched and their URLs
+            resolved, but the caller must call
+            :meth:`InferenceServerSetup.wait_until_ready` before sending any
+            request; this lets training-side initialization overlap engine
+            startup.
 
     Returns:
         An :class:`InferenceServerSetup` with the router, URLs, and
         server group references.
     """
     from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-    from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
 
     gpus_per_server = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size
     is_colocated = placement_group is not None
@@ -156,20 +207,12 @@ def create_inference_servers(
             for i in range(num_decode)
         ]
 
-        # Start all prefill and decode groups in parallel (non-blocking)
-        all_refs = []
-        for g in prefill_server_groups:
-            all_refs.extend(g.start(blocking=False))
-
-        for g in decode_server_groups:
-            all_refs.extend(g.start(blocking=False))
-
-        # Wait for all servers to be ready in one shot
-        ray.get(all_refs)
-
-        # Collect URLs — refs are already resolved so lazy property returns immediately
-        prefill_urls = [info.url for g in prefill_server_groups for info in g.server_infos]
-        decode_urls = [info.url for g in decode_server_groups for info in g.server_infos]
+        # Start all prefill and decode groups in parallel
+        pending_refs, group_infos = _launch_server_groups(prefill_server_groups + decode_server_groups, wait_for_ready)
+        prefill_infos = [info for infos in group_infos[:num_prefill] for info in infos]
+        decode_infos = [info for infos in group_infos[num_prefill:] for info in infos]
+        prefill_urls = [info.url for info in prefill_infos]
+        decode_urls = [info.url for info in decode_infos]
 
         server_urls = prefill_urls + decode_urls
 
@@ -183,9 +226,7 @@ def create_inference_servers(
         pd_kv_connector = None
         if p2p_connector == "MooncakeConnector":
             pd_kv_connector = "mooncake"
-            prefill_bootstrap_ports = [
-                info.mooncake_bootstrap_server_port for g in prefill_server_groups for info in g.server_infos
-            ]
+            prefill_bootstrap_ports = [info.mooncake_bootstrap_server_port for info in prefill_infos]
 
         router_args = build_router_args(
             ie_cfg,
@@ -194,11 +235,10 @@ def create_inference_servers(
             prefill_bootstrap_ports=prefill_bootstrap_ports,
             pd_kv_connector=pd_kv_connector,
         )
-        router = VLLMRouter(router_args, log_path=log_path)
-        proxy_url = router.start()
+        router, proxy_url = _make_router(router_args, log_path, wait_for_ready)
         logger.info(
             f"HTTP Inference (PD): prefill_urls={prefill_urls}, decode_urls={decode_urls}, "
-            f"proxy_url={proxy_url}, colocated={is_colocated}"
+            f"proxy_url={proxy_url}, colocated={is_colocated}, ready={wait_for_ready}"
         )
         return InferenceServerSetup(
             router=router,
@@ -207,6 +247,7 @@ def create_inference_servers(
             server_groups=prefill_server_groups + decode_server_groups,
             prefill_server_groups=prefill_server_groups,
             decode_server_groups=decode_server_groups,
+            pending_start_refs=pending_refs,
         )
     else:
         # When not colocated, create a shared PG for all engine groups so
@@ -233,26 +274,22 @@ def create_inference_servers(
             for i in range(ie_cfg.num_engines)
         ]
 
-        # Start all engine groups in parallel (non-blocking)
-        all_refs = []
-        for g in server_groups:
-            all_refs.extend(g.start(blocking=False))
-
-        # Wait for all servers to be ready in one shot
-        ray.get(all_refs)
-
-        # Collect URLs — refs are already resolved so lazy property returns immediately
-        server_urls = [info.url for g in server_groups for info in g.server_infos]
+        # Start all engine groups in parallel
+        pending_refs, group_infos = _launch_server_groups(server_groups, wait_for_ready)
+        server_urls = [info.url for infos in group_infos for info in infos]
 
         router_args = build_router_args(ie_cfg, server_urls=server_urls)
-        router = VLLMRouter(router_args, log_path=log_path)
-        proxy_url = router.start()
-        logger.info(f"HTTP Inference: proxy_url={proxy_url}, server_urls={server_urls}, " f"colocated={is_colocated}")
+        router, proxy_url = _make_router(router_args, log_path, wait_for_ready)
+        logger.info(
+            f"HTTP Inference: proxy_url={proxy_url}, server_urls={server_urls}, "
+            f"colocated={is_colocated}, ready={wait_for_ready}"
+        )
         return InferenceServerSetup(
             router=router,
             proxy_url=proxy_url,
             server_urls=server_urls,
             server_groups=server_groups,
+            pending_start_refs=pending_refs,
         )
 
 
@@ -260,6 +297,7 @@ def build_new_inference_client(
     cfg: SkyRLTrainConfig,
     tokenizer,
     placement_group: Optional[ResolvedPlacementGroup] = None,
+    wait_for_ready: bool = True,
 ) -> Tuple[RemoteInferenceClient, InferenceServerSetup]:
     """Build the new HTTP-based inference client and supporting state.
 
@@ -277,6 +315,10 @@ def build_new_inference_client(
         placement_group: Resolved placement group when colocated, ``None``
             otherwise. Passed through to ``create_inference_servers`` in
             the internal-servers branch; ignored on external branches.
+        wait_for_ready: Passed through to ``create_inference_servers``. With
+            ``False`` the returned client must not be used until
+            ``server_setup.wait_until_ready()`` has returned. Ignored on
+            external branches.
 
     Returns:
         Tuple of (client, server_setup). ``server_setup.router`` is
@@ -324,6 +366,7 @@ def build_new_inference_client(
             cli_args,
             log_path=cfg.trainer.log_path,
             placement_group=placement_group,
+            wait_for_ready=wait_for_ready,
         )
 
     client = RemoteInferenceClient(
