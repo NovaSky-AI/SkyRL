@@ -1,10 +1,8 @@
 """vLLM worker extension for the two weight-sync things an engine cannot do.
 
 Weight transfer itself does not route through here: the receive path is an engine
-subclass (``weight_sync/weight_receivers.py``, ``weight_sync/delta/engine.py``,
-``weight_sync/sharded_rdt/sharded_rdt_engine.py``) driven over vLLM's native RLHF
-routes, which wrap ``set_current_vllm_config`` themselves and give each engine
-its own layerwise-reload lifecycle.
+subclass (``weight_sync/weight_receivers.py``, ``weight_sync/delta/engine.py``)
+or vLLM's native ``sharded_rdt`` engine, driven over vLLM's native RLHF routes.
 
 What remains are two limits of *dispatch*:
 
@@ -39,6 +37,11 @@ from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
     batched_moe_wire_targets,
 )
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_libfabric_shim import (
+    ensure_ray_rdt_libfabric,
+)
+
+ensure_ray_rdt_libfabric()
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -78,7 +81,7 @@ except ModuleNotFoundError:
 # worker process before model init, and the device is read lazily at compile
 # time, once it is live.
 # TODO (sumanthrh): Remove the patch after https://github.com/vllm-project/vllm/pull/53312 lands.
-from skyrl.backends.skyrl_train.patches.vllm.patch_compile_cache_device_path import (
+from skyrl.backends.skyrl_train.patches.vllm.patch_compile_cache_device_path import (  # noqa: E402
     apply_compile_cache_device_path_patch,
 )
 

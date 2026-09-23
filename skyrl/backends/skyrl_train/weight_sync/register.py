@@ -14,16 +14,13 @@ Both live here so the two call sites cannot drift: a backend that
 ``get_vllm_receive_backend`` can select but nobody registered fails only once a
 real engine is constructed, inside a worker.
 
-**Registration does not import the engines.** ``delta`` and ``sharded_rdt`` are
-registered by module path and class name as strings, which vLLM imports lazily
-when a worker constructs the backend — so this module stays cheap and stays
-importable without the vLLM wheel. ``skyrl_nccl`` / ``skyrl_ipc`` are the
-exception: they are built dynamically as subclasses of vLLM's engines, so there
-is no importable module attribute to name and the class itself is passed.
+``delta`` is registered by module path and class name, so vLLM imports it lazily
+when a worker constructs the backend. ``skyrl_nccl`` / ``skyrl_ipc`` are dynamic
+subclasses of vLLM engines, so their classes are passed directly.
 
-vLLM 0.29 registers the ``sharded_rdt`` receive engine natively. SkyRL uses it
-directly, while adapting its native trainer engine with the three explicit
-worker-memory capability declarations described in ``weight_senders``.
+vLLM 0.30 registers the ``sharded_rdt`` receive engine natively. SkyRL uses it
+directly, while adapting its native trainer engine with the worker-memory
+capability declarations described in ``weight_senders``.
 """
 
 import logging
@@ -35,8 +32,6 @@ RDT_BACKEND = "sharded_rdt"
 
 _DELTA_ENGINE_MODULE = "skyrl.backends.skyrl_train.weight_sync.delta.engine"
 _DELTA_TRAINER_MODULE = "skyrl.backends.skyrl_train.weight_sync.delta.trainer"
-_RDT_ENGINE_MODULE = "skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine"
-_RDT_TRAINER_MODULE = "skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer"
 
 _RECEIVE_REGISTERED = False
 _TRAINER_REGISTERED = False
@@ -75,7 +70,6 @@ def register_receive_engines() -> None:
             WeightTransferEngineFactory.register_engine(name, build())
 
     register_delta_weight_transfer_engine()
-    register_rdt_weight_transfer_engine()
 
     _RECEIVE_REGISTERED = True
     logger.debug("Registered receive-side weight transfer engines.")
@@ -84,14 +78,6 @@ def register_receive_engines() -> None:
 def register_delta_weight_transfer_engine() -> None:
     """Register the checkpoint-delta receive engine under ``delta`` (idempotent)."""
     _register_receive_by_path(DELTA_BACKEND, _DELTA_ENGINE_MODULE, "DeltaWeightTransferEngine")
-
-
-def register_rdt_weight_transfer_engine() -> None:
-    """Register the sharded-RDT receive engine under ``sharded_rdt`` (idempotent).
-
-    REMOVAL: drops out once SkyRL's pinned vLLM registers this engine natively.
-    """
-    _register_receive_by_path(RDT_BACKEND, _RDT_ENGINE_MODULE, "ShardedRDTWeightTransferEngine")
 
 
 def _register_receive_by_path(name: str, module: str, class_name: str) -> None:
@@ -144,13 +130,12 @@ def register_trainer_engines() -> None:
         if name not in WeightTransferTrainerFactory._registry:
             WeightTransferTrainerFactory.register_engine(name, module, cls)
 
-    # Replace native RDT's lazy loader with SkyRL's capability-aware subclass.
-    if RDT_BACKEND in WeightTransferTrainerFactory._registry:
-        WeightTransferTrainerFactory._registry[RDT_BACKEND] = get_skyrl_rdt_trainer
-    else:
-        WeightTransferTrainerFactory.register_engine(
-            RDT_BACKEND, _RDT_TRAINER_MODULE, "ShardedRDTTrainerWeightTransferEngine"
+    if RDT_BACKEND not in WeightTransferTrainerFactory._registry:
+        raise RuntimeError(
+            "The installed vLLM does not register the native 'sharded_rdt' trainer engine. "
+            "SkyRL requires vLLM 0.30 or newer."
         )
+    WeightTransferTrainerFactory._registry[RDT_BACKEND] = get_skyrl_rdt_trainer
 
     _TRAINER_REGISTERED = True
     logger.debug("Registered trainer-side weight transfer engines.")

@@ -13,39 +13,42 @@ silently shipping different bytes.
 `test_sharded_rdt_source.py` the trainer-side weight source.
 """
 
+from math import prod
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-# The vendored engine/trainer import vllm at module scope, so this module cannot be
-# imported without the wheel. Both guards are needed: the importorskip lets collection
-# survive (a marker cannot -- pytest must import the module to read it), and the marker
-# is what the `-m "vllm"` CI job selects on.
-pytest.importorskip("vllm", reason="the vendored sharded_rdt engine imports vllm at module scope")
+# The native vLLM engine imports at module scope, so this module cannot be imported
+# without the wheel. The import guard lets collection survive, and the marker is what
+# the ``-m vllm`` CI job selects.
+pytest.importorskip("vllm", reason="the native sharded_rdt engine imports vllm at module scope")
 
 pytestmark = pytest.mark.vllm
+
+from vllm.distributed.weight_transfer.sharded_rdt_common import (  # noqa: E402
+    RdtRouter,
+    assign_producer_indices,
+    buffer_alloc_bytes,
+)
+from vllm.distributed.weight_transfer.sharded_rdt_engine import (  # noqa: E402
+    ShardedRDTWeightTransferEngine,
+    ShardedRDTWeightTransferInitInfo,
+    _dtype_from_name,
+)
+from vllm.distributed.weight_transfer.sharded_rdt_fake import (  # noqa: E402
+    SUPPORTED_OPS,
+    BakeSink,
+    FakeRDTTensor,
+    _Scatter,
+    _UnsupportedFakeOp,
+)
 
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (  # noqa: E402
     layerwise_groups,
 )
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common import (  # noqa: E402
     ALLOWED_OPS,
-    SUPPORTED_OPS,
-    RdtRouter,
-    assign_producer_indices,
-    buffer_alloc_bytes,
-)
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (  # noqa: E402
-    ShardedRDTWeightTransferEngine,
-    ShardedRDTWeightTransferInitInfo,
-    _dtype_from_name,
-)
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_fake import (  # noqa: E402
-    BakeSink,
-    FakeRDTTensor,
-    _Scatter,
-    _UnsupportedFakeOp,
 )
 
 META = torch.device("meta")
@@ -81,8 +84,6 @@ def _copy(name, layer_param="weight", *, offset=0, shape=(4,), ops=(), layer=Non
     stride = (
         (1,) if len(shape) == 1 else tuple(int(torch.empty(shape, device=META).stride()[i]) for i in range(len(shape)))
     )
-    from math import prod
-
     return _Scatter(
         layer=layer,
         param_name=layer_param,
@@ -91,7 +92,6 @@ def _copy(name, layer_param="weight", *, offset=0, shape=(4,), ops=(), layer=Non
         shape=tuple(shape),
         stride=stride,
         dtype=dtype,
-        nbytes=prod(shape) * dtype.itemsize,
     )
 
 
@@ -367,7 +367,8 @@ class TestBakeRecording:
 
         (recorded,) = rec.copies_by_layer[layer]
         assert recorded.dtype is torch.float32, "recorded the source dtype"
-        assert recorded.nbytes == 2 * torch.float32.itemsize == 8
+        assert recorded.shape == (2,)
+        assert prod(recorded.shape) * recorded.dtype.itemsize == 8
         # What the source name alone would have said, and what the producer
         # would NOT have sent.
         assert 2 * torch.bfloat16.itemsize == 4
@@ -593,7 +594,7 @@ class TestReplicaOverlay:
 
 def _producer_pack_offsets(slices):
     """The producer's rule, transcribed from ``rdt_produce_weights_batched``
-    (sharded_rdt_trainer.py): 16B-aligned offsets in specs order.
+    in vLLM's RDT trainer: 16B-aligned offsets in specs order.
 
     Kept as an independent implementation on purpose: the consumer computing the
     same offsets is the invariant that makes the packed blob readable, and this
@@ -748,7 +749,7 @@ class TestChunkModuleScatters:
             (2, ["a1", "b1"]),
         ]
 
-    def test_scatters_carry_their_own_dtype_and_nbytes(self):
+    def test_scatters_carry_their_own_dtype_and_shape(self):
         """dtype rides the record from the bake, where it is the fake's dtype
         AFTER its op chain — not a plan-time lookup of the source name, which
         would be wrong for any chain that reinterprets dtype."""
@@ -759,7 +760,8 @@ class TestChunkModuleScatters:
         )
         (sc,) = scatters
         assert sc.dtype is torch.float32
-        assert sc.nbytes == 40
+        assert sc.shape == (10,)
+        assert prod(sc.shape) * sc.dtype.itemsize == 40
         assert sc.layer is layer
 
 

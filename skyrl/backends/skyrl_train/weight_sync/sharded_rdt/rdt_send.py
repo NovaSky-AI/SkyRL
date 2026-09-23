@@ -37,14 +37,12 @@ logger = logging.getLogger(__name__)
 # Defaults for the must-agree wire knobs (mirror the vLLM sharded_rdt defaults).
 _DEFAULT_NUM_RDT_BUFFERS = 2
 _DEFAULT_BUFFER_PRESIZE_GB = 0.0
-# Producer stall watchdog (seconds). Mirrors sharded_rdt_trainer.
-# DEFAULT_STALL_TIMEOUT_S; duplicated rather than imported so resolving the knob
-# does not pull the vendored trainer module into every worker.
+# Producer stall watchdog (seconds). Mirrors vLLM's RDT trainer; duplicated so
+# resolving the knob does not import vLLM into every worker.
 _DEFAULT_STALL_TIMEOUT_S = 300.0
 # Gathered-but-unfreed groups the trainer's gather loop runs ahead by; bounds
-# trainer-resident memory at lookahead + 1 groups (see sharded_rdt_trainer.
-# DEFAULT_GATHER_LOOKAHEAD). 1 = while the consumers pull group N, group N+1 is
-# already gathered AND published; raise via SKYRL_RDT_LOOKAHEAD only if one
+# trainer-resident memory at lookahead + 1 groups. At 1, while consumers pull
+# group N, group N+1 is already gathered and published; raise it only if one
 # group's gather is slower than its pulls.
 _DEFAULT_GATHER_LOOKAHEAD = 1
 
@@ -1219,7 +1217,7 @@ def build_rdt_trainer_init_info(
             size are used, to derive the deployment count.
         data_parallel_size: DP replicas per deployment.
     """
-    from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
+    from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
         ShardedRDTTrainerInitInfo,
     )
 
@@ -1232,17 +1230,11 @@ def build_rdt_trainer_init_info(
         v = os.environ.get(env)
         return v if v is not None else default
 
-    # Deployment count, derived the same way the control plane derives each
-    # server's ``replica_rank`` (see ``control_plane.rdt_init_payloads``): the DP
-    # servers of one deployment share a parallel config, so they share one
-    # ordinal. [RDT-SHARE-SLOTS] reads it to size a deployment's consumer-id block.
+    # DP servers of one deployment share a parallel config and replica ordinal.
     dp = max(1, int(data_parallel_size))
     num_replicas = max(1, len(server_urls) // dp)
 
-    # [RDT-SHARE-SLOTS] Consumers per deployment, which is what groups the
-    # workers that can share one serve slot on each producer. 0 turns sharing
-    # off, and one deployment makes it a no-op anyway (the width equals the
-    # consumer count, so every group is a singleton).
+    # Consumers per deployment share one producer serve slot. Zero disables it.
     share_slots = os.environ.get("SKYRL_RDT_SHARE_SLOTS", "1") not in ("0", "false", "False")
     workers_per_replica = int(inference_world_size) // num_replicas if share_slots else 0
     _loguru.info(

@@ -9,7 +9,7 @@ engine whose ``send_weights()`` owns the round trip.
 ``nccl``         ``SkyrlNCCLTrainerWeightTransferEngine`` (``skyrl_nccl``)
 ``ipc``          ``SkyrlIPCTrainerWeightTransferEngine`` (``skyrl_ipc``)
 ``delta``        ``weight_sync/delta/trainer.py``
-``sharded_rdt``  ``weight_sync/sharded_rdt/sharded_rdt_trainer.py``
+``sharded_rdt``  ``vllm.distributed.weight_transfer.sharded_rdt_trainer``
 ===============  ==================================================
 
 The trainer- and worker-side factories keep separate registries. Both use
@@ -128,6 +128,11 @@ def get_skyrl_ipc_trainer() -> "tuple[type, type]":
 
 def get_skyrl_rdt_trainer() -> type:
     """Return the native RDT trainer with SkyRL worker capabilities."""
+    from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_libfabric_shim import (
+        ensure_ray_rdt_libfabric,
+    )
+
+    ensure_ray_rdt_libfabric()
     if RDT_TRAINER_BACKEND not in _TRAINER_ENGINE_CACHE:
         from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
             ShardedRDTTrainerInitInfo,
