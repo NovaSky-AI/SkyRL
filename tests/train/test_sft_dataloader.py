@@ -384,6 +384,43 @@ class TestDPAlignedPackingBatchSampler:
         batches = list(self._make(count=400, cardinality_reset_batch=3))
         assert sum(len(batch) for batch in batches[:3]) == 3 * 20
 
+    def test_short_epoch_tail_keeps_each_example_once(self):
+        batch_sampler = DPAlignedPackingBatchSampler(
+            sampler=StatefulSequentialSampler(list(range(5))),
+            sequence_lengths=[3] * 5,
+            batch_size=4,
+            dp_size=4,
+            allowed_variation=0.1,
+            bin_capacity=16,
+            tp_size=1,
+            cp_size=1,
+        )
+        batches = list(batch_sampler)
+        assert [len(batch) for batch in batches] == [4, 1]
+        assert [index for batch in batches for index in batch] == list(range(5))
+
+    def test_reset_applies_only_in_final_epoch_and_survives_resume(self):
+        sampler = self._make(count=400)
+        sampler.cardinality_reset_batch = 3
+        sampler.cardinality_reset_epoch = 1
+        first_epoch = list(sampler)
+        assert first_epoch[:3] == list(self._make(count=400))[:3]
+
+        second_epoch = iter(sampler)
+        first_two = [next(second_epoch) for _ in range(2)]
+        state = second_epoch.state_dict()
+        expected = list(second_epoch)
+
+        resumed_sampler = self._make(count=400)
+        resumed_sampler.cardinality_reset_batch = 3
+        resumed_sampler.cardinality_reset_epoch = 1
+        resumed = iter(resumed_sampler)
+        resumed.load_state_dict(state)
+        assert resumed.epoch_index == 1
+        assert list(resumed) == expected
+        assert sum(len(batch) for batch in first_two + expected[:1]) == 60
+        assert resumed_sampler._next_epoch_index == 2
+
 
 @pytest.mark.parametrize("dataset_kind", ["online", "pretokenized", "multi_source"])
 def test_dp_alignment_uses_all_sft_map_dataset_paths(dataset_kind):

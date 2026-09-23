@@ -94,6 +94,7 @@ class DPAlignedPackingBatchSampler(torch.utils.data.Sampler[List[int]]):
         fp8_enabled: bool = False,
         fp8_recipe: Optional[str] = None,
         cardinality_reset_batch: Optional[int] = None,
+        cardinality_reset_epoch: int = 0,
     ):
         if len(sampler) != len(sequence_lengths):
             raise ValueError(
@@ -109,6 +110,8 @@ class DPAlignedPackingBatchSampler(torch.utils.data.Sampler[List[int]]):
         self.dp_size = dp_size
         self.max_variation = math.floor(batch_size * allowed_variation)
         self.cardinality_reset_batch = cardinality_reset_batch
+        self.cardinality_reset_epoch = cardinality_reset_epoch
+        self._next_epoch_index = 0
         if cardinality_reset_batch is not None and not 1 <= cardinality_reset_batch <= len(self):
             raise ValueError(f"cardinality_reset_batch must be in [1, {len(self)}], got {cardinality_reset_batch}.")
 
@@ -122,7 +125,9 @@ class DPAlignedPackingBatchSampler(torch.utils.data.Sampler[List[int]]):
         )
 
     def __iter__(self) -> Iterator[List[int]]:
-        return _DPAlignedPackingBatchSamplerIterator(self)
+        epoch_index = self._next_epoch_index
+        self._next_epoch_index += 1
+        return _DPAlignedPackingBatchSamplerIterator(self, epoch_index)
 
     def __len__(self) -> int:
         return math.ceil(len(self.sampler) / self.batch_size)
@@ -140,9 +145,11 @@ class _DPAlignedPackingBatchSamplerIterator(Iterator[List[int]], Stateful):
     _SAMPLES_EMITTED = "samples_emitted"
     _SAMPLER_STATE = "sampler_state"
     _SAMPLER_ITER_STATE = "sampler_iter_state"
+    _EPOCH_INDEX = "epoch_index"
 
-    def __init__(self, batch_sampler: DPAlignedPackingBatchSampler):
+    def __init__(self, batch_sampler: DPAlignedPackingBatchSampler, epoch_index: int):
         self.batch_sampler = batch_sampler
+        self.epoch_index = epoch_index
         self.sampler_iter = iter(batch_sampler.sampler)
         self.batch_index = 0
         self.samples_emitted = 0
@@ -209,9 +216,16 @@ class _DPAlignedPackingBatchSamplerIterator(Iterator[List[int]], Stateful):
             target = min(max(nominal - cumulative_error, low), high)
 
             remaining_samples = len(self.batch_sampler.sampler) - self.samples_emitted
-            # Reserve one sequence per DP rank so the tail can still be packed,
-            # then trim again if the underlying iterator ends early.
-            high = min(high, remaining_samples - self.batch_sampler.dp_size)
+            # Reserve a real row per DP rank in each future step when the
+            # epoch has enough examples; otherwise reserve one per step and
+            # let the collator supply zero-loss rows on short tails.
+            future_steps = total_batches - self.batch_index - 1
+            reserve = (
+                future_steps * self.batch_sampler.dp_size
+                if remaining_samples >= (future_steps + 1) * self.batch_sampler.dp_size
+                else future_steps
+            )
+            high = min(high, remaining_samples - reserve)
             low = min(low, high)
             target = min(max(target, low), high)
             self._fill(high)
@@ -220,7 +234,10 @@ class _DPAlignedPackingBatchSamplerIterator(Iterator[List[int]], Stateful):
             target = min(max(target, low), high)
             if high <= 0:
                 raise StopIteration
-            if self.batch_index + 1 == self.batch_sampler.cardinality_reset_batch:
+            if (
+                self.epoch_index == self.batch_sampler.cardinality_reset_epoch
+                and self.batch_index + 1 == self.batch_sampler.cardinality_reset_batch
+            ):
                 # A fixed-step run must consume the same nominal sample prefix
                 # as an unaligned run; repay debt at its final scheduled step.
                 batch_size = target
@@ -238,6 +255,7 @@ class _DPAlignedPackingBatchSamplerIterator(Iterator[List[int]], Stateful):
             self._BATCH_INDEX: self.batch_index,
             self._BUFFER: self.buffer.copy(),
             self._SAMPLES_EMITTED: self.samples_emitted,
+            self._EPOCH_INDEX: self.epoch_index,
         }
         if isinstance(self.batch_sampler.sampler, Stateful):
             state[self._SAMPLER_STATE] = self.batch_sampler.sampler.state_dict()
@@ -249,6 +267,8 @@ class _DPAlignedPackingBatchSamplerIterator(Iterator[List[int]], Stateful):
         self.batch_index = state[self._BATCH_INDEX]
         self.buffer = list(state[self._BUFFER])
         self.samples_emitted = state[self._SAMPLES_EMITTED]
+        self.epoch_index = state[self._EPOCH_INDEX]
+        self.batch_sampler._next_epoch_index = max(self.batch_sampler._next_epoch_index, self.epoch_index + 1)
         if self._SAMPLER_STATE in state:
             if not isinstance(self.batch_sampler.sampler, Stateful):
                 raise TypeError("Checkpoint contains sampler state for a non-stateful sampler.")
@@ -275,6 +295,7 @@ def build_dp_aligned_packing_batch_sampler(
 
     steps_per_epoch = math.ceil(len(sampler) / sft_cfg.batch_size)
     cardinality_reset_batch = None
+    cardinality_reset_epoch = 0
     if steps_per_epoch:
         planned_steps = sft_cfg.num_steps if sft_cfg.num_steps is not None else sft_cfg.num_epochs * steps_per_epoch
         if sft_cfg.max_training_steps is not None:
@@ -282,7 +303,9 @@ def build_dp_aligned_packing_batch_sampler(
 
         # Repay batch-cardinality debt on the run's final step within an epoch,
         # so a fixed-step run consumes the fixed-batching sample prefix.
-        cardinality_reset_batch = planned_steps % steps_per_epoch or steps_per_epoch
+        if planned_steps > 0:
+            cardinality_reset_epoch, reset_index = divmod(planned_steps - 1, steps_per_epoch)
+            cardinality_reset_batch = reset_index + 1
 
     transformer_config_kwargs = sft_cfg.megatron_config.transformer_config_kwargs or {}
     return DPAlignedPackingBatchSampler(
@@ -297,6 +320,7 @@ def build_dp_aligned_packing_batch_sampler(
         fp8_enabled=is_fp8_enabled(transformer_config_kwargs.get("fp8")),
         fp8_recipe=transformer_config_kwargs.get("fp8_recipe"),
         cardinality_reset_batch=cardinality_reset_batch,
+        cardinality_reset_epoch=cardinality_reset_epoch,
     )
 
 
