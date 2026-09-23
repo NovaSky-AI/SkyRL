@@ -17,6 +17,10 @@ import ray
 import torch
 from transformers import AutoTokenizer
 
+from examples.model_checks.run_logprobs import (
+    LoRALogprobWorker,
+    check_logprobs,
+)
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
@@ -32,11 +36,13 @@ from skyrl.backends.skyrl_train.inference_servers.utils import (
     resolve_policy_model_name,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl.train.generators.base import GeneratorInput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl.train.utils.utils import validate_cfg
+from skyrl.train.utils.utils import ResolvedPlacementGroup, validate_cfg
+from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
@@ -694,3 +700,67 @@ async def test_logprobs_matching_roundtrip(
             assert (
                 logprobs_diff.mean().item() < vllm_threshold
             ), f"Logprob diff should be less than {vllm_threshold}, but is {logprobs_diff.mean().item():.6f}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.h100
+@pytest.mark.parametrize(
+    "model_name,tp,ep,etp,inference_tp,num_gpus",
+    [
+        pytest.param("Qwen/Qwen3.5-0.8B", 2, 1, None, 2, 2, id="qwen3.5-0.8b-lora_tp2"),
+        pytest.param("zai-org/GLM-4.7-Flash", 4, 4, 1, 4, 4, id="glm-4.7-flash-lora_tp4_ep4"),
+        pytest.param(
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", 4, 4, 1, 4, 4, id="nemotron3.5-lightning-lora_tp4_ep4"
+        ),
+    ],
+)
+async def test_lora_logprobs_matching_roundtrip(model_name, tp, ep, etp, inference_tp, num_gpus, tmp_path):
+    with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name)):
+        cfg = get_test_actor_config(model_name)
+        cfg.trainer.strategy = "megatron"
+        cfg.trainer.placement.colocate_all = True
+        cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
+        cfg.trainer.policy.inference_only_init = True
+        parallel = cfg.trainer.policy.megatron_config
+        parallel.tensor_model_parallel_size = tp
+        parallel.expert_model_parallel_size = ep
+        parallel.expert_tensor_parallel_size = etp
+        parallel.lora_config.merge_lora = False
+        lora = cfg.trainer.policy.model.lora
+        lora.rank = 8
+        lora.alpha = 16
+        lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
+        lora.lora_sync_path = str(tmp_path / "adapter")
+        cfg.generator.inference_engine.tensor_parallel_size = inference_tp
+        cfg.generator.inference_engine.num_engines = 1
+        overrides = _engine_overrides_for_model(model_name)
+        async with InferenceEngineState.create(
+            cfg=cfg,
+            use_local=True,
+            colocate_all=True,
+            backend="vllm",
+            sleep_level=1,
+            enable_lora=True,
+            gpu_memory_utilization=overrides["gpu_memory_utilization"],
+            engine_init_kwargs=overrides["engine_init_kwargs"],
+        ) as engines:
+            await engines.client.sleep()
+            policy = PPORayActorGroup(
+                cfg.trainer,
+                num_nodes=1,
+                num_gpus_per_node=num_gpus,
+                ray_actor_type=ray.remote(LoRALogprobWorker),
+                pg=ResolvedPlacementGroup(engines.pg),
+                num_gpus_per_actor=0.2,
+                colocate_all=True,
+            )
+            ray.get(policy.async_init_model(model_name))
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through",
+                    "init_weight_sync_state",
+                    engines.client,
+                    cfg.generator.inference_engine,
+                )
+            )
+            await check_logprobs(policy, engines.client, cfg, get_tokenizer(model_name))
