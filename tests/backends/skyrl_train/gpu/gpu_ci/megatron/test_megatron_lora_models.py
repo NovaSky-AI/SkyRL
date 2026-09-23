@@ -224,7 +224,7 @@ async def test_lora_logprobs_matching_roundtrip(
             # Build the policy with the engines asleep. Adapter rows publish the zero
             # adapter before the first rollout, as the trainer does; merged rows leave
             # the engines on the checkpoint weights they loaded.
-            await client.sleep()
+            await client.sleep(level=1)
             policy = init_worker_with_type(
                 "policy",
                 shared_pg=pg,
