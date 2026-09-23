@@ -12,9 +12,6 @@ Usage:
     TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
         python examples/tinker/dapo/dapo_client.py --lora-rank 0
 
-The learning rate follows --lora-rank (the two reference scripts differ: 1e-5 for LoRA, 1e-6 for full FT);
-override with --learning-rate or DAPO_POLICY_LEARNING_RATE.
-
 Reproduces examples/train/algorithms/dapo/run_dapo_qwen3_30b_a3b_{lora_,}megatron_aime.sh through the
 Tinker codepath. The client owns the algorithm: GRPO group-normalized advantages, DAPO soft overlong
 punishment and overlong filtering, token-mean-legacy loss scaling, clip-higher epsilons and LR warmup.
